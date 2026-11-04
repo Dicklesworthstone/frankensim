@@ -1,5 +1,19 @@
 # CONTRACT: fs-conduction
 
+## Heat-imbalance solves for linear transient conduction
+
+The theta march solves `(C + theta*dt*K) delta_T = dt*(b - K*T_old)` with zero
+increments on the already imposed Dirichlet vertices. This is the original
+theta discretization, including heterogeneous capacity, conductivity and Robin
+terms. Its relative Krylov tolerance is measured against the actual heat
+imbalance, so an absolute-temperature storage term cannot hide a weak heat pulse.
+The constant reduced operator and preconditioner are retained across steps.
+Both the primal and its unchanged discrete adjoint use the shared scaled,
+cancellable CG driver with a recomputed residual and at most two defect repairs
+inside the original iteration budget. The reported residual concerns the
+returned physical increment; it is not a spatial/time error bound or a bound
+on rounding when that increment is added to an absolute temperature.
+
 ## Complete steady contact and reflected-radiation adjoints
 
 `ContactSteadyLinearization::pullback_with_robin_and_flux_feedback_and_resistance_controls`

@@ -89,8 +89,7 @@ use crate::mesh::ConductionMesh;
 use crate::solve::{LinearConfig, spd_preconditioner};
 use crate::{ConductionError, ConductionProblem};
 use fs_exec::Cx;
-use fs_solver::krylov::CgState;
-use fs_solver::{CsrOp, norm2};
+use fs_solver::{CheckedCgConfig, CheckedCgError, CheckedCgSolution, CsrOp, checked_cg};
 use fs_sparse::{Coo, Csr};
 
 /// SI exponents of volumetric heat capacity, J/(m³·K).
@@ -301,7 +300,8 @@ impl TransientStep {
 
     /// The recomputed Euclidean relative residual of the temperature-increment
     /// system, normalized by its heat-transfer right-hand side rather than the
-    /// absolute temperature. This is not the method's recursive estimate.
+    /// absolute temperature. This is not the method's recursive estimate and
+    /// does not bound spatial/time error or final temperature rounding.
     #[must_use]
     pub const fn true_relative_residual(&self) -> f64 {
         self.true_relative_residual
@@ -564,33 +564,18 @@ fn march_inner(
             rhs[slot] = value;
         }
 
-        let mut cg = CgState::new(&op, &precond, &rhs);
-        let report = cg.run(
-            &op,
-            &precond,
-            config.linear.tolerance,
-            config.linear.max_iterations,
-        );
-        let truth = true_relative_residual(op.matrix(), &rhs, &cg.x);
-        if truth.is_nan() || truth >= config.linear.tolerance {
-            return Err(ConductionError::LinearSolveFailed {
-                iteration: step,
-                krylov_iterations: report.iters,
-                true_relative_residual: truth,
-                tolerance: config.linear.tolerance,
-            });
-        }
+        let correction = solve_spd(cx, &op, &precond, &rhs, config, step)?;
 
         for (slot, &vertex) in dofs.free().iter().enumerate() {
-            let updated = temperature[vertex] + cg.x[slot];
+            let updated = temperature[vertex] + correction.x[slot];
             crate::require_finite("transient temperature", updated)?;
             temperature[vertex] = updated;
         }
         validate_material_temperature(cx, problem, storage, &temperature)?;
         recorded.push(TransientStep {
             time_s: config.dt_s * ((step + 1) as f64),
-            krylov_iterations: report.iters,
-            true_relative_residual: truth,
+            krylov_iterations: correction.report.iters,
+            true_relative_residual: correction.report.rel_residual,
         });
     }
 
@@ -819,6 +804,7 @@ fn source_scale_gradient_inner(
     let rhs_matrix = axpy_csr(capacitance, inverse_dt, &system.operator, -(1.0 - theta));
     let (b_ff, _) = reduce_matrix_and_lift(&rhs_matrix, &dofs);
     let precond = spd_preconditioner(&a_ff);
+    let op = CsrOp::symmetric(a_ff);
 
     // db/ds over free dofs. Only the volumetric source is scaled; fixed
     // Dirichlet, Robin and Neumann loads contribute no derivative. Reuse the
@@ -851,22 +837,22 @@ fn source_scale_gradient_inner(
     }
 
     let mut gradient = 0.0f64;
+    let mut next = vec![0.0f64; dofs.n()];
     for step in 0..steps {
         cx.checkpoint().map_err(|_| ConductionError::Cancelled {
             stage: "transient-adjoint",
             at: step,
         })?;
         // A is symmetric, so A^{-T} = A^{-1}.
-        let mu = solve_spd(&a_ff, &precond, &lambda, config, step)?;
+        let mu = solve_spd(cx, &op, &precond, &lambda, config, step)?.x;
         gradient += mu
             .iter()
             .zip(load_sensitivity.iter())
             .fold(0.0f64, |acc, (m, d)| m.mul_add(*d, acc));
         if step + 1 < steps {
             // lambda <- B^T mu; B is symmetric here too.
-            let mut next = vec![0.0f64; dofs.n()];
             b_ff.spmv(&mu, &mut next);
-            lambda = next;
+            core::mem::swap(&mut lambda, &mut next);
         }
     }
 
@@ -884,30 +870,48 @@ fn source_scale_gradient_inner(
 }
 
 fn solve_spd(
-    a: &Csr,
+    cx: &Cx<'_>,
+    op: &CsrOp,
     precond: &impl fs_sparse::precond::Precond,
     b: &[f64],
     config: &TransientConfig,
     step: usize,
-) -> Result<Vec<f64>, ConductionError> {
-    let op = CsrOp::symmetric(a.clone());
-    let mut cg = CgState::new(&op, precond, b);
-    let report = cg.run(
-        &op,
+) -> Result<CheckedCgSolution, ConductionError> {
+    // Share the bounded, scaled correction driver used by backward Euler.
+    // Every repair consumes the same iteration budget, and cancellation is
+    // polled inside the solve, including long diffusion-dominated steps.
+    let solved = checked_cg(
+        op,
         precond,
-        config.linear.tolerance,
-        config.linear.max_iterations,
-    );
-    let truth = true_relative_residual(a, b, &cg.x);
-    if truth.is_nan() || truth >= config.linear.tolerance {
+        b,
+        CheckedCgConfig {
+            tolerance: config.linear.tolerance,
+            max_iterations: config.linear.max_iterations,
+            max_corrections: 2,
+        },
+        |at| {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "transient-krylov",
+                at,
+            })
+        },
+    )
+    .map_err(|error| match error {
+        CheckedCgError::Interrupted(error) => error,
+        CheckedCgError::InvalidInput(what) => ConductionError::Config {
+            parameter: "transient linear solve",
+            what: what.into(),
+        },
+    })?;
+    if !solved.report.converged_euclidean() {
         return Err(ConductionError::LinearSolveFailed {
             iteration: step,
-            krylov_iterations: report.iters,
-            true_relative_residual: truth,
+            krylov_iterations: solved.report.iters,
+            true_relative_residual: solved.report.rel_residual,
             tolerance: config.linear.tolerance,
         });
     }
-    Ok(cg.x)
+    Ok(solved)
 }
 
 /// `alpha·A + beta·B` for two same-shaped CSR matrices, via the crate's
@@ -926,21 +930,4 @@ fn axpy_csr(a: &Csr, alpha: f64, b: &Csr, beta: f64) -> Csr {
         }
     }
     coo.assemble()
-}
-
-/// The recomputed Euclidean relative residual, not the method's recursive
-/// estimate.
-fn true_relative_residual(a: &Csr, b: &[f64], x: &[f64]) -> f64 {
-    let mut ax = vec![0.0f64; b.len()];
-    a.spmv(x, &mut ax);
-    let mut residual = Vec::with_capacity(b.len());
-    for (value, target) in ax.iter().zip(b.iter()) {
-        residual.push(target - value);
-    }
-    let denominator = norm2(b);
-    if denominator > 0.0 {
-        norm2(&residual) / denominator
-    } else {
-        norm2(&residual)
-    }
 }

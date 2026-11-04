@@ -227,6 +227,74 @@ fn weak_diffusion_is_independent_of_the_absolute_temperature_background() {
 }
 
 #[test]
+fn a_small_heat_pulse_is_resolved_independently_of_absolute_temperature() {
+    // Linear insulated conduction is invariant under a uniform temperature
+    // shift. A tolerance applied to C*T/dt can hide this spatial heat signal
+    // in the 300 K background, even though the increment is representable.
+    let mesh = unit_mesh(3);
+    let boundary = adiabatic(&mesh);
+    let material = ConductivityModel::isotropic_declared(1.0).unwrap();
+    let capacity = VolumetricHeatCapacity::declared(1.0).unwrap();
+    let source = ScalarField::nodal(
+        "localized weak heat",
+        mesh.vertex_count(),
+        mesh.positions()
+            .iter()
+            .map(|p| if p[0] < 0.5 && p[1] < 0.5 { 1e-5 } else { 0.0 })
+            .collect(),
+    )
+    .unwrap();
+    for theta in [0.5, 0.75, 1.0] {
+        let config = TransientConfig::new(
+            theta,
+            0.1,
+            LinearConfig {
+                tolerance: 1e-8,
+                max_iterations: 1_000,
+                restart: 30,
+            },
+        )
+        .unwrap();
+        let problem = TransientProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source,
+            capacity,
+        };
+        let solve_at = |offset| {
+            with_cx(|cx| march(cx, problem, &config, &vec![offset; mesh.vertex_count()], 3))
+                .unwrap()
+        };
+        let reference = solve_at(0.0);
+        let physical = solve_at(T_COLD);
+        let worst = reference
+            .temperature
+            .iter()
+            .zip(&physical.temperature)
+            .map(|(&rise, &temperature)| (temperature - T_COLD - rise).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            worst < 2e-11,
+            "theta={theta}: shift changed the heat pulse by {worst} K"
+        );
+
+        // With insulated faces, all source energy stays in the body. Check the
+        // published temperatures, independently of the Krylov residual.
+        let mut energy = 0.0;
+        let mut power = 0.0;
+        for (e, tet) in mesh.complex().tets.iter().enumerate() {
+            let weight = mesh.element_volume(e) / 4.0;
+            for &vertex in tet {
+                energy += weight * (physical.temperature[vertex as usize] - T_COLD);
+                power += weight * source.at(vertex as usize);
+            }
+        }
+        assert!((energy - physical.time_s * power).abs() < 2e-11);
+    }
+}
+
+#[test]
 fn the_capacitance_matrix_holds_the_exact_heat_content() {
     // Summing every entry of C gives rho c_p V: the discrete heat content of
     // a unit uniform temperature rise. This is the property that makes the
@@ -706,6 +774,46 @@ fn the_adjoint_agrees_with_finite_differences_under_crank_nicolson_too() {
         verdict.max_rel_err, verdict.pairs
     );
     assert_eq!(verdict.informative_directions, 1);
+}
+
+#[test]
+fn the_transient_adjoint_preserves_extreme_but_finite_goal_scales() {
+    let mesh = unit_mesh(2);
+    let boundary = adiabatic(&mesh);
+    let source = ScalarField::uniform("volumetric source", 3.0e5).unwrap();
+    let config = TransientConfig::crank_nicolson(1.0, linear_config()).unwrap();
+    let steps = 3;
+    let expected_unscaled = 3.0e5 * steps as f64 / RHO_CP;
+    // The scalar goal's units may make its weights tiny or large. Squaring
+    // those physical loads inside unscaled CG must not turn a nonzero
+    // derivative into zero, or make a finite derivative overflow.
+    for scale in [1e-200, 1.0, 1e200] {
+        let functional = FinalStateFunctional::new(vec![
+            scale / mesh.vertex_count() as f64;
+            mesh.vertex_count()
+        ])
+        .unwrap();
+        let gradient = with_cx(|cx| {
+            source_scale_gradient(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &functional,
+                steps,
+            )
+        })
+        .unwrap();
+        assert!(
+            (gradient / scale - expected_unscaled).abs() < 1e-12,
+            "goal scale {scale}: derivative {gradient} lost its physical scale"
+        );
+    }
 }
 
 #[test]
