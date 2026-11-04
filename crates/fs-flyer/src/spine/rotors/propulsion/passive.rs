@@ -17,6 +17,10 @@ use fs_airscrew::swirl::Controls;
 #[path = "passive/dynamic.rs"]
 pub mod dynamic;
 
+/// Native annular angular-momentum transport into downstream lifting surfaces.
+#[path = "passive/wake.rs"]
+pub mod wake;
+
 /// Actual environment and independent motor ports at an aerodynamic stage.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShaftInputs<const N: usize> {

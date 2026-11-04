@@ -23,6 +23,9 @@ const AXIAL: [[f64; 3]; 2] = [[1.0, 0.0, 0.0]; 2];
 #[path = "passive_propulsion/dynamic.rs"]
 mod dynamic;
 
+#[path = "passive_propulsion/wake.rs"]
+mod wake;
+
 fn v(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }

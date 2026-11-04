@@ -1,5 +1,6 @@
-//! Explicit angular-wake/wing loads driving the existing geared integrator.
+//! Explicit angular-wake/wing loads sharing native aerodynamic evaluation.
 
+use super::super::{AerodynamicStage, PropulsionGeometry};
 use super::{
     AerodynamicFields, AerodynamicSolution, Controls, GearedPropulsion, GearedState,
     PropulsionInputs, Refusal, SwirlEvaluation, SwirlStep, geared, reject,
@@ -16,6 +17,77 @@ impl AerodynamicSolution for CoupledWakeStep {
     }
 }
 
+// Both mechanical consumers share one admitted source-field solve. Geometry
+// and physical spin signs are prepared once; no gear coordinate enters here.
+pub(in super::super) struct WakeModel<'a> {
+    geometry: PropulsionGeometry<'a>,
+    axes: DiskAxes,
+    spin: [f64; 2],
+    native: Controls,
+    wake: WakeControls,
+    transport: WakeTransport,
+}
+
+impl<'a> WakeModel<'a> {
+    pub(in super::super) fn new(
+        geometry: PropulsionGeometry<'a>,
+        mechanical_axes: [[f64; 3]; 2],
+        native: Controls,
+        wake: WakeControls,
+    ) -> Self {
+        let axes = geometry
+            .spatial_axes
+            .unwrap_or_else(|| DiskAxes::new([[1.0, 0.0, 0.0]; 2]).expect("constant unit axes"));
+        let spin = core::array::from_fn(|k| {
+            let mount = geometry.mounts[k];
+            let mechanical = mechanical_axes[k];
+            let thrust = mount.thrust_direction_body;
+            let alignment = Vec3::new(mechanical[0], mechanical[1], mechanical[2])
+                .dot(Vec3::new(thrust[0], thrust[1], thrust[2]));
+            mount.handedness.sign() * alignment.signum()
+        });
+        Self {
+            geometry,
+            axes,
+            spin,
+            native,
+            wake,
+            transport: WakeTransport::FixedCylinder,
+        }
+    }
+
+    pub(in super::super) fn with_transport(mut self, transport: WakeTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    pub(in super::super) fn solve(
+        &self,
+        stage: AerodynamicStage<'_>,
+        warm: Option<&WakeWarmStart>,
+    ) -> Result<CoupledWakeStep, Refusal> {
+        coupling::coupled_step_with_transport(
+            self.transport,
+            self.axes,
+            self.spin,
+            stage.op,
+            stage.panels,
+            stage.strips,
+            stage.closure,
+            stage.section_frames,
+            &self.geometry.design.rotor,
+            stage.disks,
+            stage.freestream,
+            stage.rho,
+            &self.geometry.design.coupling,
+            self.native,
+            self.wake,
+            warm,
+            stage.incident,
+        )
+    }
+}
+
 /// Opt-in downstream angular transport, with admitted energy discrepancy.
 /// Select material annuli to include native radial loading and continuity-driven
 /// contraction/expansion; the fixed-cylinder projection remains the default.
@@ -24,9 +96,7 @@ impl AerodynamicSolution for CoupledWakeStep {
 /// See the coupling module for observation-window and noninteracting-disk limits.
 pub struct WakePropulsion<'p, 'a, const N: usize> {
     propulsion: &'p GearedPropulsion<'a, N>,
-    native: Controls,
-    wake: WakeControls,
-    transport: WakeTransport,
+    model: WakeModel<'a>,
 }
 impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
     #[must_use]
@@ -35,18 +105,19 @@ impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
         native: Controls,
         wake: WakeControls,
     ) -> Self {
+        let mechanical_axes = propulsion
+            .mounts
+            .map(|mount| propulsion.assembly.rotors()[mount.rotor_index].axis_body);
         Self {
             propulsion,
-            native,
-            wake,
-            transport: WakeTransport::FixedCylinder,
+            model: WakeModel::new(propulsion.geometry(), mechanical_axes, native, wake),
         }
     }
 
     /// Select the source-field physics without replacing the mechanical owner.
     #[must_use]
     pub fn with_transport(mut self, transport: WakeTransport) -> Self {
-        self.transport = transport;
+        self.model = self.model.with_transport(transport);
         self
     }
 
@@ -63,39 +134,11 @@ impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
         wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
         warm: Option<&WakeWarmStart>,
     ) -> Result<SwirlEvaluation<N, CoupledWakeStep>, Refusal> {
-        let p = self.propulsion;
-        let axes = p
-            .spatial_axes
-            .unwrap_or(DiskAxes::new([[1.0, 0.0, 0.0]; 2])?);
-        let spin = core::array::from_fn(|k| {
-            let mount = p.mounts[k];
-            let mechanical = p.assembly.rotors()[mount.rotor_index].axis_body;
-            let thrust = mount.thrust_direction_body;
-            let alignment = Vec3::new(mechanical[0], mechanical[1], mechanical[2])
-                .dot(Vec3::new(thrust[0], thrust[1], thrust[2]));
-            mount.handedness.sign() * alignment.signum()
-        });
-        let result = p.evaluate_with(state, inputs, wind_world, |stage| {
-            coupling::coupled_step_with_transport(
-                self.transport,
-                axes,
-                spin,
-                stage.op,
-                stage.panels,
-                stage.strips,
-                stage.closure,
-                stage.section_frames,
-                &p.design.rotor,
-                stage.disks,
-                stage.freestream,
-                stage.rho,
-                &p.design.coupling,
-                self.native,
-                self.wake,
-                warm,
-                stage.incident,
-            )
-        })?;
+        let result = self
+            .propulsion
+            .evaluate_with(state, inputs, wind_world, |stage| {
+                self.model.solve(stage, warm)
+            })?;
         Ok(SwirlEvaluation {
             loads: result.loads,
             aerodynamic_force_body_n: result.aerodynamic_force_body_n,

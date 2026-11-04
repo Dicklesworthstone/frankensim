@@ -2113,3 +2113,36 @@ Resolved meridional kinetic transport is exposed for that future pressure/
 energy closure and is never credited as heat or removed from rotor torque.
 The original finite observation window and disjoint source-disk restrictions
 remain explicit.
+
+## Annular source fields on independent shafts
+
+`spine::rotors::propulsion::passive::wake::WakeShaftPropulsion` connects the
+existing native annular angular-momentum field to independent physical shafts.
+It shares the prepared `WakeModel` with geared `WakePropulsion`: mounted shaft
+axes and blade handedness determine physical swirl signs once, and the same
+native wing/rotor/field solve consumes each actual signed axial-momentum/J speed.
+Fixed-cylinder transport remains the default; material streamtubes explicitly
+include downstream axial replacement, radial motion and contraction/expansion.
+The existing field convergence, source separation and power budgets are unchanged.
+
+Both actual mechanical stages use the retained `ShaftMotion` through the common
+independent-shaft load callback. Native signed blade torque enters its external
+shaft port exactly once; downstream wing force/moment enters the carrier wrench.
+Numerical warm starts remain local through the step. A field, wind, source-budget
+or late mechanical refusal preserves both canonical mechanical states and caller
+seeds. The native owner retains motor work, bearing heat, spring storage and
+carrier recoil; this source-field selection adds no mechanical momentum owner.
+
+Focused tests compare exact geared/independent snapshots for both transport
+choices and opposite physical shaft-axis conventions, resolve unequal speeds
+after impulses with independent spin-plus-orbital momentum and mechanical work
+accounts, check native torque and material mass flux downstream, and exercise
+signed windmilling plus budget, midpoint and late native refusal/retry. These are
+selected-source native checks, not full-workspace, cross-platform or real-time
+gates. This integration makes no additional timestep-convergence claim.
+
+The annular source field remains steady and distinct from harmonic wake memory
+and physical wing-branch continuation. The native annular owner supplies no
+continued-wing entry point. Its finite observation window, disjoint source
+restrictions and explicit projection discrepancy remain in force; there is no
+new unsteady wake law or complete fluid/body energy or momentum closure.
