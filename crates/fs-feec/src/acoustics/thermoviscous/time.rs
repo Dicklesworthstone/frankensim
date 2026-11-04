@@ -10,7 +10,8 @@
 //! Fluid viscosity (shear plus bulk), fluid conduction, molecular heat exchange
 //! finite-wall conduction and original structural damping are integrated
 //! along that SAME trajectory.
-//! Pressure and structural-force work use their actual interval-integrated dual flows.
+//! Pressure, structural-force and volumetric-heat work use their actual
+//! interval-integrated dual flows on that same trajectory.
 //! No response curve, fitted decay or endpoint-loss approximation is involved.
 //!
 //! Original caloric reservoirs contribute their full P2 temperature fields,
@@ -31,6 +32,8 @@ use fs_phs::{PhsError, PortHamiltonian, PreparedStepError, QuadraticStorage};
 
 mod caloric;
 pub use caloric::ThermoviscousCaloricReservoir;
+mod heat_source;
+pub use heat_source::{PreparedThermoviscousHeatTime, ThermoviscousHeatTimeStep};
 mod wall;
 pub use wall::{ConductiveWallTimeLayout, TangentialWallConductivity, ThermoviscousWallDiscretization};
 mod interface;
@@ -140,6 +143,10 @@ pub struct ThermoviscousTimeWork {
     pub delta_energy_j: f64,
     pub pressure_work_j: f64,
     pub structural_work_j: f64,
+    /// Signed acoustic work from prescribed volumetric heating,
+    /// integral((T'/T0) q' dV dt) [J], using the actual full-field trajectory.
+    /// This is distinct from the first-order heat-deposition integral.
+    pub heat_source_work_j: f64,
     /// Signed conductive boundary transfer of acoustic available energy,
     /// integral((T'/T0) q_in dA dt) [J]. This is not the first-order caloric
     /// heat integral(q_in dA dt), nor a volume dissipation channel.
@@ -164,7 +171,10 @@ impl ThermoviscousTimeWork {
             + self.solid_conductive_heat_j
     }
     pub fn supplied_j(self) -> f64 {
-        self.pressure_work_j + self.structural_work_j + self.conductive_boundary_work_j
+        self.pressure_work_j
+            + self.structural_work_j
+            + self.heat_source_work_j
+            + self.conductive_boundary_work_j
     }
     pub fn balance_residual_j(self) -> f64 {
         self.delta_energy_j + self.dissipated_j() - self.supplied_j()
@@ -289,20 +299,56 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         limits: ThermoviscousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ThermoviscousTimeError> {
+        Self::new_with_heat_sources(
+            model,
+            duration_s,
+            frozen_cp_j_kg_k,
+            reservoirs,
+            wall_resolution,
+            tangential,
+            &[],
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_heat_sources(
+        model: &'a ThermoviscousFe<'c>,
+        duration_s: f64,
+        frozen_cp_j_kg_k: f64,
+        reservoirs: &[ThermoviscousCaloricReservoir],
+        wall_resolution: Option<ThermoviscousWallDiscretization<'_>>,
+        tangential: Option<&[TangentialWallConductivity]>,
+        heat_sources: &[&super::heat_source::ThermoviscousHeatSource<'_, '_>],
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousTimeError> {
         poll(cancelled)?;
+        for source in heat_sources {
+            poll(cancelled)?;
+            if !std::ptr::eq(source.model, model)
+                || source.load.len() != model.n - model.temperature_start
+            {
+                return Err(invalid("heat sources must belong to the original transient FE owner"));
+            }
+        }
         let (caloric_end, reservoir_offsets) =
             caloric::layout(model, frozen_cp_j_kg_k, reservoirs)?;
         let (conductive_wall_fields, base) =
             wall::WallFields::new(model, duration_s, wall_resolution, tangential, caloric_end, cancelled)?;
         let walls = model.pressure_start - 3 * model.velocity_count;
         let n = base + walls;
-        let ports = model.loads.len() + walls;
+        let mechanical_ports = model.loads.len() + walls;
+        let ports = mechanical_ports.checked_add(heat_sources.len())
+            .ok_or_else(|| invalid("complete transient source count overflow"))?;
         if !duration_s.is_finite()
             || duration_s <= 0.0
             || !limits.maximum_relative_energy_residual.is_finite()
             || limits.maximum_relative_energy_residual <= 0.0
             || limits.maximum_relative_energy_residual > 1e-6
             || n > limits.max_states
+            || ports > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
             || 2 * (n + ports + 1) > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
         {
             return Err(invalid(
@@ -404,6 +450,16 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             }
             for (p, load) in model.loads.iter().enumerate() {
                 input[i * ports + p] = load[i] / scale[i];
+            }
+        }
+        // Original weak volumetric heating belongs only on translational
+        // temperature rows. The SAME full mixed mass inverse then supplies the
+        // pressure/thermal response, molecular exchange and wall reaction.
+        for (source_index, source) in heat_sources.iter().enumerate() {
+            poll(cancelled)?;
+            for (thermal, &coefficient) in source.load.iter().enumerate() {
+                let row = model.temperature_start + thermal;
+                input[row * ports + mechanical_ports + source_index] = coefficient / scale[row];
             }
         }
         for i in 0..base {
@@ -855,6 +911,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             delta_energy_j,
             pressure_work_j,
             structural_work_j,
+            heat_source_work_j: 0.0,
             conductive_boundary_work_j: 0.0,
             fluid_viscous_heat_j: candidate.integrals[0],
             fluid_conductive_heat_j: candidate.integrals[1],
