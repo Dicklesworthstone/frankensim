@@ -14,6 +14,9 @@
 //! law resolves temperature and crystal fraction together. Latent heat is never
 //! added as a second heater. It can therefore cause recalescence even while a
 //! specimen loses heat to its environment.
+//! Per-material opt-in equilibrium remelting uses the same enthalpy and an
+//! explicitly selected surviving-crystal history rule. Unselected materials
+//! retain their irreversible growth law and refuse unsupported remelting.
 //!
 //! This is a fixed-reference-geometry, locally isobaric model with uniform
 //! temperature in each cell. The supplied conductances and slope bounds must
@@ -30,6 +33,7 @@ use super::{
 };
 use crate::crystallization::{
     CrystallizationError, CrystallizationLaw, CrystallizationSolve, CrystallizationState,
+    EquivalentAgeRemelting,
 };
 use std::collections::BTreeMap;
 
@@ -97,8 +101,9 @@ impl From<CrystallizationError> for CrystallizationTimelineError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CrystallizationAudit {
     pub thermal: EnergyAudit,
-    /// Net crystalline mass formed during this advance, kg. It is part of the
-    /// original total mass, not an extra mass source.
+    /// Signed net crystalline mass formed during this advance, kg. Selected
+    /// remelting can make it negative. It is part of the original total mass,
+    /// not an extra mass source or a separate latent-heat debit.
     pub crystallized_mass_kg: f64,
     /// Maximum sum of local represented-heat and caloric defects, J.
     pub maximum_cell_energy_residual_j: f64,
@@ -114,6 +119,7 @@ pub struct CrystallizationSimulation<'a> {
     thermal: DepositionSimulation<'a>,
     materials: BTreeMap<MaterialId, CrystallizationMaterial<'a>>,
     states: BTreeMap<CellId, CrystallizationState>,
+    remelting: BTreeMap<MaterialId, EquivalentAgeRemelting>,
 }
 
 impl<'a> CrystallizationSimulation<'a> {
@@ -170,7 +176,47 @@ impl<'a> CrystallizationSimulation<'a> {
             thermal,
             materials: map,
             states,
+            remelting: BTreeMap::new(),
         })
+    }
+
+    /// Select instantaneous equilibrium remelting for one already bound
+    /// material, with an explicit rule for its surviving-crystal kinetic age.
+    /// The original sources must cover melting; no phase chart is extrapolated.
+    /// This selection preserves current states and all pending births, and is
+    /// retained by clones and subsequent advances. Only actual melting changes
+    /// the selected history. Other materials keep irreversible crystallization.
+    ///
+    /// Equivalent Avrami age is a caller-admitted approximation, not a universal
+    /// nucleation or polymer melt-memory law. This thermal selection supplies
+    /// no mechanical unlocking, stress release, density motion or pressure work.
+    pub fn with_equilibrium_remelting(
+        mut self,
+        material_id: MaterialId,
+        remelting: EquivalentAgeRemelting,
+    ) -> Result<Self, CrystallizationTimelineError> {
+        let model = self
+            .materials
+            .get(&material_id)
+            .ok_or(DepositionError::InvalidInput(
+                "remelting requires an existing crystallization material",
+            ))?;
+        if self.remelting.contains_key(&material_id) {
+            return Err(DepositionError::InvalidInput(
+                "remelting requires a unique material selection",
+            )
+            .into());
+        }
+        if model.law.equivalent_age_remelting()? != remelting {
+            return Err(CrystallizationError::StateMismatch.into());
+        }
+        self.remelting.insert(material_id, remelting);
+        Ok(self)
+    }
+
+    /// Explicit selected history rule, absent for the original irreversible path.
+    pub fn remelting_model(&self, material_id: MaterialId) -> Option<EquivalentAgeRemelting> {
+        self.remelting.get(&material_id).copied()
     }
 
     pub fn time_s(&self) -> f64 {
@@ -356,19 +402,30 @@ impl<'a> CrystallizationSimulation<'a> {
                         // Preserve the exact caller's cancellation/source refusal.
                         // The local material callback accepts only a boolean.
                         let mut refused = None;
-                        let result = model.law.advance_specific_enthalpy(
-                            previous,
-                            target_h,
-                            dt,
-                            controls.caloric,
-                            || match checkpoint() {
-                                Ok(()) => false,
-                                Err(error) => {
-                                    refused = Some(error);
-                                    true
-                                }
-                            },
-                        );
+                        let mut cancelled = || match checkpoint() {
+                            Ok(()) => false,
+                            Err(error) => {
+                                refused = Some(error);
+                                true
+                            }
+                        };
+                        let result = match next.remelting.get(&cell.material_id) {
+                            Some(&remelting) => model.law.advance_specific_enthalpy_with_remelting(
+                                previous,
+                                target_h,
+                                dt,
+                                controls.caloric,
+                                remelting,
+                                &mut cancelled,
+                            ),
+                            None => model.law.advance_specific_enthalpy(
+                                previous,
+                                target_h,
+                                dt,
+                                controls.caloric,
+                                &mut cancelled,
+                            ),
+                        };
                         if let Some(error) = refused {
                             return Err(error.into());
                         }

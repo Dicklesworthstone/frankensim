@@ -1,4 +1,7 @@
 //! G0/G1 manufactured calorimetry and G3/G4 timeline/cancellation checks.
+#[path = "tests/remelting.rs"]
+mod remelting;
+
 use super::*;
 use crate::crystallization::{CrystallizationCaloric, CrystallizationConfig, CrystallizationRate};
 use crate::enthalpy::{CellGeometry, DepositionBudget, StepConfig, ThermalLink, TimedEvent};

@@ -35,6 +35,19 @@ accepted history. Cloning checkpoints time, enthalpy and exposure; identical
 time partitions replay bitwise. Endpoint boundary/conductance changes use the
 original physical ownership and coverage checks.
 
+`with_equilibrium_remelting` binds a prepared `EquivalentAgeRemelting` to
+one original material. The full source-derived capability must match that
+material's kinetic law; selection survives cloning and scheduled births.
+Other materials retain their irreversible growth behavior. Existing heat
+links and boundary channels can now remelt earlier crystals when later hot
+material is deposited. The signed crystal-mass observation becomes negative
+during net melting; it is neither an added mass source nor another heat debit.
+Three timeline regressions cover latent heating followed by superheat and
+recrystallization, hot incoming material remelting an older deposit through
+finite contact, and original-history preservation on binding/cancellation
+failure. These timeline regressions require the complete native dependency
+graph to execute.
+
 Focused regressions cover adiabatic and spatial calorimetry,
 recalescence while cooling, different-Cp finite-mold exchange, timestep
 refinement, source/identity/budget refusal, initial-chart roundoff, ordinary-cell
@@ -43,7 +56,7 @@ scheduled births, finite-mold contact/separation and continuation across events.
 This fixed-reference-geometry,
 uniform-cell reduction has first-order heat transport and explicit kinetic
 timestep limits. Conductivity evolution requires a declared supplied law;
-front morphology, remelting, moving geometry and mechanical work feedback are
+front morphology, moving geometry, mechanical unlocking and work feedback are
 outside this transport model.
 
 ## Finite-rate crystallization and latent thermal feedback
@@ -62,7 +75,7 @@ midpoint and endpoint temperatures on the same enthalpy account. Work and
 caloric tolerances are bounded, cancellation publishes no candidate, and
 out-of-domain or unsupported remelting trajectories refuse. Immutable source owners may
 supply positive whole-domain heat-capacity lower bounds to accelerate caloric
-inversion; generic laws retain safeguarded bracket convergence. Eleven focused
+inversion; generic laws retain safeguarded bracket convergence. Sixteen focused
 native core Rust tests pass, covering analytic JMAK, adiabatic recalescence with
 unequal heat capacities, second-order time refinement, accelerated affine and
 nonlinear inversion, datum shifts, endpoint behavior and cancellation.
@@ -74,17 +87,40 @@ exactly zero at and above melting, and positive queried rates refuse instead
 of being clamped. Once any nonzero crystalline mass fraction exists, direct
 state queries and enthalpy inversion restrict temperature to the original
 domain at or below melting. Cooling superheated amorphous feed enters the same
-conservative crystallization account; reheating crystals above melting still
-requires a separate remelting model. The core regressions include superheated
+conservative crystallization account. The default growth path refuses
+remelting; the separate capability below explicitly selects that model. The core regressions include superheated
 cooling, source-domain/rate refusal and crystal-preserving melting-boundary
 checks. A growing-timeline regression deposits 550 K feed against a finite mold
 and follows sensible cooling into crystallization without a second latent heat
 source; it requires the full native thermal dependency graph to execute.
 
-This is an irreversible isokinetic constitutive model with explicit caller
-parameters and applicability. It supplies no material calibration, stochastic
+The default is an irreversible isokinetic constitutive model with explicit
+caller parameters and applicability. It supplies no material calibration, stochastic
 nucleation, grain/dendrite morphology, segregation, remelting/reset or mechanical
 locking. Time integration error remains distinct from caloric closure.
+
+### Explicit equilibrium remelting and thermal cycling
+
+`CrystallizationLaw::equivalent_age_remelting` admits and caches the original
+melting-temperature calorics in an immutable `EquivalentAgeRemelting`.
+Both branches and the original zero-at-melting kinetic source must cover that
+temperature. `advance_specific_enthalpy_with_remelting` preserves the original
+enthalpy at its midpoint and endpoint while latent heat is absorbed on that
+plateau. Surviving crystal MASS fraction is obtained from the original forward
+Avrami relation after a bounded equivalent-age reconstruction; complete melting
+returns zero effective age and the original amorphous branch. Cooling resumes
+the original growth law from that age.
+
+This separately chosen history approximation supplies no retained-nucleus,
+lamellar-population, dissolution-rate, molecular melt-memory or mechanical
+unlocking model. Smooth unmelted paths retain the original midpoint method;
+transition steps require refinement and carry no second-order event-accuracy
+claim. A projected midpoint that would suppress continuing undercooled growth
+refuses. Zero heat and zero growth rate preserve an accepted plateau state
+bitwise, including an admitted caloric residual, without another inverse solve.
+Five native core regressions cover partial/complete melt, superheat and renewed
+growth, conserved energy, source/domain/history refusal, large datums and
+saturated ages, false-arrest prevention, cancellation and stationary holds.
 
 Layer L3. Shared conservative thermal transport and solid/vapor exchange.
 Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
@@ -240,7 +276,7 @@ and these unsupported conditions. This does not add transient species storage.
 ### Liquid enthalpy through a stationary solid skeleton
 
 `Advected::with_liquid_carrier` retains the original total-cell `mass*h`
-storage while a closed, balanced mass graph carries only the liquid phase's
+storage while a locally balanced mass graph carries only the liquid phase's
 enthalpy. For an admitted pure-substance isothermal latent plateau, liquid
 carries the liquid-side plateau enthalpy during coexistence and its original
 specific enthalpy when fully liquid. The component reference is evaluated on
@@ -254,18 +290,33 @@ caloric identity, affine liquid mass fraction on the plateau, equal constant
 phase densities and fixed cell mass consistent with density times volume.
 The public generic constructor requires the caller to provide the original
 complete chart; selected temperature samples do not establish that binding.
-Every flowing donor and receiver must contain liquid. Closed local mass
+Every flowing donor and receiver must contain liquid. Local mass
 balance, conservative pair transfers, the existing combined explicit CFL and
 implicit energy residual remain authoritative. The carried-enthalpy slope is
 zero on the plateau and one in the liquid branch, so the original total-mass
 outflow bound remains conservative.
+
+Original `MassBoundary` inlets and outlets can supply balanced open liquid
+streams. Every inlet uses that same material and enthalpy datum, lies within
+the original source chart and is entirely liquid at or above its liquidus
+enthalpy. Entry and discharge cells require liquid support and the same
+fixed-density inventory. Outlets carry the current liquid enthalpy, including
+in partially solid cells. The original external-enthalpy balance counts the
+net stream heat once. Isothermal flushing preserves the stationary solid;
+inlet superheat fills its latent-energy deficit before sensible heating.
+Boundary and carrier attachment order does not change admission or arithmetic.
 
 The native `MaterialFlowFeedback::with_liquid_carrier` adapter passes the
 original pointer-bound phase curve's full knots and retains the descriptor
 through explicit graph rebuilds and implicit Stokes endpoints. It requires
 the existing physical creeping-flow heating owner. Native velocity represents
 liquid volume flux per total face area; homogeneous retained inertia refuses
-in both attachment orders. Open or selective streams, stationary species,
+in both attachment orders. Open ordinary mobile-mushy flow uses the existing
+opposed pressure-mouth work owner and explicit pure-liquid enthalpy on actual
+inflow, including backflow. Its fixed thermodynamic reference pressure remains
+separate from the hydrodynamic pressure gauge: adding hydrodynamic `p/rho` to
+the inlet enthalpy would count the physical pressure supply twice. Exact-solid
+pressure-mouth topology remains unsupported. Selective streams, stationary species,
 bulk-enthalpy entropy auditing and nonempty bulk-enthalpy reconstruction also
 refuse until their own phase-specific closures are supplied. Alloy melting
 ranges, unequal phase densities and moving solid skeletons are outside this
@@ -274,7 +325,12 @@ model.
 Five thermal regressions cover isothermal circulation, large datum shifts,
 implicit latent melting by superheat, fully liquid equivalence and admission
 failures. Two native flow regressions exercise repeated physical wall-heating
-epochs and the implicit Stokes energy equations. These integration tests
+epochs and the implicit Stokes energy equations. Five additional open-stream
+thermal regressions cover phase-specific discharge, reversed flow, large
+enthalpy datums, latent-to-sensible timestep refinement and refusal. Two
+pressure-driven flow regressions retain analytic Darcy heat and melt-dependent
+resistance across explicit rebuilds and implicit endpoints, including pressure
+gauge shifts. These integration tests
 require the full native thermal/flow dependency graph to execute.
 
 ## Sublimation and deposition
