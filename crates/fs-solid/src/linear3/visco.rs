@@ -53,7 +53,10 @@ pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
 mod quasistatic;
 pub use quasistatic::{ViscoQuasistaticOperator, ViscoQuasistaticStep};
 mod dynamics;
-pub use dynamics::{ViscoDynamicConfig, ViscoDynamicOperator, ViscoDynamicState, ViscoDynamicStep};
+pub use dynamics::{
+    ViscoDynamicConfig, ViscoDynamicMaterialChange, ViscoDynamicOperator, ViscoDynamicState,
+    ViscoDynamicStep,
+};
 mod harmonic;
 pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicResponse};
 mod poles;

@@ -1,6 +1,9 @@
 //! G1/G3: original source changes, physical Maxwell memories and separate work.
 //! These manufactured cards are analytic software fixtures, not measured data.
 
+#[path = "visco_source/dynamics.rs"]
+mod dynamics;
+
 use fs_blake3::ContentHash;
 use fs_evidence::ValidityDomain;
 use fs_exec::Cx;

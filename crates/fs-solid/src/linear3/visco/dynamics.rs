@@ -17,6 +17,9 @@ use crate::linear::Jacobi;
 use crate::linear3::{TetStaticSolveConfig, euclidean_norm};
 use fs_solver::op::CsrOp;
 
+mod source;
+pub use source::ViscoDynamicMaterialChange;
+
 /// Explicit trajectory, sparse solve and energy-balance limits.
 #[derive(Clone, Copy, Debug)]
 pub struct ViscoDynamicConfig {
@@ -64,6 +67,7 @@ pub struct ViscoDynamicState<'p, 'a> {
     kinetic_j: f64,
     external_work_j: f64,
     eigenstrain_work_j: f64,
+    parameter_work_j: f64,
     time_s: f64,
     steps: usize,
 }
@@ -241,6 +245,7 @@ impl<'a> ViscoDynamicOperator<'a> {
             kinetic_j,
             external_work_j: 0.0,
             eigenstrain_work_j: 0.0,
+            parameter_work_j: 0.0,
             time_s: 0.0,
             steps: 0,
         })
@@ -277,6 +282,13 @@ impl ViscoDynamicState<'_, '_> {
     /// [J]. This work is separate from applied-load work and physical heat.
     pub const fn eigenstrain_work_j(&self) -> f64 {
         self.eigenstrain_work_j
+    }
+
+    /// Signed coefficient storage work since this trajectory started [J].
+    /// It excludes material changes applied before `start` and is separate
+    /// from applied-load work, imposed-eigenstrain work and physical heat.
+    pub const fn parameter_work_j(&self) -> f64 {
+        self.parameter_work_j
     }
 
     /// Advance one interval using the actual interval-mean external nodal load.
