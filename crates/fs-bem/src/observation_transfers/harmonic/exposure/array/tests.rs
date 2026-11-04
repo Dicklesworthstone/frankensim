@@ -18,6 +18,7 @@ fn owner(omega: f64, pressure: &[C64]) -> PreparedHarmonicObservation {
             })
             .collect(),
         producer_hash: ContentHash([27; 32]),
+        radiation_momentum: true,
         transfers: pressure
             .iter()
             .map(|&p| [p, C64::ZERO, C64::ZERO, C64::ZERO])
@@ -486,3 +487,5 @@ fn bounds_identity_cancellation_and_explicit_dark_channels_are_atomic() {
     let empty = PreparedHarmonicPressureArray::new(&exposure, &[], limits()).unwrap();
     assert!(empty.observe_window(window).unwrap().moments().is_empty());
 }
+
+mod microphones;

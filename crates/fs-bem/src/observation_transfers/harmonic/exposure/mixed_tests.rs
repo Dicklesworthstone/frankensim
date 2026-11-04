@@ -50,6 +50,7 @@ fn owner(omega: f64, frequency: usize) -> PreparedHarmonicObservation {
             })
             .collect(),
         producer_hash: ContentHash([41; 32]),
+        radiation_momentum: true,
         // Synthetic original transfer rows exercise the full complex p/u
         // algebra. The time oracle below never calls a harmonic kernel.
         transfers: (0..4)

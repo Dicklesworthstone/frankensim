@@ -15,6 +15,7 @@ fn owner(omega: f64, fields: Vec<[C64; 4]>) -> PreparedHarmonicObservation {
             })
             .collect(),
         producer_hash: ContentHash([19; 32]),
+        radiation_momentum: true,
         transfers: fields,
     }
 }

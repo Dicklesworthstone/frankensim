@@ -2655,6 +2655,27 @@ preparation, query and logical-workspace budgets are checked before allocation;
 the original exposure's source/frequency/factor bounds remain in force.
 Cancellation/refusal publishes no partial channel bank or observation.
 
+`PreparedHarmonicPressureArray::new_with_microphones[_cancellable]` also
+accepts one existing `near_field::FirstOrder` response per original physical
+receiver. Its Pa-equivalent signal is `alpha*p-(1-alpha)*rho*c*(front dot u)`;
+the front axis points toward the source, and `u` is the actual retained
+Cartesian particle velocity. A pressure node therefore need not silence a
+velocity-sensitive pickup. This uses the same ideal receiver law and reference
+impedance as the monochromatic microphone owner, with no plane-wave
+replacement of velocity, diaphragm model, noise or acoustic loading.
+
+The prepared array owns the declared patterns and exposes them alongside the
+original geometry in both prepared and returned observations. DD field
+projection happens once per tapped receiver and retained line, before all
+delayed channel sums and products; repeated windows reuse those phasors.
+Preparation adds at most `O(receivers*lines)` work and `O(receivers)` storage,
+included in the existing explicit work/space admission. Untapped receivers
+do not undergo unnecessary projection. The original pressure-only constructors
+retain their arithmetic and budgets. Five focused G0/G1/G3/G4 regressions cover
+mixed real/proper finite-ensemble time quadrature under both window profiles,
+standing-wave pressure nodes, rigid frame rotations, exact omni identity,
+weak oblique velocity residuals, metadata, budgets and cancellation.
+
 Six authored G0/G1/G3/G4 regressions cover delayed real-time integration over
 an exact 16-state proper ensemble under both shutters; broadband steering and
 directional cancellation; identity with original point/readout observers;

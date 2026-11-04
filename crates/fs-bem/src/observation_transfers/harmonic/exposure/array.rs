@@ -1,12 +1,15 @@
 //! Coherent delay-and-sum pressure channels from the original physical array.
 //!
-//! Every channel is y(t) = sum_r w_r p_r(t-delay_r), with authored real
-//! dimensionless weights and nonnegative delays. Under exp(-i omega t), its
+//! Every channel is y(t) = sum_r w_r m_r(t-delay_r), with authored real
+//! dimensionless weights and nonnegative delays. The default m_r is pressure;
+//! optional ideal first-order microphones project the actual pressure AND
+//! particle velocity before any channel sum or product. Under exp(-i omega t), its
 //! complex transfer is w_r exp(+i omega delay_r). Neither receiver powers nor
 //! cross spectra replace this field sum. A channel is a processed signal,
 //! not a new spatial receiver, pressure-to-intensity model or acoustic load.
 
 use super::*;
+use crate::near_field::FirstOrder;
 
 /// Maximum processed pressure channels in one prepared bank.
 pub const MAX_PRESSURE_ARRAY_CHANNELS: usize = 64;
@@ -39,6 +42,8 @@ pub struct HarmonicPressureArrayLimits {
     pub maximum_taps: usize,
     /// Tap phasors, tap/field contractions and frequency/bank lookups. A lookup
     /// performs at most thirteen comparisons under the original 4096-line cap.
+    /// Explicit microphone patterns add eight coefficient products per original
+    /// receiver and four field projections per receiver and retained line.
     pub maximum_prepare_products: usize,
     /// Linear real contractions, channel/frequency pairs and averaged-channel
     /// covariance terms. Conservative counts include both matrix triangles.
@@ -52,6 +57,8 @@ pub struct HarmonicPressureArrayLimits {
 
 /// First moment and uncentered mean square of a processed pressure signal.
 /// Mean square is E[average(y(t)^2)], not the variance of average(y).
+/// Explicit first-order microphones report their calibrated Pa-equivalent
+/// signal, including pressure/velocity interference, in these same units.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HarmonicPressureChannelMoments {
     pub mean_pressure_pa: f64,
@@ -83,6 +90,7 @@ pub struct PreparedHarmonicPressureArray<'a> {
     reference: &'a PreparedHarmonicObservation,
     source_clock: &'a str,
     channels: Vec<HarmonicPressureChannel>,
+    microphone_patterns: Option<Vec<FirstOrder>>,
     // First bank is the deterministic mean, including when it is dark.
     banks: Vec<PressureBank>,
     workspace_bytes: usize,
@@ -95,6 +103,7 @@ pub struct WindowedHarmonicPressureArray<'a> {
     reference: &'a PreparedHarmonicObservation,
     source_clock: &'a str,
     channels: &'a [HarmonicPressureChannel],
+    microphone_patterns: Option<&'a [FirstOrder]>,
     moments: Vec<HarmonicPressureChannelMoments>,
     // Row-major, symmetric centered covariance of average(y_c).
     averaged_covariance_pa2: Vec<f64>,
@@ -124,6 +133,11 @@ impl WindowedHarmonicPressureArray<'_> {
     pub fn channels(&self) -> &[HarmonicPressureChannel] {
         self.channels
     }
+    /// Ideal responses in original physical receiver order. None denotes the
+    /// original unprojected pressure array, not an inferred microphone model.
+    pub fn microphone_patterns(&self) -> Option<&[FirstOrder]> {
+        self.microphone_patterns
+    }
     pub fn moments(&self) -> &[HarmonicPressureChannelMoments] {
         &self.moments
     }
@@ -152,14 +166,70 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         exposure: &PreparedHarmonicExposure<'a>,
         channels: &[HarmonicPressureChannel],
         limits: HarmonicPressureArrayLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, TransferError> {
+        Self::prepare(exposure, channels, None, limits, cancelled)
+    }
+
+    /// Prepare causal channels of the existing ideal first-order microphones.
+    /// Patterns are in original physical receiver order, with their front axes
+    /// pointing toward the front source. Each receiver is projected as
+    /// alpha*p - (1-alpha)*rho*c*(front dot u) [Pa-equivalent], using actual
+    /// retained particle velocity, including reactive near fields and standing
+    /// waves. No plane-wave substitution u=p/(rho*c) is made.
+    ///
+    /// Projection occurs once per receiver/retained line before the signed
+    /// delayed sums. Source and cross-frequency coherence, mixed real/proper
+    /// statistics and the common clock survive. The original propagation
+    /// medium supplies the same reference rho*c calibration as FirstOrder;
+    /// no diaphragm response, electronic noise or receiver loading is inferred.
+    pub fn new_with_microphones(
+        exposure: &PreparedHarmonicExposure<'a>,
+        patterns: &[FirstOrder],
+        channels: &[HarmonicPressureChannel],
+        limits: HarmonicPressureArrayLimits,
+    ) -> Result<Self, TransferError> {
+        Self::new_with_microphones_cancellable(exposure, patterns, channels, limits, || false)
+    }
+
+    /// Cancellable counterpart. Patterns are owned by the prepared array;
+    /// neither input patterns nor the source exposure need remain alive.
+    /// Failure publishes no partial array and does not mutate either input.
+    pub fn new_with_microphones_cancellable(
+        exposure: &PreparedHarmonicExposure<'a>,
+        patterns: &[FirstOrder],
+        channels: &[HarmonicPressureChannel],
+        limits: HarmonicPressureArrayLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, TransferError> {
+        Self::prepare(exposure, channels, Some(patterns), limits, cancelled)
+    }
+
+    fn prepare(
+        exposure: &PreparedHarmonicExposure<'a>,
+        channels: &[HarmonicPressureChannel],
+        patterns: Option<&[FirstOrder]>,
+        limits: HarmonicPressureArrayLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
         poll(&mut cancelled)?;
+        let microphones = match patterns {
+            Some(patterns) if patterns.len() == exposure.reference.receivers.len() => {
+                patterns.len()
+            }
+            Some(_) => {
+                return Err(bad(
+                    "microphone patterns differ from original receiver order",
+                ));
+            }
+            None => 0,
+        };
         let n = channels.len();
         admit(n, MAX_PRESSURE_ARRAY_CHANNELS)?;
         admit(n, limits.maximum_channels)?;
         let mut taps = 0usize;
         let mut id_bytes = 0usize;
+        let mut tapped_receivers = [false; crate::near_field::MAX_RECEIVERS];
         for (i, channel) in channels.iter().enumerate() {
             poll(&mut cancelled)?;
             if channel.id.len() > MAX_CHANNEL_ID_BYTES
@@ -188,6 +258,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                         "pressure array tap needs an original receiver, finite weight and nonnegative delay",
                     ));
                 }
+                tapped_receivers[tap.receiver] = true;
             }
         }
         let bank_count = exposure.factors.len() + 1;
@@ -208,6 +279,9 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             .checked_mul(taps)
             .and_then(|p| p.checked_mul(2))
             .and_then(|p| p.checked_add(lines.checked_mul(bank_count)?))
+            .and_then(|p| {
+                p.checked_add(microphones.checked_mul(lines.checked_mul(4)?.checked_add(8)?)?)
+            })
             .ok_or_else(overflow)?;
         let query_products = lines
             .checked_mul(n)
@@ -250,9 +324,42 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                         .checked_mul(core::mem::size_of::<Dd>() + core::mem::size_of::<f64>())?,
                 )
             })
+            .and_then(|v| {
+                v.checked_add(microphones.checked_mul(
+                    core::mem::size_of::<FirstOrder>()
+                        + core::mem::size_of::<[Dd; 4]>()
+                        + core::mem::size_of::<[Dd; 2]>(),
+                )?)
+            })
             .ok_or_else(overflow)?;
         admit(workspace_bytes, limits.maximum_workspace_bytes)?;
 
+        let microphone_patterns = if let Some(patterns) = patterns {
+            let mut owned = storage(microphones)?;
+            owned.extend_from_slice(patterns);
+            Some(owned)
+        } else {
+            None
+        };
+        let mut projections = storage(microphones)?;
+        let mut projected = storage(microphones)?;
+        projected.resize(microphones, [Dd::ZERO; 2]);
+        if let Some(patterns) = patterns {
+            let medium = exposure.reference.medium;
+            let impedance = Dd::from_f64(medium.density) * Dd::from_f64(medium.sound_speed);
+            for pattern in patterns {
+                poll(&mut cancelled)?;
+                let fraction = Dd::from_f64(pattern.pressure_fraction());
+                let velocity_gain = -(Dd::ONE - fraction) * impedance;
+                let front = pattern.front_axis();
+                projections.push([
+                    fraction,
+                    velocity_gain * Dd::from_f64(front[0]),
+                    velocity_gain * Dd::from_f64(front[1]),
+                    velocity_gain * Dd::from_f64(front[2]),
+                ]);
+            }
+        }
         let mut owned_channels = storage(n)?;
         for channel in channels {
             poll(&mut cancelled)?;
@@ -314,6 +421,29 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                 };
                 let input = &bank.lines[line_index];
                 let output = &mut banks[bank_index].lines[line_index];
+                for (receiver, ((field, weights), signal)) in input
+                    .fields
+                    .iter()
+                    .zip(&projections)
+                    .zip(&mut projected)
+                    .enumerate()
+                {
+                    poll(&mut cancelled)?;
+                    if !tapped_receivers[receiver] {
+                        continue;
+                    }
+                    *signal = [Dd::ZERO; 2];
+                    for (c, &weight) in weights.iter().enumerate() {
+                        let amplitude = component(field, c);
+                        signal[0] = signal[0] + amplitude[0] * weight;
+                        signal[1] = signal[1] + amplitude[1] * weight;
+                    }
+                    if signal.iter().any(|&v| !finite(v)) {
+                        return Err(bad(
+                            "pressure array microphone projection is unrepresentable",
+                        ));
+                    }
+                }
                 let mut offset = 0;
                 for (channel_index, channel) in channels.iter().enumerate() {
                     poll(&mut cancelled)?;
@@ -322,7 +452,11 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                         if j % 64 == 0 {
                             poll(&mut cancelled)?;
                         }
-                        let a = component(&input.fields[tap.receiver], 0);
+                        let a = if microphones == 0 {
+                            component(&input.fields[tap.receiver], 0)
+                        } else {
+                            projected[tap.receiver]
+                        };
                         let [wr, wi] = weights[offset + j];
                         sum[0] = sum[0] + a[0] * wr - a[1] * wi;
                         sum[1] = sum[1] + a[0] * wi + a[1] * wr;
@@ -340,6 +474,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             reference: exposure.reference,
             source_clock: exposure.source_clock,
             channels: owned_channels,
+            microphone_patterns,
             banks,
             workspace_bytes,
             query_products,
@@ -348,6 +483,11 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
 
     pub fn channels(&self) -> &[HarmonicPressureChannel] {
         &self.channels
+    }
+    /// Explicit ideal responses in original receiver order, when authored.
+    /// None retains the original pressure-only observation semantics.
+    pub fn microphone_patterns(&self) -> Option<&[FirstOrder]> {
+        self.microphone_patterns.as_deref()
     }
     pub fn physical_receivers(&self) -> &[ReceiverSpec] {
         &self.reference.receivers
@@ -391,6 +531,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                 reference: self.reference,
                 source_clock: self.source_clock,
                 channels: &self.channels,
+                microphone_patterns: self.microphone_patterns.as_deref(),
                 moments: Vec::new(),
                 averaged_covariance_pa2: Vec::new(),
             });
@@ -475,6 +616,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             reference: self.reference,
             source_clock: self.source_clock,
             channels: &self.channels,
+            microphone_patterns: self.microphone_patterns.as_deref(),
             moments,
             averaged_covariance_pa2,
         })
