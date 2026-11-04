@@ -31,7 +31,9 @@ mod boundary;
 mod modes;
 mod momentum;
 mod step;
-pub use boundary::{ChannelEnd, ImpermeableEndResponse, ImpermeableEndsResponse};
+pub use boundary::{
+    ChannelEnd, CounterflowEndsResponse, ImpermeableEndResponse, ImpermeableEndsResponse,
+};
 use modes::Modes;
 pub use momentum::{BodyForce, ComponentForceDensity, ForcedChannelStep};
 

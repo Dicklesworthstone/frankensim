@@ -3181,6 +3181,22 @@ longitudinal/second viscosities, nonlinear heating/phase feedback, vortex
 nucleation/reconnections, critical velocities, thin-film/porous modes and
 Kapitza resistance are outside this owner.
 
+`counterflow_boundary_velocities` maps explicit total outward heat flows in W
+to the two component velocities at zero total mass current, preserving signed
+entropy flow `Q/T0` and physical heat `Q` separately from wave-availability
+power `T'*Q/T0`. `counterflow_ends_response` returns the exact discrete affine
+midpoint temperature response of both ends, including their reciprocal cross
+response, finite thermal expansion, original body forces and mutual friction.
+Its 2x2 K/W response reuses the same cached endpoint columns as the mechanical
+port. No additional wave solve implementation or warm-step allocation is added.
+It provides absolute `T0+T'` and perturbation temperatures for thermal owners.
+The nonpublishing algebraic reference bypasses only amplitude limits; the actual
+heat-driven step still enforces every physical limit and atomic publication.
+`superfluid_ports` checks signed mass/entropy/heat/work accounting, independent
+two-cell caloric equations, forced reciprocal response and refusal/retry.
+Thermal reservoirs and interface laws remain responsibilities of the coupled
+owner; the channel does not infer Kapitza conductance from a material name.
+
 ### Explicit in-phase superfluid first sound
 
 `fs_material::superfluid::FirstSoundProjection` reaches the original

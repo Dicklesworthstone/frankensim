@@ -287,3 +287,241 @@ fn auxiliary_response_never_admits_an_invalid_real_step_or_publishes_on_cancella
     assert_eq!(duct.cumulative_mutual_friction_heat_j(), 0.0);
     assert!(duct.last_mutual_friction_heat_j().iter().all(|q| *q == 0.0));
 }
+
+#[test]
+fn counterflow_ports_transport_physical_heat_and_entropy_without_net_mass() {
+    let mut duct = channel(32, false);
+    let q_out = [0.001, -0.002];
+    let boundary = duct.counterflow_boundary_velocities(q_out).unwrap();
+    let dt = 0.6 * duct.maximum_step_s();
+    let report = duct
+        .step(dt, boundary, MutualFriction::None, || false)
+        .unwrap();
+    let t0 = duct.material().temperature_k();
+    let physical_heat = -dt * (q_out[0] + q_out[1]);
+    close(
+        report.boundary_counterflow_heat_j,
+        physical_heat,
+        physical_heat,
+    );
+    close(
+        report.boundary_entropy_j_k,
+        physical_heat / t0,
+        physical_heat / t0,
+    );
+    assert!(report.boundary_mass_kg.abs() < 1e-20);
+    let mut wave_work = 0.0;
+    for (end, cell, face, sign) in [(0, 0, 0, -1.0), (1, 31, 32, 1.0)] {
+        let velocity = duct.face(face).unwrap();
+        let theta_mid = 0.5 * duct.cell(cell).unwrap().temperature_perturbation_k;
+        close(
+            sign * duct.area_m2() * velocity.counterflow_heat_flux_w_m2,
+            q_out[end],
+            q_out[end].abs(),
+        );
+        close(
+            sign * duct.area_m2() * velocity.entropy_flux_w_m2_k,
+            q_out[end] / t0,
+            q_out[end].abs() / t0,
+        );
+        assert!(velocity.mass_flux_kg_m2_s.abs() < 1e-17);
+        wave_work -= dt * theta_mid * q_out[end] / t0;
+    }
+    close(report.boundary_wave_work_j, wave_work, wave_work.abs());
+    assert!(wave_work.abs() < physical_heat.abs() / 100.0);
+    let volume = duct.area_m2() * duct.length_m() / duct.cells() as f64;
+    let stored_entropy: f64 = (0..duct.cells())
+        .map(|i| {
+            let sample = duct.cell(i).unwrap();
+            volume
+                * (duct.material().density_kg_m3() * sample.specific_entropy_perturbation_j_kg_k
+                    + duct.material().entropy_j_kg_k() * sample.density_perturbation_kg_m3)
+        })
+        .sum();
+    close(t0 * stored_entropy, physical_heat, physical_heat);
+}
+
+#[test]
+fn reciprocal_thermal_response_predicts_forced_two_sound_endpoint_temperatures() {
+    for n in [2, 9, 64] {
+        for friction in [
+            MutualFriction::None,
+            MutualFriction::Linear { gamma_kg_m3_s: 3.0 },
+            MutualFriction::GorterMellink { a_m_s_kg: 20.0 },
+        ] {
+            let mut duct = channel(n, false);
+            let pressure: Vec<_> = (0..n)
+                .map(|i| 0.005 * (std::f64::consts::PI * (i as f64 + 0.5) / n as f64).cos())
+                .collect();
+            let temperature: Vec<_> = (0..n)
+                .map(|i| 0.0002 * (std::f64::consts::TAU * (i as f64 + 0.5) / n as f64).sin())
+                .collect();
+            let normal: Vec<_> = (0..=n)
+                .map(|i| 0.001 * (std::f64::consts::PI * i as f64 / n as f64).sin())
+                .collect();
+            let superfluid: Vec<_> = normal.iter().map(|v| -0.7 * v).collect();
+            duct.initialize(&pressure, &temperature, &normal, &superfluid, || false)
+                .unwrap();
+            let force = BodyForce::Uniform(ComponentForceDensity {
+                normal_n_m3: 0.002,
+                superfluid_n_m3: -0.001,
+            });
+            let dt = 0.6 * duct.maximum_step_s();
+            let reference = [0.0001, -0.0002];
+            let q_out = [-0.0003, 0.0004];
+            let original = accepted_state(&duct);
+            let response = duct
+                .counterflow_ends_response(dt, reference, force, friction, || false)
+                .unwrap();
+            assert_eq!(accepted_state(&duct), original);
+            let resistance = response.temperature_heat_impedance_k_w;
+            assert_eq!(resistance[0][1], resistance[1][0]);
+            assert!(resistance[0][0] > resistance[0][1]);
+            assert!(resistance[1][1] > resistance[0][1]);
+            let boundary = duct.counterflow_boundary_velocities(q_out).unwrap();
+            let report = duct
+                .step_forced(dt, boundary, force, friction, || false)
+                .unwrap();
+            let mut work = 0.0;
+            for (end, cell) in [0, n - 1].into_iter().enumerate() {
+                assert_eq!(
+                    response.reference_temperature_k[end],
+                    duct.material().temperature_k()
+                        + response.reference_temperature_perturbation_k[end]
+                );
+                let expected = response.reference_temperature_perturbation_k[end]
+                    - resistance[end][0] * (q_out[0] - reference[0])
+                    - resistance[end][1] * (q_out[1] - reference[1]);
+                let actual =
+                    0.5 * (temperature[cell] + duct.cell(cell).unwrap().temperature_perturbation_k);
+                close(actual, expected, actual.abs().max(1e-6));
+                work -= dt * actual * q_out[end] / duct.material().temperature_k();
+            }
+            close(report.boundary_wave_work_j, work, work.abs().max(1e-12));
+        }
+    }
+}
+
+#[test]
+fn two_cell_thermal_response_matches_independent_caloric_midpoint_equations() {
+    let mut properties = channel(2, false).material().properties();
+    properties.thermal_expansion_per_k = 0.0;
+    let material = TwoFluidState::try_new(properties).unwrap();
+    let mut duct = TwoFluidChannel::try_new(
+        material,
+        1.0,
+        0.01,
+        2,
+        LinearizationLimits {
+            max_pressure_perturbation_pa: 1.0,
+            max_temperature_perturbation_k: 0.02,
+            max_component_speed_m_s: 0.1,
+        },
+    )
+    .unwrap();
+    let dt = 0.7 * duct.maximum_step_s();
+    let response = duct
+        .counterflow_ends_response(dt, [0.0; 2], BodyForce::None, MutualFriction::None, || {
+            false
+        })
+        .unwrap();
+    // At alpha=0 the thermal equations are rho*cp*theta_t=-q_x and
+    // q_t=-rho*cp*c2^2*theta_x. Eliminating the single interior heat current
+    // gives [[1+r,-r],[-r,1+r]] with r=(c2*dt/(2*dx))^2. Boundary Q is in W.
+    let dx = 0.5;
+    let c2_squared = 3.0 * 2.0 * 16.0 / 16.0;
+    let r = c2_squared * (dt / dx).powi(2) / 4.0;
+    let heat_capacity =
+        material.density_kg_m3() * material.specific_heat_cp_j_kg_k() * duct.area_m2() * dx;
+    let factor = dt / (2.0 * heat_capacity * (1.0 + 2.0 * r));
+    for i in 0..2 {
+        for j in 0..2 {
+            let expected = factor * if i == j { 1.0 + r } else { r };
+            close(
+                response.temperature_heat_impedance_k_w[i][j],
+                expected,
+                expected,
+            );
+        }
+    }
+    assert_eq!(response.reference_temperature_perturbation_k, [0.0; 2]);
+    assert_eq!(
+        response.reference_temperature_k,
+        [material.temperature_k(); 2]
+    );
+}
+
+#[test]
+fn thermal_response_refusals_preserve_state_and_do_not_admit_invalid_real_heat() {
+    let mut duct = channel(16, false);
+    let original = accepted_state(&duct);
+    let dt = 0.5 * duct.maximum_step_s();
+    let polls = Cell::new(0);
+    assert_eq!(
+        duct.counterflow_ends_response(
+            dt,
+            [0.0001; 2],
+            BodyForce::None,
+            MutualFriction::None,
+            || {
+                polls.set(polls.get() + 1);
+                polls.get() >= 6
+            }
+        ),
+        Err(ChannelError::Cancelled)
+    );
+    for q in [[f64::NAN, 0.0], [0.0, f64::INFINITY]] {
+        assert!(duct.counterflow_boundary_velocities(q).is_err());
+        assert!(
+            duct.counterflow_ends_response(dt, q, BodyForce::None, MutualFriction::None, || false)
+                .is_err()
+        );
+    }
+    assert_eq!(accepted_state(&duct), original);
+    let q = [0.0001, -0.0002];
+    let mut fresh = channel(16, false);
+    for owner in [&mut duct, &mut fresh] {
+        let boundary = owner.counterflow_boundary_velocities(q).unwrap();
+        owner
+            .step(dt, boundary, MutualFriction::None, || false)
+            .unwrap();
+    }
+    assert_eq!(accepted_state(&duct), accepted_state(&fresh));
+
+    let mut tight = channel(16, true);
+    let original = accepted_state(&tight);
+    let response = tight
+        .counterflow_ends_response(dt, q, BodyForce::None, MutualFriction::None, || false)
+        .unwrap();
+    assert!(
+        response
+            .reference_temperature_perturbation_k
+            .iter()
+            .any(|t| t.abs() > 1e-12)
+    );
+    assert_eq!(accepted_state(&tight), original);
+    let boundary = tight.counterflow_boundary_velocities(q).unwrap();
+    assert!(matches!(
+        tight.step(dt, boundary, MutualFriction::None, || false),
+        Err(ChannelError::Domain { .. })
+    ));
+    assert_eq!(accepted_state(&tight), original);
+}
+
+fn accepted_state(duct: &TwoFluidChannel) -> Vec<f64> {
+    let mut values = vec![
+        duct.time_s(),
+        duct.cumulative_mutual_friction_heat_j(),
+        duct.wave_energy_j().unwrap(),
+    ];
+    values.extend(duct.last_mutual_friction_heat_j());
+    for i in 0..duct.cells() {
+        let c = duct.cell(i).unwrap();
+        values.extend([c.pressure_perturbation_pa, c.temperature_perturbation_k]);
+    }
+    for i in 0..=duct.cells() {
+        let f = duct.face(i).unwrap();
+        values.extend([f.normal_velocity_m_s, f.superfluid_velocity_m_s]);
+    }
+    values
+}
