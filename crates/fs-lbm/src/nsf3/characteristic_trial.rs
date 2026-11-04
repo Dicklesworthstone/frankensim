@@ -97,8 +97,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         )
     }
 
-    /// Preview original steps under typed incoming-wave or pressure controls.
-    /// A pressure control is imposed by the original local reconstruction at
+    /// Preview original steps under typed wave, pressure or resistive controls.
+    /// A pressure or load law is imposed by the original local reconstruction at
     /// every predictor, not by another flow solve or a rebaked source waveform.
     /// Dropping or refusing the trial preserves both accepted controls and all
     /// original populations, force/energy history and material state.
@@ -395,6 +395,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             wall_out: self.wall_out, open: self.open,
             characteristic_pressure_offset_pa: self.characteristic_pressure_offset_pa,
             characteristic_inflow_temperature_k: self.characteristic_inflow_temperature_k,
+            characteristic_impedance_pa_s_m: self.characteristic_impedance_pa_s_m,
             characteristic_thermal_policy: self.characteristic_thermal_policy,
             characteristic_patch: self.characteristic_patch,
             open_faces: self.open_faces.clone(),

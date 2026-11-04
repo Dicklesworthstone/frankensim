@@ -120,6 +120,42 @@ fn native_aperture_refuses_invalid_bounds_controls_and_inlet_area() {
 }
 
 #[test]
+fn native_aperture_resistive_background_reaches_the_original_live_face() {
+    let text = input(0.0).replace(
+        "coupled_patch 1 2 1 2 pressure 0",
+        "coupled_patch 1 2 1 2 impedance 800 -0.25",
+    );
+    let file = read(&text, 8);
+    let drive = NsfBoundaryDrive::ResistiveImpedance {
+        specific_impedance_pa_s_m: 800.0,
+        pressure_offset_pa: -0.25,
+    };
+    assert_eq!(
+        file.renderer().system().patch_background_drive(),
+        Some(drive)
+    );
+    let (_, renderer) = render(file, 8);
+    for face in renderer.system().zone().open_boundary_traces(true).unwrap() {
+        if face.cell[1] != 1 || face.cell[2] != 1 {
+            assert!(
+                (face.pressure_pa - 100000.0 - (800.0 * face.outward_normal_velocity_m_s - 0.25))
+                    .abs()
+                    < 2e-8
+            );
+        }
+    }
+    let invalid = text.replace("impedance 800 -0.25", "impedance -800 -0.25");
+    assert!(
+        ResolvedDgFilePerformance::from_bytes(
+            invalid.as_bytes(),
+            8,
+            Arc::new(CancelGate::new_clock_free())
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn canonical_split_aperture_reaches_the_original_exterior_observer() {
     let file = read(
         include_str!("../../../../../examples/resolved-dg-split-aperture.performance"),

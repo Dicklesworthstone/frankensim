@@ -483,6 +483,9 @@ pub(super) fn resolved_provenance(
             fs_lbm::nsf3::NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
                 ("prescribed-pressure-and-inflow-temperature", pressure_offset_pa, "Pa",
                     format!(",\"inflow_temperature_k\":{inflow_temperature_k:e},\"temperature_scope\":\"upstream temperature for inward flow; face trace or enthalpy influx follows the selected thermal policy\"")),
+            fs_lbm::nsf3::NsfBoundaryDrive::ResistiveImpedance { specific_impedance_pa_s_m, pressure_offset_pa } =>
+                ("resistive-acoustic-impedance", pressure_offset_pa, "Pa",
+                    format!(",\"specific_impedance_pa_s_m\":{specific_impedance_pa_s_m:e},\"load_scope\":\"local passive resistance on outward acoustic velocity; no reactive storage or exterior inventory\"")),
         };
         let open = system.zone().characteristic_axis().expect("original characteristic axis");
         Some(format!(",\"{name}\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"{scope}\"}}",
@@ -565,6 +568,8 @@ pub(super) fn resolved_provenance(
             ",\"external_boundary\":{\"kind\":\"prescribed-pressure-offset\",\"units\":\"Pa\",\"reference\":\"original source-face material pressure\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\"}",
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(_)) =>
             ",\"external_boundary\":{\"kind\":\"incoming-characteristic\",\"units\":\"m/s\",\"definition\":\"delta outward normal velocity minus delta pressure over reference material impedance\"}",
+        fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::ResistiveImpedance { .. }) =>
+            ",\"external_boundary\":{\"kind\":\"resistive-acoustic-impedance\",\"impedance_units\":\"Pa s/m\",\"pressure_units\":\"Pa offset from source reference\",\"definition\":\"pressure perturbation equals nonnegative resistance times outward velocity perturbation plus the declared pressure source\",\"scope\":\"local frequency-independent resistance; no reactive storage or exterior inventory\"}",
         fs_couple::nsf_dg::NsfDgDrive::UpstreamPressureRise(_) =>
             ",\"external_boundary\":{\"kind\":\"upstream-series-pressure-rise\",\"units\":\"Pa\",\"definition\":\"resolved face pressure minus finite upstream duct pressure\",\"flow\":\"both original acoustic loads and resolved faces solved on the same physical interval\",\"source_work\":\"minus pressure rise times outward upstream volume flow times physical interval\"}",
         fs_couple::nsf_dg::NsfDgDrive::FiniteReservoirActuation { .. } =>

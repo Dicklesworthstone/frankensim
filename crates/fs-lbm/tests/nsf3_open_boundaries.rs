@@ -1,11 +1,13 @@
 //! Focused conservation/characteristic tests of the original NSF step.
 //! Source packs below are authored algebra, not experimental gas validation.
-#[path = "nsf3_thermochemical/source.rs"]
-mod source;
-#[path = "nsf3_open_boundaries/pressure.rs"]
-mod pressure;
+#[path = "nsf3_open_boundaries/impedance.rs"]
+mod impedance;
 #[path = "nsf3_open_boundaries/patch.rs"]
 mod patch;
+#[path = "nsf3_open_boundaries/pressure.rs"]
+mod pressure;
+#[path = "nsf3_thermochemical/source.rs"]
+mod source;
 
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{

@@ -647,6 +647,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     open: Option<NsfCharacteristicAxis>,
     characteristic_pressure_offset_pa: [Option<f64>; 2],
     characteristic_inflow_temperature_k: [Option<f64>; 2],
+    characteristic_impedance_pa_s_m: [Option<f64>; 2],
     characteristic_thermal_policy: [NsfCharacteristicThermalPolicy; 2],
     characteristic_patch: [Option<CharacteristicPatchBinding>; 2],
     open_faces: Option<OpenFaces>,
@@ -851,6 +852,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             open: None,
             characteristic_pressure_offset_pa: [None; 2],
             characteristic_inflow_temperature_k: [None; 2],
+            characteristic_impedance_pa_s_m: [None; 2],
             characteristic_thermal_policy: [NsfCharacteristicThermalPolicy::UpwindEntropy; 2],
             characteristic_patch: [None; 2],
             open_faces: None,
@@ -1605,6 +1607,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     self.open.as_ref(),
                     self.characteristic_pressure_offset_pa,
                     self.characteristic_inflow_temperature_k,
+                    self.characteristic_impedance_pa_s_m,
                     self.characteristic_patch,
                     &rho1,
                     &u_guess,
@@ -1732,6 +1735,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             self.open.as_ref(),
             self.characteristic_pressure_offset_pa,
             self.characteristic_inflow_temperature_k,
+            self.characteristic_impedance_pa_s_m,
             self.characteristic_patch,
             &rho1,
             &u1,
@@ -2088,6 +2092,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } => {
                     feed(2.0); feed(pressure_offset_pa); feed(inflow_temperature_k);
                 }
+                NsfBoundaryDrive::ResistiveImpedance { specific_impedance_pa_s_m, pressure_offset_pa } => {
+                    feed(3.0); feed(specific_impedance_pa_s_m); feed(pressure_offset_pa);
+                }
             }
         }
         for (owner, aperture) in self.reservoir_apertures.iter().enumerate() {
@@ -2122,6 +2129,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if *policy == NsfCharacteristicThermalPolicy::EnthalpyFlux {
                 feed(5.0);
                 feed(side as f64);
+            }
+        }
+        for (side, resistance) in self.characteristic_impedance_pa_s_m.iter().enumerate() {
+            if let Some(resistance) = resistance {
+                feed(6.0);
+                feed(side as f64);
+                feed(*resistance);
+                feed(self.characteristic_pressure_offset_pa[side].expect("resistive pressure drive"));
             }
         }
         h

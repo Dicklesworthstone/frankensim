@@ -19,6 +19,13 @@
 //! J- = J+ - 2 dp/(rho_ref c_ref) at each original quadrature point and predictor.
 //! The outgoing wave then determines normal velocity; the same reconstructed
 //! face still owns populations, material response and conservative fluxes.
+//! A resistive load instead imposes dp = R du_n + p_drive with R >= 0 in
+//! Pa s/m. Its pressure reflection is (R-rho_ref*c_ref)/(R+rho_ref*c_ref):
+//! pressure-release, matched and rigid limits retain their different signs.
+//! The source-free perturbation work R du_n^2 is nonnegative. This is a local
+//! frequency-independent resistance, not a reactive wall or a second gas domain.
+//! Acoustic impedance and normal-incidence continuity: MIT 6.013, chapter 13,
+//! <https://ocw.mit.edu/courses/6-013-electromagnetics-and-applications-spring-2009/MIT6_013S09_chap13.pdf>.
 //! The normal boundary stencil is first order. Oblique transparency, a
 //! <-40 dB reflection bound and resolved instrument accuracy are unqualified.
 
@@ -75,6 +82,22 @@ pub enum NsfBoundaryDrive {
         pressure_offset_pa: f64,
         inflow_temperature_k: f64,
     },
+    /// Passive specific acoustic resistance R [Pa s/m] with an optional ideal
+    /// pressure source: p-p_ref = R*(u_n-u_ref,n) + pressure_offset_pa.
+    /// Velocity is OUTWARD on both faces. R must be finite and nonnegative;
+    /// R=0 is pressure release and R=rho_ref*c_ref is a matched termination.
+    /// Arbitrarily large finite R approaches a rigid acoustic termination.
+    /// The same source-resolved reference impedance and live outgoing wave
+    /// determine every face predictor, including localized patches.
+    ///
+    /// The resistance acts on perturbations about the declared reference.
+    /// Its work is already in the original boundary flux; do not add another
+    /// heat sink. Reactive storage, frequency dependence and external thermal
+    /// or mass inventories are not modeled by this instantaneous load.
+    ResistiveImpedance {
+        specific_impedance_pa_s_m: f64,
+        pressure_offset_pa: f64,
+    },
 }
 
 impl NsfBoundaryDrive {
@@ -84,7 +107,55 @@ impl NsfBoundaryDrive {
             Self::IncomingCharacteristic(value) | Self::PressureOffset(value) => value.is_finite(),
             Self::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
                 pressure_offset_pa.is_finite() && inflow_temperature_k.is_finite(),
+            Self::ResistiveImpedance { specific_impedance_pa_s_m, pressure_offset_pa } =>
+                specific_impedance_pa_s_m.is_finite() && pressure_offset_pa.is_finite(),
         }
+    }
+}
+
+// Solve J+ = du_n + dp/Z0 and dp = R*du_n + p_drive directly. Computing
+// J- first and subtracting nearly opposite characteristics loses the small
+// velocity of a highly reflecting load. Scaling also avoids overflow in R+Z0.
+#[derive(Clone, Copy)]
+struct ResistiveLoad {
+    velocity_weight: f64,
+    pressure_weight: f64,
+    velocity_source: f64,
+    pressure_source: f64,
+}
+impl ResistiveLoad {
+    // Prepared once per face/patch and reference, never per quadrature point.
+    fn new(z0: f64, resistance: f64, drive: f64) -> Result<Self, NsfError> {
+        if !resistance.is_finite()
+            || resistance < 0.0
+            || !z0.is_finite()
+            || z0 <= 0.0
+            || !drive.is_finite()
+        {
+            return Err(NsfError::Input(
+                "acoustic load requires finite nonnegative specific resistance",
+            ));
+        }
+        let scale = resistance.max(z0);
+        let denominator = resistance / scale + z0 / scale;
+        let wave_weight = (z0 / scale) / denominator;
+        let load_weight = (resistance / scale) / denominator;
+        let result = Self {
+            velocity_weight: wave_weight,
+            pressure_weight: load_weight * z0,
+            velocity_source: (drive / scale) / denominator,
+            pressure_source: wave_weight * drive,
+        };
+        result.trace(0.0)?;
+        Ok(result)
+    }
+    fn trace(self, outgoing: f64) -> Result<(f64, f64), NsfError> {
+        let velocity = self.velocity_weight * outgoing - self.velocity_source;
+        let pressure = self.pressure_weight * outgoing + self.pressure_source;
+        if !velocity.is_finite() || !pressure.is_finite() {
+            return Err(NsfError::Input("acoustic load trace is unrepresentable"));
+        }
+        Ok((velocity, pressure))
     }
 }
 
@@ -293,7 +364,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
         }
-        self.rebind_characteristics(open, [None; 2], [None; 2], [None; 2])?;
+        self.rebind_characteristics(open, [None; 2], [None; 2], [None; 2], [None; 2])?;
         Ok(self)
     }
 
@@ -314,7 +385,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// entropy/shear donors follow the reference normal speed, with stationary
     /// modes retaining the adjacent cell. An explicit inflow temperature instead
     /// selects the declared thermal source on actual inflow and the adjacent
-    /// cell on outflow. Pressure, temperature, Mach and source-domain
+    /// cell on outflow. A resistive drive relates the same instantaneous pressure
+    /// and outward velocity perturbations at every predictor. Pressure, temperature, Mach and source-domain
     /// refusals apply before any physical state or control is published.
     /// Each attached aperture retains its own drive; these controls apply to
     /// the complementary cells of each face.
@@ -330,6 +402,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .ok_or(NsfError::Input("no characteristic axis is attached"))?;
         let mut pressure = [None; 2];
         let mut temperature = [None; 2];
+        let mut resistance = [None; 2];
         for (side, drive) in drives.into_iter().enumerate() {
             if !drive.is_finite() {
                 return Err(NsfError::Input("characteristic boundary drive must be finite"));
@@ -349,9 +422,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     pressure[side] = Some(pressure_offset_pa);
                     temperature[side] = Some(inflow_temperature_k);
                 }
+                NsfBoundaryDrive::ResistiveImpedance { specific_impedance_pa_s_m, pressure_offset_pa } => {
+                    open.faces[side].incoming_characteristic_m_s = 0.0;
+                    pressure[side] = Some(pressure_offset_pa);
+                    resistance[side] = Some(specific_impedance_pa_s_m);
+                }
             }
         }
-        self.rebind_characteristics(open, pressure, temperature, patch)
+        self.rebind_characteristics(open, pressure, temperature, resistance, patch)
     }
 
     /// Actual accepted controls, low then high, with their physical units.
@@ -360,6 +438,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn boundary_drives(&self) -> Option<[NsfBoundaryDrive; 2]> {
         let open = self.open.as_ref()?;
         Some(std::array::from_fn(|side| {
+            if let Some(specific_impedance_pa_s_m) = self.characteristic_impedance_pa_s_m[side] {
+                return NsfBoundaryDrive::ResistiveImpedance {
+                    specific_impedance_pa_s_m,
+                    pressure_offset_pa: self.characteristic_pressure_offset_pa[side]
+                        .expect("resistive pressure drive"),
+                };
+            }
             self.characteristic_pressure_offset_pa[side].map_or(
                 NsfBoundaryDrive::IncomingCharacteristic(
                     open.faces[side].incoming_characteristic_m_s,
@@ -468,6 +553,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     fn rebind_characteristics(
         &mut self, open: NsfCharacteristicAxis, pressure_offset_pa: [Option<f64>; 2],
         inflow_temperature_k: [Option<f64>; 2],
+        resistance_pa_s_m: [Option<f64>; 2],
         patch: [Option<CharacteristicPatchBinding>; 2],
     ) -> Result<(), NsfError> {
         let bound = open.maximum_relative_perturbation;
@@ -479,7 +565,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
         let faces = self.resolve_open_faces(Some(&open), pressure_offset_pa,
-            inflow_temperature_k, patch, &rho, &u, &self.theta, &self.material)?;
+            inflow_temperature_k, resistance_pa_s_m, patch, &rho, &u, &self.theta, &self.material)?;
         let force = self.force_field(&rho, &self.theta, faces.as_ref());
         let mut f = self.f.clone();
         for i in 0..self.n {
@@ -498,6 +584,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.open = Some(open);
         self.characteristic_pressure_offset_pa = pressure_offset_pa;
         self.characteristic_inflow_temperature_k = inflow_temperature_k;
+        self.characteristic_impedance_pa_s_m = resistance_pa_s_m;
         self.characteristic_patch = patch;
         self.open_faces = faces;
         self.f = f;
@@ -533,7 +620,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         for _ in 0..32 {
             let faces = self.resolve_open_faces(
                 self.open.as_ref(), self.characteristic_pressure_offset_pa,
-                self.characteristic_inflow_temperature_k, self.characteristic_patch,
+                self.characteristic_inflow_temperature_k, self.characteristic_impedance_pa_s_m,
+                self.characteristic_patch,
                 rho, &velocity, theta, material,
             )?;
             let force = self.force_field(rho, theta, faces.as_ref());
@@ -562,6 +650,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         open: Option<&NsfCharacteristicAxis>,
         pressure_offset_pa: [Option<f64>; 2],
         inflow_temperature_k: [Option<f64>; 2],
+        resistance_pa_s_m: [Option<f64>; 2],
         patch: [Option<CharacteristicPatchBinding>; 2],
         rho: &[f64],
         u: &[[f64; 3]],
@@ -601,6 +690,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
             let impedance = reference.density * reference.sound_speed;
+            // Validate controls even if a patch covers the complete face.
+            let face_load = resistance_pa_s_m[side].map(|resistance|
+                ResistiveLoad::new(impedance, resistance,
+                    pressure_offset_pa[side].ok_or(NsfError::Input(
+                        "resistive load requires its original pressure source"))?)
+            ).transpose()?;
+            let patch_load = match patch[side].map(|patch| patch.drive) {
+                Some(NsfBoundaryDrive::ResistiveImpedance { specific_impedance_pa_s_m, pressure_offset_pa }) =>
+                    Some(ResistiveLoad::new(impedance, specific_impedance_pa_s_m, pressure_offset_pa)?),
+                _ => None,
+            };
             let alpha = (reference.gamma - 1.0) / reference.gamma * reference.temperature
                 / reference.pressure;
             let normal_reference = sign * boundary.reference_velocity_m_s[open.axis];
@@ -643,19 +743,23 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let ui = u[i].map(|v| v * velocity_unit);
                 let outgoing =
                     sign * ui[open.axis] - normal_reference + (pi - reference.pressure) / impedance;
-                let (incoming, pressure_offset, inflow_temperature) = match patch[side].filter(|patch|
+                let (incoming, pressure_offset, inflow_temperature, load) = match patch[side].filter(|patch|
                     usize::from(patch.high) == side && patch.shape.contains(x, open.axis))
                 {
                     Some(patch) => match patch.drive {
-                        NsfBoundaryDrive::IncomingCharacteristic(value) => (value, None, None),
-                        NsfBoundaryDrive::PressureOffset(value) => (0.0, Some(value), None),
+                        NsfBoundaryDrive::IncomingCharacteristic(value) => (value, None, None, None),
+                        NsfBoundaryDrive::PressureOffset(value) => (0.0, Some(value), None, None),
                         NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
-                            (0.0, Some(pressure_offset_pa), Some(inflow_temperature_k)),
+                            (0.0, Some(pressure_offset_pa), Some(inflow_temperature_k), None),
+                        NsfBoundaryDrive::ResistiveImpedance { .. } => (0.0, None, None, patch_load),
                     },
                     None => (boundary.incoming_characteristic_m_s, pressure_offset_pa[side],
-                        inflow_temperature_k[side]),
+                        inflow_temperature_k[side], face_load),
                 };
-                let (normal, pressure) = match pressure_offset {
+                let (normal, pressure) = if let Some(load) = load {
+                    let (velocity, pressure) = load.trace(outgoing)?;
+                    (normal_reference + velocity, reference.pressure + pressure)
+                } else { match pressure_offset {
                     Some(offset) => {
                         // J- = J+ - 2 dp/Z. Evaluate the equivalent normal
                         // velocity directly, avoiding cancellation between
@@ -669,7 +773,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         reference.pressure
                             + 0.5 * impedance * (outgoing - incoming),
                     ),
-                };
+                }};
                 // The linearized entropy/shear modes travel at u_ref, not at
                 // the acoustic perturbation. Switching them at acoustic flow
                 // reversal inserts a finite material jump at zero transport.

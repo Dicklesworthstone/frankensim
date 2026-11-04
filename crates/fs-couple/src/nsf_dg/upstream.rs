@@ -149,7 +149,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
             accepted.map(|drive| Some(match drive {
                 NsfBoundaryDrive::IncomingCharacteristic(value) => value,
                 NsfBoundaryDrive::PressureOffset(_)
-                | NsfBoundaryDrive::PressureTemperature { .. } => f64::midpoint(
+                | NsfBoundaryDrive::PressureTemperature { .. }
+                | NsfBoundaryDrive::ResistiveImpedance { .. } => f64::midpoint(
                     self.limits.incoming_bracket_m_s[0], self.limits.incoming_bracket_m_s[1]),
             }))
         } else {

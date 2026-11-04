@@ -49,6 +49,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             open,
             self.characteristic_pressure_offset_pa,
             self.characteristic_inflow_temperature_k,
+            self.characteristic_impedance_pa_s_m,
             self.characteristic_patch,
         )?;
         Ok(self)

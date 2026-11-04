@@ -9215,6 +9215,32 @@ material impedance dependence, original integrated work/mass/energy accounts,
 typed characteristic identity and atomic refusals. They do not establish a
 reflection bound or measured-instrument accuracy.
 
+`NsfBoundaryDrive::ResistiveImpedance` adds a local passive acoustic load in
+specific SI impedance [Pa s/m]: `p-p_ref = R*(u_n-u_ref,n) + p_drive`, with
+outward normal velocity on either face and finite `R >= 0`. The live outgoing
+characteristic and the original reference gas's `Z0=rho*c` determine both face
+pressure and velocity at every predictor. The pressure reflection coefficient
+is `(R-Z0)/(R+Z0)`: zero resistance is pressure release, `R=Z0` is matched,
+and large resistance approaches the positive rigid-wall reflection. Scaled
+weights retain the small velocity near that rigid limit without subtracting
+opposite characteristics. They are prepared once per face or patch; evaluating
+the original quadrature adds no allocation or constitutive query.
+
+The same load reaches complementary faces, localized patches and reversible
+intervals, preserving source/Mach/temperature bounds and atomic refusal.
+Its source-free perturbation work is `R*(u_n-u_ref,n)^2 >= 0`; the original
+boundary mass, momentum, pressure-work and total-energy accounts already carry
+the exchange. There is no extra heat sink or separately evolved exterior.
+`nsf3_open_boundaries::impedance` checks source-dependent reflection on all
+axes, signed returning packets and refinement, native conservation, patches,
+trial replay and refusals. These are plane-normal local-linear numerical
+checks, not qualified oblique transparency or measured load data. Reactive
+storage, frequency-dependent impedances and finite exterior inventories remain
+outside this instantaneous resistive model. Resolved NSF-DG input files can
+select `impedance PA_S_M PA` for a source/coupled patch's complementary face;
+the final pressure value is the optional ideal source offset, not another
+incoming wave or an absolute pressure.
+
 `reservoir_aperture_state_at(P, T)` resolves held absolute pressure and
 temperature through the grid's original material source while retaining the
 attached transverse aperture's declared Cartesian ghost velocity. The warm

@@ -178,7 +178,9 @@ impl ResolvedDgFilePerformance {
     /// observation. The original NSF cold constructor itself has no internal
     /// cancellation callback; its finite cell/transport budgets still apply.
     pub fn from_bytes_with_sources(
-        bytes: &[u8], maximum_block: usize, gate: Arc<CancelGate>,
+        bytes: &[u8],
+        maximum_block: usize,
+        gate: Arc<CancelGate>,
         sources: Option<&ThermochemicalSources<'_>>,
         mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, ResolvedDgInputError> {
@@ -363,8 +365,12 @@ impl ResolvedDgFilePerformance {
                     pressure_offset_pa: row.scalar()?,
                     inflow_temperature_k: row.scalar()?,
                 },
+                "impedance" => NsfBoundaryDrive::ResistiveImpedance {
+                    specific_impedance_pa_s_m: row.scalar()?,
+                    pressure_offset_pa: row.scalar()?,
+                },
                 "characteristic" => NsfBoundaryDrive::IncomingCharacteristic(row.scalar()?),
-                _ => return Err(bad(row.line, "patch remainder requires pressure PA, pressure-temperature PA K, or characteristic M_S")),
+                _ => return Err(bad(row.line, "patch remainder requires pressure PA, pressure-temperature PA K, impedance PA_S_M PA, or characteristic M_S")),
             };
             if !background.is_finite() {
                 return Err(bad(row.line, "patch controls require finite pressure and positive inflow temperature"));
