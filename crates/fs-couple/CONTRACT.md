@@ -21837,7 +21837,20 @@ The existing held-input, contact and observer conventions remain explicit.
 
 The original bank observer reads its complete physical prefix at the declared
 string offset, so compact and Vk modes cannot overlap or double count in the
-pressure calculation. Focused native tests cover independently written
+pressure calculation. The string contribution uses the same compact strip
+observer as fixed-end strings, with the signed area and midpoint first moment
+of its original half-integer cosine shapes. Both its monopole acceleration and
+dipole jerk therefore survive body/duct composition. Acceleration retains the
+original interval-mean momentum increment; jerk differences consecutive accepted
+interval means. The first interval primes its own history without inventing a
+release impulse or an endpoint reaction from the descriptor's mean multiplier.
+Body/duct observation and material histories keep their original owners. The
+existing positive-string-axis compact approximation and absence of string
+radiation back-reaction remain. G1 checks compare sine/cosine moments with
+independent spatial quadrature and actual bare/joined pressure with a damped
+oscillator derived by eliminating the common-velocity constraint.
+
+Focused native tests cover independently written
 mechanical/fluid DAE evolution with 20/40/80-step refinement, work/heat and
 constraint closure, nonlinear histories, malformed/incompatible joins, and
 128 exact steps of accepted warm radiation memory at 48 kHz. Actual renderer

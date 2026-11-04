@@ -21,6 +21,9 @@ mod reed_ode;
 mod polarization_tests;
 #[cfg(test)]
 mod moving_contact_tests;
+#[cfg(test)]
+#[path = "acoustic_realize/string_observer_tests.rs"]
+mod moving_string_observer_tests;
 
 #[cfg(test)]
 use reed_ode::realize_reed_ode;
@@ -1589,7 +1592,10 @@ pub fn string_mode_omega(string: &PrestressedString, k: usize) -> f64 {
 /// scenario has no directional listener. This remains a compact strip model,
 /// not the radiation solution for a cylindrical wire. Common propagation
 /// delay is omitted. Jerk uses backward differences of accepted accelerations
-/// (first-order); instantaneous release impulses are not reconstructed.
+/// (first-order); instantaneous release impulses are not reconstructed. The
+/// joined moving-end path supplies interval-mean accelerations from its accepted
+/// momentum increments, retaining that clock instead of inferring endpoint
+/// reactions from a descriptor step's interval multiplier.
 #[derive(Clone)]
 struct StringObserver {
     weights: Vec<(f64, f64)>,
@@ -1603,6 +1609,18 @@ impl StringObserver {
         let factor = scale * gas.density * string.width_m / (4.0 * pi * range * mass_scale);
         let weights = (1..=string.n_modes)
             .map(|k| {
+                if string.moving_end {
+                    let kpi = (k as f64 - 0.5) * pi;
+                    let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
+                    // The original half-integer cosine shape has both signed
+                    // area and first moment about the same string midpoint.
+                    return (
+                        factor * sign * string.length_m / kpi,
+                        factor * string.length_m.powi(2)
+                            * (0.5 * sign / kpi - 1.0 / kpi.powi(2))
+                            / gas.sound_speed,
+                    );
+                }
                 let kpi = k as f64 * pi;
                 if k % 2 == 1 {
                     (factor * 2.0 * string.length_m / kpi, 0.0)
@@ -2213,8 +2231,7 @@ fn realize_dirac_join(
     let mut out = Vec::with_capacity(n);
     let mut rec_x = vec![0.0; x.len()];
     let mut average_output = vec![0.0; descriptor_exact.as_ref().map_or(0, |s| s.port_dim())];
-    let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
-    let pi = core::f64::consts::PI;
+    let mut string_observer = StringObserver::new(string, gas, listener_m, 1.0);
     for i in 0..n {
         let t = i as f64 * dt;
         if let Some(prepared) = descriptor_exact.as_mut() {
@@ -2282,13 +2299,15 @@ fn realize_dirac_join(
             )?
             .x;
         }
-        let mut p = 0.0;
-        for k in 0..n_s {
-            let acc = (rec_x[2 * k + 1] - x[2 * k + 1]) / dt;
-            let kappa = (k as f64 + 0.5) * pi / string.length_m;
-            let integral = phi0 * (if k % 2 == 0 { 1.0 } else { -1.0 }) / kappa;
-            p += gas.density * string.width_m * acc * integral / (4.0 * pi * listener_m);
-        }
+        let acceleration: Vec<f64> = (0..n_s)
+            .map(|k| (rec_x[2 * k + 1] - x[2 * k + 1]) / dt)
+            .collect();
+        // Keep the original accepted interval-mean source. Its first interval
+        // has no preceding mean: prime with itself, without a fabricated jerk
+        // or release impulse. All later means share the same observer history.
+        let initial = string_observer.previous_acceleration.is_none()
+            .then(|| acceleration.clone());
+        let mut p = string_observer.observe(acceleration, initial, dt)?;
         if let Some(observation) = &body_observation {
             p += observation.pressure_between(&x, &rec_x, dt, gas.density, listener_m)?;
         }
