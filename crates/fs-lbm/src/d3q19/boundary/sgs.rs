@@ -14,6 +14,12 @@ use crate::lattice3::{D3q19, ViscousLattice3};
 use crate::sgs3::{SgsConfig, SgsError, SgsReport, SgsWorkspace3, eddy_viscosity};
 use fs_exec::{CancelGate, KernelRunner};
 
+mod dynamic;
+pub use dynamic::{
+    BoundaryDynamicSgsConfig3, BoundaryDynamicSgsError3, BoundaryDynamicSgsReport3,
+    BoundaryDynamicSgsWorkspace3,
+};
+
 /// Refusals leave the published populations unchanged. Scratch may contain
 /// an incomplete preparation or collision pass and is rebuilt on retry.
 #[derive(Clone, Debug, PartialEq)]
@@ -181,55 +187,7 @@ impl BoundaryGrid3 {
     ) -> Result<SgsReport, E> {
         checkpoint(gate).map_err(BoundarySgsError3::from)?;
         config.validate().map_err(BoundarySgsError3::from)?;
-        let count = self.f[0].len() * TILE_CELLS;
-        if workspace.velocity.len() != count
-            || workspace.density.len() != count
-            || workspace.collisions.len() != count
-        {
-            return Err(BoundarySgsError3::Workspace.into());
-        }
-        let uniform_nu = self.collision_model.kinematic_viscosity();
-        if !(uniform_nu.is_finite() && uniform_nu > 0.0) {
-            return Err(
-                BoundarySgsError3::from(SgsError::InvalidMolecularViscosity { cell: 0 }).into(),
-            );
-        }
-        for tile in 0..self.f[0].len() {
-            checkpoint(gate).map_err(BoundarySgsError3::from)?;
-            for lane in 0..TILE_CELLS {
-                let cell = tile * TILE_CELLS + lane;
-                if self.solid[tile] & (1u64 << lane) != 0 {
-                    workspace.velocity[cell] = [0.0; 3];
-                    workspace.density[cell] = 0.0;
-                    continue;
-                }
-                let mut rho = 0.0;
-                let mut momentum = [0.0; 3];
-                for (q, e) in E3.iter().enumerate() {
-                    let population = self.f[q][tile].0[lane];
-                    if !population.is_finite() {
-                        return Err(BoundarySgsError3::InvalidState {
-                            cell: self.coords(tile, lane),
-                        }
-                        .into());
-                    }
-                    rho += population;
-                    momentum[0] += f64::from(e.0) * population;
-                    momentum[1] += f64::from(e.1) * population;
-                    momentum[2] += f64::from(e.2) * population;
-                }
-                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let velocity = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
-                if !(rho.is_finite() && rho > 0.0) || !velocity.iter().all(|v| v.is_finite()) {
-                    return Err(BoundarySgsError3::InvalidState {
-                        cell: self.coords(tile, lane),
-                    }
-                    .into());
-                }
-                workspace.velocity[cell] = velocity;
-                workspace.density[cell] = rho;
-            }
-        }
+        self.prepare_sgs_macros(gate, workspace)?;
         let mut report = SgsReport::default();
         for tile in 0..self.f[0].len() {
             checkpoint(gate).map_err(BoundarySgsError3::from)?;
@@ -292,6 +250,63 @@ impl BoundaryGrid3 {
             return Err(BoundarySgsError3::from(SgsError::NonFiniteViscosity).into());
         }
         Ok(report)
+    }
+
+    // Shared by local and nonlocal closures: both observe the same native
+    // population order and physical half-force velocity before collision.
+    fn prepare_sgs_macros(
+        &self,
+        gate: &CancelGate,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+    ) -> Result<(), BoundarySgsError3> {
+        checkpoint(gate)?;
+        let count = self.f[0].len() * TILE_CELLS;
+        if workspace.velocity.len() != count
+            || workspace.density.len() != count
+            || workspace.collisions.len() != count
+        {
+            return Err(BoundarySgsError3::Workspace);
+        }
+        let uniform_nu = self.collision_model.kinematic_viscosity();
+        if !(uniform_nu.is_finite() && uniform_nu > 0.0) {
+            return Err(SgsError::InvalidMolecularViscosity { cell: 0 }.into());
+        }
+        for tile in 0..self.f[0].len() {
+            checkpoint(gate).map_err(BoundarySgsError3::from)?;
+            for lane in 0..TILE_CELLS {
+                let cell = tile * TILE_CELLS + lane;
+                if self.solid[tile] & (1u64 << lane) != 0 {
+                    workspace.velocity[cell] = [0.0; 3];
+                    workspace.density[cell] = 0.0;
+                    continue;
+                }
+                let mut rho = 0.0;
+                let mut momentum = [0.0; 3];
+                for (q, e) in E3.iter().enumerate() {
+                    let population = self.f[q][tile].0[lane];
+                    if !population.is_finite() {
+                        return Err(BoundarySgsError3::InvalidState {
+                            cell: self.coords(tile, lane),
+                        });
+                    }
+                    rho += population;
+                    momentum[0] += f64::from(e.0) * population;
+                    momentum[1] += f64::from(e.1) * population;
+                    momentum[2] += f64::from(e.2) * population;
+                }
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let velocity = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
+                if !(rho.is_finite() && rho > 0.0) || !velocity.iter().all(|v| v.is_finite()) {
+                    return Err(BoundarySgsError3::InvalidState {
+                        cell: self.coords(tile, lane),
+                    });
+                }
+                workspace.velocity[cell] = velocity;
+                workspace.density[cell] = rho;
+            }
+        }
+        checkpoint(gate)?;
+        Ok(())
     }
 
     /// Serial SGS step using the original collision, streaming, boundary and

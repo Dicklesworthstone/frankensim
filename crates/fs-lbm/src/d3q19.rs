@@ -31,6 +31,11 @@ pub mod sparse;
 pub(crate) use fma::collision_kernel3;
 
 pub use boundary::{
+    BoundaryDynamicSgsConfig3, BoundaryDynamicSgsError3, BoundaryDynamicSgsReport3,
+    BoundaryDynamicSgsWorkspace3,
+};
+
+pub use boundary::{
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
     BoundaryLink3, BoundaryProfileError3, PressureProfileReport3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,
     BoundaryStepError3, CarrierFaceExchange3, CarrierLubricationExchange3, CarrierLubricationFace3,

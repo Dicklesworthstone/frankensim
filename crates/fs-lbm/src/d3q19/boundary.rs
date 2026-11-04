@@ -21,7 +21,10 @@ use super::{
 use crate::CS2;
 
 mod sgs;
-pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
+pub use sgs::{
+    BoundaryDynamicSgsConfig3, BoundaryDynamicSgsError3, BoundaryDynamicSgsReport3,
+    BoundaryDynamicSgsWorkspace3, BoundarySgsError3, BoundarySgsReport3,
+};
 mod wall_patches;
 pub use wall_patches::WallPatchProbe3;
 mod profile;

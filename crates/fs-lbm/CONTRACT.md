@@ -3212,6 +3212,30 @@ Couette and quadratic inlet gradients, force-frame consistency, actual
 SGS wall loads and worker-count identity, plus refusal/retry behavior. These
 are focused integration regressions, not a turbulent-flow validation campaign.
 
+`BoundaryGrid3::{dynamic_sgs_workspace, prepare_dynamic_sgs,
+step_with_dynamic_sgs, step_pooled_with_dynamic_sgs}` also connect the shared
+Favre Germano--Lilly fit to this native collision/streaming and wall-load owner.
+`BoundaryDynamicSgsConfig3` explicitly selects a fully periodic box or a planar
+channel with one impermeable moving-wall pair and two periodic directions.
+Channel fitting uses the existing tangential test filter and separate
+wall-parallel plane averages, including both current physical wall velocities.
+Open faces, interior solids, extra wall pairs and mismatched workspaces refuse;
+there is no truncated-filter fallback at unsupported geometry.
+
+The reusable workspace includes native macros/collisions, x-fastest filter
+inputs and the original dynamic filter. Its complete numerical byte budget is
+checked before allocation and against actual capacities. Each preparation
+reconstructs the current uniform-plus-local half-force velocity, fits once,
+and maps eddy viscosity back to native tile order. Coefficient and
+eddy/molecular limits refuse instead of clipping; the constructor's molecular
+collision and independent higher rates are retained. Dynamic diagnostics,
+instantaneous shear dissipation and optional same-step wall loads publish with
+the accepted step. `tests/boundary_dynamic_sgs.rs` covers shared-filter oracles,
+all-axis moving walls, force centering, laminar Couette, physical wall-momentum
+balance, serial/worker parity, bounded workspace and refusal/retry. These APIs
+remain exploratory, with the existing D3Q19 tied shear/bulk rate and no wall
+function, source-material evolution or turbulent-DNS qualification.
+
 ### Spatial and evolving D3Q19 inlet velocity
 
 `BoundaryGrid3::set_velocity_profile` samples an explicit vector trace on an
