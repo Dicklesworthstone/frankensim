@@ -1,17 +1,129 @@
 //! Held local forces in the original Guo population frame.
 
 use super::*;
-use crate::d3q19::{W3, guo_projection3};
+use crate::d3q19::{RigidFrame3, W3, guo_projection3};
+
+impl RigidFrame3 {
+    /// Prepare the original sparse VOF owner for one prescribed rigid-frame step.
+    ///
+    /// All quantities use lattice units (`dx = dt = 1`) and moving-frame axes.
+    /// Native cell centres are `[x+0.5, y+0.5, z+0.5]`. Fluid and wall velocities
+    /// are relative to this frame. `acceleration` is physical body acceleration
+    /// (including gravity), already resolved in the frame. Supply midpoint
+    /// motion coefficients and refresh before EVERY subsequent native step.
+    ///
+    /// This replaces the COMPLETE held force field, including initial gravity.
+    /// The shared dense-grid midpoint solve supplies translation, centrifugal,
+    /// Euler and Coriolis terms; each wet cell's current density converts the
+    /// resulting acceleration to force density. Pressure, capillarity and wall
+    /// traction remain in the original free-surface operator.
+    ///
+    /// The existing Guo source-frame change preserves canonical density exactly,
+    /// VOF fill/mass and physical velocity/stress to population roundoff. It
+    /// applies no impulse and advances no time. New wet cells inherit the native
+    /// neighbor-interpolated force frame during conversion; the next preparation
+    /// evaluates their load at their actual position and accepted velocity.
+    ///
+    /// Only active wet cells require storage. Cancellation is polled per tile
+    /// and before the atomic force/population publication. Geometry and mass
+    /// routes do not change. This is a prescribed closed vessel with an imposed
+    /// gas pressure, not finite-inertia vessel/gas dynamics or an energy-exact
+    /// full-flow scheme. The original low-Mach and resolution limits still apply.
+    /// Historical `LegacyGlobal` replay is refused because it does not use the
+    /// current physical Guo frame for every gas-link reconstruction.
+    /// A separately selected `FreeSurface3::rebind_body_acceleration` owner is
+    /// also refused, including an owned zero acceleration. That mode owns its
+    /// density-dependent endpoint source and cannot become a held force field
+    /// implicitly. This entry never combines independent acceleration owners.
+    pub fn prepare_free_surface_step(
+        self,
+        surface: &mut FreeSurface3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let denominator = self
+            .midpoint_denominator(acceleration)
+            .map_err(FreeSurfaceError3::Transport)?;
+        if surface.redistribution == ConversionRedistribution3::LegacyGlobal {
+            return Err(FreeSurfaceError3::Transport(
+                "rigid-frame flow requires current free-surface force semantics",
+            ));
+        }
+        if surface.body_acceleration().is_some() {
+            return Err(FreeSurfaceError3::Transport(
+                "rigid-frame forcing cannot replace an independent body-acceleration owner",
+            ));
+        }
+        if !surface.collision_model().supports_body_force() {
+            return Err(FreeSurfaceError3::Transport(
+                "rigid-frame free surface requires a forcing-compatible collision model",
+            ));
+        }
+        let mut forces = BTreeMap::new();
+        for (&key, tile) in &surface.tiles {
+            check_cancel(gate)?;
+            let slot = surface.grid.slot_of(key).expect("active");
+            for lane in 0..TILE_CELLS {
+                if tile.cells[lane] == Cell3::Gas {
+                    continue;
+                }
+                let (rho, raw) = surface.grid.cell_macros(slot, lane);
+                let previous = surface.force_at_lane(key, lane);
+                let velocity = core::array::from_fn(|axis| raw[axis] + 0.5 * previous[axis] / rho);
+                let (x, y, z) = FreeSurface3::global_of(key, lane);
+                let position = [x, y, z].map(|coordinate| coordinate as f64 + 0.5);
+                let effective =
+                    self.effective_acceleration(position, velocity, acceleration, denominator);
+                let next = effective.map(|value| rho * value);
+                if !rho.is_finite()
+                    || rho <= 0.0
+                    || !previous
+                        .into_iter()
+                        .chain(velocity)
+                        .chain(next)
+                        .all(f64::is_finite)
+                {
+                    return Err(FreeSurfaceError3::Transport(
+                        "unrepresentable rigid-frame free-surface cell",
+                    ));
+                }
+                forces.insert((key, lane), next);
+            }
+        }
+        surface.rebind_force_field(forces, gate)
+    }
+
+    /// Enclose source preparation and the native timestep in one transaction.
+    /// The SI owner delegates here so momentum-preserving conversion uses this
+    /// candidate directly rather than cloning an already-private sparse grid.
+    pub(crate) fn step_free_surface(
+        self,
+        surface: &mut FreeSurface3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let mut candidate = surface.clone();
+        self.prepare_free_surface_step(&mut candidate, acceleration, gate)?;
+        candidate.step_inner(gate, None, None, None)?;
+        check_cancel(gate)?;
+        *surface = candidate;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod acceleration_tests;
 
 pub(super) fn body_force(rho: f64, acceleration: [f64; 3]) -> Result<[f64; 3], FreeSurfaceError3> {
     let force = acceleration.map(|value| rho * value);
-    if !rho.is_finite() || rho <= 0.0
-        || force.iter().zip(acceleration).any(|(&value, a)| {
-            !value.is_finite() || a != 0.0 && value == 0.0
-        })
+    if !rho.is_finite()
+        || rho <= 0.0
+        || force
+            .iter()
+            .zip(acceleration)
+            .any(|(&value, a)| !value.is_finite() || a != 0.0 && value == 0.0)
     {
         return Err(FreeSurfaceError3::Transport(
             "body acceleration requires positive density and representable rho*a",
@@ -31,8 +143,10 @@ pub(super) fn close_body_pressure(
     let denominator = 1.0 + coefficients.iter().sum::<f64>();
     let rho = populations.iter().sum::<f64>() / denominator;
     if coefficients.iter().any(|value| !value.is_finite())
-        || !denominator.is_finite() || denominator <= 0.0
-        || !rho.is_finite() || rho <= 0.0
+        || !denominator.is_finite()
+        || denominator <= 0.0
+        || !rho.is_finite()
+        || rho <= 0.0
     {
         return Err(FreeSurfaceError3::Transport(
             "density-dependent gas pressure has no positive representable closure",
@@ -49,7 +163,10 @@ pub(super) fn close_body_pressure(
         ));
     }
     preserve_density(populations, rho)?;
-    if populations.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+    if populations
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
         return Err(FreeSurfaceError3::Transport(
             "body acceleration needs positive finite endpoint populations",
         ));
@@ -67,7 +184,10 @@ pub(super) fn source(q: usize, velocity: [f64; 3], force: [f64; 3]) -> f64 {
 // zeroth moment. Even a one-ulp density change can turn a full interface into
 // a fictitious partial cell. The rest correction changes no momentum/stress;
 // try its adjacent representations before closing the final ordered add.
-pub(super) fn preserve_density(populations: &mut [f64; Q3], rho: f64) -> Result<(), FreeSurfaceError3> {
+pub(super) fn preserve_density(
+    populations: &mut [f64; Q3],
+    rho: f64,
+) -> Result<(), FreeSurfaceError3> {
     populations[0] += rho - populations.iter().sum::<f64>();
     let corrected_rest = populations[0];
     let actual = populations.iter().sum::<f64>();
@@ -157,11 +277,14 @@ pub(super) fn retarget_velocity(
     let old_eq = equilibrium3(rho, previous);
     let new_eq = equilibrium3(rho, next);
     for (q, value) in populations.iter_mut().enumerate() {
-        *value += new_eq[q] - old_eq[q]
-            + 0.5 * (source(q, previous, force) - source(q, next, force));
+        *value +=
+            new_eq[q] - old_eq[q] + 0.5 * (source(q, previous, force) - source(q, next, force));
     }
     preserve_density(&mut populations, rho)?;
-    if populations.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+    if populations
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
         return Err(FreeSurfaceError3::Transport(
             "inflow velocity needs positive finite populations",
         ));
@@ -208,7 +331,9 @@ impl FreeSurface3 {
     ) -> Result<(), FreeSurfaceError3> {
         checkpoint()?;
         if acceleration.iter().any(|value| !value.is_finite()) {
-            return Err(FreeSurfaceError3::Transport("body acceleration must be finite"));
+            return Err(FreeSurfaceError3::Transport(
+                "body acceleration must be finite",
+            ));
         }
         if self.redistribution == ConversionRedistribution3::LegacyGlobal {
             return Err(FreeSurfaceError3::Transport(
@@ -225,14 +350,22 @@ impl FreeSurface3 {
             checkpoint()?;
             let slot = self.grid.slot_of(key).expect("active");
             for lane in 0..TILE_CELLS {
-                if tile.cells[lane] == Cell3::Gas { continue; }
+                if tile.cells[lane] == Cell3::Gas {
+                    continue;
+                }
                 let populations = self.grid.populations(slot, lane);
-                if populations.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                if populations
+                    .iter()
+                    .any(|value| !value.is_finite() || *value <= 0.0)
+                {
                     return Err(FreeSurfaceError3::Transport(
                         "body acceleration requires positive finite accepted populations",
                     ));
                 }
-                forces.insert((key, lane), body_force(populations.iter().sum(), acceleration)?);
+                forces.insert(
+                    (key, lane),
+                    body_force(populations.iter().sum(), acceleration)?,
+                );
             }
         }
         self.rebind_force_field_inner(forces, true, checkpoint)?;
@@ -359,11 +492,12 @@ impl FreeSurface3 {
         for (slot, lane, populations) in replacements {
             self.grid.set_populations(slot, lane, populations);
         }
-        self.local_force = if !retain_uniform_history && forces.values().all(|&force| force == uniform) {
-            None
-        } else {
-            Some(forces)
-        };
+        self.local_force =
+            if !retain_uniform_history && forces.values().all(|&force| force == uniform) {
+                None
+            } else {
+                Some(forces)
+            };
         Ok(())
     }
 }
@@ -414,12 +548,17 @@ mod tests {
             for a in 0..3 {
                 assert!((momentum[a] - actual_rho * next[a]).abs() < 2e-14 * rho);
                 for b in 0..3 {
-                    let expected_change = actual_rho
-                        * (next[a] * next[b] - previous[a] * previous[b]);
-                    assert!((stress[a][b] - old_stress[a][b] - expected_change).abs() < 2e-14 * rho);
+                    let expected_change =
+                        actual_rho * (next[a] * next[b] - previous[a] * previous[b]);
+                    assert!(
+                        (stress[a][b] - old_stress[a][b] - expected_change).abs() < 2e-14 * rho
+                    );
                 }
             }
-            assert_eq!(retarget_velocity(initial, previous, previous, force).unwrap(), initial);
+            assert_eq!(
+                retarget_velocity(initial, previous, previous, force).unwrap(),
+                initial
+            );
         }
     }
 

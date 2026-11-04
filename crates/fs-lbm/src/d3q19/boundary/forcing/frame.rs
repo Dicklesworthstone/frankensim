@@ -130,21 +130,7 @@ impl RigidFrame3 {
         acceleration: [f64; 3],
     ) -> Result<f64, BoundaryForcingError3> {
         use BoundaryForcingError3::Invalid;
-        let denominator = 1.0 + dot(self.angular_velocity, self.angular_velocity);
-        if !self
-            .origin
-            .into_iter()
-            .chain(self.angular_velocity)
-            .chain(self.angular_acceleration)
-            .chain(self.origin_acceleration)
-            .chain(acceleration)
-            .all(f64::is_finite)
-            || !denominator.is_finite()
-        {
-            return Err(Invalid(
-                "rigid-frame motion must be finite and representable",
-            ));
-        }
+        let denominator = self.midpoint_denominator(acceleration).map_err(Invalid)?;
         if !grid.collision_model.supports_body_force() {
             return Err(Invalid(
                 "rigid-frame flow requires a forcing-compatible collision model",
@@ -187,13 +173,8 @@ impl RigidFrame3 {
         let (rho, momentum) = grid.raw_moments(cell[0], cell[1], cell[2]);
         let previous = cell_force(grid.force, grid.force_field.as_deref(), tile, lane);
         let velocity = core::array::from_fn(|axis| (momentum[axis] + 0.5 * previous[axis]) / rho);
-        let r = core::array::from_fn(|axis| cell[axis] as f64 + 0.5 - self.origin[axis]);
-        let euler = cross(self.angular_acceleration, r);
-        let centrifugal = cross(self.angular_velocity, cross(self.angular_velocity, r));
-        let base = core::array::from_fn(|axis| {
-            acceleration[axis] - self.origin_acceleration[axis] - euler[axis] - centrifugal[axis]
-        });
-        let effective = midpoint_acceleration(self.angular_velocity, velocity, base, denominator);
+        let position = cell.map(|coordinate| coordinate as f64 + 0.5);
+        let effective = self.effective_acceleration(position, velocity, acceleration, denominator);
         let next = effective.map(|value| rho * value);
         if !previous
             .into_iter()
@@ -204,6 +185,41 @@ impl RigidFrame3 {
             return Err(BoundaryForcingError3::Unphysical { cell });
         }
         Ok((previous, next, velocity))
+    }
+
+    // Shared by dense and sparse free-surface owners. Admission is once per
+    // source update; each caller separately validates its local state/result.
+    pub(crate) fn midpoint_denominator(self, acceleration: [f64; 3]) -> Result<f64, &'static str> {
+        let denominator = 1.0 + dot(self.angular_velocity, self.angular_velocity);
+        if !self
+            .origin
+            .into_iter()
+            .chain(self.angular_velocity)
+            .chain(self.angular_acceleration)
+            .chain(self.origin_acceleration)
+            .chain(acceleration)
+            .all(f64::is_finite)
+            || !denominator.is_finite()
+        {
+            return Err("rigid-frame motion must be finite and representable");
+        }
+        Ok(denominator)
+    }
+
+    pub(crate) fn effective_acceleration(
+        self,
+        position: [f64; 3],
+        velocity: [f64; 3],
+        acceleration: [f64; 3],
+        denominator: f64,
+    ) -> [f64; 3] {
+        let r = core::array::from_fn(|axis| position[axis] - self.origin[axis]);
+        let euler = cross(self.angular_acceleration, r);
+        let centrifugal = cross(self.angular_velocity, cross(self.angular_velocity, r));
+        let base = core::array::from_fn(|axis| {
+            acceleration[axis] - self.origin_acceleration[axis] - euler[axis] - centrifugal[axis]
+        });
+        midpoint_acceleration(self.angular_velocity, velocity, base, denominator)
     }
 }
 

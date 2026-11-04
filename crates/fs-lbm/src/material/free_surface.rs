@@ -24,6 +24,8 @@ use crate::{CS2, ScalingPlan};
 
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
+mod forcing;
+pub use forcing::MaterialRigidFrame3;
 mod two_dimensional;
 pub use two_dimensional::{
     MaterialFreeSurface2, MaterialFreeSurfaceDomain2, MaterialFreeSurfaceMomentumError2,

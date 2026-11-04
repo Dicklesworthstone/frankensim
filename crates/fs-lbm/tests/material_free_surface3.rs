@@ -34,6 +34,8 @@ mod dynamic_wetting;
 mod moving_wall;
 #[path = "material_free_surface3/sgs.rs"]
 mod gradient_sgs_wall;
+#[path = "material_free_surface3/forcing.rs"]
+mod rigid_frame_forcing;
 
 fn point(temperature: f64) -> QueryPoint {
     QueryPoint::new()

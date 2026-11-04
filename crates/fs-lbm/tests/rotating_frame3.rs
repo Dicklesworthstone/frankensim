@@ -5,6 +5,9 @@ use fs_lbm::d3q19::{
     RigidFrame3, collide_cell3, equilibrium3,
 };
 
+#[path = "rotating_frame3/free_surface.rs"]
+mod free_surface;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

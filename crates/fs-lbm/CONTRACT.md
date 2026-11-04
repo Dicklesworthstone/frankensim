@@ -9838,6 +9838,48 @@ actual closed-box collision/stream/wall linear and angular impulse account.
 The runnable
 `rotating_tank3` example supplies a smooth spin-up schedule to this same owner.
 
+### Acceleration of sparse free surfaces and material-owned vessels
+
+`RigidFrame3::prepare_free_surface_step` applies the SAME admitted rigid-frame
+midpoint source to original sparse `FreeSurface3` wet cells. The field includes
+physical body acceleration minus origin acceleration, Euler and centrifugal
+terms, and the energy-neutral local Coriolis solve. All vectors use moving
+axes, velocities are relative, and centres remain `[x+0.5,y+0.5,z+0.5]`.
+Current local density converts acceleration to lattice force density. The
+complete force field replaces initial gravity; pressure, capillarity and wall
+traction are not counted twice. Historical `LegacyGlobal` replay refuses.
+An independently selected `rebind_body_acceleration` owner also refuses,
+including an owned zero acceleration: its density-dependent endpoint source
+law cannot silently become a held midpoint force field. The frozen material
+constructor retains its original reference-force convention and does not
+implicitly select that independent owner.
+
+The existing local Guo rebind preserves canonical density exactly and physical
+velocity/force-corrected stress to population roundoff, without elapsed time,
+impulse, mass, fill or topology changes. Storage follows active wet cells,
+including zero-mass interface ghosts, not the full domain. Native conversions
+inherit the neighbor force frame; callers refresh the prescribed source each
+step so newly wet cells use their actual coordinates and accepted velocities.
+Cancellation and invalid cells refuse before publication.
+
+`MaterialFreeSurface3::step_in_rigid_frame_si` consumes `MaterialRigidFrame3`
+and body acceleration in SI using the original liquid's dx/dt. Origin scales
+by 1/dx, angular rate by dt, angular acceleration by dt² and linear acceleration
+by dt²/dx. Nonfinite, overflowing or disappearing nonzero conversions refuse.
+One private candidate joins preparation and the original native step, so
+failure/cancellation preserves accepted forces, populations, mass and topology.
+The caller supplies midpoint motion and owns its external clock. This frozen
+liquid entry does not silently combine thermal buoyancy or solve a finite-inertia
+vessel/gas, and no exact energy theorem is asserted for the full VOF step.
+
+Focused G0/G1/G3/G4 regressions in `rotating_frame3/free_surface.rs` and
+`material_free_surface3/forcing.rs` exercise independent Coriolis rotation and
+work, density-independent translational acceleration/free fall, physical
+Euler/centrifugal signs, exact mass/fill and physical moment retention, real
+wet-cell conversion, SI unit/source identity, changing load histories and
+transactional/independent-owner refusal. Original dense-grid rigid-frame
+arithmetic is retained.
+
 ### Finite-inertia planar missing-film surfaces
 
 `FiniteLubricationPlane3` and
