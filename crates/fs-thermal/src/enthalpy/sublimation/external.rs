@@ -196,6 +196,10 @@ impl DepositionSimulation<'_> {
             }
             self.temperature_at_specific_enthalpy_k(id, cell.specific_h_j_kg)?;
             self.temperature_at_specific_enthalpy_k(id, next.specific_enthalpy_j_kg)?;
+            let mut candidate = cell.clone();
+            candidate.mass_kg = next.mass_kg;
+            candidate.specific_h_j_kg = next.specific_enthalpy_j_kg;
+            self.materials[&cell.material_id].validate_cell(&candidate)?;
         }
         checkpoint()?;
         // No fallible work or callbacks after this gate.
@@ -306,6 +310,86 @@ mod tests {
         state.apply_solid_exchanges(&[update], || Ok(())).unwrap();
         assert_eq!(state.cells()[&CellId(1)], expected);
         assert_eq!(state.temperature_k(CellId(1)), Ok(249.5));
+        assert_eq!(state.time_s(), 0.0);
+    }
+
+    #[test]
+    fn external_phase_batches_preserve_the_original_inventory_binding() {
+        struct FixedInventory;
+        impl ThermalLaw for FixedInventory {
+            fn validate_cell(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
+                if cell.mass_kg != 0.01 {
+                    return Err(DepositionError::InvalidInput(
+                        "fixed reference inventory changed",
+                    ));
+                }
+                Ok(())
+            }
+            fn caloric_identity(&self) -> Option<[u8; 32]> {
+                CALORIC.caloric_identity()
+            }
+            fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+                CALORIC.temperature_k(h)
+            }
+            fn maximum_temperature_slope(&self) -> f64 {
+                CALORIC.maximum_temperature_slope()
+            }
+        }
+        let fixed = FixedInventory;
+        let events = state()
+            .cells()
+            .values()
+            .cloned()
+            .map(|mut cell| {
+                if cell.id == CellId(2) {
+                    cell.material_id = MaterialId(2);
+                }
+                TimedEvent {
+                    time_s: 0.0,
+                    event: Event::Birth(cell),
+                }
+            })
+            .collect();
+        let mut state = DepositionSimulation::new(
+            events,
+            &[(MaterialId(1), &CALORIC), (MaterialId(2), &fixed)],
+            DepositionBudget {
+                max_cells: 2,
+                max_links: 0,
+                max_events: 2,
+                max_substeps: 4,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 1.0,
+                energy_tolerance_j: 1e-10,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+        let before = state.cells().clone();
+        let rows = [exchange(&state, 1), exchange(&state, 2)];
+        let expected = Err(DepositionError::InvalidInput(
+            "fixed reference inventory changed",
+        ));
+        assert_eq!(state.apply_solid_exchanges(&rows, || Ok(())), expected);
+        assert_eq!(state.cells(), &before);
+        let condensed = rows.map(|row| CondensedCellExchange {
+            expected: row.expected,
+            interval_exposed_area_m2: row.interval_exposed_area_m2,
+            replacement: row.replacement,
+            enthalpy_range_j_kg: row.pure_solid_enthalpy_range_j_kg,
+            caloric_identity: [17; 32],
+        });
+        assert_eq!(
+            state.apply_condensed_exchanges(&condensed, || Ok(())),
+            expected
+        );
+        assert_eq!(state.cells(), &before);
         assert_eq!(state.time_s(), 0.0);
     }
 

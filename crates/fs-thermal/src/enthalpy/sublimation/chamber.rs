@@ -289,6 +289,10 @@ impl DepositionSimulation<'_> {
             }
             finite(step.solid.mass_kg)?;
             finite(step.solid.specific_enthalpy_j_kg)?;
+            let mut candidate = self.cells[&id].clone();
+            candidate.mass_kg = step.solid.mass_kg;
+            candidate.specific_h_j_kg = step.solid.specific_enthalpy_j_kg;
+            caloric[index].validate_cell(&candidate)?;
         }
         checkpoint()?;
         // The bounded commit has no fallible work or callbacks. All endpoints

@@ -22,8 +22,9 @@ use fs_thermal::enthalpy::{
 ///
 /// Zero specific storage is at the explicit datum temperature. Density does not
 /// change with temperature; it only relates the caller's mass and volume. Every
-/// cell using this law must satisfy that same relation. Use `admit_cell` before
-/// inserting cells; sourced links repeat that admission at each evaluation.
+/// cell using this law must satisfy that same relation. The thermal owner's
+/// cell admission and sourced links enforce it; `admit_cell` can also check a
+/// proposed cell before scheduling it.
 #[derive(Clone, Debug)]
 pub struct FixedVolumeThermalLaw<'p> {
     path: &'p PreparedVolumetricThermalTransport,
@@ -187,6 +188,14 @@ impl<'p> FixedVolumeThermalLaw<'p> {
 }
 
 impl ThermalLaw for FixedVolumeThermalLaw<'_> {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        Some(*self.identity.as_bytes())
+    }
+
+    fn validate_cell(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
+        self.admit_cell(cell)
+    }
+
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
         let [low, high] = self.specific_storage_span;
         if !specific_h_j_kg.is_finite() || specific_h_j_kg < low || specific_h_j_kg > high {

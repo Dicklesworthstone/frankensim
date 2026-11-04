@@ -347,6 +347,13 @@ fn g3_component_permutation_amounts_and_selected_sources_change_only_their_decla
             );
         }
     }
+    // The normal timeline path must enforce the assembly amount binding without
+    // requiring callers to remember the adapter's optional preflight method.
+    close(
+        heated(&base, 3.0, 300.0, 10.0, 0.5),
+        base.temperature_after_energy_change(300.0, 5.0).unwrap(),
+        2e-12,
+    );
 }
 
 #[test]
@@ -506,6 +513,7 @@ fn heated(storage: &PreparedHeatStorage, mass: f64, start: f64, power: f64, dura
     let law = HeatStorageThermalLaw::try_new(storage, mass, start)
         .unwrap()
         .with_sensible_entropy();
+    assert_eq!(law.caloric_identity(), Some(*law.identity().as_bytes()));
     let cell = DepositedCell {
         id: CellId(1),
         segment_id: 1,
@@ -534,6 +542,27 @@ fn heated(storage: &PreparedHeatStorage, mass: f64, start: f64, power: f64, dura
         max_dt_s: 0.25,
         energy_tolerance_j: 1e-8,
     };
+    let rejected = DepositionSimulation::new(
+        vec![TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(wrong_mass),
+        }],
+        &[(MaterialId(1), &law)],
+        DepositionBudget {
+            max_cells: 1,
+            max_links: 0,
+            max_events: 1,
+            max_substeps: 10000,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        rejected.advance_to(0.0, config, || Ok(())),
+        Err(DepositionError::InvalidInput(
+            "cell mass differs from its heat-storage assembly"
+        ))
+    ));
+    assert!(rejected.cells().is_empty());
     let initial = DepositionSimulation::new(
         vec![TimedEvent {
             time_s: 0.0,

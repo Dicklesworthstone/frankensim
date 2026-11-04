@@ -10,8 +10,8 @@ use fs_thermal::enthalpy::{DepositedCell, DepositionError, ThermalLaw};
 /// coordinate. Volumetric source capacities remain volumetric; no measured
 /// density or source specific heat is manufactured. Conduction, boundaries,
 /// spatial resolution and time stepping remain with their existing owners.
-/// Call `admit_cell` for every cell before inserting its birth event; the generic
-/// `ThermalLaw` interface does not carry a cell's physical mass into evaluation.
+/// The thermal owner's cell admission enforces the assembly's declared mass;
+/// `admit_cell` also supports checking a proposed cell before scheduling it.
 #[derive(Clone, Debug)]
 pub struct HeatStorageThermalLaw<'a> {
     storage: &'a PreparedHeatStorage,
@@ -153,6 +153,14 @@ impl<'a> HeatStorageThermalLaw<'a> {
 }
 
 impl ThermalLaw for HeatStorageThermalLaw<'_> {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        Some(*self.identity.as_bytes())
+    }
+
+    fn validate_cell(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
+        self.admit_cell(cell)
+    }
+
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
         let [low, high] = self.span;
         if !h.is_finite() || h < low || h > high {
