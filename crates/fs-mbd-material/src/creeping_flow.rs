@@ -176,9 +176,12 @@ pub struct CreepingStep {
     pub viscous_heat_j: f64,
     /// Energy supplied by maintaining the uniform background flow [J].
     pub background_work_j: f64,
+    /// Work of the separately supplied, held external wrench [J]. Gravity
+    /// and the fluid wrench are excluded so their work is never counted twice.
+    pub applied_work_j: f64,
     /// Delta(kinetic + body gravity + buoyancy potential) [J].
     pub stored_energy_change_j: f64,
-    /// Signed stored-energy change plus heat minus background-flow work [J].
+    /// Stored-energy change plus heat minus background and applied work [J].
     pub energy_defect_j: f64,
     /// Fluid diffusion time divided by the fastest body relaxation time.
     pub diffusion_ratio: f64,
@@ -394,6 +397,32 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         self.step_frame(body.frame(), state, controls, &mut cancelled)
     }
 
+    /// Compose drag with an external COM force and body-frame free couple,
+    /// held over this interval. This permits driven motion without applying
+    /// drag and the drive in separate, inconsistent velocity updates.
+    ///
+    /// The force is expressed in world axes and the couple in the body's
+    /// principal axes, as in the native [`Wrench`]. Gravity and fluid forces
+    /// are already supplied by this owner and must not be included again.
+    /// A force at an offset point or a world-held torque generally changes
+    /// its body-frame moment as the sphere turns; that load needs its own
+    /// stage evaluation and is not inferred from a held wrench.
+    /// Work is evaluated at the same midpoint as drag and reported separately
+    /// from fluid heat and maintained-flow work. All existing regime,
+    /// timestep, energy and cancellation checks still precede publication.
+    pub fn step_with_wrench(
+        &self,
+        body: &PrincipalBody<'_>,
+        state: RigidBodyState,
+        applied: Wrench,
+        controls: CreepingStepControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingStep, Error> {
+        poll(&mut cancelled)?;
+        self.admit_body(body)?;
+        self.step_frame_with_wrench(body.frame(), state, applied, controls, &mut cancelled)
+    }
+
     /// Native midpoint closure shared by frozen and thermally updated bodies.
     /// The caller has already admitted this frame's one uniform sphere.
     pub(crate) fn step_frame(
@@ -401,9 +430,22 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         frame: &PrincipalFrame,
         state: RigidBodyState,
         controls: CreepingStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingStep, Error> {
+        self.step_frame_with_wrench(frame, state, Wrench::ZERO, controls, cancelled)
+    }
+
+    fn step_frame_with_wrench(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        applied: Wrench,
+        controls: CreepingStepControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingStep, Error> {
         poll(&mut cancelled)?;
+        vector(applied.force_world)?;
+        vector(applied.torque_body)?;
         if !small_positive(controls.maximum_relaxation_fraction, 1.0)
             || !controls.duration_s.is_finite()
             || controls.duration_s <= 0.0
@@ -431,7 +473,8 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         let acceleration = vector(
             self.gravity
                 .acceleration_world()
-                .scale(1.0 - self.fluid_mass_kg / p.mass()),
+                .scale(1.0 - self.fluid_mass_kg / p.mass())
+                .add(applied.force_world.scale(1.0 / p.mass())),
         )?;
         let relative_mid = vector(
             velocity
@@ -440,11 +483,14 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 .scale(1.0 / (1.0 + half_dt / translation_time)),
         )?;
         let velocity_mid = vector(relative_mid.add(self.ambient_velocity_world))?;
-        let angular_mid = Vec3::new(
-            omega.x / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.x),
-            omega.y / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.y),
-            omega.z / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.z),
-        );
+        let angular_mid = vector(Vec3::new(
+            (omega.x + half_dt * applied.torque_body.x / inertia.x)
+                / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.x),
+            (omega.y + half_dt * applied.torque_body.y / inertia.y)
+                / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.y),
+            (omega.z + half_dt * applied.torque_body.z / inertia.z)
+                / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.z),
+        ))?;
         let midpoint = RigidBodyState::new(
             state.pose(),
             velocity_mid.scale(p.mass()),
@@ -455,13 +501,20 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             ),
         )?;
         let load_midpoint = self.load_frame(frame, midpoint, &mut cancelled)?;
-        let dynamics =
-            RigidBodyIntegrator::new(self.gravity).step(state, p, load_midpoint.wrench, dt)?;
+        let total = Wrench {
+            force_world: vector(load_midpoint.wrench.force_world.add(applied.force_world))?,
+            torque_body: vector(load_midpoint.wrench.torque_body.add(applied.torque_body))?,
+        };
+        let dynamics = RigidBodyIntegrator::new(self.gravity).step(state, p, total, dt)?;
         let load_after = self.load_frame(frame, dynamics.state_after, &mut cancelled)?;
         let viscous_heat_j = finite(dt * load_midpoint.dissipated_power_w)?;
         let background_work_j = finite(dt * load_midpoint.background_power_w)?;
+        let applied_power_w =
+            finite(applied.force_world.dot(velocity_mid) + applied.torque_body.dot(angular_mid))?;
+        let applied_work_j = finite(dt * applied_power_w)?;
         if load_midpoint.dissipated_power_w > 0.0 && viscous_heat_j == 0.0
             || load_midpoint.background_power_w != 0.0 && background_work_j == 0.0
+            || applied_power_w != 0.0 && applied_work_j == 0.0
         {
             return Err(Error::Invalid(
                 "fluid work or heat vanished in conversion to energy",
@@ -480,7 +533,8 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 + (after.rotational_kinetic_energy - before.rotational_kinetic_energy)
                 - (p.mass() - self.fluid_mass_kg) * self.gravity.acceleration_world().dot(dx),
         )?;
-        let energy_defect_j = finite(stored_energy_change_j + viscous_heat_j - background_work_j)?;
+        let energy_defect_j =
+            finite(stored_energy_change_j + viscous_heat_j - background_work_j - applied_work_j)?;
         if energy_defect_j.abs() > controls.maximum_energy_defect_j {
             return Err(Error::EnergyDefect {
                 defect_j: energy_defect_j,
@@ -495,6 +549,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             load_after,
             viscous_heat_j,
             background_work_j,
+            applied_work_j,
             stored_energy_change_j,
             energy_defect_j,
             diffusion_ratio,

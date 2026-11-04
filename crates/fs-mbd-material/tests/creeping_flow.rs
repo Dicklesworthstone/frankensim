@@ -3,6 +3,8 @@
 mod common;
 #[path = "creeping_flow/finite_reynolds.rs"]
 mod finite_reynolds;
+#[path = "creeping_flow/driven.rs"]
+mod driven;
 #[path = "creeping_flow/unsteady.rs"]
 mod unsteady;
 use common::{close, density_card, point};

@@ -1152,6 +1152,17 @@ thermal evolution or other exterior/gap resistance. Continuum validity and
 actual spherical geometry remain caller obligations. Source/geometry/regime
 failure, work-budget failure or cancellation returns no proposed state.
 
+`step_with_wrench` composes an independently held world COM force and
+principal-body free couple with the Stokes load inside the same native
+midpoint solve. Gravity and the fluid wrench are already included and must
+not be supplied a second time. Its linear predictors include the drive, so a
+driven sphere approaches the force/torque-balanced terminal rates without a
+separate explicit drag kick. `applied_work_j` is dt times the applied wrench
+paired with those same midpoint rates. The independent balance subtracts
+that work separately from maintained-flow work; neither is relabeled as
+viscous heat. A world-held couple or offset-point force needs attitude-aware
+stage evaluation and is not represented by a held body-frame torque.
+
 G1/G3/G4 synthetic tests in `tests/creeping_flow.rs` compare actual repeated
 native trajectories with independent settling and rotary-decay formulae,
 demonstrate source-only body/fluid substitution, check second-order time
@@ -1181,6 +1192,15 @@ one prevents a drag-only velocity reversal. Excessive steps refuse and need
 refinement. The result retains actual native motion, solve residual/iterations,
 fluid heat, maintained-flow work and an independent work-energy residual.
 
+`step_with_wrench` supplies a separately held external world COM force to
+that same nonlinear midpoint solve. It refuses nonzero applied torque as
+well as nonzero initial spin. Applied-force work is evaluated at the actual
+native midpoint velocity and reported separately in `applied_work_j`; the
+energy residual is storage change plus fluid loss minus maintained-flow and
+applied work. All endpoint, midpoint, timescale and cancellation checks remain
+active with a drive. Rapidly changing forces still require time refinement
+and admission of the neglected unsteady flow, not merely work closure.
+
 This is an isolated, nonrotating, unbounded, incompressible, Newtonian,
 quasi-steady sphere reduction. Nonzero spin refuses; no rotary resistance,
 Magnus lift, Basset memory, added mass, free surface, particle/wall interaction,
@@ -1198,6 +1218,12 @@ against a closed-form nonlinear decay solution, material-only source swaps,
 buoyant terminal settling, Galilean invariance, maintained-flow work and
 late transactional/refinement/regime refusals. They test the numerical model,
 not measured sphere drag accuracy, and do not close the full MR57 bead.
+`tests/creeping_flow/driven.rs` adds independent forced Stokes translation,
+rotation and position convergence, accumulated drive/flow/heat balance, and
+finite-Reynolds terminal motion under a prescribed force. A uniform frame
+boost preserves the latter's slip and heat while changing its two work
+accounts consistently. Invalid forces, applied spin and out-of-regime drives
+refuse without publishing a candidate.
 
 ## Unsteady buoyant sphere with reciprocal viscous memory
 

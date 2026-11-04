@@ -72,9 +72,11 @@ pub struct FiniteReynoldsStep {
     pub viscous_heat_j: f64,
     /// Work supplied by maintaining the uniform background flow [J].
     pub background_work_j: f64,
+    /// Work supplied by the separately held external COM force [J].
+    pub applied_work_j: f64,
     /// Kinetic + body-gravity + displaced-fluid potential change [J].
     pub stored_energy_change_j: f64,
-    /// Stored-energy change + heat - background work [J]; never physical heat.
+    /// Storage + heat - background work - applied work [J]; never physical heat.
     pub energy_defect_j: f64,
     /// Largest fluid-diffusion/body-relaxation ratio of the three stages.
     pub diffusion_ratio: f64,
@@ -226,10 +228,39 @@ impl<'a, F: FluidTransport + ?Sized> FiniteReynoldsSphere<'a, F> {
         body: &PrincipalBody<'_>,
         state: RigidBodyState,
         controls: CreepingStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FiniteReynoldsStep, Error> {
+        self.step_with_wrench(body, state, Wrench::ZERO, controls, cancelled)
+    }
+
+    /// Solve drag and a held external COM force at the SAME native midpoint.
+    /// The world-frame force excludes gravity and fluid loading, which this
+    /// owner already supplies. Nonzero applied torque is refused because this
+    /// correlation admits nonrotating spheres only. An offset-point force
+    /// cannot be treated as a COM force unless its torque is independently zero.
+    ///
+    /// The radial nonlinear solve is unchanged: its predictor now includes
+    /// the imposed acceleration. External drive work is reported separately
+    /// and subtracted in the work-energy balance, never deposited as heat.
+    /// A rapidly changing drive requires time refinement and an appropriate
+    /// unsteady fluid model; passing the quasi-steady gate is not such proof.
+    pub fn step_with_wrench(
+        &self,
+        body: &PrincipalBody<'_>,
+        state: RigidBodyState,
+        applied: Wrench,
+        controls: CreepingStepControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<FiniteReynoldsStep, Error> {
         poll(&mut cancelled)?;
         self.sphere.admit_body(body)?;
+        vector(applied.force_world)?;
+        vector(applied.torque_body)?;
+        if applied.torque_body != Vec3::ZERO {
+            return Err(Error::Invalid(
+                "finite-Reynolds sphere drag requires zero applied torque",
+            ));
+        }
         if !small_positive(controls.maximum_relaxation_fraction, 1.0)
             || !controls.duration_s.is_finite()
             || controls.duration_s <= 0.0
@@ -253,7 +284,8 @@ impl<'a, F: FluidTransport + ?Sized> FiniteReynoldsSphere<'a, F> {
             self.sphere
                 .gravity
                 .acceleration_world()
-                .scale(1.0 - self.sphere.fluid_mass_kg / properties.mass()),
+                .scale(1.0 - self.sphere.fluid_mass_kg / properties.mass())
+                .add(applied.force_world.scale(1.0 / properties.mass())),
         )?;
         let rhs = vector(relative_before.add(acceleration.scale(half_dt)))?;
         let rhs_speed = norm(rhs)?;
@@ -280,12 +312,12 @@ impl<'a, F: FluidTransport + ?Sized> FiniteReynoldsSphere<'a, F> {
             load_midpoint,
             controls,
         )?);
-        let dynamics = RigidBodyIntegrator::new(self.sphere.gravity).step(
-            state,
-            properties,
-            load_midpoint.wrench,
-            dt,
-        )?;
+        let total = Wrench {
+            force_world: vector(load_midpoint.wrench.force_world.add(applied.force_world))?,
+            torque_body: Vec3::ZERO,
+        };
+        let dynamics =
+            RigidBodyIntegrator::new(self.sphere.gravity).step(state, properties, total, dt)?;
         let load_after = self.load_frame(frame, dynamics.state_after)?;
         diffusion_ratio =
             diffusion_ratio.max(self.check_timescales(properties.mass(), load_after, controls)?);
@@ -301,8 +333,11 @@ impl<'a, F: FluidTransport + ?Sized> FiniteReynoldsSphere<'a, F> {
         let midpoint_velocity_residual_m_s = norm(actual_mid.sub(solved_mid))?;
         let viscous_heat_j = finite(dt * load_midpoint.dissipated_power_w)?;
         let background_work_j = finite(dt * load_midpoint.background_power_w)?;
+        let applied_power_w = finite(applied.force_world.dot(actual_mid))?;
+        let applied_work_j = finite(dt * applied_power_w)?;
         if load_midpoint.dissipated_power_w > 0.0 && viscous_heat_j == 0.0
             || load_midpoint.background_power_w != 0.0 && background_work_j == 0.0
+            || applied_power_w != 0.0 && applied_work_j == 0.0
         {
             return Err(Error::Invalid(
                 "sphere drag heat or work vanished in conversion to energy",
@@ -319,7 +354,8 @@ impl<'a, F: FluidTransport + ?Sized> FiniteReynoldsSphere<'a, F> {
                 - (properties.mass() - self.sphere.fluid_mass_kg)
                     * self.sphere.gravity.acceleration_world().dot(dx),
         )?;
-        let energy_defect_j = finite(stored_energy_change_j + viscous_heat_j - background_work_j)?;
+        let energy_defect_j =
+            finite(stored_energy_change_j + viscous_heat_j - background_work_j - applied_work_j)?;
         if energy_defect_j.abs() > controls.maximum_energy_defect_j {
             return Err(Error::EnergyDefect {
                 defect_j: energy_defect_j,
@@ -334,6 +370,7 @@ impl<'a, F: FluidTransport + ?Sized> FiniteReynoldsSphere<'a, F> {
             load_after,
             viscous_heat_j,
             background_work_j,
+            applied_work_j,
             stored_energy_change_j,
             energy_defect_j,
             diffusion_ratio,
