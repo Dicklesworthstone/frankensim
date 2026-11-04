@@ -55,7 +55,9 @@ pub use stiff::{
     ExpEuler, IdentityPreconditioner, Imex2, ImexSolveConfig, ImexSolveError, ImexStage, ImexState,
     ImexStepTelemetry, OperatorImex2, imex2_step,
 };
-pub use symplectic::{verlet_adjoint, verlet_step};
+pub use symplectic::{
+    MomentumVerletError, verlet_adjoint, verlet_momentum_adjoint, verlet_momentum_step, verlet_step,
+};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

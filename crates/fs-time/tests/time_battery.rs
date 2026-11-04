@@ -144,6 +144,391 @@ fn verlet_is_the_variational_integrator() {
     );
 }
 
+// G0/G1/G3/G4: physical momentum, coupled mass, exact discrete pullbacks and
+// refusal without partially advancing a caller's state.
+mod momentum_verlet {
+    use fs_solver::op::LinearOp;
+    use fs_time::{
+        MomentumVerletError, verlet_adjoint, verlet_momentum_adjoint, verlet_momentum_step,
+        verlet_step,
+    };
+    use std::cell::Cell;
+
+    struct Diagonal<const N: usize>([f64; N]);
+    impl<const N: usize> LinearOp for Diagonal<N> {
+        fn n(&self) -> usize {
+            N
+        }
+        fn apply(&self, x: &[f64], out: &mut [f64]) {
+            for i in 0..N {
+                out[i] = self.0[i] * x[i];
+            }
+        }
+    }
+    struct Matrix([[f64; 2]; 2]);
+    impl LinearOp for Matrix {
+        fn n(&self) -> usize {
+            2
+        }
+        fn apply(&self, x: &[f64], out: &mut [f64]) {
+            for i in 0..2 {
+                out[i] = self.0[i][0] * x[0] + self.0[i][1] * x[1];
+            }
+        }
+        fn apply_transpose(&self, x: &[f64], out: &mut [f64]) {
+            for i in 0..2 {
+                out[i] = self.0[0][i] * x[0] + self.0[1][i] * x[1];
+            }
+        }
+    }
+
+    #[test]
+    fn unequal_mass_internal_forces_preserve_physical_momenta_and_reverse() {
+        let inverse_mass = Diagonal([0.5, 0.5, 1.0 / 3.0, 1.0 / 3.0]);
+        let force = |q: &[f64], out: &mut [f64]| {
+            for axis in 0..2 {
+                out[axis] = q[axis + 2] - q[axis];
+                out[axis + 2] = -out[axis];
+            }
+        };
+        let initial = ([-0.6, 0.2, 0.4, -0.3], [0.8, -0.5, -0.2, 1.1]);
+        let (mut q, mut p) = initial;
+        let mut scratch = [0.0; 12];
+        let angular = |q: &[f64], p: &[f64]| q[0] * p[1] - q[1] * p[0] + q[2] * p[3] - q[3] * p[2];
+        let energy = |q: &[f64], p: &[f64]| {
+            p.iter()
+                .zip(inverse_mass.0)
+                .map(|(p, b)| 0.5 * p * p * b)
+                .sum::<f64>()
+                + 0.5 * ((q[2] - q[0]).powi(2) + (q[3] - q[1]).powi(2))
+        };
+        let l0 = angular(&q, &p);
+        let e0 = energy(&q, &p);
+        for _ in 0..4000 {
+            verlet_momentum_step(
+                &mut q,
+                &mut p,
+                0.01,
+                &inverse_mass,
+                &force,
+                &mut scratch,
+                &mut || false,
+            )
+            .unwrap();
+            assert!((p[0] + p[2] - 0.6).abs() < 2e-12);
+            assert!((p[1] + p[3] - 0.6).abs() < 2e-12);
+            assert!((angular(&q, &p) - l0).abs() < 2e-10);
+            assert!((energy(&q, &p) - e0).abs() < 5e-5);
+        }
+        for axis in 0..2 {
+            let com_change = (2.0 * (q[axis] - initial.0[axis])
+                + 3.0 * (q[axis + 2] - initial.0[axis + 2]))
+                / 5.0;
+            assert!((com_change - 40.0 * 0.6 / 5.0).abs() < 2e-10);
+        }
+        for _ in 0..4000 {
+            verlet_momentum_step(
+                &mut q,
+                &mut p,
+                -0.01,
+                &inverse_mass,
+                &force,
+                &mut scratch,
+                &mut || false,
+            )
+            .unwrap();
+        }
+        for i in 0..4 {
+            assert!((q[i] - initial.0[i]).abs() < 1e-9);
+            assert!((p[i] - initial.1[i]).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn coupled_consistent_mass_matches_independent_oscillator_and_second_order() {
+        // M = [[2,1],[1,2]], K = M: both coordinate modes have frequency one.
+        let inverse_mass = Matrix([[2.0 / 3.0, -1.0 / 3.0], [-1.0 / 3.0, 2.0 / 3.0]]);
+        let force = |q: &[f64], out: &mut [f64]| {
+            out[0] = -2.0 * q[0] - q[1];
+            out[1] = -q[0] - 2.0 * q[1];
+        };
+        let (s, c) = 1.0f64.sin_cos();
+        let exact_q = [0.7 * c + 0.2 * s, -0.4 * c + 0.3 * s];
+        let exact_v = [-0.7 * s + 0.2 * c, 0.4 * s + 0.3 * c];
+        let exact_p = [2.0 * exact_v[0] + exact_v[1], exact_v[0] + 2.0 * exact_v[1]];
+        let mut errors = Vec::new();
+        for steps in [25, 50, 100] {
+            let (mut q, mut p) = ([0.7, -0.4], [0.7, 0.8]);
+            let mut scratch = [0.0; 6];
+            for _ in 0..steps {
+                verlet_momentum_step(
+                    &mut q,
+                    &mut p,
+                    1.0 / f64::from(steps),
+                    &inverse_mass,
+                    &force,
+                    &mut scratch,
+                    &mut || false,
+                )
+                .unwrap();
+            }
+            errors.push(
+                (0..2)
+                    .map(|i| (q[i] - exact_q[i]).powi(2) + (p[i] - exact_p[i]).powi(2))
+                    .sum::<f64>()
+                    .sqrt(),
+            );
+        }
+        for pair in errors.windows(2) {
+            assert!((3.9..4.1).contains(&(pair[0] / pair[1])), "{errors:?}");
+        }
+        assert!(errors[2] < 2e-5, "{errors:?}");
+    }
+
+    #[test]
+    fn identity_mass_retains_original_step_and_adjoint_bits() {
+        let identity = Diagonal([1.0, 1.0]);
+        let force = |q: &[f64], out: &mut [f64]| {
+            out[0] = -q[0].sin();
+            out[1] = -2.0 * q[1];
+        };
+        let vjp = |q: &[f64], seed: &[f64], out: &mut [f64]| {
+            out[0] = -q[0].cos() * seed[0];
+            out[1] = -2.0 * seed[1];
+        };
+        let initial = ([0.8, -0.4], [-0.2, 0.3]);
+        let (mut q, mut p) = initial;
+        let (mut old_q, mut old_p) = initial;
+        for _ in 0..31 {
+            verlet_step(&mut old_q, &mut old_p, 0.03, &force, &mut [0.0; 2]);
+            verlet_momentum_step(
+                &mut q,
+                &mut p,
+                0.03,
+                &identity,
+                &force,
+                &mut [0.0; 6],
+                &mut || false,
+            )
+            .unwrap();
+            assert_eq!(q.map(f64::to_bits), old_q.map(f64::to_bits));
+            assert_eq!(p.map(f64::to_bits), old_p.map(f64::to_bits));
+        }
+        let seed = (&[0.7, -0.2][..], &[-0.5, 0.9][..]);
+        let old = verlet_adjoint(&initial.0, &initial.1, 0.03, 31, &force, &vjp, seed);
+        let new = verlet_momentum_adjoint(
+            &initial.0,
+            &initial.1,
+            0.03,
+            31,
+            &identity,
+            &force,
+            &vjp,
+            seed,
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(
+            old.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            new.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            old.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            new.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn adjoint_uses_both_true_transposes_and_matches_finite_difference() {
+        // Deliberately nonsymmetric actions test the numerical map's transpose;
+        // this fixture makes no physical positive-mass or symplectic claim.
+        let inverse_mass = Matrix([[0.7, 0.2], [-0.1, 0.5]]);
+        let force = |q: &[f64], out: &mut [f64]| {
+            out[0] = -q[0] - 0.2 * q[0].powi(3) + 0.3 * q[1];
+            out[1] = -0.4 * q[0] - 1.6 * q[1];
+        };
+        let vjp = |q: &[f64], seed: &[f64], out: &mut [f64]| {
+            out[0] = (-1.0 - 0.6 * q[0].powi(2)) * seed[0] - 0.4 * seed[1];
+            out[1] = 0.3 * seed[0] - 1.6 * seed[1];
+        };
+        let initial = ([0.8, -0.4], [-0.2, 0.3]);
+        let seed = ([0.7, -0.2], [-0.5, 0.9]);
+        let cost = |mut q: [f64; 2], mut p: [f64; 2]| {
+            for _ in 0..17 {
+                verlet_momentum_step(
+                    &mut q,
+                    &mut p,
+                    0.03,
+                    &inverse_mass,
+                    &force,
+                    &mut [0.0; 6],
+                    &mut || false,
+                )
+                .unwrap();
+            }
+            (0..2)
+                .map(|i| seed.0[i] * q[i] + seed.1[i] * p[i])
+                .sum::<f64>()
+        };
+        let actual = verlet_momentum_adjoint(
+            &initial.0,
+            &initial.1,
+            0.03,
+            17,
+            &inverse_mass,
+            &force,
+            &vjp,
+            (&seed.0, &seed.1),
+            &mut || false,
+        )
+        .unwrap();
+        let epsilon = 1e-5;
+        for i in 0..2 {
+            let (mut high, mut low) = (initial.0, initial.0);
+            high[i] += epsilon;
+            low[i] -= epsilon;
+            let expected = (cost(high, initial.1) - cost(low, initial.1)) / (2.0 * epsilon);
+            assert!((actual.0[i] - expected).abs() < 5e-9);
+            let (mut high, mut low) = (initial.1, initial.1);
+            high[i] += epsilon;
+            low[i] -= epsilon;
+            let expected = (cost(initial.0, high) - cost(initial.0, low)) / (2.0 * epsilon);
+            assert!((actual.1[i] - expected).abs() < 5e-9);
+        }
+        let empty = verlet_momentum_adjoint(
+            &initial.0,
+            &initial.1,
+            0.03,
+            0,
+            &inverse_mass,
+            &force,
+            &vjp,
+            (&seed.0, &seed.1),
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(empty, (seed.0.to_vec(), seed.1.to_vec()));
+    }
+
+    #[test]
+    fn invalid_actions_and_late_cancellation_never_publish_partial_state() {
+        let identity = Diagonal([1.0, 1.0]);
+        let initial = ([1.0, -0.5], [0.2, 0.3]);
+        let (mut q, mut p) = initial;
+        let force = |q: &[f64], out: &mut [f64]| {
+            out[0] = -q[0];
+            out[1] = -q[1];
+        };
+        for (h, scratch_length) in [(0.0, 6), (0.1, 5)] {
+            assert!(matches!(
+                verlet_momentum_step(
+                    &mut q,
+                    &mut p,
+                    h,
+                    &identity,
+                    &force,
+                    &mut vec![0.0; scratch_length],
+                    &mut || false
+                ),
+                Err(MomentumVerletError::InvalidInput(_))
+            ));
+            assert_eq!((q, p), initial);
+        }
+        assert!(matches!(
+            verlet_momentum_step(
+                &mut q,
+                &mut p,
+                0.1,
+                &Diagonal([1.0]),
+                &force,
+                &mut [0.0; 6],
+                &mut || false
+            ),
+            Err(MomentumVerletError::InvalidInput(_))
+        ));
+        let incomplete_force = |_: &[f64], out: &mut [f64]| {
+            out[0] = 0.0;
+        };
+        assert!(matches!(
+            verlet_momentum_step(
+                &mut q,
+                &mut p,
+                0.1,
+                &identity,
+                &incomplete_force,
+                &mut [0.0; 6],
+                &mut || false
+            ),
+            Err(MomentumVerletError::NonFinite(_))
+        ));
+        let calls = Cell::new(0usize);
+        let counted = |q: &[f64], out: &mut [f64]| {
+            calls.set(calls.get() + 1);
+            force(q, out);
+        };
+        assert_eq!(
+            verlet_momentum_step(
+                &mut q,
+                &mut p,
+                0.1,
+                &identity,
+                &counted,
+                &mut [0.0; 6],
+                &mut || calls.get() == 2
+            ),
+            Err(MomentumVerletError::Cancelled)
+        );
+        assert_eq!((q, p), initial);
+        calls.set(0);
+        let vjp = |_: &[f64], seed: &[f64], out: &mut [f64]| {
+            out[0] = -seed[0];
+            out[1] = -seed[1];
+        };
+        // A pullback must admit the complete primal step, including the final
+        // force kick, even though its reverse arithmetic only needs q_next.
+        let invalid_endpoint = |position: &[f64], out: &mut [f64]| {
+            out.fill(if position[0] == initial.0[0] {
+                0.0
+            } else {
+                f64::NAN
+            });
+        };
+        assert_eq!(
+            verlet_momentum_adjoint(
+                &q,
+                &p,
+                0.1,
+                1,
+                &identity,
+                &invalid_endpoint,
+                &vjp,
+                (&q, &p),
+                &mut || false
+            ),
+            Err(MomentumVerletError::NonFinite("endpoint force"))
+        );
+        assert_eq!(
+            verlet_momentum_adjoint(
+                &q,
+                &p,
+                0.1,
+                1 << 20,
+                &identity,
+                &counted,
+                &vjp,
+                (&q, &p),
+                &mut || calls.get() >= 3
+            ),
+            Err(MomentumVerletError::Cancelled)
+        );
+        assert_eq!(
+            calls.get(),
+            3,
+            "cancellation must stop checkpoint replay immediately"
+        );
+    }
+}
+
 // ----------------------------------------------------------------- Lie/SO(3)
 
 #[test]

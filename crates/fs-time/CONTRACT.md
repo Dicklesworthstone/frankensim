@@ -28,6 +28,25 @@ where claimed below.
   `fs_ad::revolve` checkpointing (O(log N) memory).
   **Precondition: symmetric ∂F/∂q** (conservative forces): the reverse
   pass evaluates Jᵀv through the user's `force_jvp` as Jᵀv = Jv.
+- `symplectic::verlet_momentum_step(q, p, h, inverse_mass, force, scratch,
+  cancelled)` retains physical canonical momentum for a constant mass operator.
+  Kicks use generalized force; the drift uses the supplied `LinearOp` action
+  `M^-1 p`, including coupled consistent mass. It assembles no matrix, allocates
+  nothing, and uses three caller-owned state vectors of scratch. Nonfinite
+  actions, invalid dimensions/step and cancellation leave both input states
+  unchanged. Actions overwrite their complete outputs. The original unit-mass
+  API and its arithmetic are unchanged.
+  `verlet_momentum_adjoint` pulls back the same discrete trajectory through the
+  supplied force VJP and **inverse-mass transpose**, with fallible binary
+  checkpointing and immediate cancellation propagation. The mass/force actions
+  must remain pure and unchanged through replay. A force JVP is insufficient
+  unless its Jacobian is known symmetric. The derivative is with respect to
+  initial position and momentum, not mass parameters. Symplectic/physical
+  energy claims require caller-established constant SPD inverse mass and
+  conservative force; arbitrary `LinearOp` instances are not certified. Variable
+  mass, constraints and impacts are outside this separable lane. Polls bracket
+  actions and occur every 256 vector components; actions own their internal
+  latency and accepted forward publication uses two final slice copies.
 - `fs_ga::{So3, Se3, Twist, Vec3}` are re-exported canonical state/tangent
   types; fs-time does not own a second quaternion, motor, pose, or twist
   representation. `lie::{so3_body_exp_step, so3_space_exp_step}` name the
