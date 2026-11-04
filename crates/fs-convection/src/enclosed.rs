@@ -1,4 +1,4 @@
-//! Horizontal and bounded inclined Hollands air-layer correlations.
+//! Sealed air-layer correlations: horizontal/inclined Hollands and vertical Wright.
 //!
 //! Source: Hollands, Raithby and Unny, report COO-2597-2 (1976), §4,
 //! Eq. (4-1), printed p.15; doi:10.2172/7125623. The authors reproduce
@@ -16,6 +16,7 @@ use super::{
 };
 
 mod transfer;
+pub(super) mod vertical;
 pub(super) use transfer::{
     horizontal_nusselt as nusselt, horizontal_partial as partial, inclined_nusselt, inclined_partial,
 };

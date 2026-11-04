@@ -67,6 +67,16 @@ impl CorrelationInputs {
                 } else {
                     None
                 }
+            } else if id == CorrelationId::WrightVerticalAirLayer {
+                if input_is_interior(&evaluation, axis) {
+                    super::enclosed::vertical::partial(
+                        evaluation.groups()["Ra"],
+                        evaluation.groups()["aspect_ratio"],
+                        axis,
+                    )
+                } else {
+                    None
+                }
             } else if let Some(mixed_plate) = &mixed_plate
                 && input_is_interior(&evaluation, axis)
             {
@@ -251,8 +261,10 @@ fn input_elasticity(
             "mu_bulk_over_surface" => 0.25 * (nu - 2.0) / nu,
             _ => 0.0,
         },
-        // Signed/zero-Rayleigh and angle partials are evaluated directly above.
-        CorrelationId::HollandsHorizontalAirLayer | CorrelationId::HollandsInclinedAirLayer => {
+        // Signed/zero-Rayleigh, angle and finite-height partials are evaluated above.
+        CorrelationId::HollandsHorizontalAirLayer
+        | CorrelationId::HollandsInclinedAirLayer
+        | CorrelationId::WrightVerticalAirLayer => {
             return Ok(None);
         }
     };
