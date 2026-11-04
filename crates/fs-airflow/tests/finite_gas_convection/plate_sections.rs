@@ -261,6 +261,7 @@ fn unsupported_section_geometry_and_domains_refuse_without_publishing_state() {
         ForcedPlateGasSurface { start: valid.end, ..valid },
         ForcedPlateGasSurface { end: Length::new(f64::INFINITY), ..valid },
         ForcedPlateGasSurface { start: Length::new(1e-12), ..valid },
+        ForcedPlateGasSurface { speed_m_s: 0.0, ..valid },
         ForcedPlateGasSurface { speed_m_s: 1e20, ..valid },
         ForcedPlateGasSurface { area_m2: 0.03, ..valid },
         ForcedPlateGasSurface { correlation: CorrelationId::ChurchillBernsteinCylinder, ..valid },
