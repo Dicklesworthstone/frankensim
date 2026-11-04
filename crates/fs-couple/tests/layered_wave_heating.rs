@@ -8,6 +8,9 @@ mod thermo_optical;
 #[path = "layered_wave_heating/spatial_interference.rs"]
 mod spatial_interference;
 
+#[path = "layered_wave_heating/substrate.rs"]
+mod substrate;
+
 use fs_couple::layered_wave_heating::{
     LayeredWaveDrive, LayeredWaveHeating, LayeredWaveHeatingError,
 };

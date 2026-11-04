@@ -31399,3 +31399,44 @@ changing-cutoff ensemble variance, keyed replay and gate clearing. Four focused
 native Rust tests pass using the complete original math and RNG libraries and
 the pinned nightly compiler. Full fs-couple and workspace execution remain
 unrun.
+
+
+### Absorbing exit media on the original layered thermal timeline
+
+`layered_wave_heating::substrate::PreparedSubstrateWaveHeating` binds an original
+coherent angular-spectrum beam or monochromatic coherence bank to a finite
+planar column of its homogeneous exit medium. Native thermal faces define each
+depth interval; the original Maxwell owner integrates whole-periodic-cell
+absorption analytically over that interval. Positive watts are cached per
+original CellId. No depth quadrature, artificial optical interface, field FFT
+or per-step material solve is added, and the finite-film 64-layer bound does
+not constrain this homogeneous-substrate thermal subdivision.
+
+The original exit card and shared fixed query context must agree with EVERY
+conductivity and caloric source. The thermal cross section must equal the
+complete periodic optical cell within roundoff. Explicit cell, cell-mode-factor
+work and logical storage bounds precede allocation. Preparation is
+O(cells * grid points * factors); repeated held-source intervals add O(cells)
+work to the original thermal solver. Coherence is contracted by the existing
+source owner; mutually uncorrelated factors are never summed as fields.
+
+`advance_to` converts cached watts to joules over the actual native interval
+and calls `LayeredThermalStep::with_cell_energy_j` once. Native nonlinear
+capacity/conduction, authored heat, contacts, reservoirs, events and acceptance
+remain authoritative. Entering/leaving flux and a closure residual are reported
+separately; heat is not recovered from their subtraction or rescaled to close
+the residual. Loss outside the represented column and in finite films is not
+credited to this thermal body. Failure/cancellation leaves the initial timeline
+unchanged.
+
+This is a held cycle/ensemble-mean electromagnetic source. Optical coefficients,
+geometry and source statistics do not refresh with the changing cell temperature.
+Lateral thermal gradients, carrier transients, multifrequency beats, phase change,
+electromagnetic storage changes and constitutive parameter work are not supplied.
+Expected heat drives one nonlinear temperature trajectory, not an ensemble mean.
+
+Five authored G1/G3/G0/G4 regressions cover independent oblique Fresnel and
+exponential cell integrals against native finite-volume temperatures, 96-cell
+refinement and partial coherence, lossless/TIR refusal to invent heat, weak
+positive heat below endpoint-flux roundoff, and source/geometry/work/cancellation
+admission. Rust execution remains unverified: the authoring runtime is unavailable.

@@ -43,6 +43,9 @@ use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 pub mod interference;
 pub mod spatial_interference;
 
+/// Exact transmitted-substrate cell watts on the existing thermal timeline.
+pub mod substrate;
+
 /// Accepted-temperature optical refresh on the same spatial thermal timeline.
 pub mod thermo_optical;
 pub use thermo_optical::{
@@ -71,6 +74,7 @@ pub enum LayeredWaveDrive<'a> {
 pub enum LayeredWaveHeatingError {
     Invalid(&'static str),
     Electromagnetic(ReflectionError),
+    ElectromagneticField(fs_em::plane_wave::angular_spectrum::AngularSpectrumError),
     Material(fs_material::state_point::MaterialStatePointError),
     Thermal(DepositionError),
     Solve(LayeredThermalSolveError),
@@ -85,6 +89,14 @@ impl std::error::Error for LayeredWaveHeatingError {}
 impl From<ReflectionError> for LayeredWaveHeatingError {
     fn from(value: ReflectionError) -> Self {
         Self::Electromagnetic(value)
+    }
+}
+impl From<fs_em::plane_wave::angular_spectrum::AngularSpectrumError> for LayeredWaveHeatingError {
+    fn from(value: fs_em::plane_wave::angular_spectrum::AngularSpectrumError) -> Self {
+        match value {
+            fs_em::plane_wave::angular_spectrum::AngularSpectrumError::Cancelled => Self::Cancelled,
+            other => Self::ElectromagneticField(other),
+        }
     }
 }
 impl From<fs_material::state_point::MaterialStatePointError> for LayeredWaveHeatingError {
