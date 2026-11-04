@@ -27,8 +27,9 @@ const MAX_WORK: u64 = 16_777_216;
 /// Decode one declared law for both the native performer and card sweeps.
 ///
 /// Accepted records are `stribeck mu_s mu_k v0` (legacy, zero viscous term),
-/// `friction stribeck mu_s mu_k v0 viscous_per_speed`, and
-/// `friction hyperbolic mu_s mu_k v0`. All speeds are physical constitutive
+/// `friction stribeck mu_s mu_k v0 viscous_per_speed`,
+/// `friction hyperbolic mu_s mu_k v0`, and the named row
+/// `friction rosin-wg2025-eq13`. All speeds are physical constitutive
 /// scales. This set-valued owner takes no numerical regularization speed.
 /// Coefficients retain their input authority; decoding is not validation of
 /// a measured rosin interface or a temperature-dependent third-body model.
@@ -39,6 +40,13 @@ pub fn parse_friction_record(record: &str) -> Result<fs_tribo::FrictionLaw, &'st
         Some("friction") => (words.next().ok_or("friction requires a law name")?, false),
         _ => return Err("expected a stribeck or friction record"),
     };
+    // Woodhouse & Galluzzo (2025) eq. (13), the measured steady-sliding fit
+    // for rosin, as in material_strings: no numbers on the row, the constants
+    // live in fs-tribo, so it cannot become a tuning knob (MB 16552).
+    if kind == "rosin-wg2025-eq13" {
+        if words.next().is_some() { return Err("rosin-wg2025-eq13 takes no coefficients"); }
+        return Ok(fs_tribo::FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13());
+    }
     let mut scalar = || {
         let value = words.next().ok_or("missing friction coefficient")?
             .parse::<f64>().map_err(|_| "friction coefficient must be numeric")?;
@@ -342,6 +350,23 @@ mod friction_record_tests {
             "friction coulomb 0.8 0.4 0.2", "friction hyperbolic 0.4 0.8 0.2",
             "friction hyperbolic 0.8 0.4 0", "friction hyperbolic NaN 0.4 0.2",
             "friction stribeck 0.8 0.4 0.2 -1"] {
+            assert!(parse_friction_record(record).is_err(), "accepted {record}");
+        }
+    }
+
+    #[test]
+    fn named_rosin_row_is_the_wg2025_eq13_constructor() {
+        assert_eq!(parse_friction_record("friction rosin-wg2025-eq13").unwrap(),
+            FrictionLaw::rosin_woodhouse_galluzzo_2025_eq13());
+    }
+
+    #[test]
+    fn named_rosin_row_takes_no_numbers() {
+        // The eq. (13) constants are not card inputs, and no record reaches
+        // the shifted-power family by its numbers.
+        for record in ["friction rosin-wg2025-eq13 0.2", "friction rosin-wg2025-eq13 0.2 0.011 0.4",
+            "rosin-wg2025-eq13", "stribeck rosin-wg2025-eq13",
+            "friction shifted-power 1.2 0 0.011 0.4"] {
             assert!(parse_friction_record(record).is_err(), "accepted {record}");
         }
     }
