@@ -756,6 +756,13 @@ fn hash_ior(hash: &mut DomainHasher, ior: DielectricIor) {
                 hash.update(&law.max_knot_span_nm().to_bits().to_le_bytes());
             }
         }
+        #[cfg(feature = "material-state")]
+        DielectricIor::Water(law) => {
+            hash.update(&[3]);
+            hash.update(law.source_identity().as_bytes());
+            hash.update(&law.temperature_k().to_bits().to_le_bytes());
+            hash.update(&law.density_kg_m3().to_bits().to_le_bytes());
+        }
     }
 }
 

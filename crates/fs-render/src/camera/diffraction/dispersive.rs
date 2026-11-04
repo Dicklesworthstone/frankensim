@@ -455,6 +455,8 @@ mod tests {
                         let t = (wavelength - (380.0 + 50.0 * interval as f64)) / 50.0;
                         (1.0 - t) * indices[interval] + t * indices[interval + 1]
                     }
+                    #[cfg(feature = "material-state")]
+                    DielectricIor::Water(_) => unreachable!("fixture contains no water law"),
                 };
                 close(
                     lens.power_per_m(wavelength).unwrap(),

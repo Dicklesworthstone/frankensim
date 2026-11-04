@@ -19,6 +19,11 @@ pub use coating::{
 mod anisotropic;
 pub use anisotropic::AnisotropicDielectricRoughness;
 
+#[cfg(feature = "material-state")]
+mod water;
+#[cfg(feature = "material-state")]
+pub use water::IapwsWaterIor;
+
 #[cfg(test)]
 mod absorption_band_tests;
 #[cfg(test)]
@@ -522,6 +527,9 @@ pub enum DielectricIor {
     Sellmeier(SellmeierIor),
     /// Explicit finite-band absolute phase-index samples.
     Tabulated(TabulatedIor),
+    /// Original IAPWS ordinary-water dispersion at a fixed temperature/density.
+    #[cfg(feature = "material-state")]
+    Water(IapwsWaterIor),
 }
 
 impl DielectricIor {
@@ -534,6 +542,8 @@ impl DielectricIor {
             Self::Cauchy(_) => (LAMBDA_MIN, LAMBDA_MAX),
             Self::Sellmeier(ior) => ior.wavelength_bounds_nm(),
             Self::Tabulated(ior) => ior.wavelength_bounds_nm(),
+            #[cfg(feature = "material-state")]
+            Self::Water(ior) => ior.wavelength_bounds_nm(),
         }
     }
 
@@ -543,6 +553,8 @@ impl DielectricIor {
             Self::Cauchy(ior) => ior.eval(wavelength_nm),
             Self::Sellmeier(ior) => ior.eval(wavelength_nm),
             Self::Tabulated(ior) => ior.eval(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::Water(ior) => ior.eval(wavelength_nm),
         }
     }
 
@@ -553,6 +565,8 @@ impl DielectricIor {
             Self::Cauchy(ior) => ior.group_index(wavelength_nm),
             Self::Sellmeier(ior) => ior.group_index(wavelength_nm),
             Self::Tabulated(ior) => ior.group_index(wavelength_nm),
+            #[cfg(feature = "material-state")]
+            Self::Water(ior) => ior.group_index(wavelength_nm),
         }
     }
 
@@ -563,6 +577,8 @@ impl DielectricIor {
             Self::Cauchy(ior) => ior.is_dispersive(),
             Self::Sellmeier(ior) => ior.is_dispersive(),
             Self::Tabulated(ior) => ior.is_dispersive(),
+            #[cfg(feature = "material-state")]
+            Self::Water(ior) => ior.is_dispersive(),
         }
     }
 }

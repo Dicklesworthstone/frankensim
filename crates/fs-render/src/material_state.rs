@@ -16,6 +16,8 @@ mod bulk_optics;
 mod spectral_optics;
 /// Thermal lensing from original absolute dispersion and a frozen temperature field.
 pub mod thermo_optic;
+/// Original temperature/density-dependent ordinary-water phase and group optics.
+pub mod water_refraction;
 /// Source-bound dispersive particle populations in native volume transport.
 #[cfg(feature = "volumes")]
 pub mod particle_scattering;
