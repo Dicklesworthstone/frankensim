@@ -74,6 +74,22 @@ differentiable lift). Pure Rust throughout.
   linear-alpha approximation and weakly absorbing dielectric interface model.
   No RGB fit, opacity floor, or extrapolation is introduced. Thin-path absorbed
   fractions use `expm1`, and material identities retain every admitted knot.
+  Explicit `SpectralAbsorption::try_new_in_band` and Beer-Lambert band
+  constructors retain 2–16 original positive vacuum-wavelength knots on their
+  actual inclusive support, including infrared data. The legacy constructors
+  still require 380–780 nm and retain identical canonical parameters. The
+  imaginary-index band constructor converts intensity absorption with the same
+  vacuum-wavelength law before linear-alpha interpolation. Clear and constant
+  extinction are explicit achromatic declarations; lifted RGB retains visible
+  support and a source table is never extrapolated. `DielectricGlass` exposes
+  the checked intersection of its phase-index and absorption bands, refusing
+  disjoint sources while retaining a shared endpoint for monochromatic use.
+  No extra allocation or per-query spectral resampling is introduced. G1/G3
+  regressions cover original infrared knots, path composition, intensity versus
+  amplitude attenuation, common-band/refusal boundaries, weak absorption and
+  exact visible-constructor parameter agreement. These declarations do not
+  establish measurement accuracy, a causal complex-index fit or validity of
+  weak-absorption geometric optics for strongly absorbing media.
 - **Coherent coatings on transmitting dielectrics:** `DielectricSurface` owns
   an optional source-bound `DielectricCoating`, separate from homogeneous glass
   and bulk Beer-Lambert absorption. It admits the existing one-to-four-law

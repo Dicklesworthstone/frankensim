@@ -17,6 +17,9 @@ pub use coating::{
     DielectricCoating, DielectricCoatingStack, DielectricInterface, DielectricLayerPowerBalance,
 };
 
+#[cfg(test)]
+mod absorption_band_tests;
+
 const PI: f64 = core::f64::consts::PI;
 const MIN_ROUGHNESS_ALPHA: f64 = 1.0e-4;
 const MAX_ROUGHNESS_ALPHA: f64 = 1.0;
@@ -68,7 +71,7 @@ impl core::fmt::Display for DielectricError {
             Self::InvalidIor => "invalid dielectric index of refraction",
             Self::InvalidAbsorption => "invalid Beer-Lambert absorption",
             Self::InvalidRoughness => "invalid dielectric GGX roughness",
-            Self::InvalidWavelength => "wavelength is outside the visible tracer interval",
+            Self::InvalidWavelength => "wavelength is outside the optical law's declared support",
             Self::InvalidTable => "invalid dielectric spectral table",
             Self::UndefinedGroupIndex => "group index is undefined at this dielectric table knot",
             Self::InvalidDirection => "invalid dielectric direction frame",
@@ -504,7 +507,7 @@ impl From<&DielectricIor> for DielectricIor {
 /// Maximum number of wavelength knots retained inline by a bulk absorption law.
 pub const MAX_SPECTRAL_ABSORPTION_KNOTS: usize = 16;
 
-/// Piecewise-linear visible-band intensity absorption in inverse metres.
+/// Piecewise-linear intensity absorption over a declared vacuum-wavelength band.
 ///
 /// The law retains the declared wavelengths and coefficients without an RGB
 /// reconstruction. It describes homogeneous bulk attenuation, independently
@@ -524,8 +527,26 @@ impl SpectralAbsorption {
         if !(2..=MAX_SPECTRAL_ABSORPTION_KNOTS).contains(&knots.len())
             || knots[0].0 != LAMBDA_MIN
             || knots[knots.len() - 1].0 != LAMBDA_MAX
+        {
+            return Err(DielectricError::InvalidAbsorption);
+        }
+        Self::try_new_in_band(knots)
+    }
+
+    /// Admit 2–16 original intensity-absorption knots over their actual band.
+    ///
+    /// Vacuum wavelengths must be positive, finite and strictly increasing;
+    /// coefficients must be finite and nonnegative. The first and last knots
+    /// are inclusive support boundaries. No visible/infrared tail or missing
+    /// interval is inferred. Interpolation is the declared linear-alpha law,
+    /// not a claim that a measured absorption resonance has been resolved.
+    pub fn try_new_in_band(knots: &[(f64, f64)]) -> Result<Self, DielectricError> {
+        if !(2..=MAX_SPECTRAL_ABSORPTION_KNOTS).contains(&knots.len())
             || knots.iter().any(|(wavelength, coefficient)| {
-                !wavelength.is_finite() || !coefficient.is_finite() || *coefficient < 0.0
+                !wavelength.is_finite()
+                    || *wavelength <= 0.0
+                    || !coefficient.is_finite()
+                    || *coefficient < 0.0
             })
             || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
         {
@@ -550,9 +571,18 @@ impl SpectralAbsorption {
         &self.knots[..self.count]
     }
 
-    /// Evaluate intensity absorption [1/m] within the declared visible band.
+    /// Inclusive support of the retained absorption knots, in vacuum nm.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        (self.knots[0].0, self.knots[self.count - 1].0)
+    }
+
+    /// Evaluate intensity absorption [1/m] within the declared source band.
     pub fn extinction_per_m(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
-        validate_wavelength(wavelength_nm)?;
+        let (minimum, maximum) = self.wavelength_bounds_nm();
+        if !wavelength_nm.is_finite() || !(minimum..=maximum).contains(&wavelength_nm) {
+            return Err(DielectricError::InvalidWavelength);
+        }
         let knots = self.knots();
         let upper = knots
             .partition_point(|(wavelength, _)| *wavelength < wavelength_nm)
@@ -612,12 +642,15 @@ pub struct BeerLambertAbsorption {
 }
 
 impl BeerLambertAbsorption {
-    /// A medium with no absorption.
+    /// A wavelength-independent declaration of no absorption. The consuming
+    /// medium still enforces its phase-index law's source support.
     pub const CLEAR: Self = Self {
         model: AbsorptionModel::Clear,
     };
 
     /// Construct wavelength-independent extinction in inverse metres.
+    /// This law has no spectral restriction of its own; it does not extend
+    /// the source support of a phase-index or interface law used alongside it.
     pub fn try_constant(extinction_per_m: f64) -> Result<Self, DielectricError> {
         if !extinction_per_m.is_finite() || extinction_per_m < 0.0 {
             return Err(DielectricError::InvalidAbsorption);
@@ -642,6 +675,18 @@ impl BeerLambertAbsorption {
         })
     }
 
+    /// Retain original absorption samples [1/m] on their actual spectral band.
+    ///
+    /// See [`SpectralAbsorption::try_new_in_band`] for source support and
+    /// interpolation. No RGB conversion or extrapolation is applied.
+    pub fn try_from_spectral_extinction_in_band(
+        knots: &[(f64, f64)],
+    ) -> Result<Self, DielectricError> {
+        Ok(Self {
+            model: AbsorptionModel::Spectral(SpectralAbsorption::try_new_in_band(knots)?),
+        })
+    }
+
     /// Convert dimensionless imaginary-index samples to intensity absorption.
     ///
     /// At every supplied vacuum wavelength, alpha = 4*pi*k/lambda_m.
@@ -654,9 +699,34 @@ impl BeerLambertAbsorption {
     pub fn try_from_spectral_extinction_index(
         knots: &[(f64, f64)],
     ) -> Result<Self, DielectricError> {
-        let mut spectrum = SpectralAbsorption::try_new(knots)?;
+        Self::from_extinction_index(SpectralAbsorption::try_new(knots)?)
+    }
+
+    /// Convert dimensionless imaginary-index knots on their original band.
+    ///
+    /// As for [`Self::try_from_spectral_extinction_index`], this uses vacuum
+    /// wavelength and intensity attenuation, `alpha = 4*pi*k/lambda_m`, at
+    /// each knot. Alpha then interpolates linearly inside the original band;
+    /// real-index interfaces still require the weak-absorption approximation.
+    pub fn try_from_spectral_extinction_index_in_band(
+        knots: &[(f64, f64)],
+    ) -> Result<Self, DielectricError> {
+        Self::from_extinction_index(SpectralAbsorption::try_new_in_band(knots)?)
+    }
+
+    fn from_extinction_index(mut spectrum: SpectralAbsorption) -> Result<Self, DielectricError> {
         for (wavelength_nm, coefficient) in &mut spectrum.knots[..spectrum.count] {
-            *coefficient *= (4.0 * PI) / (*wavelength_nm * 1.0e-9);
+            if *coefficient == 0.0 {
+                continue;
+            }
+            let scale = (4.0 * PI) / (*wavelength_nm * 1.0e-9);
+            *coefficient = if scale.is_finite() {
+                *coefficient * scale
+            } else {
+                // A representable ratio can survive the metre conversion or
+                // scale overflowing at extremely short positive wavelengths.
+                (*coefficient / *wavelength_nm) * (4.0 * PI * 1.0e9)
+            };
             if !coefficient.is_finite() {
                 return Err(DielectricError::InvalidAbsorption);
             }
@@ -698,9 +768,26 @@ impl BeerLambertAbsorption {
         })
     }
 
-    /// Spectral extinction coefficient in inverse metres.
+    /// Spectral support of this absorption law, in vacuum nm. `None` means
+    /// the explicitly wavelength-independent clear/constant law, evaluated
+    /// at positive finite wavelengths. It is not a source-authority claim.
+    /// Lifted RGB stays in 380–780 nm; tables retain their exact source band.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> Option<(f64, f64)> {
+        match &self.model {
+            AbsorptionModel::Clear | AbsorptionModel::Constant(_) => None,
+            AbsorptionModel::Spectral(spectrum) => Some(spectrum.wavelength_bounds_nm()),
+            AbsorptionModel::ReferenceRgb { .. } => Some((LAMBDA_MIN, LAMBDA_MAX)),
+        }
+    }
+
+    /// Spectral extinction coefficient in inverse metres. This query respects
+    /// the original table or RGB support; clear/constant declarations accept
+    /// any positive finite wavelength, subject to the consuming material law.
     pub fn extinction_per_m(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
-        validate_wavelength(wavelength_nm)?;
+        if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
+            return Err(DielectricError::InvalidWavelength);
+        }
         Ok(match &self.model {
             AbsorptionModel::Clear => 0.0,
             AbsorptionModel::Constant(extinction) => *extinction,
@@ -709,7 +796,10 @@ impl BeerLambertAbsorption {
                 spectrum,
                 distance_m,
                 ..
-            } => -det::ln(spectrum.eval(wavelength_nm)) / *distance_m,
+            } => {
+                validate_wavelength(wavelength_nm)?;
+                -det::ln(spectrum.eval(wavelength_nm)) / *distance_m
+            }
         })
     }
 
@@ -872,6 +962,23 @@ impl DielectricGlass {
     #[must_use]
     pub const fn absorption_ref(&self) -> &BeerLambertAbsorption {
         &self.absorption
+    }
+
+    /// Common inclusive support of the original phase-index and absorption
+    /// laws, in vacuum nm. A physical consumer must admit this intersection,
+    /// not extend either source to the other's band. Disjoint laws refuse;
+    /// one shared endpoint remains usable for a monochromatic query.
+    pub fn wavelength_bounds_nm(&self) -> Result<(f64, f64), DielectricError> {
+        let (mut minimum, mut maximum) = self.ior.wavelength_bounds_nm();
+        if let Some((absorption_minimum, absorption_maximum)) = self.absorption.wavelength_bounds_nm() {
+            minimum = minimum.max(absorption_minimum);
+            maximum = maximum.min(absorption_maximum);
+        }
+        if minimum <= maximum {
+            Ok((minimum, maximum))
+        } else {
+            Err(DielectricError::InvalidWavelength)
+        }
     }
 
     /// Declared provenance class.
