@@ -375,6 +375,25 @@ fn the_nozzle_still_refuses_a_backpressure_above_its_stationary_donor() {
 // on the lip tests' three-segment bore, the specimen gas (mu 1.8e-5 Pa s, air-like), the real cards' clock (32 kHz output, 16
 // mechanics per output, one gas step each: 512 kHz) and the wall memory the bore tests use.
 fn jet_lip(card: Option<JetNoiseCard>) -> NonlinearLip {
+    let mut lip = match card {
+        Some(card) => probe_lip().with_jet_noise(card).expect("a usable card"),
+        None => probe_lip(),
+    };
+    lip.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+    lip
+}
+
+// The same probe lip with the opt-in constriction noise (the cup radius is the card's), or without it.
+fn constriction_lip(card: Option<ConstrictionNoiseCard>) -> NonlinearLip {
+    let mut lip = match card {
+        Some(card) => probe_lip().with_constriction_noise(card).expect("a usable card"),
+        None => probe_lip(),
+    };
+    lip.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+    lip
+}
+
+fn probe_lip() -> NonlinearLip {
     let (gas, state) = specimen_with_state();
     let duct = Duct {
         segments: vec![
@@ -405,14 +424,7 @@ fn jet_lip(card: Option<JetNoiseCard>) -> NonlinearLip {
         gamma: state.gamma,
         prandtl: state.prandtl,
     };
-    let lip = NonlinearLip::new(&duct, gas, state.temperature, state.pressure, wall_gas, lip, 1.5e-6, clock)
-        .expect("nonlinear lip");
-    let mut lip = match card {
-        Some(card) => lip.with_jet_noise(card).expect("a usable card"),
-        None => lip,
-    };
-    lip.apply(BrassControl::SetLipTension(1.6)).expect("tension");
-    lip
+    NonlinearLip::new(&duct, gas, state.temperature, state.pressure, wall_gas, lip, 1.5e-6, clock).expect("nonlinear lip")
 }
 
 // Eight blocks of 32 output samples (4096 gas steps) of cup overpressure at a steady `blow` [Pa].
@@ -462,4 +474,62 @@ fn lip_jet_noise_on_the_nonlinear_bore_is_gated_on_the_jet_and_silent_without_fo
     let still = jet_run(&mut jet_lip(None), 0.0);
     let none = jet_run(&mut jet_lip(Some(jet_card(0.0, 7))), 0.0);
     assert!(same_bits(&still, &none), "no mouth pressure, no forward flow: no source even with no gate");
+}
+
+// The probe bore's first station is a 6 mm radius cylinder (`probe_lip`): that is the cup-rim radius these tests use, the way a real
+// card's `constriction_noise` radius is the radius of its own first bore station.
+const PROBE_CUP_RADIUS_M: f64 = 6.0e-3;
+
+fn constriction_card(seed: u64, duct_radius_m: f64) -> ConstrictionNoiseCard {
+    ConstrictionNoiseCard { seed, duct_radius_m }
+}
+
+// Gauntlet G0 and G3 for the constriction noise on the nonlinear bore. A lip without it is the lip built before it existed; with no mouth
+// pressure there is no forward flow and no source; the planted negative (a 12 m "duct", whose cutoff 100 / r = 8.3 Hz is under the bank's
+// lowest band, so nothing is driven at any pressure) is bit-identical to no row at the pressure where the real radius speaks; the real
+// radius changes the cup pressure, keeps it finite, repeats bit for bit under a declared seed, and another seed gives another noise.
+#[test]
+fn lip_constriction_noise_on_the_nonlinear_bore_is_absent_silent_without_a_jet_and_speaks_seeded_on_the_printed_law() {
+    let plain = jet_run(&mut constriction_lip(None), 3000.0);
+    assert!(plain.iter().any(|p| p.abs() > 1.0), "the probe cup must carry pressure for the comparison to mean anything");
+    let still = jet_run(&mut constriction_lip(None), 0.0);
+    let none = jet_run(&mut constriction_lip(Some(constriction_card(7, PROBE_CUP_RADIUS_M))), 0.0);
+    assert!(same_bits(&still, &none), "no mouth pressure, no forward flow: no source");
+    let cut_off = jet_run(&mut constriction_lip(Some(constriction_card(7, 12.0))), 3000.0);
+    assert!(same_bits(&plain, &cut_off), "no band below the duct cutoff, so the law supplies nothing");
+    let open = jet_run(&mut constriction_lip(Some(constriction_card(7, PROBE_CUP_RADIUS_M))), 3000.0);
+    assert!(open.iter().all(|p| p.is_finite()));
+    assert!(!same_bits(&plain, &open), "the printed law drives bands at this pressure, so it must reach the cup pressure");
+    assert!(
+        same_bits(&open, &jet_run(&mut constriction_lip(Some(constriction_card(7, PROBE_CUP_RADIUS_M))), 3000.0)),
+        "a declared seed repeats bit for bit"
+    );
+    assert!(
+        !same_bits(&open, &jet_run(&mut constriction_lip(Some(constriction_card(8, PROBE_CUP_RADIUS_M))), 3000.0)),
+        "another seed gives another noise"
+    );
+}
+
+// Gauntlet G3. The two opt-in sources share the lip's series drive and the mouth reservoir without displacing each other: the pair gives
+// a cup pressure different from either alone, finite, and repeatable. The jet noise alone is the jet noise of the lip built before the
+// constriction noise existed (the refactored drive adds the same terms in the same order when only one is present).
+#[test]
+fn lip_constriction_noise_and_jet_noise_on_the_nonlinear_bore_add_in_the_same_series_drive() {
+    let both = |seed: u64| {
+        let mut lip = probe_lip()
+            .with_jet_noise(jet_card(1700.0, 7))
+            .expect("jet card")
+            .with_constriction_noise(constriction_card(seed, PROBE_CUP_RADIUS_M))
+            .expect("constriction card");
+        lip.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+        jet_run(&mut lip, 3000.0)
+    };
+    let jet_only = jet_run(&mut jet_lip(Some(jet_card(1700.0, 7))), 3000.0);
+    let constriction_only = jet_run(&mut constriction_lip(Some(constriction_card(7, PROBE_CUP_RADIUS_M))), 3000.0);
+    let pair = both(7);
+    assert!(pair.iter().all(|p| p.is_finite()));
+    assert!(!same_bits(&pair, &jet_only), "the constriction noise reaches the cup beside the jet noise");
+    assert!(!same_bits(&pair, &constriction_only), "the jet noise reaches the cup beside the constriction noise");
+    assert!(same_bits(&pair, &both(7)), "the pair repeats bit for bit");
+    assert!(!same_bits(&pair, &both(8)), "another constriction seed gives another pair");
 }

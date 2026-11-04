@@ -29,7 +29,7 @@
 //! mouth_flow_max_taps <taps>                 optional; power of two in 512..=262144; default 65536 (the ladder's own ceiling)
 //! modal_baffle <relative_kernel_tol> <maximum_kernel_terms>  optional; full modal load and observation
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>            optional; constriction noise of the lip jet, Verge's fraction
-//! constriction_noise <seed> <duct_radius_m>                  optional; Oldham and Ukpoho's printed constriction noise (linear bore)
+//! constriction_noise <seed> <duct_radius_m>                  optional; Oldham and Ukpoho's printed constriction noise (both bores)
 //! cylinder <radius_m> <length_m>             bore records, mouthpiece to bell
 //! cone <inlet_radius_m> <outlet_radius_m> <length_m>
 //! bessel <inlet_radius_m> <outlet_radius_m> <length_m> <flare> <pieces>
@@ -69,8 +69,10 @@
 //! has nothing to tune: `r` is the duct the constriction opens into, the cup rim radius the bore record's first station
 //! gives (the card says which). The law was measured on dampers and orifice plates in a 300 mm duct at 10-25 m/s, so putting
 //! it on a lip is an extrapolation in size and Mach number that any page showing a render says. It is silent while the jet
-//! flow is not forward, and a file without the record is bit-identical to one written before it existed. It is wired to the
-//! linear bore only: with `bore nonlinear` the file is refused by name rather than the source being dropped.
+//! flow is not forward, and a file without the record is bit-identical to one written before it existed. Both bores carry
+//! it, beside (not instead of) `jet_noise` when both are given: the linear loop adds it to the lip's driving pressure each
+//! sample, the nonlinear bore each gas step ([`super::nonlinear::NonlinearLip::with_constriction_noise`]; its bank runs at the
+//! gas step, with the wall binding's own gas density for `U_c`).
 //!
 //! Exactly one of `lip_response` and `lip` is given. `lip_response` carries
 //! the quantities lip-reed measurements publish: the outward-striking
@@ -988,12 +990,6 @@ impl LipDescription {
     ) -> Result<LipPerformance, String> {
         use super::nonlinear::{NonlinearClock, NonlinearLip};
         use fs_duct::nonlinear::bore::{WallGas, WallMemory};
-        if self.constriction_noise.is_some() {
-            return Err(
-                "constriction_noise is wired to the linear bore only: the nonlinear bore's lip loop does not carry it, and no source is silently dropped"
-                    .into(),
-            );
-        }
         use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
         use fs_qty::Temperature;
         let gas = self.ambient_gas();
@@ -1033,6 +1029,12 @@ impl LipDescription {
         )?;
         let lip = match self.jet_noise {
             Some(card) => lip.with_jet_noise(card).map_err(|e| format!("jet_noise refused: {e}"))?,
+            None => lip,
+        };
+        let lip = match self.constriction_noise {
+            Some(card) => lip
+                .with_constriction_noise(card)
+                .map_err(|e| format!("constriction_noise refused: {e}"))?,
             None => lip,
         };
         let receiver = BaffledPressure::circular_outlet_multirate_differentiating(

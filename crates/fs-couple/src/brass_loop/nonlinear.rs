@@ -34,7 +34,7 @@ use fs_phs::linear_exact::{LinearPropagator, LinearSplit, step_split};
 use fs_phs::{PortHamiltonian, mass_spring_damper};
 
 use super::{BrassBlockDiag, BrassControl, LipIsland, prepare_lip, zero_crossing_lock_hz};
-use crate::turbulence_noise::{JetNoiseCard, JetNoiseCoverage, LipJetNoise};
+use crate::turbulence_noise::{ConstrictionNoise, ConstrictionNoiseCard, JetNoiseCard, JetNoiseCoverage, LipJetNoise};
 
 /// How the nonlinear bore is cut, clocked and walled.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,8 +90,11 @@ pub struct NonlinearLip {
     diags: Vec<BrassBlockDiag>,
     /// Opt-in lip jet noise ([`LipJetNoise`]: Stevens' form with Verge's constant, an extrapolation); `None` adds nothing.
     jet_noise: Option<LipJetNoise>,
+    /// Opt-in constriction noise ([`ConstrictionNoise`]: Oldham and Ukpoho's printed duct-constriction law in third-octave
+    /// bands, an extrapolation to the lip); `None` adds nothing.
+    constriction_noise: Option<ConstrictionNoise>,
     /// The bore gas's dynamic viscosity [Pa s] and density [kg/m^3], the engine's own (the wall binding's), read only by the
-    /// opt-in jet noise: its Reynolds gate and its reference jet speed.
+    /// opt-in noises: the jet noise's Reynolds gate and reference jet speed, the constriction noise's reference jet speed.
     wall_viscosity_pa_s: f64,
     reference_density_kg_m3: f64,
 }
@@ -164,6 +167,7 @@ impl NonlinearLip {
             block_index: 0,
             diags: Vec::new(),
             jet_noise: None,
+            constriction_noise: None,
             wall_viscosity_pa_s,
             reference_density_kg_m3,
         })
@@ -188,6 +192,21 @@ impl NonlinearLip {
     #[must_use]
     pub fn jet_noise_coverage(&self) -> Option<JetNoiseCoverage> {
         self.jet_noise.as_ref().map(LipJetNoise::coverage)
+    }
+
+    /// Attach the opt-in constriction noise before any step: a series pressure source added to the blowing pressure that
+    /// drives the lip (its force) and the mouth reservoir the lip channel meters from, beside (not instead of) the jet noise,
+    /// of rms `K(St) P_blow` in each third octave below the duct cutoff `100 / r`, `K` the printed trend of Oldham and Ukpoho
+    /// and `P_blow` the gesture's blowing pressure (see [`ConstrictionNoise`] for the law, what it rests on and the label).
+    /// Its bank runs at the gas step. It runs once per gas step on the previous gas step's metered flow, and is silent while
+    /// that flow is not forward. A lip without it is bit-identical to one built before this existed; a card whose cutoff
+    /// leaves no driven band adds exactly zero.
+    ///
+    /// # Errors
+    /// The reason [`ConstrictionNoiseCard::validate`] gives.
+    pub fn with_constriction_noise(mut self, card: ConstrictionNoiseCard) -> Result<Self, String> {
+        self.constriction_noise = Some(ConstrictionNoise::new(card, self.clock.gas_step_s()).map_err(str::to_string)?);
+        Ok(self)
     }
 
     /// Apply a control-rate change between blocks. A held bore has no valves.
@@ -321,10 +340,12 @@ impl NonlinearLip {
         // The opt-in jet noise is a series pressure source in the lip's driving pressure: it adds to the force on the lip and
         // to the stagnation pressure of the mouth reservoir the lip channel meters from, as in the linear loop. It reads the
         // previous gas step's metered flow and gap, and its speed is bounded by the Bernoulli speed of the present pressure
-        // drop. Zero is not added and the mouth state is not rebuilt, so a lip without it, or whose gate is shut, keeps
-        // `drive == blow_pa` and `mouth` bit for bit.
+        // drop. The opt-in constriction noise joins the same series drive beside it: it reads the previous gas step's forward
+        // flow, its amplitude follows the held blowing pressure, and it needs no gap. Zero is not added and the mouth state is
+        // not rebuilt, so a lip without either, or whose gates are shut, keeps `drive == blow_pa` and `mouth` bit for bit.
         let mut drive = self.blow_pa;
         let mut mouth = self.mouth;
+        let mut noisy = false;
         if let Some(source) = self.jet_noise.as_mut() {
             let drop = (self.blow_pa - (self.face_pa - self.room.pressure)).abs();
             let bound = (2.0 * drop / self.reference_density_kg_m3).sqrt();
@@ -337,17 +358,27 @@ impl NonlinearLip {
             );
             if noise != 0.0 {
                 drive += noise;
-                let pressure = self.room.pressure + drive;
-                let density = pressure / (self.gas.gas_constant() * self.room.temperature);
-                let state = self
-                    .gas
-                    .conserved(density, 0.0, pressure)
-                    .map_err(|e| format!("mouth reservoir refused: {e}"))?;
-                mouth = self
-                    .gas
-                    .primitive(state, || false)
-                    .map_err(|e| format!("mouth reservoir refused: {e}"))?;
+                noisy = true;
             }
+        }
+        if let Some(source) = self.constriction_noise.as_mut() {
+            let noise = source.pressure_pa(self.blow_pa, self.reference_density_kg_m3);
+            if noise != 0.0 {
+                drive += noise;
+                noisy = true;
+            }
+        }
+        if noisy {
+            let pressure = self.room.pressure + drive;
+            let density = pressure / (self.gas.gas_constant() * self.room.temperature);
+            let state = self
+                .gas
+                .conserved(density, 0.0, pressure)
+                .map_err(|e| format!("mouth reservoir refused: {e}"))?;
+            mouth = self
+                .gas
+                .primitive(state, || false)
+                .map_err(|e| format!("mouth reservoir refused: {e}"))?;
         }
         let force = (drive - (self.face_pa - self.room.pressure)) * self.lip.face_area_m2;
         let record = step_split(
@@ -382,6 +413,10 @@ impl NonlinearLip {
             // The metered mass flow as a volume flow at the reference density: `Re_h = Q rho / (w mu) = mdot / (w mu)` needs
             // no density choice, and a negative flow (the cup above the mouth) is silent.
             source.record(face.mass_flow_kg_s / self.reference_density_kg_m3, gap);
+        }
+        if let Some(source) = self.constriction_noise.as_mut() {
+            // The same metered volume flow: the source needs it forward (positive), and a negative flow is silent.
+            source.record(face.mass_flow_kg_s / self.reference_density_kg_m3);
         }
         Ok((gap, defect, face, step.outlet_volume_flow_m3_s, drive))
     }

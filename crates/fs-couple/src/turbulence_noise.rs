@@ -447,21 +447,27 @@ impl TruncatedHighPass {
 /// (Goertzel on each bin whose centre lies in the band, both signs of frequency, averaged over the whole segments).
 #[cfg(test)]
 pub(crate) fn in_band_mean_square(xs: &[f64], f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> f64 {
-    const N: usize = 4096;
+    in_band_mean_square_in(xs, f_lo_hz, f_hi_hz, dt, 4096)
+}
+
+/// [`in_band_mean_square`] with `n`-sample segments (frequency resolution `1 / (n dt)`): a source drawn at a step much finer than
+/// the audio rate (the nonlinear bore's gas step) needs longer segments to keep a third octave several bins wide.
+#[cfg(test)]
+pub(crate) fn in_band_mean_square_in(xs: &[f64], f_lo_hz: f64, f_hi_hz: f64, dt: f64, n: usize) -> f64 {
     let tau = core::f64::consts::TAU;
-    let window: Vec<f64> = (0..N).map(|i| 0.5 - 0.5 * (tau * i as f64 / N as f64).cos()).collect();
+    let window: Vec<f64> = (0..n).map(|i| 0.5 - 0.5 * (tau * i as f64 / n as f64).cos()).collect();
     let w2: f64 = window.iter().map(|w| w * w).sum();
-    let df = 1.0 / (N as f64 * dt);
+    let df = 1.0 / (n as f64 * dt);
     let (k_lo, k_hi) = ((f_lo_hz / df).ceil() as usize, (f_hi_hz / df).floor() as usize);
     let (mut total, mut segments) = (0.0, 0usize);
-    for segment in xs.chunks_exact(N) {
+    for segment in xs.chunks_exact(n) {
         for k in k_lo..=k_hi {
-            let coeff = 2.0 * (tau * k as f64 / N as f64).cos();
+            let coeff = 2.0 * (tau * k as f64 / n as f64).cos();
             let (mut s1, mut s2) = (0.0f64, 0.0f64);
             for (x, w) in segment.iter().zip(&window) {
                 (s2, s1) = (s1, x * w + coeff * s1 - s2);
             }
-            total += 2.0 * (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (N as f64 * w2);
+            total += 2.0 * (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (n as f64 * w2);
         }
         segments += 1;
     }
@@ -1874,14 +1880,25 @@ mod tests {
     /// band carry only that section's skirt and fall away, and the bands the law does not drive stay at their skirt too.
     #[test]
     fn constriction_bank_delivers_k_p_in_each_driven_third_octave_and_nothing_below_the_first() {
+        bank_delivers_k_p(CONSTRICTION_DT, 1usize << 19, 4096);
+    }
+
+    /// Gauntlet G1 and G2 at the nonlinear bore's gas step: the V2 loop draws the bank once per gas step, 512 kHz on the real
+    /// cards (32 kHz output, 16 mechanics samples per output sample, one gas step each), where the 10 Hz sections are 1e-4 of a
+    /// radian per step. Every driven third octave still carries `K P` and the skirts below the first still fall away.
+    #[test]
+    fn constriction_bank_delivers_k_p_at_the_nonlinear_bore_gas_step() {
+        bank_delivers_k_p(1.0 / 512_000.0, 1usize << 21, 65_536);
+    }
+
+    fn bank_delivers_k_p(dt: f64, n: usize, segment: usize) {
         let (blow, rho) = (5000.0, 1.2);
-        let mut source = constriction(3);
+        let mut source = ConstrictionNoise::new(ConstrictionNoiseCard { seed: 3, duct_radius_m: CUP_RADIUS }, dt).unwrap();
         let driven = source.driven_bands(blow, rho);
         source.record(1.0e-3);
-        let n = 1usize << 19;
         let xs: Vec<f64> = (0..n).map(|_| source.pressure_pa(blow, rho)).collect();
         let edge = 10f64.powf(0.05);
-        let level_db = |centre: f64| 10.0 * (in_band_mean_square(&xs, centre / edge, centre * edge, CONSTRICTION_DT)).log10();
+        let level_db = |centre: f64| 10.0 * (in_band_mean_square_in(&xs, centre / edge, centre * edge, dt, segment)).log10();
         let mut worst: f64 = 0.0;
         for &(_, centre, _, rms) in &driven {
             let delivered = level_db(centre) - 10.0 * (rms * rms).log10();
@@ -1891,8 +1908,9 @@ mod tests {
         let first = driven[0].0;
         let first_db = level_db(constriction_band_centre_hz(first));
         let below: Vec<f64> = (1..=3).map(|k| first_db - level_db(constriction_band_centre_hz(first - k))).collect();
-        // Measured here: worst 0.236 dB over 12 bands, and 6.5, 13.3 and 16.9 dB under the lowest driven band (module doc).
-        assert!(worst < 0.5, "worst deviation {worst} dB over {} bands", driven.len());
+        eprintln!("constriction bank at dt = 1/{:.0}: worst |delivered - K P| {worst:.3} dB over {} bands; {below:?} dB under the lowest driven band", 1.0 / dt, driven.len());
+        // Measured here at 32 kHz: worst 0.236 dB over 12 bands, and 6.5, 13.3 and 16.9 dB under the lowest driven band (module doc).
+        assert!(worst < 0.5,"worst deviation {worst} dB over {} bands", driven.len());
         assert!(below[0] > 3.0 && below[1] > below[0] + 3.0 && below[2] > below[1] + 2.0, "below the lowest driven band: {below:?} dB under it");
         let skirt = level_db(constriction_band_centre_hz(first - 1));
         assert!(skirt > first_db - 12.0, "the next band below carries the skirt, not silence: {skirt} against {first_db}");
