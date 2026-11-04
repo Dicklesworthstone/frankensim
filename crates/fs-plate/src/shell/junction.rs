@@ -26,7 +26,7 @@ use super::stiffened::timoshenko::{
 };
 use super::{ShellMesh, ShellModel, dot, sub};
 use crate::PlateError;
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 use fs_sparse::{Coo, Csr};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -263,6 +263,11 @@ impl TiedShellModel {
 
     /// Evaluate the compliant glue viscous dissipation rate $\dot{\mathbf{q}}_r^T C_{\text{glue}} \dot{\mathbf{q}}_r$ [W].
     ///
+    /// The original directional jump factors evaluate this as a sum of squares,
+    /// without a global scratch vector. Compensated constraint/jump actions keep
+    /// small slip beside common motion; expanded-matrix cancellation is never
+    /// interpreted as physical heat or repaired by clipping a negative result.
+    ///
     /// # Errors
     /// Returns [`PlateError::BadConstraint`] if `reduced_velocity.len() != self.model.free` or contains non-finite entries.
     pub fn glue_dissipation_rate(&self, reduced_velocity: &[f64]) -> Result<f64, PlateError> {
@@ -273,21 +278,45 @@ impl TiedShellModel {
                 what: "reduced_velocity length must equal model.free and be finite",
             });
         }
-        let Some(c_glue) = &self.glue_damping else {
-            return Ok(0.0);
-        };
-        let mut cq = vec![0.0; self.model.free];
-        c_glue.spmv(reduced_velocity, &mut cq);
-        Ok(dot_slice(reduced_velocity, &cq))
+        let mut heat = Dd::ZERO;
+        for source in &self.glue_damping_sources {
+            for rate in self.glue_source_response(source, reduced_velocity, || false)? {
+                let rate = Dd::from_f64(rate);
+                heat = heat + rate * rate;
+            }
+        }
+        let heat = heat.to_f64();
+        if !heat.is_finite() {
+            return Err(PlateError::BadConstraint {
+                what: "glue dissipation is nonfinite",
+            });
+        }
+        Ok(heat)
     }
 
     /// Project the compliant glue damping matrix $C_{\text{glue}}$ onto a set of reduced modal
     /// vectors $\Phi = [\boldsymbol{\phi}_0, \dots, \boldsymbol{\phi}_{m-1}]$, returning the
     /// row-major $m \times m$ symmetric positive-semidefinite matrix $C_{\text{modal}} = \Phi^T C_{\text{glue}} \Phi$.
+    /// The Gram product of the original directional source responses retains
+    /// every cross-mode term and avoids cancellation against common rigid motion.
     ///
     /// # Errors
     /// Returns [`PlateError::BadConstraint`] if any mode vector length mismatches `model.free` or is non-finite.
     pub fn project_glue_damping(&self, modes: &[Vec<f64>]) -> Result<Vec<f64>, PlateError> {
+        let modes: Vec<_> = modes.iter().map(Vec::as_slice).collect();
+        self.project_glue_damping_borrowed(&modes, || false)
+    }
+
+    // The preloaded-assembly consumer borrows its original eigenvectors and
+    // supplies cancellation; it must not duplicate the expanded-matrix route.
+    pub(super) fn project_glue_damping_borrowed(
+        &self,
+        modes: &[&[f64]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, PlateError> {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
         let m = modes.len();
         if m == 0
             || modes
@@ -298,20 +327,94 @@ impl TiedShellModel {
                 what: "modes must be non-empty, finite, and have length equal to model.free",
             });
         }
-        let Some(c_glue) = &self.glue_damping else {
-            return Ok(vec![0.0; m * m]);
-        };
-        let mut out = vec![0.0; m * m];
-        let mut c_phi_j = vec![0.0; self.model.free];
-        for j in 0..m {
-            c_glue.spmv(&modes[j], &mut c_phi_j);
-            for i in 0..=j {
-                let val = dot_slice(&modes[i], &c_phi_j);
-                out[i * m + j] = val;
-                out[j * m + i] = val;
+        let entries = m.checked_mul(m).ok_or(PlateError::BadConstraint {
+            what: "glue modal damping dimensions overflow",
+        })?;
+        let mut gram = vec![Dd::ZERO; entries];
+        // Three channels at a time: storage does not grow with seam count.
+        let mut responses = vec![[0.0; 3]; m];
+        for source in &self.glue_damping_sources {
+            for (mode, response) in modes.iter().zip(&mut responses) {
+                *response = self.glue_source_response(source, mode, &mut cancelled)?;
+            }
+            for j in 0..m {
+                if cancelled() {
+                    return Err(PlateError::Cancelled);
+                }
+                for i in 0..=j {
+                    let mut value = gram[i * m + j];
+                    for a in 0..3 {
+                        value =
+                            value + Dd::from_f64(responses[i][a]) * Dd::from_f64(responses[j][a]);
+                    }
+                    gram[i * m + j] = value;
+                }
             }
         }
+        let mut out = vec![0.0; entries];
+        for j in 0..m {
+            if cancelled() {
+                return Err(PlateError::Cancelled);
+            }
+            for i in 0..=j {
+                let value = gram[i * m + j].to_f64();
+                if !value.is_finite() {
+                    return Err(PlateError::BadConstraint {
+                        what: "glue modal damping is nonfinite",
+                    });
+                }
+                out[i * m + j] = value;
+                out[j * m + i] = value;
+            }
+        }
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
         Ok(out)
+    }
+
+    // Apply the same original jump and constraint maps before multiplying by
+    // physical square factors. Keeping their small differences in double-double
+    // arithmetic prevents a large common displacement/velocity from exhausting
+    // the precision of an otherwise well-resolved relative motion. No factor,
+    // mode, or mapped coefficient is truncated here.
+    fn glue_source_response(
+        &self,
+        source: &GlueDampingSource,
+        values: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<[f64; 3], PlateError> {
+        let mut jump = [Dd::ZERO; 3];
+        for (a, row) in source.rows.iter().enumerate() {
+            if cancelled() {
+                return Err(PlateError::Cancelled);
+            }
+            for &(component, node, dof, weight) in row {
+                if let Some(local) = self.comp_dof_maps[component][6 * node + dof] {
+                    let value = self.comp_t[component][local].iter().fold(
+                        Dd::ZERO,
+                        |sum, &(index, coefficient)| {
+                            sum + Dd::from_f64(coefficient) * Dd::from_f64(values[index])
+                        },
+                    );
+                    jump[a] = jump[a] + Dd::from_f64(weight) * value;
+                }
+            }
+        }
+        let response = source.factor.map(|row| {
+            row.into_iter()
+                .zip(jump)
+                .fold(Dd::ZERO, |sum, (factor, rate)| {
+                    sum + Dd::from_f64(factor) * rate
+                })
+                .to_f64()
+        });
+        if response.iter().any(|value| !value.is_finite()) {
+            return Err(PlateError::BadConstraint {
+                what: "glue damping source projection is nonfinite",
+            });
+        }
+        Ok(response)
     }
 
     /// Number of original directional glue-loss rows before modal projection.
@@ -413,33 +516,13 @@ impl TiedShellModel {
         }
         let mut output = vec![0.0; entries];
         for (s, source) in self.glue_damping_sources.iter().enumerate() {
-            let mut reduced_rows: [Vec<(usize, f64)>; 3] = core::array::from_fn(|_| Vec::new());
-            for (a, row) in source.rows.iter().enumerate() {
+            for (j, phi) in modes.iter().enumerate() {
                 if cancelled() {
                     return Err(PlateError::Cancelled);
                 }
-                reduced_rows[a] =
-                    project_jump_row_to_reduced(row, &self.comp_dof_maps, &self.comp_t);
-            }
-            for (j, phi) in modes.iter().enumerate() {
-                let jump: [f64; 3] = core::array::from_fn(|a| {
-                    reduced_rows[a].iter().map(|&(i, w)| w * phi[i]).sum()
-                });
+                let response = self.glue_source_response(source, phi, &mut cancelled)?;
                 for a in 0..3 {
-                    if cancelled() {
-                        return Err(PlateError::Cancelled);
-                    }
-                    let value = source.factor[a]
-                        .iter()
-                        .zip(jump)
-                        .map(|(factor, motion)| factor * motion)
-                        .sum::<f64>();
-                    if !value.is_finite() {
-                        return Err(PlateError::BadConstraint {
-                            what: "glue damping source projection is nonfinite",
-                        });
-                    }
-                    output[(3 * s + a) * m + j] = value;
+                    output[(3 * s + a) * m + j] = response[a];
                 }
             }
         }
@@ -3232,6 +3315,121 @@ mod tests {
         ShellMesh::new(nodes, tris).expect("valid rectangular shell mesh")
     }
 
+    // One physical shear dashpot between two independently retained component
+    // translations. The same map/source representation is emitted by a
+    // matching, translation-only compliant seam.
+    fn shear_dashpot(viscosity: f64) -> TiedShellModel {
+        let mut damping = Coo::new(2, 2);
+        for (i, j, sign) in [(0, 0, 1.0), (0, 1, -1.0), (1, 0, -1.0), (1, 1, 1.0)] {
+            damping.push(i, j, sign * viscosity);
+        }
+        let empty = Coo::new(2, 2).assemble();
+        let mut mass = Coo::new(2, 2);
+        mass.push(0, 0, 1.0);
+        mass.push(1, 1, 1.0);
+        TiedShellModel {
+            model: ShellModel {
+                k: empty.clone(),
+                m: mass.assemble(),
+                dof_map: vec![Some(0), Some(1)],
+                free: 2,
+            },
+            map: vec![
+                vec![[Some(0), None, None, None, None, None]],
+                vec![[Some(1), None, None, None, None, None]],
+            ],
+            receipt: TieReceipt {
+                max_gap_m: 0.0,
+                max_angle_rad: 0.0,
+                segments: 1,
+                slave_dofs: 1,
+            },
+            glue_stiffness: empty,
+            glue_damping: Some(damping.assemble()),
+            glue_damping_sources: vec![GlueDampingSource {
+                rows: [vec![(0, 0, 0, -1.0), (1, 0, 0, 1.0)], vec![], vec![]],
+                factor: [[det::sqrt(viscosity), 0.0, 0.0], [0.0; 3], [0.0; 3]],
+            }],
+            comp_t: vec![vec![vec![(0, 1.0)]], vec![vec![(1, 1.0)]]],
+            comp_dof_maps: vec![vec![Some(0), None, None, None, None, None]; 2],
+            slave_couplings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn g0_glue_loss_keeps_small_slip_beside_common_motion() {
+        let viscosity = 123.45;
+        let tied = shear_dashpot(viscosity);
+        let slip = 2.0_f64.powi(-30);
+        let expected = viscosity * slip * slip;
+        for common in [0.0, 1.0, -1.0, 1.1, 1024.0, 1000.1] {
+            let velocity = [common, common + slip];
+            let heat = tied.glue_dissipation_rate(&velocity).unwrap();
+            assert!(
+                (heat - expected).abs() < 8.0 * f64::EPSILON * expected,
+                "common={common}, heat={heat:e}, exact={expected:e}"
+            );
+            assert_eq!(tied.glue_dissipation_rate(&[common, common]).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn g0_glue_modal_gram_retains_small_and_cross_mode_losses() {
+        let viscosity = 123.45;
+        let tied = shear_dashpot(viscosity);
+        let slip = 2.0_f64.powi(-30);
+        let modes = vec![
+            vec![1.1, 1.1 + slip],
+            vec![1.1, 1.1 - 2.0 * slip],
+            vec![1.1, 1.1],
+        ];
+        let damping = tied.project_glue_damping(&modes).unwrap();
+        let jumps = [slip, -2.0 * slip, 0.0];
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = viscosity * jumps[i] * jumps[j];
+                assert!(
+                    (damping[3 * i + j] - expected).abs() <= 8.0 * f64::EPSILON * expected.abs(),
+                    "({i},{j}): {} != {expected:e}",
+                    damping[3 * i + j]
+                );
+                assert_eq!(damping[3 * i + j], damping[3 * j + i]);
+            }
+        }
+        let borrowed: Vec<_> = modes.iter().map(Vec::as_slice).collect();
+        let factors = tied
+            .project_glue_damping_source_rows(&borrowed, 4096, 4096, || false)
+            .unwrap();
+        for i in 0..3 {
+            for j in 0..3 {
+                let gram = (0..3)
+                    .map(|row| factors[3 * row + i] * factors[3 * row + j])
+                    .sum::<f64>();
+                assert_eq!(damping[3 * i + j], gram);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_glue_sources_keep_constraint_cancellation_and_refuse_nonfinite_heat() {
+        let mut tied = shear_dashpot(123.45);
+        // The second component's retained map contains common motion plus a
+        // small relative coordinate. Forming its value in f64 first loses 1.
+        tied.comp_t[1][0] = vec![(0, 1.0), (1, 1.0)];
+        let heat = tied.glue_dissipation_rate(&[1e16, 1.0]).unwrap();
+        assert!((heat - 123.45).abs() < 8.0 * f64::EPSILON * 123.45);
+        assert!(tied.glue_dissipation_rate(&[0.0, 1e200]).is_err());
+        assert!(tied.project_glue_damping(&[vec![0.0, 1e200]]).is_err());
+        let mut polls = 0;
+        assert!(matches!(
+            tied.project_glue_damping_borrowed(&[&[1e16, 1.0]], || {
+                polls += 1;
+                polls == 3
+            }),
+            Err(PlateError::Cancelled)
+        ));
+    }
+
     #[test]
     fn g0_dual_basis_biorthogonality() {
         // Verify on a single reference segment and on a multi-segment non-matching polyline
@@ -3579,6 +3777,16 @@ mod tests {
         }
         let e_jump = tied.glue_strain_energy(&jump_q).unwrap();
         let d_jump = tied.glue_dissipation_rate(&jump_q).unwrap();
+        let mut assembled_force = vec![0.0; tied.model.free];
+        tied.glue_damping
+            .as_ref()
+            .unwrap()
+            .spmv(&jump_q, &mut assembled_force);
+        let assembled_power = dot_slice(&jump_q, &assembled_force);
+        assert!(
+            (d_jump - assembled_power).abs() < 1e-12 * d_jump,
+            "original source factors and sparse glue operator disagree"
+        );
         assert!(
             e_jump > 0.0,
             "glue stiffness must be strictly positive on interface jumps: {e_jump}"

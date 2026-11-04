@@ -288,27 +288,20 @@ pub fn eigen_windows<'a>(
             "assembled vibration has an unstable or unresolved nonpositive mode interval".into(),
         );
     }
-    let mut glue_damping = vec![0.; entries];
     if let Some(glue) = &equilibrium.assembly.glue_damping {
         if glue.nrows() != model.free || glue.ncols() != model.free {
             return Err("assembled glue damping and tangent dimensions disagree".into());
         }
-        let mut product = vec![0.; model.free];
-        // Same Phi^T C Phi contraction as the junction owner, using borrowed
-        // mode vectors so no second full eigenbasis allocation is needed.
-        for (j, mode) in modes.iter().enumerate() {
-            checkpoint(cx)?;
-            glue.spmv(&mode.phi, &mut product);
-            for i in 0..=j {
-                let value: f64 = modes[i].phi.iter().zip(&product).map(|(a, b)| a * b).sum();
-                if !value.is_finite() {
-                    return Err("assembled glue damping projection overflow".into());
-                }
-                glue_damping[i * count + j] = value;
-                glue_damping[j * count + i] = value;
-            }
-        }
     }
+    let glue_damping = if count == 0 {
+        Vec::new()
+    } else {
+        let borrowed: Vec<_> = modes.iter().map(|mode| mode.phi.as_slice()).collect();
+        equilibrium
+            .assembly
+            .project_glue_damping_borrowed(&borrowed, || checkpoint(cx).is_err())
+            .map_err(|e| e.to_string())?
+    };
     checkpoint(cx)?;
     Ok(AssemblyVibration {
         equilibrium,

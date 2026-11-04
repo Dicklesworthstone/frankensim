@@ -1356,6 +1356,14 @@ the original indivisible junction operations before publishing results.
 
 The complete row-major `Phi^T C_glue Phi` projection retains cross-mode damping;
 no diagonal approximation or omitted-mode coupling certificate is inferred.
+The junction's original directional jump factors evaluate physical glue heat
+as a sum of squares and modal damping as their full Gram matrix. Compensated
+constraint/jump actions retain small relative motion beside common rigid motion;
+the heat query needs no global scratch vector and never clips a negative matrix
+quadratic. The preloaded vibration consumer uses that same borrowed-mode owner,
+and the exact-response resistance witness uses the same source actions. Native
+regressions compare source and assembled sparse power and check common-motion
+invariance, weak relative modes, signed cross terms and nonfinite-heat refusal.
 Only the existing glue loss is included. Other material, radiation and
 frequency-dependent losses retain their own owners. Mode vectors are borrowed
 during projection instead of allocating a second full eigenbasis. Explicit
