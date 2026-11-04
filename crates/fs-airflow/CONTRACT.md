@@ -3645,3 +3645,43 @@ approximation, and positive sections have no validated local discrepancy band.
 Two source/material integration regressions cover conservation and original
 source-domain refusal; they require the unavailable constellation closure and
 are not reported as executed here.
+
+## Source-resolved developed sections in series
+
+`graph::inertial::laminar::series::LaminarSeries` connects the original admitted
+`LaminarPipe` sections with exactly one common incompressible flow. It retains
+each source, radius, viscosity and every wall-memory arm. The duplicate mean
+flows are eliminated analytically, with total inertance equal to the sum of the
+original section inertances; no intermediate compliance, steady-flow root or
+step-average continuity approximation is introduced. One energy-normalized mean
+coordinate and all original profile coordinates carry the exact sum of the
+section kinetic energies. Construction checks the complete 128-state bound and
+exact common reference density before allocating dense matrices.
+
+The original native exact propagator advances the entire held-pressure coupled
+trajectory. Its port average drives displaced volume and work. Independent
+`PreparedSourceLoss` caches integrate each section's original positive viscous
+source squares on that same trajectory, preserving local heat deposition even
+while the profiles develop or reverse. These integrals close against the native
+total dissipation before state and caller-owned section-heat slots publish
+together. They are never assigned by a steady resistance fraction, an endpoint
+power estimate or a kinetic-energy deficit. Preparation owns all exponentials
+and scratch; successful warm advances and mean-flow relations allocate nothing.
+
+`with_sources` renews each original pipe's source, frequency-band and viscosity
+admission while preserving the coupled mean flow, every local profile history,
+kinetic energy and clock. Every density must remain exactly unchanged. The
+cooperative mean/profile-flow comparison bounds Reynolds support for every
+section throughout a held interval; each original section's ceiling applies.
+A failed source, owner, regime, arithmetic, heat closure or cancellation leaves
+accepted state and local heat output unchanged.
+
+This is an ideal series connection of developed Stokes components. Different
+radii do not infer area-change, entrance or convective momentum losses, and
+local heat output does not itself evolve a thermal inventory. Thermal expansion,
+radial viscosity variation, density changes, mixing and turbulent transitions
+require their own owners. Tests check uniform-pipe subdivision through startup
+and reversal, each section's heat and kinetic inventory, heterogeneous viscous
+history against the original full common-flow descriptor, unchanged energy
+through a nonsteady material update, steady local heat, complex impedance and
+atomic physical-limit refusals. Runtime verification is reported separately.

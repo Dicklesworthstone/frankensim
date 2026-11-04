@@ -24,6 +24,9 @@
 //! The frequency-domain error is sampled over an explicit band; arbitrary
 //! startup pulses do not inherit a time-domain error certificate.
 
+/// Coupled developed sections with separate viscosity histories and heat.
+pub mod series;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;
