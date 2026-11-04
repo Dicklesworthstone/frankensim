@@ -1087,7 +1087,7 @@ impl Radiators {
 
     /// A reference temperature for the first linearization: the mean
     /// surroundings of escaping faces, else `fallback`.
-    fn reference(&self, fallback: f64) -> f64 {
+    pub(crate) fn reference(&self, fallback: f64) -> f64 {
         match self {
             Self::Escape(faces) if !faces.is_empty() => {
                 faces.iter().map(|f| f.surroundings_k).sum::<f64>() / faces.len() as f64

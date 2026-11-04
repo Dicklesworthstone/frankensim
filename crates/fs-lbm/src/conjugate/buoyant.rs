@@ -10,7 +10,8 @@
 //! `f = -rho beta (T - T_ref) g` on fluid cells, with pressure measured from
 //! the reference hydrostatic state, so an opening at pressure zero is ambient
 //! at `T_ref`. The coupling starts from conduction through still fluid with
-//! the openings held at their ambient temperature. Each coupling runs `sweeps_per_coupling` SIMPLEC iterations
+//! the openings held at their ambient temperature and any radiative heat
+//! path included. Each coupling runs `sweeps_per_coupling` SIMPLEC iterations
 //! under the current force, then re-solves the energy equation on the
 //! current fluxes. Convergence requires, at the same coupling, the SIMPLEC
 //! mass and momentum residuals below `flow.tolerance` and the largest
@@ -32,7 +33,7 @@ use fs_exec::CancelGate;
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy};
 use super::flow::FlowField;
-use super::radiation::{RadiationConfig, RadiationEndpoint, Radiators};
+use super::radiation::{RadiationConfig, RadiationEndpoint, Radiators, reference_temperature};
 use super::simple::{FvFlow, SimpleConfig, Solver, Turbulence, admit};
 use super::{ChtError, finite, finite_positive, poll};
 
@@ -206,6 +207,17 @@ pub fn fv_natural_convection(
         {
             *face = ThermalFace::Temperature(backflow_temperature);
         }
+    }
+    if let (Some(radiators), Some(radiation)) = (&exposed, &config.radiation) {
+        // Radiation may be the only heat-removal path. Use the same first
+        // linearization as the prescribed-flow radiation solver so the seed
+        // does not require an artificial conductive temperature anchor.
+        let reference = radiators.reference(reference_temperature(setup, radiation));
+        seed.cell_sinks.extend(
+            radiators
+                .endpoint(domain, &vec![reference; domain.cell_count()], gate)?
+                .sinks,
+        );
     }
     let mut temperature = solve_energy(
         domain,

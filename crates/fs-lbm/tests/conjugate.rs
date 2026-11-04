@@ -2482,6 +2482,114 @@ fn g3_negative_expansion_reverses_cavity_buoyancy_and_zero_expansion_conducts() 
     }
 }
 
+#[test]
+fn g3_radiation_cooled_natural_convection_needs_no_conductive_anchor() {
+    // Two vertical conducting plates enclose a fluid gap. Only the left
+    // plate generates heat; all thermal boundaries are insulated, while
+    // the transparent enclosure lets radiation escape to 300 K surroundings.
+    // The cold plate supplies a temperature gradient for buoyant circulation.
+    let gate = CancelGate::new();
+    let (n, dx) = (8, 0.125);
+    let domain = VoxelDomain::from_fn(n, n, 1, dx, |p| {
+        if p[0] < dx || p[0] > (n - 1) as f64 * dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1e-2,
+        kinematic_viscosity_m2_s: 0.71e-2,
+    };
+    let solids = [SolidMaterial::new("plate", 10.0)];
+    let power = 0.5;
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.add_uniform_power(&domain, power, |p| p[0] < dx);
+    let mut flow = SimpleConfig::new([
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    flow.tolerance = 1e-8;
+    let mut config = FvBuoyancyConfig::new([0.0, -9.81, 0.0], 0.0, 300.0, flow);
+    config.temperature_tolerance = 1e-8;
+
+    // Without radiation this really is an unanchored, heated Neumann problem.
+    assert!(matches!(
+        fv_natural_convection(&domain, &fluid, &solids, &setup, &config, &gate),
+        Err(ChtError::InvalidInput {
+            field: "thermal.faces",
+            ..
+        })
+    ));
+
+    for surface_exchange in [false, true] {
+        let mut radiation = RadiationConfig::new(vec![0.9], [Some(300.0); 6]);
+        radiation.surface_exchange = surface_exchange;
+        radiation.patch_size = 1;
+        radiation.tolerance = config.temperature_tolerance;
+        let (reference, _) = solve_energy_radiating(
+            &domain,
+            &fluid,
+            &solids,
+            &FlowField::quiescent(&domain),
+            &setup,
+            &config.energy,
+            &radiation,
+            &gate,
+        )
+        .unwrap();
+        config.radiation = Some(radiation);
+        let neutral =
+            fv_natural_convection(&domain, &fluid, &solids, &setup, &config, &gate).unwrap();
+        assert!(
+            neutral
+                .flow
+                .velocity_m_s
+                .iter()
+                .flatten()
+                .all(|u| u.abs() < 1e-12)
+        );
+        for (actual, expected) in neutral
+            .energy
+            .temperature
+            .iter()
+            .zip(&reference.temperature)
+        {
+            assert!((actual - expected).abs() < 1e-7, "{actual} vs {expected}");
+        }
+        assert!((neutral.report.radiated_w.unwrap() - power).abs() < 1e-7 * power);
+    }
+
+    // With expansion enabled, the same radiative heat path supports actual
+    // natural convection: the hot side rises and the cold side descends.
+    config.expansion_per_k = 1.0 / 300.0;
+    let buoyant = fv_natural_convection(&domain, &fluid, &solids, &setup, &config, &gate).unwrap();
+    assert!(buoyant.flow.velocity_m_s[domain.index(1, n / 2, 0)][1] > 1e-5);
+    assert!(buoyant.flow.velocity_m_s[domain.index(n - 2, n / 2, 0)][1] < -1e-5);
+    assert!(
+        buoyant
+            .energy
+            .temperature
+            .iter()
+            .all(|t| (300.0..302.0).contains(t))
+    );
+    assert!((buoyant.report.radiated_w.unwrap() - power).abs() < 1e-7 * power);
+    let balance = &buoyant.energy.report.balance;
+    assert!(balance.boundary_outflow_w.abs() < 1e-12, "{balance:?}");
+    assert!(
+        (balance.sink_outflow_w - power).abs() < 1e-7 * power,
+        "{balance:?}"
+    );
+    assert!(balance.relative_residual < 1e-9, "{balance:?}");
+}
+
 /// Open vertical channel (chimney) between isothermal plates `n` cells
 /// apart and `n * aspect` tall, open at the bottom and top: the induced
 /// volume flow per unit depth over the Elenbaas fully developed limit
