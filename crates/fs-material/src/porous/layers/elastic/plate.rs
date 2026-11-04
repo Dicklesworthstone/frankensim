@@ -20,9 +20,9 @@
 //! Johansson et al., JASA 118, 3436 (2005), <https://doi.org/10.1121/1.2126927>.
 //! The exp(+i omega t), outgoing exp(-i k_n z) convention matches the parent.
 
-use super::super::transmission::{log_scaled, positive_product_ratio, transmit_state};
+use super::super::transmission::{log_scaled, positive_product_ratio, transmit_state_with_layers};
 use super::super::{
-    Layer, PreparedLayer, RigidBackedLayers, bad, divided, finite, magnitude_scale,
+    Layer, LayerTransfer, PreparedLayer, RigidBackedLayers, bad, divided, finite, magnitude_scale,
     normal_wavenumber_ratio, retained_fluid_snapshot,
 };
 use super::ElasticTransmittingLayers;
@@ -151,8 +151,16 @@ impl<'a> ElasticPlateLayers<'a> {
         &self,
         cosine: f64,
     ) -> Result<LayeredElasticPlateTransmission, MaterialError> {
+        self.scattering_with_layers(cosine, |_, _| Ok(()))
+    }
+
+    pub(in super::super) fn scattering_with_layers<E: From<MaterialError>>(
+        &self,
+        cosine: f64,
+        observe: impl FnMut(usize, LayerTransfer) -> Result<(), E>,
+    ) -> Result<LayeredElasticPlateTransmission, E> {
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
-            return Err(bad("elastic plate needs incidence cosine in (0,1]"));
+            return Err(bad("elastic plate needs incidence cosine in (0,1]").into());
         }
         let prepared = &self.solid.prepared;
         let ci = prepared.fluid().acoustic().sound_speed_m_s();
@@ -175,7 +183,7 @@ impl<'a> ElasticPlateLayers<'a> {
         let r_kn = qr.scale(prepared.k0);
         for (q, kn) in [(qp, p_kn), (qs, s_kn), (qr, r_kn)] {
             if !finite(kn) || (q != C64::ZERO && kn == C64::ZERO) {
-                return Err(bad("elastic plate normal wavenumber is unrepresentable"));
+                return Err(bad("elastic plate normal wavenumber is unrepresentable").into());
             }
         }
         let load = if qr == C64::ZERO {
@@ -204,7 +212,7 @@ impl<'a> ElasticPlateLayers<'a> {
             let ss = sine / self.solid.shear_ratio;
             let zeta = self.solid.impedance_ratio / cosine;
             if !finite(cp) || !finite(cs) || !ss.is_finite() || !zeta.is_finite() || zeta <= 0.0 {
-                return Err(bad("elastic plate refraction contrast is unrepresentable"));
+                return Err(bad("elastic plate refraction contrast is unrepresentable").into());
             }
             parity_boundary(
                 bounded_wave(
@@ -225,7 +233,13 @@ impl<'a> ElasticPlateLayers<'a> {
                 load,
             )?
         };
-        let state = transmit_state(prepared, cosine, boundary.pressure, boundary.velocity)?;
+        let state = transmit_state_with_layers(
+            prepared,
+            cosine,
+            boundary.pressure,
+            boundary.velocity,
+            observe,
+        )?;
         let transmission = C64::from_re(boundary.transmission);
         let pressure_transmission =
             state.scaled_coefficient(transmission, boundary.transmission_log_scale)?;
@@ -250,7 +264,7 @@ impl<'a> ElasticPlateLayers<'a> {
             || absorbed < -tolerance
             || (reflected + transmitted + absorbed - 1.0).abs() > tolerance
         {
-            return Err(bad("elastic plate failed passive normal-power balance"));
+            return Err(bad("elastic plate failed passive normal-power balance").into());
         }
         Ok(LayeredElasticPlateTransmission {
             pressure_reflection: state.reflection,

@@ -19,8 +19,8 @@
 
 use super::transmission::{LogAmplitude, log_scaled};
 use super::{
-    ElasticTransmittingLayers, LayerTransfer, MAX_LAYERS, RigidBackedLayers, TransmittingLayers,
-    divided, finite, magnitude_scale,
+    ElasticPlateLayers, ElasticTransmittingLayers, LayerTransfer, MAX_LAYERS, RigidBackedLayers,
+    TransmittingLayers, divided, finite, magnitude_scale,
 };
 use crate::MaterialError;
 use fs_math::{c64::C64, dd::Dd, det};
@@ -237,6 +237,48 @@ impl ElasticTransmittingLayers<'_> {
                 response.reflected_fraction,
                 response.longitudinal_transmitted_fraction + response.shear_transmitted_fraction,
             ],
+            &transfers,
+            &mut cancelled,
+        )
+    }
+}
+
+impl ElasticPlateLayers<'_> {
+    /// Resolve heat in the original entrance layers while retaining the
+    /// finite plate's coherent P/S waves, resonances and evanescent tunneling.
+    /// The solid and receiving fluid are lossless; neither is assigned heat.
+    /// Transmitted power is the original receiving-fluid normal power.
+    ///
+    /// Rows and `max_layers` count only the declared entrance layers. The one
+    /// finite plate adds bounded work and supplies the same boundary pair used
+    /// by [`Self::scattering`]. No source is re-evaluated, and positive local
+    /// absorption is computed independently of the boundary-power residual.
+    pub fn layer_absorption(
+        &self,
+        cosine: f64,
+        incident_power_w: f64,
+        budget: LayerAbsorptionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<LayerAbsorption, LayerAbsorptionError> {
+        let prepared = self.prepared_layers();
+        admit(
+            prepared.layer_count(),
+            cosine,
+            incident_power_w,
+            budget,
+            &mut cancelled,
+        )?;
+        let mut transfers = [LayerTransfer::default(); MAX_LAYERS];
+        let response = self.scattering_with_layers::<LayerAbsorptionError>(cosine, |i, step| {
+            poll(&mut cancelled)?;
+            transfers[i] = step;
+            Ok(())
+        })?;
+        partition(
+            prepared,
+            cosine,
+            incident_power_w,
+            [response.reflected_fraction, response.transmitted_fraction],
             &transfers,
             &mut cancelled,
         )

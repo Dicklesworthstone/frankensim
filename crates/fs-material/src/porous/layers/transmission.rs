@@ -185,21 +185,6 @@ impl<'a> TransmittingLayers<'a> {
 /// Propagate a homogeneous receiver boundary pair without dividing pressure by
 /// velocity. Elastic mode conversion can have zero pressure or zero normal
 /// velocity, so an admittance-only representation would introduce false poles.
-pub(super) fn transmit_state(
-    prepared: &RigidBackedLayers<'_>,
-    cosine: f64,
-    exit_pressure: C64,
-    exit_velocity: C64,
-) -> Result<TransmittedState, MaterialError> {
-    transmit_state_with_layers(
-        prepared,
-        cosine,
-        exit_pressure,
-        exit_velocity,
-        |_, _| Ok(()),
-    )
-}
-
 pub(super) fn transmit_state_with_layers<E: From<MaterialError>>(
     prepared: &RigidBackedLayers<'_>,
     cosine: f64,

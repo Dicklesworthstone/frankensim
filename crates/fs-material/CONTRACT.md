@@ -11126,10 +11126,10 @@ specimen diffraction or certify a reverberant room's diffuse field.
 
 ### Layer-resolved viscous and thermal acoustic absorption
 
-Rigid-backed, fluid-transmitting and elastic-transmitting prepared layers expose
-`layer_absorption` for explicit incident normal watts at one angle. Each original
-layer retains separate viscous and thermal absorbed fractions and their combined
-watts. The original R/T API
+Rigid-backed, fluid-transmitting, elastic-half-space and finite-elastic-plate
+prepared layers expose `layer_absorption` for explicit incident normal watts at
+one angle. Each original entrance layer retains separate viscous and thermal
+absorbed fractions and their combined watts. The original R/T API
 is unchanged. Its SAME bounded propagation supplies the layer-face states;
 no additional material query, fitted attenuation or second field solver enters.
 
@@ -11158,6 +11158,16 @@ regressions compare an independent three-equation elastic boundary plus spatial
 loss quadrature across both mode cutoffs, the matched thin-layer limit below
 roundoff, normal-incidence fluid equivalence, subdivision, opaque layers and
 cancelled/budget-refused queries.
+
+`ElasticPlateLayers` likewise retains its original finite P/S plate solution,
+including resonances and evanescent tunneling into the receiving fluid. Only the
+declared entrance layers count toward report rows and the layer budget; the one
+lossless plate adds bounded work and no heat. `porous_elastic_plate` regressions
+compare independent six-wave boundary equations plus local spatial quadrature,
+the exact zero-thickness and normal longitudinal-fluid limits, quarter/half-wave
+changes in porous heating, sub-roundoff heat with evanescent plate transmission,
+and cancellation/budget refusals. Interleaved elastic plate stacks do not yet
+expose this layer-resolved heat account.
 
 The mechanism split does not assign mean heat separately to the pore fluid and
 solid frame or evolve their temperatures. Original linear, rigid-frame,

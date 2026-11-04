@@ -5,7 +5,8 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluidState;
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::porous::layers::{
-    ElasticPlateLayers, ElasticTransmittingLayers, Layer, TransmittingLayers,
+    ElasticPlateLayers, ElasticTransmittingLayers, Layer, LayerAbsorptionBudget,
+    LayerAbsorptionError, TransmittingLayers,
 };
 use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_math::c64::C64;
@@ -514,4 +515,317 @@ fn plate_rejects_unadmitted_geometry_angles_and_anisotropic_sources() {
     for cosine in [0.0, -0.5, 1.01, f64::NAN, f64::INFINITY] {
         assert!(stack.scattering(cosine).is_err());
     }
+}
+
+// One original porous entrance layer, followed by an incident-fluid gap and
+// the finite plate. The independent six-wave boundary solution supplies the
+// load. Conventional complex propagation and spatial quadrature then evaluate
+// the local viscous/thermal loss; production face states and analytic integrals
+// are not used. Fields are normalized to one peak incident pascal.
+fn independent_entrance_heat(
+    stack: &ElasticPlateLayers<'_>,
+    cosine: f64,
+    samples: usize,
+) -> [f64; 2] {
+    let prepared = stack.prepared_layers();
+    let incident = prepared.fluid().acoustic();
+    let receiver = stack.receiving_state();
+    let [cp, cs] = stack.plate_phase_speeds_m_s();
+    let omega = prepared.angular_frequency_rad_s();
+    let bare = boundary_oracle(
+        [incident.density_kg_m3(), incident.sound_speed_m_s()],
+        [stack.plate_state().density_kg_m3(), cp, cs],
+        [receiver.density_kg_m3(), receiver.sound_speed_m_s()],
+        omega,
+        stack.thickness_m(),
+        cosine,
+    );
+    let Layer::Porous { thickness_m: d, .. } = prepared.layer(0).unwrap() else {
+        panic!("oracle requires the original porous entrance layer");
+    };
+    let Layer::FluidGap { thickness_m: gap } = prepared.layer(1).unwrap() else {
+        panic!("oracle requires the original incident-fluid gap");
+    };
+    let phi = omega * gap * cosine / incident.sound_speed_m_s();
+    let jsin = C64::new(0.0, phi.sin());
+    let p = (C64::ONE + bare[0]).scale(phi.cos()) + jsin * (C64::ONE - bare[0]);
+    let q = (C64::ONE - bare[0]).scale(phi.cos()) + jsin * (C64::ONE + bare[0]);
+    let response = prepared.material_response(0).unwrap();
+    let rho = response.dynamic_density_kg_m3();
+    let compliance = response.dynamic_bulk_modulus_pa().recip();
+    let k = response.characteristic().1;
+    let zref = incident.characteristic_impedance_pa_s_m() / cosine;
+    let kt = omega / incident.sound_speed_m_s() * (1.0 - cosine * cosine).sqrt();
+    let mut kn = (k * k - C64::from_re(kt * kt)).sqrt();
+    if kn.im > 0.0 {
+        kn = -kn;
+    }
+    let ratio = rho.scale(omega / zref) / kn;
+    let cos_sin = |z: C64| {
+        (
+            C64::new(z.re.cos() * z.im.cosh(), -z.re.sin() * z.im.sinh()),
+            C64::new(z.re.sin() * z.im.cosh(), z.re.cos() * z.im.sinh()),
+        )
+    };
+    let (cos, sin) = cos_sin(kn.scale(d));
+    let jsin = C64::new(0.0, 1.0) * sin;
+    let p_front = cos * p + ratio * jsin * q;
+    let q_front = cos * q + jsin * p / ratio;
+    let amplitude = C64::from_re(2.0) / (p_front + q_front);
+    let (p, q) = (p * amplitude, q * amplitude);
+    let mut heat = [0.0; 2];
+    for sample in 0..samples {
+        let z = (sample as f64 + 0.5) * d / samples as f64;
+        let (cos, sin) = cos_sin(kn.scale(z));
+        let jsin = C64::new(0.0, 1.0) * sin;
+        let pressure = cos * p + ratio * jsin * q;
+        let normal_velocity = (cos * q + jsin * p / ratio).scale(1.0 / zref);
+        let tangential_velocity = (pressure / rho).scale(kt / omega);
+        heat[0] +=
+            omega * zref * -rho.im * (normal_velocity.norm_sq() + tangential_velocity.norm_sq());
+        heat[1] += omega * zref * -compliance.im * pressure.norm_sq();
+    }
+    heat.map(|value| value * d / samples as f64)
+}
+
+#[test]
+fn finite_plate_heat_matches_independent_boundary_and_local_loss() {
+    let incident = fluid(1.2, 340.0);
+    let receiver = fluid(1.0, 300.0);
+    let plate = solid(30.0, 700.0, 350.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let layers = [
+        Layer::Porous {
+            law: &foam,
+            thickness_m: 0.025,
+        },
+        Layer::FluidGap { thickness_m: 0.012 },
+    ];
+    let budget = LayerAbsorptionBudget { max_layers: 2 };
+    for thickness in [0.003, 0.035, 0.3] {
+        let stack =
+            ElasticPlateLayers::new(&incident, &plate, &receiver, 4000.0, thickness, &layers)
+                .unwrap();
+        for sine in [0.2_f64, 0.65, 0.985] {
+            let cosine = (1.0 - sine * sine).sqrt();
+            let response = stack.scattering(cosine).unwrap();
+            let actual = stack
+                .layer_absorption(cosine, 5.0, budget, || false)
+                .unwrap();
+            let expected = independent_entrance_heat(&stack, cosine, 4096);
+            for (observed, expected) in [
+                actual.layers()[0].viscous_absorbed_fraction,
+                actual.layers()[0].thermal_absorbed_fraction,
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                assert!(observed > 0.0);
+                assert!(
+                    (observed / expected - 1.0).abs() < 2e-7,
+                    "d={thickness}, sin(theta)={sine}, observed={observed}, expected={expected}"
+                );
+            }
+            assert_eq!(actual.layers().len(), 2);
+            assert_eq!(actual.layers()[1].absorbed_power_w, 0.0);
+            assert_eq!(actual.reflected_fraction, response.reflected_fraction);
+            assert_eq!(actual.transmitted_fraction, response.transmitted_fraction);
+            assert!(actual.transmitted_fraction > 0.0);
+            near_real(actual.absorbed_fraction, response.absorbed_fraction, 3e-13);
+            assert!(actual.balance_residual_w.abs() < 1e-12);
+            if sine > 0.98 {
+                assert!(response.longitudinal_normal_wavenumber_rad_m.im < 0.0);
+                assert!(response.shear_normal_wavenumber_rad_m.im < 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_and_normal_plate_limits_keep_original_layer_heating() {
+    let incident = fluid(1.2, 340.0);
+    let receiver = fluid(1.0, 300.0);
+    let plate = solid(30.0, 700.0, 350.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let layers = [
+        Layer::Porous {
+            law: &foam,
+            thickness_m: 0.025,
+        },
+        Layer::FluidGap { thickness_m: 0.012 },
+    ];
+    let omega = 4000.0;
+    let budget = LayerAbsorptionBudget { max_layers: 2 };
+    let zero = ElasticPlateLayers::new(&incident, &plate, &receiver, omega, 0.0, &layers).unwrap();
+    let original = TransmittingLayers::new(&incident, &receiver, omega, &layers).unwrap();
+    for cosine in [1.0, 0.8, 0.2] {
+        let actual = zero
+            .layer_absorption(cosine, 5.0, budget, || false)
+            .unwrap();
+        let expected = original
+            .layer_absorption(cosine, 5.0, budget, || false)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+    let cp = zero.plate_phase_speeds_m_s()[0];
+    let longitudinal = FluidAcousticState::try_new(plate.density_kg_m3(), cp).unwrap();
+    let mut heat = [0.0; 2];
+    for (index, thickness) in [0.5, 1.0]
+        .map(|multiple| multiple * core::f64::consts::PI * cp / omega)
+        .into_iter()
+        .enumerate()
+    {
+        let elastic =
+            ElasticPlateLayers::new(&incident, &plate, &receiver, omega, thickness, &layers)
+                .unwrap();
+        let reference = TransmittingLayers::new(
+            &incident,
+            &receiver,
+            omega,
+            &[
+                layers[0],
+                layers[1],
+                Layer::FluidLayer {
+                    fluid: &longitudinal,
+                    thickness_m: thickness,
+                },
+            ],
+        )
+        .unwrap();
+        let actual = elastic
+            .layer_absorption(1.0, 5.0, budget, || false)
+            .unwrap();
+        let expected = reference
+            .layer_absorption(1.0, 5.0, LayerAbsorptionBudget { max_layers: 3 }, || false)
+            .unwrap();
+        near_real(
+            actual.layers()[0].viscous_absorbed_fraction,
+            expected.layers()[0].viscous_absorbed_fraction,
+            4e-14,
+        );
+        near_real(
+            actual.layers()[0].thermal_absorbed_fraction,
+            expected.layers()[0].thermal_absorbed_fraction,
+            4e-14,
+        );
+        near_real(
+            actual.transmitted_fraction,
+            expected.transmitted_fraction,
+            4e-14,
+        );
+        assert_eq!(expected.layers()[2].absorbed_power_w, 0.0);
+        heat[index] = actual.absorbed_fraction;
+    }
+    // The lossless plate's quarter/half-wave loading changes heat in the
+    // actual porous material; no plate absorption is needed to obtain it.
+    assert!((heat[0] - heat[1]).abs() > 1e-3, "{heat:?}");
+}
+
+#[test]
+fn thin_porous_heat_keeps_evanescent_plate_tunneling_below_roundoff() {
+    let incident = fluid(1.2, 340.0);
+    let plate = solid(30.0, 700.0, 350.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let omega = 4000.0;
+    let d = 1e-20;
+    let cosine = 0.2_f64;
+    let stack = ElasticPlateLayers::new(
+        &incident,
+        &plate,
+        &incident,
+        omega,
+        0.02,
+        &[Layer::Porous {
+            law: &foam,
+            thickness_m: d,
+        }],
+    )
+    .unwrap();
+    let actual = stack
+        .layer_absorption(cosine, 5.0, LayerAbsorptionBudget { max_layers: 1 }, || {
+            false
+        })
+        .unwrap();
+    let [cp, cs] = stack.plate_phase_speeds_m_s();
+    let bare = boundary_oracle(
+        [1.2, 340.0],
+        [30.0, cp, cs],
+        [1.2, 340.0],
+        omega,
+        stack.thickness_m(),
+        cosine,
+    );
+    let response = stack.prepared_layers().material_response(0).unwrap();
+    let rho = response.dynamic_density_kg_m3();
+    let zref = incident.acoustic().characteristic_impedance_pa_s_m() / cosine;
+    let pressure = C64::ONE + bare[0];
+    let normal_velocity = (C64::ONE - bare[0]).scale(1.0 / zref);
+    let tangential_velocity = (pressure / rho).scale((1.0 - cosine * cosine).sqrt() / 340.0);
+    // First-order heat is thickness times the local loss at the original
+    // plate's exact front trace. This retains the oblique tangential channel.
+    let viscous =
+        omega * d * zref * -rho.im * (normal_velocity.norm_sq() + tangential_velocity.norm_sq());
+    let thermal =
+        omega * d * zref * -response.dynamic_bulk_modulus_pa().recip().im * pressure.norm_sq();
+    assert!((actual.layers()[0].viscous_absorbed_fraction / viscous - 1.0).abs() < 1e-11);
+    assert!((actual.layers()[0].thermal_absorbed_fraction / thermal - 1.0).abs() < 1e-11);
+    assert!(actual.absorbed_fraction > 0.0 && actual.absorbed_fraction < f64::EPSILON);
+    assert!(actual.absorbed_power_w > 0.0);
+    assert!(actual.transmitted_fraction > 0.0);
+    let waves = stack.scattering(cosine).unwrap();
+    assert!(waves.longitudinal_normal_wavenumber_rad_m.im < 0.0);
+    assert!(waves.shear_normal_wavenumber_rad_m.im < 0.0);
+}
+
+#[test]
+fn finite_plate_heat_obeys_entrance_budget_and_atomic_cancellation() {
+    let incident = fluid(1.2, 340.0);
+    let plate = solid(30.0, 700.0, 350.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let layers = [
+        Layer::Porous {
+            law: &foam,
+            thickness_m: 0.025,
+        },
+        Layer::FluidGap { thickness_m: 0.012 },
+    ];
+    let stack =
+        ElasticPlateLayers::new(&incident, &plate, &incident, 4000.0, 0.02, &layers).unwrap();
+    let budget = LayerAbsorptionBudget { max_layers: 2 };
+    let expected = stack.layer_absorption(0.8, 5.0, budget, || false).unwrap();
+    for cancel_on in 1..=2 * layers.len() + 2 {
+        let mut calls = 0;
+        assert_eq!(
+            stack.layer_absorption(0.8, 5.0, budget, || {
+                calls += 1;
+                calls == cancel_on
+            }),
+            Err(LayerAbsorptionError::Cancelled)
+        );
+    }
+    assert_eq!(
+        stack.layer_absorption(0.8, 5.0, budget, || false).unwrap(),
+        expected
+    );
+    assert!(
+        stack
+            .layer_absorption(0.8, 5.0, LayerAbsorptionBudget { max_layers: 1 }, || false)
+            .is_err()
+    );
+    assert!(
+        stack
+            .layer_absorption(0.8, f64::NAN, budget, || false)
+            .is_err()
+    );
+    let zero = stack.layer_absorption(0.8, 0.0, budget, || false).unwrap();
+    assert_eq!(zero.absorbed_fraction, expected.absorbed_fraction);
+    assert_eq!(zero.absorbed_power_w, 0.0);
+    let lossless =
+        ElasticPlateLayers::new(&incident, &plate, &incident, 4000.0, 0.02, &[]).unwrap();
+    let actual = lossless
+        .layer_absorption(0.2, 5.0, LayerAbsorptionBudget { max_layers: 0 }, || false)
+        .unwrap();
+    assert!(actual.layers().is_empty());
+    assert_eq!(actual.absorbed_power_w, 0.0);
+    assert!(actual.transmitted_power_w > 0.0);
 }
