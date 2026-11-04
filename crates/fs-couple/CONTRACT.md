@@ -1,5 +1,30 @@
 # CONTRACT: fs-couple
 
+## Complete curved solid and rigid-pair scenes
+
+`inelastic_impact::surface::quadratic::scene` joins original curved TET10
+material contacts and explicitly declared rigid sphere pairs through the same
+prepared scene owner. It retains every signed native solid trace, actual paired
+witness, full rigid inertia and original interface law. Canonical solid IDs
+remain even and pair IDs odd. The shared scene query now carries its original
+surface receipt type, so quadratic geometry never becomes a fabricated linear
+surface. Maxwell and conservative native geometry both use this adapter.
+
+Complete affine scene paths combine the existing curved-boundary query with
+swept-box pair pruning and the original directed sphere-path owner. Visits,
+candidate storage and time windows share the enclosing scene allowances.
+Clearance bounds include culled pairs; earliest unresolved windows retain their
+original face/pair key with deterministic ties. Initial actual pair penetration,
+missing pair laws and exhausted work refuse. Local volume regularity remains a
+separate admission, and the affine path is not a continuum-flow certificate.
+
+Three focused native regressions cover a simultaneous curved-support/pair impact
+with independently derived impulses and support torque, native geometry and
+history identity, canonical permutation, hidden pair crossings, shared work,
+exact touching recession and one-ULP penetration. Pinned parser/format checks,
+source review and independent impulse/path arithmetic passed. Native compilation
+and execution remain unverified under the current disk/dependency-memory block.
+
 ## Native quadratic Maxwell trajectories through curved impacts
 
 `inelastic_impact::trajectory::quadratic::mixed_visco_sphere_trajectory_candidate`

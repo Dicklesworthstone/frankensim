@@ -45,6 +45,9 @@ mod quadratic_surface;
 #[path = "inelastic_impact/scene.rs"]
 mod scene;
 
+#[path = "inelastic_impact/quadratic_scene.rs"]
+mod quadratic_scene;
+
 #[path = "inelastic_impact/trajectory.rs"]
 mod trajectory;
 

@@ -20,6 +20,8 @@ use fs_exec::Cx;
 use fs_mbd::frictional_impact::spheres::{SphereContactError, sphere_pair_witness};
 use fs_mbd::{RigidBodyState, Vec3};
 
+pub(crate) mod path;
+
 /// Uses the same explicitly resolved ordered-pair law as the native rigid owner.
 pub use fs_mbd::frictional_impact::spheres::SpherePairLaw;
 
@@ -40,12 +42,13 @@ pub enum FiniteSolidSphereSceneKey {
 
 /// Complete admitted current geometry; no state has been advanced or repaired.
 #[derive(Clone, Debug)]
-pub struct FiniteSolidSphereSceneQuery<P = FiniteSolidPoint> {
+pub struct FiniteSolidSphereSceneQuery<P = FiniteSolidPoint, S = FiniteSolidSurfaceQuery> {
     /// Sorted by scene contact ID. Surface IDs are even; rigid-pair IDs are odd.
     pub contacts: Vec<FiniteSolidMixedContact<f64, P>>,
     pub keys: Vec<FiniteSolidSphereSceneKey>,
     pub maximum_contact_gap_m: f64,
-    pub surface: FiniteSolidSurfaceQuery,
+    /// Original surface receipt; the point and geometry owners stay paired.
+    pub surface: S,
     pub sphere_pair_candidates: usize,
     pub sphere_pair_comparisons: usize,
 }
@@ -208,10 +211,60 @@ impl FiniteSolidSphereScene {
             ));
         }
         surface_query.admitted_contacts()?;
-        let mut rows = Vec::with_capacity(surface_query.contacts.len());
+        let surface_contacts = surface_query
+            .contacts
+            .iter()
+            .map(|witness| {
+                let c = witness.contact;
+                (
+                    FiniteSolidMixedContact::from(super::FiniteSolidRigidContact {
+                        id: c.id,
+                        rigid_body: c.rigid_body,
+                        arm_body_m: c.arm_body_m,
+                        solid_point: map_point(c.solid_point),
+                        normal_world: c.normal_world,
+                        tangent_world: c.tangent_world,
+                        activation_tolerance_m: c.activation_tolerance_m,
+                        friction_coefficient: c.friction_coefficient,
+                        normal_law: c.normal_law,
+                    }),
+                    witness.sphere_id,
+                    witness.face,
+                    witness.gap_m,
+                )
+            })
+            .collect();
+        self.contacts_from_admitted_surface(surface_query, surface_contacts, bodies, controls, cx)
+    }
+
+    /// Shared original scene composition after the surface owner has admitted
+    /// its actual geometry. The tuple retains the original contact, sphere ID,
+    /// canonical face and physical witness gap. Native adapters cannot change
+    /// the pair laws, even/odd ID namespace, capacity or pair witness owner.
+    pub(crate) fn contacts_from_admitted_surface<P, S>(
+        &self,
+        surface_query: S,
+        surface_contacts: Vec<(FiniteSolidMixedContact<f64, P>, u64, usize, f64)>,
+        bodies: &[RigidBodyState],
+        controls: FiniteSolidSurfaceControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteSolidSphereSceneQuery<P, S>, FiniteSolidSphereSceneError> {
+        poll(cx)?;
+        if bodies.len() != self.spheres.len() {
+            return Err(FiniteSolidSphereSceneError::Invalid(
+                "scene/native body count mismatch",
+            ));
+        }
+        if surface_contacts.len() > controls.maximum_contacts {
+            return Err(FiniteSolidSphereSceneError::ContactBudget {
+                maximum_contacts: controls.maximum_contacts,
+            });
+        }
+        let mut rows = Vec::with_capacity(surface_contacts.len());
         let mut maximum_gap = 0.0_f64;
-        for witness in &surface_query.contacts {
-            let mut contact = FiniteSolidMixedContact::from(witness.contact);
+        for (mut contact, sphere_id, face, gap_m) in surface_contacts {
+            poll(cx)?;
+            let contact_id = contact.id;
             contact.id = contact
                 .id
                 .checked_mul(2)
@@ -219,12 +272,12 @@ impl FiniteSolidSphereScene {
             rows.push((
                 contact,
                 FiniteSolidSphereSceneKey::Solid {
-                    sphere: witness.sphere_id,
-                    contact_id: witness.contact.id,
-                    face: witness.face,
+                    sphere: sphere_id,
+                    contact_id,
+                    face,
                 },
             ));
-            maximum_gap = maximum_gap.max(witness.gap_m);
+            maximum_gap = maximum_gap.max(gap_m);
         }
         let mut items = Vec::with_capacity(self.spheres.len());
         for s in &self.spheres {
@@ -305,32 +358,7 @@ impl FiniteSolidSphereScene {
             }
         }
         rows.sort_unstable_by_key(|(c, _)| c.id);
-        let (contacts, keys) = rows
-            .into_iter()
-            .map(|(contact, key)| {
-                let counterpart = match contact.counterpart {
-                    FiniteSolidContactCounterpart::Solid(point) => {
-                        FiniteSolidContactCounterpart::Solid(map_point(point))
-                    }
-                    FiniteSolidContactCounterpart::Rigid(point) => {
-                        FiniteSolidContactCounterpart::Rigid(point)
-                    }
-                };
-                (
-                    FiniteSolidMixedContact {
-                        id: contact.id,
-                        point: contact.point,
-                        counterpart,
-                        normal_world: contact.normal_world,
-                        tangent_world: contact.tangent_world,
-                        activation_tolerance_m: contact.activation_tolerance_m,
-                        friction_coefficient: contact.friction_coefficient,
-                        normal_law: contact.normal_law,
-                    },
-                    key,
-                )
-            })
-            .unzip();
+        let (contacts, keys) = rows.into_iter().unzip();
         Ok(FiniteSolidSphereSceneQuery {
             contacts,
             keys,
