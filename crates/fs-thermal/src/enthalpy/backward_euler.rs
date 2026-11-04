@@ -9,8 +9,10 @@
 //!
 //! Fixed topology/geometry, immutable caloric laws, endpoint-evaluated sources
 //! and conductances. Optional entropy accounting uses the original caloric laws.
-//! No moving mass, kinetics or unconditional
-//! nonlinear-convergence claim. Refine time steps independently of tolerances.
+//! Stateful physical owners may supply their original endpoint calorics through
+//! the internal ingress; no kinetics or entropy chart is inferred here. No
+//! moving mass or unconditional nonlinear-convergence claim. Refine time steps
+//! independently of tolerances.
 
 use super::*;
 
@@ -331,14 +333,73 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         with_entropy: bool,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
-        self.evaluate_transport_option(energy_increments_j,
-            |state| resolve(state).map(TransportStepCoefficients::from), with_entropy, checkpoint)
+        self.evaluate_transport_option(
+            energy_increments_j,
+            |state| resolve(state).map(TransportStepCoefficients::from),
+            with_entropy,
+            checkpoint,
+        )
     }
 
     fn evaluate_transport_option<T, E: From<DepositionError>>(
         &self,
         energy_increments_j: &[f64],
         resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<TransportStepCoefficients<T>, E>,
+        with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_endpoint_option(
+            energy_increments_j,
+            |state| resolve(state).map(|transport| (transport, None)),
+            false,
+            with_entropy,
+            checkpoint,
+        )
+    }
+
+    /// Internal ingress for an original stateful caloric owner. Its callback
+    /// receives the unchanged mass/topology and exact trial energy coordinates,
+    /// then resolves every actual endpoint temperature from frozen physical
+    /// history. No substitute ThermalLaw or temperature-only storage is created.
+    ///
+    /// The map must cover exactly the active cells; values are (T, fixed-state
+    /// inverse-Cp bound). All fluxes, boundary coverage, storage residuals and
+    /// acceptance stay in this owner. The original single-coordinate entropy
+    /// integral is intentionally unavailable for a history-dependent mixture.
+    pub(super) fn evaluate_with_state_calorics<T, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+        )
+            -> Result<(BTreeMap<CellId, (f64, f64)>, BoundaryStepCoefficients<T>), E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_endpoint_option(
+            energy_increments_j,
+            |state| {
+                resolve(state)
+                    .map(|(calorics, heat)| (TransportStepCoefficients::from(heat), Some(calorics)))
+            },
+            true,
+            false,
+            checkpoint,
+        )
+    }
+
+    fn evaluate_endpoint_option<T, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+        ) -> Result<
+            (
+                TransportStepCoefficients<T>,
+                Option<BTreeMap<CellId, (f64, f64)>>,
+            ),
+            E,
+        >,
+        stateful_calorics: bool,
         with_entropy: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
@@ -372,25 +433,58 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 .get_mut(&id)
                 .expect("frozen cell map")
                 .specific_h_j_kg = h;
-            next.temperature_k(id)?;
+            if !stateful_calorics {
+                next.temperature_k(id)?;
+            }
             let actual = finite(old.mass_kg * finite(h - old.specific_h_j_kg)?)?;
             stored_change = finite(stored_change + actual)?;
             storage.push(actual);
         }
         checkpoint()?;
-        let TransportStepCoefficients { heat: BoundaryStepCoefficients {
-            bulk:
-                StepCoefficients {
-                    sources_w,
-                    conductances_w_k,
-                    payload,
-                },
-            boundaries,
-        }, transfers } = resolve(&next)?;
+        let (
+            TransportStepCoefficients {
+                heat:
+                    BoundaryStepCoefficients {
+                        bulk:
+                            StepCoefficients {
+                                sources_w,
+                                conductances_w_k,
+                                payload,
+                            },
+                        boundaries,
+                    },
+                transfers,
+            },
+            calorics,
+        ) = resolve(&next)?;
         checkpoint()?;
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
         let sources = next.add_step_sources(&sources_w, &mut checkpoint)?;
-        let mut rates = next.heat_rates_with_boundaries(f64::MAX, &boundaries, &mut checkpoint)?;
+        let mut rates = if let Some(calorics) = calorics {
+            if !stateful_calorics
+                || with_entropy
+                || calorics.len() != self.ids.len()
+                || self.ids.iter().any(|id| !calorics.contains_key(id))
+            {
+                return Err(DepositionError::InvalidInput(
+                    "stateful implicit calorics must cover exactly the active cells without inferred entropy",
+                ).into());
+            }
+            next.heat_rates_with_calorics_and_boundaries(
+                f64::MAX,
+                |id, _| Ok(calorics[&id]),
+                &boundaries,
+                &mut checkpoint,
+            )?
+        } else {
+            if stateful_calorics {
+                return Err(DepositionError::InvalidInput(
+                    "stateful implicit endpoint omitted its original calorics",
+                )
+                .into());
+            }
+            next.heat_rates_with_boundaries(f64::MAX, &boundaries, &mut checkpoint)?
+        };
         if !transfers.is_empty() {
             next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
         }
@@ -401,23 +495,39 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             let mut transfer_sources = BTreeMap::new();
             let mut has_transfer = false;
             for (i, transfer) in transfers.iter().enumerate() {
-                if i % 256 == 0 { checkpoint()?; }
+                if i % 256 == 0 {
+                    checkpoint()?;
+                }
                 has_transfer |= transfer.power_w != 0.0;
                 for (id, sign) in [(transfer.a, -1.0), (transfer.b, 1.0)] {
-                    let old = transfer_sources.get(&id).copied()
+                    let old = transfer_sources
+                        .get(&id)
+                        .copied()
                         .unwrap_or(next.cells[&id].boundary.source_w);
                     transfer_sources.insert(id, finite(old + sign * transfer.power_w)?);
                 }
             }
             let mut audit = if transfers.is_empty()
-                && boundaries.ambient_w_k.is_empty() && boundaries.reservoir_w_k.is_empty() {
-                next.entropy_step_audit(&initial_h, &rates.temperatures,
-                    self.duration_s, &mut checkpoint)?
+                && boundaries.ambient_w_k.is_empty()
+                && boundaries.reservoir_w_k.is_empty()
+            {
+                next.entropy_step_audit(
+                    &initial_h,
+                    &rates.temperatures,
+                    self.duration_s,
+                    &mut checkpoint,
+                )?
             } else {
-                next.entropy_step_audit_with_boundary_coefficients(&initial_h,
-                    &rates.temperatures, self.duration_s, &transfer_sources,
-                    &BTreeMap::new(), &boundaries.ambient_w_k, &boundaries.reservoir_w_k,
-                    &mut checkpoint)?
+                next.entropy_step_audit_with_boundary_coefficients(
+                    &initial_h,
+                    &rates.temperatures,
+                    self.duration_s,
+                    &transfer_sources,
+                    &BTreeMap::new(),
+                    &boundaries.ambient_w_k,
+                    &boundaries.reservoir_w_k,
+                    &mut checkpoint,
+                )?
             };
             audit.has_unclassified_sources |= has_transfer;
             Some(audit)

@@ -22,12 +22,15 @@
 //! temperature in each cell. The supplied conductances and slope bounds must
 //! apply throughout the stated phase domain. Density change, free-surface flow,
 //! crystal-front geometry, solute segregation and load-bearing skeletons need
-//! their own owners. Heat transport is explicit and first order; the local
-//! exposure update uses the shared midpoint kernel. Timestep refinement remains
+//! their own owners. `advance_to` heat transport is explicit and first order;
+//! the local exposure update uses the shared midpoint kernel. Timestep refinement remains
 //! necessary for accuracy. A domain exit or exhausted budget refuses atomically.
 //! Optional per-material adaptivity resolves the local phase history along each
 //! thermal step's linear enthalpy path. It controls local kinetic discrepancies;
 //! the outer heat-transfer discretization retains its own timestep requirement.
+//! [`implicit`] supplies a separate backward-Euler endpoint residual on these
+//! same cells and heat links, with each phase candidate replayed from its frozen
+//! accepted history. It retains independent thermal time-error requirements.
 
 use super::{
     Boundary, CellId, DepositedCell, DepositionError, DepositionSimulation, EnergyAudit, Event,
@@ -43,6 +46,10 @@ use std::collections::BTreeMap;
 #[path = "crystallization/impulses.rs"]
 mod impulses;
 pub use impulses::CrystallizationImpulseControls;
+
+/// Implicit heat transport with original finite-rate phase history.
+#[path = "crystallization/implicit.rs"]
+pub mod implicit;
 
 /// The material closure and its original, all-amorphous thermal coordinate.
 #[derive(Clone, Copy)]
@@ -337,6 +344,14 @@ impl<'a> CrystallizationSimulation<'a> {
         self.materials
             .get(&material_id)
             .map(|material| material.law)
+    }
+    /// Original thermodynamic coordinate of a kinetic cell or ordinary finite
+    /// body. Heat exchange does not relabel fixed-volume internal energy as h.
+    pub fn material_storage_basis(
+        &self,
+        material_id: MaterialId,
+    ) -> Result<ThermalStorageBasis, DepositionError> {
+        self.thermal.material_storage_basis(material_id)
     }
     pub fn mass_kg(&self) -> f64 {
         self.thermal.mass_kg()

@@ -59,6 +59,44 @@ timestep limits. Conductivity evolution requires a declared supplied law;
 front morphology, moving geometry, mechanical unlocking and work feedback retain
 their separate physical owners.
 
+### Implicit kinetic heat transport on the existing network
+
+`enthalpy::crystallization::implicit::CrystallizationBackwardEulerStep` extends
+the original backward-Euler energy residual with complete original-state
+calorics. Each joule-vector candidate starts from the same accepted cell
+histories and advances the shared adaptive phase kernel once over that interval.
+The existing thermal operator still owns links, covered boundaries, sources,
+storage coordinates and residual assembly. Ordinary finite molds and substrates
+retain their own enthalpy or explicitly fixed-volume internal-energy laws.
+No fictitious crystallinity is assigned to those materials, and no parent-law
+entropy integral is applied to a kinetic mixture.
+
+`solve_implicit_step` reuses the existing fallible finite-difference and
+Newton--Krylov owners for simultaneous network heat exchange. Endpoint source
+callbacks see every actual proposed phase state. A bounded two-entry residual
+cache avoids repeated phase reconstruction at identical numerical base points;
+acceptance reconstructs the complete physical state and source payload afresh.
+Both endpoint caloric errors, each original local heat residual and independently
+reduced storage/transfer roundoff consume noncancelling energy budgets. Numerical
+convergence alone cannot publish a physically inadmissible candidate.
+
+`advance_implicit_to` splits at original birth/contact/separation/boundary events
+and processes them through the existing timeline in authored order. New material
+enters with its original mass/enthalpy and zero exposure. Whole-call nonlinear
+work, physical interval count and accumulated energy defects remain bounded;
+late source, solver or checkpoint failures return no partial timeline.
+
+The implicit path requires explicitly selected phase adaptivity for every
+active kinetic material. It removes the explicit heat-transfer CFL restriction;
+maximum timestep, phase tolerances and the joule-valued numerical-difference
+scale still require independent resolution. It retains fixed reference geometry
+and mass between births, with no moving-interface or pressure-work model inferred.
+Three integration regressions specify a three-body kinetic/finite-bath analytic
+balance, deposition/contact event replay, and original refusal/cancellation.
+The complete thermal library and this public integration-test target pass native
+metadata compilation against the original dependency artifacts. That verifies
+type integration; it does not execute the new network regressions.
+
 ### Instantaneous heat transfers on accepted phase history
 
 `CrystallizationLaw::apply_specific_enthalpy` resolves a caloric transition at
