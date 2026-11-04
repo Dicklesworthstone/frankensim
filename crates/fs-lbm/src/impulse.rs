@@ -2,6 +2,8 @@
 //!
 //! An impulse changes momentum now, without a collision, transport, or elapsed
 //! timestep. For each fully occupied fluid cell, `rho * (u_plus-u_minus) = J`.
+//! A free-surface owner instead supplies its retained liquid mass `m`, giving
+//! `m * (u_plus-u_minus) = J` without changing canonical density or fill.
 //! The external source supplies the signed kinetic work `J dot (u_plus+u_minus)/2`.
 //! No heat, pressure impulse, boundary reaction, or free-surface mass is invented.
 //! Subsequent native evolution resolves the resulting pressure/velocity field.
@@ -57,7 +59,8 @@ impl ImpulseControls {
 pub struct ImpulseReport<const D: usize> {
     /// Sum of the prescribed impulse densities; no multiplication by dt.
     pub applied_impulse: [f64; D],
-    /// Actual change in force-corrected population momentum.
+    /// Actual change in force-corrected fluid momentum, using the retained
+    /// liquid mass when supplied by a free-surface owner.
     pub momentum_change: [f64; D],
     /// Actual mass change (roundoff only), never an authored mass source.
     pub mass_change: f64,
@@ -70,7 +73,7 @@ pub struct ImpulseReport<const D: usize> {
     pub absolute_momentum_defect: f64,
     /// Local absolute plus global kinetic/work defect, in lattice energy units.
     pub absolute_work_defect: f64,
-    /// Number of fluid cells with a nonzero prescribed impulse.
+    /// Number of fluid or interface cells with a nonzero prescribed impulse.
     pub affected_cells: usize,
 }
 
@@ -186,6 +189,62 @@ impl<const D: usize> ImpulseSum<D> {
         controls: ImpulseControls,
         index: usize,
     ) -> Result<(), ImpulseError> {
+        self.kick_inertia(
+            populations,
+            directions,
+            weights,
+            acceleration,
+            external_force,
+            impulse,
+            None,
+            controls,
+            index,
+        )
+    }
+
+    /// Liquid-cell impulse with inertia supplied by the original mass owner.
+    /// `J` is per whole cell, not per occupied liquid volume. Canonical density
+    /// is closed exactly before readback, retaining the owner's fill fraction
+    /// and classification thresholds. No mass or population-volume remap occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kick_with_mass<const Q: usize>(
+        &mut self,
+        populations: &mut [f64; Q],
+        directions: &[[f64; D]; Q],
+        weights: &[f64; Q],
+        acceleration: [f64; D],
+        external_force: [f64; D],
+        impulse: [f64; D],
+        liquid_mass: f64,
+        controls: ImpulseControls,
+        index: usize,
+    ) -> Result<(), ImpulseError> {
+        self.kick_inertia(
+            populations,
+            directions,
+            weights,
+            acceleration,
+            external_force,
+            impulse,
+            Some(liquid_mass),
+            controls,
+            index,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn kick_inertia<const Q: usize>(
+        &mut self,
+        populations: &mut [f64; Q],
+        directions: &[[f64; D]; Q],
+        weights: &[f64; Q],
+        acceleration: [f64; D],
+        external_force: [f64; D],
+        impulse: [f64; D],
+        held_mass: Option<f64>,
+        controls: ImpulseControls,
+        index: usize,
+    ) -> Result<(), ImpulseError> {
         let refuse = || ImpulseError::Cell { index };
         if !impulse.iter().all(|x| x.is_finite()) {
             return Err(refuse());
@@ -213,7 +272,23 @@ impl<const D: usize> ImpulseSum<D> {
         {
             return Err(refuse());
         }
-        let jump = impulse.map(|j| j / rho);
+        let mass = held_mass.unwrap_or(rho);
+        if !mass.is_finite()
+            || mass <= 0.0
+            || mass > rho
+            || (held_mass.is_some() && populations.iter().any(|f| *f <= 0.0))
+        {
+            return Err(refuse());
+        }
+        let jump = impulse.map(|j| j / mass);
+        // Populations describe intrinsic liquid density even at partial fill.
+        // Scaling the velocity jump back by rho retains that density/stress
+        // while the original mass owner determines the actual cell impulse.
+        let population_impulse = if mass == rho {
+            impulse
+        } else {
+            jump.map(|u| u * rho)
+        };
         let target: [f64; D] = core::array::from_fn(|a| velocity[a] + jump[a]);
         let speed_sq = |u: [f64; D]| u.iter().map(|x| x * x).sum::<f64>();
         let limit_sq = controls.maximum_speed * controls.maximum_speed;
@@ -225,11 +300,11 @@ impl<const D: usize> ImpulseSum<D> {
         }
         let midpoint: [f64; D] = core::array::from_fn(|a| velocity[a] + 0.5 * jump[a]);
         let dot = |a: [f64; D], b: [f64; D]| (0..D).map(|d| a[d] * b[d]).sum::<f64>();
-        let uj = dot(midpoint, impulse);
+        let uj = dot(midpoint, population_impulse);
         let df = dot(jump, force);
         let inv_cs2 = 1.0 / crate::CS2;
         for ((f, &e), &w) in populations.iter_mut().zip(directions).zip(weights) {
-            let ej = dot(e, impulse);
+            let ej = dot(e, population_impulse);
             // Evaluate differences algebraically: no subtraction of nearly
             // equal equilibria for a small impulse or mean-flow boost.
             let equilibrium_change =
@@ -241,6 +316,9 @@ impl<const D: usize> ImpulseSum<D> {
         // The exact update has zero zeroth moment. The rest direction is zero
         // in both native stencils, so this repairs mass roundoff without a kick.
         populations[0] += rho - populations.iter().sum::<f64>();
+        if held_mass.is_some() {
+            preserve_liquid_density(populations, rho).map_err(|()| refuse())?;
+        }
         let (rho_after, _, after, velocity_after) = observe(populations);
         if !rho_after.is_finite()
             || rho_after <= 0.0
@@ -255,8 +333,15 @@ impl<const D: usize> ImpulseSum<D> {
             return Err(refuse());
         }
         let mean_velocity = core::array::from_fn(|a| 0.5 * velocity[a] + 0.5 * velocity_after[a]);
-        let change = core::array::from_fn(|a| after[a] - before[a]);
-        let mass_change = rho_after - rho;
+        let change = core::array::from_fn(|a| match held_mass {
+            Some(mass) => mass * (velocity_after[a] - velocity[a]),
+            None => after[a] - before[a],
+        });
+        let mass_change = if held_mass.is_some() {
+            0.0
+        } else {
+            rho_after - rho
+        };
         let work = dot(impulse, mean_velocity);
         // Exact finite-difference identity for K = |p|^2/(2 rho), including
         // any remaining mass representation roundoff in the independent readback.
@@ -276,4 +361,35 @@ impl<const D: usize> ImpulseSum<D> {
         self.count += 1;
         Ok(())
     }
+}
+
+/// Match the native ordered density reduction, whose bits also control fill
+/// and conversion. Only population-roundoff corrections are admitted. The
+/// final directional correction, when necessary, is included in the subsequent
+/// independent momentum/work observation rather than hidden after its receipt.
+fn preserve_liquid_density<const Q: usize>(f: &mut [f64; Q], rho: f64) -> Result<(), ()> {
+    let rest = f[0];
+    for _ in 0..8 {
+        let sum = f.iter().sum::<f64>();
+        if sum == rho {
+            break;
+        }
+        f[0] = if sum < rho {
+            f[0].next_up()
+        } else {
+            f[0].next_down()
+        };
+    }
+    if f.iter().sum::<f64>() != rho {
+        f[0] = rest;
+        let last = rho - f[..Q - 1].iter().sum::<f64>();
+        if (last - f[Q - 1]).abs() > 64.0 * f64::EPSILON * rho {
+            return Err(());
+        }
+        f[Q - 1] = last;
+    }
+    if f.iter().sum::<f64>() != rho || f.iter().any(|x| !x.is_finite() || *x <= 0.0) {
+        return Err(());
+    }
+    Ok(())
 }

@@ -14,6 +14,7 @@
 //! its numerical contact-line estimate does not claim measured calibration.
 
 mod curvature;
+mod impulse;
 mod momentum;
 pub use momentum::{
     ConversionMomentumReport2, ConversionRedistribution2, FreeSurfaceMomentumError2,

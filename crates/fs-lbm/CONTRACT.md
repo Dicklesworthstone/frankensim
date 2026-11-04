@@ -1,5 +1,30 @@
 # CONTRACT: fs-lbm
 
+## Instantaneous loading of retained liquid mass
+
+`FreeSurface::apply_impulse_density` applies a resolved zero-duration input to
+the original D2Q9 populations. Inputs are lattice impulse per whole geometric
+cell, with integrated momentum/work understood per out-of-plane depth. Fluid
+inertia is the canonical population sum; interface inertia is its original
+tracked liquid mass. Equal impulses therefore produce larger velocity changes
+at partial fill. A source specified per occupied liquid volume must supply its
+fill factor; the API never silently multiplies or clamps the requested impulse.
+
+The shared Guo-frame kernel preserves intrinsic density and corrected viscous
+stress. Liquid density closes to the exact original ordered sum before momentum
+and work readback, preserving fill, conversion thresholds and the native mass
+ledger. The applied impulse, actual liquid momentum change, signed midpoint
+work and stable kinetic change are independently reduced and budgeted.
+Nonpositive, nonfinite or overfilled addressed interface mass refuses; no
+unlocated conversion carry supplies missing local inertia.
+
+All cells are admitted into reusable native scratch before one publication.
+Unsupported gas/wall inputs, malformed fields, allocation, low-Mach, balance
+or cancellation refusal retain accepted populations, forces, mass lanes,
+topology, carry, capillarity and wetting history. No time, streaming, pressure
+projection, conversion, heat or damping is fabricated. Subsequent native
+evolution resolves the resulting pressure and interface motion.
+
 ## Dimensional free-surface laminar film
 
 `film::NusseltFilm` evaluates the constant-property Newtonian no-slip,
