@@ -392,9 +392,9 @@ impl EnergySolution {
         let after = context(endpoint);
         let owners = super::compact_owners(domain, &setup.compact_components, gate)?;
         let old_compact = super::Compact::new(domain, solids, &before.k, setup, None,
-            owners.clone(), gate)?;
+            owners.clone(), &self.face_contact_resistance_m2_k_w, gate)?;
         let new_compact = super::Compact::new(domain, solids, &after.k, setup, None,
-            owners, gate)?;
+            owners, &self.face_contact_resistance_m2_k_w, gate)?;
         let mut maximum = 0.0_f64;
         for cell in 0..cells {
             if cell.is_multiple_of(256) { super::super::poll(gate)?; }

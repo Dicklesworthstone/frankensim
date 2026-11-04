@@ -125,9 +125,13 @@ fn g0_ambiguous_and_nonphysical_faces_refuse() {
     assert!(check(&setup).is_err());
     setup.contacts.clear();
     setup.compact_components.push(CompactComponent { lo: [1,0,0], hi: [2,1,1],
-        board_face: fs_lbm::Face3::ALL[0], power_w: 0.0,
+        board_face: fs_lbm::Face3::ALL[2], power_w: 0.0,
         junction_to_case_k_w: 1.0, junction_to_board_k_w: 1.0, heat_capacity_j_k: None });
-    assert!(check(&setup).is_err());
+    // A physical case/board contact is supported; this joint instead touches
+    // the package's adiabatic x side and must not create a new heat path.
+    assert!(matches!(check(&setup), Err(ChtError::InvalidInput {
+        field: "thermal.face_contacts", ref reason,
+    }) if reason.contains("compact sides")));
 }
 
 #[test]

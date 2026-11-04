@@ -886,9 +886,11 @@ frozen-bulk semantics, including the fluid's eddy contribution exactly once.
 Native and resolved-field energy entry points share one bounded contact
 iteration. Each trial reuses the original conservative fixed-resistance solve;
 transient trials retain the original stored-energy history. There is no second
-time integrator, interfacial storage or additional source of heat. Duplicate
-face ownership, compact aliases and through-flow use the existing face-contact
-admission. A failed query, cancellation or exhausted iteration publishes no
+time integrator, interfacial storage or additional source of heat. Explicit
+compact case/board joints add to the package branch resistance; their source
+queries use the actual package and outside surfaces after the junction drop.
+Duplicate ownership, compact sides/internal aliases and through-flow remain
+refused. A failed query, cancellation or exhausted iteration publishes no
 candidate and changes no caller-owned setup or thermal history.
 
 Acceptance checks both the relative difference between source and assembled
@@ -5236,10 +5238,11 @@ jumps, solid/fluid observations and an independent transient storage balance.
 
 Compact-component links integrate the native conductivity law of the outside
 solid's half cell in series with the declared junction-to-board or
-junction-to-case resistor. Its area-specific resistance is `R_junction * A_total`;
-the existing analytic film law resolves the outside surface without a nested
-iteration. Each face receives its correct parallel area share, and the collapsed
-package adds no bulk resistance. Frozen material fields and fluid links retain
+junction-to-case resistor and any explicit case/board contact. The combined
+area-specific resistance is `R_junction * A_total + R_contact''`; the existing
+analytic film law resolves the outside surface without a nested bulk iteration.
+Each face receives its correct parallel area share, and the collapsed package
+adds no bulk resistance. Frozen material fields and fluid links retain
 their declared coefficients. Junction powers, fixed-cell reactions and observers
 all use the same stored links. Ordinary boundary conditions on collapsed component
 sides contribute no heat, matching the assembly's adiabatic side ownership.
@@ -5336,15 +5339,28 @@ like any solid, but its interior is collapsed. One extra unknown per
 component, the junction, receives the power and reaches every cell beyond
 the case-top face through `R_jc` and every cell beyond the board face
 through `R_jb`. Each resistor is split over its face in proportion to area
-and placed in series with the outside cell's half width:
-`G = 1 / (R A_face / A_cell + dx / (2 k A_cell))`. The sides are
-adiabatic; the box cells report the junction temperature through identity
-rows. `EnergySolution::junctions` gives the junction temperature and the
+and placed in series with the outside cell's half width. An explicit
+`face_contacts` or `source_face_contacts` entry may add a package/TIM joint:
+`G = A_cell / (R A_face + R_contact'' + dx / (2 k))`, with zero added
+contact resistance when no joint is declared. The sides are adiabatic; the box
+cells report the junction temperature through identity rows. `EnergySolution::junctions` gives the junction temperature and the
 case and board heats; `solid_to_fluid_heat_w` counts the case links into
 fluid instead of the collapsed cells. Refusals: a box that holds fluid,
 overlaps or sits on another component, or puts its case or board face on
 the domain boundary; power, sinks or fixed temperatures inside a box; a
 physical transient without an explicitly declared positive junction capacity.
+
+For an outward package heat flux `q`, the case/board surface is
+`T_package = T_junction - q R A_face`; the outside surface is
+`T_outside = T_package - q R_contact''`. Source laws query these surfaces in
+their declared order, retain the original source context, and never query a
+collapsed alias as bulk material. Fixed and source contacts share the stored
+branch links, nonlinear outside half-cell law, conductivity-defect audit and
+native storage equations. Contact layers add no heat or capacity. Sides,
+internal aliases, two compact components and conflicting face owners refuse.
+`tests/compact_contacts.rs` checks independent graded anisotropic series
+networks, surface-only nonlinear source support and reversed order, and closed
+fixed/source transients through both resolved-field and native marches.
 
 `heat_capacity_j_k: Some(C_j)` adds a constant lumped junction storage law to
 the same resistive model. `march_energy` and `march_conjugate` solve

@@ -97,6 +97,7 @@ pub struct ThermalSetup {
     /// SAME material. A face cannot also have a material-pair contact rule.
     /// These interfaces have no storage and admit no through-flow; they do not
     /// change either cell's mechanical occupancy or material assignment.
+    /// On compact case/board faces they add to the declared junction resistor.
     pub face_contacts: Vec<FaceContactResistance>,
     /// Ordered source laws evaluated at their solved half-cell surfaces.
     /// Every face has exactly one fixed or source-backed resistance owner.
@@ -129,6 +130,8 @@ pub struct ThermalSetup {
 /// domain that belong to no other component. Physical transients require
 /// an explicitly declared junction heat capacity; collapsed voxel material
 /// capacities are not added to it.
+/// Explicit case/board face contacts add their area resistance after the
+/// package's own junction-to-surface resistor; its adiabatic sides stay closed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactComponent {
     /// First cells of the box (inclusive).
@@ -1091,8 +1094,9 @@ fn solve_energy_field(
         contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
     }
     let conductivity_temperature = nonlinear.and_then(|(_, temperature)| temperature);
-    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature, compact_owner, gate)?;
-    let face_contacts = face_contact::prepare(domain, flow, setup, &compact, gate)?;
+    let face_contacts = face_contact::prepare(domain, flow, setup, &compact_owner, gate)?;
+    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature,
+        compact_owner, &face_contacts, gate)?;
     let enthalpy_offsets = if config.scheme == ConvectionScheme::EnthalpyMinmod {
         Some(enthalpy.expect("admitted caloric field").limited_offsets(domain, gate)?)
     } else {
@@ -1129,6 +1133,9 @@ fn solve_energy_field(
     // centre-conductivity approximation during nonlinear Picard passes.
     for (index, &(a, b)) in ctx.face_contacts.keys().enumerate() {
         if index.is_multiple_of(256) { super::poll(gate)?; }
+        // Compact::new already admitted the actual package/outside law.
+        // Its collapsed alias has no ordinary material half cell to query.
+        if compact.owner(a).is_some() || compact.owner(b).is_some() { continue; }
         let face = (0..6).find(|&f| domain.neighbor(a, f) == Some(b))
             .expect("admitted contact face");
         if !ctx.diffusive_conductance(a, b, face / 2).is_finite() {
@@ -1687,6 +1694,7 @@ impl Compact {
         setup: &ThermalSetup,
         conductivity_temperature: Option<&[f64]>,
         owner: Vec<usize>,
+        face_contacts: &std::collections::BTreeMap<(usize, usize), f64>,
         gate: &CancelGate,
     ) -> Result<Self, ChtError> {
         let parts = &setup.compact_components;
@@ -1728,38 +1736,18 @@ impl Compact {
                                     )));
                                 }
                                 Some(m) => {
-                                    // The resistor's area share in series
-                                    // with the outside cell's half width.
-                                    // A native nonlinear solid uses the same
-                                    // analytic bulk/film law as a Robin face:
-                                    // R'' = R_junction * total face area.
-                                    // The collapsed package adds no bulk path.
-                                    let face_area = domain.face_area(m, axis);
-                                    let half_width = 0.5 * domain.widths(m)[axis];
-                                    let mut conductivity = k[m][axis];
-                                    if let Some(previous) = conductivity_temperature
-                                        && let Voxel::Solid(material) = domain.voxel_at(m)
-                                    {
-                                        let solid = &solids[usize::from(material)];
-                                        if !solid.conductivity_table.is_empty() {
-                                            let axis_k = solid.axis_conductivity()[axis];
-                                            let junction = domain.index(
-                                                part.lo[0], part.lo[1], part.lo[2],
-                                            );
-                                            conductivity = axis_k * solid.film_conductivity_factor(
-                                                previous[m], previous[junction], axis_k,
-                                                half_width, 1.0 / (resistance * area),
-                                            );
-                                        }
-                                    }
-                                    let g = 1.0
-                                        / (resistance * area / face_area
-                                            + half_width / (conductivity * face_area));
-                                    if !g.is_finite() || g <= 0.0 {
-                                        return Err(refuse(format!(
+                                    // Package and contact resistances are
+                                    // separate physical series legs. The
+                                    // collapsed package adds no bulk path.
+                                    let contact = face_contacts.get(&(c.min(m), c.max(m)))
+                                        .copied().unwrap_or(0.0);
+                                    let junction = domain.index(part.lo[0], part.lo[1], part.lo[2]);
+                                    let g = compact_link_conductance(domain, solids, k,
+                                        conductivity_temperature, m, junction, axis,
+                                        resistance * area + contact)
+                                        .ok_or_else(|| refuse(format!(
                                             "component {i}: link to cell {m} has unrepresentable conductance"
-                                        )));
-                                    }
+                                        )))?;
                                     list.push((m, g, f == board));
                                     by_cell.entry(m).or_default().push((i, g));
                                 }
@@ -1834,4 +1822,33 @@ impl Compact {
     fn links_of(&self, c: usize) -> &[(usize, f64)] {
         self.by_cell.get(&c).map_or(&[], Vec::as_slice)
     }
+}
+
+/// Same analytic bulk/film law for compact assembly and physical source-contact
+/// surface recovery. R'' contains the package branch and external contact in
+/// series. Its stored junction state is separate from both surface temperatures.
+#[allow(clippy::too_many_arguments)]
+fn compact_link_conductance(
+    domain: &VoxelDomain, solids: &[SolidMaterial], k: &[[f64; 3]],
+    temperature: Option<&[f64]>, outside: usize, junction: usize, axis: usize,
+    resistance_m2_k_w: f64,
+) -> Option<f64> {
+    if !resistance_m2_k_w.is_finite() || resistance_m2_k_w <= 0.0 { return None; }
+    let area = domain.face_area(outside, axis);
+    let half = 0.5 * domain.widths(outside)[axis];
+    let mut conductivity = k[outside][axis];
+    if let Some(previous) = temperature
+        && let Voxel::Solid(material) = domain.voxel_at(outside)
+    {
+        let solid = &solids[usize::from(material)];
+        if !solid.conductivity_table.is_empty() {
+            let axis_k = solid.axis_conductivity()[axis];
+            conductivity = axis_k * solid.film_conductivity_factor(
+                previous[outside], previous[junction], axis_k, half,
+                1.0 / resistance_m2_k_w,
+            );
+        }
+    }
+    let g = 1.0 / (resistance_m2_k_w / area + half / (conductivity * area));
+    (g.is_finite() && g > 0.0).then_some(g)
 }
