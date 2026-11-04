@@ -30498,6 +30498,51 @@ not run: the full Cargo/DSR workspace remains unavailable with missing sibling
 checkouts. These limits do not establish full optical-depth, thermal-time or
 material-data convergence.
 
+## Finite axisymmetric porous-rotor momentum
+
+`porous_momentum::rotor::AxisymmetricPorousRotor` couples a native finite
+principal-axis rotor to the original D3Q19 Darcy–Forchheimer flow. The COM and
+axis remain fixed while native angular momentum and attitude evolve. A finite
+cylinder must fit completely inside a nonsolid box with six stationary walls,
+including for an oblique axis. Scalar isotropic Darcy and vector-speed
+Forchheimer coefficients depend only on cylindrical radius and axial position;
+the material support and law therefore remain invariant under rotation.
+Dry inertia excludes the fluid already represented by the original populations.
+
+The coefficient and independent fluid-force callbacks are sampled once per
+eligible cell for each tick and retained through the solve. One scalar midpoint
+angular speed sets the skeleton field `omega * axis x (x-COM)`. Every residual,
+numerical derivative probe and final replay executes the actual native fluid
+operator from the same accepted populations. One reused native scratch grid
+avoids reconstructing populations or recompiling topology. The original
+Newton–Krylov owner solves the measured nonlinear torque response; no affine
+pilot response or replacement effective inertia is assumed.
+
+The original rigid midpoint integrator receives the axial drag and actuator
+impulses and advances the actual attitude. The stationary bearing cancels the
+measured skeleton force and transverse couple, independently of the resulting
+momentum residual. Fluid/body linear and angular changes are checked separately,
+including measured wall exchange and explicit shifts to the reporting origin.
+Opposing participant defects cannot cancel their acceptance gates.
+
+Native constitutive loss, fluid drag work, rotor interface work, actuator work
+and the bearing's zero-work condition have independent checks. Remaining fluid
+kinetic change includes pressure, transport and collision; it is not deposited
+as heat or classified as a numerical defect. Native trial/cell budgets charge
+all probes and replay. Fluid populations, rigid state and physical clock publish
+only as one accepted candidate after cancellation and physical gates.
+
+The retained fluid source quadrature can reverse slip under stiff unresolved
+steps. Spatial, relaxation-time and rotor-phase refinement remain necessary.
+This is finite spin in invariant porous support, not general six-degree motion,
+moving occupancy, nonaxisymmetric blades, evolving porosity or a caloric model.
+
+Four native numerical integration cases cover finite-inertia slowdown and real
+attitude, independent cell impulse/torque/dissipation reconstruction, wall and
+bearing balance, oblique-axis motion, reporting-origin invariance, exact driven
+zero-drag phase, native population replay and atomic refusal. The original
+integration target typechecks against these owners' full actual dependencies.
+
 ## Finite periodic porous-skeleton recoil
 
 `porous_momentum::PeriodicPorousSkeleton` couples the original fully periodic

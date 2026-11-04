@@ -15,6 +15,9 @@
 //! energy. No thermal store, heat partition, global energy theorem or trajectory
 //! error certificate is inferred. Resolve spatial and relaxation timescales.
 
+#[path = "porous_momentum/rotor.rs"]
+pub mod rotor;
+
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
     BoundaryGrid3, BoundarySpec3, BoundaryStepError3, DarcyForchheimer3,
@@ -707,7 +710,7 @@ fn fluid_change(
     }
     let mass_change = (mass * dd(units.mass_per_density_cell_kg)).to_f64();
     check(
-        "periodic fluid mass",
+        "closed fluid mass",
         mass_change.abs(),
         (mass0 * dd(units.mass_per_density_cell_kg) * dd(c.relative_mass_tolerance)).to_f64(),
     )?;
