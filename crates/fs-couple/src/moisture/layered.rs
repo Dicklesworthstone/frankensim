@@ -634,6 +634,7 @@ impl MoistureLayeredSlab {
         let mut system = LayeredSystem {
             operator: DiffusionStep {
                 diagonal: Vec::with_capacity(n),
+                storage_boundary: Vec::with_capacity(n),
                 off: vec![0.0; n - 1],
             },
             rhs: Vec::with_capacity(n),
@@ -656,6 +657,7 @@ impl MoistureLayeredSlab {
             }
             let offset = original[i] - layer.sorption.moisture(self.activity[i])?;
             system.operator.diagonal.push(capacity);
+            system.operator.storage_boundary.push(capacity);
             system
                 .rhs
                 .push(capacity.mul_add(self.activity[i] - reference, mass * offset));
@@ -736,6 +738,7 @@ impl MoistureLayeredSlab {
                 system.boundary[side] = coefficient;
                 system.surfaces[side] = Some(surface);
                 system.operator.diagonal[cell] += coefficient;
+                system.operator.storage_boundary[cell] += coefficient;
                 system.rhs[cell] += coefficient * (a - reference);
             }
         }

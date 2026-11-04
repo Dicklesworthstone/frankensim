@@ -39,6 +39,8 @@ pub struct MoistureNonlinearReport {
     pub iterations: usize,
     /// All tridiagonal substitutions, including linear defect corrections.
     pub tridiagonal_solves: usize,
+    /// Endpoint-equation residual normalized by the load for moisture relative
+    /// to the initial first cell, as in the frozen-coefficient linear solve.
     pub relative_residual: f64,
     /// Uses endpoint diffusivity for both surface transfers; never the lagged
     /// linear solve's flux to make nonlinear conservation appear satisfied.
@@ -79,7 +81,7 @@ impl MoistureSlab {
         let mut total_solves = 0;
         for iteration in 1..=controls.maximum_iterations {
             poll(cx)?;
-            let solution =
+            let mut solution =
                 system
                     .0
                     .solve_tridiagonal(&system.1, step.linear, &mut workspace, cx)?;
@@ -89,15 +91,15 @@ impl MoistureSlab {
             }
             // Re-query the ORIGINAL pinned source at every proposed endpoint.
             // Unsupported intermediate or final states refuse transactionally.
-            let endpoint = self.transport_states(&solution.x, cx)?;
+            let candidate: Vec<_> = solution.x.iter().map(|m| m + self.moisture[0]).collect();
+            let endpoint = self.transport_states(&candidate, cx)?;
             let endpoint_system = self.transport_system(dt, faces, &endpoint, profile, cx)?;
             let (_, relative_residual) =
                 endpoint_system
                     .0
                     .defect(&solution.x, &endpoint_system.1, cx)?;
-            let transfer = self.boundary_transfer(&solution.x, faces, &endpoint_system.2);
-            let water_after: f64 = solution
-                .x
+            let transfer = self.boundary_transfer(&candidate, faces, &endpoint_system.2);
+            let water_after: f64 = candidate
                 .iter()
                 .map(|m| self.dry_mass_per_cell_kg * m)
                 .sum();
@@ -112,16 +114,17 @@ impl MoistureSlab {
                 && water_balance.is_finite()
                 && water_balance.abs() <= step.water_balance_tolerance_kg
             {
+                solution.x = candidate;
                 return Ok((solution, endpoint, endpoint_system.2, Some(report)));
             }
             if iteration == controls.maximum_iterations {
                 return Err(MoistureError::NonlinearNotConverged(report));
             }
             if controls.relaxation == 1.0 {
-                iterate = solution.x;
+                iterate = candidate;
                 system = endpoint_system;
             } else {
-                for (old, candidate) in iterate.iter_mut().zip(&solution.x) {
+                for (old, candidate) in iterate.iter_mut().zip(&candidate) {
                     *old = controls.relaxation.mul_add(candidate - *old, *old);
                 }
                 let states = self.transport_states(&iterate, cx)?;
