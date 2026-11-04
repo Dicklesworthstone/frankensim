@@ -20,7 +20,8 @@ mod finite;
 /// This does not change interface geometry, mass, heat capacity or source law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceImplicitSolve {
-    /// Liquid energy coordinates plus one when a finite atmosphere is attached.
+    /// Original liquid and finite-solid energy coordinates, plus one when a
+    /// finite atmosphere is attached.
     pub maximum_unknowns: usize,
     pub maximum_krylov_restart: usize,
     pub maximum_newton_iterations: usize,
@@ -28,9 +29,9 @@ pub struct FreeSurfaceImplicitSolve {
     pub maximum_residual_evaluations: usize,
     /// Maximum-component numerical Jacobian perturbation in J/kg, not joules.
     pub difference_step_j_kg: f64,
-    /// Independent maximum actual liquid-cell AND finite-gas energy-balance
-    /// defect in joules, per accepted implicit interval. GasEnergySolve keeps
-    /// its separate original caloric inversion tolerance.
+    /// Independent maximum actual liquid-cell, solid-cell AND finite-gas
+    /// energy-balance defect in joules, per accepted implicit interval.
+    /// GasEnergySolve keeps its separate original caloric inversion tolerance.
     /// The total gate remains `FreeSurfaceConductionControls::energy_tolerance_j`.
     pub cell_energy_tolerance_j: f64,
     /// Residual coordinates are J/kg after frozen positive row normalization.
@@ -64,8 +65,9 @@ pub struct FreeSurfaceImplicitReport {
     pub intervals: usize,
     pub residual_evaluations: usize,
     pub newton_iterations: usize,
+    /// Largest absolute original-law liquid or solid cell balance defect.
     pub maximum_cell_residual_j: f64,
-    /// Largest absolute original-law gas storage minus reciprocal surface heat.
+    /// Largest absolute original-law gas storage minus reciprocal liquid/solid heat.
     /// Zero for prescribed reservoirs, which have no finite gas equation.
     pub maximum_gas_residual_j: f64,
     pub last_nonlinear: Option<NewtonReport>,
@@ -264,9 +266,9 @@ impl Sum {
 }
 
 /// Original timeline and observer, advanced at implicit endpoint quadrature.
-/// Callers have already processed the initial birth/contact events. Other
+/// Callers have already processed the initial liquid/solid birth/contact events.
 /// One finite isochoric atmosphere adds its original energy equation to the
-/// same nonlinear solve. Other histories still require a coupled residual.
+/// same nonlinear solve. Electrical histories still require a coupled residual.
 pub(in super::super) fn advance<'t, 'a, 'm>(
     mut thermal: DepositionSimulation<'t>,
     mut observer: Conduction<'a, 'm>,
@@ -277,14 +279,11 @@ pub(in super::super) fn advance<'t, 'a, 'm>(
     validate(solve, thermal.cells().len().saturating_add(usize::from(observer.finite_atmosphere.is_some())))?;
     if observer.surfaces.is_empty()
         || observer.electrical.is_some()
-        || !observer.bodies.is_empty()
-        || !observer.contacts.is_empty()
-        || !observer.solid_links.is_empty()
         || !observer.environment.is_empty()
         || !observer.radiation.is_empty()
     {
         return Err(Error::Invalid(
-            "implicit surface exchange requires solved surfaces without finite bodies, current or separate environment/radiation sources",
+            "implicit surface exchange requires solved surfaces without current or separate liquid environment/radiation sources",
         ));
     }
     if !target_s.is_finite()
@@ -326,7 +325,14 @@ pub(in super::super) fn advance<'t, 'a, 'm>(
         // same samples give conditioning, never substitute for endpoint rates.
         observer.sources(&thermal, &mut || checkpoint(gate))?;
         let conductances = observer.conductances(&thermal, &mut || checkpoint(gate))?;
-        let slope = observer.caloric.maximum_temperature_slope();
+        // Each original caloric law conditions its OWN row. Bodies may have
+        // capacities very different from the liquid; none inherits the liquid
+        // slope or an apparent-capacity surrogate. These frozen positive
+        // scales do not replace the nonlinear source laws or raw joule gates.
+        let slope = |id: CellId| match observer.body_ids.binary_search(&id) {
+            Ok(index) => observer.bodies[index].caloric().maximum_temperature_slope(),
+            Err(_) => observer.caloric.maximum_temperature_slope(),
+        };
         let mut scales: BTreeMap<_, _> = thermal
             .cells()
             .iter()
@@ -338,7 +344,7 @@ pub(in super::super) fn advance<'t, 'a, 'm>(
                 .copied()
                 .unwrap_or(link.conductance_w_k);
             for cell in [link.a, link.b] {
-                *scales.get_mut(&cell).expect("active link endpoint") += dt * g * slope;
+                *scales.get_mut(&cell).expect("active link endpoint") += dt * g * slope(cell);
             }
         }
         for (&id, sample) in observer
@@ -347,7 +353,23 @@ pub(in super::super) fn advance<'t, 'a, 'm>(
             .zip(&observer.surface_last)
         {
             *scales.get_mut(&id).expect("active surface endpoint") +=
-                dt * sample.liquid_decay_conductance_w_k * slope;
+                dt * sample.liquid_decay_conductance_w_k * slope(id);
+        }
+        for (&(index, _), sample) in observer.body_atmosphere.faces.iter()
+            .zip(&observer.body_atmosphere.last)
+        {
+            checkpoint(gate)?;
+            let id = observer.body_ids[index];
+            *scales.get_mut(&id).expect("active solid gas endpoint") +=
+                dt * sample.conductance_w_k * slope(id);
+        }
+        for (&(index, _), sample) in observer.body_radiation.faces.iter()
+            .zip(&observer.body_radiation.last)
+        {
+            checkpoint(gate)?;
+            let id = observer.body_ids[index];
+            *scales.get_mut(&id).expect("active solid radiant endpoint") +=
+                dt * sample.conductance_w_k * slope(id);
         }
         let scales: Vec<_> = scales.into_values().collect();
         let resolve = |endpoint: &DepositionSimulation<'t>| {

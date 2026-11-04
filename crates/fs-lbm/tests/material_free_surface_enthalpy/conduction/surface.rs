@@ -13,6 +13,10 @@ mod convection;
 #[path = "surface/implicit_finite.rs"]
 mod implicit_finite;
 
+#[cfg(feature = "implicit-enthalpy-coupling")]
+#[path = "surface/implicit_bodies.rs"]
+mod implicit_bodies;
+
 fn face(surroundings_k: f64) -> FreeSurfaceInterfaceFace {
     FreeSurfaceInterfaceFace {
         face: FreeSurfaceGasFace {

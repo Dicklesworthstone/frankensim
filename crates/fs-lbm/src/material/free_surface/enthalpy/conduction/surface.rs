@@ -104,7 +104,8 @@ pub struct FreeSurfaceInterfaceSolve {
     /// Explicit continuation of detached-interface boundary data after flow.
     pub local_boundary_evolution: LocalSurfaceBoundaryEvolution,
     /// Opt into endpoint-evaluated backward Euler for prescribed reservoirs or
-    /// one finite isochoric atmosphere. None retains explicit thermal subcycling.
+    /// one finite isochoric atmosphere, including original finite solid cells
+    /// and contacts. None retains explicit thermal subcycling.
     #[cfg(feature = "implicit-enthalpy-coupling")]
     pub implicit: Option<FreeSurfaceImplicitSolve>,
 }
@@ -442,8 +443,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// temperatures coincide. Its contribution to gas decay bounds the step.
     /// With `solve.implicit`, the same gas internal energy is an additional
     /// coupled endpoint unknown. This removes the explicit gas-capacity step
-    /// restriction while retaining the declared time/work and joule gates;
-    /// finite bodies, current and separate environmental paths still refuse.
+    /// restriction while retaining the declared time/work and joule gates.
+    /// Original finite solid cells, contacts, solid/gas films and solid radiant
+    /// heat share this same solve. Current and separate liquid environmental
+    /// paths still refuse.
     ///
     /// No gas momentum, pressure work, evaporation, participating-media radiation
     /// or moving-solid/phase-density handoff is added. Liquid, wall and gas

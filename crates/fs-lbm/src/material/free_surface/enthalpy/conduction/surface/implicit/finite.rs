@@ -1,15 +1,15 @@
-//! One original isochoric gas energy equation beside the original liquid BE rows.
+//! One original isochoric gas equation beside original liquid and solid BE rows.
 //!
-//! Coordinates are liquid specific-enthalpy increments followed by one gas
+//! Coordinates are liquid/solid specific-enthalpy increments followed by one gas
 //! specific-internal-energy increment. Each private gas candidate is recovered
 //! by its original caloric/EOS owner. Surface rates use THAT gas and the actual
-//! liquid endpoint together; no accepted heat/history changes during a trial.
+//! liquid/solid endpoints together; no accepted heat/history changes during a trial.
 
 use super::*;
 use fs_conduction::enthalpy::backward_euler::BackwardEulerTrial;
 
 struct CoupledTrial<'t, 'a, 'm> {
-    liquid: BackwardEulerTrial<'t, Conduction<'a, 'm>>,
+    thermal: BackwardEulerTrial<'t, Conduction<'a, 'm>>,
     gas_residual_j: f64,
     gas_stored_j: f64,
     independent_heat_j: f64,
@@ -20,7 +20,7 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
     thermal: &DepositionSimulation<'t>,
     observer: &Conduction<'a, 'm>,
     target_s: f64,
-    liquid_scales_kg: &[f64],
+    thermal_scales_kg: &[f64],
     solve: FreeSurfaceImplicitSolve,
     total_tolerance_j: f64,
     evaluations: &Cell<usize>,
@@ -46,11 +46,11 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
         .checked_add(1)
         .ok_or(Error::Invalid("implicit gas dimension overflows"))?;
     validate(solve, dimension)?;
-    if liquid_scales_kg.len() != count
-        || liquid_scales_kg.iter().any(|v| !v.is_finite() || *v <= 0.0)
+    if thermal_scales_kg.len() != count
+        || thermal_scales_kg.iter().any(|v| !v.is_finite() || *v <= 0.0)
     {
         return Err(Error::Invalid(
-            "implicit liquid row scales must be complete and positive",
+            "implicit liquid/solid row scales must be complete and positive",
         ));
     }
     let dt = environment::finite(target_s - thermal.time_s())?;
@@ -66,13 +66,19 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
             gas_scale_kg + dt * surface.gas_decay_conductance_w_k * gas.temperature_slope,
         )?;
     }
+    for surface in &observer.body_atmosphere.last {
+        check()?;
+        gas_scale_kg = environment::finite(
+            gas_scale_kg + dt * surface.conductance_w_k * gas.temperature_slope,
+        )?;
+    }
     if gas_scale_kg <= 0.0 {
         return Err(Error::Invalid(
             "implicit gas conditioning requires positive actual capacity",
         ));
     }
     // Independent authored/molecular heat. Radiation is appended from each
-    // trial's original surface samples below. Gas heat is internal to the union
+    // trial's original liquid/solid samples below. Gas heat is internal to the union
     // and is deliberately absent from this independent external-energy account.
     let mut authored_power = Sum::default();
     for &power in observer.powers.values() {
@@ -84,7 +90,7 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
         check()?;
         if increments.len() != dimension {
             return Err(Error::Invalid(
-                "implicit liquid/gas coordinates are incomplete",
+                "implicit liquid/solid/gas coordinates are incomplete",
             ));
         }
         if evaluations.get() >= solve.maximum_residual_evaluations {
@@ -112,7 +118,7 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
             .as_mut()
             .expect("original finite atmosphere")
             .trial_energy_increment(increments[count], &mut || check())?;
-        let liquid = step.evaluate(
+        let thermal = step.evaluate(
             &energy,
             |endpoint| {
                 let sources_w = payload.sources(endpoint, &mut || check())?;
@@ -130,15 +136,28 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
         let mut gas_heat_j = 0.0;
         let mut external = Sum::default();
         external.add(environment::finite(dt * authored_power)?)?;
-        for surface in &liquid.payload().surface_last {
+        for surface in &thermal.payload().surface_last {
             check()?;
             gas_heat_j = environment::finite(
                 gas_heat_j + environment::finite(dt * surface.heat_from_gas_w)?,
             )?;
             external.add(environment::finite(dt * surface.heat_from_radiation_w)?)?;
         }
+        // The same atmosphere supplies EVERY original solid gas patch. Match
+        // the accepted observer's liquid-surface then body-surface ordering;
+        // omitting even one patch would invent an external gas energy supply.
+        for surface in &thermal.payload().body_atmosphere.last {
+            check()?;
+            gas_heat_j = environment::finite(
+                gas_heat_j + environment::finite(dt * surface.heat_into_solid_w)?,
+            )?;
+        }
+        for surface in &thermal.payload().body_radiation.last {
+            check()?;
+            external.add(environment::finite(dt * surface.heat_into_solid_w)?)?;
+        }
         Ok(CoupledTrial {
-            liquid,
+            thermal,
             gas_residual_j: environment::finite(gas_stored_j + gas_heat_j)?,
             gas_stored_j,
             independent_heat_j: external.finish()?,
@@ -150,10 +169,10 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
         |x| {
             let trial = evaluate(x)?;
             let mut residual: Vec<_> = trial
-                .liquid
+                .thermal
                 .residual_j()
                 .iter()
-                .zip(liquid_scales_kg)
+                .zip(thermal_scales_kg)
                 .map(|(&r, &scale)| r / scale)
                 .collect();
             residual.push(trial.gas_residual_j / gas_scale_kg);
@@ -166,18 +185,18 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
     if maximum_gas > solve.cell_energy_tolerance_j {
         return Err(DepositionError::EnergyBalance(trial.gas_residual_j).into());
     }
-    // This union gate reads original-law liquid/gas storage and separately
+    // This union gate reads original-law liquid/solid/gas storage and separately
     // accumulated external heat, not a difference of opposite gas receipts.
     let combined = environment::finite(
-        trial.liquid.audit().stored_energy_change_j + trial.gas_stored_j - trial.independent_heat_j,
+        trial.thermal.audit().stored_energy_change_j + trial.gas_stored_j - trial.independent_heat_j,
     )?;
     if combined.abs() > environment::finite(total_tolerance_j + solve.cell_energy_tolerance_j)? {
         return Err(DepositionError::EnergyBalance(combined).into());
     }
-    let maximum_liquid = trial.liquid.maximum_cell_residual_j();
+    let maximum_cell = trial.thermal.maximum_cell_residual_j();
     let (next, payload, audit) =
         trial
-            .liquid
+            .thermal
             .accept(solve.cell_energy_tolerance_j, total_tolerance_j, check)?;
-    Ok((next, payload, audit, nonlinear, maximum_liquid, maximum_gas))
+    Ok((next, payload, audit, nonlinear, maximum_cell, maximum_gas))
 }

@@ -7816,12 +7816,13 @@ With `implicit-enthalpy-coupling`, `FreeSurfaceInterfaceSolve::implicit` selects
 the original thermal owner's backward-Euler residual. The default remains the
 existing explicit trajectory. The optional path supports prescribed solved
 surface reservoirs or one finite isochoric atmosphere, together with declared
-liquid-liquid conduction links and the same material, caloric, gas-film,
-convection and radiation laws. Finite bodies, electrical coupling and separate
-gas/radiation APIs still require additional coupled residuals and refuse.
+liquid-liquid, liquid-solid and solid-solid conduction links. Original finite
+solid calorics, ordered contact sources, direct solid/gas films and solid
+radiation participate in that same residual. Electrical coupling and separate
+liquid gas/radiation APIs still require additional coupled residuals and refuse.
 
-Liquid coordinates are specific-enthalpy increments in J/kg, mapped to actual
-cell energy increments with the original masses. A finite atmosphere appends
+Liquid and solid coordinates are specific-enthalpy increments in J/kg, mapped
+to actual cell energy increments with the original masses. A finite atmosphere appends
 one original specific-internal-energy increment to this same nonlinear system. A small cut cell therefore does not receive
 the same finite-difference joule probe as a large cell. Frozen positive row
 scales combine cell mass and the interval's conductance/caloric slope bound.
@@ -10383,8 +10384,9 @@ pressure and source properties feed subsequent trials. Optional pressure loading
 uses this same parcel through the existing native pressure owner. Accepted
 liquid, wall and gas states still publish together. The opt-in implicit residual
 calls the provider at each trial endpoint for prescribed or single finite-gas
-surfaces. Finite bodies, electrical and separate environmental paths retain
-their original implicit exclusions.
+surfaces. Finite solid cells and contacts participate through their original
+thermal owner; electrical and separate liquid environmental paths retain their
+implicit exclusions.
 
 This bounded entry admits explicit Cartesian planar faces. Height-graph and
 local reconstructed surfaces refuse. A higher owner must declare the physical
@@ -10485,7 +10487,7 @@ still needs time resolution.
 
 Selecting `FreeSurfaceInterfaceSolve::implicit` on the existing finite-gas
 surface or surface-convection entry couples one gas energy coordinate to the
-original liquid backward-Euler residual and bounded Newton-Krylov driver.
+original liquid/solid backward-Euler residual and bounded Newton-Krylov driver.
 Every trial reconstructs a private parcel through its original isochoric caloric
 inversion. Its actual temperature, EOS pressure, composition and selected source
 claims feed the same interface root as the trial liquid endpoint. No physical
@@ -10493,10 +10495,11 @@ history advances in a residual or directional-difference evaluation.
 
 The added gas row is original-law `m_g Delta u_g + dt sum(Q_from_gas) = 0`.
 It uses actual represented storage, with formation references canceled by the
-original temperature-anchored caloric law. The liquid rows retain the original
-`BackwardEulerStep` heat-rate and local/total energy gates. A separate union
-gate compares actual liquid-plus-gas storage with independently accumulated
-authored/molecular and radiant heat. Gas exchange is internal to that union.
+original temperature-anchored caloric law. Liquid and solid rows retain the
+original `BackwardEulerStep` heat-rate and local/total energy gates. The gas row
+includes both solved liquid surfaces and every original direct solid/gas film.
+A separate union gate compares actual liquid-plus-solid-plus-gas storage with
+independently accumulated authored/molecular and liquid/solid radiant heat. Gas exchange is internal to that union.
 The accepted observer validates the already prepared gas endpoint and accounts
 for its surface heat once; it never applies that heat to the parcel a second
 time. Native flow, source, pressure and final endpoint failures still discard
@@ -10504,8 +10507,8 @@ all candidates before publication.
 
 `maximum_unknowns` includes the gas coordinate. Existing residual, Newton,
 Krylov, interval, source-inversion and interface-root budgets remain operative.
-`cell_energy_tolerance_j` bounds each liquid row and the gas row per accepted
-interval. `GasEnergySolve` retains its separate original caloric-inversion
+`cell_energy_tolerance_j` bounds each liquid row, each solid row and the gas row
+per accepted interval. `GasEnergySolve` retains its separate original caloric-inversion
 controls. `FreeSurfaceImplicitReport::maximum_gas_residual_j` exposes the actual
 accepted gas defect; `FreeSurfaceFiniteGasExchange::implicit_energy_tolerance_j`
 identifies the accumulated declared gas-row allowance within the reported
@@ -10514,8 +10517,8 @@ combined gas budget. Conditioning scales do not replace any raw joule gate.
 This removes the explicit gas-capacity CFL restriction; it does not establish
 timestep accuracy or unconditional nonlinear convergence. The original
 first-order thermal/native-flow split and fixed gas mass, composition and volume
-remain. Finite bodies, current, and separate environment/radiation paths remain
-excluded from this implicit rung. Focused public-API regressions compare the
+remain. Current and separate liquid environment/radiation paths remain excluded
+from this implicit rung. Focused public-API regressions compare the
 stiff coupled endpoint with an independent caloric/series-resistance equation,
 check large formation-reference invariance and evolving gas/film source states,
 close the radiating liquid-plus-gas union, and verify late-domain, cancellation
@@ -10564,3 +10567,29 @@ These remain local infinite missing-film patches: no resolved moving wall,
 finite extent, contact, GCL, rotation or thermal destination is inferred.
 The inherited midpoint method is not L-stable; stiff relaxation still
 requires adequate time resolution.
+
+## Finite solids in the implicit moving-liquid surface solve
+
+The opt-in surface residual retains each `FreeSurfaceThermalBody` as the same
+original `DepositionSimulation` caloric cell used by explicit conduction.
+Liquid/solid contacts and solid/solid links enter its original pair operator;
+there is no duplicate wall store or second heat integrator. Each row uses its
+own original caloric slope for numerical conditioning. Source conductivity,
+ordered interface resistance and both contact states are re-evaluated at the
+actual trial endpoint, without freezing their physical coefficients.
+
+A finite atmosphere's one energy equation includes the opposite of every
+liquid-surface and direct solid-film transfer. Original solid radiation remains
+external to the liquid/solid/gas union. Raw per-cell, gas-row, aggregate thermal
+and independent union joule gates remain in force. Only the accepted endpoint
+advances the original observer, and the native flow acceptance still precedes
+publication of liquid, all bodies and gas together.
+
+This extension retains stationary solid geometry, the declared scalar bulk and
+contact/film models, and each body's uniform-cell interpretation. A source or
+fully-solid phase-domain exit refuses the complete transaction; it does not
+invent a melting or mechanical handoff. Focused regressions check independent
+five-store backward-Euler equations with distinct material capacities, evolving
+contact/film sources, radiation and one shared gas; a separately solved
+prescribed-reservoir contact; and late source/cancellation rollback followed by
+an identical accepted retry.
