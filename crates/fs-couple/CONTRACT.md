@@ -21101,6 +21101,35 @@ thermal tests independently integrate continuous damped-oscillator heating,
 exercise capture/pull-off with distinct snap/support destinations, and verify
 explicit-route refusal plus caloric/cancellation rollback.
 
+### Prescribed source temperature with continuous native and caloric history
+
+`JkrNormalEventModalSystem::continue_at_temperature` transfers the original
+held-indentation JKR source at an accepted boundary. It retains all native
+positions, velocities, sample count, physical support and complete normal-motion
+history. The successor force, area and branch limits drive later motion.
+Original contact storage is reevaluated at actual native geometry; its change
+is independently checked against the source's signed parameter supply at the
+contact energy scale. Native total-energy and force limits remain active.
+
+`JkrSnapHeat::propose_temperature_continuation` transfers the exact sealed
+motion predecessor and successor while retaining original ordered caloric
+objects, receiver identities and geometry, accepted thermal time, heat
+partitions, outside destinations and accumulated snap ledger. It increments
+the original history version; stale stamps or substituted histories refuse.
+No caloric operation, zero-time transport or duplicate release is performed.
+`JkrThermalModalSystem::continue_at_temperature` stages this heat-history
+successor before publishing the mechanical source, then publishes both
+together. Any source, receiver, work or cancellation refusal leaves all
+accepted owners and observations unchanged. Last interval frames remain
+historical observations of those intervals.
+
+The returned signed coefficient supply belongs to the explicitly prescribed
+temperature driver. It changes contact potential once and enters neither snap
+nor support heat partition. Coefficients stay frozen within each subsequent
+mechanical interval. The three source temperatures remain independently
+prescribed; finite-cell temperatures do not acquire an inferred interface
+temperature, entropy or autonomous contact caloric closure.
+
 ## Native event-resolved adhesive stopping and restart
 
 `contact::adhesive_events::AdhesiveEventModalSystem` applies the original

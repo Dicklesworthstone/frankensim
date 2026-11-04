@@ -8,7 +8,9 @@
 //! may share the normal work column. Its spring storage, viscous loss and
 //! connection ports remain in the native owner. Loss uses the source's passive
 //! midpoint work quadrature; it is separate from adhesive jump release.
-//! One fixed normal and a frozen quasistatic JKR source are required. General
+//! One fixed normal and a quasistatic JKR source are required. Coefficients stay
+//! frozen during an interval; [`temperature`] continues their original source
+//! at an accepted boundary under an explicit signed parameter-work supply. General
 //! elastic networks, rotating normals and resolved waves need their own owner.
 
 use super::adhesive_events::native::{
@@ -31,6 +33,7 @@ mod elastic;
 use elastic::{ElasticConnection, SpringObservation};
 
 pub mod thermal;
+pub mod temperature;
 
 #[derive(Debug)]
 pub enum JkrNormalEventModalError {

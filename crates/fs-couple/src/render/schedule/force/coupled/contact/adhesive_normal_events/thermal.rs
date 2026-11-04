@@ -5,14 +5,18 @@
 //! Original support damping has its own heat/outside partition and finite-time
 //! source history. It never inherits the adhesive snap partition implicitly.
 //! Both accepted owners publish together. Material/contact coefficients stay
-//! frozen over this one-way thermal split; no temperature feedback is implied.
+//! frozen over an interval. Prescribed temperature continuation at its boundary
+//! retains all three histories and reports signed driver work; it does not
+//! infer autonomous contact entropy or temperature feedback from caloric heat.
 
+use super::temperature::JkrNormalTemperatureModalReport;
 use super::{JkrNormalEventModalError, JkrNormalEventModalFrame, JkrNormalEventModalSystem};
 use crate::friction_heat::adhesive::snap::{
     JkrSnapHeat, JkrSnapHeatError,
     timed::{JkrTimedSnapHeatControls, JkrTimedSnapHeatReport},
     viscous::{JkrViscousHeatReport, JkrViscousHeatRoute},
 };
+use fs_contact::normal_patch::adhesive::temperature::SourceJkrThermalRefresh;
 use fs_exec::CancelGate;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_math::dd::Dd;
@@ -229,6 +233,41 @@ impl<'s, 'm> JkrThermalModalSystem<'s, 'm> {
 
     pub fn stored_energy_j(&self) -> Result<f64, JkrThermalModalError> {
         finite(self.mechanical.total_energy_j()? + self.thermal.energy_j())
+    }
+
+    /// Atomically continue mechanics and snap history under prescribed source
+    /// temperatures at the accepted boundary. The native thermal state, clock,
+    /// caloric storage and accumulated heat ledger remain exactly unchanged.
+    /// The returned signed parameter work is supplied by the prescribed driver
+    /// and must not be passed through either dissipative heat partition.
+    ///
+    /// Independent surface and interface temperatures come from the original
+    /// source refresh. Inferring them from finite cells requires an additional
+    /// thermodynamic interface law; this operation supplies no such closure.
+    pub fn continue_at_temperature(
+        &mut self,
+        refresh: &'s SourceJkrThermalRefresh,
+        gate: &CancelGate,
+    ) -> Result<JkrNormalTemperatureModalReport, JkrThermalModalError> {
+        let thermal = &self.thermal;
+        let heat = &self.heat;
+        let (history, report) = self.mechanical.continue_at_temperature_with_admission(
+            refresh,
+            gate,
+            |continuation, report| {
+                let history = heat.propose_temperature_continuation(
+                    thermal,
+                    heat.stamp(),
+                    continuation,
+                    || checkpoint(gate),
+                )?;
+                // All mechanical and thermal changes are now staged. No cell
+                // operation is needed: only original contact storage changes.
+                Ok::<_, JkrThermalModalError>((history, *report))
+            },
+        )?;
+        self.heat = history;
+        Ok(report)
     }
 
     pub fn step(

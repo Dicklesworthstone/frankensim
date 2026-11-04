@@ -5,6 +5,9 @@ mod common;
 #[path = "adhesive_jkr_thermal_modal/damping.rs"]
 mod damping;
 
+#[path = "adhesive_jkr_thermal_modal/temperature.rs"]
+mod temperature_continuation;
+
 use fs_contact::normal_patch::adhesive::{motion::*, *};
 use fs_couple::friction_heat::adhesive::snap::{timed::*, viscous::*, *};
 use fs_couple::modal_acoustic_time::*;

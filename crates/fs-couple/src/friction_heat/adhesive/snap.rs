@@ -27,6 +27,8 @@ mod normal_motion;
 pub mod timed;
 /// Explicit viscous-support losses on their original smooth mechanical intervals.
 pub mod viscous;
+/// Preserve original snap and caloric history across prescribed source temperature changes.
+pub mod temperature;
 
 /// Finite work and heat accuracy budgets, all chosen by the caller.
 #[derive(Clone, Copy, Debug, PartialEq)]
