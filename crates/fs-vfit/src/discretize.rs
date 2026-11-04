@@ -617,14 +617,8 @@ impl DelayedFilter {
                         field: "exact_pole_response_phase", index: Some(index),
                     });
                 }
-                // 1-exp(-sigma*dt+i*phase), without subtracting rounded
-                // unit exponentials at a narrow resonance.
-                let (sine, _) = det::sin_cos(phase);
-                let half_sine = det::sin(0.5 * phase);
-                let decay = det::exp(-pole.sigma * dt);
-                let denominator = C64::new(
-                    -det::expm1(-pole.sigma * dt) + 2.0 * decay * half_sine * half_sine,
-                    -decay * sine,
+                let denominator = crate::mimo::zoh_pole_denominator(
+                    C64::new(-pole.sigma, sign * pole.omega), -omega, dt,
                 );
                 if denominator == C64::ZERO {
                     return Err(DiscretizeError::NonFiniteRuntimeValue {
