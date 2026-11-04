@@ -3337,6 +3337,28 @@ They enter one exact complex `c_v(omega)`, and `k = omega/c(omega) + i alpha_SK`
 Stokes-Kirchhoff is counted once, there is no separate bulk viscosity, and the
 strengths are not linearized.
 
+For propagated histories, `RelaxationState::causal_wavenumber` instead solves
+the coupled homogeneous linear continuity, viscous-momentum and energy
+equations with the original complex `cv(omega)` and ideal-gas EOS. The same
+caloric response governs compression and Fourier heat conduction; an
+equilibrium-loss factor is no longer multiplied onto the molecular wave.
+The shared thermoviscous dispersion owner selects the acoustic root with a
+rationalized quadratic, retaining weak thermal loss and refusing unresolved
+acoustic/thermal roots. No extra bulk viscosity, wall attenuation or thermal
+mode is added. Zero reservoir strength recovers the full original classical
+dispersion, including outside the leading Stokes--Kirchhoff approximation.
+For complex calorics, admission requires the discriminant's real part to stay
+positive throughout the zero-transport homotopy, whose quadratic minimum is
+checked analytically. Stronger mixed modes require explicit continuation and
+refuse: positive attenuation alone cannot exclude an acoustic/thermal root
+switch. A positive-reservoir, Eucken-ratio regression demonstrates that failure.
+Work is allocation-free and bounded by the admitted reservoir count. Direct
+continuity/momentum/energy residuals, a falsifier for the former multiplier,
+the zero-reservoir limit, dimensional similarity and branch refusals are
+covered by the shared dispersion unit tests and `tests/relaxation_absorption.rs`.
+Continuum, linear-response, constant-transport and original rate-data support
+remain required; no experimental or finite-wavefront claim is inferred.
+
 `RelaxationState::caloric_response` exposes that same bounded, allocation-free
 reservoir sum as complex mass-specific `cv`, `cp = cv + R`, and bulk modulus
 `K = p cp/cv`, including the equilibrium DC limit. Under `exp(-i omega t)`,

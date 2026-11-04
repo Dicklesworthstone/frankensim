@@ -16,6 +16,130 @@
 
 use fs_math::c64::C64;
 
+/// The same spatial acoustic branch with an ideal gas's original complex
+/// caloric response. `cv_over_r = cv(omega)/R_specific`; viscosity and
+/// conductivity times are respectively `4 mu/(3 rho c0^2)` and
+/// `kappa/(rho R_specific c0^2)`. No molecular loss enters either time.
+///
+/// Eliminating temperature from `-i omega rho cv T' + kappa k^2 T' =
+/// -i k p u`, together with continuity, viscous momentum and `p = rho R T`,
+/// gives `A z^2 + B z - 1 = 0`, for `z=(k c0/omega)^2`, where
+/// `g=(1+R/cv)/gamma0`, `x=omega*viscous_time`, `y=omega*kappa/(rho cv c0^2)`,
+/// `A=(x+i/gamma0)y` and `B=g-i(x+y)`. This uses the SAME relaxing heat
+/// capacity in both compression and heat conduction; an equilibrium-loss
+/// multiplier on the molecular wavenumber does not satisfy these equations.
+pub(crate) fn relaxing_acoustic_wavenumber(
+    omega: f64,
+    sound_speed: f64,
+    viscous_time: f64,
+    conductivity_time: f64,
+    equilibrium_gamma: f64,
+    cv_over_r: C64,
+) -> Result<C64, &'static str> {
+    if !omega.is_finite()
+        || omega < 0.0
+        || !sound_speed.is_finite()
+        || sound_speed <= 0.0
+        || !viscous_time.is_finite()
+        || viscous_time < 0.0
+        || !conductivity_time.is_finite()
+        || conductivity_time < 0.0
+        || !equilibrium_gamma.is_finite()
+        || equilibrium_gamma <= 1.0
+        || !cv_over_r.re.is_finite()
+        || cv_over_r.re <= 0.0
+        || !cv_over_r.im.is_finite()
+        || cv_over_r.im < 0.0
+    {
+        return Err("relaxing dispersion needs finite passive transport and caloric response");
+    }
+    if omega == 0.0 {
+        return Ok(C64::ZERO);
+    }
+    let inverse_cv = cv_over_r.recip();
+    let r = inverse_cv.scale(1.0 / equilibrium_gamma);
+    let g = C64::from_re(1.0 / equilibrium_gamma) + r;
+    if cv_over_r.im == 0.0 {
+        // A real caloric response has the existing classical branch policy,
+        // with its actual (possibly frozen) sound speed and Cp. Preserve the
+        // full strong-loss domain established by that owner.
+        return acoustic_wavenumber(
+            omega,
+            sound_speed * fs_math::det::sqrt(g.re),
+            viscous_time / g.re,
+            conductivity_time / (cv_over_r.re + 1.0) / g.re,
+            1.0 + inverse_cv.re,
+        );
+    }
+    let x = omega * viscous_time;
+    let y = inverse_cv.scale(omega * conductivity_time);
+    if !x.is_finite() || !y.re.is_finite() || !y.im.is_finite() {
+        return Err("relaxing dispersion transport scales are unrepresentable");
+    }
+    let viscous = g + C64::new(0.0, -x);
+    let inverse_z = if conductivity_time == 0.0 {
+        viscous
+    } else {
+        // D = u^2 - 4 i y r, u = g-i(x-y). The rationalized correction
+        // retains arbitrarily weak thermal coupling. Re(u)>0 for passive cv,
+        // so sqrt(D)+u never subtracts nearly equal roots.
+        let u = viscous + C64::new(-y.im, y.re);
+        let yr = y * r;
+        let correction = C64::new(4.0 * yr.im, -4.0 * yr.re);
+        let discriminant = u * u + correction;
+        let scale = u.norm_sq() + correction.abs();
+        let imaginary_scale = (2.0 * u.re * u.im).abs() + correction.im.abs();
+        if !discriminant.re.is_finite() || !discriminant.im.is_finite() || !scale.is_finite() {
+            return Err("relaxing dispersion discriminant is unrepresentable");
+        }
+        // Complex calorics can move D through the negative-real cut as
+        // frequency changes. Passivity alone does not distinguish the two
+        // roots there. Admit a sufficient separated domain: Re(D(t)) stays
+        // positive as viscosity/conduction scale from zero to their values.
+        // This is a quadratic in t, so its minimum is checked analytically,
+        // without a frequency sweep or a hidden continuation state.
+        let d0 = g * g;
+        let product = g * (C64::from_re(x) + y);
+        let d1 = C64::new(2.0 * product.im, -2.0 * product.re)
+            + C64::new(
+                -4.0 * y.im / equilibrium_gamma,
+                4.0 * y.re / equilibrium_gamma,
+            );
+        let difference = C64::from_re(x) - y;
+        let d2 = -(difference * difference);
+        let branch_scale = d0.abs() + d1.abs() + d2.abs();
+        let mut minimum_real = d0.re.min(discriminant.re);
+        if d2.re > 0.0 {
+            let vertex = -0.5 * (d1.re / d2.re);
+            if vertex > 0.0 && vertex < 1.0 {
+                minimum_real = minimum_real.min(d0.re + vertex * (d1.re + vertex * d2.re));
+            }
+        }
+        if !branch_scale.is_finite() || minimum_real <= 64.0 * f64::EPSILON * branch_scale {
+            return Err(
+                "strong mixed caloric/thermal modes require explicit acoustic continuation",
+            );
+        }
+        if discriminant.abs() <= 64.0 * f64::EPSILON * scale
+            || (discriminant.re < 0.0
+                && discriminant.im.abs() <= 128.0 * f64::EPSILON * imaginary_scale)
+        {
+            return Err("relaxing acoustic and thermal branches are unresolved");
+        }
+        viscous + correction.scale(0.5) / (discriminant.sqrt() + u)
+    };
+    let wave = inverse_z.sqrt().recip().scale(omega / sound_speed);
+    if !wave.re.is_finite()
+        || wave.re <= 0.0
+        || !wave.im.is_finite()
+        || wave.im < 0.0
+        || ((viscous_time > 0.0 || conductivity_time > 0.0 || cv_over_r.im > 0.0) && wave.im == 0.0)
+    {
+        return Err("relaxing acoustic wavenumber is unrepresentable or nonpassive");
+    }
+    Ok(wave)
+}
+
 pub(super) fn acoustic_wavenumber(
     omega: f64,
     sound_speed: f64,
@@ -98,6 +222,136 @@ mod tests {
 
     fn relative(actual: C64, expected: C64) -> f64 {
         (actual - expected).abs() / expected.abs()
+    }
+
+    #[test]
+    fn g1_relaxing_wave_closes_original_mass_momentum_and_energy() {
+        // rho=R=c0=1, T=p=1/gamma0, velocity amplitude 1. A single
+        // independent reservoir with frozen Cv=2 and equilibrium Cv=5.
+        let gamma = 1.2;
+        for omega in [0.001, 0.1, 1.0, 10.0, 100.0] {
+            let cv = C64::new(
+                2.0 + 3.0 / (1.0 + omega * omega),
+                3.0 * omega / (1.0 + omega * omega),
+            );
+            for viscosity in [1e-9, 1e-5, 0.002] {
+                for conductivity in [1e-9, 3e-5, 0.007] {
+                    let k = relaxing_acoustic_wavenumber(
+                        omega,
+                        1.0,
+                        viscosity,
+                        conductivity,
+                        gamma,
+                        cv,
+                    )
+                    .unwrap();
+                    let density = k.scale(omega.recip());
+                    let temperature = k.scale(gamma.recip())
+                        / (cv.scale(omega) + C64::new(0.0, conductivity) * k * k);
+                    let pressure = density.scale(gamma.recip()) + temperature;
+                    let momentum_pressure = k.recip().scale(omega) + C64::new(0.0, viscosity) * k;
+                    assert!(
+                        relative(pressure, momentum_pressure) < 3e-12,
+                        "omega={omega}, nu={viscosity}, kappa={conductivity}, k={k:?}"
+                    );
+                    assert!(k.re > 0.0 && k.im > 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_equilibrium_multiplier_fails_the_coupled_equations() {
+        let cv = C64::new(3.5, 1.5);
+        let gamma: f64 = 1.2;
+        let molecular = (C64::ONE + cv.recip()).scale(gamma.recip()).sqrt().recip();
+        let delta = 0.2 + 2.0 * (gamma - 1.0) * (gamma - 1.0) / gamma;
+        let old = molecular * C64::new(1.0, -delta).sqrt().recip();
+        let pressure = old.scale(gamma.recip())
+            + old.scale(gamma.recip()) / (cv + C64::new(0.0, 2.0) * old * old);
+        let momentum_pressure = old.recip() + C64::new(0.0, 0.2) * old;
+        assert!(relative(pressure, momentum_pressure) > 0.05);
+        let coupled = relaxing_acoustic_wavenumber(1.0, 1.0, 0.2, 2.0, gamma, cv).unwrap();
+        assert!(relative(coupled, old) > 0.02);
+    }
+
+    #[test]
+    fn g1_zero_reservoir_limit_is_full_classical_dispersion() {
+        for gamma in [1.1, 1.4, 5.0 / 3.0] {
+            for omega in [1e-8, 0.1, 1.0, 10.0] {
+                let cv = C64::from_re(1.0 / (gamma - 1.0));
+                for thermal in [0.0, 0.1, 0.7] {
+                    let coupled = relaxing_acoustic_wavenumber(
+                        omega,
+                        2.0,
+                        0.2,
+                        thermal * gamma / (gamma - 1.0),
+                        gamma,
+                        cv,
+                    )
+                    .unwrap();
+                    let classical = acoustic_wavenumber(omega, 2.0, 0.2, thermal, gamma).unwrap();
+                    assert!(relative(coupled, classical) < 3e-14);
+                    if classical.im != 0.0 {
+                        assert!((coupled.im / classical.im - 1.0).abs() < 3e-14);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_relaxing_dispersion_limits_and_dimensional_similarity() {
+        let cv = C64::new(3.5, 1.5);
+        let base = relaxing_acoustic_wavenumber(1.0, 2.0, 0.02, 0.07, 1.2, cv).unwrap();
+        let scaled = relaxing_acoustic_wavenumber(7.0, 6.0, 0.02 / 7.0, 0.01, 1.2, cv).unwrap();
+        assert!(relative(scaled, base.scale(7.0 / 3.0)) < 1e-15);
+        let lossless_transport = relaxing_acoustic_wavenumber(1.0, 2.0, 0.0, 0.0, 1.2, cv).unwrap();
+        let molecular = (C64::ONE + cv.recip())
+            .scale(1.0 / 1.2)
+            .sqrt()
+            .recip()
+            .scale(0.5);
+        assert!(relative(lossless_transport, molecular) < 3e-16);
+        assert_eq!(
+            relaxing_acoustic_wavenumber(0.0, 2.0, 0.2, 0.7, 1.2, cv).unwrap(),
+            C64::ZERO
+        );
+    }
+
+    #[test]
+    fn g0_relaxing_dispersion_refuses_invalid_or_unresolved_modes() {
+        let cv = C64::new(3.5, 1.5);
+        for omega in [-1.0, f64::NAN, f64::INFINITY, f64::MAX, f64::from_bits(1)] {
+            assert!(relaxing_acoustic_wavenumber(omega, 2.0, 0.2, 0.7, 1.2, cv).is_err());
+        }
+        for cv in [
+            C64::ZERO,
+            C64::new(1.0, -1.0),
+            C64::new(f64::NAN, 1.0),
+            C64::new(1.0, f64::INFINITY),
+        ] {
+            assert!(relaxing_acoustic_wavenumber(1.0, 2.0, 0.2, 0.7, 1.2, cv).is_err());
+        }
+        // The same acoustic/thermal coalescence as the nonrelaxing owner.
+        assert!(relaxing_acoustic_wavenumber(1.0, 1.0, 0.5, 3.0, 1.5, C64::from_re(2.0)).is_err());
+        assert!(relaxing_acoustic_wavenumber(1.0, 1.0, 1.0, 6.0, 1.5, C64::from_re(2.0)).is_err());
+    }
+
+    #[test]
+    fn g0_molecular_thermal_mode_switch_cannot_pass_as_absorption() {
+        // Positive Cv_inf=2R and reservoir C=0.25R. The transport ratio is
+        // Eucken-consistent. A principal square root without continuation
+        // jumps by about 25% between these neighboring frequencies, although
+        // both roots have positive attenuation. Refuse that unresolved domain.
+        for omega in [49.425, 49.430] {
+            let wt = 0.03 * omega;
+            let cv = C64::new(2.0 + 0.25 / (1.0 + wt * wt), 0.25 * wt / (1.0 + wt * wt));
+            assert_eq!(
+                relaxing_acoustic_wavenumber(omega, 1.0, 0.16, 0.54, 13.0 / 9.0, cv),
+                Err("strong mixed caloric/thermal modes require explicit acoustic continuation"),
+            );
+        }
     }
 
     #[test]

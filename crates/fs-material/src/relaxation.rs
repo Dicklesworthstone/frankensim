@@ -54,10 +54,10 @@ use crate::gas::GasState;
 use crate::iso9613::iso9613_relaxation_frequencies_hz;
 use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 
-/// Bounded native declarations of the same species/reservoir laws.
-pub mod input;
 /// Exact positive time-domain compression realization of the same reservoirs.
 pub mod bulk;
+/// Bounded native declarations of the same species/reservoir laws.
+pub mod input;
 
 /// The ISO terrestrial-air admission policy, shared with
 /// [`crate::iso9613::TerrestrialAir`].
@@ -416,7 +416,9 @@ impl RelaxationAbsorption {
     /// [`MaterialError::Parameters`] naming any other species present, CO2
     /// above the ceiling, a gas without N2, O2 or Ar, a state outside ISO's
     /// frequency window, and each refusal of [`Self::evaluate`].
-    pub fn evaluate_iso9613_rates_held(medium: &RelaxingMedium) -> Result<RelaxationState, MaterialError> {
+    pub fn evaluate_iso9613_rates_held(
+        medium: &RelaxingMedium,
+    ) -> Result<RelaxationState, MaterialError> {
         let (mut dry, mut co2, mut water) = (0.0, 0.0, 0.0);
         for (species, fraction) in medium.components() {
             match species.as_str() {
@@ -435,7 +437,9 @@ impl RelaxationAbsorption {
             }
         }
         if dry <= 0.0 {
-            return Err(parameters("ISO 9613 rates cannot be held for a gas without dry air"));
+            return Err(parameters(
+                "ISO 9613 rates cannot be held for a gas without dry air",
+            ));
         }
         if co2 / dry > ISO9613_MAX_DRY_CO2 {
             return Err(parameters(format!(
@@ -463,11 +467,26 @@ impl RelaxationAbsorption {
             },
         };
         Self::new(vec![
-            SpeciesRelaxation { species: id("O2")?, processes: vec![vibration(2239.1, fr_o)] },
-            SpeciesRelaxation { species: id("N2")?, processes: vec![vibration(3352.0, fr_n)] },
-            SpeciesRelaxation { species: id("Ar")?, processes: Vec::new() },
-            SpeciesRelaxation { species: id("CO2")?, processes: Vec::new() },
-            SpeciesRelaxation { species: id("H2O")?, processes: Vec::new() },
+            SpeciesRelaxation {
+                species: id("O2")?,
+                processes: vec![vibration(2239.1, fr_o)],
+            },
+            SpeciesRelaxation {
+                species: id("N2")?,
+                processes: vec![vibration(3352.0, fr_n)],
+            },
+            SpeciesRelaxation {
+                species: id("Ar")?,
+                processes: Vec::new(),
+            },
+            SpeciesRelaxation {
+                species: id("CO2")?,
+                processes: Vec::new(),
+            },
+            SpeciesRelaxation {
+                species: id("H2O")?,
+                processes: Vec::new(),
+            },
         ])?
         .evaluate(medium)
     }
@@ -837,29 +856,47 @@ impl RelaxationState {
         Ok(C64::new(k.re, im))
     }
 
-    /// Causal complete wavenumber for propagating a history:
-    /// `k = (w / c(w)) (1 - i w delta)^{-1/2}` with
-    /// `delta = (4 mu / 3 + (gamma - 1) kappa / c_p) / (rho c^2)` from the
-    /// equilibrium state. The viscothermal factor is the first-order Kirchhoff
-    /// dispersion relation. Its imaginary part reproduces Stokes-Kirchhoff to
-    /// relative `O(w delta)` (`delta` is about 1e-10 s in air), and unlike adding
-    /// `i alpha_SK` it is analytic in the upper half plane. A history
-    /// propagated with it therefore stays causal. The losses are still counted
-    /// once.
+    /// Complete spatial acoustic wavenumber for propagating a history.
+    ///
+    /// The original complex `cv(omega)` enters the linearized energy equation
+    /// together with Fourier heat conduction; continuity, viscous momentum and
+    /// the original ideal-gas EOS close the acoustic branch. Molecular loss,
+    /// longitudinal shear viscosity and heat conduction are coupled once. No
+    /// extra bulk viscosity or equilibrium-loss multiplier is introduced.
+    /// With zero reservoir strength this reduces to the full homogeneous
+    /// Navier--Stokes--Fourier acoustic branch; weak transport recovers the
+    /// classical limit. The separate thermal diffusion mode is not returned.
+    ///
+    /// Evaluation is allocation-free and bounded by the original reservoir
+    /// count. The continuum, constant-transport and relaxation-data validity
+    /// remain the caller's responsibility. Parabolic transport does not imply
+    /// a finite wavefront at the equilibrium `range / sound_speed` delay.
+    /// Complex calorics require a positive-real discriminant along the
+    /// zero-transport continuation; stronger mixed modes refuse until their
+    /// acoustic branch can be explicitly continued. Real calorics retain the
+    /// existing full thermoviscous branch policy.
     ///
     /// # Errors
-    /// As [`Self::relaxing_wavenumber`].
+    /// As [`Self::relaxing_wavenumber`], plus unresolved acoustic/thermal roots.
     pub fn causal_wavenumber(&self, omega: f64) -> Result<C64, MaterialError> {
-        let k = self.relaxing_wavenumber(omega)?;
-        let gas = &self.gas;
-        let delta = (4.0 / 3.0 * gas.dynamic_viscosity
-            + (gas.gamma - 1.0) * gas.thermal_conductivity / gas.specific_heat_cp)
-            / (gas.density * gas.sound_speed * gas.sound_speed);
-        let k = k * C64::new(1.0, -omega * delta).sqrt().recip();
-        if !(k.re.is_finite() && k.re > 0.0 && k.im.is_finite() && k.im >= 0.0) {
-            return Err(state_error("causal wavenumber is unrepresentable"));
+        if !positive(omega) {
+            return Err(parameters("relaxation omega must be positive and finite"));
         }
-        Ok(k)
+        let caloric = self.caloric_response(omega)?;
+        let gas = &self.gas;
+        let c = gas.sound_speed;
+        let viscous_time = ((4.0 / 3.0) * (gas.dynamic_viscosity / gas.density) / c) / c;
+        let conductivity_time =
+            ((gas.thermal_conductivity / gas.density / gas.specific_gas_constant) / c) / c;
+        crate::fluid_acoustics::thermoviscous::absorption::dispersion::relaxing_acoustic_wavenumber(
+            omega,
+            c,
+            viscous_time,
+            conductivity_time,
+            gas.gamma,
+            caloric.cv_j_kg_k.scale(gas.specific_gas_constant.recip()),
+        )
+        .map_err(state_error)
     }
 
     /// Amplitude absorption coefficient `Im k` [Np/m].

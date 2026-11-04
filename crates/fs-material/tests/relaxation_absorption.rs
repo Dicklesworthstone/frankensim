@@ -101,6 +101,50 @@ fn g0_classical_limit_is_stokes_kirchhoff_bitwise() {
 }
 
 #[test]
+fn propagated_nonrelaxing_gas_uses_full_original_thermoviscous_branch() {
+    use fs_material::fluid_acoustics::thermoviscous::absorption::ClassicalBulkAbsorption;
+    let gas = test_gas(1.4, 293.15, 101_325.0);
+    let molecular = RelaxationAbsorption::new(vec![species("A", vec![])])
+        .unwrap()
+        .evaluate(&medium(gas, &[("A", 1.0)]))
+        .unwrap();
+    let classical = ClassicalBulkAbsorption::from_material(&gas, 0.0).unwrap();
+    for scaled_frequency in [1e-8, 1e-4, 0.01, 0.2, 1.0, 10.0] {
+        let omega = scaled_frequency / classical.relaxation_time_s();
+        let a = molecular.causal_wavenumber(omega).unwrap();
+        let b = classical.thermoviscous_wavenumber(omega).unwrap();
+        assert!((a - b).abs() / b.abs() < 3e-14);
+        assert!((a.im / b.im - 1.0).abs() < 3e-14);
+    }
+}
+
+#[test]
+fn propagated_relaxing_gas_closes_its_original_energy_and_momentum() {
+    use fs_math::c64::C64;
+    let gas = test_gas(1.2, 293.15, 101_325.0);
+    let law =
+        RelaxationAbsorption::new(vec![species("A", vec![rot(2, timed(2e-8, gas.pressure))])])
+            .unwrap();
+    let state = law.evaluate(&medium(gas, &[("A", 1.0)])).unwrap();
+    for omega in [10.0, 1e5, 1e7, 1e9] {
+        let k = state.causal_wavenumber(omega).unwrap();
+        let cv = state.caloric_response(omega).unwrap().cv_j_kg_k;
+        // Peak velocity is one m/s; reconstruct the original perturbations.
+        let density = k.scale(gas.density / omega);
+        let temperature = k.scale(gas.pressure)
+            / (cv.scale(omega * gas.density) + C64::new(0.0, gas.thermal_conductivity) * k * k);
+        let pressure = density.scale(gas.specific_gas_constant * gas.temperature)
+            + temperature.scale(gas.density * gas.specific_gas_constant);
+        let momentum_pressure = k.recip().scale(omega * gas.density)
+            + C64::new(0.0, 4.0 * gas.dynamic_viscosity / 3.0) * k;
+        assert!((pressure - momentum_pressure).abs() / pressure.abs() < 3e-13);
+    }
+    for omega in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(state.causal_wavenumber(omega).is_err());
+    }
+}
+
+#[test]
 fn caloric_response_matches_independent_single_reservoir_bulk_modulus() {
     let gas = test_gas(1.25, 293.15, 101_325.0);
     let tau = 0.002;

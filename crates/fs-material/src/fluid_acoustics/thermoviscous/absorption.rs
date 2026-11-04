@@ -22,7 +22,7 @@ use super::{ThermoviscousFluid, ThermoviscousFluidState};
 use crate::MaterialError;
 use fs_math::c64::C64;
 
-mod dispersion;
+pub(crate) mod dispersion;
 
 /// Prepared classical bulk absorption, with no per-frequency material queries.
 #[derive(Clone, Copy, Debug, PartialEq)]
