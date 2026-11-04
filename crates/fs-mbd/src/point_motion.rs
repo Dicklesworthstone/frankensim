@@ -9,6 +9,8 @@ use crate::{
     Vec3, Wrench,
 };
 
+mod relative;
+
 /// Immutable instantaneous motion shared by points on one native rigid body.
 ///
 /// Preparation evaluates the original full inertia once for angular velocity
