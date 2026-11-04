@@ -87,6 +87,23 @@ pub struct PrescribedStepPullback3 {
     pub true_relative_residual: f64,
 }
 
+/// Reverse of a step driven by prescribed endpoint support acceleration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrescribedAccelerationStepPullback3 {
+    /// Full previous q/v/a. Chain earlier intervals or initialization to
+    /// propagate the dependence of the initial free acceleration.
+    pub previous: NodalMotionCotangent3,
+    /// Endpoint external/equivalent thermal force in `free_dofs()` order.
+    pub force: Vec<f64>,
+    /// Endpoint support-acceleration derivatives in `fixed_dofs()` order.
+    /// An omitted primal component is a zero acceleration control.
+    pub prescribed_acceleration: Vec<f64>,
+    /// Iterations in the original reduced transpose solve.
+    pub iterations: usize,
+    /// True relative residual of that solve.
+    pub true_relative_residual: f64,
+}
+
 /// Reverse of the initial coupled mass solve with explicit support kinematics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrescribedInitialPullback3 {
@@ -279,6 +296,49 @@ impl PrescribedTransientAdjoint3<'_, '_, '_, '_> {
             previous,
             force: reduced.force,
             prescribed_displacement,
+            iterations: reduced.iterations,
+            true_relative_residual: reduced.true_relative_residual,
+        })
+    }
+
+    /// Reverse `advance_with_support_accelerations`, including consistent-mass
+    /// and both Rayleigh cross terms. The endpoint acceleration is the control;
+    /// support displacement and velocity are integrated from the previous state.
+    /// Unlike `pullback_step`, this map contains no division by the squared
+    /// timestep. It includes direct objective seeds on all support q/v/a.
+    pub fn pullback_acceleration_step(
+        &self,
+        h_s: f64,
+        seed: &NodalMotionCotangent3,
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedAccelerationStepPullback3, TransientAdjointError3> {
+        let reduced_seed = self.reduce(seed, cx)?;
+        let reduced = self.reduced.pullback_step(h_s, &reduced_seed, cx)?;
+        let (mt, kt) = self.cross_transpose(&reduced.force, cx)?;
+        let mut previous = self.scatter(&reduced.previous, cx)?;
+        let mut prescribed_acceleration = Vec::with_capacity(self.fixed.len());
+        let b = number(0.25 * h_s * h_s)?;
+        let d = 0.5 * h_s;
+        let eta = self.reduced.primal_config.mass_damping_per_s;
+        let zeta = self.reduced.primal_config.stiffness_damping_s;
+        for &fixed in self.fixed_dofs() {
+            check(cx)?;
+            let node = fixed / 3;
+            let component = fixed % 3;
+            let q = number(seed.q[node][component] - kt[fixed])?;
+            let v = number(seed.v[node][component] - number(eta * mt[fixed] + zeta * kt[fixed])?)?;
+            let a = number(seed.a[node][component] - mt[fixed])?;
+            let integrated = number(b * q + d * v)?;
+            prescribed_acceleration.push(number(a + integrated)?);
+            previous.q[node][component] = q;
+            previous.v[node][component] = number(h_s * q + v)?;
+            previous.a[node][component] = integrated;
+        }
+        check(cx)?;
+        Ok(PrescribedAccelerationStepPullback3 {
+            previous,
+            force: reduced.force,
+            prescribed_acceleration,
             iterations: reduced.iterations,
             true_relative_residual: reduced.true_relative_residual,
         })

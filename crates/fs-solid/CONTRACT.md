@@ -2059,6 +2059,23 @@ they are not finite differences with an unrelated integration convention.
 Recovering acceleration from rounded displacement samples amplifies their
 roundoff by the inverse squared step size; a smaller step is not an unlimited
 accuracy guarantee for prescribed derivatives.
+The displacement-controlled recurrence subtracts the absolute endpoints before
+the velocity/acceleration predictor drift, retaining resolved drift even when
+adding it to a nonzero displacement would round it away.
+
+`advance_with_support_accelerations` instead accepts sorted, unique fixed-DOF
+endpoint accelerations in m/s². It integrates support velocity and displacement
+with the same Newmark map while retaining the supplied acceleration directly.
+An omitted component has zero endpoint acceleration and continues its existing
+motion. It does not reset displacement or stop a moving support. This route
+avoids inverse-squared-step amplification of sampled displacement roundoff and
+retains consistent-mass/damping/stiffness coupling into free acceleration.
+Support work uses the accepted Newmark increment `h * (v_old + v_new)/2`, so
+resolved kinetic gain still has reaction work when absolute displacement
+cannot represent a tiny increment. The original admission and energy gates
+remain in force; inputs describe absolute world Cartesian acceleration,
+not fictitious forces in a rotating frame or impulsive velocity changes.
+
 Full element actions reuse the canonical P1 stiffness/mass kernel. No dense
 global operator is assembled. Fully prescribed meshes use empty reduced
 matrices and zero solve iterations after full geometry/material validation;
@@ -2120,6 +2137,11 @@ remain those of the original trajectory.
 cross-term initialization, a closed-form accelerating-base oscillator with
 second-order refinement, fully prescribed thermal/external/support work and
 reaction checks, and G3/G4 fork, malformed-input and cancellation checks.
+It also checks direct acceleration forcing against an independent scalar
+partitioned equation with both Rayleigh cross terms, unchanged constrained
+acceleration and exact kinetic/support work below displacement resolution,
+unchanged prescribed displacement with a resolved velocity reversal, and
+transactional malformed-input/cancellation handling.
 `tests/transient_support_history3.rs` covers rigid translation with damping,
 agreement with explicit core endpoints, physical frame time beyond a clamped
 table, a base-excited oscillator with both held-force pulse edges, full-support
@@ -2155,6 +2177,15 @@ acceptance, floating-point rounding, moving constraint axes, impulses, or step
 times. Direct stress/reaction/work/energy-observation and material derivatives
 are not supplied by this motion pullback. Prescribed derivatives retain the
 forward recurrence's inverse-squared-step conditioning.
+
+`pullback_acceleration_step` is the separate full-state transpose for direct
+support acceleration controls. It returns previous full q/v/a, free-force and
+endpoint prescribed-acceleration cotangents while retaining the same reduced
+transpose solve and canonical cross-mass/stiffness actions. Reversing the
+integrated support kinematics uses only `h` and `h²`, never their inverses.
+The initial coupled acceleration pullback chains unchanged. The support-adjoint
+tests check analytical gradients down to a 1e-8 s step and all ten initial,
+force and acceleration controls against actual two-step trajectory perturbations.
 
 `tests/transient_support_adjoint3.rs` checks the analytical one-free-DOF
 mass/stiffness/both-Rayleigh transpose, every initial/force/support control

@@ -106,23 +106,36 @@ fn g1_initial_acceleration_includes_mass_stiffness_and_both_damping_cross_terms(
             run.state().total_energy_j,
         );
         let energy = run.state().total_energy_j;
-        let loaded = g.assemble(&[],VolumeLoad3::None,&[(0,0.034),(3,0.012)],cx).unwrap();
-        let jump = run.apply_load_jump(&loaded,cx).unwrap();
-        close(jump.acceleration_change_l2_m_s2,0.012/0.1);
-        close(run.state().acceleration[0],expected+0.012/0.1);
-        assert_eq!(run.state().time_s,0.0); assert_eq!(run.state().step,0);
-        assert_eq!(run.state().total_energy_j,energy);
+        let loaded = g
+            .assemble(&[], VolumeLoad3::None, &[(0, 0.034), (3, 0.012)], cx)
+            .unwrap();
+        let jump = run.apply_load_jump(&loaded, cx).unwrap();
+        close(jump.acceleration_change_l2_m_s2, 0.012 / 0.1);
+        close(run.state().acceleration[0], expected + 0.012 / 0.1);
+        assert_eq!(run.state().time_s, 0.0);
+        assert_eq!(run.state().step, 0);
+        assert_eq!(run.state().total_energy_j, energy);
         let jumped = run.nodal_motion(cx).unwrap();
-        assert_eq!(jumped[0],u); assert_eq!(jumped[1],v); assert_eq!(jumped[2][0],a[0]);
-        let right = run.recover_response(FRAME,0.01,cx).unwrap();
+        assert_eq!(jumped[0], u);
+        assert_eq!(jumped[1], v);
+        assert_eq!(jumped[2][0], a[0]);
+        let right = run.recover_response(FRAME, 0.01, cx).unwrap();
         // Reaction change includes M_cf*delta(a_f) and the newly applied
         // fixed-node force, not merely minus the external force.
-        close(right.support_reactions_n[0][0]-response.support_reactions_n[0][0],
-            0.05*(0.012/0.1)-0.034);
+        close(
+            right.support_reactions_n[0][0] - response.support_reactions_n[0][0],
+            0.05 * (0.012 / 0.1) - 0.034,
+        );
         let h = 0.01;
-        let step = run.advance_with_supports(&loaded,
-            &[(0,u[0][0]+h*v[0][0]+0.5*h*h*a[0][0])],h,cx).unwrap();
-        close(step.balance_error_j,0.0);
+        let step = run
+            .advance_with_supports(
+                &loaded,
+                &[(0, u[0][0] + h * v[0][0] + 0.5 * h * h * a[0][0])],
+                h,
+                cx,
+            )
+            .unwrap();
+        close(step.balance_error_j, 0.0);
     });
 }
 
@@ -189,6 +202,219 @@ fn g1_accelerating_base_matches_an_independent_oscillator_with_second_order_erro
             assert!((3.7..4.3).contains(&ratio), "{errors:?}");
         }
         assert!(errors[2] < 5e-7);
+    });
+}
+
+#[test]
+fn g1_direct_acceleration_drives_the_complete_partitioned_equation() {
+    with_cx(false, |cx| {
+        let m = material();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let p = problem(&m, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let mut u = ZERO;
+        u[0][0] = 0.0005;
+        u[1][0] = 0.0003;
+        let mut v = ZERO;
+        v[0][0] = 0.002;
+        v[1][0] = -0.001;
+        let mut a = ZERO;
+        a[0][0] = 0.004;
+        let config = TransientConfig3 {
+            mass_damping_per_s: 0.4,
+            stiffness_damping_s: 0.006,
+            ..Default::default()
+        };
+        let mut run = load
+            .begin_transient_with_supports(&p, None, 0.0, &u, &v, &a, config, cx)
+            .unwrap();
+        let mut support = [u[0][0], v[0][0], a[0][0]];
+        let mut free = [u[1][0], v[1][0], run.state().acceleration[0]];
+        let h = 0.01;
+        let b = h * h / 4.0;
+        let mut total_work = 0.0;
+        let initial_energy = run.state().total_energy_j;
+        for acceleration in [0.02, -0.01, 0.03, 0.0] {
+            // Independent scalar partition: M_ff=.1, M_fc=.05,
+            // K_ff=10, K_fc=-10, C_ff=.1 and C_fc=-.04.
+            let support_velocity = support[1] + 0.5 * h * (support[2] + acceleration);
+            let support_displacement = support[0] + 0.5 * h * (support[1] + support_velocity);
+            let predictor = free[0] + h * free[1] + b * free[2];
+            let velocity_predictor = free[1] + 0.5 * h * free[2];
+            let force = 10.0 * support_displacement + 0.04 * support_velocity - 0.05 * acceleration;
+            let free_acceleration =
+                (force - 10.0 * predictor - 0.1 * velocity_predictor) / (0.1 + 0.05 * h + 10.0 * b);
+            free = [
+                predictor + b * free_acceleration,
+                velocity_predictor + 0.5 * h * free_acceleration,
+                free_acceleration,
+            ];
+            support = [support_displacement, support_velocity, acceleration];
+            let step = run
+                .advance_with_support_accelerations(&load, &[(0, acceleration)], h, cx)
+                .unwrap();
+            let full = run.nodal_motion(cx).unwrap();
+            for field in 0..3 {
+                close(full[field][0][0], support[field]);
+                close(full[field][1][0], free[field]);
+            }
+            assert_eq!(full[2][0][0], acceleration);
+            assert!(
+                run.recover_response(FRAME, 0.01, cx)
+                    .unwrap()
+                    .free_force_residual_n
+                    < 1e-11
+            );
+            close(step.balance_error_j, 0.0);
+            total_work += step.support_work_j - step.damping_loss_j;
+        }
+        close(run.state().total_energy_j - initial_energy, total_work);
+    });
+}
+
+#[test]
+fn g1_direct_support_acceleration_and_work_survive_unresolved_displacement() {
+    with_cx(false, |cx| {
+        let m = material();
+        let fixed: Vec<_> = (0..12).collect();
+        let p = problem(&m, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let u = [[1.0 / 1024.0, 0.0, 0.0]; 4];
+        let acceleration = [[1.0, 0.0, 0.0]; 4];
+        let config = TransientConfig3 {
+            absolute_energy_tolerance_j: 1e-30,
+            ..Default::default()
+        };
+        let mut run = load
+            .begin_transient_with_supports(&p, None, 0.0, &u, &ZERO, &acceleration, config, cx)
+            .unwrap();
+        let h = 2.0_f64.powi(-32);
+        let step = run
+            .advance_with_support_accelerations(
+                &load,
+                &[(0, 1.0), (3, 1.0), (6, 1.0), (9, 1.0)],
+                h,
+                cx,
+            )
+            .unwrap();
+        let full = run.nodal_motion(cx).unwrap();
+        assert_eq!(
+            full[0], u,
+            "the absolute displacement cannot represent this increment"
+        );
+        assert_eq!(full[1], [[h, 0.0, 0.0]; 4]);
+        assert_eq!(full[2], acceleration);
+        // rho*V = 1 kg: all support work is the exact rigid kinetic gain.
+        let energy = 0.5 * h * h;
+        assert!((step.support_work_j / energy - 1.0).abs() < 1e-12);
+        assert!((run.state().kinetic_energy_j / energy - 1.0).abs() < 1e-12);
+        assert!(step.balance_error_j.abs() < 1e-30);
+        assert_eq!(step.iterations, 0);
+    });
+}
+
+#[test]
+fn g1_fixed_displacement_endpoint_retains_resolved_predictor_drift() {
+    with_cx(false, |cx| {
+        let m = material();
+        let fixed: Vec<_> = (0..12).collect();
+        let p = problem(&m, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let displacement = 2.0_f64.powi(-10);
+        let h = 2.0_f64.powi(-32);
+        let u = [[displacement, 0.0, 0.0]; 4];
+        let velocity = [[h, 0.0, 0.0]; 4];
+        let config = TransientConfig3 {
+            absolute_energy_tolerance_j: 1e-30,
+            ..Default::default()
+        };
+        let mut run = load
+            .begin_transient_with_supports(&p, None, 0.0, &u, &velocity, &ZERO, config, cx)
+            .unwrap();
+        let initial_energy = run.state().total_energy_j;
+        let step = run
+            .advance_with_supports(
+                &load,
+                &[
+                    (0, displacement),
+                    (3, displacement),
+                    (6, displacement),
+                    (9, displacement),
+                ],
+                h,
+                cx,
+            )
+            .unwrap();
+        let full = run.nodal_motion(cx).unwrap();
+        assert_eq!(full[0], u);
+        // q1=q0 requires zero midpoint velocity. Although h*v0 is below
+        // one displacement ULP, a1=-4*v0/h remains exactly representable.
+        assert_eq!(full[1], [[-h, 0.0, 0.0]; 4]);
+        assert_eq!(full[2], [[-4.0, 0.0, 0.0]; 4]);
+        assert_eq!(step.support_work_j, 0.0);
+        assert_eq!(run.state().total_energy_j, initial_energy);
+        assert!(step.balance_error_j.abs() < 1e-30);
+    });
+}
+
+#[test]
+fn g4_direct_support_acceleration_refusals_preserve_all_motion() {
+    with_cx(false, |cx| {
+        let m = material();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let p = problem(&m, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let mut run = load
+            .begin_transient_with_supports(
+                &p,
+                None,
+                0.0,
+                &ZERO,
+                &ZERO,
+                &ZERO,
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        let before = run.state().clone();
+        let motion = run.nodal_motion(cx).unwrap();
+        for values in [
+            vec![(3, 1.0)],
+            vec![(12, 1.0)],
+            vec![(0, 1.0), (0, 2.0)],
+            vec![(1, 1.0), (0, 1.0)],
+            vec![(0, f64::NAN)],
+            vec![(0, f64::INFINITY)],
+            vec![(0, 1e20)],
+        ] {
+            assert!(
+                run.advance_with_support_accelerations(&load, &values, 0.01, cx)
+                    .is_err()
+            );
+            assert_eq!(*run.state(), before);
+            assert_eq!(run.nodal_motion(cx).unwrap(), motion);
+        }
+        with_cx(true, |cancelled| {
+            assert!(matches!(
+                run.advance_with_support_accelerations(&load, &[(0, 0.01)], 0.01, cancelled),
+                Err(TransientError3::Cancelled)
+            ));
+        });
+        assert_eq!(*run.state(), before);
+        assert_eq!(run.nodal_motion(cx).unwrap(), motion);
+        run.advance_with_support_accelerations(&load, &[(0, 0.01)], 0.01, cx)
+            .unwrap();
+        let old = run.nodal_motion(cx).unwrap();
+        run.advance_with_support_accelerations(&load, &[], 0.01, cx)
+            .unwrap();
+        let continued = run.nodal_motion(cx).unwrap();
+        assert_eq!(continued[2][0][0], 0.0);
+        assert!(continued[1][0][0] > old[1][0][0]);
+        assert!(continued[0][0][0] > old[0][0][0]);
     });
 }
 
@@ -300,7 +526,12 @@ fn g4_invalid_supports_cancel_and_incompatible_operations_preserve_the_checkpoin
             );
         }
         assert!(run.advance(&load, 0.01, cx).is_err());
-        assert_eq!(run.apply_load_jump(&load, cx).unwrap().acceleration_change_l2_m_s2, 0.0);
+        assert_eq!(
+            run.apply_load_jump(&load, cx)
+                .unwrap()
+                .acceleration_change_l2_m_s2,
+            0.0
+        );
         assert!(run.adjoint(TransientAdjointConfig3::default(), cx).is_err());
         with_cx(true, |cancelled| {
             assert_eq!(

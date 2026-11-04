@@ -78,8 +78,9 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
     /// and must be zero on free components; their initial acceleration is solved
     /// from the complete partitioned equation, including M_fc, C_fc and K_fc.
     ///
-    /// Every later endpoint must use `advance_with_supports` (or its history
-    /// adapter). Fixed components and material/thermal state remain frozen.
+    /// Every later endpoint must use `advance_with_supports`,
+    /// `advance_with_support_accelerations`, or a corresponding history adapter.
+    /// The constraint set and material/thermal state remain frozen.
     /// Prescribed motion is absolute in the reference world's Cartesian axes;
     /// no accelerating-frame or velocity-integration convention is inferred.
     /// Existing displacement, element, solve and cancellation bounds apply.
@@ -116,6 +117,12 @@ struct Endpoint {
     reactions: Vec<f64>,
 }
 
+#[derive(Clone, Copy)]
+enum SupportEndpoint {
+    Displacement,
+    Acceleration,
+}
+
 impl TetTransientRun3<'_, '_, '_, '_> {
     /// Advance to explicitly prescribed absolute displacement components [m].
     /// DOFs must be sorted, unique and fixed in the original problem. An omitted
@@ -137,6 +144,59 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         &mut self,
         load_next: &TetLoadCase3<'_, '_>,
         prescribed_dofs_m: &[(usize, f64)],
+        h_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TransientStep3, TransientError3> {
+        self.advance_support_endpoint(
+            load_next,
+            prescribed_dofs_m,
+            SupportEndpoint::Displacement,
+            h_s,
+            cx,
+        )
+    }
+
+    /// Advance with prescribed endpoint support accelerations [m/s²].
+    /// DOFs must be sorted, unique and fixed in the original problem. An omitted
+    /// fixed component has ZERO endpoint acceleration; its displacement and
+    /// velocity continue from their accepted values. Initial support velocity
+    /// and acceleration come from `begin_transient_with_supports`.
+    ///
+    /// The same beta=1/4, gamma=1/2 Newmark map integrates support motion:
+    /// v_c1=v_c0+h*(a_c0+a_c1)/2, u_c1=u_c0+h*(v_c0+v_c1)/2.
+    /// Acceleration is retained directly, including when its displacement
+    /// increment is below the precision of a nonzero support displacement.
+    /// This is appropriate for base acceleration records and finite actuator
+    /// accelerations; a velocity jump requires an impulse model instead.
+    ///
+    /// The original consistent mass, damping, stiffness, support reactions and
+    /// work gates remain coupled to the free solid. Inputs are world Cartesian
+    /// components on the fixed reference constraints, not rotating-frame forces.
+    /// An acceleration history still needs timestep refinement. Refusal or
+    /// cancellation leaves the whole accepted trajectory unchanged.
+    /// `prescribed_adjoint().pullback_acceleration_step` supplies the discrete
+    /// full-state/acceleration-control transpose for this input convention.
+    pub fn advance_with_support_accelerations(
+        &mut self,
+        load_next: &TetLoadCase3<'_, '_>,
+        prescribed_dofs_m_s2: &[(usize, f64)],
+        h_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TransientStep3, TransientError3> {
+        self.advance_support_endpoint(
+            load_next,
+            prescribed_dofs_m_s2,
+            SupportEndpoint::Acceleration,
+            h_s,
+            cx,
+        )
+    }
+
+    fn advance_support_endpoint(
+        &mut self,
+        load_next: &TetLoadCase3<'_, '_>,
+        prescribed_dofs: &[(usize, f64)],
+        kind: SupportEndpoint,
         h_s: f64,
         cx: &Cx<'_>,
     ) -> Result<TransientStep3, TransientError3> {
@@ -162,20 +222,21 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 "prescribed step must reach a distinct finite time with representable squared step",
             ));
         }
-        if prescribed_dofs_m.len() > self.problem.fixed_dofs.len() {
+        if prescribed_dofs.len() > self.problem.fixed_dofs.len() {
             return Err(TransientError3::Invalid(
                 "too many prescribed support components",
             ));
         }
         let full = previous.motion[0].len();
         let mut prior = None;
-        for &(d, u) in prescribed_dofs_m {
+        for &(d, value) in prescribed_dofs {
             check(cx)?;
             if d >= full
                 || prior.is_some_and(|p| d <= p)
                 || self.free_dofs().binary_search(&d).is_ok()
-                || !u.is_finite()
-                || u.abs() > self.config.maximum_displacement_m
+                || !value.is_finite()
+                || (matches!(kind, SupportEndpoint::Displacement)
+                    && value.abs() > self.config.maximum_displacement_m)
             {
                 return Err(TransientError3::Invalid(
                     "prescribed components must be finite, bounded, sorted, unique and fixed",
@@ -184,21 +245,36 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             prior = Some(d);
         }
         let mut candidate = previous.clone();
-        candidate.motion[0].fill(0.0);
-        for &(d, u) in prescribed_dofs_m {
+        let field = match kind {
+            SupportEndpoint::Displacement => 0,
+            SupportEndpoint::Acceleration => 2,
+        };
+        candidate.motion[field].fill(0.0);
+        for &(d, value) in prescribed_dofs {
             check(cx)?;
-            candidate.motion[0][d] = u;
+            candidate.motion[field][d] = value;
         }
         for &d in self.problem.fixed_dofs {
             check(cx)?;
-            let predictor = number(
-                previous.motion[0][d] + h_s * previous.motion[1][d] + b * previous.motion[2][d],
-            )?;
-            candidate.motion[2][d] = number((candidate.motion[0][d] - predictor) / b)?;
+            if matches!(kind, SupportEndpoint::Displacement) {
+                // Subtract the absolute endpoints before the small predictor
+                // drift. Adding that drift to a nonzero displacement first
+                // can round it away and violate the prescribed endpoint.
+                let increment = number(candidate.motion[0][d] - previous.motion[0][d])?;
+                let correction = number((-h_s).mul_add(previous.motion[1][d], increment))?;
+                candidate.motion[2][d] =
+                    number((-b).mul_add(previous.motion[2][d], correction) / b)?;
+            }
             candidate.motion[1][d] = number(
                 previous.motion[1][d]
-                    + 0.5 * h_s * (previous.motion[2][d] + candidate.motion[2][d]),
+                    + h_s * (0.5 * previous.motion[2][d] + 0.5 * candidate.motion[2][d]),
             )?;
+            if matches!(kind, SupportEndpoint::Acceleration) {
+                candidate.motion[0][d] = number(
+                    previous.motion[0][d]
+                        + h_s * (0.5 * previous.motion[1][d] + 0.5 * candidate.motion[1][d]),
+                )?;
+            }
         }
         self.advance_impl(load_next, Some(candidate), h_s, cx)
     }
@@ -227,12 +303,21 @@ impl TetTransientRun3<'_, '_, '_, '_> {
 
     /// A zero-duration force change retains support kinematics and energy but
     /// changes reactions, including the consistent-mass free acceleration term.
-    pub(super) fn load_jump_supports(&self, acceleration: &[f64],
-        full_force: &[(usize, f64)], cx: &Cx<'_>)
-        -> Result<Option<PrescribedMotion3>, TransientError3> {
-        let Some(supports) = &self.prescribed else { return Ok(None); };
-        let endpoint = self.endpoint(supports,
-            [&self.state.displacement, &self.state.velocity, acceleration], full_force, cx)?;
+    pub(super) fn load_jump_supports(
+        &self,
+        acceleration: &[f64],
+        full_force: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<Option<PrescribedMotion3>, TransientError3> {
+        let Some(supports) = &self.prescribed else {
+            return Ok(None);
+        };
+        let endpoint = self.endpoint(
+            supports,
+            [&self.state.displacement, &self.state.velocity, acceleration],
+            full_force,
+            cx,
+        )?;
         let mut candidate = supports.clone();
         candidate.reactions = endpoint.reactions;
         check(cx)?;
@@ -358,8 +443,11 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             if d % 256 == 0 {
                 check(cx)?;
             }
-            dq[d] = number(endpoint.motion[0][d] - old[0][d])?;
             midpoint[1][d] = number(0.5 * old[1][d] + 0.5 * endpoint.motion[1][d])?;
+            // The accepted Newmark increment is h*v_mid. Subtracting rounded
+            // absolute displacements can erase resolved acceleration-driven
+            // support work about a nonzero displacement datum.
+            dq[d] = number(h * midpoint[1][d])?;
         }
         let actions = self.problem.apply_full_kinematics(&midpoint, cx)?;
         let mut damping = 0.0;

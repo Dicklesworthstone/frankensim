@@ -138,6 +138,127 @@ fn g1_support_transpose_retains_exact_mass_stiffness_and_both_rayleigh_cross_ter
 }
 
 #[test]
+fn g1_acceleration_control_transpose_retains_coupling_without_inverse_step_scaling() {
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6., 60., 0., [83; 32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let load = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let run = load
+            .begin_transient_with_supports(&problem, None, 0., &ZERO, &ZERO, &ZERO, config(), cx)
+            .unwrap();
+        let adjoint = run
+            .prescribed_adjoint(Default::default(), Default::default(), cx)
+            .unwrap();
+        let mut seed = zero_seed();
+        seed.q[1][0] = 0.7;
+        seed.v[1][0] = -0.2;
+        seed.a[1][0] = 0.03;
+        seed.q[0][0] = 0.11;
+        seed.v[0][0] = -0.07;
+        seed.a[0][0] = 0.02;
+        for h in [0.1, 1e-4, 1e-8] {
+            let b = h * h / 4.;
+            let d = h / 2.;
+            let lambda = (b * 0.7 - d * 0.2 + 0.03) / (0.1 + d * 0.1 + b * 10.);
+            let q = 0.11 + 10. * lambda;
+            let v = -0.07 + 0.04 * lambda;
+            let a = 0.02 - 0.05 * lambda;
+            let step = adjoint.pullback_acceleration_step(h, &seed, cx).unwrap();
+            close(step.force[0], lambda);
+            close(step.prescribed_acceleration[0], a + b * q + d * v);
+            close(step.previous.q[0][0], q);
+            close(step.previous.v[0][0], v + h * q);
+            close(step.previous.a[0][0], b * q + d * v);
+            assert!(step.true_relative_residual < 1e-11);
+        }
+    });
+}
+
+#[test]
+fn g3_acceleration_driven_support_gradient_matches_native_trajectory_perturbations() {
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6., 60., 0., [83; 32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let mut seed = zero_seed();
+        seed.q[0][0] = 0.11;
+        seed.q[1][0] = 0.7;
+        seed.v[0][0] = -0.07;
+        seed.v[1][0] = -0.2;
+        seed.a[0][0] = 0.02;
+        seed.a[1][0] = 0.03;
+        // Initial constrained q/v/a, free q/v, initial force, then two
+        // endpoint support accelerations and two endpoint free forces.
+        let input = [
+            0.001, 0.002, 0.004, 0.0003, -0.001, 0.012, 0.02, -0.01, 0.015, 0.008,
+        ];
+        let times = [0.02, 0.03];
+        let evaluate = |x: [f64; 10]| {
+            let mut u = ZERO;
+            let mut v = ZERO;
+            let mut a = ZERO;
+            u[0][0] = x[0];
+            v[0][0] = x[1];
+            a[0][0] = x[2];
+            u[1][0] = x[3];
+            v[1][0] = x[4];
+            let initial = geometry
+                .assemble(&[], VolumeLoad3::None, &[(3, x[5])], cx)
+                .unwrap();
+            let mut run = initial
+                .begin_transient_with_supports(&problem, None, 0., &u, &v, &a, config(), cx)
+                .unwrap();
+            for i in 0..2 {
+                let load = geometry
+                    .assemble(&[], VolumeLoad3::None, &[(3, x[8 + i])], cx)
+                    .unwrap();
+                run.advance_with_support_accelerations(&load, &[(0, x[6 + i])], times[i], cx)
+                    .unwrap();
+            }
+            let motion = run.nodal_motion(cx).unwrap();
+            let value = field_dot(&seed.q, &motion[0])
+                + field_dot(&seed.v, &motion[1])
+                + field_dot(&seed.a, &motion[2]);
+            (
+                value,
+                run.prescribed_adjoint(Default::default(), Default::default(), cx)
+                    .unwrap(),
+            )
+        };
+        let (_, adjoint) = evaluate(input);
+        let mut gradient = [0.0; 10];
+        let mut previous = seed.clone();
+        for i in (0..2).rev() {
+            let step = adjoint
+                .pullback_acceleration_step(times[i], &previous, cx)
+                .unwrap();
+            gradient[6 + i] = step.prescribed_acceleration[0];
+            gradient[8 + i] = step.force[0];
+            previous = step.previous;
+        }
+        let initial = adjoint.pullback_initialization(&previous, cx).unwrap();
+        gradient[..6].copy_from_slice(&[
+            initial.initial.q[0][0],
+            initial.initial.v[0][0],
+            initial.initial.a[0][0],
+            initial.initial.q[1][0],
+            initial.initial.v[1][0],
+            initial.force[0],
+        ]);
+        for i in 0..input.len() {
+            let mut plus = input;
+            let mut minus = input;
+            plus[i] += 1e-6;
+            minus[i] -= 1e-6;
+            close(gradient[i], (evaluate(plus).0 - evaluate(minus).0) / 2e-6);
+        }
+    });
+}
+
+#[test]
 fn g3_full_nodal_objective_reverses_all_controls_through_multiple_native_steps() {
     with_cx(false, |cx| {
         let fixed = [0, 1, 2, 4, 5, 8];
