@@ -3889,6 +3889,43 @@ shared controls against independently configured native camera/probe paths.
 These checks retain the existing ideal-projector and unknown calibration/model
 error scope; no measured performance or manufactured-lens accuracy is claimed.
 
+#### Shared projector component controls
+
+`FixtureOpticalState` can replace a gobo and independently retain, remove or
+replace each projector's native beam splitter and diffuser through
+`FixtureOpticOverride`. Retained components stay individually authored.
+Replacement gobos use their declared physical dimensions in each emitter's
+optical frame; they are not implicitly fitted to the former mask. Frames,
+geometry, spectra and clear-output calibration remain emitter-specific.
+
+The final gobo, splitter, diffuser and scaled lens distances are applied
+atomically by `ThinLensProjector::with_optical_state`. No obsolete intermediate
+diffuser is prepared. Existing `PhotometricAreaEmitter::with_projector` derives
+emitted lumens from retained clear-output flux and the final passive optical
+transmission, then ordinary shared dimming and spectral filtering apply.
+Opening an optic can restore its blocked power, but cannot restore individual
+or shared dimmer/filter losses. Default component policies retain the original
+assembly arithmetic. Unsupported point and Lambertian emitters refuse with
+fixture/emitter identity, including dark sources; cancellation publishes no
+partial rig.
+
+Each immutable `GoboTransmission` shares a lazily prepared positive integral
+across projector clones, diffuser laws and lens distances. Successful
+preparation is cached; allocation failures are not. A different gobo owns a
+different cache, and semantic equality ignores preparation state. Source
+evaluation has no cache access or lock. Cached storage remains alive with the
+gobo; concurrent first preparations can temporarily build duplicate trees.
+This is an allocation-sharing property, not a measured throughput claim.
+
+The optical laws retain their existing scope: achromatic piecewise-constant
+gobos, ideal paraxial beam replication and passive box-slope diffusion. They
+do not add iris/shutter geometry, wavelength-dependent prism refraction,
+measured frost BSDFs or calibrated hardware control channels. Regressions
+exercise transformed mixed-calibration projectors through native camera and
+probe paths, component power accounting, cache sharing, refusal/cancellation,
+and a 300-fixture rig with 24 emitters per fixture. Calibration, discretization
+and total physical error remain unqualified.
+
 #### Bounded direct-area references for fixture rigs
 
 `UnoccludedAreaReference::new_with_rig` and

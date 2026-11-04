@@ -40,6 +40,8 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 #[path = "photometric_fixtures/lens_controls.rs"]
 mod lens_controls;
+#[path = "photometric_fixtures/optical_components.rs"]
+mod optical_components;
 
 fn with_cx<R>(run: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();

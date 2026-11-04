@@ -9,8 +9,9 @@
 //!
 //! Shared optics are a linear dimmer and a spatially uniform passive spectral
 //! filter, applied independently to each source's already calibrated spectrum.
-//! Optional lens-distance scales retune each finite projector through its native
-//! owner while sharing prepared assets and retaining individual optical laws.
+//! Optional lens-distance scales and component overrides retune each finite
+//! projector through its native owner. Components not explicitly overridden
+//! retain each emitter's authored optical law and shared prepared assets.
 //! These controls do not represent a shared refracting lens or interaction
 //! between emitters. Assembly does not redistribute power between emitters.
 //! Reassemble from the original fixture data when controls change.
@@ -25,7 +26,10 @@ use crate::instances::{GeometryInstance, InstanceError, RigidTransform};
 use crate::tracer::{Material, Primitive, Shape};
 
 use super::CompensatedSum;
-use super::area::PhotometricAreaEmitter;
+use super::area::{
+    GoboTransmission, ParaxialBeamSplitter, ParaxialBoxDiffuser, PhotometricAreaEmitter,
+    ThinLensProjector,
+};
 use super::source::{PhotometricSource, SPECTRAL_BINS, SourceError};
 
 /// Caller-owned fixture identity. Zero is refused at assembly.
@@ -81,12 +85,54 @@ pub struct FixtureGeometry {
     pub material: Material,
 }
 
+/// Explicit control of one optional native projector component.
+///
+/// Retaining a component preserves each emitter's individually authored state.
+/// Removing or replacing it recomputes emitted power from clear-output
+/// calibration; previous dimming and spectral attenuation are never undone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FixtureOpticOverride<T> {
+    /// Preserve the component supplied by each emitter.
+    Retain,
+    /// Remove the component and its passive loss.
+    Remove,
+    /// Use this validated native component for every projector in the fixture.
+    Replace(T),
+}
+
+impl<T> Default for FixtureOpticOverride<T> {
+    fn default() -> Self {
+        Self::Retain
+    }
+}
+
+impl<T> FixtureOpticOverride<T> {
+    fn resolve<'a>(&'a self, original: Option<&'a T>) -> Option<&'a T> {
+        match self {
+            Self::Retain => original,
+            Self::Remove => None,
+            Self::Replace(value) => Some(value),
+        }
+    }
+
+    fn is_retained(&self) -> bool {
+        matches!(self, Self::Retain)
+    }
+}
+
 /// Passive optical state common to every emitter in one fixture.
+///
+/// Shared attenuation applies to all source kinds. Lens and component controls
+/// require finite projectors and retain their individual frames, calibration,
+/// spectra and any optical components not explicitly overridden.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixtureOpticalState {
     dimmer: f64,
     transmittance: [f64; SPECTRAL_BINS],
     lens_scale: [f64; 2],
+    gobo: Option<GoboTransmission>,
+    beam_splitter: FixtureOpticOverride<ParaxialBeamSplitter>,
+    diffuser: FixtureOpticOverride<ParaxialBoxDiffuser>,
 }
 
 impl Default for FixtureOpticalState {
@@ -95,6 +141,9 @@ impl Default for FixtureOpticalState {
             dimmer: 1.0,
             transmittance: [1.0; SPECTRAL_BINS],
             lens_scale: [1.0; 2],
+            gobo: None,
+            beam_splitter: FixtureOpticOverride::Retain,
+            diffuser: FixtureOpticOverride::Retain,
         }
     }
 }
@@ -115,8 +164,93 @@ impl FixtureOpticalState {
         Ok(Self {
             dimmer,
             transmittance,
-            lens_scale: [1.0; 2],
+            ..Self::default()
         })
+    }
+
+    /// Replace each projector's gobo with this validated passive map.
+    ///
+    /// Its dimensions are physical metres in each emitter's optical frame;
+    /// there is no implicit rescaling to the original map. Clear-output flux,
+    /// emitter frames and unspecified components remain individually authored.
+    /// A transparent replacement opens the gobo without restoring power lost
+    /// to a dimmer, spectral filter, retained splitter or retained diffuser.
+    #[must_use]
+    pub fn with_gobo(mut self, gobo: GoboTransmission) -> Self {
+        self.gobo = Some(gobo);
+        self
+    }
+
+    /// Retain, remove or replace each projector's native beam splitter.
+    /// Beam offsets remain in each emitter's optical slope coordinates.
+    #[must_use]
+    pub fn with_beam_splitter(
+        mut self,
+        control: FixtureOpticOverride<ParaxialBeamSplitter>,
+    ) -> Self {
+        self.beam_splitter = control;
+        self
+    }
+
+    /// Retain, remove or replace each projector's native slope-space diffuser.
+    /// Preparation shares immutable gobo integrals across emitters; distinct
+    /// lens distances still determine each emitter's metric diffusion width.
+    #[must_use]
+    pub fn with_diffuser(mut self, control: FixtureOpticOverride<ParaxialBoxDiffuser>) -> Self {
+        self.diffuser = control;
+        self
+    }
+
+    /// Shared replacement gobo, or `None` to retain individually authored maps.
+    #[must_use]
+    pub const fn gobo_override(&self) -> Option<&GoboTransmission> {
+        self.gobo.as_ref()
+    }
+
+    /// Explicit policy for each emitter's native beam splitter.
+    #[must_use]
+    pub const fn beam_splitter_override(&self) -> &FixtureOpticOverride<ParaxialBeamSplitter> {
+        &self.beam_splitter
+    }
+
+    /// Explicit policy for each emitter's native diffuser.
+    #[must_use]
+    pub const fn diffuser_override(&self) -> &FixtureOpticOverride<ParaxialBoxDiffuser> {
+        &self.diffuser
+    }
+
+    fn has_component_overrides(&self) -> bool {
+        self.gobo.is_some() || !self.beam_splitter.is_retained() || !self.diffuser.is_retained()
+    }
+
+    fn lens_distances(&self, projector: &ThinLensProjector) -> Result<[f64; 2], SourceError> {
+        let distances = [
+            projector.gobo_distance_m() * self.lens_scale[0],
+            projector.focal_length_m() * self.lens_scale[1],
+        ];
+        if distances
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(SourceError::NumericalRange);
+        }
+        Ok(distances)
+    }
+
+    fn controlled_projector(
+        &self,
+        original: &ThinLensProjector,
+    ) -> Result<ThinLensProjector, SourceError> {
+        let [distance, focal_length] = self.lens_distances(original)?;
+        original.with_optical_state(
+            distance,
+            focal_length,
+            self.gobo.as_ref().unwrap_or(original.gobo()).clone(),
+            self.beam_splitter
+                .resolve(original.beam_splitter())
+                .cloned(),
+            self.diffuser.resolve(original.diffuser()).copied(),
+        )
     }
 
     /// Scale each finite projector's original gobo distance and focal length.
@@ -238,6 +372,12 @@ pub enum FixtureError {
     /// A point angular law or Lambertian surface has no lens distances to scale.
     UnsupportedLensControl {
         /// Stable fixture and emitter identities, including a dark emitter.
+        identity: FixtureEmitterIdentity,
+    },
+    /// Shared gobo, splitter or diffuser controls require an authored finite
+    /// projector, even when an unsupported point or Lambertian source is dark.
+    UnsupportedProjectorControl {
+        /// Stable fixture and emitter identities.
         identity: FixtureEmitterIdentity,
     },
     /// Native geometry object identities must be unique across the rig/scene.
@@ -392,6 +532,9 @@ impl PhotometricRig {
                 if fixture.optics.lens_scale != [1.0; 2] {
                     return Err(FixtureError::UnsupportedLensControl { identity });
                 }
+                if fixture.optics.has_component_overrides() {
+                    return Err(FixtureError::UnsupportedProjectorControl { identity });
+                }
                 let source = emitter
                     .source
                     .transformed(fixture.transform)
@@ -416,29 +559,44 @@ impl PhotometricRig {
                 if geometry >= fixture.geometry.len() || !emitting_geometry.insert(geometry) {
                     return Err(FixtureError::InvalidSurfaceBinding { identity, geometry });
                 }
-                let mut source = emitter
-                    .source
+                // Apply the final optical combination before attenuation. A
+                // removed opaque optic must not hide the retained clear-output
+                // calibration, and obsolete intermediate frost states must not
+                // be prepared. The original authored source stays unchanged.
+                let component_controls = fixture.optics.has_component_overrides();
+                let controlled_source = if component_controls {
+                    let original = emitter
+                        .source
+                        .projector()
+                        .ok_or(FixtureError::UnsupportedProjectorControl { identity })?;
+                    let projector = fixture
+                        .optics
+                        .controlled_projector(original)
+                        .map_err(|error| FixtureError::Source { identity, error })?;
+                    Some(
+                        emitter
+                            .source
+                            .clone()
+                            .with_projector(projector)
+                            .map_err(|error| FixtureError::Source { identity, error })?,
+                    )
+                } else {
+                    None
+                };
+                let mut source = controlled_source
+                    .as_ref()
+                    .unwrap_or(&emitter.source)
                     .dimmed(fixture.optics.dimmer)
                     .and_then(|source| source.filtered(fixture.optics.transmittance))
                     .map_err(|error| FixtureError::Source { identity, error })?;
-                if fixture.optics.lens_scale != [1.0; 2] {
+                if !component_controls && fixture.optics.lens_scale != [1.0; 2] {
                     let projector = source
                         .projector()
                         .ok_or(FixtureError::UnsupportedLensControl { identity })?;
-                    let [gobo_scale, focal_scale] = fixture.optics.lens_scale;
-                    let distances = [
-                        projector.gobo_distance_m() * gobo_scale,
-                        projector.focal_length_m() * focal_scale,
-                    ];
-                    if distances
-                        .iter()
-                        .any(|value| !value.is_finite() || *value <= 0.0)
-                    {
-                        return Err(FixtureError::Source {
-                            identity,
-                            error: SourceError::NumericalRange,
-                        });
-                    }
+                    let distances = fixture
+                        .optics
+                        .lens_distances(projector)
+                        .map_err(|error| FixtureError::Source { identity, error })?;
                     source = source
                         .with_lens_distances(distances[0], distances[1])
                         .map_err(|error| FixtureError::Source { identity, error })?;
