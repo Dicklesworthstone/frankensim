@@ -47,6 +47,17 @@ differentiable lift). Pure Rust throughout.
   air-relative catalog data need an explicit conversion/refit before physical
   accuracy is claimed. There is no built-in measured-glass preset or claim for
   anomalous/absorptive resonance, transient propagation or pulse broadening.
+  `SellmeierIor::try_new_in_band` retains an explicit positive finite vacuum-
+  wavelength interval for original oscillator coefficients and analytic group
+  index. The closed interval excludes every active pole; monotone endpoint
+  checks retain the transparent `[1, 3]` phase-index domain. Nonrepresentable
+  squared-micrometre bounds and queries outside the source interval refuse.
+  No table fit or extrapolation is introduced through native fields, interfaces,
+  coherent films or thermal-source consumers. Effective glass support still
+  intersects original absorption. The legacy constructor retains its visible
+  arithmetic and identities; nondefault bands enter material, camera, film and
+  thermal optical identities. This does not broaden the CIE observer or confer
+  measurement authority on supplied coefficients.
   `TabulatedIor` extends the same phase-law owner with nine ordered absolute
   index samples spanning exactly 380--780 nm, with gaps at most 100 nm and
   bounded linear interpolation. Every knot is retained in material identity.
@@ -1904,6 +1915,37 @@ differentiable lift). Pure Rust throughout.
   energy and replay. This does not add refractive multi-interface source
   connectors or participating fields inside a glass body.
 
+## Material thermo-optic refraction
+
+With `material-state`, `MaterialThermoOpticField` binds the original reference
+glass and `fs-material::thermo_optic::SchottThermoOpticLaw` to one immutable
+thermal snapshot. Its usable wavelengths are the intersection of reference
+phase/absorption and thermo-optic support. Preparing a wavelength evaluates
+reference dispersion and the spectral material coefficients once; optical
+stages still query the actual spatial temperature and its analytic derivatives.
+
+The original gradient-index and ray-bundle owners consume
+`grad(n) = n_T grad(T)` and
+`Hess(n) = n_T Hess(T) + n_TT grad(T) grad(T)^T`, including mixed terms.
+Phase and available group optical distance retain the original material law;
+absorption remains the explicitly declared reference law. The same bound
+source supplies the native temperature trait. No finite-difference field,
+temperature-dependent absorption, moving state, expansion or stress response
+is invented. Each material/contact discontinuity requires a separate region
+and the native boundary event, not a smooth integration across the jump.
+
+`thermo_optic::conduction::PlanarConductionTemperatureField` borrows one original
+`GeneratedLayeredWallSolution` profile, with an explicit world origin and unit
+axis. The conduction owner supplies temperature, Fourier gradient and
+curvature; the bridge only rotates them. Prepared profile queries are O(1),
+allocation-free and bounded by the original layer and source temperature span.
+Contact jumps and exact stored face values survive. Even a constant-temperature
+bounded layer cannot activate an unbounded uniform-field shortcut.
+
+Controls run original conduction solves through analytic infrared dispersion,
+thermal refraction and native bundle focusing, with independent path/footprint,
+phase/group, Beer attenuation, mixed-Hessian, contact and domain references.
+
 ## Invariants
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy
@@ -2234,13 +2276,28 @@ The exact legacy one-rectangle/no-environment lighting branch retains its
 original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
-expectation.
+expectation. Tracer bit-semantics v4 and bidirectional semantics v10 retain
+ordinary emitting geometry's authored surface scattering. Source radiance is
+added at a hit with its existing emitter MIS weight; reflection/transmission
+then uses the original diffuse, GGX, conductor/coating, brushing or dielectric
+owner. An emitting surface can be an intermediate vertex on either BDPT
+subpath; its emission is a separate source endpoint contribution for the
+corresponding camera prefix. Emitting dielectric solids also participate in
+initial-medium discovery and Beer absorption. An exact black
+`SpectralDiffuse` material supplies an opaque emission-only surface. These
+authored relative-radiance sources do not infer an equilibrium thermal law;
+thermal and calibrated photometric source ownership remains unchanged.
+The five emitter-continuation regressions are authored but not yet executed:
+the native feature build was killed while compiling the pinned runtime under
+the available memory limit. The Cornell reference remains pinned to tracer
+v3 and must be reproduced in debug and release before a justified v4 re-freeze;
+neither its digest nor its evidence pin has been replaced without that proof.
 Current scalar scene-integrator no-claims: no gradient-index propagation or arbitrary overlapping media,
 no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
-are single-scattering without multiple-scattering compensation, and standalone
-RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse
-reflection. Dielectric tracer bit-semantics v14 retains v13's isotropic
+are single-scattering without multiple-scattering compensation. Thermal
+emitters retain their reciprocal diffuse reflection. Dielectric tracer
+bit-semantics v14 retains v13's isotropic
 view-conditioned visible-normal rough-dielectric proposal, exact environment
 endpoint, finite-rectangle one-internal-reflection manifold connector,
 coplanar-interface canonicalization, and support-preserving `T-R-T` cone cull.
@@ -4274,6 +4331,28 @@ with vacuum wavelength in metres; RGB-derived absorption refuses. Every spectral
 knot and independent midpoint uses the source's wavelength-dependent index.
 Temperature-dependent source values enter when the material is resolved and
 bound; a changed state or particle geometry requires rebinding.
+
+`MaterialParticleScattering::try_spectral` consumes the original
+`SpectralComplexIndexStatePoint` with explicit wavelength/full-property-key
+bindings. Arbitrary supported UV, visible and infrared bands enter without
+relabeling a visible source or fitting a replacement material. Optical and
+bulk-density bundles must share the exact card, complete physical condition and
+quantity conventions. The binding identity includes the original wavelength/key
+map as well as the accepted state, density, host and radius-number distribution.
+An exactly zero extinction index remains zero particle absorption.
+
+`source_spectrum` uses the SAME native Mie preparation owner for 2--16 caller
+knots inside that original support. It evaluates material n/k at every knot and
+fresh midpoint, then retains the exact output support in absorption, scattering
+and angular tables. Material-state refresh keeps original claim pins; rebinding
+after temperature changes updates optical response and particle bulk density
+together. Existing cell palettes, constituent mixtures, LTE emission and
+constituent heat deposition consume these spectra without new transport loops.
+Source-knot interpolation and prepared Mie interpolation remain separate
+approximations; midpoint diagnostics do not certify unsampled resonances.
+Synthetic G0/G1/G3 regressions cover infrared Rayleigh absorption, temperature
+refresh, source-map identity, two-temperature Kirchhoff transport, and exclusion
+of purely scattering constituents from heat, plus source/state/work refusals.
 
 `MaterialParticleSpectrum::bind_ambient_grid` supplies native absorption,
 scattering and optional LTE emission from the prepared spectrum and borrowed
