@@ -13180,3 +13180,22 @@ interior elastic field is supplied. Nine new native controls and 19 existing
 controls pass, including an independent six-boundary-equation oracle, normal
 and zero-thickness limits, critical neighborhoods, reciprocity, porous loss,
 thick evanescence and a narrow air-loaded flexural tunneling resonance.
+
+## Explicit broadband molecular dispersion
+
+`MolecularCauchyDispersion::try_new_in_band` admits an explicitly supplied
+normal-dispersion molecular fit on its original positive finite vacuum-wavelength
+interval, including ultraviolet and infrared support. The original reference
+wavelength and number density remain attached, and the reference must lie inside
+the fit interval. Monotone endpoint checks retain the dilute refractivity and
+representable-derivative requirements. The existing `try_new` and unmodified
+constant-polarizability sources retain their visible-domain behavior.
+
+After every component has an explicit fit, `MolecularRefractionModel` uses the
+intersection of those original source bands. Analytic phase/group indices,
+spatial composition derivatives and independent molecular cross sections share
+one wavelength preparation. A zero-shape explicit broadband source still uses
+its molecular volume for nonvisible scattering; visible constant-source arithmetic
+is retained. The original wavelength-independent depolarization and nonabsorbing,
+dilute independent-molecule assumptions remain. No measured dataset, resonance
+model, gas absorption or unbounded extrapolation is inferred.

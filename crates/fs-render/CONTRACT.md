@@ -6939,3 +6939,18 @@ state. These sources currently use emitter-hit transport; no thermal area-light
 proposal or additional cooling owner is inferred. Detector surface transport
 remains available without `volumes`; only the scattering-specific detector
 APIs and corresponding tests require that feature.
+
+## Broadband molecular refraction through native GRIN transport
+
+The original material gas-composition field consumes explicitly supported
+broadband molecular Cauchy sources through its existing prepared-wavelength path.
+Phase index, true group index, composition gradient and Hessian keep the same
+Lorentz--Lorenz mixture; no phase-index table, extra gas law or per-stage spectral
+fit is introduced. Material wavelength refusal remains authoritative and a
+prepared field admits only its retained wavelength. Optical temperature/density
+and composition continue to come from the original frozen reconstruction.
+
+Focused native controls cover 300, 1550 and 2500 nm phase/group paths and analytic
+ray-bundle footprints, with independent material scattering and source-domain
+controls. These are explicit synthetic fits, not measured-gas accuracy claims.
+Molecular scattering stays distinct from true absorption.

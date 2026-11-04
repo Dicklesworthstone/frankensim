@@ -36,6 +36,28 @@ impl MolecularCauchyDispersion {
         let [lo, hi] = wavelength_range_nm;
         wavelength(lo)?;
         wavelength(hi)?;
+        Self::try_new_in_band(reference, b_um2, c_um4, wavelength_range_nm, source_identity)
+    }
+
+    /// Admit the original fit on an explicit positive finite vacuum-wavelength
+    /// band, including ultraviolet or infrared support. The original molecular
+    /// reference must lie inside that band; its source and number density remain
+    /// unchanged. No visible fit is extrapolated and no resonance or absorption
+    /// is supplied. Molecular depolarization remains wavelength independent.
+    /// The source must justify this normal-dispersion Cauchy model
+    /// over the complete interval. Monotone endpoint admission retains the
+    /// original dilute refractivity and representable derivative requirements.
+    pub fn try_new_in_band(
+        reference: MolecularRayleigh,
+        b_um2: f64,
+        c_um4: f64,
+        wavelength_range_nm: [f64; 2],
+        source_identity: ContentHash,
+    ) -> Result<Self, GasScatteringError> {
+        let [lo, hi] = wavelength_range_nm;
+        if !lo.is_finite() || lo <= 0.0 || !hi.is_finite() || hi <= 0.0 {
+            return Err(GasScatteringError::Wavelength);
+        }
         if !b_um2.is_finite()
             || b_um2 < 0.0
             || !c_um4.is_finite()
@@ -162,7 +184,9 @@ impl MolecularRefractionModel {
             return Err(GasScatteringError::Components);
         }
         let mut result = self.clone();
-        let mut range = [380.0_f64, 780.0_f64];
+        // Every component has an explicit fit. Their original bands, rather
+        // than the legacy reference approximation, determine common support.
+        let mut range = rows[0].wavelength_range_nm;
         let mut hash = DomainHasher::new("org.frankensim.material.molecular-cauchy-refraction.v1");
         hash.update(self.reference_identity.as_bytes());
         for (component, &row) in result.components.iter_mut().zip(rows) {
@@ -190,7 +214,12 @@ impl MolecularRefractionModel {
         wavelength_nm: f64,
         basis: PartialDensityBasis,
     ) -> Result<MolecularRefractionWavelength<'_>, GasScatteringError> {
-        wavelength(wavelength_nm)?;
+        if self.wavelength_range_nm[0] >= 380.0 && self.wavelength_range_nm[1] <= 780.0 {
+            // Preserve the legacy visible owner's refusal semantics.
+            wavelength(wavelength_nm)?;
+        } else if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
+            return Err(GasScatteringError::Wavelength);
+        }
         if !(self.wavelength_range_nm[0]..=self.wavelength_range_nm[1]).contains(&wavelength_nm) {
             return Err(GasScatteringError::RefractivityDomain);
         }
@@ -301,3 +330,5 @@ impl MolecularRefractionWavelength<'_> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod spectral_tests;

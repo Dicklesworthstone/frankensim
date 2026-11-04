@@ -6,6 +6,8 @@ use fs_material::gas::GasSpec;
 use fs_material::gas_scattering::{AVOGADRO_PER_MOL, MolecularRayleigh, MolecularRayleighMixture};
 use fs_qty::semantic::{Composition, CompositionBasis};
 
+mod spectral_band;
+
 fn model() -> MolecularRefractionModel {
     let mut specs = [GasSpec::dry_air_ussa1976(); 2];
     specs[1].molar_mass *= 2.0;

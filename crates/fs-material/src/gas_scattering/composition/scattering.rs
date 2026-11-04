@@ -68,11 +68,14 @@ impl MolecularRefractionWavelength<'_> {
             positive_result(local_mass)?;
             mass_density_kg_m3 += local_mass;
             let optical = component.optical();
-            let sigma = if component
-                .dispersion()
-                .is_none_or(|shape| shape.coefficients() == [0.0; 2])
+            let sigma = if (380.0..=780.0).contains(&self.wavelength_nm())
+                && component
+                    .dispersion()
+                    .is_none_or(|shape| shape.coefficients() == [0.0; 2])
             {
-                // Keep the original nondispersive per-molecule arithmetic.
+                // Keep original visible, nondispersive arithmetic. An explicit
+                // zero-shape fit can also authorize a wider band; there the
+                // same prepared molecular volume enters the formula below.
                 optical.cross_section_m2(self.wavelength_nm())?
             } else {
                 let volume = self.molecular_volumes_m3[i];
