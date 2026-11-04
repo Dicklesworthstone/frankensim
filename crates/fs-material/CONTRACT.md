@@ -10478,6 +10478,13 @@ incident fluid, and porous constitutive responses still use the original pore
 fluid. No viscosity, thermal loss or source calibration is inferred from the
 lossless finite-layer view.
 
+Critical-angle classification retains the original sound-speed pair. Factored
+source contrast preserves nearly matched grazing propagation, and only
+cancelling critical evaluations use the existing double-double precision ladder
+with exact power-of-two speed scaling. A rounded speed ratio cannot decide
+whether a channel carries outgoing power. Equal-medium and normal-incidence
+fast paths remain exact; no angular band is clipped to artificial criticality.
+
 Normal-wave matching retains finite transmission through evanescent layers
 (frustrated total internal reflection). Such decay is not heat. At critical
 incidence, the transfer uses the finite pressure/normal-velocity limit instead

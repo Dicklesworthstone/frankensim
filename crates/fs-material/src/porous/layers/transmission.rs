@@ -115,7 +115,12 @@ impl<'a> TransmittingLayers<'a> {
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
             return Err(bad("layer transmission needs incidence cosine in (0,1]"));
         }
-        let q = normal_wavenumber_ratio(self.speed_ratio, cosine);
+        let q = normal_wavenumber_ratio(
+            self.speed_ratio,
+            cosine,
+            self.prepared.fluid().acoustic().sound_speed_m_s(),
+            self.receiver.sound_speed_m_s(),
+        );
         let receiving_kn = q.scale(self.prepared.k0);
         if !finite(receiving_kn) || (q != C64::ZERO && receiving_kn == C64::ZERO) {
             return Err(bad("receiving normal wavenumber is unrepresentable"));

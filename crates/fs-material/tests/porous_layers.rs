@@ -451,12 +451,9 @@ fn receiving_interface_obeys_pressure_velocity_refraction_and_critical_limits() 
         );
         assert_eq!(response.absorbed_fraction, 0.0);
         assert!((response.reflected_fraction + response.transmitted_fraction - 1.0).abs() < 2e-14);
-        if cosine == 0.6 {
-            assert_eq!(response.receiving_normal_wavenumber_rad_m, C64::ZERO);
-            near(response.pressure_reflection, C64::ONE, 1e-15);
-            near(response.pressure_transmission, C64::from_re(2.0), 1e-15);
-            assert_eq!(response.transmitted_fraction, 0.0);
-        } else if cosine < 0.6 {
+        // Binary64 0.6 lies just below the exact critical cosine 3/5.
+        // Its nonzero evanescent normal component must not be rounded away.
+        if cosine <= 0.6 {
             assert!(response.receiving_normal_wavenumber_rad_m.im < 0.0);
             assert_eq!(response.receiving_normal_wavenumber_rad_m.re, 0.0);
             assert_eq!(response.transmitted_fraction, 0.0);
@@ -467,6 +464,103 @@ fn receiving_interface_obeys_pressure_velocity_refraction_and_critical_limits() 
             assert_eq!(q.im, 0.0);
         }
     }
+}
+
+#[test]
+fn original_sound_speed_contrast_preserves_grazing_transmission_and_layer_phase() {
+    let exterior = fluid();
+    let faster = FluidAcousticState::try_new(1.2, f64::from_bits(340.0_f64.to_bits() + 1)).unwrap();
+    let cosine = 2.107_342_425_544_701_4e-8;
+    // Exact rational arithmetic on the original binary64 speeds and cosine,
+    // followed by an 85-decimal-digit sqrt, gives this positive k_n/k0.
+    // Squaring the rounded speed ratio instead misclassifies it as evanescent.
+    let q = 1.047_454_809_181_105_1e-8;
+    let omega = 340.0; // k0=1 rad/m; thickness below fixes the normal phase.
+    let interface = TransmittingLayers::new(&exterior, &faster, omega, &[]).unwrap();
+    let result = interface.scattering(cosine).unwrap();
+    let load = q / cosine;
+    let expected_r = (1.0 - load) / (1.0 + load);
+    let expected_t = 2.0 / (1.0 + load);
+    near(result.pressure_reflection, C64::from_re(expected_r), 3e-15);
+    near(
+        result.pressure_transmission,
+        C64::from_re(expected_t),
+        3e-15,
+    );
+    assert!((result.transmitted_fraction - load * expected_t * expected_t).abs() < 3e-15);
+    assert!(result.transmitted_fraction > 0.88);
+    assert_eq!(result.receiving_normal_wavenumber_rad_m.im, 0.0);
+    assert_eq!(result.absorbed_fraction, 0.0);
+
+    let phase = 0.75_f64;
+    let thickness = phase / q;
+    let whole_layers = [Layer::FluidLayer {
+        fluid: &faster,
+        thickness_m: thickness,
+    }];
+    let split_layers = [Layer::FluidLayer {
+        fluid: &faster,
+        thickness_m: thickness * 0.5,
+    }; 2];
+    let normal_impedance_ratio = cosine / q;
+    // Independent pressure/velocity transfer with the original normal mode.
+    let p = C64::new(phase.cos(), normal_impedance_ratio * phase.sin());
+    let v = C64::new(phase.cos(), phase.sin() / normal_impedance_ratio);
+    let expected_r = (p - v) / (p + v);
+    let expected_t = C64::from_re(2.0) / (p + v);
+    let expected_rigid = (C64::from_re(phase.cos())
+        - C64::new(0.0, phase.sin() / normal_impedance_ratio))
+        / (C64::from_re(phase.cos()) + C64::new(0.0, phase.sin() / normal_impedance_ratio));
+    for layers in [&whole_layers[..], &split_layers[..]] {
+        let stack = TransmittingLayers::new(&exterior, &exterior, omega, layers).unwrap();
+        let response = stack.scattering(cosine).unwrap();
+        near(response.pressure_reflection, expected_r, 5e-15);
+        near(response.pressure_transmission, expected_t, 5e-15);
+        assert_eq!(response.absorbed_fraction, 0.0);
+        near(
+            stack
+                .prepared_layers()
+                .reflection(cosine)
+                .unwrap()
+                .pressure_reflection,
+            expected_rigid,
+            5e-15,
+        );
+    }
+}
+
+#[test]
+fn critical_side_from_original_speeds_keeps_evanescent_pressure_and_zero_power() {
+    let exterior = fluid();
+    let faster = FluidAcousticState::try_new(1.2, 500.0).unwrap();
+    let cosine = 0.733_212_111_192_934_4;
+    // Independent exact-input rational/sqrt oracle. The old rounded-ratio
+    // discriminant was positive, assigning spurious outgoing normal power.
+    let q = C64::new(0.0, -3.952_211_632_119_969_6e-9);
+    let load = q.scale(1.0 / cosine);
+    let stack = TransmittingLayers::new(&exterior, &faster, 340.0, &[]).unwrap();
+    let result = stack.scattering(cosine).unwrap();
+    near(result.receiving_normal_wavenumber_rad_m, q, 5e-23);
+    near(
+        result.pressure_reflection,
+        (C64::ONE - load) / (C64::ONE + load),
+        3e-15,
+    );
+    near(
+        result.pressure_transmission,
+        C64::from_re(2.0) / (C64::ONE + load),
+        3e-15,
+    );
+    assert_eq!(result.transmitted_fraction, 0.0);
+    assert_eq!(result.absorbed_fraction, 0.0);
+    assert!(result.pressure_reflection.im > 0.0);
+    assert!(
+        stack
+            .scattering(cosine.next_up())
+            .unwrap()
+            .transmitted_fraction
+            > 0.0
+    );
 }
 
 #[test]

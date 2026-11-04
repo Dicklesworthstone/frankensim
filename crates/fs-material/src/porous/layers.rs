@@ -293,7 +293,12 @@ impl<'a> RigidBackedLayers<'a> {
             if !speed_ratio.is_finite() || speed_ratio <= 0.0 {
                 return Err(bad("finite fluid sound-speed contrast is unrepresentable"));
             }
-            let q = normal_wavenumber_ratio(speed_ratio, cosine);
+            let q = normal_wavenumber_ratio(
+                speed_ratio,
+                cosine,
+                self.fluid.acoustic().sound_speed_m_s(),
+                fluid.sound_speed_m_s(),
+            );
             let kn = q.scale(self.k0);
             // Z_n/Z_ref = a/q, q=k_n/k0. Form the finite matrix entries
             // directly: at q=0, sin(k_n*d)/q -> k0*d. Dividing by k_n
@@ -396,21 +401,53 @@ impl<'a> RigidBackedLayers<'a> {
 // q=k_n/k_incident for a lossless fluid. Share this Snell branch between
 // finite fluid layers and the outgoing receiving half-space. Keep matched
 // grazing and small normal contrasts; ratio^2-(1-cosine^2) loses those limits.
-fn normal_wavenumber_ratio(ratio: f64, cosine: f64) -> C64 {
+// The cached ratio alone cannot classify critical incidence: its rounding can
+// change the sign. Retain the original sound speeds for contrast and refinement.
+fn normal_wavenumber_ratio(
+    ratio: f64,
+    cosine: f64,
+    incident_speed: f64,
+    transmitted_speed: f64,
+) -> C64 {
     if cosine == 1.0 {
         return C64::from_re(ratio);
     }
-    if ratio == 1.0 {
+    if incident_speed == transmitted_speed {
         return C64::from_re(cosine);
     }
     if ratio > 2.0 {
         let sine_over_ratio = det::sqrt((1.0 - cosine) * (1.0 + cosine)) / ratio;
         return C64::from_re(ratio * det::sqrt(1.0 - sine_over_ratio * sine_over_ratio));
     }
-    let squared = if cosine > 0.5 {
-        ratio * ratio - (1.0 - cosine) * (1.0 + cosine)
+    let (squared, cancellation_scale) = if cosine > 0.5 {
+        let tangential_squared = (1.0 - cosine) * (1.0 + cosine);
+        (
+            ratio * ratio - tangential_squared,
+            ratio * ratio + tangential_squared,
+        )
     } else {
-        (ratio - 1.0) * (ratio + 1.0) + cosine * cosine
+        let contrast = ((incident_speed - transmitted_speed) / transmitted_speed) * (ratio + 1.0);
+        (
+            cosine.mul_add(cosine, contrast),
+            cosine * cosine + contrast.abs(),
+        )
+    };
+    let squared = if incident_speed < transmitted_speed
+        && squared.abs() <= 64.0 * f64::EPSILON * cancellation_scale
+    {
+        use fs_math::dd::Dd;
+        // Power-of-two scaling preserves the original speeds exactly and keeps
+        // the precision ladder away from squared-speed overflow/underflow.
+        let scale = f64::from_bits(transmitted_speed.to_bits() & 0x7ff0_0000_0000_0000)
+            .max(f64::MIN_POSITIVE);
+        let incident = Dd::from_f64(incident_speed / scale);
+        let transmitted = Dd::from_f64(transmitted_speed / scale);
+        let normal = transmitted * Dd::from_f64(cosine);
+        (((incident - transmitted) * (incident + transmitted) + normal * normal)
+            / (transmitted * transmitted))
+            .to_f64()
+    } else {
+        squared
     };
     if squared >= 0.0 {
         C64::from_re(det::sqrt(squared))
@@ -520,4 +557,79 @@ fn bounded_propagator(kn: C64, thickness: f64) -> Result<(C64, C64), MaterialErr
         C64::new(loss + 2.0 * attenuation * cosine * cosine, -cross),
         C64::new(loss + 2.0 * attenuation * sine * sine, cross),
     ))
+}
+
+#[cfg(test)]
+mod normal_wave_tests {
+    use super::*;
+
+    fn normal(incident: f64, transmitted: f64, cosine: f64) -> C64 {
+        normal_wavenumber_ratio(incident / transmitted, cosine, incident, transmitted)
+    }
+
+    #[test]
+    fn g1_critical_side_uses_original_speeds_and_exact_input_oracles() {
+        // Independent rational arithmetic on the exact binary64 inputs,
+        // followed by an 85-decimal-digit square root. No rounded speed ratio
+        // or floating sine/cosine reconstruction participates in these oracles.
+        for (incident, transmitted, cosine, expected) in [
+            (
+                340.0,
+                500.0,
+                0.733_212_111_192_934_4,
+                C64::new(0.0, -3.952_211_632_119_969_6e-9),
+            ),
+            (340.0, 425.0, 0.6, C64::new(0.0, -5.161_913_655_903_57e-9)),
+            (
+                340.0,
+                425.0,
+                0.599_999_999_999_999_9,
+                C64::new(0.0, -1.264_405_455_326_820_9e-8),
+            ),
+            (
+                1.0,
+                1.0_f64.next_up(),
+                2.107_342_425_544_701_4e-8,
+                C64::from_re(2.630_083_138_697_363_2e-16),
+            ),
+            (
+                340.0,
+                340.0_f64.next_up(),
+                2.107_342_425_544_701_4e-8,
+                C64::from_re(1.047_454_809_181_105_1e-8),
+            ),
+        ] {
+            let actual = normal(incident, transmitted, cosine);
+            assert!(
+                (actual - expected).abs() <= 8e-15 * expected.abs(),
+                "{actual:?} != {expected:?}"
+            );
+            assert_eq!(actual.re == 0.0, expected.re == 0.0);
+            assert_eq!(actual.im == 0.0, expected.im == 0.0);
+        }
+        let cosine = 0.733_212_111_192_934_4_f64;
+        assert!(normal(340.0, 500.0, cosine.next_down()).im < 0.0);
+        assert!(normal(340.0, 500.0, cosine.next_up()).re > 0.0);
+    }
+
+    #[test]
+    fn g3_normal_wave_preserves_speed_scaling_and_exact_fast_paths() {
+        let cosine = 0.733_212_111_192_934_4;
+        let expected = normal(340.0, 500.0, cosine);
+        for exponent in [-1000, -500, 0, 500, 1000] {
+            let scale = 2.0_f64.powi(exponent);
+            assert_eq!(normal(340.0 * scale, 500.0 * scale, cosine), expected);
+        }
+        for speed in [1e-150, 340.0, 1e150] {
+            for cosine in [1.0, 0.25, 1e-200] {
+                assert_eq!(normal(speed, speed, cosine), C64::from_re(cosine));
+            }
+        }
+        for (incident, transmitted) in [(340.0, 500.0), (500.0, 340.0), (1.0, 1e-150)] {
+            assert_eq!(
+                normal(incident, transmitted, 1.0),
+                C64::from_re(incident / transmitted)
+            );
+        }
+    }
 }
