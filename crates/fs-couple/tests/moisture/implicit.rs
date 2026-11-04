@@ -40,6 +40,27 @@ fn stiff_uniform_moisture_is_exact_equilibrium_in_every_slab_scheme() {
 }
 
 #[test]
+fn stiff_drying_retains_small_positive_endpoint_water_in_every_slab_scheme() {
+    with_cx(|cx| {
+        let original = slab(card([0.01; 2], 0.3), 1.0, vec![0.2], cx);
+        let dt = 1.0e12;
+        // Two dry reservoirs, each separated by one half-cell resistance:
+        // m_new = m_old / (1 + 4*dt*D/L^2).
+        let expected = 0.2 / (1.0 + 4.0 * dt * 0.01);
+        for field in [
+            original.clone(),
+            original.clone().with_implicit_diffusivity(nonlinear()).unwrap(),
+            original.with_kirchhoff_diffusivity(nonlinear()).unwrap(),
+        ] {
+            let (next, report) = field.advance(dt, &faces(0.0), config(), cx).unwrap();
+            assert!(next.moisture()[0] > 0.0);
+            near(next.moisture()[0], expected, expected * 1.0e-11);
+            near(report.water_balance_residual_kg, 0.0, config().water_balance_tolerance_kg);
+        }
+    });
+}
+
+#[test]
 fn g1_nonlinear_one_cell_uses_endpoint_diffusivity_and_endpoint_water_flux() {
     with_cx(|cx| {
         let lagged = slab(card([0.01, 0.04], 0.3), 1.0, vec![0.1], cx);

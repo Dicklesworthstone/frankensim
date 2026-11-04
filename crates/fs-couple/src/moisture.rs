@@ -342,8 +342,8 @@ pub struct MoistureStepReport {
     /// None retains the harmonic endpoint/lagged coefficient scheme.
     pub kirchhoff_source: Option<ContentHash>,
     /// True residual of the conservative equations for moisture relative to
-    /// the initial first cell. Its normalization resolves gradients without
-    /// dilution by the uniform water inventory.
+    /// the minimum initial/active-reservoir content. This removes a shared
+    /// uniform offset while retaining small positive drying endpoints.
     pub linear: SolveReport,
     /// Endpoint nonlinear residual/work, or None for accepted-start lagging.
     /// `linear` describes the last frozen-coefficient solve; this report tests
@@ -654,6 +654,7 @@ impl MoistureSlab {
             // Admission at the actual interface state, not just the interior.
             self.transport_state_at(m)?;
         }
+        let reference = diffusion_reference(&self.moisture, &faces);
         let start = self.transport_states(&self.moisture, cx)?;
         let profile = self.kirchhoff_diffusivity
             .map(|_| self.kirchhoff_profile(surface, cx))
@@ -668,18 +669,13 @@ impl MoistureSlab {
                     return Err(MoistureError::NotConverged(solution.report));
                 }
                 for value in &mut solution.x {
-                    *value += self.moisture[0];
+                    *value += reference;
                 }
                 let endpoint = self.transport_states(&solution.x, cx)?;
                 (solution, endpoint, coupling, None)
             };
         let n = self.moisture.len();
-        let lower = self
-            .moisture
-            .iter()
-            .copied()
-            .chain(surface.into_iter().flatten())
-            .fold(f64::INFINITY, f64::min);
+        let lower = reference;
         let upper = self
             .moisture
             .iter()
@@ -766,8 +762,8 @@ impl MoistureSlab {
     }
 
     /// One common finite-volume operator for both coefficient time levels.
-    /// The unknown is moisture relative to the initial first cell, so a large
-    /// uniform inventory cannot hide small diffusion gradients in the residual.
+    /// The unknown is moisture relative to the common lower bound, removing
+    /// uniform offsets shared by the initial field and active reservoirs.
     fn transport_system(
         &self,
         dt_s: f64,
@@ -835,7 +831,7 @@ impl MoistureSlab {
             };
         }
         let boundary = [coupling[0].0, coupling[1].0];
-        let reference = self.moisture[0];
+        let reference = diffusion_reference(&self.moisture, faces);
         let mut rhs: Vec<_> = self.moisture.iter().map(|m| m - reference).collect();
         for (side, i) in [0, n - 1].into_iter().enumerate() {
             if let Some(m) = surface[side] {
@@ -877,6 +873,18 @@ impl MoistureSlab {
                 * (faces[1].equilibrium.unwrap_or(moisture[n - 1]) - moisture[n - 1]),
         ]
     }
+}
+
+/// Shift by the maximum principle's lower bound. Admissible deviations are
+/// nonnegative, so reconstruction cannot erase a small positive endpoint by
+/// cancellation against a larger wet reference during stiff drying.
+fn diffusion_reference(moisture: &[f64], faces: &[ResolvedMoistureFace]) -> f64 {
+    moisture.iter().copied().chain(
+        faces.iter()
+            // A zero-transfer surface has no reservoir forcing.
+            .filter(|face| face.coefficient_m_s != Some(0.0))
+            .filter_map(|face| face.equilibrium),
+    ).fold(f64::INFINITY, f64::min)
 }
 
 struct DiffusionStep {

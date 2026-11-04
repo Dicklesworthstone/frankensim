@@ -65,7 +65,8 @@ pub struct MoistureCartesianReport {
     pub transport_start: Vec<ResolvedMaterialStatePoint>,
     pub transport_end: Vec<ResolvedMaterialStatePoint>,
     /// Last frozen-coefficient solve, independently checked by its native owner.
-    /// The load and unknown use moisture relative to the initial first cell.
+    /// The load and unknown use moisture relative to the minimum initial or
+    /// active-reservoir content.
     pub linear: SolveReport,
     pub nonlinear_iterations: usize,
     /// Sum of native CG iterations across every Picard solve.
@@ -402,6 +403,7 @@ impl MoistureCartesian {
         } else {
             None
         };
+        let reference = diffusion_reference(&self.moisture, &boundaries);
         let start = self.transport_states(&self.moisture, cx)?;
         let mut system = self.system(dt_s, &boundaries, &start, profiles.as_ref(), cx)?;
         let mut iterate = self.moisture.clone();
@@ -425,7 +427,7 @@ impl MoistureCartesian {
             linear_iterations = linear_iterations.checked_add(solution.report.iters).ok_or(
                 MoistureError::Invalid("Cartesian solver work count overflow"),
             )?;
-            let candidate: Vec<_> = solution.x.iter().map(|m| m + self.moisture[0]).collect();
+            let candidate: Vec<_> = solution.x.iter().map(|m| m + reference).collect();
             let endpoint = self.transport_states(&candidate, cx)?;
             let endpoint_system =
                 self.system(dt_s, &boundaries, &endpoint, profiles.as_ref(), cx)?;
@@ -440,12 +442,7 @@ impl MoistureCartesian {
                 && balance.is_finite()
                 && balance.abs() <= config.water_balance_tolerance_kg
             {
-                let lower = self
-                    .moisture
-                    .iter()
-                    .copied()
-                    .chain(reservoir.into_iter().flatten())
-                    .fold(f64::INFINITY, f64::min);
+                let lower = reference;
                 let upper = self
                     .moisture
                     .iter()
@@ -558,6 +555,7 @@ impl MoistureCartesian {
                 "Cartesian time/length scale is unrepresentable",
             ));
         }
+        let reference = diffusion_reference(&self.moisture, faces);
         let mut system = CartesianSystem {
             operator: CartesianOperator {
                 diagonal: vec![1.0; n],
@@ -567,7 +565,7 @@ impl MoistureCartesian {
             },
             // Solve relative to one common reference, preserving the scale of
             // small gradients independently of the uniform water inventory.
-            rhs: self.moisture.iter().map(|m| m - self.moisture[0]).collect(),
+            rhs: self.moisture.iter().map(|m| m - reference).collect(),
             faces: Vec::new(),
         };
         for i in 0..n {
@@ -635,7 +633,7 @@ impl MoistureCartesian {
                         }
                         system.operator.diagonal[i] += coefficient;
                         system.operator.storage_boundary[i] += coefficient;
-                        system.rhs[i] += coefficient * (equilibrium - self.moisture[0]);
+                        system.rhs[i] += coefficient * (equilibrium - reference);
                         system.faces.push(CartesianFace {
                             side,
                             cell: i,

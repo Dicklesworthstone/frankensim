@@ -40,7 +40,7 @@ pub struct MoistureNonlinearReport {
     /// All tridiagonal substitutions, including linear defect corrections.
     pub tridiagonal_solves: usize,
     /// Endpoint-equation residual normalized by the load for moisture relative
-    /// to the initial first cell, as in the frozen-coefficient linear solve.
+    /// to the minimum initial/active-reservoir content, as in the linear solve.
     pub relative_residual: f64,
     /// Uses endpoint diffusivity for both surface transfers; never the lagged
     /// linear solve's flux to make nonlinear conservation appear satisfied.
@@ -75,6 +75,7 @@ impl MoistureSlab {
         MoistureError,
     > {
         let n = self.moisture.len();
+        let reference = diffusion_reference(&self.moisture, faces);
         let mut workspace = TridiagonalWorkspace::new(n).map_err(linear_error)?;
         let mut iterate = self.moisture.clone();
         let mut system = self.transport_system(dt, faces, start, profile, cx)?;
@@ -91,7 +92,7 @@ impl MoistureSlab {
             }
             // Re-query the ORIGINAL pinned source at every proposed endpoint.
             // Unsupported intermediate or final states refuse transactionally.
-            let candidate: Vec<_> = solution.x.iter().map(|m| m + self.moisture[0]).collect();
+            let candidate: Vec<_> = solution.x.iter().map(|m| m + reference).collect();
             let endpoint = self.transport_states(&candidate, cx)?;
             let endpoint_system = self.transport_system(dt, faces, &endpoint, profile, cx)?;
             let (_, relative_residual) =

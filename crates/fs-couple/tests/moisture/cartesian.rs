@@ -120,12 +120,34 @@ fn weak_cartesian_cosine_diffusion_uses_gradient_scale_not_background_water() {
         for background in [0.1, 0.2] {
             let initial = (0..n).map(|i| background + amplitude * wave(i)).collect();
             let field = grid(card([diffusion; 2], 0.3), geometry, initial, cx);
-            let (next, report) = field.advance(dt, &sealed(), step, controls, cx).unwrap();
-            for (i, &m) in next.moisture().iter().enumerate() {
-                near(m, background + amplitude * decay * wave(i), 2.0e-10);
+            let zero_exchange = std::array::from_fn(|_| MoistureFace::SourceSorption {
+                law: super::surface::law([0.0; 2]),
+                relative_humidity: 0.0,
+            });
+            for boundaries in [sealed(), zero_exchange] {
+                let (next, report) = field.advance(dt, &boundaries, step, controls, cx).unwrap();
+                for (i, &m) in next.moisture().iter().enumerate() {
+                    near(m, background + amplitude * decay * wave(i), 2.0e-10);
+                }
+                near(report.water_balance_residual_kg, 0.0, 1.0e-12);
             }
-            near(report.water_balance_residual_kg, 0.0, 1.0e-12);
         }
+    });
+}
+
+#[test]
+fn stiff_cartesian_drying_retains_small_positive_endpoint_water() {
+    with_cx(|cx| {
+        let field = grid(card([0.01; 2], 0.3),
+            grid_geometry([1.0; 3], [1; 3]), vec![0.2], cx);
+        let dt = 1.0e12;
+        let boundaries = std::array::from_fn(|_| MoistureFace::PrescribedDryBasis(0.0));
+        let (next, report) = field.advance(dt, &boundaries, config(), nonlinear(), cx).unwrap();
+        // Six independent dry half-cell faces of the unit reference cube.
+        let expected = 0.2 / (1.0 + 12.0 * dt * 0.01);
+        assert!(next.moisture()[0] > 0.0);
+        near(next.moisture()[0], expected, expected * 1.0e-11);
+        near(report.water_balance_residual_kg, 0.0, config().water_balance_tolerance_kg);
     });
 }
 
