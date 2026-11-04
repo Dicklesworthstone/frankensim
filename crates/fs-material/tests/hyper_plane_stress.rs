@@ -31,6 +31,7 @@ fn tilted_fibre(scale: f64) -> Hyperelastic {
 fn laws() -> Vec<Hyperelastic> {
     vec![
         nh(5e5, 0.3, 4.0),
+        nh(5e5, -0.25, 4.0),
         Hyperelastic::new(
             HyperelasticModel::MooneyRivlin {
                 c10: 6e4,
@@ -72,7 +73,7 @@ fn close(a: f64, b: f64, scale: f64, tolerance: f64) {
 #[test]
 fn g0_reference_tangent_is_isotropic_plane_stress_not_plane_strain() {
     let e = 3e5;
-    for nu in [0.0, 0.25, 0.49] {
+    for nu in [-0.75, -0.25, 0.0, 0.25, 0.49] {
         let law = nh(e, nu, 4.0);
         let response = law
             .plane_stress(&[1.0, 0.0, 0.0, 1.0], PlaneStressSettings::default())
@@ -133,6 +134,46 @@ fn g0_finite_neo_hookean_response_satisfies_the_independent_thickness_equation()
             .abs()
             > 1e4
     );
+}
+
+#[test]
+fn g1_auxetic_neo_hookean_expands_both_free_lateral_directions() {
+    let youngs = 3e5;
+    for poisson in [-0.75, -0.25] {
+        let (lambda, mu) = IsotropicElastic::new(youngs, poisson, 1.0).unwrap().lame();
+        let law = nh(youngs, poisson, 3.0);
+        for axial in [1.0001, 1.08] {
+            // Independent scalar uniaxial equilibrium with equal lateral
+            // stretches t: P22*t = mu*(t²-1)+lambda*ln(axial*t²).
+            let balance = |t: f64| mu * (t * t - 1.0) + lambda * (axial * t * t).ln();
+            let (mut lo, mut hi) = (1.0, 1.5);
+            assert!(balance(lo) < 0.0 && balance(hi) > 0.0);
+            for _ in 0..64 {
+                let mid = 0.5 * (lo + hi);
+                if balance(mid) < 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let lateral = 0.5 * (lo + hi);
+            let response = law
+                .plane_stress(&[axial, 0.0, 0.0, lateral], PlaneStressSettings::default())
+                .unwrap();
+            assert!(lateral > 1.0 && response.deformation_gradient[8] > 1.0);
+            close(response.deformation_gradient[8], lateral, 1.0, 2e-11);
+            close(response.piola[3], 0.0, mu, 3e-11);
+            close(
+                response.piola[0],
+                mu * (axial - lateral * lateral / axial),
+                mu,
+                3e-11,
+            );
+            if axial == 1.0001 {
+                close((lateral - 1.0) / (axial - 1.0), -poisson, 1.0, 3e-4);
+            }
+        }
+    }
 }
 
 #[test]

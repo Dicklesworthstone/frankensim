@@ -85,7 +85,8 @@ pub enum HyperelasticModel {
     NeoHookean {
         /// Shear modulus μ.
         mu: f64,
-        /// Lamé λ.
+        /// Lamé λ. It may be negative for an auxetic reference response;
+        /// the infinitesimal bulk modulus `λ + 2μ/3` must remain positive.
         lambda: f64,
     },
     /// Mooney–Rivlin (decoupled):
@@ -335,6 +336,10 @@ fn neo_hookean_energy<T: Real>(f: &[T; 9], mu: f64, lambda: f64) -> T {
 
 impl Hyperelastic {
     /// Construct with parameter checks.
+    /// Neo-Hookean requires positive reference shear and bulk moduli,
+    /// `mu > 0` and `lambda + 2*mu/3 > 0`; a negative Lamé `lambda`
+    /// represents an auxetic reference state. This local condition does not
+    /// certify stability over the entire calibrated finite-stretch domain.
     ///
     /// # Errors
     /// [`MaterialError::Parameters`] on inadmissible moduli or a
@@ -347,10 +352,12 @@ impl Hyperelastic {
         }
         let ok = match &model {
             HyperelasticModel::NeoHookean { mu, lambda } => {
+                let bulk = *lambda + (2.0 / 3.0) * *mu;
                 mu.is_finite()
                     && lambda.is_finite()
                     && *mu > 0.0
-                    && *lambda >= 0.0
+                    && bulk.is_finite()
+                    && bulk > 0.0
                     && (2.0 * *mu + *lambda).is_finite()
             }
             HyperelasticModel::MooneyRivlin { c10, c01, kappa } => {
@@ -409,7 +416,7 @@ impl Hyperelastic {
         };
         if !ok {
             return Err(MaterialError::Parameters {
-                what: format!("{model:?}: moduli must be positive"),
+                what: format!("{model:?}: inadmissible or unrepresentable moduli"),
             });
         }
         Ok(Hyperelastic {
@@ -528,8 +535,10 @@ impl Hyperelastic {
         }
     }
 
-    /// Bulk energy. NH retains its original coupled energy split; MR and
-    /// the new variants expose their decoupled bulk penalty directly.
+    /// Original scalar volume term. NH retains its coupled energy split:
+    /// its `lambda/2 * ln(J)^2` can be negative for an auxetic material and
+    /// is not an independent bulk storage law. MR and the new variants
+    /// expose their decoupled bulk penalty directly.
     pub fn volumetric_energy<T: Real>(&self, j: T) -> T {
         match &self.model {
             HyperelasticModel::NeoHookean { lambda, .. } => {
@@ -643,10 +652,20 @@ impl Hyperelastic {
                 // declared stretch domain, never a near-reference spot test.
                 HyperelasticModel::NeoHookean { mu, lambda } => {
                     // W=mu/2 |F|²+g(J), with
-                    // g''(J)=[mu+lambda*(1-ln J)]/J² and J<=limit³.
-                    (*lambda == 0.0
-                        || 3.0 * fs_math::det::ln(self.stretch_limit) <= 1.0 + mu / lambda)
-                        .then_some(true)
+                    // g''(J)=[mu+lambda*(1-ln J)]/J² and
+                    // limit^-3 <= J <= limit³. Positive lambda has its
+                    // worst numerator at maximum J; auxetic negative lambda
+                    // has it at minimum J. Positive reference bulk alone
+                    // does not certify this whole finite-strain domain.
+                    let log_volume_span = 3.0 * fs_math::det::ln(self.stretch_limit);
+                    let convex = if *lambda == 0.0 {
+                        true
+                    } else if *lambda > 0.0 {
+                        log_volume_span <= 1.0 + mu / lambda
+                    } else {
+                        log_volume_span <= mu / (-lambda) - 1.0
+                    };
+                    convex.then_some(true)
                 }
                 HyperelasticModel::MooneyRivlin { c01, .. } => {
                     // |F|²/J^(2/3) is a convex power perspective. The

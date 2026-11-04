@@ -1497,7 +1497,7 @@ fn g0_log_bulk_split_and_parameter_derived_admissibility() {
 
 #[test]
 fn g0_basic_hyperelastic_moduli_are_finite_and_representable() {
-    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -2.0] {
         for model in [
             HyperelasticModel::NeoHookean {
                 mu: bad,
@@ -1570,6 +1570,87 @@ fn g0_basic_hyperelastic_moduli_are_finite_and_representable() {
         assert!(law.piola(&I).is_ok());
         assert!(law.tangent(&I).is_ok());
     }
+}
+
+#[test]
+fn g0_auxetic_neo_hookean_retains_the_original_isotropic_reference_tensor() {
+    let youngs = 3e5;
+    for poisson in [-0.75, -0.25, 0.0, 0.3] {
+        let elastic = fs_material::IsotropicElastic::new(youngs, poisson, 1.0).unwrap();
+        let (lambda, mu) = elastic.lame();
+        let law = Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 3.0).unwrap();
+        let p = law.piola(&I).unwrap();
+        let tangent = law.tangent(&I).unwrap();
+        let delta = |i: usize, j: usize| if i == j { 1.0 } else { 0.0 };
+        for row in 0..9 {
+            close(p[row], 0.0, youngs, 1e-14);
+            let (i, j) = (row / 3, row % 3);
+            for col in 0..9 {
+                let (k, l) = (col / 3, col % 3);
+                let expected = lambda * delta(i, j) * delta(k, l)
+                    + mu * (delta(i, k) * delta(j, l) + delta(i, l) * delta(j, k));
+                close(tangent[row][col], expected, youngs, 2e-13);
+            }
+        }
+        // This also checks the finite-strain potential's Hessian away from
+        // the reference; a small-strain-only substitute would fail it.
+        fd_tangent(&law, [1.1, 0.07, 0.0, -0.03, 1.04, 0.02, 0.0, -0.01, 0.98]);
+    }
+}
+
+#[test]
+fn g0_auxetic_bulk_admission_and_finite_domain_convexity_are_separate() {
+    // mu=3 gives K=lambda+2 exactly. Positive shear does not rescue zero
+    // or negative reference bulk; positive K need not certify every stretch.
+    for lambda in [-3.0, -2.0] {
+        assert!(matches!(
+            Hyperelastic::new(HyperelasticModel::NeoHookean { mu: 3.0, lambda }, 1.1),
+            Err(MaterialError::Parameters { .. })
+        ));
+    }
+    assert!(
+        Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 3.0,
+                lambda: (-2.0_f64).next_up(),
+            },
+            1.0,
+        )
+        .is_ok()
+    );
+    for (lambda, limit, expected) in [
+        (-1.0, 1.3, Some(true)),
+        (-1.0, 1.5, None),
+        (1.0, 1.5, Some(true)),
+        (1.0, 3.0, None),
+        (0.0, 10.0, Some(true)),
+    ] {
+        let law =
+            Hyperelastic::new(HyperelasticModel::NeoHookean { mu: 2.0, lambda }, limit).unwrap();
+        assert_eq!(law.admissibility().polyconvex, expected);
+    }
+    // Independent witness: the auxetic law's volumetric remainder loses
+    // convexity at the COMPRESSION end of the larger calibrated domain.
+    let j = 1.0 / 1.5_f64.powi(3);
+    let g_second = (2.0 - (1.0 - j.ln())) / (j * j);
+    assert!(g_second < 0.0);
+    let auxetic = Hyperelastic::new(
+        HyperelasticModel::NeoHookean {
+            mu: 2.0,
+            lambda: -1.0,
+        },
+        1.3,
+    )
+    .unwrap();
+    let f = diag([1.01; 3]);
+    let volume_term = auxetic.volumetric_energy(determinant(&f));
+    assert!(volume_term < 0.0 && auxetic.energy(&f) > 0.0);
+    close(
+        auxetic.energy(&f),
+        auxetic.isochoric_energy(&f) + volume_term,
+        2.0,
+        1e-14,
+    );
 }
 
 fn model_card(hgo_model: bool) -> fs_matdb::ConstitutiveModelCard {
@@ -1697,11 +1778,14 @@ fn g0_dimensioned_model_pack_reaches_real_hyperelastic_registry() {
         LawRegistry, check_consistent_tangent, check_free_energy_consistency,
     };
     use fs_material::hyper::cards::register_hyperelastic_laws;
+    let mut auxetic = isotropic_model_card(false);
+    auxetic.parameters.get_mut("lambda").unwrap().value = -1e5;
     for card in [
         model_card(false),
         model_card(true),
         isotropic_model_card(false),
         isotropic_model_card(true),
+        auxetic,
     ] {
         let is_hgo = card.law.0 == "hgo-dispersed";
         let source = card.provenance.artifact.unwrap();
