@@ -1393,6 +1393,31 @@ receiver motion, independently inverted curved pairs, coherent source sums,
 partition invariance, finite domains, cancellation and the original PCM path.
 Native compilation and execution remain separate verification obligations.
 
+## Fixed laboratory histories in a uniform fluid flow
+
+`MovingCompactRenderer::with_uniform_flow` observes original accepted volume
+and force histories through `UniformFlowCompactObserver` paths bound to one
+`UniformFlowReceiver`. Every source must retain the same fluid, laboratory
+velocity, microphone and limits. The existing Hermite source interpolant,
+finite-history and bandwidth admission, coherent pressure sum, resource limits,
+global receiver clock and transactional callbacks remain the only render path.
+
+Uniform flow changes the physical pressure coefficients and propagation delay;
+fixed laboratory endpoints have observed `d tau/d t = 1`. The fluid-frame
+Eulerian `1/kappa` is never used to inflate their required receiver bandwidth.
+Exact retained endpoints use cached relative geometry and are accepted only
+when the rounded arrival equals the requested timestamp and the original
+residual budget holds. Large epochs do not cause the renderer to subtract two
+large Galilean positions. Explicit `observer_at` queries do return fluid-frame
+coordinates and may refuse an unrepresentable transform.
+
+Pressure remains in Pa for the original observation/decimation/PCM interfaces.
+This supplies homogeneous lossless convective propagation, not wind-generated
+microphone noise, shear/refraction, scattering, absorption or source feedback.
+Four focused regression groups cover coherent cubic histories without Doppler
+inflation, common-receiver and history/bandwidth refusals, exact endpoints at
+large epochs, and bitwise callback partition/cancellation/retry behavior.
+
 ## Stationary compact fields from accepted force and volume histories
 
 `pcm_wav::observation::moving::stationary::StationaryCompactRenderer` reuses

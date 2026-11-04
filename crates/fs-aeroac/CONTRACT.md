@@ -144,6 +144,12 @@ material scaling and domain/representability refusals.
   is pressure in a homogeneous, lossless, uniform flow, without shear-layer
   refraction, boundaries, dispersion, particle velocity, energy-flux inference,
   source feedback, finite-source validation or measured-SPL qualification.
+  `UniformFlowReceiver` binds multiple source paths to one admitted fluid,
+  laboratory velocity, microphone and clearance policy. Exact emission-endpoint
+  preparation preserves cached relative geometry at large clock epochs. Its
+  native Eulerian pressure view carries the actual emission/arrival timestamps
+  and residual; the retained fluid-frame `1/kappa` is not the laboratory
+  observed source-time rate, which is exactly one for these fixed endpoints.
 - `curle3d::moving::trajectory::PreparedSourceTrajectory` binds a finite C2
   quintic position history to the original microphone and fluid. Its position,
   velocity and acceleration come from the same accepted-knot interpolant.

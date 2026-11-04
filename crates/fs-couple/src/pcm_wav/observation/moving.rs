@@ -9,6 +9,8 @@
 //! A moving microphone reads that same Eulerian pressure at its accepted
 //! arrival-time position. Its velocity changes the observed source clock, not
 //! the source's radiation coefficients.
+//! Fixed laboratory sources in a uniform flow reuse this same history owner;
+//! their original convected pressure paths retain a unit observed clock rate.
 //!
 //! Input bandwidth, interpolation convergence, finite-source compactness and
 //! pressure linearity remain producer responsibilities. Declared receiver
@@ -26,6 +28,7 @@ use fs_aeroac::curle3d::moving::{
 };
 use fs_math::{dd::Dd, det};
 
+mod flow;
 mod motion;
 mod receiver;
 /// Native rigid-body attachments and bounded accepted acoustic histories.
@@ -300,7 +303,9 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
     pub const fn observer(&self) -> &M::Observer {
         &self.observer
     }
-    /// Actual microphone position and original medium at one admitted time.
+    /// Microphone position in the fluid rest frame at one admitted time.
+    /// For uniform flow, the common receiver retains its fixed laboratory
+    /// position separately; an unrepresentable frame transform may refuse.
     /// Limits belong to the first source; each other source retains its own
     /// prepared motion and clearance bounds.
     pub fn observer_at(&self, time: f64) -> Result<MovingCompactObserver, RenderError> {
@@ -532,9 +537,9 @@ fn prepare_history<M: CompactMotion, Cancel: FnMut() -> bool>(
     // This is no extrapolation, tolerance-sized time clamp, or invented history.
     for endpoint_time in [first, last] {
         check_cancel(cancelled)?;
-        if let Ok(kinematics) = source.motion.kinematics_at(endpoint_time)
-            && let Ok(observer) = source.motion.observer_at(observer, time)
-            && let Ok(endpoint) = observer.prepare_emission(endpoint_time, kinematics)
+        if let Ok(endpoint) = source
+            .motion
+            .prepare_endpoint(observer, endpoint_time, time)
             && endpoint.receiver_time_s() == time
             && endpoint.retarded_time_residual_s() <= tolerance
         {

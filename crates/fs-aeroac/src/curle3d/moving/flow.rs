@@ -35,6 +35,62 @@ use crate::curle3d::statistics::{finite, invalid, nonfinite};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// One fixed laboratory microphone in a homogeneous subsonic fluid flow.
+/// Sources bound to this receiver share its original fluid, velocity and frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UniformFlowReceiver {
+    medium: FluidAcousticState,
+    velocity_m_s: [f64; 3],
+    observer_m: [f64; 3],
+    limits: MovingCompactLimits,
+}
+
+impl UniformFlowReceiver {
+    /// Admit the physical receiver, fluid speed and laboratory clearance policy.
+    pub fn new(
+        medium: FluidAcousticState,
+        velocity_m_s: [f64; 3],
+        observer_m: [f64; 3],
+        limits: MovingCompactLimits,
+    ) -> Result<Self, AeroacError> {
+        let admission = MovingCompactObserver::new(medium, observer_m, limits)?;
+        if velocity_m_s.iter().any(|v| !v.is_finite()) {
+            return Err(nonfinite("uniform-flow fluid velocity"));
+        }
+        admission.admit_speed(norm(velocity_m_s.map(|v| v / medium.sound_speed_m_s())))?;
+        Ok(Self {
+            medium,
+            velocity_m_s,
+            observer_m,
+            limits,
+        })
+    }
+
+    /// Prepare a source path without changing the common receiver or fluid.
+    pub fn bind_source(
+        self,
+        source_m: [f64; 3],
+    ) -> Result<UniformFlowCompactObserver, AeroacError> {
+        UniformFlowCompactObserver::from_receiver(self, source_m)
+    }
+    /// Original coherent thermodynamic acoustic state.
+    pub const fn medium(self) -> FluidAcousticState {
+        self.medium
+    }
+    /// Fluid velocity relative to the laboratory [m/s].
+    pub const fn velocity_m_s(self) -> [f64; 3] {
+        self.velocity_m_s
+    }
+    /// Fixed microphone position in the laboratory [m].
+    pub const fn observer_position_m(self) -> [f64; 3] {
+        self.observer_m
+    }
+    /// Original fluid-Mach and laboratory-clearance limits.
+    pub const fn limits(self) -> MovingCompactLimits {
+        self.limits
+    }
+}
+
 /// Cached pressure propagation between fixed laboratory positions in one flow.
 ///
 /// Preparation and every observation are constant-work and allocation-free.
@@ -43,10 +99,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 /// introduced. The physical density and sound speed remain one original state.
 #[derive(Clone, Copy, Debug)]
 pub struct UniformFlowCompactObserver {
-    medium: FluidAcousticState,
-    velocity_m_s: [f64; 3],
+    receiver: UniformFlowReceiver,
     source_m: [f64; 3],
-    observer_m: [f64; 3],
     pressure: PreparedMovingCompactSample,
 }
 
@@ -63,20 +117,25 @@ impl UniformFlowCompactObserver {
         source_m: [f64; 3],
         limits: MovingCompactLimits,
     ) -> Result<Self, AeroacError> {
-        if source_m
-            .iter()
-            .chain(&observer_m)
-            .chain(&velocity_m_s)
-            .any(|v| !v.is_finite())
-        {
-            return Err(nonfinite("uniform-flow source, receiver or fluid velocity"));
+        UniformFlowReceiver::new(medium, velocity_m_s, observer_m, limits)?.bind_source(source_m)
+    }
+
+    fn from_receiver(
+        receiver: UniformFlowReceiver,
+        source_m: [f64; 3],
+    ) -> Result<Self, AeroacError> {
+        if source_m.iter().any(|v| !v.is_finite()) {
+            return Err(nonfinite("uniform-flow source"));
         }
-        // Reuse the original motion-limit admission before any derived geometry.
-        let admission = MovingCompactObserver::new(medium, [0.0; 3], limits)?;
+        let UniformFlowReceiver {
+            medium,
+            velocity_m_s,
+            observer_m,
+            limits,
+        } = receiver;
         let c = medium.sound_speed_m_s();
         let mach = velocity_m_s.map(|v| v / c);
         let speed = norm(mach);
-        admission.admit_speed(speed)?;
         let displacement = core::array::from_fn(|i| {
             (Dd::from_f64(observer_m[i]) - Dd::from_f64(source_m[i])).to_f64()
         });
@@ -130,21 +189,23 @@ impl UniformFlowCompactObserver {
             },
         )?;
         Ok(Self {
-            medium,
-            velocity_m_s,
+            receiver,
             source_m,
-            observer_m,
             pressure,
         })
     }
 
+    /// Common receiver, retaining its fluid, laboratory velocity and limits.
+    pub const fn receiver(&self) -> UniformFlowReceiver {
+        self.receiver
+    }
     /// Original fluid state; the flow never replaces its thermodynamic c or rho.
     pub const fn medium(&self) -> FluidAcousticState {
-        self.medium
+        self.receiver.medium
     }
     /// Uniform fluid velocity relative to the laboratory [m/s].
     pub const fn velocity_m_s(&self) -> [f64; 3] {
-        self.velocity_m_s
+        self.receiver.velocity_m_s
     }
     /// Fixed physical source position [m].
     pub const fn source_position_m(&self) -> [f64; 3] {
@@ -152,7 +213,7 @@ impl UniformFlowCompactObserver {
     }
     /// Fixed physical microphone position [m].
     pub const fn observer_position_m(&self) -> [f64; 3] {
-        self.observer_m
+        self.receiver.observer_m
     }
     /// Direction-dependent acoustic travel time [s], already used by phasors.
     pub const fn propagation_delay_s(&self) -> f64 {
@@ -188,12 +249,49 @@ impl UniformFlowCompactObserver {
                 residual: error,
             });
         }
-        Ok(PreparedUniformFlowSample {
-            pressure: self.pressure,
+        Ok(self.at_times(source_time_s, receiver_time_s, error))
+    }
+
+    /// Prepare an exact retained emission endpoint and its rounded arrival.
+    /// The residual is reported, not waived: a history consumer must require
+    /// the requested arrival to match and the residual to fit its time budget.
+    pub fn prepare_emission(
+        &self,
+        source_time_s: f64,
+    ) -> Result<PreparedUniformFlowSample, AeroacError> {
+        let delay = self.propagation_delay_s();
+        let receiver_time_s = (Dd::from_f64(source_time_s) + Dd::from_f64(delay)).to_f64();
+        if !source_time_s.is_finite()
+            || !receiver_time_s.is_finite()
+            || receiver_time_s <= source_time_s
+        {
+            return Err(invalid(
+                "uniform-flow emission or arrival time is unrepresentable",
+            ));
+        }
+        let error = residual(receiver_time_s, source_time_s, delay);
+        if !error.is_finite() {
+            return Err(invalid("uniform-flow emission residual is unrepresentable"));
+        }
+        Ok(self.at_times(source_time_s, receiver_time_s, error))
+    }
+
+    fn at_times(
+        &self,
+        source_time_s: f64,
+        receiver_time_s: f64,
+        error: f64,
+    ) -> PreparedUniformFlowSample {
+        let mut pressure = self.pressure;
+        pressure.sample.source_time_s = source_time_s;
+        pressure.sample.receiver_time_s = receiver_time_s;
+        pressure.sample.retarded_time_residual_s = error;
+        PreparedUniformFlowSample {
+            pressure,
             source_time_s,
             receiver_time_s,
             retarded_time_residual_s: error,
-        })
+        }
     }
 
     /// Observe one original peak source phasor, using exp(-i omega t).
@@ -259,6 +357,13 @@ pub struct PreparedUniformFlowSample {
 }
 
 impl PreparedUniformFlowSample {
+    /// Original Eulerian pressure coefficients with these physical timestamps.
+    /// Galilean frames share time. The retained `source_time_rate()` is the
+    /// fixed-position fluid-frame factor `1/kappa`, not the laboratory observed
+    /// rate: fixed laboratory source and receiver have `d tau/d t = 1`.
+    pub const fn pressure_in_fluid_frame(&self) -> PreparedMovingCompactSample {
+        self.pressure
+    }
     /// Original source time at which all strengths and derivatives are needed [s].
     pub const fn source_time_s(&self) -> f64 {
         self.source_time_s

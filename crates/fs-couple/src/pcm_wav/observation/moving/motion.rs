@@ -16,7 +16,8 @@ pub(super) mod sealed {
 ///
 /// Implemented for uniform motion, a borrowed prepared curved trajectory,
 /// [`CompactSourceMotion`] for heterogeneous fixed-receiver ensembles, and a
-/// borrowed prepared moving source/receiver pair. Sealing keeps
+/// borrowed prepared moving source/receiver pair, and fixed sources in a
+/// shared uniform-flow receiver. Sealing keeps
 /// whole-domain speed/clearance guarantees with the original motion owners.
 /// Dispatch is static for homogeneous histories and one enum match for mixed
 /// histories. No trajectory is cloned, evolved, or allocated during callbacks.
@@ -55,6 +56,20 @@ pub trait CompactMotion: sealed::Sealed + Copy {
         maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<PreparedMovingCompactSample, RenderError>;
+    /// Prepare one retained emission endpoint at the requested receiver event.
+    /// The history owner still requires an exactly matching rounded arrival
+    /// and its original residual budget before accepting this endpoint.
+    fn prepare_endpoint(
+        self,
+        observer: &Self::Observer,
+        source_time_s: f64,
+        receiver_time_s: f64,
+    ) -> Result<PreparedMovingCompactSample, RenderError> {
+        let kinematics = self.kinematics_at(source_time_s).map_err(acoustic)?;
+        self.observer_at(observer, receiver_time_s)?
+            .prepare_emission(source_time_s, kinematics)
+            .map_err(acoustic)
+    }
     /// Admit continuous geometry and return a whole-window Doppler-rate bound.
     fn admit_window<Cancel: FnMut() -> bool>(
         self,
