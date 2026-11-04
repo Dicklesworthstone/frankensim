@@ -14,6 +14,10 @@
 //! does not estimate this backward-Euler contact step's time-discretization error.
 //! A contact residual, a caloric error and an energy balance are distinct tests.
 
+/// Bounded contact time refinement using the same implicit two-body step.
+#[path = "exchange/adaptive.rs"]
+pub mod adaptive;
+
 use super::super::{CrystallizationAdaptivity, CrystallizationError, check_cancelled};
 use super::parcel::IsobaricCrystallizationParcel;
 use super::{

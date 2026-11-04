@@ -148,6 +148,26 @@ owners for contact-driven melting and crystallization; they require the full
 native material graph to execute. The single endpoint step has first-order
 thermal time error, separate from its inner phase-history estimates.
 
+`pressure::exchange::adaptive::advance_exchange_to` adds local thermal time
+control around that same endpoint owner. One full contact step is compared
+with two half steps, and only the conservative half steps are retained.
+Temperature, specific enthalpy, crystal mass fraction and unsaturated exposure
+all participate; a melting plateau cannot pass on temperature agreement alone.
+Relative tolerances scale physical changes instead of absolute caloric datums.
+Representable unequal half spans receive the first-order error correction.
+
+Rejected comparisons spend bounded work but contribute no heat, phase history
+or volume work. Double-double accumulation retains accepted physical accounts;
+final endpoint storage/work and public-total rounding consume a separate
+whole-call noncancelling energy budget. Exact target times, deterministic
+replay, maximum comparison work and final cancellation are explicit. The
+caller must admit the heat bracket over every candidate. Original source,
+domain and nonlinear failures propagate instead of being disguised as time
+refinement. These local discrepancies are not global error bounds, and the
+maximum timestep must resolve the original source's features. Three native
+regressions cover convergence to finite-body exponential cooling, latent
+inventory-driven refinement and atomic work-budget/cancellation refusal.
+
 ## Finite-rate crystallization and latent thermal feedback
 
 `crystallization::CrystallizationLaw` retains an independent Nakamura exposure
