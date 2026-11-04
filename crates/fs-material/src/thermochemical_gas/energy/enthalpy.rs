@@ -271,9 +271,8 @@ pub(super) fn minimum_cp(
     Ok(lower)
 }
 
-fn caloric_reference_identity(source: &ThermochemicalGasModel) -> Option<fs_blake3::ContentHash> {
+fn caloric_reference_identity(source: &ThermochemicalGasModel) -> fs_blake3::ContentHash {
     let components = source.thermodynamics().components();
-    if components.iter().all(|species| species.caloric_reference().is_none()) { return None; }
     let mut payload = Vec::new();
     payload.extend_from_slice(&(components.len() as u64).to_le_bytes());
     for species in components {
@@ -296,7 +295,7 @@ fn caloric_reference_identity(source: &ThermochemicalGasModel) -> Option<fs_blak
             }
         } else { payload.push(0); }
     }
-    Some(fs_blake3::hash_domain("org.frankensim.fs-material.gas-caloric-reference.v1", &payload))
+    fs_blake3::hash_domain("org.frankensim.fs-material.gas-caloric-reference.v1", &payload)
 }
 impl GasEnthalpyLaw {
     /// Construct a frozen mixture caloric law from one verified common source
@@ -351,13 +350,13 @@ impl GasEnthalpyLaw {
         if !maximum_slope.is_finite() || maximum_slope <= 0.0 {
             return Err(GasEnergyError::Invalid("caloric CFL slope is not representable"));
         }
-        let mut enthalpy_reference = format!("NASA9:{:?}:{:?}:{:016x}:{}",
+        // A common convention names the physical reference, but does not prove
+        // that separately authored tables implement the same formation datum.
+        // Bind every original source chart, including dormant species, so the
+        // shared mass/enthalpy transport owner cannot mix incompatible joules.
+        let enthalpy_reference = format!("NASA9:{:?}:{:?}:{:016x}:{}:caloric:{}",
             convention.phase(), convention.eos(), convention.reference_pressure().value().to_bits(),
-            convention.elemental_reference().as_str());
-        if let Some(identity) = caloric_reference_identity(source) {
-            enthalpy_reference.push_str(":caloric:");
-            enthalpy_reference.push_str(&identity.to_hex());
-        }
+            convention.elemental_reference().as_str(), caloric_reference_identity(source).to_hex());
         Ok(Self {
             model, context, controls,
             species: source.thermodynamics().components().iter()
@@ -409,12 +408,35 @@ impl ThermalLaw for GasEnthalpyLaw {
         let t0 = self.temperature_k(initial_h_j_kg)?;
         let t1 = if initial_h_j_kg == final_h_j_kg { t0 }
             else { self.temperature_k(final_h_j_kg)? };
+        if initial_h_j_kg == final_h_j_kg { return Ok(Some(0.0)); }
+        let dh = final_h_j_kg - initial_h_j_kg;
         let (_, pressure) = coordinates(&self.context)
             .map_err(|_| DepositionError::MaterialDomain)?;
-        self.model.thermodynamics().specific_entropy_change(
-            Temperature::new(t0), pressure, Temperature::new(t1), pressure)
-            .map(|entropy| Some(entropy.value()))
-            .map_err(|_| DepositionError::MaterialDomain)
+        // The stored enthalpy increment is authoritative. Independent bounded
+        // inversions can lose a small transfer in their residual tolerances,
+        // even returning the same temperature for two distinct stored h values.
+        // Retain the original variable-Cp inverse-temperature mean, while
+        // scaling it by the actual transfer rather than rounded endpoint h.
+        // Its coincident-temperature limit is exactly 1/T. Accuracy of that
+        // mean remains subject to the caller's declared caloric solve tolerance.
+        let change = if t0 == t1 {
+            dh / t0
+        } else {
+            let thermodynamics = self.model.thermodynamics();
+            let ds = thermodynamics.specific_entropy_change(
+                Temperature::new(t0), pressure, Temperature::new(t1), pressure)
+                .map_err(|_| DepositionError::MaterialDomain)?.value();
+            let represented_dh = thermodynamics.specific_enthalpy_change(
+                Temperature::new(t0), Temperature::new(t1))
+                .map_err(|_| DepositionError::MaterialDomain)?.value();
+            dh * (ds / represented_dh)
+        };
+        if !change.is_finite() || change == 0.0
+            || change.is_sign_positive() != (final_h_j_kg > initial_h_j_kg)
+        {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(Some(change))
     }
     fn advected_composition(&self) -> Option<CaloricComposition<'_>> {
         Some(CaloricComposition { species: &self.species, mass_fractions: &self.mass_fractions,

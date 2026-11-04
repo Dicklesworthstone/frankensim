@@ -1,6 +1,10 @@
 //! Synthetic NASA-9 coefficients provide an independent caloric oracle.
 use super::*;
 use crate::thermochemical_gas::tests::{model, point};
+use fs_thermal::enthalpy::{
+    Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionSimulation,
+    Event, MaterialId, StepConfig, TimedEvent,
+};
 
 fn controls() -> GasEnergySolve {
     GasEnergySolve { minimum_temperature_k: 280.0, maximum_temperature_k: 360.0,
@@ -8,6 +12,26 @@ fn controls() -> GasEnergySolve {
 }
 fn mole(fractions: Vec<f64>) -> Composition {
     Composition::new(CompositionBasis::MoleFraction, fractions).unwrap()
+}
+
+fn thermal_config() -> StepConfig {
+    StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-8 }
+}
+
+fn thermal_timeline<'a>(
+    materials: &[(MaterialId, &'a dyn ThermalLaw)], h: f64, source_w: f64,
+) -> DepositionSimulation<'a> {
+    let cell = DepositedCell {
+        id: CellId(1), segment_id: 1, body_id: 1, material_id: MaterialId(1),
+        mass_kg: 1.0, specific_h_j_kg: h,
+        geometry: CellGeometry { start_m: [0.0; 3], end_m: [1.0, 0.0, 0.0],
+            volume_m3: 1.0, surface_area_m2: 6.0 },
+        boundary: Boundary { ambient_k: 320.0, htc_w_m2_k: 0.0,
+            reservoir: None, source_w },
+    };
+    DepositionSimulation::new(vec![TimedEvent { time_s: 0.0, event: Event::Birth(cell) }],
+        materials, DepositionBudget { max_cells: 2, max_links: 0, max_events: 1, max_substeps: 8 })
+        .unwrap().advance_to(0.0, thermal_config(), || Ok(())).unwrap().0
 }
 
 #[test]
@@ -55,6 +79,54 @@ fn thermal_entropy_adapter_integrates_original_variable_cp_at_fixed_pressure() {
     assert_eq!(law.specific_entropy_change_j_kg_k(h1,h0).unwrap().unwrap(),-entropy);
     assert_eq!(law.specific_entropy_change_j_kg_k(h0,h0).unwrap(),Some(0.0));
     assert!(law.specific_entropy_change_j_kg_k(h0-1e9,h1).is_err());
+}
+
+#[test]
+fn thermal_entropy_retains_heat_smaller_than_the_caloric_inverse_tolerance() {
+    let source = model(vec![0.75, 0.25], 0.001);
+    for tolerance in [1e-8, 1e-3] {
+        let law = GasEnthalpyLaw::from_mole(&source, mole(vec![0.75, 0.25]),
+            point(320.0, 140000.0), GasEnergySolve {
+                energy_tolerance_j_kg: tolerance, ..controls()
+            }).unwrap();
+        let h0 = law.enthalpy_at_temperature(320.0).unwrap();
+        let h1 = h0 + 0.25 * tolerance;
+        assert!(h1 > h0);
+        // Both inversions legitimately accept the same bracket midpoint.
+        assert_eq!(law.temperature_k(h0).unwrap(), 320.0);
+        assert_eq!(law.temperature_k(h1).unwrap(), 320.0);
+        let entropy = law.specific_entropy_change_j_kg_k(h0, h1).unwrap().unwrap();
+        assert!(entropy > 0.0);
+        assert_eq!(entropy, (h1 - h0) / 320.0);
+        assert_eq!(law.specific_entropy_change_j_kg_k(h1, h0).unwrap(), Some(-entropy));
+        assert_eq!(law.specific_entropy_change_j_kg_k(h0, h0).unwrap(), Some(0.0));
+    }
+}
+
+#[test]
+fn gas_heating_timeline_accounts_for_heat_below_temperature_reconstruction_tolerance() {
+    let source = model(vec![0.75, 0.25], 0.001);
+    let law = GasEnthalpyLaw::from_mole(&source, mole(vec![0.75, 0.25]),
+        point(320.0, 140000.0), GasEnergySolve {
+            energy_tolerance_j_kg: 0.01, ..controls()
+        }).unwrap();
+    let h0 = law.enthalpy_at_temperature(320.0).unwrap();
+    // One millijoule over one second in a one-kilogram isobaric cell.
+    let initial = thermal_timeline(&[(MaterialId(1), &law)], h0, 0.001);
+    let (heated, energy, entropy) = initial.advance_to_with_entropy(
+        1.0, thermal_config(), || Ok(())).unwrap();
+    let stored_heat = heated.cells()[&CellId(1)].specific_h_j_kg - h0;
+    assert_eq!(energy.substeps, 1);
+    assert_eq!(energy.external_heat_j, 0.001);
+    assert!(energy.residual_j.abs() < thermal_config().energy_tolerance_j);
+    assert!(stored_heat > 0.0);
+    assert_eq!(law.temperature_k(heated.cells()[&CellId(1)].specific_h_j_kg).unwrap(), 320.0);
+    assert_eq!(entropy.thermal_storage_change_j_k, stored_heat / 320.0);
+    assert_eq!(entropy.unclassified_source_at_cell_j_k, 0.001 / 320.0);
+    assert!(entropy.has_unclassified_sources);
+    assert_eq!(entropy.conduction_generation_j_k, 0.0);
+    assert!(entropy.temporal_defect_j_k.abs() < 3e-13);
+    assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, h0);
 }
 
 #[test]
@@ -296,6 +368,54 @@ fn caloric_transport_reference_binds_policy_but_preserves_the_full_species_catal
         original.advected_composition().unwrap().enthalpy_reference);
     assert_eq!(a.advected_composition().unwrap().enthalpy_reference,
         b.advected_composition().unwrap().enthalpy_reference);
+}
+
+#[test]
+fn stationary_advection_refuses_unreconciled_source_formation_reference_mismatch() {
+    use fs_thermal::enthalpy::advection::{Advected, MassBoundary, species::InletSpecies};
+    use crate::thermochemical_gas::tests::{species_with_energy_reference, transport};
+
+    let source = |reference_j_kg| ThermochemicalGasModel::new(
+        fs_thermochem::mixture::FrozenIdealGasMixtureModelV1::new(
+            vec![species_with_energy_reference("A", 0.028, 3.5, 0.001, reference_j_kg)],
+            mole(vec![1.0]),
+        ).unwrap(), vec![transport("A", 1.7e-5, 0.025)], None,
+    ).unwrap();
+    let cell_source = source(0.0);
+    let cell_law = GasEnthalpyLaw::from_mole(&cell_source, mole(vec![1.0]),
+        point(320.0, 100000.0), controls()).unwrap();
+    let h0 = cell_law.enthalpy_at_temperature(320.0).unwrap();
+    for reference_j_kg in [0.0, 1000.0] {
+        let inlet_source = source(reference_j_kg);
+        let inlet_law = GasEnthalpyLaw::from_mole(&inlet_source, mole(vec![1.0]),
+            point(320.0, 100000.0), controls()).unwrap();
+        // The species, composition and named convention agree; only the
+        // source's formation-energy coefficient changes. Without source
+        // binding the 1000 J/kg offset acts as spurious sensible inlet heat.
+        assert_eq!(cell_source.thermodynamics().components()[0].convention(),
+            inlet_source.thermodynamics().components()[0].convention());
+        assert!(inlet_source.thermodynamics().components()[0].caloric_reference().is_none());
+        let inlet_h = inlet_law.enthalpy_at_temperature(320.0).unwrap();
+        assert!((inlet_h - h0 - reference_j_kg).abs() < 1e-8);
+        let initial = thermal_timeline(
+            &[(MaterialId(1), &cell_law), (MaterialId(2), &inlet_law)], h0, 0.0);
+        let flow = Advected::new((), vec![], 0).unwrap().with_boundaries(vec![
+            MassBoundary::Inlet { id: 1, cell: CellId(1), kg_s: 0.001,
+                material_id: MaterialId(2), specific_h_j_kg: inlet_h },
+            MassBoundary::Outlet { id: 2, cell: CellId(1), kg_s: 0.001 },
+        ], 2).unwrap().with_stationary_species(vec!["A".into()],
+            vec![InletSpecies { boundary_id: 1, mass_fractions: vec![1.0] }], 1, 1).unwrap();
+        let result = initial.advance_observed(&flow, 1.0, thermal_config(), || Ok(()));
+        if reference_j_kg == 0.0 {
+            let (advanced, _, audit) = result.unwrap();
+            assert_eq!(advanced.cells()[&CellId(1)].specific_h_j_kg, h0);
+            assert_eq!(audit.residual_j, 0.0);
+        } else {
+            assert_eq!(result.err(), Some(DepositionError::InvalidInput(
+                "stationary species caloric laws have different enthalpy references")));
+        }
+        assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, h0);
+    }
 }
 
 #[test]
