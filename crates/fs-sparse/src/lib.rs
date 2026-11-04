@@ -298,6 +298,16 @@ impl Csr {
         (&self.col_idx[span.clone()], &self.vals[span])
     }
 
+    /// Mutate one row's coefficients without changing its canonical sparsity.
+    ///
+    /// This permits numerical equilibration in the existing allocation before
+    /// products are formed. Callers retain responsibility for symmetry and
+    /// other numerical properties; column indices and row boundaries stay fixed.
+    pub fn row_values_mut(&mut self, r: usize) -> &mut [f64] {
+        let span = self.row_ptr[r]..self.row_ptr[r + 1];
+        &mut self.vals[span]
+    }
+
     /// Value access (O(log nnz_row)); zero if not stored.
     #[must_use]
     pub fn get(&self, r: usize, c: usize) -> f64 {

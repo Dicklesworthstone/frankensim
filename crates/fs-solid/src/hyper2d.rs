@@ -205,10 +205,7 @@ impl HyperProblem<'_> {
                     });
                 }
                 let b: Vec<f64> = resid.iter().map(|r| -r / rnorm).collect();
-                let op = ScaledNewtonOp {
-                    original: CsrOp::symmetric(tangent),
-                    scale: stiffness_scale,
-                };
+                let op = normalized_newton_operator(tangent, stiffness_scale, &fixed);
                 let mut st = MinresState::new(&op, &b);
                 while st.iters < 20_000 && st.rel_residual() >= 1e-10 {
                     checkpoint(projection)?;
@@ -619,22 +616,25 @@ impl crate::continuation::PathResidual for HyperProblem<'_> {
     }
 }
 
-struct ScaledNewtonOp {
-    original: CsrOp,
-    scale: f64,
-}
-
-impl LinearOp for ScaledNewtonOp {
-    fn n(&self) -> usize {
-        self.original.n()
-    }
-
-    fn apply(&self, x: &[f64], y: &mut [f64]) {
-        self.original.apply(x, y);
-        for value in y {
-            *value /= self.scale;
+fn normalized_newton_operator(
+    mut tangent: fs_sparse::Csr,
+    stiffness_scale: f64,
+    fixed: &BTreeMap<usize, f64>,
+) -> CsrOp {
+    // Scale the coefficients BEFORE multiplication. Dividing K*x afterward
+    // cannot recover a finite normalized result once the unscaled product or
+    // row sum has overflowed (or underflowed). The matrix is already owned by
+    // this Newton step, so no second sparse allocation or per-apply division
+    // is needed. Support rows are dimensionless identities, not stiffness;
+    // keep them at one even when the free coefficients are subnormal.
+    for row in 0..tangent.nrows() {
+        if !fixed.contains_key(&row) {
+            for value in tangent.row_values_mut(row) {
+                *value /= stiffness_scale;
+            }
         }
     }
+    CsrOp::symmetric(tangent)
 }
 
 fn norm(v: &[f64]) -> f64 {
@@ -653,6 +653,58 @@ fn norm(v: &[f64]) -> f64 {
 mod tests {
     use super::*;
     use fs_material::hyper::{FibreInvariants, HyperelasticModel, OgdenTerm, Volumetric};
+
+    /// G3: force-unit normalization must precede products, including the true
+    /// residual action on a recovered Krylov iterate larger than one.
+    #[test]
+    fn normalized_newton_action_preserves_finite_products_and_supports() {
+        for scale in [1e-310, 1.0, 1e308] {
+            let mut tangent = Coo::new(3, 3);
+            tangent.push(0, 0, scale);
+            tangent.push(0, 1, -scale);
+            tangent.push(1, 0, -scale);
+            tangent.push(1, 1, scale);
+            tangent.push(2, 2, 1.0);
+            let fixed = BTreeMap::from([(2, 0.0)]);
+            let op = normalized_newton_operator(tangent.assemble(), scale, &fixed);
+            let mut actual = [0.0; 3];
+            op.apply(&[2.0, -2.0, 0.0], &mut actual);
+            assert_eq!(actual, [4.0, -4.0, 0.0]);
+            // Tiny products would round to zero in the physical matrix.
+            op.apply(&[1e-20, 0.0, 3.0], &mut actual);
+            assert_eq!(actual, [1e-20, -1e-20, 3.0]);
+            let mut transpose = [0.0; 3];
+            op.apply_transpose(&[1e-20, 0.0, 3.0], &mut transpose);
+            assert_eq!(actual, transpose);
+        }
+    }
+
+    /// A symmetric indefinite tangent remains usable near a limit point.
+    /// Both the Krylov path and the final true residual use the same scaling.
+    #[test]
+    fn normalized_newton_krylov_solves_across_extreme_force_units() {
+        for scale in [1e-300, 1.0, 1e300] {
+            let mut tangent = Coo::new(3, 3);
+            tangent.push(0, 0, scale);
+            tangent.push(0, 1, scale);
+            tangent.push(1, 0, scale);
+            tangent.push(1, 1, -scale);
+            tangent.push(2, 2, 1.0);
+            let fixed = BTreeMap::from([(2, 0.0)]);
+            let op = normalized_newton_operator(tangent.assemble(), scale, &fixed);
+            let rhs = [0.6, 0.8, 0.0];
+            let mut state = MinresState::new(&op, &rhs);
+            state.run(&op, 1e-12, 8);
+            let mut actual = [0.0; 3];
+            op.apply(&state.x, &mut actual);
+            for (a, b) in actual.iter().zip(rhs) {
+                assert!((a - b).abs() < 2e-14, "scale={scale:e}, action={actual:?}");
+            }
+            assert!((state.x[0] - 0.7).abs() < 2e-14);
+            assert!((state.x[1] + 0.1).abs() < 2e-14);
+            assert_eq!(state.x[2], 0.0);
+        }
+    }
 
     /// The cheaper force probe must preserve the fully assembled residual bits.
     #[test]
