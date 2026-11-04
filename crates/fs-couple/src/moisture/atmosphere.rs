@@ -412,6 +412,11 @@ impl FiniteMoistureAtmosphere {
     pub const fn gas(&self) -> &ClosedGasParcel {
         &self.gas
     }
+    /// Original complete species catalog, retained even after exact vapor
+    /// depletion. This contains constitutive sources, not a second inventory.
+    pub const fn source_catalog(&self) -> &ThermochemicalGasModel {
+        &self.catalog
+    }
     pub fn relative_humidity(&self) -> Result<f64, AtmosphereMoistureError> {
         Ok(self.vapor_mass_kg()? / self.saturation_mass_kg)
     }

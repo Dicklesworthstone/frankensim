@@ -5024,6 +5024,36 @@ contact resistance, swelling or sorption heat. Authored tests cover nonlinear
 inverse/storage values, heterogeneous partition, narrow changes, typed-domain
 refusals, fixed-temperature surface cuts and unsupported gaps.
 
+### Differential moisture sorption energy
+
+`state_point::MoistureSorptionEnergy` admits the original selected differential
+isosteric heat `q_st = h_vapor - partial_h_bound` in **J/kg water**, as a function
+of dry-basis moisture M at explicitly fixed absolute temperature and source
+context. This is total vapor-to-bound enthalpy, not merely the net heat relative
+to liquid water. No heat of condensation, water property or material-name
+default is added. Signed finite source values remain signed.
+
+The existing `query_line_typed` owner admits every intervening curve segment
+and triangulated surface cell with one pinned claim. A source gap, changed card,
+wrong moisture basis, untyped temperature or extrapolation refuses. Preparation
+inherits its 4096-knot limit. Integrals evaluate local segment contributions
+directly with compensated accumulation, preserving narrow changes without
+subtracting large cumulative potentials. Evaluation allocates nothing; a point
+lookup is logarithmic and integration visits only the crossed segments. The
+exact segment count is available for a consumer's work admission.
+
+The signed integral `integral q_st(M) dM` has units J/kg dry skeleton. It is
+exact for the admitted piecewise-affine source interpolation up to roundoff,
+not a continuum or statistical error certificate. Under an explicit rigid-solid,
+negligible bound-phase pV approximation and original ideal vapor, the consumer
+obtains `partial_u_bound - u_vapor = R_water*T - q_st`. IUPAC's differential
+energy/enthalpy convention is stated at
+https://old.iupac.org/reports/2001/colloid_2001/manual_of_s_and_t/node31.html .
+This source chart does not supply transport, hysteresis, thermal feedback,
+independently authenticate compatible isotherm data, or establish entropy
+production. Authored tests cover signed nonlinear integrals, narrow increments,
+source pins, surface cuts, source holes and quantity/domain refusal.
+
 ## Source-backed permanent-magnet recoil
 
 `field_storage::permanent::ResolvedRecoilMaterial` binds the reversible isotropic law `B = mu_recoil H + Br n` at one complete fixed material state. Required source properties are `recoil_magnetic_permeability` [H/m], `remanent_flux_density` [T], signed `recoil_minimum_parallel_field_strength` and `recoil_maximum_parallel_field_strength` [A/m], and `recoil_maximum_transverse_field_strength` [A/m]. The parallel interval must contain zero; all values retain their original units, selected claims, card identity, query coordinates and receipts. Generic permeability, coercivity and energy-product-derived model coefficients cannot substitute for recoil data. All coefficients and limits must be static at the selected external conditions; field/frequency dependence cannot be frozen into this linear law.

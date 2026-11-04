@@ -56,6 +56,11 @@ pub use moisture_diffusion::KirchhoffMoistureDiffusivity;
 mod moisture_sorption;
 pub use moisture_sorption::MonotoneMoistureSorption;
 
+mod moisture_energy;
+pub use moisture_energy::{
+    MOISTURE_ISOSTERIC_HEAT_DIMS, MOISTURE_ISOSTERIC_HEAT_PROPERTY, MoistureSorptionEnergy,
+};
+
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
     ElasticTensorOrder, ElasticTensorSymmetry, JointCorrelation, JointUsageReceipt,

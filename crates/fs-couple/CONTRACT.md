@@ -22826,6 +22826,45 @@ balance over continuing intervals, opposite-sign uptake/drying, canonical input
 permutation, a companion material changing an unchanged specimen's native plate
 response, and whole-candidate refusal/cancellation.
 
+### Finite-atmosphere sorption calorimetry
+
+The `moisture-sorption-calorics` consumer composes original finite-atmosphere
+slab or Cartesian diffusion with `MoistureSorptionEnergy` from the SAME solid
+card and exact fixed source context. `advance_with_sorption_energy` and
+`advance_cartesian_with_sorption_energy` run the existing conservative endpoint
+and then admit every original cell's caloric interval before publishing either
+the transport candidate or its energy. Diffusion, finite surface exchange,
+the shared RH solve and the species inventory are unchanged physical owners.
+
+At held T, a rigid solid with negligible bound-phase pV stores
+`delta_U_bound = m_dry * integral (h_vapor - q_st(M)) dM`. The original retained
+water-vapor species supplies the full NASA-9 caloric receipt and molar mass,
+even when an active composition has depleted that species. Its datum never
+comes from a synthetic liquid-water or latent-heat constant. The fixed-volume
+gas+solid system's thermostat duty is
+`Q_in = sum m_dry * integral (R_water*T - q_st(M)) dM`.
+Positive Q enters the system; negative Q must be removed to maintain T.
+Native gas internal-energy change plus bound storage independently audits this
+datum-free duty against the caller's absolute joule allowance. Represented
+water-balance and gas-energy rounding errors are retained and can refuse the
+candidate; arbitrary reference energies never enlarge that allowance.
+
+Local binding/storage increments and mean external thermostat power are
+reported. Nonlinear loading-dependent energy changes include internal moisture
+redistribution even when net vapor uptake is zero. These per-cell storage
+increments are NOT unique spatial heat-deposition sources: internal water-energy
+fluxes and conduction require their own closure. Source integration is bounded
+by a caller-selected total crossed-segment budget, with no allocation inside
+the material chart and cancellation between cells. Only the native candidate
+and O(cells) final caloric report are retained.
+
+This rung remains isothermal with fixed dry skeletons and finite ideal vapor;
+it does not evolve temperature, add hysteresis or free liquid, or establish
+isotherm/caloric thermodynamic consistency or a global entropy inequality.
+Focused tests cover native uptake/desorption and the RT correction, sealed
+redistribution, actual six-face Cartesian fields, late source/work refusal
+and cancellation. Native Rust execution is a separate verification claim.
+
 
 ### Shared material for immersed flow, additional inertia and sphere films
 

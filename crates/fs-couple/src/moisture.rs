@@ -17,8 +17,10 @@
 //! The solid consumer resolves quasistatic swelling in that reference chart.
 //! The slab has no transverse transport; `cartesian` supplies three-dimensional
 //! principal-axis diffusion and the same source-bound native solid mechanics.
-//! Sorption heat, stress-assisted diffusion, free liquid and hysteresis are not
-//! modeled. Ordinary surface conditions are
+//! Ordinary transport excludes sorption heat, stress-assisted diffusion, free
+//! liquid and hysteresis. Opt-in `calorics` accounts for original sorption
+//! energy and the finite atmosphere's actual isothermal thermostat duty.
+//! Ordinary surface conditions are
 //! infinite reservoirs; `atmosphere` instead balances an actual finite vapor
 //! inventory against this same diffusion owner. The plate consumer retains the
 //! fixed geometry and rebuilds actual stiffness AND wet inertia.
@@ -27,6 +29,8 @@
 pub mod adaptive;
 /// Finite vapor inventory, source sorption and the original diffusion endpoint.
 pub mod atmosphere;
+/// Original sorption energetics and finite-atmosphere isothermal heat duty.
+pub mod calorics;
 mod binding;
 /// Three-dimensional principal-axis transport on actual Cartesian finite volumes.
 pub mod cartesian;

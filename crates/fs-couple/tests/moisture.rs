@@ -22,6 +22,8 @@ use fs_solver::CheckedCgConfig;
 mod solid;
 #[path = "moisture/atmosphere.rs"]
 mod atmosphere;
+#[path = "moisture/calorics.rs"]
+mod calorics;
 #[path = "moisture/surface.rs"]
 mod surface;
 #[path = "moisture/solution.rs"]
