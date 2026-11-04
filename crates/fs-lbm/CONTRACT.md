@@ -9917,6 +9917,35 @@ Analytic regression sources cover sealed expansion/contraction on all axes,
 continued evolution from actual endpoint momentum, reservoir gauge invariance
 and atomic late refusal. Compiler checks do not constitute numerical execution.
 
+## Molecular viscosity driving thermal density and phase volume
+
+`FlowField::advance_piecewise_thermal_volume_momentum_with_viscosity` and its
+pressure-profile variant route original molecular dissipation through the
+same chart that owns material density and occupied volume. The existing
+symmetric-stress viscosity owner samples each transport source once, uses
+actual M/V face inertia and returns its native momentum impulse and physical
+cell heat. The sampled source density must exactly match the original chart
+state; other source coordinates and admitted phase mobility remain explicit
+caller responsibilities.
+
+Physical molecular heat is added once to authored NET caloric increments.
+Original phase states remain the initial state until the thermal owner advances
+h and phase and derives compatible expansion/contraction flux. Viscously
+updated momentum then receives the accepted pressure impulse and follows the
+same accepted mass routes as M and M*h. No source is sampled again during
+thermal trials, and no second viscosity solve or momentum pressure solve is
+introduced.
+
+Heat-addition residuals share the original thermal enthalpy budget and the
+viscosity energy gate. Wall work, required source-pressure work, temporal loss
+and scatter/transport losses retain separate accounts; numerical dissipation
+does not become heat. A sealed geometry incompatible with its chart's net
+expansion refuses instead of inventing compression. The existing closed
+wall/symmetry and opposed pressure-mouth restrictions remain. This is a
+first-order frozen-source split with caller-owned thermodynamic work and phase
+support, not a pressure-dependent EOS or deformable-solid closure. All stages
+must accept before any endpoint is returned.
+
 ## Source conductivity driving thermal-density momentum
 
 `FlowField::advance_isotropic_conductive_thermal_volume_momentum` and its

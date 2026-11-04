@@ -147,7 +147,7 @@ pub use flow::{
     MaterialVolumeSource, PiecewiseThermalVolumeControls, ProjectionReport, ReservoirPressure,
     StaggeredBoundaryPressure, ThermalVolumeControls, ThermalVolumeMomentumControls,
     ThermalVolumeMomentumInput, ThermalVolumeMomentumStep, ThermalVolumeStep,
-    ViscousMaterialMomentumAdvance, lbm_duct_flow,
+    ViscousMaterialMomentumAdvance, ViscousThermalVolumeMomentumStep, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{

@@ -1,7 +1,7 @@
 //! Source-viscosity diffusion and physical heating before the original advance.
 
-use super::super::StaggeredBoundaryPressure;
 use super::super::density_projection::face_dual_mass;
+use super::super::{DensityMomentumReconstructionControls, StaggeredBoundaryPressure};
 use super::*;
 use crate::conjugate::simple::FvBoundary;
 pub use crate::conjugate::simple::viscous_heat::material_momentum::{
@@ -10,7 +10,7 @@ pub use crate::conjugate::simple::viscous_heat::material_momentum::{
 use crate::conjugate::simple::viscous_heat::material_momentum::{
     NativeMaterialViscosityInput, kick,
 };
-use fs_material::fluid_transport::FluidTransport;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_math::dd::Dd;
 
 /// Borrow original transport evaluations; no viscosity or EOS is inferred.
@@ -28,6 +28,14 @@ pub struct MaterialMomentumViscosityInput<'a> {
     /// pressure/zero-gradient openings. Their pressure comes only from the
     /// separate profile. Solid voxels remain stationary no-slip.
     pub boundaries: [FvBoundary; 6],
+}
+
+/// One privately prepared original-source molecular kick. Caloric consumers
+/// decide how its physical heat enters their original material state owner.
+pub(in crate::conjugate::flow) struct PreparedMaterialViscosity {
+    pub momentum_kg_m_s: Vec<[f64; 3]>,
+    pub report: MaterialViscosityReport,
+    pub reconstruction: DensityMomentumReconstructionReport,
 }
 
 /// One atomic molecular-viscosity/force/pressure/material-advection candidate.
@@ -134,30 +142,11 @@ impl FlowField {
         gate: &CancelGate,
     ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
         poll(gate)?;
-        let axis = (0..3)
-            .find(|&a| faces[2 * a] == FlowFace::Free && faces[2 * a + 1] == FlowFace::Free)
-            .ok_or_else(|| refuse("viscous pressure flow needs one opposed reservoir pair"))?;
-        for f in 0..6 {
-            if f / 2 == axis {
-                if !matches!(viscosity.boundaries[f], FvBoundary::Outlet)
-                    || input.boundary_velocity_m_s[f]
-                        .is_some_and(|u| (0..3).any(|a| a != axis && u[a] != 0.0))
-                {
-                    return Err(refuse(
-                        "reservoir pressure belongs to the profile and tangential trace must be zero",
-                    ));
-                }
-            } else if faces[f] != FlowFace::Wall
-                || !matches!(
-                    viscosity.boundaries[f],
-                    FvBoundary::Wall { .. } | FvBoundary::Symmetry
-                )
-            {
-                return Err(refuse(
-                    "viscous pressure flow admits one opposed pair and closed sides",
-                ));
-            }
-        }
+        let axis = Self::admit_material_viscosity_pressure_mouth(
+            faces,
+            viscosity.boundaries,
+            input.boundary_velocity_m_s,
+        )?;
         self.advance_viscous_material(
             domain,
             faces,
@@ -200,13 +189,142 @@ impl FlowField {
             ));
         }
         let duration = controls.mechanics.projection.duration_s;
-        finite_positive("flow.viscosity_duration", duration)?;
+        let viscous = self.prepare_material_viscosity(
+            domain,
+            faces,
+            pressure_mouth_axis,
+            input.material.mass_kg,
+            input.momentum_kg_m_s,
+            viscosity,
+            controls.mechanics.reconstruction,
+            duration,
+            viscosity_controls,
+            gate,
+            |_, _| Ok(()),
+        )?;
+        let mut enthalpy = input.material.specific_enthalpy_j_kg.to_vec();
+        let mut represented = Dd::ZERO;
+        let mut insertion_defect = Dd::ZERO;
+        for c in 0..n {
+            poll_every(gate, c)?;
+            if !domain.is_fluid(c) {
+                continue;
+            }
+            finite("flow.viscosity_original_enthalpy", enthalpy[c])?;
+            let heat = viscous.report.cell_molecular_heat_j[c];
+            if heat != 0.0 {
+                enthalpy[c] += heat / input.material.mass_kg[c];
+            }
+            finite("flow.viscosity_heated_enthalpy", enthalpy[c])?;
+            let actual = Dd::from_f64(input.material.mass_kg[c])
+                * (Dd::from_f64(enthalpy[c])
+                    - Dd::from_f64(input.material.specific_enthalpy_j_kg[c]));
+            represented = represented + actual;
+            insertion_defect =
+                insertion_defect + Dd::from_f64((actual - Dd::from_f64(heat)).to_f64().abs());
+        }
+        let defect = insertion_defect.to_f64();
+        finite("flow.viscosity_heat_insertion_defect", defect)?;
+        if (insertion_defect + Dd::from_f64(viscous.report.absolute_energy_defect_j)).to_f64()
+            > viscosity_controls.maximum_energy_defect_j
+        {
+            return Err(refuse(
+                "actual molecular heating exceeds the viscosity energy budget",
+            ));
+        }
+        let represented = represented.to_f64();
+        finite("flow.viscosity_represented_heat", represented)?;
+        let heated = MaterialMomentumAdvanceInput {
+            material: MaterialAdvectionInput {
+                specific_enthalpy_j_kg: &enthalpy,
+                ..input.material
+            },
+            momentum_kg_m_s: &viscous.momentum_kg_m_s,
+            ..input
+        };
+        let advance = match profile {
+            Some(profile) => self.advance_material_momentum_with_pressure_profile(
+                domain, faces, profile, heated, controls, gate,
+            )?,
+            None => self.advance_material_momentum(domain, faces, heated, controls, gate)?,
+        };
+        poll(gate)?;
+        Ok(ViscousMaterialMomentumAdvance {
+            advance,
+            viscosity_reconstruction: viscous.reconstruction,
+            viscosity: viscous.report,
+            represented_molecular_heat_j: represented,
+            absolute_heat_insertion_defect_j: defect,
+        })
+    }
+
+    /// Share the original opposed-mouth admission with other caloric owners.
+    pub(in crate::conjugate::flow) fn admit_material_viscosity_pressure_mouth(
+        faces: [FlowFace; 6],
+        boundaries: [FvBoundary; 6],
+        boundary_velocity_m_s: [Option<[f64; 3]>; 6],
+    ) -> Result<usize, ChtError> {
+        let axis = (0..3)
+            .find(|&a| faces[2 * a] == FlowFace::Free && faces[2 * a + 1] == FlowFace::Free)
+            .ok_or_else(|| refuse("viscous pressure flow needs one opposed reservoir pair"))?;
+        for f in 0..6 {
+            if f / 2 == axis {
+                if !matches!(boundaries[f], FvBoundary::Outlet)
+                    || boundary_velocity_m_s[f]
+                        .is_some_and(|u| (0..3).any(|a| a != axis && u[a] != 0.0))
+                {
+                    return Err(refuse(
+                        "reservoir pressure belongs to the profile and tangential trace must be zero",
+                    ));
+                }
+            } else if faces[f] != FlowFace::Wall
+                || !matches!(
+                    boundaries[f],
+                    FvBoundary::Wall { .. } | FvBoundary::Symmetry
+                )
+            {
+                return Err(refuse(
+                    "viscous pressure flow admits one opposed pair and closed sides",
+                ));
+            }
+        }
+        Ok(axis)
+    }
+
+    /// Prepare molecular impulse and heat once on the original actual M/V
+    /// inertia. The private source callback admits the SAME sampled transport
+    /// state for a stricter caloric owner without reevaluating its source.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::conjugate::flow) fn prepare_material_viscosity(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        mass_kg: &[f64],
+        momentum_kg_m_s: &[[f64; 3]],
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        reconstruction_controls: DensityMomentumReconstructionControls,
+        duration_s: f64,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        mut admit_source: impl FnMut(usize, &FluidTransportState) -> Result<(), ChtError>,
+    ) -> Result<PreparedMaterialViscosity, ChtError> {
+        poll(gate)?;
+        let n = domain.cell_count();
+        if n > viscosity_controls.max_cells
+            || n > reconstruction_controls.max_cells
+            || mass_kg.len() != n
+            || viscosity.sources.len() != n
+        {
+            return Err(refuse("viscosity needs bounded original inventory"));
+        }
+        finite_positive("flow.viscosity_duration", duration_s)?;
         let reconstructed = self.reconstruct_material_momentum(
             domain,
             faces,
-            input.material.mass_kg,
-            input.momentum_kg_m_s,
-            controls.mechanics.reconstruction,
+            mass_kg,
+            momentum_kg_m_s,
+            reconstruction_controls,
             gate,
         )?;
         let mut molecular = vec![0.0; n];
@@ -222,6 +340,7 @@ impl FlowField {
                                 field: "flow.viscosity_source",
                                 reason: format!("cell {c}: {error}"),
                             })?;
+                    admit_source(c, &state)?;
                     molecular[c] = state.dynamic_viscosity_pa_s();
                     first.get_or_insert(molecular[c]);
                 }
@@ -277,70 +396,21 @@ impl FlowField {
             domain,
             NativeMaterialViscosityInput {
                 field: &reconstructed.field,
-                mass_kg: input.material.mass_kg,
-                momentum_kg_m_s: input.momentum_kg_m_s,
+                mass_kg,
+                momentum_kg_m_s,
                 viscosity_pa_s: &molecular,
                 face_mass_kg: face_mass,
                 boundaries: viscosity.boundaries,
                 pressure_mouth_axis,
-                duration_s: duration,
+                duration_s,
             },
             viscosity_controls,
             gate,
         )?;
-        let mut enthalpy = input.material.specific_enthalpy_j_kg.to_vec();
-        let mut represented = Dd::ZERO;
-        let mut insertion_defect = Dd::ZERO;
-        for c in 0..n {
-            poll_every(gate, c)?;
-            if !domain.is_fluid(c) {
-                continue;
-            }
-            finite("flow.viscosity_original_enthalpy", enthalpy[c])?;
-            let heat = viscous.report.cell_molecular_heat_j[c];
-            if heat != 0.0 {
-                enthalpy[c] += heat / input.material.mass_kg[c];
-            }
-            finite("flow.viscosity_heated_enthalpy", enthalpy[c])?;
-            let actual = Dd::from_f64(input.material.mass_kg[c])
-                * (Dd::from_f64(enthalpy[c])
-                    - Dd::from_f64(input.material.specific_enthalpy_j_kg[c]));
-            represented = represented + actual;
-            insertion_defect =
-                insertion_defect + Dd::from_f64((actual - Dd::from_f64(heat)).to_f64().abs());
-        }
-        let defect = insertion_defect.to_f64();
-        finite("flow.viscosity_heat_insertion_defect", defect)?;
-        if (insertion_defect + Dd::from_f64(viscous.report.absolute_energy_defect_j)).to_f64()
-            > viscosity_controls.maximum_energy_defect_j
-        {
-            return Err(refuse(
-                "actual molecular heating exceeds the viscosity energy budget",
-            ));
-        }
-        let represented = represented.to_f64();
-        finite("flow.viscosity_represented_heat", represented)?;
-        let heated = MaterialMomentumAdvanceInput {
-            material: MaterialAdvectionInput {
-                specific_enthalpy_j_kg: &enthalpy,
-                ..input.material
-            },
-            momentum_kg_m_s: &viscous.momentum_kg_m_s,
-            ..input
-        };
-        let advance = match profile {
-            Some(profile) => self.advance_material_momentum_with_pressure_profile(
-                domain, faces, profile, heated, controls, gate,
-            )?,
-            None => self.advance_material_momentum(domain, faces, heated, controls, gate)?,
-        };
-        poll(gate)?;
-        Ok(ViscousMaterialMomentumAdvance {
-            advance,
-            viscosity_reconstruction: reconstructed.report,
-            viscosity: viscous.report,
-            represented_molecular_heat_j: represented,
-            absolute_heat_insertion_defect_j: defect,
+        Ok(PreparedMaterialViscosity {
+            momentum_kg_m_s: viscous.momentum_kg_m_s,
+            report: viscous.report,
+            reconstruction: reconstructed.report,
         })
     }
 }

@@ -45,9 +45,10 @@ pub use phase_volume::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveThermalVolumeControls,
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
-    ConductiveThermalVolumeReport, ConductiveThermalVolumeStep, PiecewiseThermalVolumeControls,
+    ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
+    PiecewiseThermalVolumeControls,
     ThermalVolumeControls, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,
-    ThermalVolumeMomentumStep, ThermalVolumeStep,
+    ThermalVolumeMomentumStep, ThermalVolumeStep, ViscousThermalVolumeMomentumStep,
 };
 
 /// Mass-flow role of one domain face for flux construction and projection.

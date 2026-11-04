@@ -30,7 +30,7 @@ fn chart() -> EquilibriumEnthalpyPhaseCurve {
     .unwrap()
 }
 
-fn controls() -> ThermalVolumeMomentumControls {
+pub(super) fn controls() -> ThermalVolumeMomentumControls {
     let projection = DensityProjectionControls {
         duration_s: 0.1,
         relative_tolerance: 1e-12,
@@ -104,7 +104,7 @@ fn input<'a>(
     }
 }
 
-fn close(actual: f64, expected: f64) {
+pub(super) fn close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() < 4e-10 * expected.abs().max(1.0),
         "{actual:.17e} != {expected:.17e}"

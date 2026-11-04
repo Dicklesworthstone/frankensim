@@ -4,11 +4,11 @@ mod conduction;
 pub use conduction::{
     ConductiveThermalVolumeControls, ConductiveThermalVolumeMomentumControls,
     ConductiveThermalVolumeMomentumStep, ConductiveThermalVolumeReport,
-    ConductiveThermalVolumeStep,
-};
+    ConductiveThermalVolumeStep, };
 mod momentum;
 pub use momentum::{
     ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
+    ViscousThermalVolumeMomentumStep,
 };
 
 use fs_material::phase::{
