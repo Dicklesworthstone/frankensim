@@ -13,6 +13,7 @@
 //! momentum definitions: https://drake.mit.edu/doxygen_cxx/group__multibody__spatial__inertia.html.
 
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
+use fs_math::dd::Dd;
 
 /// Point-parcel capture with native central inertia and spatial momentum.
 pub mod capture;
@@ -329,8 +330,8 @@ impl RigidAssembly {
         )?;
         let state = RigidBodyState::new(
             Pose::new(center, orientation)?,
-            before.linear_world,
-            orientation.rotate_world_to_body(before.angular_world),
+            rounded(before.linear_world)?,
+            rounded(rotate_wide(orientation.conjugate(), before.angular_world))?,
         )?;
         let after = totals(
             &[state],
@@ -369,11 +370,7 @@ impl RigidAssembly {
         if removed < 0.0 {
             return Err(AssemblyError::Invalid("negative relative kinetic energy"));
         }
-        let balance = AssemblyBalance {
-            linear_momentum_residual_world_ns: after.linear_world.sub(before.linear_world),
-            angular_momentum_residual_world_nms: after.angular_world.sub(before.angular_world),
-            energy_residual_j: finite(after.kinetic - before.kinetic + removed)?,
-        };
+        let balance = after.balance(&before, -removed)?;
         controls.admit(balance)?;
         poll(&mut cancelled)?;
         Ok(AssemblyLatch {
@@ -501,15 +498,11 @@ pub(crate) fn release_accounting(
         velocity,
         cancelled,
     )?;
-    let balance = AssemblyBalance {
-        linear_momentum_residual_world_ns: after.linear_world.sub(before.linear_world),
-        angular_momentum_residual_world_nms: after.angular_world.sub(before.angular_world),
-        energy_residual_j: finite(after.kinetic - before.kinetic - work)?,
-    };
+    let balance = after.balance(&before, work)?;
     Ok(ReleaseReceipt {
         supplied_work_j: work,
-        kinetic_before_j: before.kinetic,
-        kinetic_after_j: after.kinetic,
+        kinetic_before_j: finite(before.kinetic.to_f64())?,
+        kinetic_after_j: finite(after.kinetic.to_f64())?,
         balance,
     })
 }
@@ -556,9 +549,28 @@ impl AssemblyControls {
 }
 
 struct Totals {
-    linear_world: Vec3,
-    angular_world: Vec3,
-    kinetic: f64,
+    linear_world: WideVec,
+    angular_world: WideVec,
+    kinetic: Dd,
+}
+impl Totals {
+    fn balance(&self, before: &Self, work: f64) -> Result<AssemblyBalance, AssemblyError> {
+        // Round only the signed defect: rounding either absolute total first
+        // can hide lost native momentum or erase representable recoil work.
+        Ok(AssemblyBalance {
+            linear_momentum_residual_world_ns: rounded(subtract(
+                self.linear_world,
+                before.linear_world,
+            ))?,
+            angular_momentum_residual_world_nms: rounded(subtract(
+                self.angular_world,
+                before.angular_world,
+            ))?,
+            energy_residual_j: finite(
+                (self.kinetic - before.kinetic - Dd::from_f64(work)).to_f64(),
+            )?,
+        })
+    }
 }
 fn totals(
     bodies: &[RigidBodyState],
@@ -567,34 +579,76 @@ fn totals(
     boost: Vec3,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Totals, AssemblyError> {
-    let mut linear = VectorSum::default();
-    let mut angular = VectorSum::default();
-    let mut first_moment = VectorSum::default();
-    let mut kinetic = Sum::default();
+    let mut linear = [Dd::ZERO; 3];
+    let mut angular = [Dd::ZERO; 3];
+    let mut kinetic = Dd::ZERO;
+    let half = Dd::from_f64(0.5);
     for (body, property) in bodies.iter().zip(properties) {
         poll(cancelled)?;
-        let p = body.linear_momentum_world();
-        let relative = vector(p.sub(boost.scale(property.mass())))?;
-        let r = vector(body.pose().position_world().sub(center))?;
+        let p = wide(body.linear_momentum_world());
+        let mass = Dd::from_f64(property.mass());
+        let relative = subtract(p, wide(boost).map(|v| v * mass));
+        let r = subtract(wide(body.pose().position_world()), wide(center));
         let spin = body.angular_momentum_body();
-        linear.add(p);
-        angular.add(vector(
-            body.pose()
-                .orientation()
-                .rotate_body_to_world(spin)
-                .add(r.cross(relative)),
-        )?);
-        first_moment.add(vector(r.scale(property.mass()))?);
-        kinetic.add(finite(
-            0.5 * (relative.dot(relative.scale(property.mass().recip()))
-                + spin.dot(property.angular_velocity_body_checked(spin)?)),
-        )?);
+        linear = add(linear, p);
+        // The actual native positions/momenta define the orbital moment.
+        // Keep each product residual through cancellation; reconstructing
+        // it from separately rounded boost/first-moment terms loses torque.
+        angular = add(
+            angular,
+            add(
+                rotate_wide(body.pose().orientation(), wide(spin)),
+                cross(r, p),
+            ),
+        );
+        kinetic = kinetic
+            + half
+                * (dot(relative, relative) / mass
+                    + dot(
+                        wide(spin),
+                        wide(property.angular_velocity_body_checked(spin)?),
+                    ));
     }
+    rounded(linear)?;
+    rounded(angular)?;
+    finite(kinetic.to_f64())?;
     Ok(Totals {
-        linear_world: vector(linear.value())?,
-        angular_world: vector(angular.value().add(first_moment.value().cross(boost)))?,
-        kinetic: finite(kinetic.value())?,
+        linear_world: linear,
+        angular_world: angular,
+        kinetic,
     })
+}
+
+// Fixed-size extra precision is used only for event construction/accounting,
+// with the existing scalar owner. Native states remain binary64; a transition
+// whose native endpoint cannot meet the declared physical gate is refused.
+type WideVec = [Dd; 3];
+fn wide(v: Vec3) -> WideVec {
+    array(v).map(Dd::from_f64)
+}
+fn add(a: WideVec, b: WideVec) -> WideVec {
+    core::array::from_fn(|i| a[i] + b[i])
+}
+fn subtract(a: WideVec, b: WideVec) -> WideVec {
+    core::array::from_fn(|i| a[i] - b[i])
+}
+fn cross(a: WideVec, b: WideVec) -> WideVec {
+    core::array::from_fn(|i| a[(i + 1) % 3] * b[(i + 2) % 3] - a[(i + 2) % 3] * b[(i + 1) % 3])
+}
+fn dot(a: WideVec, b: WideVec) -> Dd {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+fn rotate_wide(rotation: UnitQuaternion, body: WideVec) -> WideVec {
+    let axes = [
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+    ]
+    .map(|axis| wide(rotation.rotate_body_to_world(axis)));
+    core::array::from_fn(|i| axes[0][i] * body[0] + axes[1][i] * body[1] + axes[2][i] * body[2])
+}
+fn rounded(v: WideVec) -> Result<Vec3, AssemblyError> {
+    vector(Vec3::new(v[0].to_f64(), v[1].to_f64(), v[2].to_f64()))
 }
 
 const ENTRIES: [(usize, usize); 6] = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)];

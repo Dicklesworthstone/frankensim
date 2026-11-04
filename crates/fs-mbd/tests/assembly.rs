@@ -497,6 +497,126 @@ fn small_latch_loss_survives_a_large_common_translational_energy() {
 }
 
 #[test]
+fn release_retains_small_internal_couple_work_under_large_common_spin() {
+    let m = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let part = AssemblyPart {
+        properties: m,
+        pose_in_reference: Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap(),
+    };
+    let assembly = RigidAssembly::new(&[part; 2], controls(), || false).unwrap();
+    let large = (1_u64 << 55) as f64;
+    let parent = state(
+        assembly.properties(),
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+        Vec3::ZERO,
+        Vec3::new(0.0, 0.0, large),
+    );
+    let result = assembly
+        .release(
+            parent,
+            &[SeparationImpulse {
+                part_a: 0,
+                part_b: 1,
+                point_assembly_m: Vec3::ZERO,
+                impulse_on_a_assembly_ns: Vec3::ZERO,
+                couple_on_a_assembly_nms: Vec3::new(0.0, 0.0, 8.0),
+            }],
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(result.bodies[0].angular_momentum_body().z, large + 8.0);
+    assert_eq!(result.bodies[1].angular_momentum_body().z, large - 8.0);
+    // 1/2 ((L + 8)^2 + (L - 8)^2) - L^2 = 64 J. The
+    // public f64 absolute energies round alike; their signed balance must not.
+    assert_eq!(result.kinetic_before_j, result.kinetic_after_j);
+    assert_eq!(result.supplied_work_j, 64.0);
+    assert_eq!(result.balance.energy_residual_j, 0.0);
+    assert_eq!(
+        result.balance.angular_momentum_residual_world_nms,
+        Vec3::ZERO
+    );
+}
+
+#[test]
+fn release_gate_detects_momentum_hidden_by_rounded_endpoint_totals() {
+    let m = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let part = AssemblyPart {
+        properties: m,
+        pose_in_reference: Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap(),
+    };
+    let assembly = RigidAssembly::new(&[part; 3], controls(), || false).unwrap();
+    let large = (1_u64 << 55) as f64;
+    let parent = RigidBodyState::new(
+        part.pose_in_reference,
+        Vec3::new(large, 0.0, 0.0),
+        Vec3::ZERO,
+    )
+    .unwrap();
+    // Every child receives the representable L/3 = 12009599006321322.
+    // Their exact sum is L - 2, although its rounded f64 value is L.
+    let error = assembly
+        .release(parent, &[], controls(), || false)
+        .unwrap_err();
+    let AssemblyError::Balance(balance) = error else {
+        panic!("expected native endpoint momentum refusal, got {error:?}");
+    };
+    assert_eq!(
+        balance.linear_momentum_residual_world_ns,
+        Vec3::new(-2.0, 0.0, 0.0)
+    );
+}
+
+#[test]
+fn latch_gate_detects_spin_hidden_by_rounded_endpoint_totals() {
+    let m = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let pose = Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap();
+    let large = (1_u64 << 55) as f64;
+    let bodies = [large, 1.0]
+        .map(|spin| RigidBodyState::new(pose, Vec3::ZERO, Vec3::new(0.0, 0.0, spin)).unwrap());
+    let mut gates = controls();
+    gates.energy_tolerance_j = 1e100;
+    let error = RigidAssembly::latch(&bodies, &[m; 2], UnitQuaternion::IDENTITY, gates, || false)
+        .unwrap_err();
+    let AssemblyError::Balance(balance) = error else {
+        panic!("expected native endpoint spin refusal, got {error:?}");
+    };
+    assert_eq!(
+        balance.angular_momentum_residual_world_nms,
+        Vec3::new(0.0, 0.0, -1.0)
+    );
+}
+
+#[test]
+fn latch_retains_orbital_spin_from_cancelling_moment_products() {
+    let m = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let large = (1_u64 << 55) as f64;
+    let arm = Vec3::new(1.0 + f64::EPSILON, 1.0 - f64::EPSILON, 0.0);
+    let momentum = Vec3::new(large + 16.0, large, 0.0);
+    let bodies = [1.0, -1.0].map(|sign| {
+        RigidBodyState::new(
+            Pose::new(arm.scale(sign), UnitQuaternion::IDENTITY).unwrap(),
+            momentum.scale(sign),
+            Vec3::ZERO,
+        )
+        .unwrap()
+    });
+    let mut gates = controls();
+    gates.energy_tolerance_j = 1e100;
+    let result =
+        RigidAssembly::latch(&bodies, &[m; 2], UnitQuaternion::IDENTITY, gates, || false).unwrap();
+    // Each exact moment is (1 + 2^-52)L - (1 - 2^-52)(L + 16)
+    // = 2^-48. Rounding the second product first also defeats a one-FMA
+    // cross product: its tiny residual must survive until the subtraction.
+    assert_eq!(result.state.angular_momentum_body().z, 32.0 * f64::EPSILON);
+    assert_eq!(
+        result.balance.angular_momentum_residual_world_nms,
+        Vec3::ZERO
+    );
+}
+
+#[test]
 fn late_cancellation_caps_and_invalid_impulse_pairs_never_publish_partial_motion() {
     let components = parts();
     let a = RigidAssembly::new(&components, controls(), || false).unwrap();

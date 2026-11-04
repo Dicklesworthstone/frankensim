@@ -3511,15 +3511,25 @@ Actual returned states supply momentum and energy/work residuals. Declared
 part/impulse caps and absolute physical gates apply before publication, and
 bounded cancellation leaves borrowed inputs unchanged. Fixed input order is
 deterministic; reordered floating sums have only roundoff-level equivalence.
+Constant-storage double-double reductions retain linear momentum, rotated spin,
+orbital cross-product residuals, and translating-frame kinetic energy until
+the signed endpoint balance is formed. Public absolute energies remain rounded
+binary64 values and can coincide despite nonzero separation work. A rounded
+aggregate must not conceal an actual native endpoint defect: if the single
+latched momentum or released component momenta cannot meet the caller's gate,
+the event is refused. This does not increase native-state precision or imply
+arbitrary-precision conservation.
 The rocket staging adapter keeps its dry/propellant partition and inertia
 assembly admission and uses this same release kernel with stack workspaces.
 It reconstructs receipts after conversion to its stored velocities; the
 two-piece rocket path remains allocation-free.
 
-Seven native assembly cases check an independent full parallel-axis assembly,
+Eleven native assembly cases check an independent full parallel-axis assembly,
 zero-impulse rigid motion inheritance, shared-body impulse work against native
 sequential impulses, closed-form orbital-to-spin latching, frame covariance,
-small loss under large translation, and atomic limits/cancellation/retry.
+small loss under large translation, small couple work under large common spin,
+native linear/spin defects hidden by rounded totals, cancelling orbital-moment
+products, and atomic limits/cancellation/retry.
 The existing nine rocket attitude/staging cases remain applicable. These are
 floating numerical balances, not exact arithmetic or a complete hybrid-event,
 material-calibration, interval-enclosure, or whole-workspace qualification.
