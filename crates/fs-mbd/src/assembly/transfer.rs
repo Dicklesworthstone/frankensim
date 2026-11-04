@@ -18,6 +18,9 @@ use crate::{MassProperties, RigidBodyState, Vec3};
 /// Simultaneous closed networks of material handoffs between finite bodies.
 pub mod network;
 
+/// Finite rigid-component networks retaining intrinsic spin and material geometry.
+pub mod rigid;
+
 /// One existing donor parcel transferred to one receiver material point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointMassTransfer {

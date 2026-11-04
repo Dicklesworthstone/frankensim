@@ -6272,3 +6272,47 @@ and formatting pass with available nightly-2026-08-31 rustfmt; the repository's
 pinned nightly-2026-07-06 is unavailable. Native compilation and numerical test
 execution remain **UNRUN**: no existing FrankenSim native dependency graph,
 DSR or RCH is available in this runtime. This is not a native test-pass claim.
+
+## Finite rigid-component transfer networks
+
+`assembly::transfer::rigid::transfer_rigid_components` redistributes original
+finite components between moving rigid assemblies in one atomic event. Each
+leaf has exactly one destination; every final body remains nonempty. Cyclic
+handoffs use only original inventories, including complete inventory exchange.
+The final body axes remain the corresponding original receiver axes.
+
+A donor's components assigned to one receiver remain a rigid group. The native
+`AssemblyPartition` prepares full group inertias, and its original release
+owner applies all authored force/couple pairs together. Shared-group recoil
+cross terms therefore enter the source work once. Every pair must cross released
+groups. After all donors release, the original `RigidAssembly::latch` admits
+each receiver's complete incoming set, including intrinsic spin, orbital momentum,
+and nonnegative relative-motion loss. No leaf-release/relatch surrogate is used.
+
+Final inventories retain flat original component geometry and properties,
+alongside original body/part indices, so later transfer events retain material
+identity. Flattening changes bookkeeping only: native aggregate inertia and
+momentum are kept. World component poses do not change during this instantaneous
+event. Contact discovery, attachment strength and geometric admissibility,
+finite flight, actuator energy debit and thermal deposition remain caller-owned.
+
+One reusable destination map and donor/part-ordered groups give linear routing
+and staging in bodies, components and impulse pairs; there is no dense network
+mobility matrix. Aggregate bounds are checked before network staging. Single
+groups skip release, singleton unchanged-axis receivers skip latching, and
+isolated bodies preserve their exact original state and inventory.
+
+Native per-phase checks and the existing polarized common-frame transfer audit
+check actual final stored mass, linear/angular momentum and kinetic change minus
+source work plus sticking loss. Source and loss accounts remain separate per
+body and globally. Late refusal or final cancellation publishes no endpoint.
+Pinned Rust parsing is distinct from native compilation and numerical tests;
+the latter remain unrun while storage is full and DSR/RCH are unavailable.
+
+Five focused G1/G3/G4 regressions cover independent shared-recoil work and
+intrinsic-spin sticking loss, retained packets without artificial leaf loss,
+full-tensor cycles against a flat-leaf mechanical oracle, scene/boost and body-
+permutation covariance, exact no-op and whole-inventory reuse, and late invalid
+inventory, aggregate caps and final cancellation/retry. The analytic fixture's
+source work is 41/5 J and sticking loss is 117/56 J; rational arithmetic checks
+those values independently of the native Rust implementation.
