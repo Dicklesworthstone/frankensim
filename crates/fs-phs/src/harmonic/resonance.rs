@@ -15,6 +15,10 @@ use fs_math::{c64::C64, dd::Dd};
 
 pub(in crate::harmonic) mod sensitivity;
 pub use sensitivity::{DrivenResonanceParameterResponse, HalfPowerBandwidthDerivative};
+mod survey;
+pub use survey::{
+    ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError, survey_resonances,
+};
 
 /// A fixed real observation of original physical phasors, using the supplied
 /// weights without normalization. Units and coordinate meaning belong to the
