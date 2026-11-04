@@ -6003,21 +6003,30 @@ and vector mean together with `Option<[[f64; 3]; 3]>` for
 `d(mean traction)/d(endpoint jump)` [Pa/m], holding accepted history and the
 physical interval fixed. The existing `fs-ad::Real`/`Dual64<3>` owner differentiates
 the shared analytic path primitives and the implicit locations of damage,
-failure and normal-contact crossings. Common-mode evolution and previously
-selected frozen-BK histories include unloading, softening and rupture. Physical
-viscosity includes the derivative of the integrated surviving-bond fraction,
+failure and normal-contact crossings. Common-mode and mixed-mode evolution
+include first initiation, unloading, softening and rupture. A first BK selection
+reuses the original quadratic-onset sensitivity to differentiate its energy
+radius and fracture energy, including both moving softening/rupture crossings
+and the selected envelope. Previously selected BK histories stay frozen. The
+original onset lower bound also covers a strength crossing that precedes
+renewed outward energy-radius growth. Physical viscosity includes the derivative
+of the integrated surviving-bond fraction,
 not only its direct rate term. Original source, damage, work and dissipation
 accounts are unchanged; ordinary mean-only methods execute no tangent path.
 
 `None` explicitly leaves the consumer's numerical/semismooth fallback in charge
-for first mixed-mode initiation, an identically zero-normal path, a held
-onset/loading-unloading kink, or a degenerate/unrepresentable derivative. The
+for an identically zero-normal path, a held onset/loading-unloading kink, or a
+degenerate/unrepresentable derivative. The
 endpoint tangent is never substituted, and a selected one-sided derivative is
 not represented as a classical one. Allocation and work remain bounded per
 point. G0/G1 regressions compare independent endpoint perturbations of the
-original mean and total work, retained-history symmetry, exact elastic/viscous
-slopes, coincident initiation/reclosure, tiny-onset rupture and short-softening
-limits. These are numerical constitutive tests, not adhesive calibration or
+original mean and total work, first-initiation BK gradients across integer and
+fractional exponents, shear-basis covariance, delayed energy-radius growth,
+retained-history symmetry, exact elastic/viscous slopes, coincident
+initiation/reclosure, tiny-onset rupture and short-softening limits. An
+independent fully ruptured mixed-mode solution checks the complete toughness
+gradient, including its generally nonsymmetric contribution. These are numerical
+constitutive tests, not adhesive calibration or
 wall-clock performance claims.
 
 `resolve_mixed_mode_bilinear_cohesive` requires eight explicit ordered-interface

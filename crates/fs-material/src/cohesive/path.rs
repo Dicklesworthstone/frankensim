@@ -284,11 +284,13 @@ fn softening_mean(
 // The derivative also needs the mean intact fraction for physical viscosity.
 // Computing it uses the SAME inverse-radius moments as vector traction. The
 // const parameter omits this output in the ordinary f64 vector-force path.
+// The envelope shares the scalar type so first-initiation derivatives retain
+// the original mode-dependent onset and fracture-energy sensitivities.
 fn softening_integrals<S: Real, const WITH_INTEGRITY: bool>(
     a: [S; 3],
     b: [S; 3],
-    onset: f64,
-    failure: f64,
+    onset: S,
+    failure: S,
 ) -> Result<([S; 3], S), CohesiveError> {
     let r0 = scalar_norm(a)?;
     positive(r0.value())?;
@@ -323,9 +325,8 @@ fn softening_integrals<S: Real, const WITH_INTEGRITY: bool>(
                     + S::from_f64(binomial) * coefficient / S::from_f64(f64::from(k + j + 2));
             }
         }
-        let base = (S::from_f64(onset) / r0)
-            * ((S::from_f64(failure) - r0) / S::from_f64(failure - onset));
-        let correction = (S::from_f64(onset) / r0) * S::from_f64(failure / (failure - onset));
+        let base = (onset / r0) * ((failure - r0) / (failure - onset));
+        let correction = (onset / r0) * (failure / (failure - onset));
         (
             core::array::from_fn(|i| {
                 base * average[i] + correction * (a[i] * moment[0] + delta[i] * moment[1])
@@ -348,15 +349,15 @@ fn softening_integrals<S: Real, const WITH_INTEGRITY: bool>(
             (S::one() + length * (S::one() + radial_rate) / (S::one() + projection)).ln()
         };
         let inverse_radius_mean = logarithm / length;
-        let factor = S::from_f64(onset / (failure - onset));
+        let factor = onset / (failure - onset);
         (
             core::array::from_fn(|i| {
                 let unit_mean = direction[i] * radial_rate
                     + (u[i] - projection * direction[i]) * inverse_radius_mean;
-                factor * (S::from_f64(failure) * unit_mean - average[i])
+                factor * (failure * unit_mean - average[i])
             }),
             if WITH_INTEGRITY {
-                factor * ((S::from_f64(failure) / r0) * inverse_radius_mean - S::one())
+                factor * ((failure / r0) * inverse_radius_mean - S::one())
             } else {
                 S::zero()
             },

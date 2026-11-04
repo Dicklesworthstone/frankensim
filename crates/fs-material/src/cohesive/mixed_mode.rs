@@ -417,7 +417,7 @@ pub(super) fn initiate(
         lambda,
     ))
 }
-fn initiation_gradient(
+pub(super) fn initiation_gradient(
     p: MixedModeParameters,
     old: [f64; 3],
     end: [f64; 3],

@@ -63,7 +63,13 @@ fn heterogeneous_full_cross_compliance_uses_exact_tangents_with_two_calls_per_si
         let points: Vec<_> = laws
             .iter()
             .zip(old)
-            .map(|(law, g)| law.bonded_point().trial(g, 1e-8).unwrap().point)
+            .map(|(law, g)| {
+                law.bonded_point()
+                    .trial_over_time(g, dt, 1e-8)
+                    .unwrap()
+                    .equilibrium
+                    .point
+            })
             .collect();
         let target = [
             [1e-4, 8e-5, -6e-5],

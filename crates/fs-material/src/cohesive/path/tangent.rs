@@ -2,8 +2,9 @@
 //!
 //! Differentiate the shared analytic primitives, including motion of the damage,
 //! failure and normal-contact crossings. The endpoint tangent is a different
-//! quantity. The old maximum, frozen BK envelope and all dissipation references
-//! are constants in this derivative; no trial can advance accepted history.
+//! quantity. Accepted history and dissipation references remain fixed. A new BK
+//! envelope carries the original initiation sensitivities; a previously selected
+//! envelope stays frozen. No trial can advance accepted history.
 
 use super::*;
 use fs_ad::Dual64;
@@ -14,17 +15,18 @@ impl<'a> CohesivePoint<'a> {
     /// Original equilibrium trial and path mean, plus
     /// d(mean traction)/d(endpoint jump) in Pa/m at fixed accepted history.
     ///
-    /// Common-mode damage and an already selected frozen-BK envelope are
-    /// differentiated through unloading, softening, rupture and normal sign
-    /// changes. This is the derivative of the vector path integral, NOT the
+    /// Common-mode and mixed-mode paths differentiate unloading, first
+    /// initiation, softening, rupture and normal sign changes. First initiation
+    /// retains the original onset-mode and toughness sensitivities; accepted BK
+    /// histories stay frozen. This differentiates the vector path integral, NOT the
     /// returned step's endpoint tangent. No quadrature or difference scale is
     /// introduced; arithmetic and scratch storage are bounded and allocation-free.
     ///
     /// None explicitly requests a consumer's existing numerical/semismooth
-    /// fallback: first mixed-mode initiation is not covered, nor a path held
-    /// identically at a normal or damage loading/unloading kink, or an
-    /// unrepresentable/degenerate crossing derivative. The original trial/mean
-    /// still obey every material-domain and energy gate. No selected one-sided
+    /// fallback for a path held identically at a normal or damage
+    /// loading/unloading kink, or an unrepresentable/degenerate crossing
+    /// derivative. The original trial/mean still obey every material-domain and
+    /// energy gate. No selected one-sided
     /// branch is mislabeled as a classical derivative.
     pub fn trial_with_mean_traction_tangent(
         &self,
@@ -68,14 +70,6 @@ fn mean_tangent(
     if old.jump[0] == 0.0 && end.jump[0] == 0.0 {
         return None;
     }
-    if old.law.mixed_mode.is_some()
-        && old.mixed_history.is_none()
-        && end.mixed_history.is_some()
-    {
-        // The first onset mode itself depends on the endpoint. Freezing it here
-        // would silently omit initiation/toughness sensitivity.
-        return None;
-    }
     let stiffness = old.law.mixed_mode.map_or([old.law.stiffness; 3], |p| {
         [
             p.normal_stiffness_pa_m,
@@ -97,32 +91,59 @@ fn mean_tangent(
     ];
     let mut mean_intact = D::constant(intact);
     if intact > 0.0 {
-        let envelope = if old.law.mixed_mode.is_some() {
-            old.mixed_history.map(|h| {
-                (
+        let envelope = if let Some(parameters) = old.law.mixed_mode {
+            match (old.mixed_history, end.mixed_history) {
+                (Some(history), _) => Some((
                     stiffness.map(det::sqrt),
-                    h.onset_sqrt_energy,
-                    h.failure_sqrt_energy,
-                )
-            })
+                    D::constant(history.onset_sqrt_energy),
+                    D::constant(history.failure_sqrt_energy),
+                    0.0,
+                )),
+                (None, Some(history)) => {
+                    // Reuse the original quadratic-onset/BK sensitivity owner.
+                    // Freezing the newly selected envelope would drop genuine
+                    // nonproportional-path sensitivity and give a wrong matrix.
+                    let (_, lower) =
+                        super::super::mixed_mode::initiate(parameters, old.jump, end.jump).ok()?;
+                    let (da, dgc) = super::super::mixed_mode::initiation_gradient(
+                        parameters, old.jump, end.jump, lower, history,
+                    ).ok()?;
+                    let onset = D { re: history.onset_sqrt_energy, eps: da };
+                    let fracture = D { re: history.fracture_energy_j_m2, eps: dgc };
+                    let mut failure = D::constant(2.0) * (fracture / onset);
+                    // Preserve the exact original envelope's primal arithmetic.
+                    failure.re = history.failure_sqrt_energy;
+                    Some((stiffness.map(det::sqrt), onset, failure, lower))
+                }
+                _ => None,
+            }
         } else {
-            Some(([1.0; 3], old.law.onset, old.law.failure))
+            Some((
+                [1.0; 3],
+                D::constant(old.law.onset),
+                D::constant(old.law.failure),
+                0.0,
+            ))
         };
-        if let Some((weights, onset, failure)) = envelope {
-            let threshold = old.maximum.max(onset);
+        if let Some((weights, onset, failure, lower)) = envelope {
+            let threshold = if old.maximum > onset.re {
+                D::constant(old.maximum)
+            } else {
+                onset
+            };
             let weighted_old = core::array::from_fn(|i| weights[i] * old.jump[i]);
             let weighted_end = core::array::from_fn(|i| weights[i] * end.jump[i]);
             let end_radius = norm(active(weighted_end)).ok()?;
-            if old.jump == end.jump && end_radius >= threshold {
+            if old.jump == end.jump && end_radius >= threshold.re {
                 // At a held maximum, loading and unloading have different
                 // first variations even though their force values coincide.
                 return None;
             }
-            if end_radius <= threshold {
+            if end_radius <= threshold.re {
                 add_elastic(&mut mean, stiffness, intact, D::one(), a, b);
             } else {
-                let start = crossing(weighted_old, weighted_end, weights, threshold, 0.0)?;
-                let finish = if end_radius >= failure {
+                let start = crossing(weighted_old, weighted_end, weights, threshold, lower)?;
+                let finish = if end_radius >= failure.re {
                     crossing(weighted_old, weighted_end, weights, failure, start.re)?
                 } else {
                     D::one()
@@ -196,20 +217,22 @@ fn mean_tangent(
 
 // Reuse the original accurately scaled outward root for its value. Implicit
 // differentiation of |q_old+s(q_end-q_old)|=radius gives
-// ds/dg_end,j = -s * weight_j * unit_q_j / (unit_q dot delta_q).
-// Radius is fixed by accepted history, never by a new endpoint-selected mode.
-// Normal compression has unit_q_n=0. Scaling avoids squaring a metre/energy
-// radius or differentiating through the root's numerical bracketing/clamps.
+// ds/dg_end,j = (d(radius)/dg_end,j - s * weight_j * unit_q_j)
+//                / (unit_q dot delta_q).
+// The radius is constant for accepted history; a first mixed-mode envelope
+// retains its original initiation sensitivity. Normal compression has
+// unit_q_n=0. Scaling avoids squaring a metre/energy radius or differentiating
+// through the root's numerical bracketing/clamps.
 fn crossing(
     old: [f64; 3],
     end: [f64; 3],
     weights: [f64; 3],
-    radius: f64,
+    radius: D,
     lower: f64,
 ) -> Option<D> {
-    let fraction = outward_crossing(old, end, radius, lower).ok()?;
+    let fraction = outward_crossing(old, end, radius.re, lower).ok()?;
     let unit = active(core::array::from_fn(|i| {
-        ((1.0 - fraction) * old[i] + fraction * end[i]) / radius
+        ((1.0 - fraction) * old[i] + fraction * end[i]) / radius.re
     }));
     let delta = core::array::from_fn(|i| end[i] - old[i]);
     let length = norm(delta).ok()?;
@@ -223,6 +246,7 @@ fn crossing(
     }
     let eps = core::array::from_fn(|i| {
         -(fraction * unit[i] / projection) * (weights[i] / length)
+            + (radius.eps[i] / projection) / length
     });
     eps.iter().all(|value| value.is_finite()).then_some(D { re: fraction, eps })
 }

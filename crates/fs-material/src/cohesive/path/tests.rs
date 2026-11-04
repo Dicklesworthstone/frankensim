@@ -425,13 +425,164 @@ fn full_rupture_derivative_retains_tiny_onset_and_short_softening_limits() {
     close(tangent.unwrap()[0][0], -0.5 * law.softening_stiffness_pa_m(), 2e-12);
 }
 
+
+#[test]
+fn first_mixed_mode_path_derivatives_follow_selection_reclosure_and_viscosity() {
+    let viscosity = CohesiveViscosity::new(2e6, 7e5, 2.0).unwrap();
+    for exponent in [1.0, 1.7, 2.5] {
+        let mut parameters = mixed().mixed_mode_parameters().unwrap();
+        parameters.bk_exponent = exponent;
+        for viscous in [false, true] {
+            let law = BilinearCohesive::new_mixed_mode(parameters, 2e9, 0.02).unwrap();
+            let law = if viscous { law.with_viscosity(viscosity) } else { law };
+            for (start, end) in [
+                ([0.0, 0.0, 0.0], [4e-4, 6e-4, 2e-4]),
+                ([6e-5, 3e-5, -2e-5], [4e-4, 6e-4, -3e-4]),
+                ([-1.5e-4, 3e-5, 4e-5], [5e-4, 1.4e-3, -7e-4]),
+                ([6e-5, -3e-5, 2e-5], [-5e-4, 0.012, 0.004]),
+                // The first quadratic onset is exactly at the normal switch.
+                ([1e-4, 0.0, 0.0], [-1e-4, 8e-4, 0.0]),
+                ([0.0, 0.0, 0.0], [6e-4, 0.0, 0.0]),
+                ([-1e-4, 0.0, 0.0], [-1e-4, 0.001, 0.0003]),
+            ] {
+                let old = law.bonded_point()
+                    .trial_over_time(start, 0.2, 1e-8).unwrap().equilibrium.point;
+                assert!(old.mixed_mode_history().is_none());
+                check_path_tangent(old, end, 0.2, 1e-9);
+                let step = old.trial_over_time(end, 0.2, 1e-8).unwrap();
+                assert!(step.equilibrium.point.mixed_mode_history().is_some());
+                assert!(old.mixed_mode_history().is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn first_mixed_mode_selection_can_precede_outward_energy_radius_growth() {
+    let mut parameters = mixed().mixed_mode_parameters().unwrap();
+    parameters.tangential_strength_pa = 2.8e5;
+    let start = [1.6e-4, 3.85e-4, 0.0];
+    let end = [4.4e-4, -7e-4, 0.0];
+    let (history, initiation) =
+        super::super::mixed_mode::initiate(parameters, start, end).unwrap();
+    let stiffness = [
+        parameters.normal_stiffness_pa_m,
+        parameters.tangential_stiffness_pa_m,
+        parameters.tangential_stiffness_pa_m,
+    ];
+    let delta = core::array::from_fn::<_, 3, _>(|i| end[i] - start[i]);
+    let at_initiation = at(start, end, initiation);
+    // The strength surface has been crossed while elastic energy still falls.
+    // Softening starts at a later outward crossing of the selected energy radius.
+    assert!((0..3).map(|i| stiffness[i] * at_initiation[i] * delta[i]).sum::<f64>() < 0.0);
+    let weights = stiffness.map(det::sqrt);
+    let softening = outward_crossing(
+        core::array::from_fn(|i| weights[i] * start[i]),
+        core::array::from_fn(|i| weights[i] * end[i]),
+        history.onset_sqrt_energy,
+        initiation,
+    ).unwrap();
+    assert!(softening > initiation);
+    for viscous in [false, true] {
+        let law = BilinearCohesive::new_mixed_mode(parameters, 2e9, 0.02).unwrap();
+        let law = if viscous {
+            law.with_viscosity(CohesiveViscosity::new(2e6, 7e5, 2.0).unwrap())
+        } else {
+            law
+        };
+        let old = law.bonded_point()
+            .trial_over_time(start, 0.2, 1e-8).unwrap().equilibrium.point;
+        assert!(old.mixed_mode_history().is_none());
+        check_path_tangent(old, end, 0.2, 1e-9);
+    }
+}
+
+#[test]
+fn first_mixed_mode_mean_tangent_rotates_with_the_shear_basis() {
+    let rotation = [[1.0, 0.0, 0.0], [0.0, 0.6, -0.8], [0.0, 0.8, 0.6]];
+    let rotate = |g: [f64; 3]| rotation.map(|row| dot(row, g));
+    let start = [6e-5, 3e-5, -2e-5];
+    let end = [4e-4, 6e-4, -3e-4];
+    for law in [
+        mixed(),
+        mixed().with_viscosity(CohesiveViscosity::new(2e6, 7e5, 2.0).unwrap()),
+    ] {
+        let old = law.bonded_point()
+            .trial_over_time(start, 0.2, 1e-8).unwrap().equilibrium.point;
+        let rotated = law.bonded_point()
+            .trial_over_time(rotate(start), 0.2, 1e-8).unwrap().equilibrium.point;
+        let (step, mean, tangent) = old
+            .trial_over_time_with_mean_traction_tangent(end, 0.2, 1e-8).unwrap();
+        let (rotated_step, rotated_mean, rotated_tangent) = rotated
+            .trial_over_time_with_mean_traction_tangent(rotate(end), 0.2, 1e-8).unwrap();
+        close_vector(rotate(mean), rotated_mean, 3e-12);
+        close(step.total_work_j_m2(), rotated_step.total_work_j_m2(), 3e-12);
+        let tangent = tangent.unwrap();
+        let rotated_tangent = rotated_tangent.unwrap();
+        let scale = tangent.iter().flatten().fold(1.0_f64, |a, b| a.max(b.abs()));
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = (0..3).map(|a| (0..3).map(|b| {
+                    rotation[i][a] * tangent[a][b] * rotation[j][b]
+                }).sum::<f64>()).sum::<f64>();
+                assert!((expected - rotated_tangent[i][j]).abs() <= 3e-12 * scale);
+            }
+        }
+        assert!(old.mixed_mode_history().is_none());
+        assert!(rotated.mixed_mode_history().is_none());
+    }
+}
+
+#[test]
+fn first_mixed_mode_full_rupture_retains_the_bk_toughness_gradient() {
+    let end = [0.003, 0.008, -0.004];
+    for exponent in [1.0, 1.7, 2.5] {
+        let mut p = mixed().mixed_mode_parameters().unwrap();
+        p.bk_exponent = exponent;
+        let law = BilinearCohesive::new_mixed_mode(p, 2e9, 0.02).unwrap();
+        let (step, mean, tangent) = law.bonded_point()
+            .trial_with_mean_traction_tangent(end, 1e-8).unwrap();
+        assert!(step.point.failed());
+        let tangent = tangent.unwrap();
+        let stiffness = [p.normal_stiffness_pa_m, p.tangential_stiffness_pa_m,
+            p.tangential_stiffness_pa_m];
+        let radius_squared = (0..3).map(|i| stiffness[i] * end[i] * end[i]).sum::<f64>();
+        let beta = p.tangential_stiffness_pa_m
+            * (end[1] * end[1] + end[2] * end[2]) / radius_squared;
+        let difference = p.mode_ii_fracture_energy_j_m2 - p.mode_i_fracture_energy_j_m2;
+        let energy = p.mode_i_fracture_energy_j_m2 + difference * beta.powf(exponent);
+        let beta_gradient = core::array::from_fn::<_, 3, _>(|j| {
+            2.0 * (if j == 0 { -beta } else { 1.0 - beta })
+                * stiffness[j] * end[j] / radius_squared
+        });
+        let energy_gradient = beta_gradient.map(|value| {
+            difference * exponent * beta.powf(exponent - 1.0) * value
+        });
+        close(step.energy.work, energy, 2e-12);
+        // Independent closed form for a fully spent proportional ramp:
+        // mean_i = Gc(beta) K_i g_i / (g dot K g).
+        // Differentiating Gc is essential and need not give a symmetric matrix.
+        for i in 0..3 {
+            close(mean[i], energy * stiffness[i] * end[i] / radius_squared, 2e-12);
+            for j in 0..3 {
+                let expected = if i == j { energy * stiffness[i] / radius_squared } else { 0.0 }
+                    + (stiffness[i] * end[i] / radius_squared) * energy_gradient[j]
+                    - 2.0 * energy * (stiffness[i] * end[i] / radius_squared)
+                        * (stiffness[j] * end[j] / radius_squared);
+                close(tangent[i][j], expected, 2e-10);
+            }
+        }
+        assert!((tangent[0][1] - tangent[1][0]).abs() > 1e3);
+    }
+}
+
 #[test]
 fn unsupported_path_derivatives_preserve_original_force_and_explicit_refusals() {
     let common = common();
     let mixed = mixed();
     let held = common.bonded_point().trial([4e-4, 0.0, 0.0], 1e-8).unwrap().point;
     for (old, end) in [
-        (mixed.bonded_point(), [4e-4, 3e-4, 1e-4]), // First BK selection.
+        (mixed.bonded_point(), [0.0, 4e-4, 1e-4]), // First BK path held at normal kink.
         (common.bonded_point(), [0.0, 4e-4, 1e-4]), // Entire path at contact kink.
         (held, held.jump_m()), // Held irreversible maximum.
     ] {

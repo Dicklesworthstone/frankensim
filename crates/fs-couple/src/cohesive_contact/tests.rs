@@ -318,7 +318,12 @@ fn path_tangent_solves_full_elastic_viscous_compliance_in_two_material_evaluatio
             law()
         };
         let eta = if viscous { [2e6, 7e5, 7e5] } else { [0.0; 3] };
-        let point = law.bonded_point().trial(old, 1e-8).unwrap().point;
+        let point = law
+            .bonded_point()
+            .trial_over_time(old, dt, 1e-8)
+            .unwrap()
+            .equilibrium
+            .point;
         // This path remains strictly before damage initiation. The exact
         // constitutive derivative is K/2 + eta/dt, never the endpoint K.
         let force = core::array::from_fn(|i| {
