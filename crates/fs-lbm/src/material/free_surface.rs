@@ -69,6 +69,7 @@ pub struct MaterialFreeSurfaceScaling<'a> {
     mass_unit_kg: f64,
     surface_tension_lattice: f64,
     planar_wetting: Option<(PlanarWall3, &'a ResolvedLiquidWettingState)>,
+    density_dependent_gravity: bool,
 }
 
 /// Stationary voxel domain and explicitly chosen numerical wall model.
@@ -76,8 +77,9 @@ pub struct MaterialFreeSurfaceScaling<'a> {
 pub struct MaterialFreeSurfaceDomain3<'a> {
     /// Global cell counts, each a positive multiple of the native tile edge.
     pub cells: [usize; 3],
-    /// Gravity [m/s²]. Native forcing is the constant reference-density force
-    /// rho0*g, not a compressible density-dependent force law.
+    /// Gravity [m/s²]. The default retains the reference-density force rho0*g.
+    /// Select [`MaterialFreeSurfaceScaling::with_density_dependent_gravity`]
+    /// to apply this acceleration to each cell's current numerical density.
     pub gravity_m_s2: [f64; 3],
     /// Existing neutral/wetting fill ghost, explicitly chosen by the scenario.
     /// Neither choice infers a measured contact angle from material names.
@@ -195,6 +197,7 @@ pub fn plan_free_surface_from_material(
         mass_unit_kg,
         surface_tension_lattice,
         planar_wetting: None,
+        density_dependent_gravity: false,
     })
 }
 
@@ -251,6 +254,23 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     #[must_use]
     pub const fn timestep_s(&self) -> f64 { self.timestep_s }
 
+    /// Apply sparse 3-D gravity to each cell's actual numerical mass density.
+    ///
+    /// The force is `rho_lattice * g_lattice`, including the pressure-density
+    /// perturbation carried by the native populations. This selects the same
+    /// density convention already used by the dense 2-D owner. It does not
+    /// supply a liquid EOS, thermal expansion or phase-density volume flux.
+    /// Existing constructors retain reference-density gravity unless selected.
+    ///
+    /// This uniform acceleration owns the complete body-force law. Independent
+    /// thermal buoyancy, Lorentz or other local force bindings refuse; their
+    /// physical source model must not silently replace or double this gravity.
+    #[must_use]
+    pub fn with_density_dependent_gravity(mut self) -> Self {
+        self.density_dependent_gravity = true;
+        self
+    }
+
     /// Native uniform surface-tension coefficient; zero means explicitly omitted.
     #[must_use]
     pub const fn surface_tension_lattice(&self) -> f64 { self.surface_tension_lattice }
@@ -281,13 +301,27 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     }
 
     /// Signed acceleration [m/s²] to lattice acceleration, `g*dt²/dx`.
-    /// The sparse owner applies a reference-density force; the dense owner
-    /// multiplies this acceleration by each cell's current lattice density.
+    /// The dense owner and the explicit sparse density-dependent mode multiply
+    /// this acceleration by each cell's current lattice density. Historical
+    /// sparse constructors instead retain the reference-density force.
     /// Both observe velocity with the Guo half-force correction.
     pub fn gravity_lattice(&self, gravity_m_s2: f64) -> Result<f64, MaterialLbmError> {
         finite(gravity_m_s2, "free-surface gravity must be finite")?;
         finite((gravity_m_s2 * self.timestep_s) / self.velocity_scale,
             "free-surface lattice gravity is unrepresentable")
+    }
+
+    fn gravity_vector_lattice(&self, gravity_m_s2: [f64; 3]) -> Result<[f64; 3], MaterialLbmError> {
+        let mut gravity = [0.0; 3];
+        for axis in 0..3 {
+            gravity[axis] = self.gravity_lattice(gravity_m_s2[axis])?;
+            if gravity_m_s2[axis] != 0.0 && gravity[axis] == 0.0 {
+                return Err(MaterialLbmError::Invalid(
+                    "nonzero SI gravity disappeared in lattice conversion",
+                ));
+            }
+        }
+        Ok(gravity)
     }
 
     /// Incompressible pressure perturbation [Pa] about the reference-one density.
@@ -347,15 +381,19 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             ));
         }
         admit_domain(&domain, &fluid)?;
-        let mut gravity = [0.0; 3];
-        for (component, physical) in gravity.iter_mut().zip(domain.gravity_m_s2) {
-            *component = self.gravity_lattice(physical)?;
-        }
+        let gravity = self.gravity_vector_lattice(domain.gravity_m_s2)?;
         let [nx, ny, nz] = domain.cells;
+        // The historical binary constructor seeds raw rest populations. Start
+        // the explicit acceleration model in the zero-force frame so binding
+        // gravity preserves physical rest instead of introducing g*dt/2.
+        let reference_force = if self.density_dependent_gravity { [0.0; 3] } else { gravity };
         let mut lattice = FreeSurface3::with_solid_tiles(
-            nx, ny, nz, self.flow.tau, gravity, self.surface_tension_lattice,
+            nx, ny, nz, self.flow.tau, reference_force, self.surface_tension_lattice,
             domain.contact, domain.solid_tiles, fluid,
         )?;
+        if self.density_dependent_gravity {
+            lattice.rebind_body_acceleration(gravity, &CancelGate::new_clock_free())?;
+        }
         if let Some((wall, wetting)) = self.planar_wetting {
             lattice.set_planar_contact_angle(wall, wetting.contact_angle_radians())?;
         }
@@ -379,6 +417,28 @@ impl<'a> MaterialFreeSurface3<'a> {
     /// Read-only access to the actual sparse VOF owner.
     #[must_use]
     pub const fn lattice(&self) -> &FreeSurface3 { &self.lattice }
+
+    /// Bind or replace gravity [m/s²] using each wet cell's current density.
+    ///
+    /// The complete native force becomes `rho_lattice * g_lattice`. Rebinding
+    /// advances no time and preserves physical velocity, density and stress to
+    /// population roundoff, along with all tracked liquid mass and topology.
+    /// Actual subsequent timesteps evolve the density-dependent Guo source.
+    /// The original material, pressure datum and dx/dt units remain fixed.
+    ///
+    /// Nonfinite/unrepresentable SI loads, conflicting independent local-force
+    /// authority, historical LegacyGlobal conversion, invalid native states or
+    /// cancellation refuse before changing the accepted flow or force law.
+    pub fn rebind_gravity(
+        &mut self,
+        gravity_m_s2: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), MaterialLbmError> {
+        let gravity = self.scaling.gravity_vector_lattice(gravity_m_s2)?;
+        self.lattice.rebind_body_acceleration(gravity, gate)?;
+        self.scaling.density_dependent_gravity = true;
+        Ok(())
+    }
 
     /// Advance the existing native owner by the admitted physical timestep.
     /// Its original refusal and mass-conversion semantics are unchanged.

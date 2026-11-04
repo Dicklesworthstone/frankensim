@@ -141,10 +141,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 "initial liquid exceeds the domain cell budget",
             ));
         }
-        let mut gravity = [0.0; 3];
-        for (component, physical) in gravity.iter_mut().zip(domain.gravity_m_s2) {
-            *component = self.gravity_lattice(physical)?;
-        }
+        let gravity = self.gravity_vector_lattice(domain.gravity_m_s2)?;
         let mut native = Vec::with_capacity(initial.len());
         for cell in initial {
             if cx.checkpoint().is_err() {
@@ -174,6 +171,13 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             &native,
             cx,
         )?;
+        if self.density_dependent_gravity {
+            lattice.rebind_body_acceleration_checked(gravity, || {
+                cx.checkpoint().map_err(|_| {
+                    crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled
+                })
+            })?;
+        }
         if let Some((wall, wetting)) = self.planar_wetting {
             lattice.set_planar_contact_angle(wall, wetting.contact_angle_radians())?;
         }

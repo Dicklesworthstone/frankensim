@@ -5034,6 +5034,21 @@ native ledger, regional mass and unregioned carry in kg, and wet-cell density,
 Guo-corrected velocity and incompressible pressure perturbation in SI. Gas
 populations are never presented as liquid samples.
 
+`MaterialFreeSurfaceScaling::with_density_dependent_gravity` explicitly selects
+the native `rho_lattice*g_lattice` law for both binary and supplied-state sparse
+constructors, including supplied pressure. Binary initialization starts at
+physical rest in the selected source frame; supplied velocities are retained.
+`MaterialFreeSurface3::rebind_gravity` replaces this held SI acceleration without
+instantaneous impulse, retaining the original material, pressure reference and
+dx/dt units. All components are admitted before native publication; nonzero
+loads that disappear in conversion refuse. The current numerical density sets
+gravity, while sourced reference density still owns the SI mass/pressure units.
+Independent local-force/Boussinesq authority and LegacyGlobal replay remain
+incompatible with this explicit uniform-acceleration mode. Four SI regressions
+specify equal acceleration across source and pressure-density changes, refreshed
+gas-pressure trajectories, no-impulse/atomic load replacement, and zero-load
+compatibility. This does not supply a compressible or thermally expanding liquid.
+
 The capillary reconstruction must remain positive at both signs of the native
 smoothed-fill curvature clamp; its identical bound is exposed as
 `FreeSurface3::CURVATURE_LIMIT`. This is a necessary numerical gate, not a
