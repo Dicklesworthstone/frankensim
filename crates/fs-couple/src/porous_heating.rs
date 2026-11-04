@@ -33,6 +33,8 @@ mod stack;
 pub use stack::PorousStackHeating;
 mod load_receiver;
 use load_receiver::LoadReceiver;
+/// Frozen coherent angular fields integrated over the original thermal volumes.
+pub mod coherent;
 /// Accepted-state gas-temperature feedback through the original porous stack.
 pub mod feedback;
 
@@ -49,7 +51,7 @@ pub struct PorousHeatCell {
     pub end_depth_m: f64,
 }
 
-/// Analytic physical heat cached once for one original thermal control volume.
+/// Physical heat cached once for one original thermal control volume.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PorousCellHeating {
     /// Original thermal destination, in authored depth order.
