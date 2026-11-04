@@ -10983,3 +10983,16 @@ wrench/work with independent SI conversions, stencil/budget/cancellation refusal
 and a late SI conversion failure preserving the accepted native flow.
 Native compilation, formatting and execution of these new regressions were
 unavailable when this extension was committed.
+
+## Source-resolved Newtonian films
+
+`film::material::MaterialFilmLiquid` borrows the original
+`ResolvedLiquidSurfaceState` used by material VOF, retaining its exact query,
+viscosity basis, receipts and capillarity decision. It supplies native
+Nusselt/Benney coefficients without source re-selection, cloning or caloric
+prerequisites. Evolving shear/pressure rheology refuses; only explicitly
+neglected capillarity maps to zero. Repeated film queries allocate nothing;
+temperature/composition changes require a newly admitted source state.
+`tests/material_film.rs` covers both viscosity bases, pinned temperature and
+receipt preservation, dimensional growth, explicit capillarity omission and
+rheology refusal using synthetic source inputs, without a calibration claim.

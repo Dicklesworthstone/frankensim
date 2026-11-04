@@ -10,6 +10,8 @@
 //! Source: Scheid et al., Phys. Fluids 14 (2002), DOI 10.1063/1.1515270,
 //! equation (7), zero thermal terms; their R = 3 Re. Author manuscript:
 //! <https://www.uni-muenster.de/Physik.TP/pauli/~thiele/Paper/SOCT2002pf.pdf>.
+pub mod material;
+
 /// Prescribed uniform Newtonian liquid properties; no material calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FilmMaterial {
