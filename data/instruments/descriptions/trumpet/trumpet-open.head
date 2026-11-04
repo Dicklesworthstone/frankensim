@@ -16,9 +16,9 @@ ambient moist_air 293.15 101325 0
 # Stevenson and Campbell work were looked for and none gives a complete (f, Q, 1/mu, width, rest gap) set).
 # This is the artificial latex lip pair of J. S. Cullen (2000), PhD thesis, University of Edinburgh, measured
 # on a TROMBONE-size mouthpiece (rig cup diameter 25.5 mm, Fig 3.5 p.41), Table A.2 p.253 embouchure 19,
-# the tightest of her 20 embouchures: fL1 237.0 Hz, QL1 12.0, 1/muL1 0.072 m^2/kg, b 9 mm, H0 0.25 mm
-# (standard font = measured, read on the page image). The lip is a trombone-rig artificial lip, not a
-# trumpeter's, and PLAYABILITY ENTERED THE CHOICE, so it is disclosed here and on the status card.
+# the tightest of her 20 embouchures: fL1 237.0 Hz, QL1 12.0, 1/muL1 0.072 m^2/kg (standard font in the table: MEASURED);
+# b 9 mm and H0 0.25 mm are in BOLD in the table = ESTIMATED by the thesis (measured only for embouchures 3, 7 and 11).
+# A trombone-rig artificial lip, not a trumpeter's, and PLAYABILITY ENTERED THE CHOICE: disclosed here and on the status card.
 #
 # Why row 19 and not row 7 (which the trombone uses): (1) the trumpet cup rim is 16.8 mm across (station 0
 # below), against the rig's 25.5 mm. Row 7's 12 mm channel fills 47 percent of the rig cup but would fill
