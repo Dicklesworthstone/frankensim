@@ -1258,8 +1258,9 @@ impl FlueVoice {
     ///
     /// `v = q / S_m` takes flue width by cut-up as the opening the mouth flow crosses. On a recorder
     /// that is the window. A flute's flow crosses the embouchure hole's open strip, which the flue
-    /// row does not know. Only the jet's transverse velocity moves: the source coefficient, the
-    /// mouth contraction and any authored linear mouth loss stay on `S_m`.
+    /// row does not know. Only the jet's transverse velocity moves here: the mouth contraction and
+    /// any authored linear mouth loss stay on `S_m`, and so does the source coefficient unless
+    /// [`Self::with_jet_source_area`] moves it.
     ///
     /// # Errors
     /// Late attachment, no forced jet, or an area that is not finite and positive.
@@ -1277,6 +1278,31 @@ impl FlueVoice {
     /// The area the jet's transverse velocity is taken over [m^2]: `S_m` unless the card names another.
     #[must_use]
     pub const fn jet_forcing_area_m2(&self) -> f64 { self.jet_forcing_area_m2 }
+
+    /// Evaluate the default source coefficient `rho 0.61 sqrt(A/pi) / A` on `area_m2` instead of `S_m`.
+    ///
+    /// The volume source is driven by the flow the jet puts into the mouth, and on a flute that flow
+    /// crosses the open strip ([`Self::with_jet_forcing_area`]). Only the area can be argued from
+    /// geometry: `0.61 sqrt(A/pi)` is the same unflanged end-correction law on another opening, not
+    /// a length measured for a strip. The mouth contraction and any authored linear mouth loss stay
+    /// on `S_m`.
+    ///
+    /// # Errors
+    /// Late attachment, no forced jet, or an area that is not finite and positive.
+    pub fn with_jet_source_area(mut self, area_m2: f64) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.forced.is_none() {
+            return Err(FlueError::Invalid { what: "jet source area requires a cold voice with the forced jet" });
+        }
+        if !(area_m2.is_finite() && area_m2 > 0.0) {
+            return Err(FlueError::Invalid { what: "jet source area must be finite and positive" });
+        }
+        self.source_coeff = self.rho * (0.61 * (area_m2 / core::f64::consts::PI).sqrt()) / area_m2;
+        Ok(self)
+    }
+
+    /// The jet's source coefficient [Pa s^2/m^3].
+    #[must_use]
+    pub const fn jet_source_coefficient(&self) -> f64 { self.source_coeff }
 
     /// Series mouth inertance [Pa s^2/m^3]: `rho 0.61 a_eq / S_m`, the rest
     /// of a computed window mass (less a window radiation load's static
@@ -3379,6 +3405,49 @@ mod forced_jet_tests {
         late.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
         late.step_block(&mut [0.0; 8]).unwrap();
         assert!(matches!(late.with_jet_forcing_area(1e-4),
+            Err(FlueError::Invalid { what }) if what.contains("cold voice")));
+    }
+
+    // jet_source_area: the default source coefficient's law on another area, on the same run as above.
+    #[test]
+    fn g0_jet_source_area_at_the_mouth_area_is_bit_identical() {
+        let plain = spread_voice(forced_jet::JetSpreadingLaw::None);
+        let s_m = plain.geometry.mouth_area_m2();
+        let named = spread_voice(forced_jet::JetSpreadingLaw::None).with_jet_source_area(s_m).unwrap();
+        assert_eq!(named.jet_source_coefficient().to_bits(), plain.jet_source_coefficient().to_bits());
+        assert_eq!(spread_run(named), spread_run(plain));
+    }
+
+    #[test]
+    fn g3_jet_source_area_moves_the_source_coefficient_and_leaves_the_rest_on_the_mouth_area() {
+        let plain = spread_voice(forced_jet::JetSpreadingLaw::None);
+        let s_m = plain.geometry.mouth_area_m2();
+        let area = 1.75 * s_m;
+        let moved = spread_voice(forced_jet::JetSpreadingLaw::None).with_jet_source_area(area).unwrap();
+        // The law's length goes as sqrt(A), so over A the coefficient falls as sqrt(S_m / A).
+        let expected = plain.jet_source_coefficient() * (s_m / area).sqrt();
+        assert!((moved.jet_source_coefficient() / expected - 1.0).abs() < 1e-14);
+        assert_eq!(moved.jet_forcing_area_m2(), s_m);
+        assert_eq!(moved.geometry.mouth_area_m2(), s_m);
+        assert_eq!(moved.mouth_inertance_pa_s2_m3(), plain.mouth_inertance_pa_s2_m3());
+        // `spread_run` also holds the work ledger on the moved coefficient.
+        assert_ne!(spread_run(moved), spread_run(plain));
+    }
+
+    #[test]
+    fn g6_jet_source_area_refuses_a_voice_without_the_forced_jet_a_late_call_and_a_bad_area() {
+        let bare = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096);
+        assert!(matches!(bare.with_jet_source_area(1e-4),
+            Err(FlueError::Invalid { what }) if what.contains("forced jet")));
+        for area in [0.0, -1e-4, f64::NAN, f64::INFINITY] {
+            let v = spread_voice(forced_jet::JetSpreadingLaw::None);
+            assert!(matches!(v.with_jet_source_area(area),
+                Err(FlueError::Invalid { what }) if what.contains("finite and positive")));
+        }
+        let mut late = spread_voice(forced_jet::JetSpreadingLaw::None);
+        late.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        late.step_block(&mut [0.0; 8]).unwrap();
+        assert!(matches!(late.with_jet_source_area(1e-4),
             Err(FlueError::Invalid { what }) if what.contains("cold voice")));
     }
 

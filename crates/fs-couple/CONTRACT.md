@@ -8595,6 +8595,33 @@ None.
   is not finite and positive. NOT CLAIMED: a measured flute mouth flow, a
   uniform velocity over the strip, and the terms left on `S_m`.
 
+  OPT-IN JET SOURCE ON THE STRIP (term `source` on the same row,
+  `jet_forcing_area open-strip source`; `FlueVoice::with_jet_source_area`; MB
+  1497/1783, bead pexfp.135.1): the volume source is driven by the flow the
+  jet puts into the mouth, and on a flute that flow crosses the open strip, so
+  the term evaluates the default coefficient `rho 0.61 sqrt(A/pi) / A` on the
+  strip instead of `S_m`. The coefficient falls by `sqrt(S_m / A)`: x 0.819,
+  0.756 and 0.707 on the PF-661 slide D4, G4 and C5 cards. Only the area can be
+  argued from geometry. `0.61 sqrt(A/pi)` is the same unflanged end-correction
+  law on another opening, not a length measured for a strip. The mouth
+  contraction and any authored linear mouth loss stay on `S_m`. The sidecar
+  says so: `flue_input.jet_forcing_area` drops the source from
+  `still_on_mouth_area` and adds `source_coefficient_on_strip_pa_s2_m3`, and
+  `window.jet_source_coefficient` reads `moved to the open strip`. Graded
+  through MB (1783): 5, 5 and 9 of 14 on D4, G4 and C5 against 5, 5 and 8 on
+  the slide cards, with spectrum, harmonics, envelope and pitch closer on all
+  three and centroid inside on D4 and C5; flux leaves the ruler on D4. Moving
+  the contraction to the strip as well was rendered on scratch code and graded
+  5, 5 and 4, rejected, so it is no term here. A row without the term is
+  bit-identical (`g0_jet_source_area_at_the_mouth_area_is_bit_identical` for
+  the law at `S_m`). On this code at d2fb1d874 on ts2 the slide G4 card, which
+  has the bare row, rendered wav 62caaebe and flows 234a4215, that card's
+  bytes, and the D4 card with the term rendered wav bee42500 and flows
+  8fee179b, the graded rung's bytes, which were rendered on ts1.
+  REFUSALS: a term other than `source`, trailing fields after it, and the
+  row's own refusals above. NOT CLAIMED: a measured source length for an
+  embouchure, a uniform flow over the strip, and the terms left on `S_m`.
+
   JET SPEED EDGE (ruling 8132, bead pexfp.135.2): the declared minimum jet
   speed U_min (`jet_limits`, or 1 m/s on the legacy TMM image) sizes the
   retained history, so every lookup at or above it is retained. A slower

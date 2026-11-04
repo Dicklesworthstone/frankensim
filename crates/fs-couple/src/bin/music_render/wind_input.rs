@@ -1174,6 +1174,7 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
         None => ",\"window_radiation\":null".to_string(),
     };
     let window_loss = if window_radiation.is_some() { "replaced by window_radiation" } else { "unchanged" };
+    let window_source = if p.jet_source_on_strip() { "moved to the open strip" } else { "unchanged" };
     let window_json = match p.window() {
         Some(record) => {
             let (w, l) = (&record.window, &record.ladder);
@@ -1201,7 +1202,7 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
                 ef.junction_mass_per_density * bore_area,
                 w.ramp.map_or_else(|| "null".to_string(), |r| format!("{:e}", r.edge_height)),
                 l.mass_per_density * bore_area));
-            format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"cover\":{cover},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"{window_loss}\"{mass_law}}}",
+            format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"cover\":{cover},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"{window_source}\",\"mouth_loss_rel\":\"{window_loss}\"{mass_law}}}",
                 w.bore_radius, w.wall_thickness, w.arc_width, fine.resolved_arc_width, w.axial_length,
                 fine.outer_axial_length, pocket, record.cells[0], record.cells[1], record.cells[2], l.order,
                 record.mass_per_density() * bore_area, record.channel_line_m, record.riser_mass_per_density,
@@ -1210,9 +1211,16 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
         None => ",\"window\":null".to_string(),
     };
     // Named only when the card adds `jet_forcing_area`.
-    let jet_forcing_json = p.jet_forcing_area_m2().map_or_else(String::new, |area| format!(
-        ",\"jet_forcing_area\":{{\"law\":\"open-strip\",\"area_m2\":{area:e},\"mouth_area_m2\":{:e},\"still_on_mouth_area\":\"source coefficient, mouth contraction, any authored linear mouth loss\"}}",
-        geometry.mouth_area_m2()));
+    let jet_forcing_json = p.jet_forcing_area_m2().map_or_else(String::new, |area| {
+        let (still, source) = if p.jet_source_on_strip() {
+            ("mouth contraction, any authored linear mouth loss",
+                format!(",\"source_coefficient_on_strip_pa_s2_m3\":{:e}", p.renderer().voice().jet_source_coefficient()))
+        } else {
+            ("source coefficient, mouth contraction, any authored linear mouth loss", String::new())
+        };
+        format!(",\"jet_forcing_area\":{{\"law\":\"open-strip\",\"area_m2\":{area:e},\"mouth_area_m2\":{:e},\"still_on_mouth_area\":\"{still}\"{source}}}",
+            geometry.mouth_area_m2())
+    });
     // Present only when a row adds one, so other cards' provenance is unchanged.
     let hole_inner_json = if p.hole_inner_lengths().is_empty() { String::new() } else {
         let opt = |v: Option<f64>| v.map_or_else(|| "null".to_string(), |v| format!("{v:e}"));

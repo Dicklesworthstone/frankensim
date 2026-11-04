@@ -12,6 +12,7 @@ const RESPONSE: &str = "jet_response forced-bickley 0.25 40\n";
 const WINDOW: &str =
     "window embouchure 16 0.0098740 0.0118488 0.0058387 lip one-sided face 0.0018\n";
 const ROW: &str = "jet_forcing_area open-strip\n";
+const ROW_SOURCE: &str = "jet_forcing_area open-strip source\n";
 
 fn parse(response: &str, window: &str) -> Result<FlueFilePerformance, String> {
     assert_eq!(CARD.matches(JET).count(), 1, "the D4 jet row changed; update this test");
@@ -44,11 +45,39 @@ fn the_row_names_the_open_strip_and_a_card_without_it_keeps_the_flue_rows_area()
 }
 
 #[test]
+fn the_source_term_moves_the_source_coefficient_to_the_strip_and_the_bare_row_does_not() {
+    let without = parse(RESPONSE, WINDOW).expect("parses");
+    let bare = parse(RESPONSE, &format!("{WINDOW}{ROW}")).expect("parses");
+    let with = parse(RESPONSE, &format!("{WINDOW}{ROW_SOURCE}")).expect("parses");
+    assert!(!without.jet_source_on_strip());
+    assert!(!bare.jet_source_on_strip());
+    assert!(with.jet_source_on_strip());
+
+    let plain = without.renderer().voice().jet_source_coefficient();
+    assert_eq!(bare.renderer().voice().jet_source_coefficient().to_bits(), plain.to_bits());
+
+    let strip = 0.0118488 * 0.0058387;
+    let s_m = without.geometry().mouth_area_m2();
+    let moved = with.renderer().voice().jet_source_coefficient();
+    assert!((moved / plain - (s_m / strip).sqrt()).abs() < 1e-14);
+    // The velocity's area stays the strip, and the series mass stays where the window put it.
+    assert_eq!(with.jet_forcing_area_m2(), Some(strip));
+    assert_eq!(with.renderer().voice().jet_forcing_area_m2(), strip);
+    assert_eq!(
+        with.renderer().voice().mouth_inertance_pa_s2_m3(),
+        without.renderer().voice().mouth_inertance_pa_s2_m3()
+    );
+}
+
+#[test]
 fn the_row_refuses_what_it_cannot_read() {
     for (response, window, text) in [
         (RESPONSE, format!("{WINDOW}jet_forcing_area\n"), "jet_forcing_area requires open-strip"),
         (RESPONSE, format!("{WINDOW}jet_forcing_area riser\n"), "jet_forcing_area requires open-strip"),
-        (RESPONSE, format!("{WINDOW}jet_forcing_area open-strip 2\n"), "unexpected trailing fields"),
+        (RESPONSE, format!("{WINDOW}jet_forcing_area open-strip 2\n"), "takes only the term source"),
+        (RESPONSE, format!("{WINDOW}jet_forcing_area open-strip contraction\n"), "takes only the term source"),
+        (RESPONSE, format!("{WINDOW}jet_forcing_area open-strip source 2\n"), "unexpected trailing fields"),
+        ("", format!("{WINDOW}{ROW_SOURCE}"), "jet forcing area requires a cold voice with the forced jet"),
         (
             RESPONSE,
             ROW.to_owned(),
