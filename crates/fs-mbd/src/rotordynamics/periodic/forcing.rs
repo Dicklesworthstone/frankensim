@@ -1,7 +1,7 @@
 //! Held physical loads and periodic forced orbits through the shared cycle owner.
 use super::{
-    PreparedRotorCycle, RotorFloquetBudget, RotorFloquetResponse, RotorPeriodicSegment, finite,
-    poll, prepare_cycle, restore_entry,
+    CycleForcing, PreparedRotorCycle, RotorFloquetBudget, RotorFloquetResponse,
+    RotorPeriodicSegment, finite, poll, prepare_cycle, restore_entry,
 };
 use crate::rotordynamics::{RotorError, transient::RotorTransientState};
 use fs_la::factor::lu;
@@ -69,7 +69,7 @@ pub fn prepare_forced_cycle(
     prepare_cycle(
         spin_rad_s,
         segments,
-        Some(held_forces),
+        CycleForcing::Held(held_forces),
         relative_mass_residual_tolerance,
         budget,
         cancelled,

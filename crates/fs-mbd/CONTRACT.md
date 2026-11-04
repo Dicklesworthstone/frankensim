@@ -527,6 +527,31 @@ across force scales, nonbinary static equilibrium, an unstable quarter-period
 particular orbit and growing perturbations, full mutual inertia, coordinate
 congruence and cycle origin, singularity, small-force resolution and cancellation.
 
+`rotordynamics::periodic::prepare_harmonic_cycle` drives those SAME physical
+segments with continuous `Fc*cos(omega*t) + Fs*sin(omega*t)` forces/torques.
+The positive integer harmonic order (at most 1024) fixes
+`omega=2*pi*order/period`; phase is relative to the common cycle origin and
+continues through every coefficient/load switch. The sine sign expresses
+rotation direction independently of the signed shaft speed. For the existing
+`exp(+i omega t)` force phasor, Fc is its real part and Fs minus its imaginary
+part. Synchronous forcing requires the caller's period/order to match spin.
+
+Two normalized source coordinates form a skew rotation inside the existing
+bounded exponential (at most 66 coordinates). They carry no physical energy
+and are excluded from the physical monodromy and Floquet spectrum. Both
+original force columns pass the existing full-mass residual check. Source
+amplitude does not set the exponential's scaling; a zero load uses the identical
+homogeneous flow. No dynamic-stiffness inverse or held-sinusoid approximation
+is introduced, including at a lossless resonance. The same cached trajectory
+and unique-orbit solve retain singularity/resolvent and cancellation refusals.
+A single harmonic and segmented coefficients do not imply smooth coefficient
+modulation, spin acceleration, actuator-work receipts or certified state errors.
+
+Six G1/G3 regression cases cover continuous resonant response across force
+scales and subdivision, signed gyroscopic rotating loads, full mutual inertia
+with free coordinates, secular lossless resonance, globally phased coefficient
+switches, and homogeneous/admission equivalence.
+
 `harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
 on `K - omega^2 M + i omega(C + Omega G)`. Row equilibration precedes the solve;
 compensated inertial products retain the original binary coefficients' detuning

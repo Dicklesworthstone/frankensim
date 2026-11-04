@@ -28,6 +28,50 @@ use fs_phs::linear_exact::{DenseExponentialBudget, exponential_with_budget};
 
 mod forcing;
 pub use forcing::{RotorPeriodicOrbit, RotorPeriodicTrajectory, prepare_forced_cycle};
+mod harmonic;
+pub use harmonic::{MAX_ROTOR_FORCE_HARMONIC, RotorHarmonicForce, prepare_harmonic_cycle};
+
+#[derive(Clone, Copy)]
+enum CycleForcing<'a> {
+    Homogeneous,
+    Held(&'a [&'a [f64]]),
+    Harmonic {
+        rows: &'a [RotorHarmonicForce<'a>],
+        order: usize,
+    },
+}
+
+impl CycleForcing<'_> {
+    fn source_coordinates(self) -> usize {
+        match self {
+            Self::Homogeneous => 0,
+            Self::Held(_) => 1,
+            Self::Harmonic { .. } => 2,
+        }
+    }
+
+    fn admit(self, n: usize, segments: usize) -> Result<(), RotorError> {
+        let valid_row = |row: &[f64]| row.len() == n && row.iter().all(|x| x.is_finite());
+        let valid = match self {
+            Self::Homogeneous => true,
+            Self::Held(rows) => rows.len() == segments && rows.iter().all(|row| valid_row(row)),
+            Self::Harmonic { rows, order } => {
+                (1..=MAX_ROTOR_FORCE_HARMONIC).contains(&order)
+                    && rows.len() == segments
+                    && rows
+                        .iter()
+                        .all(|row| valid_row(row.cosine) && valid_row(row.sine))
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(RotorError::Invalid(
+                "matching finite segment loads and bounded positive harmonic order required",
+            ))
+        }
+    }
+}
 
 /// Hard bound on coefficient switches in a single declared physical cycle.
 pub const MAX_ROTOR_PERIODIC_SEGMENTS: usize = 256;
@@ -79,7 +123,7 @@ impl RotorFloquetBudget {
         self,
         n: usize,
         segments: usize,
-        forced: bool,
+        source_coordinates: usize,
     ) -> Result<DenseExponentialBudget, RotorError> {
         if self.max_segments == 0
             || self.max_segments > MAX_ROTOR_PERIODIC_SEGMENTS
@@ -90,11 +134,12 @@ impl RotorFloquetBudget {
             return Err(RotorError::PeriodicBudget("segment or QR sweep admission"));
         }
         // n <= 32 and segments <= 256 were checked before these products.
-        // A held source adds one normalized affine coordinate to the shared
-        // exponential, never another physical mode. Forced plans retain each
+        // Held/harmonic sources add one/two normalized coordinates to the shared
+        // exponential, never physical modes. Forced plans retain each
         // segment map and reserve one complete boundary trajectory and solve.
         let d = 2 * n;
-        let e = d + if forced { 1 } else { 0 };
+        let forced = source_coordinates != 0;
+        let e = d + source_coordinates;
         let retained = if forced {
             segments * (d * d + 3 * d + 16) + d * d + 16 * d
         } else {
@@ -145,8 +190,9 @@ pub struct RotorFloquetResponse {
 
 /// Cached full affine rotor cycle with a fixed physical force schedule.
 ///
-/// Construct with prepare_forced_cycle. Each declared force is held for its
-/// complete segment; coefficient and force changes introduce no state reset.
+/// Construct with prepare_forced_cycle or prepare_harmonic_cycle. Held loads
+/// and continuous harmonic sources share the same complete coupled operators.
+/// Coefficient and force changes introduce no state reset.
 /// Warm trajectory calls use the retained maps without new exponentials.
 /// The homogeneous Floquet report does not classify this forced orbit as
 /// attracting: unstable perturbations remain unstable.
@@ -193,7 +239,7 @@ pub fn periodic_floquet(
     Ok(prepare_cycle(
         spin_rad_s,
         segments,
-        None,
+        CycleForcing::Homogeneous,
         relative_mass_residual_tolerance,
         budget,
         cancelled,
@@ -204,7 +250,7 @@ pub fn periodic_floquet(
 fn prepare_cycle(
     spin_rad_s: f64,
     segments: &[RotorPeriodicSegment<'_>],
-    forces: Option<&[&[f64]]>,
+    forces: CycleForcing<'_>,
     relative_mass_residual_tolerance: f64,
     budget: RotorFloquetBudget,
     mut cancelled: impl FnMut() -> bool,
@@ -223,13 +269,9 @@ fn prepare_cycle(
     }
     let reference = segments[0].model;
     let n = reference.dofs();
-    let forced = forces.is_some();
-    let dense_budget = budget.admit(n, segments.len(), forced)?;
-    if forces.is_some_and(|rows| rows.len() != segments.len()) {
-        return Err(RotorError::Invalid(
-            "one original force vector per periodic segment required",
-        ));
-    }
+    forces.admit(n, segments.len())?;
+    let forced = forces.source_coordinates() != 0;
+    let dense_budget = budget.admit(n, segments.len(), forces.source_coordinates())?;
     let mut boundary_times = if forced {
         Vec::with_capacity(segments.len() + 1)
     } else {
@@ -239,7 +281,7 @@ fn prepare_cycle(
         boundary_times.push(0.0);
     }
     let mut period = Dd::ZERO;
-    for (index, segment) in segments.iter().enumerate() {
+    for segment in segments {
         poll(&mut cancelled)?;
         if segment.model.dofs() != n
             || segment.model.mass() != reference.mass()
@@ -250,13 +292,6 @@ fn prepare_cycle(
             return Err(RotorError::Invalid(
                 "periodic segments require identical M/G and positive finite durations",
             ));
-        }
-        if let Some(force) = forces.map(|rows| rows[index]) {
-            if force.len() != n || force.iter().any(|value| !value.is_finite()) {
-                return Err(RotorError::Invalid(
-                    "matching finite original segment forces required",
-                ));
-            }
         }
         period = period + Dd::from_f64(segment.duration_seconds);
         let boundary = finite(period.to_f64())?;
@@ -299,20 +334,38 @@ fn prepare_cycle(
             &mut cancelled,
         )?;
         maximum_mass_residual = maximum_mass_residual.max(residual);
-        let source = if let Some(force) = forces.map(|rows| rows[index]) {
-            let (column, residual) = mass.force_column(
-                force,
-                segment.duration_seconds,
-                period_seconds,
-                relative_mass_residual_tolerance,
-                &mut cancelled,
-            )?;
-            maximum_mass_residual = maximum_mass_residual.max(residual);
-            column
-        } else {
-            vec![0.0; d]
+        let flow = match forces {
+            CycleForcing::Homogeneous => {
+                affine_segment_flow(&generator, &vec![0.0; d], d, dense_budget, &mut cancelled)?
+            }
+            CycleForcing::Held(rows) => {
+                let (column, residual) = mass.force_column(
+                    rows[index],
+                    segment.duration_seconds,
+                    period_seconds,
+                    relative_mass_residual_tolerance,
+                    &mut cancelled,
+                )?;
+                maximum_mass_residual = maximum_mass_residual.max(residual);
+                affine_segment_flow(&generator, &column, d, dense_budget, &mut cancelled)?
+            }
+            CycleForcing::Harmonic { rows, order } => {
+                let (flow, residual) = harmonic::segment_flow(
+                    &mass,
+                    &generator,
+                    rows[index],
+                    order,
+                    boundary_times[index],
+                    segment.duration_seconds,
+                    period_seconds,
+                    relative_mass_residual_tolerance,
+                    dense_budget,
+                    &mut cancelled,
+                )?;
+                maximum_mass_residual = maximum_mass_residual.max(residual);
+                flow
+            }
         };
-        let flow = affine_segment_flow(&generator, &source, d, dense_budget, &mut cancelled)?;
         // Left multiplication is physical chronological order. The source
         // offset has the same order: b_next = E_segment b + b_segment.
         if forced {
