@@ -1,0 +1,25 @@
+frankensim.matdb-source.v1
+surface_a	source-pack:violin-string-dominant-a-pickering1985-section	declared solid model	frozen source-pack realization	0	outer-string-surface-at-the-bridge-crown
+surface_b	source-pack:violin-maple-sycamore-sonderegger2013-shell	declared solid model	frozen source-pack realization	0	bridge-crown-end-grain
+context	dry-preloaded-contact	-	string-tension-downbearing-at-the-cannone-break-angle	stress-free-reference-about-the-static-preload
+observation	crown-contact	Pickering 1985 Dominant A on the il Cannone maple bridge crown; tension 55.4865 N (cannone-dominant-g3.material-strings), break angle 20.22 deg (CT string-contacts.tsv), normal load 19.4810 N	derived by gen_crown_interface_packs.py: Hertz crossed cylinders and Mindlin no-slip tangential stiffness (Johnson 1985 eqs. 4.53 and 7.42) from the cited packs; STATED UNKNOWN and enveloped at both ends: the maple orthotropy (G_RT with E_L, G_LR with E_R), the crown edge radius (0.1 mm to half the CT bridge-top thickness) and the unnamed wrap metal (aluminium (aluminum-2024-t3-sheet-mil-hdbk-5j) to silver (silver-pure-smith-fickett-nist1995, silver-pure-wrap-nist1995)); joint loss the maple shear retardation time times its compliance share, written at the maple's constant-loss anchor 1256.63706 rad/s (constant loss factor share x eta)	the elastic envelope's mean pressures exceed what end-grain maple bears, so a played crown is bedded: a conforming groove only enlarges the contact, the compliant end is a lower bound and the stiff end can be exceeded; the winding's turn-by-turn contact is not resolved and the metal's own loss is not in its packs; claimed 0 to 2 pi 200 kHz (quasi-static contact), the loss outside the maple's measured 942.477796-62831.8531 rad/s is a STATED UNKNOWN
+scalar	crown-stiffness-compliant	crown-contact	crown_lateral_stiffness_per_area_compliant	9.40139106e+12	Pa/m	constant
+uncertainty	crown-stiffness-compliant	unstated	-	-	-	-
+validity	crown-stiffness-compliant	T	280	320	K
+validity	crown-stiffness-compliant	omega	0	1256637.06	rad/s
+scalar	crown-viscosity-compliant	crown-contact	crown_lateral_viscosity_per_area_compliant	119522043	Pa*s/m	constant
+uncertainty	crown-viscosity-compliant	unstated	-	-	-	-
+validity	crown-viscosity-compliant	T	280	320	K
+validity	crown-viscosity-compliant	omega	0	1256637.06	rad/s
+scalar	crown-stiffness-stiff	crown-contact	crown_lateral_stiffness_per_area_stiff	1.34802021e+13	Pa/m	constant
+uncertainty	crown-stiffness-stiff	unstated	-	-	-	-
+validity	crown-stiffness-stiff	T	280	320	K
+validity	crown-stiffness-stiff	omega	0	1256637.06	rad/s
+scalar	crown-viscosity-stiff	crown-contact	crown_lateral_viscosity_per_area_stiff	164850502	Pa*s/m	constant
+uncertainty	crown-viscosity-stiff	unstated	-	-	-	-
+validity	crown-viscosity-stiff	T	280	320	K
+validity	crown-viscosity-stiff	omega	0	1256637.06	rad/s
+scalar	crown-loss-anchor	crown-contact	constant_loss_reference_omega	1256.63706	rad/s	constant
+uncertainty	crown-loss-anchor	unstated	-	-	-	-
+validity	crown-loss-anchor	T	280	320	K
+validity	crown-loss-anchor	omega	0	1256637.06	rad/s

@@ -123,6 +123,7 @@ outlet 32 -0.1499959 0
 outlet 34 -0.1168766 0
 outlet 36 -0.0817800 0
 outlet 38 -0.0446073 0
+mouth_aperture rectangle 0.010 0.012
 mouth_radiation -0.6384936 0 4 4
 controls 4096 100000
 gesture

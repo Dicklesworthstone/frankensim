@@ -4,7 +4,7 @@
   "related_beads": [
     "frankensim-irp-v5-instrument-realism-pexfp.219"
   ],
-  "retrieved_utc": "2026-10-23T02:23:33Z",
+  "retrieved_utc": "2026-10-24T05:10:07.574401+00:00",
   "storage": "Use fetch-references.sh --manifest references-supplemental.json with an existing FRANKENSIM_REFERENCE_DIR. Audio is not committed. Named archive members require separate extraction.",
   "purpose": "Real recordings for independent listening and validation of physics predictions; never synthesis inputs or parameter-fitting targets. All supplemental entries remain gradable=false pending appropriate specimen, pitch, articulation and recording-chain controls.",
   "baseline_manifest": "data/instruments/references.json",
@@ -114,6 +114,18 @@
       "format": "16-bit/44.1 kHz stereo",
       "room": "room 2017, Voxman Music Building (not an anechoic chamber)",
       "notes": "8 inches above bass and treble strings; Steinway B, performed by Evan Mazunik, recorded by Michael Cash in November 2001."
+    },
+    {
+      "id": "uiowa-cymbals-2013",
+      "source_url": "https://theremin.music.uiowa.edu/MIScymbals.html",
+      "mic": "Earthworks QTC-40",
+      "distance_m": 1.524,
+      "signal_chain": [
+        "Metric Halo 2882"
+      ],
+      "format": "24-bit/44.1 kHz stereo",
+      "room": "anechoic chamber, Wendell Johnson Speech and Hearing Center, University of Iowa",
+      "notes": "Performed by Andrew Thierauf; recorded by Daniel Frantz and Will Huff on March 20, 2013. The page lists the cymbal model as N/A; these are not a characterized match to the simulation's eight-inch splash geometry."
     }
   ],
   "files": [
@@ -457,7 +469,7 @@
       "source_page": "https://archive.org/details/SalamanderDrumkit",
       "gradable": false,
       "articulation": "single struck hits; overhead microphone",
-      "notes": "Archive was streamed completely to verify its digest; only the nine exact kitgrade.py reference members were retained. Original stereo audio was not normalized, filtered or retuned during acquisition.",
+      "notes": "The complete archive was streamed and its SHA-256 verified on 2026-10-24. All 27 kitgrade.py members (a primary hit, a repeat hit and a second dynamic for each of nine kit states) were independently hashed and fully decoded. Original stereo audio was not normalized, filtered or retuned during acquisition; no audio is committed.",
       "members": [
         {
           "path": "Salamander/OH/loTom_OH_FF_5.wav",
@@ -566,8 +578,314 @@
             "duration_s": 0.471792,
             "decode_check": "ffmpeg full decode succeeded"
           }
+        },
+        {
+          "path": "Salamander/OH/crash1_OH_FF_2.wav",
+          "archive_member": "OH/crash1_OH_FF_2.wav",
+          "sha256": "fabe68fa50a178b8e07c8dd41fa39195709882bf7360ef5872849a28a1b8c617",
+          "bytes": 3265988,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 11.340083333333334,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/crash1_OH_P_2.wav",
+          "archive_member": "OH/crash1_OH_P_2.wav",
+          "sha256": "4e869d15e40b6a6ade96b9c5cbef515d981f37305a6d3e9912f5d48b7cb45f1c",
+          "bytes": 2546420,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 8.841583333333332,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hihatClosed_OH_F_4.wav",
+          "archive_member": "OH/hihatClosed_OH_F_4.wav",
+          "sha256": "b5702661e970af3ebc3910953c59943c526c7bb4e03463de9b5c09b8b070515d",
+          "bytes": 165830,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 0.5756458333333333,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hihatClosed_OH_P_8.wav",
+          "archive_member": "OH/hihatClosed_OH_P_8.wav",
+          "sha256": "939b33127c8fa2cb73667dff61d5448021284e72776cd95b80351fcee3be25d4",
+          "bytes": 147806,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 0.5130625,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hihatOpen_OH_F_3.wav",
+          "archive_member": "OH/hihatOpen_OH_F_3.wav",
+          "sha256": "de81f49dea6f7bcb05cba08b181a29e3aacbe0a60d1cc746a3ec8807c5b7d42d",
+          "bytes": 2511236,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 8.719416666666667,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hihatOpen_OH_P_3.wav",
+          "archive_member": "OH/hihatOpen_OH_P_3.wav",
+          "sha256": "e5c9127d0671031c57da72e45bc84e4feaffc32f322fb9229b326bb4661d1170",
+          "bytes": 2499302,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 8.677979166666667,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hiTom_OH_F_8.wav",
+          "archive_member": "OH/hiTom_OH_F_8.wav",
+          "sha256": "ed4a54ff08e689937f0d67b5243040f3f495d17fc27ccb00e59be1956a900611",
+          "bytes": 788552,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 2.737875,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hiTom_OH_P_3.wav",
+          "archive_member": "OH/hiTom_OH_P_3.wav",
+          "sha256": "9b9c0bd181e6ddded36d6bbddeb921847af981f89ae1a9aa6ba5108d53fe289d",
+          "bytes": 590918,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 2.051645833333333,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/kick_OH_F_5.wav",
+          "archive_member": "OH/kick_OH_F_5.wav",
+          "sha256": "926912994a9a201c117978f130a329ef7942e49294790b38a1f4ab4b4f2dc568",
+          "bytes": 136208,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 0.47279166666666667,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/kick_OH_P_3.wav",
+          "archive_member": "OH/kick_OH_P_3.wav",
+          "sha256": "097d64b8d3a2ed085b1e970943a0257a4debfcabbc6db8d3933956025bb2b630",
+          "bytes": 136316,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 0.4731666666666667,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/loTom_OH_FF_2.wav",
+          "archive_member": "OH/loTom_OH_FF_2.wav",
+          "sha256": "656d624bd176a593056d2d00e3cfe3ddce34d15b2d2902a8aa63e9ed31c041b9",
+          "bytes": 687878,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 2.3883125,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/loTom_OH_MP_3.wav",
+          "archive_member": "OH/loTom_OH_MP_3.wav",
+          "sha256": "2b292c140e295895969a0fd9e21195480380b417b65532cceca6d67008acb3e1",
+          "bytes": 613496,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 2.1300416666666666,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/ride1_OH_FF_2.wav",
+          "archive_member": "OH/ride1_OH_FF_2.wav",
+          "sha256": "5e80faf808cfd0d783bf105b23c6024a6eb733698b5f054fbf717ac0dbff21ae",
+          "bytes": 3008558,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 10.446229166666667,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/ride1_OH_MP_4.wav",
+          "archive_member": "OH/ride1_OH_MP_4.wav",
+          "sha256": "b8ee4a7fe5893379d3e8c9192bee810ead7ee0445e59cac9a4100d052d38be53",
+          "bytes": 1930694,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 6.703645833333334,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/snare2_OH_F_9.wav",
+          "archive_member": "OH/snare2_OH_F_9.wav",
+          "sha256": "b4559f98a78849d28daab241d76ff709d7ad7d61198b4cfeab983c4a272fc8eb",
+          "bytes": 517448,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 1.7965416666666667,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/snare2_OH_MP_5.wav",
+          "archive_member": "OH/snare2_OH_MP_5.wav",
+          "sha256": "eab08730c6a68985255648cf39499839845e4f7242ceddf76496e21c5390b4a6",
+          "bytes": 565442,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 1.9631875,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/snare2OFF_OH_F_6.wav",
+          "archive_member": "OH/snare2OFF_OH_F_6.wav",
+          "sha256": "bc8d0fe0993da7a159871e401c98d382e0bfeae789ac46c6967b35d65c993032",
+          "bytes": 478652,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 1.6618333333333333,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/snare2OFF_OH_P_2.wav",
+          "archive_member": "OH/snare2OFF_OH_P_2.wav",
+          "sha256": "2ffc08c3718565bfb690e7a0b0cf5a96cf61f5e60c2fc8955f62b1da0b2d7215",
+          "bytes": 406226,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 1.4103541666666666,
+            "bits_per_sample": 24,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
         }
       ]
+    },
+    {
+      "id": "uiowa-splash-stick-normal-pp",
+      "instrument": "Splash cymbal",
+      "path": "IowaPercussion/splash.stick.normal.pp.aif",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/cymbals/suspended%20cymbals/stick/splash.stick.normal.pp.aif",
+      "sha256": "936907695b6f420357dd548fbce80f2f8101ba483301c0986c4d398609572e66",
+      "bytes": 2138950,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MIScymbals.html",
+      "chain": "uiowa-cymbals-2013",
+      "articulation": "normal stick strike",
+      "dynamic": "pp",
+      "range": null,
+      "notes": "Original Iowa suspended splash cymbal recording. Manufacturer, diameter, thickness profile, alloy and strike force are uncharacterized; source dynamics are performance labels.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 8.083311,
+        "codec": "pcm_s24be",
+        "bits_per_sample": 24,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "uiowa-splash-stick-normal-mf",
+      "instrument": "Splash cymbal",
+      "path": "IowaPercussion/splash.stick.normal.mf.aif",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/cymbals/suspended%20cymbals/stick/splash.stick.normal.mf.aif",
+      "sha256": "ace502de3ef9187081cd245ee66eb6d397345542c778641207a71cb21ede2b13",
+      "bytes": 2337448,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MIScymbals.html",
+      "chain": "uiowa-cymbals-2013",
+      "articulation": "normal stick strike",
+      "dynamic": "mf",
+      "range": null,
+      "notes": "Original Iowa suspended splash cymbal recording. Manufacturer, diameter, thickness profile, alloy and strike force are uncharacterized; source dynamics are performance labels.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 8.833492,
+        "codec": "pcm_s24be",
+        "bits_per_sample": 24,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "uiowa-splash-stick-normal-ff",
+      "instrument": "Splash cymbal",
+      "path": "IowaPercussion/splash.stick.normal.ff.aif",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/cymbals/suspended%20cymbals/stick/splash.stick.normal.ff.aif",
+      "sha256": "6870bc9771cdbcf8469afae5ea934aa97fb77fadf79564001bd927f6f5c7938f",
+      "bytes": 2253082,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MIScymbals.html",
+      "chain": "uiowa-cymbals-2013",
+      "articulation": "normal stick strike",
+      "dynamic": "ff",
+      "range": null,
+      "notes": "Original Iowa suspended splash cymbal recording. Manufacturer, diameter, thickness profile, alloy and strike force are uncharacterized; source dynamics are performance labels.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 8.514649,
+        "codec": "pcm_s24be",
+        "bits_per_sample": 24,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
     }
   ],
   "acquisition_check": {
@@ -578,5 +896,17 @@
     "retained_audio_duration_s": 1569.812189,
     "verification": "Selected baseline pins matched. Every supplemental URL was downloaded and SHA-256/length recorded; the complete Salamander archive was hashed while streaming. All 45 retained audio files passed full ffmpeg decoding. Archives are not counted as audio files.",
     "qualification": "Acquisition and decoding establish availability and integrity, not simulation fidelity or complete specimen/material measurements."
-  }
+  },
+  "additional_acquisition_checks": [
+    {
+      "date": "2026-10-24",
+      "new_recordings": 21,
+      "reverified_existing_recordings": 9,
+      "decoded_audio_files": 30,
+      "decoded_audio_duration_s": 135.00995200000003,
+      "verification": "The complete 387611727-byte Salamander archive matched its existing SHA-256. All 27 named kit comparison members and three original Iowa splash AIFFs were independently hashed and passed full FFmpeg decode. The 18 additional kit members close the repeat-hit and second-dynamic inputs used by kitgrade.py.",
+      "storage": "Audio was verified in memory because the current filesystem was full. Hashes, byte sizes and original download URLs are retained here; no local audio-cache availability is claimed.",
+      "qualification": "Recording availability does not establish model fidelity, measured strike forces, material properties or specimen geometry."
+    }
+  ]
 }

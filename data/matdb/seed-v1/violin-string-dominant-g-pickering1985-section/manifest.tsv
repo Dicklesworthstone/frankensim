@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	violin-string-dominant-g-pickering1985-section
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed pack violin-strings-whole-pickering-jcas1985 (whose own terms apply) and the pendulum constants of the same source's method text
+citation	Pickering N.C. (1985), Physical Properties of Violin Strings, Journal of the Catgut Acoustical Society 44:6-8 (November 1985), the table on p. 7 and the method text on p. 6; derived by the pack author
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

@@ -135,9 +135,9 @@ def mouthpiece_segments(desc, dims):
     interior_volume = volume["internal-volume"] - cone_volume
     if interior_length <= 0 or interior_volume <= 0:
         refuse("mouthpiece total length or volume does not exceed its exit cone")
-    r_eq = math.sqrt(interior_volume / (math.pi * interior_length))
+    l_eq = interior_volume / (math.pi * r_in**2)
     return [
-        f"cylinder {num(r_eq)} {num(interior_length)}",
+        f"cylinder {num(r_in)} {num(l_eq)}",
         f"cone {num(r_in)} {num(r_out)} {num(cone_length)}",
     ]
 
@@ -176,9 +176,12 @@ def duct_records(desc, dims, open_holes):
 
 
 def pressure_curve(desc, root):
+    table_rel = need(desc, "player.pressure_table")
+    if table_rel == "-":
+        return None
     group = need(desc, "player.instrument_group")
     level = need(desc, "player.level")
-    path = os.path.join(root, need(desc, "player.pressure_table"))
+    path = os.path.join(root, table_rel)
     sums = {}
     for row in table(path, "frankensim.player-blowing-pressure.v1"):
         if row["instrument"] == group and row["level"] == level:
@@ -188,7 +191,10 @@ def pressure_curve(desc, root):
     return sorted((m, sum(v) / len(v) * CM_H2O_PA) for m, v in sums.items())
 
 
-def pressure_for(curve, note, reach, step):
+def pressure_for(desc, curve, note, reach, step):
+    if curve is None:
+        value = float(need(desc, "reed.operating_blowing_pa"))
+        return round(value / step) * step, "fixed-operating-point"
     lo, hi = curve[0][0], curve[-1][0]
     if note < lo - reach or note > hi + reach:
         refuse(f"{uiowa_name(note)} lies more than {reach} semitones outside the published pressure range")
@@ -208,6 +214,10 @@ def pressure_for(curve, note, reach, step):
 def gesture(desc, pressure):
     attack = float(need(desc, "gesture.attack_s"))
     start = float(need(desc, "gesture.attack_start_s"))
+    if "tongue.contact_duration_s" in desc:
+        start = round(start - float(need(desc, "tongue.contact_duration_s")), 10)
+        if start < 0:
+            refuse("tongue.contact_duration_s exceeds gesture.attack_start_s")
     release_at = float(need(desc, "gesture.release_start_s"))
     release = float(need(desc, "gesture.release_s"))
     return (
@@ -219,43 +229,77 @@ def gesture(desc, pressure):
     )
 
 
+def tongue_record(desc):
+    if "tongue.contact_area_m2" not in desc:
+        return ""
+    area_t = float(need(desc, "tongue.contact_area_m2"))
+    area_r = float(need(desc, "reed.effective_area_m2"))
+    force_n = float(need(desc, "tongue.contact_force_n"))
+    release_start = float(need(desc, "gesture.attack_start_s"))
+    contact_duration = float(need(desc, "tongue.contact_duration_s"))
+    unload_start = round(release_start - contact_duration, 10)
+    unload_s = float(need(desc, "gesture.attack_s"))
+    release_s = float(need(desc, "tongue.release_s"))
+    if unload_start < 0 or unload_start + unload_s > release_start:
+        refuse("tongue contact window does not enclose the pre-release mouth-pressure ramp")
+    return f"tongue_contact {num(area_t)} {num(area_r)} {num(force_n)} {num(release_start)} {num(release_s)}\n"
+
+
 def reed_record(desc, pressure):
     """The `reed` header values: literal keys, or per-area quantities with a lip-force rule.
 
-    Per-area mode (reed.stiffness_per_area_pa_m present): the closing pressure is the blowing
-    pressure over the published operating ratio p_m / (K_a y_m), the stiffness is the closing
-    pressure times the effective area over y_m (the reed owner's face rule k H = P_c A), the
-    mass is the mass per area times the effective area, and the damping ratio follows from the
-    damping rate g as g / (2 omega) with omega = sqrt(k / m).
+    Per-area mode (reed.stiffness_per_area_pa_m present): at the published operating point
+    p_m = reed.operating_blowing_pa (Chatziioannou and van Walstijn 2009 Table 1), the lip-reduced
+    equilibrium rest opening is held at y_m = h0 = 0.40 mm across all notes with closing pressure
+    P_M = K_a y_m = 3464 Pa, stiffness k = K_a S_r = 659.026 N/m, mass m = m_a S_r = 3.805e-6 kg,
+    and damping ratio zeta = g / (2 omega_r) with omega_r = sqrt(K_a / m_a) = sqrt(k / m).
     """
     height = need(desc, "reed.rest_opening_m")
     width = need(desc, "reed.width_m")
     if "reed.stiffness_per_area_pa_m" not in desc:
         keys = ("reed.closing_pressure_pa", "reed.mass_kg", "reed.stiffness_n_m", "reed.damping_ratio")
         return " ".join([height, width] + [need(desc, key) for key in keys])
-    h = float(height)
+    h0 = float(height)
     area = float(need(desc, "reed.effective_area_m2"))
-    ratio = float(need(desc, "reed.operating_blowing_pa")) / (float(need(desc, "reed.stiffness_per_area_pa_m")) * h)
-    closing = pressure / ratio
-    stiffness = closing * area / h
-    mass = float(need(desc, "reed.mass_per_area_kg_m2")) * area
-    zeta = float(need(desc, "reed.damping_rate_1_s")) / (2.0 * math.sqrt(stiffness / mass))
-    return f"{height} {width} {num(closing)} {mass!r} {stiffness!r} {zeta!r}"
+    k_a = float(need(desc, "reed.stiffness_per_area_pa_m"))
+    m_a = float(need(desc, "reed.mass_per_area_kg_m2"))
+    g = float(need(desc, "reed.damping_rate_1_s"))
+    p_op = float(need(desc, "reed.operating_blowing_pa"))
+    if abs(pressure - p_op) <= 1e-12:
+        y_m = h0
+        closing = k_a * h0
+    else:
+        ratio = p_op / (k_a * h0)
+        closing = pressure / ratio
+        y_m = closing / k_a
+    if "reed.tip_opening_cap_m" in desc and y_m > float(desc["reed.tip_opening_cap_m"]):
+        refuse(f"equilibrium reed opening {y_m} m exceeds tip opening cap {desc['reed.tip_opening_cap_m']} m")
+    stiffness = k_a * area
+    mass = m_a * area
+    zeta = g / (2.0 * math.sqrt(k_a / m_a))
+    return f"{num(y_m)} {width} {num(closing)} {mass!r} {stiffness!r} {zeta!r}"
 
 
 def performance(desc, records, pressure):
     rate = int(need(desc, "audio.rate_hz"))
     samples = round(float(need(desc, "audio.duration_s")) * rate)
     reed = reed_record(desc, pressure)
-    ambient = " ".join(
-        need(desc, key)
-        for key in ("ambient.temperature_k", "ambient.pressure_pa", "ambient.relative_humidity")
-    )
+    if "ambient.composition" in desc:
+        ambient = (
+            f"mixture {need(desc, 'ambient.temperature_k')} {need(desc, 'ambient.pressure_pa')} "
+            f"{need(desc, 'ambient.composition')}"
+        )
+    else:
+        ambient = " ".join(
+            need(desc, key)
+            for key in ("ambient.temperature_k", "ambient.pressure_pa", "ambient.relative_humidity")
+        )
+    observer_law = f"observer_law {need(desc, 'observer.law')}\n" if "observer.law" in desc else ""
     head = (
         "frankensim-reed-performance-v1\n"
         f"audio {rate} {samples} {need(desc, 'audio.full_scale_pa')}\n"
-        f"ambient {ambient}\nreed {reed}\n{need(desc, 'observer.record')}\n"
-        f"termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
+        f"ambient {ambient}\nreed {reed}\n{tongue_record(desc)}{need(desc, 'observer.record')}\n"
+        f"{observer_law}termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
     )
     return head + "\n".join(records) + f"\ncompile_limits {need(desc, 'compile_limits')}\nschedule\n" + gesture(desc, pressure)
 
@@ -282,7 +326,7 @@ def main(argv):
             continue
         open_holes = set() if row["open_holes"] == "-" else {int(h) for h in row["open_holes"].split(",")}
         note = midi(row["concert"])
-        pressure, rule = pressure_for(curve, note, reach, step)
+        pressure, rule = pressure_for(desc, curve, note, reach, step)
         records = duct_records(desc, dims, open_holes)
         name = f"{prefix}.{level}.{uiowa_name(note)}.performance"
         with open(os.path.join(out_dir, name), "w", encoding="utf-8", newline="\n") as handle:

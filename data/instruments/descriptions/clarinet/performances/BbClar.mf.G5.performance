@@ -1,11 +1,13 @@
 frankensim-reed-performance-v1
 audio 48000 127200 20
-ambient 293.15 101325 0
-reed 0.0004 0.013 6604.6933333333 3.8050000000000004e-06 1256.5429066666668 0.08254293899961854
+ambient mixture 300.15 101325 mole 5 N2 0.7534 O2 0.1591 Ar 0.0090 CO2 0.0434 H2O 0.0351
+reed 0.0004 0.013 3464 3.8050000000000004e-06 659.0260000000001 0.11397702454754344
+tongue_contact 0.000026 0.0000761 0.2 0.15 0.005
 baffled_outlet 0 0 0.5 32 128 4800
+observer_law stokes-kirchhoff
 termination flanged
 segments 112
-cylinder 0.0052819864 0.0446
+cylinder 0.006935 0.0258723859
 cone 0.006935 0.007425 0.045
 cone 0.007675 0.00767 0.0048
 cylinder 0.00767 0.008
@@ -117,13 +119,13 @@ cone 0.0174 0.018 0.0024
 cone 0.018 0.0223 0.0198
 cone 0.0223 0.02635 0.0186
 cone 0.02635 0.028 0.008
-compile_limits 100000 4096
+compile_limits 600000 8192
 schedule
 frankensim-gesture-schedule-v1
-control_rate_hz	700
+control_rate_hz	48000
 tracks	1
 track	blow	blowing-pressure
 initial	pressure-pa	0e0
 events	2
-event	1.5e-1	2e-2	pressure-pa	3.432e3
+event	1.15e-1	2e-2	pressure-pa	1.8e3
 event	2.45e0	6e-2	pressure-pa	0e0
