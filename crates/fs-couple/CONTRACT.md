@@ -198,6 +198,46 @@ all six modes of a curved pressure-loaded shape, native PR departures,
 reciprocal pressure observations, endpoint/budget/cancellation refusal, and
 unstable/nonconservative pencils. Test presence does not claim execution.
 
+
+### Sealed-gas membrane motion
+
+`cavity_phs::membrane::GasMembraneMotion` advances the full admitted nonlinear
+membrane through the original `fs_time::galpha::OperatorGeneralizedAlpha` owner
+at `rho_inf = 1`. It retains the original fixed perimeter, reference nodal
+masses, membrane force/tangent and source-owned isentropic gas response,
+including variable caloric data and the admitted Peng–Robinson branch.
+Every actual shape determines its enclosed volume and absolute gas pressure.
+Original gas compressibility and follower-pressure geometry enter the same
+native tangent; pressure is not added again as external forcing.
+
+Initial, generalized-alpha stage and accepted endpoint shapes must pass
+original membrane, volume, temperature and material/source admission. One
+original gas trial is cached per coordinate point for force/tangent reuse.
+Physical line-search refusals remain recoverable; cancellation and caller
+evaluation limits stop the proposal. Mechanics, gas, clock and native history
+publish together only after all endpoint and energy checks. A refused proposal
+preserves the complete accepted state. Caller controls bound physical
+evaluations, retained steps, Krylov restart and the permitted energy defect.
+
+Each accepted interval reports kinetic, membrane and native gas storage
+changes, gas work, exact geometric swept volume, exterior-pressure work and
+held dead-load work. The measured defect is
+`Delta K + Delta E_membrane + Delta U_gas + p_exterior Delta V - W_dead`;
+gas work is `-Delta U_gas` and is not debited twice. The caller must select
+an acceptable defect and timestep: nonlinear midpoint integration is not
+exactly energy conserving, and its defect is not physical heat or damping.
+Stored endpoint acceleration is the native algorithmic quantity; endpoint
+force residual does not certify static or instantaneous acceleration equilibrium.
+
+This bounded path retains homogeneous sealed gas, stationary supports and the
+existing free-coordinate cap. It does not introduce gas inertia/waves, heat or
+mass exchange, contact, material damping, prescribed support motion or topology
+changes. Five focused native regressions cover small motion with a changed held
+load, finite-amplitude timestep/energy refinement, curved full-coordinate
+midpoint pressure balance, original variable-caloric/PR endpoint states, and
+complete rollback after energy, source, cancellation or work-budget refusal.
+Test presence does not claim native execution.
+
 ## Original spatial gas sources in three-dimensional pressure acoustics
 
 `cavity_modal::interior::heterogeneous::AxialGasInterior` binds the original

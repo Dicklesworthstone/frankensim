@@ -9,6 +9,8 @@ mod solve;
 pub use solve::{GasMembraneSolution, GasMembraneSolve};
 mod vibration;
 pub use vibration::GasMembraneVibration;
+mod motion;
+pub use motion::{GasMembraneMotion, GasMembraneMotionControls, GasMembraneMotionError, GasMembraneMotionStep};
 
 use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntropySolve};
 use fs_material::thermochemical_gas::energy::parcel::mechanics::{
