@@ -70,6 +70,8 @@ mod normal_impact;
 pub use normal_impact::{FrameNormalContact, FrameNormalImpact, FrameNormalImpactError};
 mod frictional_impact;
 pub use frictional_impact::{FrameFrictionalContact, FrameFrictionalImpact, FrameFrictionalImpactError};
+/// Sustained planar normal/Coulomb forces through original Newmark motion.
+pub mod sustained;
 mod modes;
 pub use modes::{FrameModalAnalysis, FrameMode, FrameModeStatus};
 mod viscosity;

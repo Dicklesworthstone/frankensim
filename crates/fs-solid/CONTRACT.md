@@ -3815,6 +3815,64 @@ ID replay, inactive endpoints, internal linear/reference angular momentum,
 moving-obstacle work and velocity boosts, finite-force/Newmark continuation,
 the zero-friction limit, redundant-contact qualifications and atomic refusals.
 
+### Sustained planar contact through native Newmark motion
+
+`Frame2d::advance_sustained_contacts` advances one held-force interval through
+the original `newmark_with_load` response and the existing
+`fs-contact::sustained::solve` force/displacement Coulomb owner. Fixed normal
+and tangent covectors at each physical point apply forces and moments through
+the same transpose that measures contact motion. Stable IDs order every
+response and work reduction. The planar embedding retains an exactly zero
+auxiliary tangent; no spring, compliance, impact kick or alternate integrator
+is introduced.
+
+Every nonlinear probe starts from the same accepted native frame. All original
+responses, including rejected probes and the final fresh replay, spend the
+shared response budget. The final replay supplies the actual frame/history;
+it is not replaced by an uncounted reconstruction. The native 21-contact limit,
+256-coordinate/member hard bounds, explicit adapter workspace and native
+solver budgets bound work. Each original Newmark interval is indivisible for
+cancellation; polling surrounds it and continues through the contact solve
+and physical audits.
+
+Acceptance measures actual stored displacement, velocity and finite endpoint
+acceleration. Original full-mass momentum includes integrated support reaction
+and consistent-inertia cross terms. Actual displacement must agree with the
+Newmark midpoint-velocity increment using separate physical metre and radian
+allowances, without an absolute-world-coordinate rounding floor. Lost resolved
+motion cannot supply fictitious contact gap, slip or work. Compensated audits
+separate elastic storage, original material/Rayleigh damping, held external
+work, moving-obstacle work, signed normal work and relative friction loss.
+The whole balance and original native energy ledger must both close; contact
+loss is not added again to native damping or assigned a thermal destination.
+
+The receiving path owner must explicitly admit the complete physical interval,
+fixed traces, contact-feature coverage and contact mode before any state
+publishes. Loaded contacts dwell; interior-cone forces stick; sliding cannot
+cross an unresolved stop. Resolved endpoint slip reversal refuses even if net
+slip retains its initial sign. Endpoint force convergence alone establishes
+neither full-path admissibility nor global existence/uniqueness; any additional
+branch or determinacy evidence belongs to that mandatory admission. Initial
+closing impacts and contact-arrival transitions require separate event
+resolution. Actual negative final gap is always refused.
+
+Scope is frozen linear geometry, elastic sections, untimed source laws,
+positive inertia on every free coordinate, stationary frame supports and
+held obstacle velocities/loads. Original source-viscosity and retained
+Rayleigh-reference rules remain authoritative. Automatic discovery, changing
+contact frames, general finite-rotation inertia, massless DAE projection,
+interior stick/slip event location and thermal allocation remain separate.
+Any source, budget, geometry, mode, balance, callback or cancellation refusal
+preserves the complete accepted frame. The callback's own state must likewise
+remain staged until the complete call succeeds.
+
+`tests/frame2d_sustained_contacts.rs` checks analytic gravity support,
+sticking/threshold/breakaway/sliding, native unknown-force recovery,
+detachment, moving-belt and lifting-obstacle work, stop-time refusal,
+post-stop/native continuation, original consistent-mass support impulse,
+elastic/damping work, actual small translated/rotated increments, large-coordinate
+lost-motion refusal and atomic path/cancellation/resource/domain refusals.
+
 ## Signed, mass-normalized frame modes and participation
 
 `Frame2d::modal_analysis` exposes the complete signed current-tangent spectrum,
