@@ -149,6 +149,55 @@ fn the_dominant_loss_rows_read_the_printed_mean_q_as_a_constant_loss_factor() {
     assert_eq!(rows, 3, "the observation and its two scalars");
 }
 
+/// The Kaplan KS510 cello strings behind the posted C2, D3 and A3 notes: tension, mass per length, bending stiffness and the two loss
+/// coefficients of Mansour, Woodhouse and Scavone (author manuscript, Table 1; Table 2.1 of Mansour's 2016 McGill thesis), and the outer
+/// diameters of Percival 2013 Table 3.2 (cello-I, strings of unknown make, +-10 percent), which the Kaplan table does not print.
+/// Each row is checked against the number printed in the table, then against the table's own identities: the printed impedance
+/// Z0 = sqrt(T ms), T = ms (2 L f0)^2 on the 0.69 m effective length, and the printed inharmonicity B = pi^2 EI / (T L^2).
+/// The loss rows are the cards' `loss-factors` rows: (eta_F, eta_B) = (1.2e-4, 0.047) C2, (2.3e-4, 0.125) D3, (2.2e-4, 0.114) A3.
+#[test]
+fn kaplan_ks510_rows_are_the_mansour_table_and_satisfy_its_identities() {
+    let s = load_pack("cello-ks510-mansour-2016-percival-2013", PERMITTED_FACTS);
+    let l = s["playing_length"];
+    assert_eq!(l, 0.69, "effective open-string length of Table 1");
+    // note, f0 [Hz], T [N], ms [kg/m], EI [N m^2], eta_F, eta_B, printed Z0 [kg/s], printed B, Percival diameter [m]
+    let table = [
+        ("a3", 220.0, 171.0, 1.85e-3, 3.26e-4, 2.2e-4, 0.114, 0.56, 39.5e-6, 0.68e-3),
+        ("d3", 146.8, 135.9, 3.31e-3, 2.48e-4, 2.3e-4, 0.125, 0.67, 37.9e-6, 0.80e-3),
+        ("c2", 65.4, 131.5, 16.14e-3, 6.20e-4, 1.2e-4, 0.047, 1.46, 97.8e-6, 1.40e-3),
+    ];
+    for (n, f0, t, ms, ei, eta_f, eta_b, z0, b, d) in table {
+        for (stem, printed) in [
+            ("tension", t),
+            ("linear_density", ms),
+            ("bending_stiffness", ei),
+            ("loss_friction", eta_f),
+            ("loss_bending", eta_b),
+            ("diameter", d),
+        ] {
+            assert_eq!(s[&format!("{stem}_ks510_{n}")], printed, "{stem} {n}");
+        }
+        assert!(((t * ms).sqrt() / z0 - 1.0).abs() < 0.01, "{n}: Z0 = sqrt(T ms)");
+        assert!((ms * (2.0 * l * f0).powi(2) / t - 1.0).abs() < 0.01, "{n}: T = ms (2 L f0)^2");
+        let b_law = std::f64::consts::PI.powi(2) * ei / (t * l * l);
+        assert!((b_law / b - 1.0).abs() < 0.01, "{n}: B = pi^2 EI / (T L^2) = {b_law:e}");
+    }
+    // Only the three notes of the posted cards: the Table 1 G2 column is not entered, and neither is eta_A.
+    for absent in ["tension_ks510_g2", "loss_friction_ks510_g2", "loss_air_ks510_a3"] {
+        assert!(!s.contains_key(absent), "{absent}");
+    }
+    // The two observations say what they are; the diameters' one says they are NOT the Kaplan strings.
+    let text = std::fs::read_to_string(
+        repo_root().join("data/matdb/seed-v1/cello-ks510-mansour-2016-percival-2013/properties.tsv"),
+    )
+    .expect("properties");
+    let percival = text
+        .lines()
+        .find(|line| line.starts_with("observation\tpercival-2013-table32\t"))
+        .expect("the diameters' observation");
+    assert!(percival.contains("NOT the Kaplan strings"), "{percival}");
+}
+
 #[test]
 fn multifilament_core_patents_satisfy_their_identities() {
     let s = load_pack(

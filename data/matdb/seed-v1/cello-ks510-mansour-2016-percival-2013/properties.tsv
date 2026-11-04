@@ -1,0 +1,60 @@
+frankensim.matdb-source.v1
+observation	mansour-2016-table1	D'Addario Kaplan Solutions cello strings, model KS510 4/4M; the A3, D3 and C2 strings of a set of nominally identical strings, effective open-string length taken as 690 mm	Tension, mass per unit length and bending stiffness EI as printed in the string-property table of Mansour, Woodhouse and Scavone, Enhanced wave-based modelling of musical strings, Part 1: Plucked strings (author manuscript Table 1, and the same rows in Mansour's McGill thesis, Table 2.1, printed p. 38); loss coefficients eta_F and eta_B from the same rows; strings mounted on a rigid granite base so that the Q factors reflect intrinsic damping only	Values are as printed there; the printed loss rows are fitted to averaged Q factors of seven sets (the Q factors came from D'Addario); the eta_A air row of that table is not used because the renderer computes air drag from the diameter
+observation	percival-2013-table32	Outer diameters of the A, D and C strings of one lab cello (cello-I of ten instruments, a 1997 Canadian instrument) whose strings were of unknown make (the thesis says no information about the strings was accessible, the instruments had been owned for at least a year and strings were not changed regularly)	Photographs of each string beside a ruler, counted in pixels; the diameters of cello-I and of one violin were checked against a Vernier calliper and the photographs; Percival 2013 (University of Glasgow PhD thesis), Table 3.2, printed p. 69; the thesis states the diameters are believed accurate to 10 percent	These strings are NOT the Kaplan strings of the other observation: the diameter is that of an unnamed lab-cello string, paired here with the Kaplan tension, mass and stiffness as a stated approximation; Table 3.2 prints one value per string and does not say which method gave it
+scalar	playing-length	mansour-2016-table1	playing_length	0.69	m	constant
+uncertainty	playing-length	unstated	-	-	-	-
+validity	playing-length	temperature_known	0	0	1
+scalar	diameter-a3	percival-2013-table32	diameter_ks510_a3	0.00068	m	constant
+uncertainty	diameter-a3	unstated	-	-	-	-
+validity	diameter-a3	temperature_known	0	0	1
+scalar	tension-a3	mansour-2016-table1	tension_ks510_a3	171	N	constant
+uncertainty	tension-a3	unstated	-	-	-	-
+validity	tension-a3	temperature_known	0	0	1
+scalar	linear-density-a3	mansour-2016-table1	linear_density_ks510_a3	0.00185	kg/m	constant
+uncertainty	linear-density-a3	unstated	-	-	-	-
+validity	linear-density-a3	temperature_known	0	0	1
+scalar	bending-stiffness-a3	mansour-2016-table1	bending_stiffness_ks510_a3	0.000326	N*m^2	constant
+uncertainty	bending-stiffness-a3	unstated	-	-	-	-
+validity	bending-stiffness-a3	temperature_known	0	0	1
+scalar	loss-friction-a3	mansour-2016-table1	loss_friction_ks510_a3	0.00022	1	constant
+uncertainty	loss-friction-a3	unstated	-	-	-	-
+validity	loss-friction-a3	temperature_known	0	0	1
+scalar	loss-bending-a3	mansour-2016-table1	loss_bending_ks510_a3	0.114	1	constant
+uncertainty	loss-bending-a3	unstated	-	-	-	-
+validity	loss-bending-a3	temperature_known	0	0	1
+scalar	diameter-d3	percival-2013-table32	diameter_ks510_d3	0.0008	m	constant
+uncertainty	diameter-d3	unstated	-	-	-	-
+validity	diameter-d3	temperature_known	0	0	1
+scalar	tension-d3	mansour-2016-table1	tension_ks510_d3	135.9	N	constant
+uncertainty	tension-d3	unstated	-	-	-	-
+validity	tension-d3	temperature_known	0	0	1
+scalar	linear-density-d3	mansour-2016-table1	linear_density_ks510_d3	0.00331	kg/m	constant
+uncertainty	linear-density-d3	unstated	-	-	-	-
+validity	linear-density-d3	temperature_known	0	0	1
+scalar	bending-stiffness-d3	mansour-2016-table1	bending_stiffness_ks510_d3	0.000248	N*m^2	constant
+uncertainty	bending-stiffness-d3	unstated	-	-	-	-
+validity	bending-stiffness-d3	temperature_known	0	0	1
+scalar	loss-friction-d3	mansour-2016-table1	loss_friction_ks510_d3	0.00023	1	constant
+uncertainty	loss-friction-d3	unstated	-	-	-	-
+validity	loss-friction-d3	temperature_known	0	0	1
+scalar	loss-bending-d3	mansour-2016-table1	loss_bending_ks510_d3	0.125	1	constant
+uncertainty	loss-bending-d3	unstated	-	-	-	-
+validity	loss-bending-d3	temperature_known	0	0	1
+scalar	diameter-c2	percival-2013-table32	diameter_ks510_c2	0.0014	m	constant
+uncertainty	diameter-c2	unstated	-	-	-	-
+validity	diameter-c2	temperature_known	0	0	1
+scalar	tension-c2	mansour-2016-table1	tension_ks510_c2	131.5	N	constant
+uncertainty	tension-c2	unstated	-	-	-	-
+validity	tension-c2	temperature_known	0	0	1
+scalar	linear-density-c2	mansour-2016-table1	linear_density_ks510_c2	0.01614	kg/m	constant
+uncertainty	linear-density-c2	unstated	-	-	-	-
+validity	linear-density-c2	temperature_known	0	0	1
+scalar	bending-stiffness-c2	mansour-2016-table1	bending_stiffness_ks510_c2	0.00062	N*m^2	constant
+uncertainty	bending-stiffness-c2	unstated	-	-	-	-
+validity	bending-stiffness-c2	temperature_known	0	0	1
+scalar	loss-friction-c2	mansour-2016-table1	loss_friction_ks510_c2	0.00012	1	constant
+uncertainty	loss-friction-c2	unstated	-	-	-	-
+validity	loss-friction-c2	temperature_known	0	0	1
+scalar	loss-bending-c2	mansour-2016-table1	loss_bending_ks510_c2	0.047	1	constant
+uncertainty	loss-bending-c2	unstated	-	-	-	-
+validity	loss-bending-c2	temperature_known	0	0	1

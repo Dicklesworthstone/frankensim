@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	cello-kaplan-ks510-mansour-2016-percival-2013-scratch
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Mansour H., Woodhouse J., Scavone G. P., Enhanced wave-based modelling of musical strings, Part 1: Plucked strings (author manuscript, Table 1; the same rows in Mansour H. 2016, The bowed string and its playability, PhD thesis, McGill University, Table 2.1); and Percival G. K. (2013), Physical modelling meets machine learning: performing music with a virtual string ensemble, PhD thesis, University of Glasgow, Table 3.2 (cello-I)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
