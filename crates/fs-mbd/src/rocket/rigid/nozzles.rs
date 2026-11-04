@@ -24,6 +24,10 @@ use super::{SpecificInertia, TensorRocketForcing, TensorRocketState, TensorRocke
 use crate::Vec3;
 use fs_ga::Mat3;
 
+/// Finite physical particle transport on the original rotating rocket stages.
+#[path = "nozzles/transport.rs"]
+pub mod transport;
+
 /// Maximum number of central or opposed groups in one bounded preparation.
 pub const MAX_NOZZLE_GROUPS: usize = 16_384;
 

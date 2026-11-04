@@ -32,6 +32,7 @@ use fs_math::det;
 #[path = "exhaust/forced.rs"]
 mod forced;
 pub use forced::ExhaustEnvironment;
+pub(super) use forced::velocity_moments;
 
 #[path = "exhaust/exchange.rs"]
 mod exchange;

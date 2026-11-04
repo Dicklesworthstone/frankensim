@@ -33,7 +33,7 @@ impl ExhaustEnvironment {
 // Center the variance on s before squaring. For x -> 0, phi -> s and its
 // covariance becomes rank one; subtracting raw second moments would erase
 // the remaining O(x^2) variance when force acceleration cancels gravity.
-pub(super) fn velocity_moments(
+pub(in crate::rocket) fn velocity_moments(
     x: f64,
     a: f64,
     c: f64,

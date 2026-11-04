@@ -21,7 +21,7 @@
 //! material body frame; it does not infer internal fluid momentum or engine work.
 //! See Eke, NASA/CR-1998-208246, https://ntrs.nasa.gov/citations/19980210404.
 
-use super::{RocketError, RocketForcing, RocketState};
+use super::{RocketError, RocketForcing, RocketState, RocketStep};
 use crate::spatial_loads::PreparedSpatialLoads;
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
@@ -279,6 +279,17 @@ impl ScalarSum {
     }
 }
 
+// Accepted native stages for physical transport on this SAME trajectory.
+// Private observers may accumulate bounded diagnostics, never change a stage.
+struct RocketSubstep {
+    before: RocketState,
+    midpoint_orientation: UnitQuaternion,
+    midpoint_momentum_body: Vec3,
+    midpoint_properties: MassProperties,
+    motion: RocketStep,
+    duration_s: f64,
+}
+
 impl sealed::Sealed for RigidRocketInertia {}
 impl RocketInertiaModel for RigidRocketInertia {
     type ExhaustInertia = Vec3;
@@ -411,6 +422,25 @@ impl<I: RocketInertiaModel> RigidRocketState<I> {
         loads: &PreparedSpatialLoads,
         duration_s: f64,
         controls: RigidRocketSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidRocketStep<I>, RigidRocketError> {
+        self.advance_spatial_observed(
+            forcing,
+            loads,
+            duration_s,
+            controls,
+            |_, _| Ok(()),
+            cancelled,
+        )
+    }
+
+    fn advance_spatial_observed(
+        &self,
+        forcing: RigidRocketForcing<I::ExhaustInertia>,
+        loads: &PreparedSpatialLoads,
+        duration_s: f64,
+        controls: RigidRocketSolve,
+        mut observe: impl FnMut(RocketSubstep, &mut dyn FnMut() -> bool) -> Result<(), RigidRocketError>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RigidRocketStep<I>, RigidRocketError> {
         poll(&mut cancelled)?;
@@ -590,6 +620,17 @@ impl<I: RocketInertiaModel> RigidRocketState<I> {
             powered.add(motion.powered_duration_s);
             coast.add(motion.coast_duration_s);
             consumed.add(motion.burned_propellant_mass_kg);
+            observe(
+                RocketSubstep {
+                    before: current.translation,
+                    midpoint_orientation,
+                    midpoint_momentum_body: midpoint_momentum,
+                    midpoint_properties,
+                    motion,
+                    duration_s: h,
+                },
+                &mut cancelled,
+            )?;
             current = Self::new(motion.state_after, orientation, momentum, current.inertia)?;
             if h == remaining {
                 remaining = 0.0;

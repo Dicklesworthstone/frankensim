@@ -6683,3 +6683,34 @@ Native compilation and numerical Rust tests remain **UNRUN** under the previousl
 recorded toolchain/dependency limitations. No throughput, full supported
 continuous-loop integration, supported batch-inventory or full-plan completion
 claim is made; `frankensim-ext-mbd-core-vqqt` remains open.
+
+## Finite physical nozzle transport on full-tensor motion
+
+`rocket::rigid::nozzles::transport` adds
+`TensorRocketState::advance_nozzles_transport`. A private observer consumes the
+original accepted rigid stages; native motion, mass/inertia, burnout and work
+limits retain one owner. Held nozzle rates, geometry and complete local relative
+energy belong to `NozzleTransportForcing`; additional spatial loads stay separate.
+There is no emission after burnout or a second application of propulsion.
+
+The original analytic velocity moments integrate physical linear export and COM
+kinetic transport. Native midpoint spin supplies the additional co-rotation and
+tangential-jet energy correction. Local relative energy includes jet kinetic and
+the supplied caloric datum once; its integral and both frame corrections remain
+separate. No engine, pressure-flow, internal-flow or thermal closure is inferred.
+
+Two-point orbital quadrature follows the same analytic COM trajectory. It is
+anchored at each native stage and translated with its analytic linear impulse;
+the requested fixed-world origin is applied once using the integrated impulse.
+Spin export remains the original native angular outflow integral. Returned
+momentum residuals retain actual endpoint and quadrature defects. The complete
+rotating/depleting composition is second order and requires temporal refinement.
+Work/storage per native substep are constant, independent of nozzle count;
+cancellation or exhausted work publishes neither a partial body nor stream.
+
+Five focused native tests cover analytic forced exhaust through burnout, native
+endpoint parity, an independent continuous rotating-particle reference with
+second-order momentum/angular-momentum/energy refinement, origin/boost changes,
+signed caloric data, dry coast, work limits and late cancellation. The bounded
+actual-source native run passed all 69 included tests; workspace Cargo gates were
+not run in this constrained environment.
