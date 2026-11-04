@@ -1,0 +1,26 @@
+frankensim-material-strings-v3
+audio 144000 432000 4 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 4 N2 0.78084 O2 0.20946 Ar 0.00934 CO2 0.00036
+body violin-spruce-norway-viala2020-shell.fsmatpk 0.23729601900000002 0.104940603 0.003 209 1
+strings 1
+string viola-percival-2013-guettler-2012.fsmatpk 0.4375 0.000325 tension 54.180924 64 0 0.8571428571428571 200000 0.1
+section measured 1 temperature_known 0 playing_length diameter_viola_c3 tension_viola_c3 linear_density_viola_c3 bending_stiffness_viola_c3 no-intrinsic-loss speaking-length
+polarizations two 1 0 1 0
+prepared-linear 512 4294967296 1000000000000000
+residual-flexibility exact-static-green
+bow-residual-flexibility exact-static-green
+cavity physical-neck 0.003237145 0.033543048 0.003035486 flanged flanged 1
+friction rosin-wg2025-eq13
+bow_ribbon 0.010 3
+bow_compliance quasistatic-continuation bow-hair-horse-pitteroff-woodhouse-acustica1998.fsmatpk 0.000095 0.65 50 0.5 2 frequency 0 relative_humidity_known 0 young_modulus_static density viscosity kelvin_voigt_young_viscosity_pw98_model
+forces retain 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	bow	bow	0
+initial	bow	0e0	1.024183241008713e0	7.792207792207791e-1
+events	2
+event	0e0	1.5e-1	bow	1.5e-1	1.024183241008713e0	7.792207792207791e-1
+event	2.5e0	2e-2	bow	1.5e-1	0e0	7.792207792207791e-1

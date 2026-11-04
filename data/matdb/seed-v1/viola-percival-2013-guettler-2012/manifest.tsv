@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	viola-percival-2013-guettler-2012-scratch
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no thesis text, figure or scanned table is reproduced
+citation	Percival G. K. (2013), Physical modelling meets machine learning: performing music with a virtual string ensemble, PhD thesis, University of Glasgow, Table 3.2 (string lengths and diameters, printed p. 69) and Table 3.3 (f0 and inharmonicity B, printed p. 76), the rows of viola-I; and Guettler K. (2012), Some typical properties of bowed strings (knutsacoustics.com/files/Typical-string-properties.pdf), viola rows: string length, frequency, mass per unit length, propagation speed
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

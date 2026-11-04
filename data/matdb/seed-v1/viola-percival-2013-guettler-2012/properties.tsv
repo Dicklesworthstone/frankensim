@@ -1,0 +1,55 @@
+frankensim.matdb-source.v1
+observation	guettler-2012-viola	Typical viola strings C3, G3, D4 and A4 as tabulated by Guettler (values contributed by string makers per the document): one string length 0.375 m for all four, the frequency, the printed range of mass per unit length across commercial strings and the propagation speed	Mass per unit length = the midpoint of the printed range (C 4.95-6.31, G 2.20-2.81, D 0.98-1.25, A 0.56-0.92 g/m); tension = that mass times the printed propagation speed squared (98.1, 147, 220.27, 330 m/s); the same values as the live viola cards	The brand and core of the strings are not stated; the midpoint is a fixed selection rule, not a fit; the derived tensions lie inside the printed tension ranges (47.6-60.7 N for C, G and D, 60.6-100.2 N for A)
+observation	percival-2013-table32	Outer diameters of the A, D, G and C strings of one lab viola (viola-I of the thesis's two violas, a Chinese instrument of about 1990) whose strings were of unknown make and core (the thesis says no information about the strings was accessible, the instruments had been owned for at least a year and strings were not changed regularly)	Photographs of each string beside a ruler, counted in pixels (only violin-II and cello-I were also checked with a Vernier calliper); Percival 2013, Table 3.2, printed p. 69; the thesis states the diameters are believed accurate to 10 percent, with no confidence level, so the uncertainty rows say unstated	These strings are NOT Guettler's typical strings: the diameter of an unnamed lab-viola string is paired here with Guettler's mass and tension as a stated approximation, as the cello pack pairs Percival's cello-I diameters with Kaplan values. viola-I is the only complete set from an instrument in playing condition (viola-II's D row is its A string tuned down; the thesis says that instrument should not be relied on for string research). The pairing implies a bulk density mu/(pi d^2/4) of 16970 kg/m3 for C (silver 10490, tungsten 19300), 8570 for G, 6160 for D and 8650 for A; viola-II's C is printed 0.82 mm (10660 kg/m3), so the two violas disagree by more than the stated 10 percent
+observation	percival-2013-table33-ei	Bending stiffness EI of the same four viola-I strings, DERIVED, not printed: no source prints a viola EI, and the E of the thesis's Table 3.10 is set artificially to match its B	EI = B T L^2 / pi^2 with Percival's measured inharmonicity B (Table 3.3, a least-squares fit to plucked partials 4 and up on the instrument), his string length L (Table 3.2) and f0 (Table 3.3), and T = Guettler's mid-range mass per unit length times (2 L f0)^2	Derived from plucked-string inharmonicity; the same derivation overstates Mansour's printed KS510 cello EI by 1.36x (A), 3.80x (D), 5.54x (C), so these values are likely high by a similar factor
+scalar	playing-length	guettler-2012-viola	playing_length	0.375	m	constant
+uncertainty	playing-length	unstated	-	-	-	-
+validity	playing-length	temperature_known	0	0	1
+scalar	diameter-c3	percival-2013-table32	diameter_viola_c3	0.00065	m	constant
+uncertainty	diameter-c3	unstated	-	-	-	-
+validity	diameter-c3	temperature_known	0	0	1
+scalar	tension-c3	guettler-2012-viola	tension_viola_c3	54.180924	N	constant
+uncertainty	tension-c3	unstated	-	-	-	-
+validity	tension-c3	temperature_known	0	0	1
+scalar	linear-density-c3	guettler-2012-viola	linear_density_viola_c3	0.00563	kg/m	constant
+uncertainty	linear-density-c3	unstated	-	-	-	-
+validity	linear-density-c3	temperature_known	0	0	1
+scalar	bending-stiffness-c3	percival-2013-table33-ei	bending_stiffness_viola_c3	0.000259	N*m^2	constant
+uncertainty	bending-stiffness-c3	unstated	-	-	-	-
+validity	bending-stiffness-c3	temperature_known	0	0	1
+scalar	diameter-g3	percival-2013-table32	diameter_viola_g3	0.00061	m	constant
+uncertainty	diameter-g3	unstated	-	-	-	-
+validity	diameter-g3	temperature_known	0	0	1
+scalar	tension-g3	guettler-2012-viola	tension_viola_g3	54.130545	N	constant
+uncertainty	tension-g3	unstated	-	-	-	-
+validity	tension-g3	temperature_known	0	0	1
+scalar	linear-density-g3	guettler-2012-viola	linear_density_viola_g3	0.002505	kg/m	constant
+uncertainty	linear-density-g3	unstated	-	-	-	-
+validity	linear-density-g3	temperature_known	0	0	1
+scalar	bending-stiffness-g3	percival-2013-table33-ei	bending_stiffness_viola_g3	9.56e-05	N*m^2	constant
+uncertainty	bending-stiffness-g3	unstated	-	-	-	-
+validity	bending-stiffness-g3	temperature_known	0	0	1
+scalar	diameter-d4	percival-2013-table32	diameter_viola_d4	0.00048	m	constant
+uncertainty	diameter-d4	unstated	-	-	-	-
+validity	diameter-d4	temperature_known	0	0	1
+scalar	tension-d4	guettler-2012-viola	tension_viola_d4	54.098543	N	constant
+uncertainty	tension-d4	unstated	-	-	-	-
+validity	tension-d4	temperature_known	0	0	1
+scalar	linear-density-d4	guettler-2012-viola	linear_density_viola_d4	0.001115	kg/m	constant
+uncertainty	linear-density-d4	unstated	-	-	-	-
+validity	linear-density-d4	temperature_known	0	0	1
+scalar	bending-stiffness-d4	percival-2013-table33-ei	bending_stiffness_viola_d4	8.95e-05	N*m^2	constant
+uncertainty	bending-stiffness-d4	unstated	-	-	-	-
+validity	bending-stiffness-d4	temperature_known	0	0	1
+scalar	diameter-a4	percival-2013-table32	diameter_viola_a4	0.00033	m	constant
+uncertainty	diameter-a4	unstated	-	-	-	-
+validity	diameter-a4	temperature_known	0	0	1
+scalar	tension-a4	guettler-2012-viola	tension_viola_a4	80.586	N	constant
+uncertainty	tension-a4	unstated	-	-	-	-
+validity	tension-a4	temperature_known	0	0	1
+scalar	linear-density-a4	guettler-2012-viola	linear_density_viola_a4	0.00074	kg/m	constant
+uncertainty	linear-density-a4	unstated	-	-	-	-
+validity	linear-density-a4	temperature_known	0	0	1
+scalar	bending-stiffness-a4	percival-2013-table33-ei	bending_stiffness_viola_a4	5.98e-05	N*m^2	constant
+uncertainty	bending-stiffness-a4	unstated	-	-	-	-
+validity	bending-stiffness-a4	temperature_known	0	0	1

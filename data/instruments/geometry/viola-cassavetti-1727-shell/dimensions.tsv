@@ -1,0 +1,3 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+soundpost	section	equivalent-diameter-mean	0.006500	m	unstated	published-maker-table	johannsson-viola-medium	soundpost thickness 6.5 mm (hansjohannsson.com/resources/mesviola.html, Medium column)
