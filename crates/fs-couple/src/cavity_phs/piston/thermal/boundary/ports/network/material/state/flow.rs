@@ -23,6 +23,7 @@ pub enum MaterialFlowError {
     Flow(GasNetworkError),
     SnapshotFlow(network::snapshot::SnapshotNozzleError),
     Diffusion(fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError),
+    AdaptiveDiffusion(fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::adaptive::DiffusionNetworkAdvanceError),
     Transport(fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportError),
     Exchange(ReactiveExchangeError),
     Gas { chamber: u64, error: fs_material::MaterialError },
@@ -87,6 +88,14 @@ impl From<fs_material::thermochemical_gas::energy::parcel::transfer::species::di
     fn from(error: fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError) -> Self {
         use fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError;
         match error { DiffusionNetworkError::Cancelled => Self::Cancelled, other => Self::Diffusion(other) }
+    }
+}
+impl From<fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::adaptive::DiffusionNetworkAdvanceError>
+    for MaterialFlowError
+{
+    fn from(error: fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::adaptive::DiffusionNetworkAdvanceError) -> Self {
+        use fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::adaptive::DiffusionNetworkAdvanceError;
+        match error { DiffusionNetworkAdvanceError::Cancelled => Self::Cancelled, other => Self::AdaptiveDiffusion(other) }
     }
 }
 /// Full-interval extensive changes, including flow and any subsequent reaction.

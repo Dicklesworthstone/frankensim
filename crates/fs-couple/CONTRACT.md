@@ -11544,6 +11544,35 @@ the binary limit, diffusivity-only physical response, post-mixing reaction,
 zero-net-mass stream accounting, closed faces and transactional refusal.
 Native execution and experimental qualification remain separate requirements.
 
+### Adaptive molecular transport through the complete material assembly
+
+`MaterialExchangeState::{adaptive_diffusion_step_candidate,
+advance_with_adaptive_diffusion}` resolves the full requested transport window
+with the original explicit step-doubling network owner, then invokes the same
+reaction and joint thermal/electrical/moving-piston solve once. Each accepted
+half step resamples actual gas composition, temperature, pressure and source
+diffusivities. Arrivals can continue across a second face in later substeps;
+each substep still admits simultaneous gross withdrawals against its own donor
+snapshot. Species-inventory and temperature error controls reduce the step
+without relaxing original source, entropy, mass, enthalpy or withdrawal gates.
+The caller selects the composition-only molar frame or the existing
+composition-plus-pressure mass frame explicitly.
+
+The returned report includes full-window gross species transfers, accepted and
+rejected work, endpoint species/energy residuals and entropy change. Gross
+transfers from every accepted substep determine open-stream chamber audits,
+including zero-net-mass exchange and reversals. The enclosing whole-assembly
+balance starts before transport. Work exhaustion, cancellation and later
+chemistry or feedback refusal publish no chamber, cell, circuit or clock change.
+
+This remains an explicit adaptive transport method with finite work, followed
+by the existing first-order diffusion/reaction/heat-motion split. Its diffusion
+error estimate does not bound that complete split. It adds no Soret/Dufour
+transport, bulk advection or simultaneous mechanical/diffusive residual.
+Manufactured regressions cover a window refused by one explicit withdrawal,
+binary and three-cell analytic relaxation, downstream arrival, pressure-driven
+counterdiffusion, complete owner parity and atomic late refusal.
+
 ### Combined species transport with selected material heat laws
 
 `MaterialExchangeState::{transport_step_with_gas_law_candidate,

@@ -3,10 +3,11 @@
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::{
     network::SpeciesNetworkSolve,
-    diffusion::{BinaryDiffusionMaterial, GasDiffusionGeometry, BINARY_DIFFUSIVITY_DIMS,
+    diffusion::{BinaryDiffusionMaterial, GasDiffusionDriving, GasDiffusionGeometry, BINARY_DIFFUSIVITY_DIMS,
         BINARY_DIFFUSIVITY_PROPERTY, network::{self as diffusion, DiffusionFaceSolve,
             DiffusionNetworkLink, DiffusionNetworkSolve}},
 };
+use diffusion::adaptive::{DiffusionNetworkAdvanceControls, DiffusionNetworkAdvanceError};
 
 const DT: f64 = 0.00005;
 
@@ -195,5 +196,168 @@ fn missing_sources_and_late_feedback_refusals_preserve_every_owner_and_retry_onc
             Err(MaterialFlowError::Cancelled)));
         assert_eq!(state.time_s(),DT);assert_eq!(state.chambers(),preview.chambers());
         assert_eq!(state.circuit(),preview.circuit());assert_eq!(state.thermal().cells(),preview.thermal().cells());
+    }));
+}
+
+fn adaptive_controls() -> DiffusionNetworkAdvanceControls {
+    DiffusionNetworkAdvanceControls {
+        maximum_step_s: DT,
+        minimum_step_s: 1e-12,
+        maximum_evaluations: 10000,
+        absolute_species_tolerance_kg: 1e-13,
+        relative_species_tolerance: 1e-4,
+        temperature_tolerance_k: 1e-6,
+    }
+}
+
+#[test]
+fn adaptive_diffusion_completes_a_stiff_window_before_whole_assembly_feedback() {
+    fixture([0.2,0.2],150.0,|assembly,thermal,circuit|with_cx(|cx,_| {
+        let card = pair_card(0.002); let context = QueryPoint::new();
+        let pairs = [binding(&card,&context)]; let links = [face(&pairs)];
+        let prepared = assembly.prepare(cx,&thermal).unwrap();
+        let mut state = MaterialExchangeState::from_parts(thermal,circuit,mixtures());
+        let drives = drives(state.chambers());
+        // A one-shot transfer exceeds the actual donor allowance. The adaptive
+        // assembly must complete this SAME interval without changing that gate.
+        assert!(matches!(state.diffusion_step_candidate(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),controls(),&[0.0;2]),
+            Err(MaterialFlowError::Diffusion(_))));
+        let parcels = state.chambers().iter().map(|(&id,g)|(id,g.gas().clone())).collect();
+        let endpoints = drives.iter().map(|d|(d.chamber,d.piston_solve.gas)).collect();
+        let (diffused, original) = diffusion::adaptive::advance_candidate(&parcels,&links,DT,
+            &endpoints,diffusion_controls(),adaptive_controls(),||false).unwrap().into_parts();
+        let x = |id| diffused[&id].model().thermodynamics().mole_composition().fractions()[0];
+        let exact_gap = 0.5 * (-2.0_f64 * 0.002 * 0.1 / (0.0001 * 0.001) * DT).exp();
+        assert!(((x(10)-x(20))-exact_gap).abs()<5e-4);
+        let staged = MaterialExchangeState::from_parts(state.thermal().clone(),state.circuit().clone(),
+            diffused.into_iter().map(|(id,g)|(id,GasPiston::new(g,1.0,0.01,0.0).unwrap())).collect());
+        let (expected,_) = staged.step_candidate(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),controls(),&[0.0;2]).unwrap();
+        let report = state.advance_with_adaptive_diffusion(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),adaptive_controls(),
+            GasDiffusionDriving::IsobaricMolar,controls(),&[0.0;2]).unwrap();
+        assert_eq!(report.flow,original);
+        assert_eq!(state.chambers(),expected.chambers());
+        assert_eq!(state.circuit(),expected.circuit());
+        assert_eq!(state.thermal().cells(),expected.thermal().cells());
+        assert_eq!(state.time_s(),DT);
+        assert!(report.flow.rejected_intervals>0 && report.flow.accepted_intervals>1);
+        assert_eq!(report.flow.accepted_substeps,2*report.flow.accepted_intervals);
+        assert!(report.flow.maximum_species_error_ratio<=1.0);
+        assert!(report.total_mass_residual_kg.abs()<=diffusion_controls().exchange.mass_tolerance_kg);
+        assert!(report.total_energy_residual_j.abs()<=controls().total_energy_tolerance_j);
+        for gas in state.chambers().values() {
+            assert_eq!(gas.last_window_duration_s(),Some(DT));
+            assert!(matches!(gas.audit_last_window().unwrap(),ModuleWindowAudit::Unavailable {..}));
+        }
+    }));
+}
+
+#[test]
+fn adaptive_pressure_diffusion_changes_uniform_composition_in_the_mass_frame() {
+    fixture([0.2,0.2],150.0,|assembly,thermal,circuit|with_cx(|cx,_| {
+        let card = pair_card(0.002); let context = QueryPoint::new();
+        let pairs = [binding(&card,&context)]; let links = [face(&pairs)];
+        let prepared = assembly.prepare(cx,&thermal).unwrap();
+        let model = mixtures()[&10].gas().model().clone();
+        let chambers = BTreeMap::from([(10,parcel_piston(model.clone(),100500.0)),
+            (20,parcel_piston(model,99500.0))]);
+        let state = MaterialExchangeState::from_parts(thermal,circuit,chambers);
+        let drives = drives(state.chambers());
+        let (_,molar) = state.adaptive_diffusion_step_candidate(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),adaptive_controls(),
+            GasDiffusionDriving::IsobaricMolar,controls(),&[0.0;2]).unwrap();
+        assert!(molar.flow.transfers.is_empty());
+        let driving = GasDiffusionDriving::CompositionAndPressureMass {
+            mass_flux_tolerance_kg_m2_s: 1e-12 };
+        let (next,mass) = state.adaptive_diffusion_step_candidate(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),adaptive_controls(),driving,
+            controls(),&[0.0;2]).unwrap();
+        assert!(!mass.flow.transfers.is_empty());
+        for face in &mass.flow.last_substep.links {
+            assert_eq!(face.flux.driving,driving);
+            assert!(face.flux.mass_frame_residual_kg_m2_s.abs()<=1e-12);
+        }
+        assert!(mass.flow.entropy_change_j_k>0.0);
+        for (&id,before) in state.chambers() {
+            assert!((next.chambers()[&id].gas().mass_kg()-before.gas().mass_kg()).abs()<1e-13);
+            assert_ne!(next.chambers()[&id].gas().model().thermodynamics().mole_composition(),
+                before.gas().model().thermodynamics().mole_composition());
+            assert!(matches!(next.chambers()[&id].audit_last_window().unwrap(),
+                ModuleWindowAudit::Unavailable {..}));
+        }
+        assert!(mass.total_energy_residual_j.abs()<=controls().total_energy_tolerance_j);
+        assert_eq!(state.time_s(),0.0);
+    }));
+}
+
+#[test]
+fn adaptive_arrivals_reach_a_third_live_chamber_during_the_same_window() {
+    fixture([0.2,0.2],150.0,|assembly,thermal,circuit|with_cx(|cx,_| {
+        let card = pair_card(0.002); let context = QueryPoint::new();
+        let pairs = [binding(&card,&context)];
+        let links = [face(&pairs),DiffusionNetworkLink { id:28,parcels:[20,30],..face(&pairs) }];
+        let prepared = assembly.prepare(cx,&thermal).unwrap();
+        let mut chambers = mixtures();
+        chambers.insert(30,chambers[&20].clone());
+        let state = MaterialExchangeState::from_parts(thermal,circuit,chambers);
+        let drives = drives(state.chambers());
+        let mut settings = controls(); settings.maximum_chambers = 3;
+        let parcels = state.chambers().iter().map(|(&id,g)|(id,g.gas().clone())).collect();
+        let endpoints = drives.iter().map(|d|(d.chamber,d.piston_solve.gas)).collect();
+        let original = diffusion::step_candidate(&parcels,&links,DT/128.0,&endpoints,
+            diffusion_controls(),||false).unwrap();
+        assert!(original.step().links[1].flux.species.iter()
+            .all(|row|row.mass_rate_left_to_right_kg_s==0.0));
+        let (next,report) = state.adaptive_diffusion_step_candidate(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),adaptive_controls(),
+            GasDiffusionDriving::IsobaricMolar,settings,&[0.0;2]).unwrap();
+        assert!(report.flow.transfers.iter().any(|row|row.donor==20 && row.receiver==30
+            && row.species.as_str()=="A" && row.mass_kg>0.0));
+        // Independent three-cell line Laplacian eigenmodes, rates k and 3k.
+        let q = 0.002 * 0.1 / (0.0001 * 0.001) * DT;
+        let exact = 5.0/12.0 - 0.25*(-q).exp() + (-3.0*q).exp()/12.0;
+        let actual = next.chambers()[&30].gas().model().thermodynamics()
+            .mole_composition().fractions()[0];
+        assert!(actual>0.25 && (actual-exact).abs()<3e-4);
+        assert_eq!(next.time_s(),DT);
+        assert!(report.flow.maximum_species_mass_residual_kg<=diffusion_controls().exchange.mass_tolerance_kg);
+        assert!(report.flow.endpoint_energy_change_j.abs()<=diffusion_controls().exchange.energy_tolerance_j);
+        assert!(report.total_energy_residual_j.abs()<=settings.total_energy_tolerance_j);
+        assert!(matches!(next.chambers()[&30].audit_last_window().unwrap(),
+            ModuleWindowAudit::Unavailable {..}));
+    }));
+}
+
+#[test]
+fn adaptive_work_exhaustion_and_late_feedback_failure_publish_nothing() {
+    fixture([0.2,0.2],150.0,|assembly,thermal,circuit|with_cx(|cx,gate| {
+        let card = pair_card(0.002); let context = QueryPoint::new();
+        let pairs = [binding(&card,&context)]; let links = [face(&pairs)];
+        let prepared = assembly.prepare(cx,&thermal).unwrap();
+        let mut state = MaterialExchangeState::from_parts(thermal,circuit,mixtures());
+        let drives = drives(state.chambers());
+        let saved_gas = state.chambers().clone();
+        let saved_cells = state.thermal().cells().clone();
+        let saved_circuit = state.circuit().clone();
+        let limited_time = DiffusionNetworkAdvanceControls { maximum_evaluations: 3,
+            ..adaptive_controls() };
+        assert!(matches!(state.advance_with_adaptive_diffusion(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),limited_time,
+            GasDiffusionDriving::IsobaricMolar,controls(),&[0.0;2]),
+            Err(MaterialFlowError::AdaptiveDiffusion(DiffusionNetworkAdvanceError::WorkLimit {..}))));
+        let mut late = controls(); late.network.maximum_circuit_trials = 1;
+        assert!(matches!(state.advance_with_adaptive_diffusion(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),adaptive_controls(),
+            GasDiffusionDriving::IsobaricMolar,late,&[0.0;2]),Err(MaterialFlowError::Exchange(_))));
+        gate.request();
+        assert!(matches!(state.advance_with_adaptive_diffusion(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),&links,diffusion_controls(),adaptive_controls(),
+            GasDiffusionDriving::IsobaricMolar,controls(),&[0.0;2]),Err(MaterialFlowError::Cancelled)));
+        assert_eq!(state.chambers(),&saved_gas);
+        assert_eq!(state.circuit(),&saved_circuit);
+        assert_eq!(state.thermal().cells(),&saved_cells);
+        assert_eq!(state.time_s(),0.0);
     }));
 }
