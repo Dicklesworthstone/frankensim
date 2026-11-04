@@ -1790,6 +1790,24 @@ trajectories, full off-center force/angular impulse, branched mixed-joint free
 momentum and COM drift, second-order convergence to the exact symmetric-top
 solution, frame covariance, distant admitted origins and atomic refusal/cancellation.
 
+### Conservative spatial gravity on original articulated links
+
+`articulated::motion::gravity::PreparedArticulatedGravity` binds the original
+tree and prepares each link's complete central inertia once through the native
+rigid mass-property admission. Uniform, central and quadrupole fields sample
+the actual COM poses at the existing initial and midpoint motion stages. COM
+forces and tidal torques shift to the original link origins for ABA, while
+their physical COM resultants and power drive the same O(links) momentum owner.
+The separate held uniform gravity must be zero. Endpoint field admission and
+per-link potential changes use the already computed native endpoint kinematics;
+any refusal returns no candidate. Gravity work remains part of the original
+external-work receipt, with a separate potential account and measured mechanical
+work defect; this does not assert exact discrete energy conservation or source
+recoil. `tests/articulated_gravity.rs` checks uniform/free-fall and translating
+frame equivalence, differential tidal joint acceleration, full-tensor torque and
+COM-wrench potential derivatives, offset-COM Kepler refinement, independent
+nongravitational work, and late field-domain refusal.
+
 ### State-dependent internal actuator effort
 
 `articulated::motion::step_free_floating_with_effort` evaluates a caller's joint

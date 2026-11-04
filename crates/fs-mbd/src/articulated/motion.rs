@@ -28,6 +28,9 @@ pub mod reconfigure;
 /// Momentum-conserving capture and release of rigid link payloads.
 pub mod inventory;
 
+/// Conservative spatial gravity on each original link's full mass properties.
+pub mod gravity;
+
 use super::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
     Kinematics, SpatialInertia, forward_kinematics, free_floating_forward_dynamics,
@@ -705,6 +708,7 @@ fn step_evaluated_with_forcing<'a, C: FnMut() -> bool>(
     Ok(EvaluatedStep {
         stored_energy_before: initial_load.stored_energy,
         dissipated_energy,
+        kinematics_after,
         step: FreeFloatingMotionStep {
             state_after,
             center_of_mass_world_before: initial.center_world,
@@ -1381,6 +1385,7 @@ struct EvaluatedStep {
     step: FreeFloatingMotionStep,
     stored_energy_before: f64,
     dissipated_energy: f64,
+    kinematics_after: Kinematics,
 }
 
 fn advance(value: &[f64], rate: &[f64], duration: f64) -> Vec<f64> {

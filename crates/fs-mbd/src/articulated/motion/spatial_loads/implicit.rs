@@ -745,6 +745,7 @@ fn finish_midpoint<B: bushing::BushingLaw>(
         EvaluatedStep {
             stored_energy_before: initial_load.stored_energy,
             dissipated_energy: duration * load.dissipation_power,
+            kinematics_after: after,
             step: FreeFloatingMotionStep {
                 state_after,
                 center_of_mass_world_before: initial.center_world,
