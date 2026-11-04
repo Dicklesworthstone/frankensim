@@ -36,6 +36,10 @@ pub use plate::{
     evaluate_flat_plate_section_from_material,
 };
 
+/// Rectangular cooling-channel sections retain their original heated entrance.
+pub mod duct;
+pub use duct::{MaterialRectangularDuctSection, evaluate_rectangular_duct_section_from_material};
+
 /// Planar gas convection on the original moving-liquid interface heat solve.
 pub mod free_surface;
 pub use free_surface::{

@@ -14,6 +14,148 @@ use fs_evidence::{Evidence, NumericalCertificate, ProvenanceHash, SensitivitySum
 
 mod flat_plate;
 pub(super) use flat_plate::{flat_plate_laminar_mean, flat_plate_turbulent_mean};
+mod rectangular;
+pub(super) use rectangular::mean_nusselt as rectangular_mean_nusselt;
+
+/// Mean transfer over one finite section of the original rectangular CWT
+/// table slice at aspect ratio 0.5 and Pr=0.72. Lengths use hydraulic diameter.
+#[derive(Debug)]
+pub struct RectangularDuctSection {
+    start_over_diameter: f64,
+    end_over_diameter: f64,
+    upstream: Option<NusseltEvaluation>,
+    downstream: NusseltEvaluation,
+    nusselt: f64,
+}
+
+impl RectangularDuctSection {
+    pub const fn start_over_diameter(&self) -> f64 { self.start_over_diameter }
+    pub const fn end_over_diameter(&self) -> f64 { self.end_over_diameter }
+    /// Absent only for a section starting at the exact original heated entrance.
+    pub const fn upstream(&self) -> Option<&NusseltEvaluation> { self.upstream.as_ref() }
+    pub const fn downstream(&self) -> &NusseltEvaluation { &self.downstream }
+    pub const fn nusselt(&self) -> f64 { self.nusselt }
+
+    /// Convert using the original fluid conductivity and hydraulic diameter.
+    /// A positive-start section has no independently established local model
+    /// discrepancy; it retains both mean evaluations rather than inheriting
+    /// their engineering allowance as a validated section allowance.
+    pub fn heat_transfer_coefficient(
+        &self,
+        conductivity: ThermalConductivity,
+        hydraulic_diameter: Length,
+    ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
+        let mut evidence = self.downstream
+            .heat_transfer_coefficient(conductivity, hydraulic_diameter)?;
+        let Some(upstream) = &self.upstream else { return Ok(evidence); };
+        let value = self.nusselt * conductivity.value() / hydraulic_diameter.value();
+        if !value.is_finite() || value <= 0.0 {
+            return Err(CorrelationError::NonFiniteResult {
+                stage: "rectangular duct section Nu-to-h conversion", value_bits: value.to_bits(),
+            });
+        }
+        evidence.value = HeatTransferCoefficient::new(value);
+        evidence.qoi = value;
+        evidence.numerical = NumericalCertificate::estimate(value, value);
+        evidence.model.discrepancy_rel = f64::INFINITY;
+        evidence.model.assumptions.push(
+            "section difference of original rectangular CWT cumulative means at one held fluid and wall state".into());
+        evidence.model.assumptions.push(
+            "table interpolation and the declared Gz<10 engineering bridge retain their original authority; section slopes are not source-published local data".into());
+        evidence.model.assumptions.push(
+            "original mean-card discrepancy does not bound local or section model discrepancy".into());
+        evidence.model.assumptions.sort_unstable();
+        evidence.model.assumptions.dedup();
+        evidence.sensitivity = SensitivitySummary::default();
+        let mut values = [0_u8; 32];
+        for (bytes, input) in values.chunks_exact_mut(8).zip([
+            self.start_over_diameter, self.end_over_diameter,
+            conductivity.value(), hydraulic_diameter.value(),
+        ]) {
+            bytes.copy_from_slice(&input.to_bits().to_le_bytes());
+        }
+        evidence.provenance = ProvenanceHash::chain("convection-rectangular-duct-section-nu-to-h-v1", &[
+            upstream.evidence().provenance, self.downstream.evidence().provenance,
+            ProvenanceHash::of_bytes(&values),
+        ]);
+        Ok(evidence)
+    }
+
+    /// Lower this section's coefficient into the existing conduction Robin row.
+    pub fn robin_boundary(
+        &self,
+        conductivity: ThermalConductivity,
+        hydraulic_diameter: Length,
+        reference_temperature: Temperature,
+    ) -> Result<CorrelationRobinBoundary, CorrelationError> {
+        let temperature = reference_temperature.value();
+        if !temperature.is_finite() {
+            return Err(CorrelationError::InvalidDimensionalInput {
+                field: "Robin reference temperature", value_bits: temperature.to_bits(),
+                requirement: "supply a finite coherent-SI absolute temperature",
+            });
+        }
+        let coefficient = self.heat_transfer_coefficient(conductivity, hydraulic_diameter)?;
+        let boundary = fs_conduction::ThermalBc::robin(coefficient.value.value(), temperature)
+            .map_err(|_| CorrelationError::NonFiniteResult {
+                stage: "conduction Robin boundary admission", value_bits: coefficient.value.value().to_bits(),
+            })?;
+        Ok(CorrelationRobinBoundary { coefficient, reference_temperature, boundary })
+    }
+}
+
+/// Integrate the existing simultaneously developing rectangular CWT table
+/// between two distances measured from the SAME physical heated entrance.
+///
+/// Re, Pr, aspect ratio and both positive endpoint Graetz numbers must pass the
+/// original card unchanged. Start zero returns its exact original whole-length
+/// mean; no unsupported short positive start is clamped to zero. Each table
+/// interval `Nu(Gz)=m Gz+c` has cumulative transfer `x Nu(Re Pr/x)=m Re Pr+c x`,
+/// so weighted positive interval lengths give a stable section average without
+/// subtracting nearly equal cumulative heat. The declared Gz<10 bridge gives
+/// the fully developed section limit and remains an engineering bridge.
+///
+/// Additivity requires the same source state, velocity, geometry and isothermal
+/// wall throughout. This derivative of the admitted mean interpolant is a
+/// held-property approximation, not a source-published local heat-transfer
+/// law, a smoothed table, or an extension to other Pr/aspect-ratio values.
+pub fn evaluate_rectangular_duct_section(
+    reynolds: f64,
+    prandtl: f64,
+    aspect_ratio: f64,
+    start_over_diameter: f64,
+    end_over_diameter: f64,
+) -> Result<RectangularDuctSection, CorrelationError> {
+    if !start_over_diameter.is_finite() || start_over_diameter < 0.0 {
+        return Err(CorrelationError::InvalidGroup {
+            axis: "section_start_over_Dh", value_bits: start_over_diameter.to_bits(),
+        });
+    }
+    if !end_over_diameter.is_finite() || end_over_diameter <= start_over_diameter {
+        return Err(CorrelationError::InvalidGroup {
+            axis: "section_end_over_Dh", value_bits: end_over_diameter.to_bits(),
+        });
+    }
+    let original = |length| evaluate(
+        CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
+        CorrelationInputs::forced(reynolds, prandtl)
+            .with_aspect_ratio(aspect_ratio).with_length_ratio(length),
+    );
+    let downstream = original(end_over_diameter)?;
+    let upstream = if start_over_diameter == 0.0 { None }
+        else { Some(original(start_over_diameter)?) };
+    let nusselt = if upstream.is_none() { downstream.evidence().value }
+        else { rectangular::section_nusselt(reynolds * prandtl,
+            start_over_diameter, end_over_diameter, super::rectangular_laminar_cwt(aspect_ratio)) };
+    if !nusselt.is_finite() || nusselt <= 0.0 {
+        return Err(CorrelationError::NonFiniteResult {
+            stage: "rectangular duct section cumulative-transfer difference", value_bits: nusselt.to_bits(),
+        });
+    }
+    Ok(RectangularDuctSection {
+        start_over_diameter, end_over_diameter, upstream, downstream, nusselt,
+    })
+}
 
 /// A strip must select one of the original flat-plate mean correlations.
 #[derive(Debug)]

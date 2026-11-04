@@ -551,3 +551,32 @@ unequal physical subdivisions, streamwise decay and cancellation in thin strips.
 dimensional heat additivity, exact first-strip compatibility, source/evidence
 retention and Robin lowering. Full crate integration execution still requires
 the repository's constellation dependencies.
+
+## Finite developing rectangular-duct sections
+
+`developing::evaluate_rectangular_duct_section` supplies conservative finite
+sections of the existing simultaneously developing rectangular CWT table at
+aspect ratio 0.5 and Pr=0.72. Hydraulic diameter remains the length for Re and
+`h=Nu_section k/Dh`; section endpoints measure from the same heated entrance.
+The exact first section preserves the original mean evidence and Robin row.
+Every positive endpoint must satisfy the original Re, Pr, aspect and Graetz
+domain. An unsupported positive upstream distance is never replaced by zero.
+
+The original mean and finite sections now share one table/interpolation owner.
+For a segment `Nu(Gz)=m Gz+c`, cumulative transfer is `x Nu(Re Pr/x)=m Re Pr+c x`.
+Integrating the positive lengths of the crossed segments gives a stable
+section average, including adjacent floating-point endpoints. In the declared
+Gz<10 engineering bridge, the section limit is the original fully developed
+CWT coefficient. Table slope jumps remain explicit; no smoothing or additional
+source data are inferred. These are derivatives of the admitted interpolant,
+not source-published local coefficients. The original table provenance and
+limited knot transcription authority remain unchanged.
+
+Positive-section dimensional evidence retains both source evaluations and
+geometry, clears sensitivities and marks model discrepancy unbounded. Additive
+heat assumes constant source properties, speed, geometry and isothermal wall;
+local property updates remain a held-property approximation. Three native
+scalar regressions passed for unequal subdivisions, cross-knot integration and
+thin-section limits using the installed August 31 toolchain. Public API and
+material integration regressions require the full constellation dependency
+closure and have not been executed in this environment.

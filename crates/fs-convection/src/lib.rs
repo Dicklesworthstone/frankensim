@@ -21,7 +21,7 @@ mod natural;
 mod enclosed;
 mod sensitivity;
 
-/// Finite sections of the original mean flat-plate and circular-duct relations.
+/// Finite sections of the original mean flat-plate and duct relations.
 pub mod developing;
 
 pub use natural::{HorizontalPlateFacing, NaturalConvectionGeometry};
@@ -996,39 +996,7 @@ fn rectangular_laminar_chf(aspect_ratio: f64) -> f64 {
 }
 
 fn rectangular_laminar_cwt_developing_pr072(graetz: f64) -> f64 {
-    const GRAETZ_KNOTS: [f64; 14] = [
-        RECTANGULAR_DEVELOPING_FIRST_TABLE_GRAETZ,
-        20.0,
-        30.0,
-        40.0,
-        50.0,
-        60.0,
-        80.0,
-        100.0,
-        120.0,
-        140.0,
-        160.0,
-        180.0,
-        200.0,
-        220.0,
-    ];
-    const NUSSELT_KNOTS: [f64; 14] = [
-        4.20, 4.79, 5.23, 5.61, 5.95, 6.27, 6.88, 7.42, 7.91, 8.37, 8.80, 9.20, 9.60, 10.00,
-    ];
-
-    if graetz <= GRAETZ_KNOTS[0] {
-        let fully_developed = rectangular_laminar_cwt(0.5);
-        return fully_developed + (NUSSELT_KNOTS[0] - fully_developed) * graetz / GRAETZ_KNOTS[0];
-    }
-    for index in 1..GRAETZ_KNOTS.len() {
-        if graetz <= GRAETZ_KNOTS[index] {
-            let fraction = (graetz - GRAETZ_KNOTS[index - 1])
-                / (GRAETZ_KNOTS[index] - GRAETZ_KNOTS[index - 1]);
-            return NUSSELT_KNOTS[index - 1]
-                + fraction * (NUSSELT_KNOTS[index] - NUSSELT_KNOTS[index - 1]);
-        }
-    }
-    NUSSELT_KNOTS[NUSSELT_KNOTS.len() - 1]
+    developing::rectangular_mean_nusselt(graetz, rectangular_laminar_cwt(0.5))
 }
 
 fn card_for(id: CorrelationId) -> CorrelationCard {

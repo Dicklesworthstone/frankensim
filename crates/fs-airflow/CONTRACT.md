@@ -3556,3 +3556,22 @@ changing material history require other owners. Gas use additionally needs
 caller-qualified low-Mach/frozen-density support. Native regressions exercise
 independent radial Stokes startup/reversal and kinetic energy, harmonic phase
 and power, finite-reservoir composition, and atomic history/regime admission.
+
+## Material-backed finite rectangular cooling-channel sections
+
+`graph::thermal::medium::convection::duct` evaluates the original rectangular
+CWT developing table over physical heated-entrance distances. One original
+`FluidTransport` snapshot supplies Re, Pr and the conductivity in the section's
+dimensional h. Hydraulic diameter, aspect ratio and both distances remain
+explicit physical inputs. The existing source still admits exactly Pr=0.72
+and aspect ratio 0.5; other fluids/geometries and unsupported positive upstream
+positions are refused. Opposite flow requires authored opposite-entrance
+distances. No cell boundary silently resets development.
+
+The source-bearing section coefficient lowers to the existing conduction Robin
+row with the actual bulk reference temperature. Uniform-state subdivision
+preserves cumulative heat; varying local states remain a held-property
+approximation, and positive sections have no validated local discrepancy band.
+Two source/material integration regressions cover conservation and original
+source-domain refusal; they require the unavailable constellation closure and
+are not reported as executed here.
