@@ -696,6 +696,36 @@ not add species advection or chemistry/flow splitting to that field. Neither
 path supplies diffusion flames, generic third-body/falloff mechanisms, spray,
 knock, real-gas phases, moving volumes or a validated ignition model.
 
+### Constant-pressure reactions on the common material parcel
+
+`material::isobaric::MaterialIsobaricReactor` connects the existing prepared
+constant-pressure chemistry owner to that same `ClosedGasParcel`. Its adiabatic,
+held-bath and finite-body entry points reuse the original chemical stages,
+temperature-dependent Cp, reaction formation enthalpy and entropy accounts.
+The bath/body heat is integrated with the reactions; it is never an additional
+chemical heat-release term or an independent temperature update.
+
+The original material enthalpy replacement resolves the final products at the
+original mass and pressure. Actual `Delta H = Q` and `Delta U + p Delta V = Q`
+are checked along with the chemical endpoint's H, U, volume, work, temperature
+and species fractions. Finite bodies retain their source phase plateau and
+density; combined gas/body H and U-plus-both-volume-works close before either
+endpoint publishes. Source/transport refusal or final cancellation preserves
+the complete gas parcel and leaves the supplied body unchanged. Zero duration
+preserves the parcel exactly after admission.
+
+Kinetic preparation and dense feed storage are reused. The returned chemistry
+view borrows that workspace; existing `to_owned` supplies an independent
+snapshot when needed. Material endpoint resolution still allocates. The source
+identity and neutral dilute-gas restrictions above remain. Absolute
+cross-composition energy resolution must meet the requested Joule tolerances;
+unresolvable reference offsets refuse. This is a homogeneous quasistatic
+pressure constraint, not load inertia, spatial combustion or experimental
+validation. The focused regressions in `material/tests/isobaric.rs` cover
+independent Cp/Cv balances, an analytic temperature-dependent reaction/bath
+trajectory, finite-body melting and both expansion works, exact replay,
+source/domain refusal and early/late cancellation.
+
 ### Caller-owned end ports and local cell sources
 
 `Euler1d::step_with_ports(max, controls, ports, cancelled)` advances a

@@ -2,8 +2,12 @@
 //!
 //! The L3 kinetics owner chooses the composition after an actual elapsed time.
 //! The existing material owner then reconstructs one state at the parcel's
-//! original mass, volume and total internal energy. Transport and acoustics use
-//! those same products and sources. No additional reaction heat is applied.
+//! original mass, volume and total internal energy, or at prescribed pressure
+//! through [`isobaric`]. Transport and acoustics use those same products and
+//! sources. No additional reaction heat is applied.
+
+/// Constant-pressure chemistry and heat exchange on the common material parcel.
+pub mod isobaric;
 
 /// Adiabatic compressor/expander outlets with original mixture phase equilibrium.
 pub mod phase_machinery;
@@ -31,13 +35,14 @@ use fs_thermochem::kinetics::{IdealGasKineticsV1, KineticsErrorV1};
 /// Explicit time-integration, material-inversion and cross-owner tolerances.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialKineticsSolve {
-    /// Adaptive finite-rate integration with one conserved total internal energy.
+    /// Adaptive finite-rate integration of internal energy (rigid) or enthalpy
+    /// (constant pressure), including any explicitly declared thermal exchange.
     pub chemistry: IsochoricKineticsSolve,
     /// Original material energy inversion; its tolerance is in J/kg.
     pub material_energy: GasEnergySolve,
     /// Maximum feed/product/density mass discrepancy [kg].
     pub mass_tolerance_kg: f64,
-    /// Maximum relative temperature or pressure change while resolving the
+    /// Maximum relative temperature, pressure or volume change while resolving the
     /// material endpoint. This bounds source/roundoff reconciliation, not a
     /// permitted physical heating or expansion process.
     pub relative_state_tolerance: f64,
@@ -92,6 +97,8 @@ pub enum MaterialKineticsError {
     Energy(GasEnergyError),
     /// Actual material balances exceeded the requested tolerances.
     Balance(MaterialKineticsBalance),
+    /// Constant-pressure chemistry and the actual material endpoint disagree.
+    IsobaricBalance(isobaric::MaterialIsobaricBalance),
     /// Cancellation before the complete update was published.
     Cancelled,
 }
@@ -299,28 +306,8 @@ fn admit_sources(
     bank: &ThermochemicalGasModel,
     mechanism: &IdealGasKineticsV1,
 ) -> Result<(), MaterialKineticsError> {
-    // The homogeneous reactor can conserve charged elementary reactions, but
-    // this material adapter still resolves neutral Wilke/WMS transport.
-    let chemistry = mechanism.thermodynamics();
-    if (0..chemistry.models().len()).any(|i| chemistry.charge_vector().get(i) != Some(0)) {
-        return Err(MaterialKineticsError::Invalid(
-            "charged chemistry requires ionized-gas transport; neutral Wilke/WMS closure is unsupported",
-        ));
-    }
+    admit_bank(bank, mechanism)?;
     let models = bank.thermodynamics().components();
-    let chemical = mechanism.thermodynamics().models();
-    if models.len() != chemical.len() {
-        return Err(MaterialKineticsError::Invalid(
-            "material bank must cover the complete mechanism",
-        ));
-    }
-    for (material, source) in models.iter().zip(chemical) {
-        if material != source {
-            return Err(MaterialKineticsError::SourceMismatch(
-                source.species().clone(),
-            ));
-        }
-    }
     let active = parcel.model().thermodynamics().components();
     for (i, source) in active.iter().enumerate() {
         let Some(j) = models.iter().position(|m| m.species() == source.species()) else {
@@ -344,24 +331,47 @@ fn admit_sources(
             "active feed water identities differ",
         ));
     }
-    let packs: Vec<_> = bank
+    let packs = bank
         .source_packs()
         .iter()
         .filter(|pack| {
             active
                 .iter()
                 .any(|source| source.species() == &pack.species)
-        })
-        .collect();
-    if packs.len() != parcel.model().source_packs().len()
-        || packs
-            .iter()
-            .zip(parcel.model().source_packs())
-            .any(|(a, b)| *a != b)
-    {
+        });
+    if !packs.eq(parcel.model().source_packs().iter()) {
         return Err(MaterialKineticsError::Invalid(
             "active feed source-pack identities differ",
         ));
+    }
+    Ok(())
+}
+
+fn admit_bank(
+    bank: &ThermochemicalGasModel,
+    mechanism: &IdealGasKineticsV1,
+) -> Result<(), MaterialKineticsError> {
+    // The homogeneous reactor can conserve charged elementary reactions, but
+    // this material adapter still resolves neutral Wilke/WMS transport.
+    let chemistry = mechanism.thermodynamics();
+    if (0..chemistry.models().len()).any(|i| chemistry.charge_vector().get(i) != Some(0)) {
+        return Err(MaterialKineticsError::Invalid(
+            "charged chemistry requires ionized-gas transport; neutral Wilke/WMS closure is unsupported",
+        ));
+    }
+    let models = bank.thermodynamics().components();
+    let chemical = mechanism.thermodynamics().models();
+    if models.len() != chemical.len() {
+        return Err(MaterialKineticsError::Invalid(
+            "material bank must cover the complete mechanism",
+        ));
+    }
+    for (material, source) in models.iter().zip(chemical) {
+        if material != source {
+            return Err(MaterialKineticsError::SourceMismatch(
+                source.species().clone(),
+            ));
+        }
     }
     Ok(())
 }
