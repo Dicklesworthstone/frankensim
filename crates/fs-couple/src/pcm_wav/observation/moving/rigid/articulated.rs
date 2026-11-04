@@ -29,7 +29,7 @@ use fs_mbd::articulated::{ArticulatedError, ArticulatedPointMotion, PreparedLink
 
 /// Coherent, allocation-free publication of a complete accepted link frame.
 pub mod frame;
-pub use frame::{LinkAcousticUpdate, append_link_frame};
+pub use frame::{LinkAcousticUpdate, append_link_frame, append_link_frame_with_relative_motion};
 
 /// Preserve the original articulated refusal without changing the existing
 /// standalone-rigid error API or replacing native failures with generic text.
@@ -96,31 +96,7 @@ impl RigidAcousticAttachment {
     ) -> Result<RigidAcousticSample, ArticulatedAcousticError> {
         validate_strength(strength)?;
         let point = self.link_point(time_s, motion)?;
-        let rotation = motion.world_from_link().rotation();
-        let force = rotation
-            .rotate(vector(strength.force_on_fluid_body_n))
-            .map_err(ArticulatedError::from)?;
-        let derivative = rotation
-            .rotate(vector(strength.force_rate_on_fluid_body_n_s))
-            .map_err(ArticulatedError::from)?
-            + point.angular_velocity_world.cross(force);
-        let force = components(force);
-        let derivative = components(derivative);
-        if force.iter().chain(&derivative).any(|v| !v.is_finite()) {
-            return Err(nonfinite("articulated acoustic force transport derivative").into());
-        }
-        Ok(RigidAcousticSample {
-            kinematics: timed(time_s, point),
-            source: TimedCompactSource {
-                source_time_s: time_s,
-                strength: CompactSourceStrength {
-                    volume_flow_m3_s: strength.volume_flow_m3_s,
-                    volume_flow_rate_m3_s2: strength.volume_flow_rate_m3_s2,
-                    force_on_fluid_n: force,
-                    force_rate_on_fluid_n_s: derivative,
-                },
-            },
-        })
+        sample_at_point(time_s, point, motion, strength)
     }
 
     fn link_point(
@@ -134,6 +110,41 @@ impl RigidAcousticAttachment {
         let arm = self.arm_body_m();
         Ok(motion.point_motion(Vec3::new(arm.x, arm.y, arm.z))?)
     }
+}
+
+// Both fixed and migrating points use this one force/derivative transport.
+// The native point query has already run; no duplicate motion evaluation.
+pub(super) fn sample_at_point(
+    time_s: f64,
+    point: ArticulatedPointMotion,
+    motion: &PreparedLinkPointMotion,
+    strength: BodyFrameCompactSourceStrength,
+) -> Result<RigidAcousticSample, ArticulatedAcousticError> {
+    let rotation = motion.world_from_link().rotation();
+    let force = rotation
+        .rotate(vector(strength.force_on_fluid_body_n))
+        .map_err(ArticulatedError::from)?;
+    let derivative = rotation
+        .rotate(vector(strength.force_rate_on_fluid_body_n_s))
+        .map_err(ArticulatedError::from)?
+        + point.angular_velocity_world.cross(force);
+    let force = components(force);
+    let derivative = components(derivative);
+    if force.iter().chain(&derivative).any(|v| !v.is_finite()) {
+        return Err(nonfinite("articulated acoustic force transport derivative").into());
+    }
+    Ok(RigidAcousticSample {
+        kinematics: timed(time_s, point),
+        source: TimedCompactSource {
+            source_time_s: time_s,
+            strength: CompactSourceStrength {
+                volume_flow_m3_s: strength.volume_flow_m3_s,
+                volume_flow_rate_m3_s2: strength.volume_flow_rate_m3_s2,
+                force_on_fluid_n: force,
+                force_rate_on_fluid_n_s: derivative,
+            },
+        },
+    })
 }
 
 impl RigidAcousticHistory {
@@ -160,7 +171,7 @@ impl RigidAcousticHistory {
     }
 }
 
-fn timed(time_s: f64, point: ArticulatedPointMotion) -> TimedSourceKinematics {
+pub(super) fn timed(time_s: f64, point: ArticulatedPointMotion) -> TimedSourceKinematics {
     TimedSourceKinematics {
         source_time_s: time_s,
         kinematics: SourceKinematics {

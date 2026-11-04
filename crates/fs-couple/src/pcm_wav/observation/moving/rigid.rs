@@ -28,6 +28,9 @@ use fs_mbd::{DynamicsError, PreparedRigidPointMotion, Vec3};
 
 /// Native articulated-link adapters using the same paired history owner.
 pub mod articulated;
+/// Explicit motion relative to the original carrier-coordinate attachment.
+pub mod relative;
+pub use relative::RelativeAcousticMotion;
 
 /// A source law evaluated in the original body's instantaneous coordinate frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -45,15 +48,16 @@ pub struct BodyFrameCompactSourceStrength {
 /// Geometry and source strengths evaluated at exactly one accepted timestamp.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidAcousticSample {
-    /// Native material-point kinematics on the physical emission clock.
+    /// Native source-point kinematics on the physical emission clock.
     pub kinematics: TimedSourceKinematics,
     /// Fixed-medium-frame source values and derivatives at that SAME time.
     pub source: TimedCompactSource,
 }
 
-/// A material point fixed in the original body's coordinates.
+/// A fixed reference attachment in the original body's coordinates.
 /// Standalone rigid queries use centre-of-mass-relative coordinates. The
 /// explicit `*_link` queries use the native articulated LINK origin instead.
+/// Relative-motion queries add an explicitly supplied local displacement.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidAcousticAttachment {
     arm_body_m: Vec3,
@@ -109,31 +113,41 @@ impl RigidAcousticAttachment {
     ) -> Result<RigidAcousticSample, RigidAcousticError> {
         validate_strength(strength)?;
         let kinematics = self.kinematics(time_s, motion)?;
-        let force_body = vector(strength.force_on_fluid_body_n);
-        let derivative_body = vector(strength.force_rate_on_fluid_body_n_s)
-            .add(motion.angular_velocity_body().cross(force_body));
-        if !derivative_body.is_finite() {
-            return Err(nonfinite("rigid acoustic force transport derivative"));
-        }
-        let orientation = motion.pose().orientation();
-        let force_world = orientation.rotate_body_to_world(force_body);
-        let derivative_world = orientation.rotate_body_to_world(derivative_body);
-        if !force_world.is_finite() || !derivative_world.is_finite() {
-            return Err(nonfinite("rigid acoustic medium-frame strength"));
-        }
-        Ok(RigidAcousticSample {
-            kinematics,
-            source: TimedCompactSource {
-                source_time_s: time_s,
-                strength: CompactSourceStrength {
-                    volume_flow_m3_s: strength.volume_flow_m3_s,
-                    volume_flow_rate_m3_s2: strength.volume_flow_rate_m3_s2,
-                    force_on_fluid_n: components(force_world),
-                    force_rate_on_fluid_n_s: components(derivative_world),
-                },
-            },
-        })
+        sample_at_kinematics(kinematics, motion, strength)
     }
+}
+
+// Shared by fixed and migrating points. Carrier rotation is independent of
+// local source translation, and the already prepared point is not queried again.
+fn sample_at_kinematics(
+    kinematics: TimedSourceKinematics,
+    motion: &PreparedRigidPointMotion,
+    strength: BodyFrameCompactSourceStrength,
+) -> Result<RigidAcousticSample, RigidAcousticError> {
+    let force_body = vector(strength.force_on_fluid_body_n);
+    let derivative_body = vector(strength.force_rate_on_fluid_body_n_s)
+        .add(motion.angular_velocity_body().cross(force_body));
+    if !derivative_body.is_finite() {
+        return Err(nonfinite("rigid acoustic force transport derivative"));
+    }
+    let orientation = motion.pose().orientation();
+    let force_world = orientation.rotate_body_to_world(force_body);
+    let derivative_world = orientation.rotate_body_to_world(derivative_body);
+    if !force_world.is_finite() || !derivative_world.is_finite() {
+        return Err(nonfinite("rigid acoustic medium-frame strength"));
+    }
+    Ok(RigidAcousticSample {
+        kinematics,
+        source: TimedCompactSource {
+            source_time_s: kinematics.source_time_s,
+            strength: CompactSourceStrength {
+                volume_flow_m3_s: strength.volume_flow_m3_s,
+                volume_flow_rate_m3_s2: strength.volume_flow_rate_m3_s2,
+                force_on_fluid_n: components(force_world),
+                force_rate_on_fluid_n_s: components(derivative_world),
+            },
+        },
+    })
 }
 
 /// Explicit retained endpoint and logical payload limits for a finite history.
@@ -149,8 +163,9 @@ pub struct RigidHistoryBudget {
 /// A bounded source/trajectory history from the same accepted mechanical events.
 ///
 /// Source and microphone trajectories may share each native prepared snapshot.
-/// This owner keeps one fixed body attachment and records source strengths as
-/// well as its motion. Callers retain the mechanical identity, physical clock
+/// This owner keeps one fixed body-coordinate reference attachment and records
+/// source strengths and motion, including explicitly supplied relative migration.
+/// Callers retain the mechanical identity, physical clock
 /// and smoothness of this sequence; the native state contains no time field.
 /// Both borrowed slices are immutable during observation, enforced by Rust.
 pub struct RigidAcousticHistory {
@@ -241,7 +256,7 @@ impl RigidAcousticHistory {
     pub fn sources(&self) -> &[TimedCompactSource] {
         &self.sources
     }
-    /// The fixed original body attachment retained by this history.
+    /// The fixed original reference attachment, before any local migration.
     pub const fn attachment(&self) -> RigidAcousticAttachment {
         self.attachment
     }

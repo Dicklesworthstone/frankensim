@@ -5,6 +5,7 @@ use super::{
     RigidAcousticHistory, RigidAcousticSample,
 };
 use super::super::{invalid, poll};
+use super::super::relative::RelativeAcousticMotion;
 
 /// One source/history binding for an accepted mechanical event.
 ///
@@ -12,7 +13,7 @@ use super::super::{invalid, poll};
 /// mutable history borrows prevent recording one history twice in a frame.
 /// A microphone may use zero strength while retaining its original motion.
 pub struct LinkAcousticUpdate<'a> {
-    /// Original preallocated history, retaining its fixed link-relative arm.
+    /// Original preallocated history, retaining its fixed link-relative anchor.
     pub history: &'a mut RigidAcousticHistory,
     /// Original native receipt for this attachment's link at the supplied time.
     pub motion: &'a PreparedLinkPointMotion,
@@ -20,7 +21,7 @@ pub struct LinkAcousticUpdate<'a> {
     pub strength: BodyFrameCompactSourceStrength,
 }
 
-/// Publish one common physical timestamp across all supplied attachments.
+/// Publish one common physical timestamp across all supplied fixed attachments.
 ///
 /// Stage every original point/force sample in caller-owned scratch, then
 /// publish ALL paired histories only after the final cancellation checkpoint.
@@ -41,16 +42,51 @@ pub fn append_link_frame(
     scratch: &mut [Option<RigidAcousticSample>],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ArticulatedAcousticError> {
+    append_frame(time_s, updates, None, scratch, cancelled)
+}
+
+/// Atomically record fixed and migrating sources/microphones in the same frame.
+///
+/// Supply one local displacement/velocity/acceleration record per update;
+/// a zero record uses the unchanged fixed-attachment path. All records describe
+/// this same accepted physical event. Source derivatives must include any
+/// variation along the moving local path, in the carrier's coordinate axes.
+/// Shape, motion, source, clock and cancellation refusals publish nothing.
+/// This reuses the original frame staging, storage and publication owner.
+pub fn append_link_frame_with_relative_motion(
+    time_s: f64,
+    updates: &mut [LinkAcousticUpdate<'_>],
+    relative: &[RelativeAcousticMotion],
+    scratch: &mut [Option<RigidAcousticSample>],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ArticulatedAcousticError> {
+    append_frame(time_s, updates, Some(relative), scratch, cancelled)
+}
+
+fn append_frame(
+    time_s: f64,
+    updates: &mut [LinkAcousticUpdate<'_>],
+    relative: Option<&[RelativeAcousticMotion]>,
+    scratch: &mut [Option<RigidAcousticSample>],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ArticulatedAcousticError> {
     poll(cancelled)?;
-    if updates.is_empty() || scratch.len() != updates.len() {
-        return Err(invalid("articulated acoustic frame needs one scratch slot per attachment").into());
+    if updates.is_empty() || scratch.len() != updates.len()
+        || relative.is_some_and(|motion| motion.len() != updates.len())
+    {
+        return Err(invalid("articulated acoustic frame needs matching scratch and motion counts").into());
     }
-    for (update, slot) in updates.iter().zip(scratch.iter_mut()) {
+    for (i, (update, slot)) in updates.iter().zip(scratch.iter_mut()).enumerate() {
         poll(cancelled)?;
         update.history.admit_append(time_s)?;
-        *slot = Some(update.history.attachment.sample_link(
-            time_s, update.motion, update.strength,
-        )?);
+        *slot = Some(match relative {
+            Some(motion) => update.history.attachment.sample_link_relative(
+                time_s, update.motion, motion[i], update.strength,
+            )?,
+            None => update.history.attachment.sample_link(
+                time_s, update.motion, update.strength,
+            )?,
+        });
     }
     poll(cancelled)?;
     // Unique mutable history borrows and successful preflight guarantee all
