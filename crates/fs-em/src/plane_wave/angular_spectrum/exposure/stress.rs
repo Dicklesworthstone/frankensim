@@ -527,7 +527,7 @@ pub(super) fn integrate_dyad<P: Copy, A: Copy>(
     Ok(sum)
 }
 
-fn stress_from_dyad(mut dyad: [Dd; 6]) -> [Dd; 6] {
+pub(super) fn stress_from_dyad(mut dyad: [Dd; 6]) -> [Dd; 6] {
     let half_trace = (dyad[0] + dyad[1] + dyad[2]) * Dd::from_f64(0.5);
     for value in &mut dyad[..3] {
         *value = *value - half_trace;
@@ -535,11 +535,11 @@ fn stress_from_dyad(mut dyad: [Dd; 6]) -> [Dd; 6] {
     dyad
 }
 
-fn symmetric<T: Copy>([xx, yy, zz, xy, xz, yz]: [T; 6]) -> [[T; 3]; 3] {
+pub(super) fn symmetric<T: Copy>([xx, yy, zz, xy, xz, yz]: [T; 6]) -> [[T; 3]; 3] {
     [[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]]
 }
 
-fn admit_normal(normal: [f64; 3]) -> Result<(), AngularSpectrumError> {
+pub(super) fn admit_normal(normal: [f64; 3]) -> Result<(), AngularSpectrumError> {
     if normal.iter().any(|n| !n.is_finite()) {
         return Err(bad("stress traction requires a finite unit normal"));
     }
@@ -553,7 +553,7 @@ fn admit_normal(normal: [f64; 3]) -> Result<(), AngularSpectrumError> {
     Ok(())
 }
 
-fn finite_vector(value: [f64; 3]) -> Result<[f64; 3], AngularSpectrumError> {
+pub(super) fn finite_vector(value: [f64; 3]) -> Result<[f64; 3], AngularSpectrumError> {
     if value.iter().any(|v| !v.is_finite()) {
         Err(bad("exposure stress traction is unrepresentable"))
     } else {

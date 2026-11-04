@@ -58,7 +58,7 @@ pub use exposure::{
     AngularSpectrumExposure, AngularSpectrumExposureApertureLimits,
     AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
     AngularSpectrumExposureApertureProjectionReading,
-    AngularSpectrumExposureApertureReading, AngularSpectrumExposureEnsemble,
+    AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress, AngularSpectrumExposureEnsemble,
     AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureField,
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,

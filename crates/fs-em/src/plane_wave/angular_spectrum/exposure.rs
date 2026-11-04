@@ -24,7 +24,7 @@ mod aperture;
 pub use aperture::{
     AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,
-    AngularSpectrumExposureApertureReading,
+    AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress,
 };
 
 mod stress;

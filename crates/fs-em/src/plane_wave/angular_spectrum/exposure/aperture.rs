@@ -12,6 +12,8 @@ use super::*;
 type FieldParts = [[Dd; 2]; 6];
 
 mod polarization;
+mod stress;
+pub use stress::AngularSpectrumExposureApertureStress;
 pub use polarization::{
     AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
     AngularSpectrumExposureApertureProjectionReading,

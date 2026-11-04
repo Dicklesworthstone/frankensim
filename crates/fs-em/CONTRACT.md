@@ -3797,3 +3797,41 @@ Only original causal material reservoirs are admissible: sampled finite-band
 optical n+k remains insufficient for this heat law. Reversible storage is not
 deposited heat. The full-uniform-body coupled heating guard continues to reject
 finite patches until a physical spatial mapping to thermal cells is supplied.
+
+## Finite-aperture Maxwell stress and field energy
+
+`AngularSpectrumExposure{,Ensemble}::measure_aperture_stress` and the two-face
+`measure_illumination_aperture_stress` use the original continuous rectangular
+aperture/shutter engine to retain the complete symmetric Maxwell stress,
+physical field-energy density and signed vector Poynting flux. Real fields and
+real factors retain carrier-sum and beat terms; proper factors retain their
+original law. Actual total incoming/outgoing fields, longitudinal components,
+polarization and spatial interference enter before products. The new accumulator
+forms eighteen scalar field products per admitted modal/frequency pair, without
+an additional spatial FFT or a full correlation matrix. Original whole-query
+source, pair-work, storage and cancellation admission remains authoritative.
+
+Only the original observed lossless nondispersive half-space supplies epsilon
+and mu, through the existing material admission. A lossless left observation
+remains admissible with a lossy exit; stress in that lossy exit refuses. Dyads,
+trace subtraction, traction and area conversion retain double-double arithmetic.
+Energy receives no second cycle-average factor; signed stresses are not clamped.
+Derived integrated tensors, tractions and normal watts refuse unrepresentable
+unit conversions. Observation normals are finite unit vectors in the original
+frame and do not rotate or resample the transverse aperture.
+
+The result is an electromagnetic surface observation. Mechanical body force
+requires a complete closed-surface balance and the field-momentum rate, together
+with the applicable material momentum law. Lateral walls do not cancel for an
+arbitrary finite patch; opposite patches alone do not replace that balance.
+The represented field remains the original periodic continuation, without a
+new diffraction, back-action or finite-beam source model.
+
+Six native tests execute the exact aperture kernels, original stress helpers
+and new accumulator with real FFT/math: independent space/time quadrature,
+plane-wave flux/traction, a standing electric node with magnetic stress,
+real/proper statistics, a narrow dark fringe, and work/cancellation/overflow
+refusals. Public original-Maxwell/material tests cover cell/patch partition and
+two-face node observation but remain unrun without the constellation checkouts.
+Native material/source declarations are signature-only links; this does not
+establish full material admission, Maxwell assembly or spatial convergence.
