@@ -36,7 +36,7 @@ pub mod path;
 pub mod source;
 pub mod transport;
 
-use fixture::{FixtureEmitterIdentity, FixtureId, PhotometricRig};
+use fixture::{FixtureEmitterIdentity, FixtureError, FixtureId, PhotometricRig};
 use medium::{HomogeneousMedium, MediumError};
 use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
@@ -128,6 +128,13 @@ pub enum PhotometryError {
     },
     /// Calibrated-source validation/evaluation refusal.
     Source(SourceError),
+    /// Fixture assembly or native surface binding refused an inconsistent rig.
+    Fixture(FixtureError),
+    /// This estimator cannot include the supplied kind of calibrated emitter.
+    UnsupportedEmitters {
+        /// Use the native spectral path jobs for finite-source contributions.
+        reason: &'static str,
+    },
     /// Participating-medium validation/evaluation refusal.
     Medium(MediumError),
     /// The original physical-grid transport refused a field, ray or budget.
@@ -162,6 +169,15 @@ impl From<Cancelled> for PhotometryError {
 impl From<SourceError> for PhotometryError {
     fn from(value: SourceError) -> Self {
         Self::Source(value)
+    }
+}
+
+impl From<FixtureError> for PhotometryError {
+    fn from(value: FixtureError) -> Self {
+        match value {
+            FixtureError::Cancelled => Self::Cancelled,
+            other => Self::Fixture(other),
+        }
     }
 }
 
@@ -443,6 +459,8 @@ impl<'a> PhotometricScene<'a> {
     /// homogeneous-haze paths. Attach fixture bodies to `primitives` once with
     /// [`PhotometricRig::append_geometry_to`] before admission. Their geometry
     /// then participates in the same native visibility index as the scene.
+    /// Active finite emitters refuse here; use the rig constructors on the
+    /// native path jobs to include their surface emission and sampled lux.
     pub fn try_from_rig(
         primitives: &'a [Primitive],
         rig: &'a PhotometricRig,
@@ -526,6 +544,13 @@ impl<'a> PhotometricScene<'a> {
         let sources = points.sources();
         let rig = points.rig();
         cx.checkpoint()?;
+        if !native_paths
+            && rig.is_some_and(|rig| rig.surface_sources().iter().any(|s| s.flux_lm() > 0.0))
+        {
+            return Err(PhotometryError::UnsupportedEmitters {
+                reason: "finite fixture emitters require native spectral path jobs",
+            });
+        }
         if !options.ray_epsilon_m.is_finite()
             || options.ray_epsilon_m <= 0.0
             || !options.max_distance_m.is_finite()

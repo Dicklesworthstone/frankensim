@@ -158,12 +158,20 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         self.transport.rig()
     }
 
-    /// Retained source-index mapping to fixture and local emitter identities.
+    /// Retained point-source-index mapping to fixture and local emitter identities.
     /// This is input attribution; sampled reflected/scattered contributions
     /// are aggregate physical illuminance, not per-emitter estimates.
     #[must_use]
     pub fn emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
         self.transport.emitter_identities()
+    }
+
+    /// Identities for fixture-owned finite sources, in the retained prefix of
+    /// native area-source order. Supplemental bindings follow this prefix and
+    /// have no fixture identity. This is input attribution for aggregate lux.
+    #[must_use]
+    pub fn surface_emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
+        self.transport.surface_emitter_identities()
     }
 
     #[cfg(test)]
@@ -200,6 +208,8 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
     /// [`PhotometricRig::append_geometry_to`] before constructing the job.
     /// Direct lux and all sampled surface/volume paths share the rig's exact
     /// source order, calibrated spectra and transformed optical frames.
+    /// Rig-owned finite sources bind to their mounted native instances and
+    /// contribute through the sampled continuous component.
     /// Supplemental native `surfaces` bindings contribute through the sampled
     /// continuous component, as in [`Self::new_with_emitters`].
     #[allow(clippy::too_many_arguments)]
@@ -277,6 +287,7 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
 
     /// Admit a calculation plane with a grouped rig, retaining the native
     /// point-probe semantics and requiring no intermediate receiver array.
+    /// Rig-owned finite sources are included automatically.
     /// Supplemental native area bindings use the same sampled continuous
     /// component as [`Self::new_with_rig`].
     #[allow(clippy::too_many_arguments)]

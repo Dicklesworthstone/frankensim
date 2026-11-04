@@ -1,10 +1,11 @@
 //! Multi-emitter fixtures assembled into the existing calibrated transport.
 //!
-//! Each source's transform is emitter-to-fixture; each geometry instance's
+//! Each point source's transform is emitter-to-fixture; each geometry instance's
 //! transform is body-part-to-fixture. Assembly composes the same proper-rigid
-//! fixture-to-world transform with both. Local +Z remains each emitter's
-//! optical axis. GDTF/MVR conversion and geometry-tree evaluation stay with the
-//! caller; no geometry, spectral or transport implementation is duplicated.
+//! fixture-to-world transform with both. Finite emitters bind to these original
+//! body parts, retaining their winding and body-local projector frames. GDTF/MVR
+//! conversion and geometry-tree evaluation stay with the caller; no geometry,
+//! spectral or transport implementation is duplicated.
 //!
 //! Shared optics are a linear dimmer and a spatially uniform passive spectral
 //! filter, applied independently to each source's already calibrated spectrum.
@@ -22,6 +23,7 @@ use crate::instances::{GeometryInstance, InstanceError, RigidTransform};
 use crate::tracer::{Material, Primitive, Shape};
 
 use super::CompensatedSum;
+use super::area::PhotometricAreaEmitter;
 use super::source::{PhotometricSource, SPECTRAL_BINS, SourceError};
 
 /// Caller-owned fixture identity. Zero is refused at assembly.
@@ -50,6 +52,20 @@ pub struct FixtureEmitter {
     /// Original source, including its local position/orientation, angular law,
     /// spectrum, luminous calibration and individual dimmer/filter state.
     pub source: PhotometricSource,
+}
+
+/// A calibrated finite emitter attached to native fixture geometry.
+///
+/// The source's primitive index selects a slot in [`PhotometricFixture::geometry`],
+/// not the eventual scene. Its spectrum, sidedness and optional projector law
+/// retain their native meanings. Projector frames stay local to that geometry;
+/// the native instance applies body placement and fixture placement exactly once.
+#[derive(Debug, Clone)]
+pub struct FixtureSurfaceEmitter {
+    /// Local identity, unique across both point and surface emitters.
+    pub id: EmitterId,
+    /// Original calibrated emission, bound to a fixture-local geometry slot.
+    pub source: PhotometricAreaEmitter,
 }
 
 /// Native body geometry sharing its fixture's placement.
@@ -115,6 +131,8 @@ impl FixtureOpticalState {
 ///
 /// Assembly checks identities and composes frames without modifying this data.
 /// Empty fixtures and fully dark emitters are retained with their identities.
+/// Point and finite entries contribute independent calibrated power; a finite
+/// emitter is not a display proxy for a point emitter's already-counted lumens.
 #[derive(Debug, Clone)]
 pub struct PhotometricFixture {
     /// Stable fixture identity, unique within the rig.
@@ -125,6 +143,9 @@ pub struct PhotometricFixture {
     pub optics: FixtureOpticalState,
     /// Emitters in their deterministic caller order.
     pub emitters: Vec<FixtureEmitter>,
+    /// Finite emitters in their deterministic caller order. Each binds one
+    /// distinct slot in `geometry`; that slot retains its native material.
+    pub surfaces: Vec<FixtureSurfaceEmitter>,
     /// Native body parts in their deterministic caller order.
     pub geometry: Vec<FixtureGeometry>,
 }
@@ -134,7 +155,7 @@ pub struct PhotometricFixture {
 pub struct FixtureAssemblyLimits {
     /// Maximum fixture records, including empty fixtures.
     pub max_fixtures: usize,
-    /// Maximum total point emitters, including dark emitters.
+    /// Maximum combined point and surface emitters, including dark emitters.
     pub max_emitters: usize,
     /// Maximum total native body instances.
     pub max_geometry_instances: usize,
@@ -157,9 +178,12 @@ pub struct AssembledFixture {
     pub id: FixtureId,
     /// Contiguous range of world sources and emitter identities.
     pub sources: Range<usize>,
+    /// Contiguous range of finite sources and their emitter identities.
+    pub surfaces: Range<usize>,
     /// Contiguous range of world body instances.
     pub geometry: Range<usize>,
-    /// Compensated sum of emitted lumens after both levels of attenuation.
+    /// Compensated sum of point and finite emitted lumens after both levels
+    /// of attenuation, including the finite sources' passive projector losses.
     pub flux_lm: f64,
 }
 
@@ -174,6 +198,29 @@ pub enum FixtureError {
     InvalidEmitterId(FixtureEmitterIdentity),
     /// Native geometry object identities must be unique across the rig/scene.
     DuplicateGeometryId(u64),
+    /// A finite source names an absent geometry slot or repeats another finite
+    /// source's slot. Each native primitive has one calibrated emission law.
+    InvalidSurfaceBinding {
+        /// Stable fixture and emitter identities.
+        identity: FixtureEmitterIdentity,
+        /// Index into the original fixture's geometry list.
+        geometry: usize,
+    },
+    /// A finite emitter's native body has not been mounted in the scene.
+    SurfaceNotMounted {
+        /// Stable fixture and emitter identities.
+        identity: FixtureEmitterIdentity,
+        /// Native object identity required by this emitter.
+        object_id: u64,
+    },
+    /// The mounted body no longer has the rig's shared geometry, rigid
+    /// placement or material. Assemble and mount a new snapshot after edits.
+    SurfaceGeometryMismatch {
+        /// Stable fixture and emitter identities.
+        identity: FixtureEmitterIdentity,
+        /// Native object identity whose mounted state differs.
+        object_id: u64,
+    },
     /// A caller-declared admission limit was exceeded.
     LimitExceeded {
         /// Fixture, emitter or geometry count.
@@ -219,13 +266,16 @@ impl std::error::Error for FixtureError {}
 
 /// Immutable world-space assembly consumed by the original photometric paths.
 ///
-/// Source order is fixture input order, then emitter input order. IDs do not
-/// reorder sums or RNG addresses. Identical inputs replay on the same admitted
+/// Point and finite source lists each retain fixture order, then emitter order.
+/// Fixture flux sums add its points followed by its surfaces. IDs do not reorder
+/// sums or RNG addresses. Identical inputs replay on the same admitted
 /// ISA/toolchain; arbitrary input permutations and cross-ISA bit equality are
 /// not claimed. Dark sources are never pruned or merged.
 pub struct PhotometricRig {
     sources: Vec<PhotometricSource>,
     identities: Vec<FixtureEmitterIdentity>,
+    surfaces: Vec<PhotometricAreaEmitter>,
+    surface_identities: Vec<FixtureEmitterIdentity>,
     fixtures: Vec<AssembledFixture>,
     geometry: Vec<FixtureGeometry>,
 }
@@ -242,6 +292,7 @@ impl PhotometricRig {
         cx.checkpoint()?;
         check_count(fixtures.len(), limits.max_fixtures, "fixtures")?;
         let mut source_count = 0_usize;
+        let mut surface_count = 0_usize;
         let mut geometry_count = 0_usize;
         for fixture in fixtures {
             cx.checkpoint()?;
@@ -251,6 +302,13 @@ impl PhotometricRig {
                 limits.max_emitters,
                 "emitters",
             )?;
+            surface_count = add_count(
+                surface_count,
+                fixture.surfaces.len(),
+                limits.max_emitters,
+                "emitters",
+            )?;
+            add_count(source_count, surface_count, limits.max_emitters, "emitters")?;
             geometry_count = add_count(
                 geometry_count,
                 fixture.geometry.len(),
@@ -261,6 +319,8 @@ impl PhotometricRig {
         let mut rig = Self {
             sources: reserved(source_count)?,
             identities: reserved(source_count)?,
+            surfaces: reserved(surface_count)?,
+            surface_identities: reserved(surface_count)?,
             fixtures: reserved(fixtures.len())?,
             geometry: reserved(geometry_count)?,
         };
@@ -272,6 +332,7 @@ impl PhotometricRig {
                 return Err(FixtureError::InvalidFixtureId(fixture.id));
             }
             let source_start = rig.sources.len();
+            let surface_start = rig.surfaces.len();
             let geometry_start = rig.geometry.len();
             let mut emitter_ids = BTreeSet::new();
             let mut flux = CompensatedSum::default();
@@ -293,6 +354,30 @@ impl PhotometricRig {
                 flux.add(source.flux_lm());
                 rig.sources.push(source);
                 rig.identities.push(identity);
+            }
+            let mut emitting_geometry = BTreeSet::new();
+            for emitter in &fixture.surfaces {
+                cx.checkpoint()?;
+                let identity = FixtureEmitterIdentity {
+                    fixture: fixture.id,
+                    emitter: emitter.id,
+                };
+                if emitter.id.0 == 0 || !emitter_ids.insert(emitter.id) {
+                    return Err(FixtureError::InvalidEmitterId(identity));
+                }
+                let geometry = emitter.source.primitive_index();
+                if geometry >= fixture.geometry.len() || !emitting_geometry.insert(geometry) {
+                    return Err(FixtureError::InvalidSurfaceBinding { identity, geometry });
+                }
+                let source = emitter
+                    .source
+                    .dimmed(fixture.optics.dimmer)
+                    .and_then(|source| source.filtered(fixture.optics.transmittance))
+                    .map_err(|error| FixtureError::Source { identity, error })?
+                    .bound_to_primitive(geometry_start + geometry);
+                flux.add(source.flux_lm());
+                rig.surfaces.push(source);
+                rig.surface_identities.push(identity);
             }
             for body in &fixture.geometry {
                 cx.checkpoint()?;
@@ -324,6 +409,7 @@ impl PhotometricRig {
             rig.fixtures.push(AssembledFixture {
                 id: fixture.id,
                 sources: source_start..rig.sources.len(),
+                surfaces: surface_start..rig.surfaces.len(),
                 geometry: geometry_start..rig.geometry.len(),
                 flux_lm: flux
                     .finish()
@@ -340,10 +426,25 @@ impl PhotometricRig {
         &self.sources
     }
 
-    /// One identity for every source, including dark emitters.
+    /// One identity for every point source, including dark emitters.
     #[must_use]
     pub fn emitter_identities(&self) -> &[FixtureEmitterIdentity] {
         &self.identities
+    }
+
+    /// Calibrated finite sources after shared controls. Primitive indices here
+    /// address [`Self::geometry`], not a scene; rig path constructors resolve
+    /// the mounted instances to their actual scene indices during admission.
+    #[must_use]
+    pub fn surface_sources(&self) -> &[PhotometricAreaEmitter] {
+        &self.surfaces
+    }
+
+    /// One identity per finite source, including dark sources. Native rig jobs
+    /// admit these sources first, followed by any supplemental scene bindings.
+    #[must_use]
+    pub fn surface_emitter_identities(&self) -> &[FixtureEmitterIdentity] {
+        &self.surface_identities
     }
 
     /// Fixture ranges and emitted flux totals in original fixture order.
@@ -358,12 +459,76 @@ impl PhotometricRig {
         &self.geometry
     }
 
+    /// Resolve original native instances without requiring a fixed scene
+    /// insertion offset or cloning calibrated sources. The returned references
+    /// borrow this rig, never the temporary index used to locate mounted bodies.
+    pub(crate) fn bind_surfaces<'a>(
+        &'a self,
+        primitives: &[Primitive],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, &'a PhotometricAreaEmitter)>, FixtureError> {
+        cx.checkpoint()?;
+        if self.surfaces.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut objects = reserved(primitives.len())?;
+        for (index, primitive) in primitives.iter().enumerate() {
+            cx.checkpoint()?;
+            let object_id = match &primitive.shape {
+                Shape::Instance(instance) => instance.object_id(),
+                Shape::AnimatedInstance(instance) => instance.object_id(),
+                _ => continue,
+            };
+            objects.push((object_id, index));
+        }
+        objects.sort_unstable_by_key(|&(id, _)| id);
+        cx.checkpoint()?;
+        let mut bindings = reserved(self.surfaces.len())?;
+        for (source, &identity) in self.surfaces.iter().zip(&self.surface_identities) {
+            cx.checkpoint()?;
+            let body = &self.geometry[source.primitive_index()];
+            let original = &body.instance;
+            let object_id = original.object_id();
+            let slot = objects.partition_point(|&(id, _)| id < object_id);
+            let &(found_id, primitive_index) = objects
+                .get(slot)
+                .filter(|&&(id, _)| id == object_id)
+                .ok_or(FixtureError::SurfaceNotMounted {
+                    identity,
+                    object_id,
+                })?;
+            if objects.get(slot + 1).is_some_and(|&(id, _)| id == found_id) {
+                return Err(FixtureError::DuplicateGeometryId(object_id));
+            }
+            let primitive = &primitives[primitive_index];
+            let matches = match &primitive.shape {
+                Shape::Instance(instance) => {
+                    instance.geometry_identity() == original.geometry_identity()
+                        && instance.transform() == original.transform()
+                        && instance.geometry().ptr_eq(original.geometry())
+                        && primitive.material == body.material
+                }
+                _ => false,
+            };
+            if !matches {
+                return Err(FixtureError::SurfaceGeometryMismatch {
+                    identity,
+                    object_id,
+                });
+            }
+            bindings.push((primitive_index, source));
+        }
+        cx.checkpoint()?;
+        Ok(bindings)
+    }
+
     /// Mount body instances into the caller's native primitive list once.
     ///
     /// Use that same list for direct scenes or `tracer::Scene::primitives` for
     /// spectral jobs. This appends only native instances with shared geometry,
-    /// not duplicated meshes or light-emitting proxy surfaces. Existing body
-    /// IDs are rejected, including a second mount of this rig. No elements are
+    /// not duplicated meshes or light-emitting proxy surfaces. Rig path jobs
+    /// attach finite emission to these same instances during admission. Existing
+    /// body IDs are rejected, including a second mount of this rig. No elements are
     /// appended on cancellation or refusal. The returned range locates bodies
     /// without changing existing primitive indices or finite-emitter bindings.
     pub fn append_geometry_to(
@@ -442,7 +607,9 @@ mod tests {
     use asupersync::types::Budget;
     use fs_exec::{CancelGate, ExecMode, StreamKey};
 
+    use super::super::area::EmissionSidedness;
     use crate::photometry::source::{AngularDistribution, SourceSpectrum};
+    use crate::{charts::TriMesh, instances::SharedGeometry, spectral::LiftedSpectrum};
 
     fn with_cx(operation: impl FnOnce(&Cx<'_>, &CancelGate)) {
         let gate = CancelGate::new_clock_free();
@@ -483,8 +650,132 @@ mod tests {
                     .unwrap(),
                 })
                 .collect(),
+            surfaces: Vec::new(),
             geometry: Vec::new(),
         }
+    }
+
+    fn surface_fixture(id: u64, emitter_id: u64) -> PhotometricFixture {
+        let mut input = fixture(id, &[]);
+        input.geometry.push(FixtureGeometry {
+            instance: GeometryInstance::try_new(
+                id,
+                fs_blake3::hash_domain("org.frankensim.test.fixture-aperture", b"triangle"),
+                SharedGeometry::mesh(TriMesh::new(
+                    vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    vec![[0, 1, 2]],
+                )),
+                RigidTransform::identity(),
+            )
+            .unwrap(),
+            material: Material::Lambertian {
+                reflectance: LiftedSpectrum { c: [0.0; 3] },
+            },
+        });
+        input.surfaces.push(FixtureSurfaceEmitter {
+            id: EmitterId(emitter_id),
+            source: PhotometricAreaEmitter::try_new(
+                0,
+                200.0,
+                1.0,
+                SourceSpectrum::equal_energy(),
+                EmissionSidedness::Front,
+            )
+            .unwrap(),
+        });
+        input
+    }
+
+    #[test]
+    fn g0_mixed_emitters_share_controls_identity_scope_and_count_limit() {
+        with_cx(|cx, _| {
+            let mut first = surface_fixture(10, 2);
+            first.emitters = fixture(10, &[1]).emitters;
+            first.optics = FixtureOpticalState::try_new(0.5, [0.25; SPECTRAL_BINS]).unwrap();
+            let mut second = surface_fixture(20, 1);
+            second.optics = FixtureOpticalState::try_new(0.0, [1.0; SPECTRAL_BINS]).unwrap();
+            let inputs = [first.clone(), second];
+            let rig =
+                PhotometricRig::try_new(&inputs, FixtureAssemblyLimits::default(), cx).unwrap();
+            assert_eq!(rig.sources()[0].flux_lm(), 12.5);
+            assert_eq!(rig.surface_sources()[0].flux_lm(), 25.0);
+            assert_eq!(rig.fixtures()[0].flux_lm, 37.5);
+            assert_eq!(rig.fixtures()[0].surfaces, 0..1);
+            assert_eq!(rig.fixtures()[1].surfaces, 1..2);
+            assert_eq!(rig.surface_sources()[1].primitive_index(), 1);
+            assert_eq!(rig.surface_sources()[1].flux_lm(), 0.0);
+            assert_eq!(
+                rig.surface_emitter_identities()[1],
+                FixtureEmitterIdentity {
+                    fixture: FixtureId(20),
+                    emitter: EmitterId(1),
+                }
+            );
+            assert_eq!(inputs[0].surfaces[0].source.flux_lm(), 200.0);
+            assert!(matches!(
+                PhotometricRig::try_new(
+                    &inputs,
+                    FixtureAssemblyLimits {
+                        max_emitters: 2,
+                        ..FixtureAssemblyLimits::default()
+                    },
+                    cx
+                ),
+                Err(FixtureError::LimitExceeded {
+                    resource: "emitters",
+                    ..
+                })
+            ));
+            first.surfaces[0].id = EmitterId(1);
+            assert!(matches!(
+                PhotometricRig::try_new(&[first], FixtureAssemblyLimits::default(), cx),
+                Err(FixtureError::InvalidEmitterId(FixtureEmitterIdentity {
+                    fixture: FixtureId(10),
+                    emitter: EmitterId(1),
+                }))
+            ));
+        });
+    }
+
+    #[test]
+    fn g0_finite_sources_require_distinct_existing_geometry_slots() {
+        with_cx(|cx, _| {
+            let mut input = surface_fixture(10, 1);
+            input.surfaces[0].source = input.surfaces[0].source.bound_to_primitive(1);
+            assert!(matches!(
+                PhotometricRig::try_new(&[input], FixtureAssemblyLimits::default(), cx),
+                Err(FixtureError::InvalidSurfaceBinding { geometry: 1, .. })
+            ));
+            let mut input = surface_fixture(10, 1);
+            let mut repeated = input.surfaces[0].clone();
+            repeated.id = EmitterId(2);
+            input.surfaces.push(repeated);
+            assert!(matches!(
+                PhotometricRig::try_new(&[input], FixtureAssemblyLimits::default(), cx),
+                Err(FixtureError::InvalidSurfaceBinding { geometry: 0, .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn g4_cancelled_surface_binding_keeps_rig_and_native_scene_intact() {
+        with_cx(|cx, gate| {
+            let rig = PhotometricRig::try_new(
+                &[surface_fixture(10, 1)],
+                FixtureAssemblyLimits::default(),
+                cx,
+            )
+            .unwrap();
+            let mut primitives = Vec::new();
+            rig.append_geometry_to(&mut primitives, cx).unwrap();
+            gate.request();
+            assert!(matches!(
+                rig.bind_surfaces(&primitives, cx),
+                Err(FixtureError::Cancelled)
+            ));
+            assert_eq!(primitives.len(), 1);
+            assert_eq!(rig.surface_sources()[0].flux_lm(), 200.0);
+        });
     }
 
     #[test]

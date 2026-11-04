@@ -47,17 +47,6 @@ differentiable lift). Pure Rust throughout.
   air-relative catalog data need an explicit conversion/refit before physical
   accuracy is claimed. There is no built-in measured-glass preset or claim for
   anomalous/absorptive resonance, transient propagation or pulse broadening.
-  `SellmeierIor::try_new_in_band` retains an explicit positive finite vacuum-
-  wavelength interval for original oscillator coefficients and analytic group
-  index. The closed interval excludes every active pole; monotone endpoint
-  checks retain the transparent `[1, 3]` phase-index domain. Nonrepresentable
-  squared-micrometre bounds and queries outside the source interval refuse.
-  No table fit or extrapolation is introduced through native fields, interfaces,
-  coherent films or thermal-source consumers. Effective glass support still
-  intersects original absorption. The legacy constructor retains its visible
-  arithmetic and identities; nondefault bands enter material, camera, film and
-  thermal optical identities. This does not broaden the CIE observer or confer
-  measurement authority on supplied coefficients.
   `TabulatedIor` extends the same phase-law owner with nine ordered absolute
   index samples spanning exactly 380--780 nm, with gaps at most 100 nm and
   bounded linear interpolation. Every knot is retained in material identity.
@@ -1915,37 +1904,6 @@ differentiable lift). Pure Rust throughout.
   energy and replay. This does not add refractive multi-interface source
   connectors or participating fields inside a glass body.
 
-## Material thermo-optic refraction
-
-With `material-state`, `MaterialThermoOpticField` binds the original reference
-glass and `fs-material::thermo_optic::SchottThermoOpticLaw` to one immutable
-thermal snapshot. Its usable wavelengths are the intersection of reference
-phase/absorption and thermo-optic support. Preparing a wavelength evaluates
-reference dispersion and the spectral material coefficients once; optical
-stages still query the actual spatial temperature and its analytic derivatives.
-
-The original gradient-index and ray-bundle owners consume
-`grad(n) = n_T grad(T)` and
-`Hess(n) = n_T Hess(T) + n_TT grad(T) grad(T)^T`, including mixed terms.
-Phase and available group optical distance retain the original material law;
-absorption remains the explicitly declared reference law. The same bound
-source supplies the native temperature trait. No finite-difference field,
-temperature-dependent absorption, moving state, expansion or stress response
-is invented. Each material/contact discontinuity requires a separate region
-and the native boundary event, not a smooth integration across the jump.
-
-`thermo_optic::conduction::PlanarConductionTemperatureField` borrows one original
-`GeneratedLayeredWallSolution` profile, with an explicit world origin and unit
-axis. The conduction owner supplies temperature, Fourier gradient and
-curvature; the bridge only rotates them. Prepared profile queries are O(1),
-allocation-free and bounded by the original layer and source temperature span.
-Contact jumps and exact stored face values survive. Even a constant-temperature
-bounded layer cannot activate an unbounded uniform-field shortcut.
-
-Controls run original conduction solves through analytic infrared dispersion,
-thermal refraction and native bundle focusing, with independent path/footprint,
-phase/group, Beer attenuation, mixed-Hessian, contact and domain references.
-
 ## Invariants
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy
@@ -2276,28 +2234,13 @@ The exact legacy one-rectangle/no-environment lighting branch retains its
 original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
-expectation. Tracer bit-semantics v4 and bidirectional semantics v10 retain
-ordinary emitting geometry's authored surface scattering. Source radiance is
-added at a hit with its existing emitter MIS weight; reflection/transmission
-then uses the original diffuse, GGX, conductor/coating, brushing or dielectric
-owner. An emitting surface can be an intermediate vertex on either BDPT
-subpath; its emission is a separate source endpoint contribution for the
-corresponding camera prefix. Emitting dielectric solids also participate in
-initial-medium discovery and Beer absorption. An exact black
-`SpectralDiffuse` material supplies an opaque emission-only surface. These
-authored relative-radiance sources do not infer an equilibrium thermal law;
-thermal and calibrated photometric source ownership remains unchanged.
-The five emitter-continuation regressions are authored but not yet executed:
-the native feature build was killed while compiling the pinned runtime under
-the available memory limit. The Cornell reference remains pinned to tracer
-v3 and must be reproduced in debug and release before a justified v4 re-freeze;
-neither its digest nor its evidence pin has been replaced without that proof.
+expectation.
 Current scalar scene-integrator no-claims: no gradient-index propagation or arbitrary overlapping media,
 no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
-are single-scattering without multiple-scattering compensation. Thermal
-emitters retain their reciprocal diffuse reflection. Dielectric tracer
-bit-semantics v14 retains v13's isotropic
+are single-scattering without multiple-scattering compensation, and standalone
+RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse
+reflection. Dielectric tracer bit-semantics v14 retains v13's isotropic
 view-conditioned visible-normal rough-dielectric proposal, exact environment
 endpoint, finite-rectangle one-internal-reflection manifold connector,
 coplanar-interface canonicalization, and support-preserving `T-R-T` cone cull.
@@ -3663,57 +3606,81 @@ Passive spectral filters reduce flux instead of renormalizing away attenuation.
 ### Multi-emitter fixture assembly
 
 `photometry::fixture::PhotometricFixture` groups original `PhotometricSource`
-values under one proper-rigid fixture-to-world transform and a shared
-`FixtureOpticalState`. Each emitter retains its own local transform, normalized
-angular distribution, full spectrum and individually calibrated/dimmed/filtered
-lumens. Shared state is an additional linear dimmer and passive 80-bin spectral
-transmission. It is applied independently through the existing source admission
-and filter implementation: no fixture-wide flux normalization, RGB conversion,
-or redistribution between emitters occurs. Positive attenuation that underflows
+and `PhotometricAreaEmitter` values under one proper-rigid fixture-to-world
+transform and a shared `FixtureOpticalState`. Point emitters retain their own
+local transform, angular distribution, spectrum and calibrated/dimmed/filtered
+lumens. Each `FixtureSurfaceEmitter` binds its source's primitive index to a
+local slot in the fixture's `geometry` list. Its original sidedness, spectrum,
+clear-output calibration and optional thin-lens/gobo/splitter/diffuser law stay
+with that native surface. Projector frames remain body-local; native instance
+placement composes body and fixture transforms exactly once.
+
+Shared state is an additional linear dimmer and passive 80-bin spectral
+transmission applied through the existing source owners. For finite emitters,
+both clear and emitted flux are attenuated, preserving passive projector loss;
+replacing optics cannot restore absorbed power. Each point or surface entry
+contributes independent calibrated power. There is no fixture-wide flux
+normalization, RGB conversion, redistribution between emitters or extra emissive
+proxy for a point's already-counted lumens. Positive attenuation that underflows
 the represented flux or spectral filter computation refuses as `NumericalRange`
 instead of silently becoming physical opacity.
 
-`PhotometricRig::try_new` assembles an immutable world-space snapshot in fixture
-input order, then emitter input order. Dark emitters and empty fixtures retain
-their identities and ranges. Fixture IDs are nonzero and unique in the rig;
-emitter IDs are nonzero and unique within their fixture, so different fixtures
-may reuse a local emitter ID. `FixtureEmitterIdentity` explicitly carries both.
-Fixture metadata reports the compensated sum of post-control emitted lumens.
-Count limits cover fixtures, emitters and native geometry instances before
-output reservation. Assembly checks cancellation per fixture/emitter/body part
-and publishes no partial rig. Source data is never modified; changing controls
-means assembling a fresh snapshot from the original calibration.
+`PhotometricRig::try_new` retains fixture input order and each fixture's emitter
+order in separate point and finite-source lists. Dark emitters and empty
+fixtures retain identities and ranges. Fixture IDs are nonzero and unique in
+the rig; emitter IDs are nonzero and unique across both emitter types within
+their fixture. Different fixtures may reuse a local emitter ID.
+`FixtureEmitterIdentity` explicitly carries both. Fixture metadata reports
+point/surface/geometry ranges and the compensated sum of post-control lumens,
+adding point entries followed by surface entries. Admission limits bound the
+combined emitter count, fixture count and native geometry count. Assembly checks
+cancellation per fixture/emitter/body part and publishes no partial rig. Source
+data is never modified; control changes assemble a fresh snapshot from the
+original calibration. Point-only fixture literals set `surfaces: Vec::new()`.
 
-Optional fixture body parts retain native `GeometryInstance` handles, geometry
-identities and materials. Their local placements compose with the same fixture
-transform as the emitters. `append_geometry_to` mounts the resulting instances
-once into the caller's native primitive list without copying mesh data or
-changing existing primitive indices. Object IDs share the native static/animated
-namespace; collisions refuse. The append is staged, so cancellation/refusal
-leaves the primitive contents unchanged. Mount bodies before admitting the
-direct scene or native spectral scene; they then use the existing geometry,
-visibility and material rules, including all unsupported-physics refusals.
+Fixture bodies retain original native `GeometryInstance` handles, geometry
+identities and materials. `append_geometry_to` mounts these instances once into
+the caller's native primitive list without copying meshes or changing existing
+primitive indices. Native static/animated object-ID collisions refuse. The
+append is staged, so cancellation/refusal leaves primitive contents unchanged.
 
-Rig constructors on `PhotometricScene`, `PathIlluminanceJob` and
-`PathLuminanceJob` retain the source-to-fixture identity map through the native
-`FixtureLighting` path. Direct illuminance breakdowns report emitter and fixture
-contributions in lux using the original source connection/visibility calculation.
-Their total retains the original source-order compensated sum. Summing separately
-rounded fixture totals need not reproduce its last bit. Spectral image/probe
-results retain job-level identities; they do not claim per-emitter decomposition
-of sampled indirect paths. Direct and single-scattered images continue to use
-`LuminanceJob` on the admitted rig scene, and physical-camera spectral images use
-the original path integrator.
+Rig path constructors resolve each finite source's rig-local geometry slot to
+the actual scene slot by native object ID, independent of insertion offset or
+later primitive ordering. Missing bodies, duplicate object IDs and mismatched
+shared geometry, placement or material refuse; every finite source binds one
+distinct fixture geometry slot. Area admission still validates the original
+mesh area, aperture, material and source law. Bound sources remain borrowed;
+the temporary object-index map creates no second renderer or mesh collection.
+Fixture surface bindings precede supplemental scene-level area bindings, and
+the existing native owner rejects duplicate emission on one primitive.
 
-The fixture layer adds no GDTF/MVR parser, finite-source substitute, shared lens
-solver, spatial mask, inter-emitter coupling or new transport/error model.
-Point emitters remain far-field delta-position sources; a body mesh does not
-make a point's front lens visibly emissive. Existing spectral discretization,
-calibration, geometry and omitted-transport no-claims below still apply. The
-fixture regression battery exercises transformed native geometry, independent
-controls, lux, spectral camera outputs, haze, cancellation/replay and a
-300-fixture multi-emitter rig. These are functional regressions with explicit
-test tolerances, not measured throughput or general physical error bounds.
+`PathIlluminanceJob` and `PathLuminanceJob` include rig-owned finite emission
+through the existing source-hit, next-event, MIS, visibility, spectral and
+physical-medium paths. Both retain separate point and surface emitter identity
+maps. The surface map identifies the rig-owned prefix before supplemental area
+bindings; it does not claim per-emitter decomposition of sampled indirect light.
+Finite emission contributes to probe `continuous_lux`, while `direct_lux`
+remains the deterministic point-source component. Public direct-only
+`PhotometricScene` rig admission refuses active finite emitters explicitly.
+Use the native path jobs for mixed or finite-source rig results.
+
+For point rigs, direct illuminance breakdowns retain emitter/fixture
+contributions in lux through the original connection/visibility calculation.
+The total preserves source-order compensated summation; separately rounded
+fixture totals need not reproduce its last bit. Direct and single-scattered
+images retain the original `LuminanceJob` path, and physical-camera spectral
+images use the original path integrator.
+
+The fixture layer adds no GDTF/MVR parser, shared lens solver, inter-emitter
+coupling or new transport/error model. Points remain far-field delta-position
+sources. Finite apertures obey the represented Lambertian or ideal-projector
+law; they do not establish real curved-lens glow, diffraction, aberrations or
+manufacturer calibration. Existing glass/point-source refusals, spectral
+discretization and unknown total-error qualifications remain in force.
+Regression cases cover transformed finite/point geometry, independent and
+shared controls, native camera/probe parity, visible luminance, stale binding
+refusal, haze, cancellation/replay and a 300-fixture point-emitter rig.
+These functional cases do not establish throughput or general physical bounds.
 
 ### Direct and native transport
 
@@ -4307,28 +4274,6 @@ with vacuum wavelength in metres; RGB-derived absorption refuses. Every spectral
 knot and independent midpoint uses the source's wavelength-dependent index.
 Temperature-dependent source values enter when the material is resolved and
 bound; a changed state or particle geometry requires rebinding.
-
-`MaterialParticleScattering::try_spectral` consumes the original
-`SpectralComplexIndexStatePoint` with explicit wavelength/full-property-key
-bindings. Arbitrary supported UV, visible and infrared bands enter without
-relabeling a visible source or fitting a replacement material. Optical and
-bulk-density bundles must share the exact card, complete physical condition and
-quantity conventions. The binding identity includes the original wavelength/key
-map as well as the accepted state, density, host and radius-number distribution.
-An exactly zero extinction index remains zero particle absorption.
-
-`source_spectrum` uses the SAME native Mie preparation owner for 2--16 caller
-knots inside that original support. It evaluates material n/k at every knot and
-fresh midpoint, then retains the exact output support in absorption, scattering
-and angular tables. Material-state refresh keeps original claim pins; rebinding
-after temperature changes updates optical response and particle bulk density
-together. Existing cell palettes, constituent mixtures, LTE emission and
-constituent heat deposition consume these spectra without new transport loops.
-Source-knot interpolation and prepared Mie interpolation remain separate
-approximations; midpoint diagnostics do not certify unsampled resonances.
-Synthetic G0/G1/G3 regressions cover infrared Rayleigh absorption, temperature
-refresh, source-map identity, two-temperature Kirchhoff transport, and exclusion
-of purely scattering constituents from heat, plus source/state/work refusals.
 
 `MaterialParticleSpectrum::bind_ambient_grid` supplies native absorption,
 scattering and optional LTE emission from the prepared spectrum and borrowed

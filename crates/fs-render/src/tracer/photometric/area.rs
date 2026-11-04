@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::photometry::area::{EmissionSidedness, PhotometricAreaEmitter};
+use crate::photometry::fixture::PhotometricRig;
 use crate::photometry::source::SourceError;
 use core::ops::Range;
 
@@ -14,6 +15,8 @@ const PROBE_AREA_NEE_DOMAIN: u32 = 0x6172_7072;
 
 struct Emitter<'a> {
     source: &'a PhotometricAreaEmitter,
+    // Resolved native scene slot; fixture sources retain rig-local bindings.
+    primitive_index: usize,
     faces: Range<usize>,
     luminance_cd_m2: f64,
     projector: Option<ProjectorPlacement>,
@@ -85,27 +88,45 @@ impl<'a> AreaLighting<'a> {
 
     pub(in crate::tracer) fn try_new(
         scene: &Scene,
+        rig: Option<&'a PhotometricRig>,
         sources: &'a [PhotometricAreaEmitter],
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
         cx.checkpoint()?;
+        let rig_bindings = match rig {
+            Some(rig) => rig.bind_surfaces(&scene.primitives, cx)?,
+            None => Vec::new(),
+        };
+        let count = rig_bindings
+            .len()
+            .checked_add(sources.len())
+            .ok_or(PhotometryError::AllocationRefused)?;
+        // Keep fixture/emitter input order, followed by caller-supplied native
+        // surface bindings. The source references outlive this temporary map.
+        let bindings = || {
+            rig_bindings.iter().copied().chain(
+                sources
+                    .iter()
+                    .map(|source| (source.primitive_index(), source)),
+            )
+        };
         let mut result = Self::empty();
         result
             .emitters
-            .try_reserve_exact(sources.len())
+            .try_reserve_exact(count)
             .map_err(|_| PhotometryError::AllocationRefused)?;
         result
             .primitive_emitters
-            .try_reserve_exact(sources.len())
+            .try_reserve_exact(count)
             .map_err(|_| PhotometryError::AllocationRefused)?;
-        let maximum_flux = sources
-            .iter()
-            .map(PhotometricAreaEmitter::flux_lm)
-            .fold(0.0, f64::max);
-        let mut flux_sum = 0.0;
-        for (emitter_index, source) in sources.iter().enumerate() {
+        let mut maximum_flux = 0.0_f64;
+        for (_, source) in bindings() {
             cx.checkpoint()?;
-            let primitive_index = source.primitive_index();
+            maximum_flux = maximum_flux.max(source.flux_lm());
+        }
+        let mut flux_sum = 0.0;
+        for (emitter_index, (primitive_index, source)) in bindings().enumerate() {
+            cx.checkpoint()?;
             let primitive =
                 scene
                     .primitives
@@ -304,6 +325,7 @@ impl<'a> AreaLighting<'a> {
             flux_sum = next;
             result.emitters.push(Emitter {
                 source,
+                primitive_index,
                 faces: first_face..result.faces.len(),
                 luminance_cd_m2: luminance,
                 projector,
@@ -570,7 +592,7 @@ impl<'a> AreaLighting<'a> {
             point,
             shadow_origin,
             sample.point,
-            emitter.source.primitive_index(),
+            emitter.primitive_index,
         )? {
             return Ok(result);
         }
@@ -666,7 +688,7 @@ impl<'a> AreaLighting<'a> {
             incoming_ray,
             ..
         } = receiver
-            && intersection.primitive_index == emitter.source.primitive_index()
+            && intersection.primitive_index == emitter.primitive_index
         {
             // A ray-derived hit can lie an ulp off its actual triangle plane.
             // Do not turn that error into a grazing self-lighting connection:
@@ -872,14 +894,16 @@ impl Receiver<'_> {
                         return Ok((0.0, 0.0));
                     };
                     let boundary = boundary.ok_or(TracerError::InvalidInput)?;
-                    let evaluation = surface.interface(wavelength, boundary.coating_reversed())?.evaluate_rough(
-                        frame.oriented,
-                        outgoing,
-                        direction,
-                        medium_ior(boundary.incident, wavelength)?,
-                        medium_ior(boundary.transmitted, wavelength)?,
-                        alpha,
-                    )?;
+                    let evaluation = surface
+                        .interface(wavelength, boundary.coating_reversed())?
+                        .evaluate_rough(
+                            frame.oriented,
+                            outgoing,
+                            direction,
+                            medium_ior(boundary.incident, wavelength)?,
+                            medium_ior(boundary.transmitted, wavelength)?,
+                            alpha,
+                        )?;
                     Ok((
                         frame.oriented.dot(direction).abs() * evaluation.value,
                         evaluation.pdf,

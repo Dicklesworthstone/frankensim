@@ -191,7 +191,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 Aperture::try_circular(0.0)?,
             )?;
         }
-        let areas = area::AreaLighting::try_new(scene, surfaces, cx)?;
+        let areas = area::AreaLighting::try_new(scene, points.rig(), surfaces, cx)?;
         let envelope = if sources.iter().all(|source| source.flux_lm() == 0.0) {
             areas.diffuse_envelope(scene, cx)?
         } else {
@@ -294,6 +294,12 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
 
     pub(crate) fn emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
         self.fixtures.rig.map(PhotometricRig::emitter_identities)
+    }
+
+    pub(crate) fn surface_emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
+        self.fixtures
+            .rig
+            .map(PhotometricRig::surface_emitter_identities)
     }
 
     pub(crate) const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {

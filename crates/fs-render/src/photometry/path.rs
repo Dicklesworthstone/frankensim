@@ -166,6 +166,7 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
     /// `scene.primitives` with [`PhotometricRig::append_geometry_to`] first.
     /// Source indices and the rig snapshot remain attached to the job; each
     /// emitter retains its own spectrum and angular law at every path vertex.
+    /// The rig's finite surface sources bind to their mounted native instances.
     /// Supplemental `surfaces` bind calibrated area emission to the native
     /// scene primitives and use the existing surface-light transport.
     pub fn new_with_rig(
@@ -386,6 +387,14 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
     #[must_use]
     pub fn emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
         self.transport.emitter_identities()
+    }
+
+    /// Identities for fixture-owned finite sources, in the retained prefix of
+    /// native area-source order. Supplemental bindings follow this prefix and
+    /// have no fixture identity. The image remains an aggregate measurement.
+    #[must_use]
+    pub fn surface_emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
+        self.transport.surface_emitter_identities()
     }
 
     #[cfg(test)]
