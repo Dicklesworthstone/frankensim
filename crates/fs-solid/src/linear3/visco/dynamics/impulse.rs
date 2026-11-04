@@ -1,0 +1,229 @@
+//! Instantaneous momentum changes on the original tensor-Prony trajectory.
+
+use super::*;
+use fs_math::dd::Dd;
+use fs_solver::LinearOp;
+
+/// A zero-duration event in full node-major coordinates. The material history,
+/// displacement, physical clock and accepted interval count are unchanged.
+#[derive(Clone, Debug)]
+pub struct ViscoDynamicImpulse {
+    pub time_s: f64,
+    pub iterations: usize,
+    /// Original full consistent mass times the actual represented delta-v.
+    pub momentum_change_kg_m_s: Vec<f64>,
+    /// Impulse ON the solid from supports; zero on free coordinates.
+    pub support_impulse_kg_m_s: Vec<f64>,
+    /// M delta-v minus applied and support impulse, in full nodal order.
+    pub impulse_residual_kg_m_s: Vec<f64>,
+    pub maximum_impulse_residual_kg_m_s: f64,
+    pub kinetic_before_j: f64,
+    pub kinetic_after_j: f64,
+    /// Average velocity dotted with M delta-v, without subtracting large K.
+    pub kinetic_change_j: f64,
+    pub external_work_j: f64,
+    pub support_work_j: f64,
+    /// Average velocity dotted with the actual impulse residual; never heat.
+    pub balance_residual_j: f64,
+}
+
+// Reuse the native sparse solve while borrowing its original mass. No mass
+// assembly, matrix copy, dense inverse or constitutive evaluation is needed.
+struct BorrowedMass<'a>(&'a Csr);
+impl LinearOp for BorrowedMass<'_> {
+    fn n(&self) -> usize {
+        self.0.nrows()
+    }
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        self.0.spmv(x, y);
+    }
+}
+
+fn work(before: &[f64], after: &[f64], impulse: &[f64]) -> Result<f64, ViscoElementError> {
+    // Retain a midpoint between adjacent f64 velocities before pairing it with
+    // impulse. Rounding that midpoint first can erase quadratic kinetic work.
+    let sum =
+        before
+            .iter()
+            .zip(after)
+            .zip(impulse)
+            .fold(Dd::ZERO, |sum, ((&old, &new), &applied)| {
+                let mean = Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new);
+                sum + mean * Dd::from_f64(applied)
+            });
+    finite(sum.hi)?;
+    finite(sum.lo)?;
+    finite(sum.to_f64())
+}
+
+impl ViscoDynamicState<'_, '_> {
+    /// Original admitted nodes; current positions add `material_history()`'s
+    /// full displacement. Impulse geometry never comes from unrelated nodes.
+    pub fn reference_nodes_m(&self) -> &[[f64; 3]] {
+        self.prepared.system.reference_nodes_m()
+    }
+
+    /// Full nodal velocity response to a world impulse [kg m/s], with every
+    /// support velocity held. This is the native M_ff^-1 action needed by a
+    /// contact mobility, lifted to full coordinates with zero supported rows.
+    /// All off-diagonal consistent-mass terms are retained. No state changes.
+    ///
+    /// The same full reference mass required by `apply_momentum_impulse` must
+    /// be retained. Interpolation traces and the contact law remain with their
+    /// physical owner; this method does not infer a point from a nodal vector.
+    pub fn momentum_response(
+        &self,
+        nodal_impulse_kg_m_s: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, ViscoElementError> {
+        self.momentum_response_impl(nodal_impulse_kg_m_s, cx)
+            .map(|(velocity, _)| velocity)
+    }
+
+    fn momentum_response_impl(
+        &self,
+        nodal_impulse_kg_m_s: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, usize), ViscoElementError> {
+        checkpoint(cx)?;
+        let system = self.prepared.system;
+        if system.full_reference_mass().is_none()
+            || nodal_impulse_kg_m_s.len() != system.full_dofs
+            || nodal_impulse_kg_m_s.iter().any(|j| !j.is_finite())
+        {
+            return Err(invalid(
+                "impulses require retained full reference mass and complete finite nodal components",
+            ));
+        }
+        let free = &system.equilibrium.free_dofs;
+        let rhs: Vec<_> = free.iter().map(|&d| nodal_impulse_kg_m_s[d]).collect();
+        let scale = finite(euclidean_norm(rhs.iter().copied()))?;
+        let mut response = vec![0.0; system.full_dofs];
+        if scale == 0.0 {
+            checkpoint(cx)?;
+            return Ok((response, 0));
+        }
+        let mass = &system.equilibrium.mass;
+        let (delta, iterations) = solve_linear(
+            &BorrowedMass(mass),
+            &Jacobi::new(mass),
+            &rhs,
+            scale,
+            self.prepared.config.solve,
+            cx,
+        )?;
+        for (i, (&d, value)) in free.iter().zip(delta).enumerate() {
+            if i % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            response[d] = finite(value)?;
+        }
+        checkpoint(cx)?;
+        Ok((response, iterations))
+    }
+
+    /// Apply an instantaneous nodal impulse through the original reference
+    /// mass, retaining the complete accepted material/thermal history and clock.
+    /// Supports keep their actual velocities, including nonzero moving rates;
+    /// full mass coupling supplies their reaction impulses and signed work.
+    /// Applied impulses on supported rows enter those reactions as well.
+    ///
+    /// Free bodies already retain full mass. Constrained sources must use
+    /// `ViscoElements::new_with_full_reference_mass`. Both force and impulse
+    /// responses then use the same inventory, without remeshing or lumping.
+    /// The caller owns any restitution/friction law and partner impulse.
+    ///
+    /// No material interval passes: Maxwell memory, Kelvin heat, thermal strain,
+    /// displacement, source work, time and lifetime step budget all survive.
+    /// The next native interval starts from the returned velocity. Solve,
+    /// actual-velocity momentum, work and cancellation checks precede mutation.
+    pub fn apply_momentum_impulse(
+        &mut self,
+        nodal_impulse_kg_m_s: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicImpulse, ViscoElementError> {
+        checkpoint(cx)?;
+        if !maximum_impulse_error_kg_m_s.is_finite() || maximum_impulse_error_kg_m_s < 0.0 {
+            return Err(invalid("finite nonnegative impulse allowance required"));
+        }
+        let (response, iterations) = self.momentum_response_impl(nodal_impulse_kg_m_s, cx)?;
+        let system = self.prepared.system;
+        let n = system.full_dofs;
+        let mut velocity = self.velocity_mps.clone();
+        let mut delta = vec![0.0; n];
+        for d in 0..n {
+            if d % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if response[d] != 0.0 {
+                velocity[d] = finite(velocity[d] + response[d])?;
+            }
+            delta[d] = finite(velocity[d] - self.velocity_mps[d])?;
+        }
+        let momentum_change_kg_m_s = mass_action(system, &delta);
+        let mut support_impulse_kg_m_s = vec![0.0; n];
+        let mut impulse_residual_kg_m_s = vec![0.0; n];
+        let mut maximum = 0.0_f64;
+        for d in 0..n {
+            if d % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let difference = Dd::from_f64(finite(momentum_change_kg_m_s[d])?)
+                - Dd::from_f64(nodal_impulse_kg_m_s[d]);
+            if self.prepared.reduced[d].is_none() {
+                support_impulse_kg_m_s[d] = finite(difference.to_f64())?;
+            }
+            // Check the returned reaction too: rounding a large opposing
+            // support impulse must not erase a smaller physical M delta-v.
+            let residual = finite((difference - Dd::from_f64(support_impulse_kg_m_s[d])).to_f64())?;
+            impulse_residual_kg_m_s[d] = residual;
+            maximum = maximum.max(residual.abs());
+        }
+        if maximum > maximum_impulse_error_kg_m_s {
+            return Err(ViscoElementError::ImpulseMomentum {
+                residual_kg_m_s: maximum,
+                allowance_kg_m_s: maximum_impulse_error_kg_m_s,
+            });
+        }
+        let kinetic_after_j = kinetic(system, &velocity)?;
+        let kinetic_change_j = work(&self.velocity_mps, &velocity, &momentum_change_kg_m_s)?;
+        let external_work_j = work(&self.velocity_mps, &velocity, nodal_impulse_kg_m_s)?;
+        let support_work_j = work(&self.velocity_mps, &velocity, &support_impulse_kg_m_s)?;
+        let balance_residual_j = work(&self.velocity_mps, &velocity, &impulse_residual_kg_m_s)?;
+        let config = self.prepared.config;
+        let allowance_j = finite(
+            config.absolute_energy_tolerance_j
+                + config.relative_energy_tolerance
+                    * (external_work_j.abs() + support_work_j.abs() + kinetic_change_j.abs()),
+        )?;
+        if balance_residual_j.abs() > allowance_j {
+            return Err(ViscoElementError::DynamicEnergy {
+                residual_j: balance_residual_j,
+                allowance_j,
+            });
+        }
+        let external_work = finite(self.external_work_j + external_work_j)?;
+        let support_work = finite(self.support_work_j + support_work_j)?;
+        let report = ViscoDynamicImpulse {
+            time_s: self.time_s,
+            iterations,
+            momentum_change_kg_m_s,
+            support_impulse_kg_m_s,
+            impulse_residual_kg_m_s,
+            maximum_impulse_residual_kg_m_s: maximum,
+            kinetic_before_j: self.kinetic_j,
+            kinetic_after_j,
+            kinetic_change_j,
+            external_work_j,
+            support_work_j,
+            balance_residual_j,
+        };
+        checkpoint(cx)?;
+        self.velocity_mps = velocity;
+        self.kinetic_j = kinetic_after_j;
+        self.external_work_j = external_work;
+        self.support_work_j = support_work;
+        Ok(report)
+    }
+}

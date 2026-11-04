@@ -54,8 +54,8 @@ mod quasistatic;
 pub use quasistatic::{ViscoQuasistaticOperator, ViscoQuasistaticStep};
 mod dynamics;
 pub use dynamics::{
-    ViscoDynamicConfig, ViscoDynamicMaterialChange, ViscoDynamicOperator, ViscoDynamicState,
-    ViscoDynamicStep,
+    ViscoDynamicConfig, ViscoDynamicImpulse, ViscoDynamicMaterialChange, ViscoDynamicOperator,
+    ViscoDynamicState, ViscoDynamicStep,
 };
 mod harmonic;
 pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicResponse};
@@ -210,6 +210,13 @@ pub enum ViscoElementError {
         /// Explicit absolute plus relative numerical allowance [J].
         allowance_j: f64,
     },
+    /// Actual represented momentum or support reaction missed an impulse gate.
+    ImpulseMomentum {
+        /// Largest absolute original-mass impulse residual [kg m/s].
+        residual_kg_m_s: f64,
+        /// Caller-admitted absolute residual allowance [kg m/s].
+        allowance_kg_m_s: f64,
+    },
     /// Explicit mode-count, matrix-size, iteration or frequency controls failed.
     InvalidModalBudget,
     /// The existing modal eigensolver refused the pencil.
@@ -327,6 +334,7 @@ pub struct ViscoElements {
     // Optional support inertia and free/support couplings from the same native
     // assembly. Free bodies already retain this matrix in equilibrium.
     full_mass: Option<std::sync::Arc<Csr>>,
+    reference_nodes_m: std::sync::Arc<[[f64; 3]]>,
     full_dofs: usize,
     internal_variables: usize,
     // Free-body modal/history use remains admitted; load control requires the
@@ -927,6 +935,7 @@ impl ViscoElements {
             elements: prepared,
             equilibrium: eq,
             full_mass,
+            reference_nodes_m: std::sync::Arc::from(nodes),
             full_dofs: nodes.len() * 3,
             internal_variables: needed,
             static_constraint_error,
@@ -937,6 +946,12 @@ impl ViscoElements {
     /// Canonical equilibrium elastic pencil, including consistent mass.
     pub fn equilibrium(&self) -> &TetElasticAssembly {
         &self.equilibrium
+    }
+
+    /// Original admitted mesh nodes in the same order as the full mass and
+    /// material displacement. Source refreshes retain this reference geometry.
+    pub fn reference_nodes_m(&self) -> &[[f64; 3]] {
+        &self.reference_nodes_m
     }
 
     /// Full node-major consistent mass, including supported rows, when retained.

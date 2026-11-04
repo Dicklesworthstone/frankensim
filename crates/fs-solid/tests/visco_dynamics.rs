@@ -4,6 +4,9 @@ use fs_material::visco::tensor::{Mandel6, PronyBranch, TensorProny};
 use fs_solid::linear3::visco::*;
 use fs_solid::linear3::{TetAssemblyBudget, TetStaticSolveConfig};
 
+#[path = "visco_dynamics/impulse.rs"]
+mod impulse;
+
 const NODES: [[f64; 3]; 4] = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 const CELLS: [[usize; 4]; 1] = [[0, 1, 2, 3]];
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &fs_exec::CancelGate) -> R) -> R {

@@ -21,6 +21,9 @@ use fs_solver::op::CsrOp;
 mod source;
 pub use source::ViscoDynamicMaterialChange;
 
+mod impulse;
+pub use impulse::ViscoDynamicImpulse;
+
 /// Explicit trajectory, sparse solve and energy-balance limits.
 #[derive(Clone, Copy, Debug)]
 pub struct ViscoDynamicConfig {
