@@ -83,6 +83,110 @@ fn malformed_geometry_source_domain_and_correlation_regime_refuse() {
     assert_eq!(law.reference().state(), &snapshot);
 }
 
+#[test]
+fn g1_g3_plate_strips_integrate_source_gas_heat_without_restarting_the_boundary_layer() {
+    let law = air(100000.0);
+    let original = *law.reference().state();
+    for (regime, geometry, speed) in [
+        (FlatPlateRegime::Laminar, ForcedGasGeometry::LaminarFlatPlate, 1.0),
+        (FlatPlateRegime::Turbulent, ForcedGasGeometry::TurbulentFlatPlate, 100.0),
+    ] {
+        let whole = ForcedGasBoundary { geometry, characteristic_length_m: 1.0,
+            exposed_area_m2: 0.1, speed_m_s: speed }.evaluate(&law, 340.0).unwrap();
+        let leading = FlatPlateGasBoundary { regime, start_m: 0.0, end_m: 1.0,
+            exposed_area_m2: 0.1, speed_m_s: speed }.evaluate(&law, 340.0).unwrap();
+        assert_eq!(leading.coefficient, whole.coefficient);
+        assert_eq!(leading.heat_into_wall_w, whole.heat_into_wall_w);
+        assert!(leading.nusselt.is_none());
+        assert!(leading.flat_plate_section.as_ref().unwrap().upstream().is_none());
+        let mut heat = 0.0;
+        let mut entropy = 0.0;
+        for pair in [0.0, 0.1, 0.27, 0.61, 1.0].windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let boundary = FlatPlateGasBoundary { regime, start_m: a, end_m: b,
+                exposed_area_m2: 0.1 * (b - a), speed_m_s: speed };
+            let sample = boundary.evaluate(&law, 340.0).unwrap();
+            let film = sample.property_gas.state();
+            assert_eq!(film.temperature, 320.0);
+            assert_eq!(film.pressure, original.pressure);
+            assert_eq!(sample.property_gas, whole.property_gas);
+            let re_per_m = film.density * speed / film.dynamic_viscosity;
+            let pr = film.dynamic_viscosity * film.specific_heat_cp / film.thermal_conductivity;
+            // Independent analytic integral of the local boundary-layer law.
+            // Turbulent first strip retains the original laminar entrance.
+            let integrated_nu = match regime {
+                FlatPlateRegime::Laminar =>
+                    0.664 * re_per_m.sqrt() * (b.sqrt() - a.sqrt()) * pr.cbrt(),
+                FlatPlateRegime::Turbulent => {
+                    (0.037 * re_per_m.powf(0.8) * (b.powf(0.8) - a.powf(0.8))
+                        - if a == 0.0 { 871.0 } else { 0.0 }) * pr.cbrt()
+                }
+            };
+            near(sample.conductance_w_k, 0.1 * film.thermal_conductivity * integrated_nu);
+            near(sample.heat_into_wall_w, -40.0 * sample.conductance_w_k);
+            if a > 0.0 {
+                let section = sample.flat_plate_section.as_ref().unwrap();
+                assert!(section.upstream().is_some());
+                assert_eq!(section.start_fraction(), a / b);
+                assert!(sample.coefficient.as_ref().unwrap().model.discrepancy_rel.is_infinite());
+            }
+            heat += sample.heat_into_wall_w;
+            entropy += sample.entropy_generation_w_k;
+        }
+        near(heat, whole.heat_into_wall_w);
+        near(entropy, whole.entropy_generation_w_k);
+    }
+    assert_eq!(law.reference().state(), &original);
+}
+
+#[test]
+fn g3_plate_strip_pressure_composition_and_passivity_follow_the_original_source() {
+    let boundary = FlatPlateGasBoundary { regime: FlatPlateRegime::Laminar,
+        start_m: 0.04, end_m: 0.1, exposed_area_m2: 0.006, speed_m_s: 1.0 };
+    for wall_k in [280.0, 300.0, 340.0] {
+        let a = boundary.evaluate(&air(100000.0), wall_k).unwrap();
+        let b = boundary.evaluate(&air(200000.0), wall_k).unwrap();
+        near(b.conductance_w_k / a.conductance_w_k, 2.0_f64.sqrt());
+        assert!(a.heat_into_wall_w * (300.0 - wall_k) >= 0.0);
+        assert!(a.entropy_generation_w_k >= 0.0);
+        if wall_k == 300.0 {
+            assert_eq!(a.heat_into_wall_w, 0.0);
+            assert!(a.conductance_w_k > 0.0);
+        }
+    }
+    let gas = read_gas_record(&mut "mixture 300 100000 mole 1 He 1".split_ascii_whitespace(), None, None).unwrap();
+    let helium = IsobaricGasLaw::try_from_record(gas).unwrap();
+    let sample = boundary.evaluate(&helium, 340.0).unwrap();
+    let air = boundary.evaluate(&air(100000.0), 340.0).unwrap();
+    assert!((sample.conductance_w_k / air.conductance_w_k - 1.0).abs() > 0.1);
+    assert_eq!(sample.property_gas.state().specific_gas_constant,
+        helium.reference().state().specific_gas_constant);
+}
+
+#[test]
+fn g4_plate_strips_preserve_both_endpoint_domains_and_refuse_false_geometry() {
+    let law = air(100000.0);
+    let boundary = FlatPlateGasBoundary { regime: FlatPlateRegime::Laminar,
+        start_m: 0.04, end_m: 0.1, exposed_area_m2: 0.006, speed_m_s: 1.0 };
+    for (a, b) in [(-0.1, 0.1), (0.1, 0.1), (0.2, 0.1), (f64::NAN, 0.1),
+        (0.0, f64::INFINITY), (1e-310, 1e100), (1e-12, 0.1)]
+    {
+        assert!(FlatPlateGasBoundary { start_m: a, end_m: b, ..boundary }
+            .evaluate(&law, 320.0).is_err());
+    }
+    for x in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(FlatPlateGasBoundary { speed_m_s: x, ..boundary }.evaluate(&law, 320.0).is_err());
+        assert!(FlatPlateGasBoundary { exposed_area_m2: x, ..boundary }.evaluate(&law, 320.0).is_err());
+        assert!(boundary.evaluate(&law, x).is_err());
+    }
+    // A supported turbulent downstream endpoint cannot authorize a positive
+    // upstream endpoint in the laminar regime, or reset it to zero.
+    assert!(FlatPlateGasBoundary { regime: FlatPlateRegime::Turbulent,
+        start_m: 0.001, end_m: 1.0, speed_m_s: 100.0, ..boundary }
+        .evaluate(&law, 320.0).is_err());
+    assert!(boundary.evaluate(&law, 1e9).is_err());
+}
+
 fn nitrogen() -> IsobaricGasLaw {
     let gas = read_gas_record(
         &mut "mixture 300 100000 mole 1 N2 1".split_ascii_whitespace(), None, None,

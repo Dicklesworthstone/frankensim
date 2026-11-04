@@ -2,6 +2,7 @@
 use super::*;
 use fs_couple::air_path::input::convection::{
     AidingVerticalPlateGasBoundary, AidingVerticalPlateSettings,
+    FlatPlateGasBoundary, FlatPlateRegime,
     ForcedGasBoundary, ForcedGasGeometry, GasConvectionBoundary,
     NaturalConvectionGeometry, NaturalGasBoundary,
 };
@@ -77,6 +78,29 @@ fn gas_boundary_mixed_grammar_requires_signed_speed_gravity_and_density_bound() 
 }
 
 #[test]
+fn plate_strip_grammar_retains_the_original_leading_edge() {
+    for (geometry, regime) in [
+        ("laminar-flat-plate-strip", FlatPlateRegime::Laminar),
+        ("turbulent-flat-plate-strip", FlatPlateRegime::Turbulent),
+    ] {
+        let route = format!("convection 1\nconvection-cell 10 {geometry} 1e-6 0.1 2 0.04\n");
+        let parsed = Profile::parse(version_five(profile_text(false), &route).as_bytes()).unwrap();
+        let GasConvectionBoundary::FlatPlateSection(boundary) = parsed.convection[0].boundary else {
+            panic!("finite strip was replaced by a whole-plate mean");
+        };
+        assert_eq!(boundary, FlatPlateGasBoundary {
+            regime, exposed_area_m2: 1e-6, start_m: 0.04, end_m: 0.1, speed_m_s: 2.0,
+        });
+        for start in ["", "-0.01", "0.1", "0.2", "NaN", "inf", "0.04 0"] {
+            let malformed = route.replace("2 0.04", &format!("2 {start}"));
+            assert!(Profile::parse(version_five(profile_text(false), &malformed).as_bytes()).is_err());
+        }
+        let entrance = route.replace("2 0.04", "2 0");
+        assert!(Profile::parse(version_five(profile_text(false), &entrance).as_bytes()).is_ok());
+    }
+}
+
+#[test]
 fn gas_boundary_mixed_preparation_admits_the_entire_authored_temperature_interval() {
     for (lower_temperature, speed, density_bound) in [(280.0, 0.2, 0.1), (300.0, -0.2, 0.1), (300.0, 0.2, 0.001)] {
         scoped(|cx, gate| {
@@ -113,6 +137,11 @@ fn source_gas_cooling_enters_the_original_backward_euler_external_heat_once() {
                     speed_up_m_s: 0.2, gravity_m_s2: 9.81,
                     maximum_relative_density_departure: 0.1,
                 },
+            })),
+        ("laminar-flat-plate-strip 1e-6 0.02 1 0.01",
+            GasConvectionBoundary::FlatPlateSection(FlatPlateGasBoundary {
+                regime: FlatPlateRegime::Laminar, start_m: 0.01, end_m: 0.02,
+                exposed_area_m2: 1e-6, speed_m_s: 1.0,
             })),
     ] {
     scoped(|cx, gate| {

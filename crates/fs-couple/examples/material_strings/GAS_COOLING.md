@@ -36,6 +36,8 @@ convection-cell 10 aiding-vertical-plate 0.000001 0.002 0.2 9.81 0.1
 | `cylinder-crossflow` | Cylinder diameter | Positive speed |
 | `laminar-flat-plate` | Streamwise extent | Positive speed |
 | `turbulent-flat-plate` | Streamwise extent | Positive speed |
+| `laminar-flat-plate-strip` | Downstream distance from original leading edge | Positive speed, upstream distance from same edge |
+| `turbulent-flat-plate-strip` | Downstream distance from original leading edge | Positive speed, upstream distance from same edge |
 | `sphere` | Sphere diameter | Positive speed |
 | `natural-vertical-plate` | Plate height | Nonnegative gravity |
 | `natural-horizontal-cylinder` | Cylinder diameter | Nonnegative gravity |
@@ -57,6 +59,40 @@ Every other v5 record is the existing v4 record, in the same order: dry contacts
 films, film surfaces, series heat, material heat budget, fiber/string heat, links.
 `boundary adiabatic` remains available in v5 and has no `convection` block.
 These rows are a syntax example, not measured instrument geometry.
+
+### Physical strips along a plate
+
+Use strip rows when several finite thermal cells represent successive portions
+of one external plate. For example, two equal-width portions spanning 0–0.01 m
+and 0.01–0.02 m are declared as:
+
+```text
+convection 2
+convection-cell 10 laminar-flat-plate-strip 0.000001 0.01 1 0
+convection-cell 20 laminar-flat-plate-strip 0.000001 0.02 1 0.01
+```
+
+The last field is the upstream distance. Both distances are measured from the
+same physical leading edge in the prescribed flow direction; reversing flow
+requires distances from the opposite edge. `end_m` remains the correlation
+length. Each positive upstream point must pass the same original card as its
+downstream point. A later turbulent strip cannot silently cross into the
+laminar card, and a positive unsupported start is never replaced by zero.
+
+`FlatPlateGasBoundary` uses the shared `fs-convection::developing` integral of
+cumulative mean transfer. For a common isothermal wall, uniform source fluid,
+uniform speed and constant transverse width, arbitrary streamwise subdivisions
+recover the original whole-plate heat. Local h still varies downstream; mesh
+cells do not restart the boundary layer. A zero-start strip exactly preserves
+the whole-plate coefficient. Local wall/film-temperature changes are an explicit
+held-property approximation, not a resolved non-isothermal boundary layer.
+
+The actual coefficient and both original endpoint evaluations stay attached
+to `GasConvectionSample::flat_plate_section`; `nusselt` is absent for a strip.
+The original mean-card uncertainty does not bound a difference of cumulative
+predictions. Positive-start strips therefore keep the shared section owner's
+unbounded model discrepancy. Their signed heat and entropy use the same
+boundary account and native nonlinear thermal residual as the other geometries.
 
 ## One physical state and one heat step
 
@@ -126,7 +162,8 @@ https://doi.org/10.1002/aic.690180219 .
 
 No second correlation formula, fitted cooling coefficient or material-name
 switch is introduced. `GasConvectionBoundary` explicitly selects a
-`ForcedGasBoundary`, `NaturalGasBoundary` or `AidingVerticalPlateGasBoundary`;
+`ForcedGasBoundary`, `NaturalGasBoundary`, `AidingVerticalPlateGasBoundary`
+or `FlatPlateGasBoundary`;
 their shared sample retains the
 actual gas evaluation, correlation evidence, signed heat and instantaneous
 entropy production. These are correlation-rung models, not resolved CFD or
@@ -173,9 +210,10 @@ cargo check --locked -p fs-couple --bin material_strings --example material_stri
 
 The shared tests compare the original source evaluation against independent
 correlation arithmetic, pressure scaling, mixture substitution, humid-gas
-composition, natural face orientation, mixed pure limits and density/alignment
+composition, natural face orientation, physical strip heat additivity and both
+endpoint domains, mixed pure limits and density/alignment
 refusal, equilibrium and passive heat/entropy signs. Native tests cover
-forced/natural/mixed grammar, complete source-interval admission,
+forced/natural/mixed/strip grammar, complete source-interval admission,
 original finite-cell energy balance, temperature-dependent pressure and
 unchanged stream/chunk semantics. The accompanying patch bundle records which
 checks were actually executed; authored tests are not passing-test claims.

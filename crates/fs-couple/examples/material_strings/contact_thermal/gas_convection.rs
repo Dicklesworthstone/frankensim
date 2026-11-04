@@ -2,6 +2,7 @@
 use super::*;
 use fs_couple::air_path::input::convection::{
     AidingVerticalPlateGasBoundary, AidingVerticalPlateSettings,
+    FlatPlateGasBoundary, FlatPlateRegime,
     ForcedGasBoundary, ForcedGasGeometry, GasConvectionBoundary,
     HorizontalPlateFacing, NaturalConvectionGeometry, NaturalGasBoundary,
 };
@@ -54,7 +55,18 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
                     },
                 },
             ),
-            _ => return Err("convection-cell needs an explicit forced, natural or aiding vertical-plate geometry".into()),
+            "laminar-flat-plate-strip" | "turbulent-flat-plate-strip" => {
+                GasConvectionBoundary::FlatPlateSection(FlatPlateGasBoundary {
+                    regime: if geometry == "laminar-flat-plate-strip" {
+                        FlatPlateRegime::Laminar
+                    } else {
+                        FlatPlateRegime::Turbulent
+                    },
+                    exposed_area_m2, end_m: characteristic_length_m,
+                    speed_m_s: driving, start_m: row.scalar()?,
+                })
+            }
+            _ => return Err("convection-cell needs an explicit forced, natural, aiding or plate-strip geometry".into()),
         };
         row.end()?;
         boundary.validate()?;
@@ -165,6 +177,11 @@ impl Reservoir {
                         route.cell.0, boundary.exposed_area_m2, boundary.characteristic_length_m,
                         boundary.settings.speed_up_m_s, boundary.settings.gravity_m_s2,
                         boundary.settings.maximum_relative_density_departure);
+                }
+                GasConvectionBoundary::FlatPlateSection(boundary) => {
+                    eprintln!("contact_thermal_convection_cell={}; plate_strip={:?}; area_m2={}; leading_edge_start_m={}; leading_edge_end_m={}; free_stream_m_s={}",
+                        route.cell.0, boundary.regime, boundary.exposed_area_m2,
+                        boundary.start_m, boundary.end_m, boundary.speed_m_s);
                 }
             }
         }

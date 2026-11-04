@@ -14,8 +14,10 @@
 
 mod natural;
 mod mixed;
+mod plate;
 pub use natural::NaturalGasBoundary;
 pub use mixed::AidingVerticalPlateGasBoundary;
+pub use plate::{FlatPlateGasBoundary, FlatPlateRegime};
 pub use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
 pub use fs_material::fluid_transport::{AidingVerticalPlateFrame, AidingVerticalPlateSettings};
 
@@ -23,6 +25,7 @@ use fs_convection::{
     CorrelationError, CorrelationId, CorrelationInputs, HeatTransferCoefficient,
     NusseltEvaluation, ThermalConductivity,
 };
+use fs_convection::developing::{FlatPlateSection, FlatPlateSectionError};
 use fs_evidence::Evidence;
 use fs_material::{
     MaterialError,
@@ -57,7 +60,7 @@ pub struct ForcedGasBoundary {
     pub speed_m_s: f64,
 }
 
-/// Explicit choice of forced, natural or laminar aiding mixed convection.
+/// Explicit choice of forced, natural, laminar aiding mixed or plate-strip convection.
 /// Zero speed never changes a forced-only card into a natural one. The declared
 /// mixed plate retains its own continuous pure limits and alignment checks.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +68,8 @@ pub enum GasConvectionBoundary {
     Forced(ForcedGasBoundary),
     Natural(NaturalGasBoundary),
     AidingVerticalPlate(AidingVerticalPlateGasBoundary),
+    /// Finite strip measured from the original physical plate's leading edge.
+    FlatPlateSection(FlatPlateGasBoundary),
 }
 
 impl GasConvectionBoundary {
@@ -73,6 +78,7 @@ impl GasConvectionBoundary {
             Self::Forced(boundary) => boundary.validate(),
             Self::Natural(boundary) => boundary.validate(),
             Self::AidingVerticalPlate(boundary) => boundary.validate(),
+            Self::FlatPlateSection(boundary) => boundary.validate(),
         }
     }
 
@@ -82,6 +88,7 @@ impl GasConvectionBoundary {
             Self::Forced(boundary) => boundary.exposed_area_m2,
             Self::Natural(boundary) => boundary.exposed_area_m2,
             Self::AidingVerticalPlate(boundary) => boundary.exposed_area_m2,
+            Self::FlatPlateSection(boundary) => boundary.exposed_area_m2,
         }
     }
 
@@ -92,6 +99,7 @@ impl GasConvectionBoundary {
             Self::Forced(boundary) => boundary.evaluate(gas, wall_temperature_k),
             Self::Natural(boundary) => boundary.evaluate(gas, wall_temperature_k),
             Self::AidingVerticalPlate(boundary) => boundary.evaluate(gas, wall_temperature_k),
+            Self::FlatPlateSection(boundary) => boundary.evaluate(gas, wall_temperature_k),
         }
     }
 }
@@ -102,6 +110,7 @@ pub enum GasConvectionError {
     Invalid(&'static str),
     Material(MaterialError),
     Correlation(CorrelationError),
+    Section(FlatPlateSectionError),
 }
 impl core::fmt::Display for GasConvectionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -109,6 +118,7 @@ impl core::fmt::Display for GasConvectionError {
             Self::Invalid(what) => write!(f, "gas convection: {what}"),
             Self::Material(error) => write!(f, "gas convection material: {error}"),
             Self::Correlation(error) => write!(f, "gas convection correlation: {error}"),
+            Self::Section(error) => write!(f, "gas convection plate section: {error}"),
         }
     }
 }
@@ -118,6 +128,9 @@ impl From<MaterialError> for GasConvectionError {
 }
 impl From<CorrelationError> for GasConvectionError {
     fn from(error: CorrelationError) -> Self { Self::Correlation(error) }
+}
+impl From<FlatPlateSectionError> for GasConvectionError {
+    fn from(error: FlatPlateSectionError) -> Self { Self::Section(error) }
 }
 
 /// The same evaluated gas and model evidence that produced the boundary heat.
@@ -129,11 +142,16 @@ pub struct GasConvectionSample {
     /// Same gas law evaluated at the wall, retained when the forced-sphere relation
     /// needs surface viscosity. Other geometries do not query this state.
     pub surface_gas: Option<GasRecord>,
-    /// None only for exact resting thermal equilibrium when the declared
-    /// natural/mixed correlation does not admit the zero-driving point.
-    /// No out-of-range coefficient or heat derivative is inferred.
+    /// Whole-surface mean evaluation. Finite strips instead retain both
+    /// cumulative means in `flat_plate_section`; neither mean is their local h.
+    /// Both are absent only at exact resting thermal equilibrium when the
+    /// declared natural/mixed law does not admit the zero-driving point.
     pub nusselt: Option<NusseltEvaluation>,
-    /// Paired with `nusselt`; an absent coefficient certifies zero heat only.
+    /// Original strip evaluation and its upstream/downstream source domains.
+    /// Mutually exclusive with `nusselt` in every returned sample.
+    pub flat_plate_section: Option<FlatPlateSection>,
+    /// Actual boundary coefficient, paired with the retained mean OR strip.
+    /// An absent coefficient certifies zero heat only, not a heat derivative.
     pub coefficient: Option<Evidence<HeatTransferCoefficient>>,
     pub wall_temperature_k: f64,
     pub reservoir_temperature_k: f64,
@@ -245,6 +263,22 @@ fn finish_sample(
             Length::new(characteristic_length_m),
         )
     }).transpose()?;
+    finish_coefficient(property_gas, surface_gas, nusselt, None, coefficient,
+        exposed_area_m2, wall_temperature_k, reservoir_temperature_k)
+}
+
+/// All geometries use this same signed external heat and entropy account.
+#[allow(clippy::too_many_arguments)]
+fn finish_coefficient(
+    property_gas: GasRecord,
+    surface_gas: Option<GasRecord>,
+    nusselt: Option<NusseltEvaluation>,
+    flat_plate_section: Option<FlatPlateSection>,
+    coefficient: Option<Evidence<HeatTransferCoefficient>>,
+    exposed_area_m2: f64,
+    wall_temperature_k: f64,
+    reservoir_temperature_k: f64,
+) -> Result<GasConvectionSample, GasConvectionError> {
     let conductance_w_k = coefficient.as_ref()
         .map_or(0.0, |value| value.value.value() * exposed_area_m2);
     let difference = reservoir_temperature_k - wall_temperature_k;
@@ -262,7 +296,7 @@ fn finish_sample(
     {
         return Err(GasConvectionError::Invalid("boundary heat or entropy is unrepresentable"));
     }
-    Ok(GasConvectionSample { property_gas, surface_gas, nusselt, coefficient,
+    Ok(GasConvectionSample { property_gas, surface_gas, nusselt, flat_plate_section, coefficient,
         wall_temperature_k, reservoir_temperature_k, conductance_w_k,
         heat_into_wall_w, entropy_generation_w_k })
 }
