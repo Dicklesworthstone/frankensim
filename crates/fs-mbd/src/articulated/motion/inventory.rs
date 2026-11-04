@@ -28,23 +28,19 @@ pub mod supported;
 pub mod bilateral;
 
 use super::reconfigure::constraints::{
-    self, ConstraintControls, ConstraintError, JointConstraint, PreparedJointConstraints,
-    admit_constraints, apply_rows,
+    self, ConstraintControls, ConstraintError, JointConstraint, admit_constraints,
 };
 use super::reconfigure::{
     self, ReconfigurationControls, ReconfigurationError, audit_momentum, state_kinematics,
 };
 use super::spatial_loads::implicit::ImplicitSpatialError;
-use super::spatial_loads::implicit::distance::{
-    BilateralImpulseConfig, BilateralImpulseResponse, BilateralLoop, BilateralLoopError,
-};
+use super::spatial_loads::implicit::distance::BilateralLoopError;
 use super::{
     FreeFloatingMotionError, FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS, SpatialSum,
 };
 use crate::articulated::{
-    ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
-    Kinematics, Link, SpatialInertia, forward_kinematics, free_floating_impulse_delta,
-    inverse_dynamics, momentum_from_kinematics, validate_slice, validate_twist,
+    ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, Kinematics, Link,
+    SpatialInertia, inverse_dynamics, momentum_from_kinematics, validate_slice, validate_twist,
 };
 use core::fmt;
 use fs_ga::{GaError, Mat3, Se3, Twist, Vec3, Wrench};
@@ -303,6 +299,10 @@ pub fn capture_payload(
         controls,
         cancelled,
     )?;
+    Ok(single_capture(result))
+}
+
+fn single_capture(result: PayloadBatchCapture) -> PayloadCapture {
     // The singleton entry retains the same native batch solve and accounting;
     // only the one-element inventory/result containers are unwrapped.
     let PayloadBatchCapture {
@@ -313,275 +313,14 @@ pub fn capture_payload(
         removed_relative_energy_j,
         balance,
     } = result;
-    Ok(PayloadCapture {
+    PayloadCapture {
         model_after,
         state_after,
         attachment: attachments.remove(0),
         payload_after: payloads_after.remove(0),
         removed_relative_energy_j,
         balance,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn capture_evaluated(
-    model: &ArticulatedModel,
-    state: &FreeFloatingMotionState,
-    target_link: usize,
-    payload: PayloadState,
-    constraints: &[JointConstraint],
-    controls: PayloadControls<'_>,
-    bilateral_rows: Option<(&[BilateralLoop], BilateralImpulseConfig)>,
-    mut cancelled: impl FnMut() -> bool,
-) -> Result<bilateral::BilateralPayloadCapture, PayloadError> {
-    let before_kin = validate_inputs(
-        model,
-        state,
-        target_link,
-        constraints,
-        controls,
-        &mut cancelled,
-    )?;
-    validate_twist(payload.twist_body, "payload.twist_body")?;
-    let link_from_payload = before_kin.world_from_link[target_link]
-        .inverse()?
-        .compose(payload.world_from_body)?;
-    let loaded_inertia = combine_inertias(
-        model.links()[target_link].inertia(),
-        payload.inertia,
-        link_from_payload,
-    )?;
-    let model_after = replace_link_inertia(model, target_link, loaded_inertia)?;
-    poll(&mut cancelled)?;
-    let before = system_totals(
-        model,
-        state,
-        &before_kin,
-        Some((target_link, &payload)),
-        &mut cancelled,
-    )?;
-    let boost = account_boost(model, &before_kin)?;
-    let (state_after, impulse, multipliers, reaction) =
-        if let Some((loops, config)) = bilateral_rows {
-            let reaction = bilateral::capture_response(
-                &model_after,
-                state,
-                target_link,
-                payload,
-                link_from_payload,
-                &before_kin,
-                boost,
-                loops,
-                constraints,
-                controls,
-                config,
-                &mut cancelled,
-            )?;
-            let state_after = FreeFloatingMotionState {
-                base: reaction.impulse.base_after,
-                joint_position: state.joint_position.clone(),
-                joint_velocity: reaction.impulse.joint_velocity_after.clone(),
-            };
-            let impulse = bilateral::project_constraint_impulses(
-                &model_after,
-                state,
-                &reaction.constraint_body_impulses,
-                &reaction.constraint_joint_impulses,
-                &mut cancelled,
-            )?;
-            let multipliers = reaction.joint_multipliers.clone();
-            (state_after, impulse, multipliers, Some(reaction))
-        } else {
-            let boost_base = state
-                .base
-                .world_from_base
-                .rotation()
-                .inverse()
-                .rotate(boost)?;
-            let centered = forward_kinematics(
-                model,
-                BaseState::prescribed(
-                    state.base.world_from_base,
-                    state
-                        .base
-                        .twist_body
-                        .minus(Twist::new(Vec3::default(), boost_base)),
-                    Twist::zero(),
-                ),
-                &state.joint_position,
-                &state.joint_velocity,
-            )?;
-            poll(&mut cancelled)?;
-            let mut body_momenta = Vec::with_capacity(model.link_count());
-            for (index, link) in model.links().iter().enumerate() {
-                if index % 64 == 0 {
-                    poll(&mut cancelled)?;
-                }
-                body_momenta.push(link.inertia().momentum(centered.body_twist[index])?);
-            }
-            let incoming = payload
-                .inertia
-                .momentum(twist_in_frame(
-                    payload.twist_body,
-                    payload.world_from_body,
-                    boost,
-                )?)?
-                .transform_by(&link_from_payload);
-            body_momenta[target_link] = add_wrench(body_momenta[target_link], incoming);
-            poll(&mut cancelled)?;
-            let solved = free_floating_impulse_delta(
-                &model_after,
-                &state.joint_position,
-                &vec![0.0; model.dof_count()],
-                &body_momenta,
-            )?;
-            poll(&mut cancelled)?;
-            let mut state_after = FreeFloatingMotionState {
-                base: FreeFloatingBaseState::new(
-                    state.base.world_from_base,
-                    solved.base.plus(Twist::new(Vec3::default(), boost_base)),
-                ),
-                joint_position: state.joint_position.clone(),
-                joint_velocity: solved.joint,
-            };
-            let mut impulse = vec![0.0; 6 + model.dof_count()];
-            let mut multipliers = Vec::new();
-            if !constraints.is_empty() {
-                let mut prepared = PreparedJointConstraints::new(
-                    &model_after,
-                    &state.joint_position,
-                    constraints,
-                    controls.minimum_reciprocal_condition,
-                    &mut cancelled,
-                )?;
-                let rhs: Vec<_> = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?
-                    .into_iter()
-                    .map(|value| -value)
-                    .collect();
-                let response = prepared.solve_response(&rhs, &mut cancelled)?;
-                state_after.base.twist_body = state_after.base.twist_body.plus(response.base_delta);
-                for (index, delta) in response.joint_delta.iter().enumerate() {
-                    if index % 64 == 0 {
-                        poll(&mut cancelled)?;
-                    }
-                    state_after.joint_velocity[index] = finite(
-                        state_after.joint_velocity[index] + delta,
-                        "payload final joint rate",
-                    )?;
-                }
-                impulse[6..].copy_from_slice(&response.joint_effort);
-                multipliers = response.multipliers;
-            }
-
-            (state_after, impulse, multipliers, None)
-        };
-    let final_rows = admit_constraints(
-        constraints,
-        &state_after.joint_position,
-        &state_after.joint_velocity,
-        &mut cancelled,
-    )?;
-    let after_kin = state_kinematics(&model_after, &state_after)?;
-    poll(&mut cancelled)?;
-    let payload_after =
-        payload_at_link(&after_kin, target_link, link_from_payload, payload.inertia)?;
-    let after = system_totals(&model_after, &state_after, &after_kin, None, &mut cancelled)?;
-
-    let mut removed_relative_energy_j = 0.0;
-    for (index, link) in model.links().iter().enumerate() {
-        if index % 64 == 0 {
-            poll(&mut cancelled)?;
-        }
-        removed_relative_energy_j = finite(
-            removed_relative_energy_j
-                + link.inertia().kinetic_energy(
-                    before_kin.body_twist[index].minus(after_kin.body_twist[index]),
-                )?,
-            "payload removed relative energy",
-        )?;
     }
-    removed_relative_energy_j = finite(
-        removed_relative_energy_j
-            + payload
-                .inertia
-                .kinetic_energy(payload.twist_body.minus(payload_after.twist_body))?,
-        "payload removed relative energy",
-    )?;
-    if removed_relative_energy_j < 0.0 {
-        return Err(PayloadError::Invalid("negative capture relative energy"));
-    }
-    if removed_relative_energy_j > controls.maximum_energy_exchange_j {
-        return Err(PayloadError::EnergyExchange {
-            energy_j: removed_relative_energy_j,
-            maximum_j: controls.maximum_energy_exchange_j,
-        });
-    }
-    let reaction_work_j = if let Some(reaction) = &reaction {
-        bilateral::constraint_work(
-            &reaction.constraint_body_impulses,
-            &reaction.constraint_joint_impulses,
-            &before_kin,
-            &after_kin,
-            &state.joint_velocity,
-            &state_after.joint_velocity,
-            boost,
-            &mut cancelled,
-        )?
-    } else {
-        let initial_rows = apply_rows(constraints, &state.joint_velocity, &mut cancelled)?;
-        let mut reaction_work_j = 0.0;
-        for (index, multiplier) in multipliers.iter().enumerate() {
-            poll(&mut cancelled)?;
-            reaction_work_j = finite(
-                reaction_work_j
-                    + multiplier * (0.5 * initial_rows[index] + 0.5 * final_rows.velocity[index]),
-                "payload reaction work",
-            )?;
-        }
-
-        reaction_work_j
-    };
-    let kinetic_before_j =
-        energy_in_frame(model, &before_kin, Some(&payload), boost, &mut cancelled)?;
-    let kinetic_after_j = energy_in_frame(&model_after, &after_kin, None, boost, &mut cancelled)?;
-    // The relative quadratic already describes the complete passive capture
-    // projection. Finite gear work is independently retained and capped; it is
-    // not relabelled as removed energy or subtracted to hide this defect.
-    let energy_residual_j = finite(
-        kinetic_after_j - kinetic_before_j + removed_relative_energy_j,
-        "payload common-frame capture energy residual",
-    )?;
-    let balance = finish_common_frame_balance(
-        before,
-        after,
-        impulse,
-        multipliers,
-        reaction_work_j,
-        boost,
-        kinetic_before_j,
-        kinetic_after_j,
-        energy_residual_j,
-        controls,
-        &mut cancelled,
-    )?;
-    poll(&mut cancelled)?;
-    Ok(bilateral::BilateralPayloadCapture {
-        capture: PayloadCapture {
-            model_after,
-            state_after,
-            attachment: PayloadAttachment {
-                target_link,
-                retained_link: model.links()[target_link].clone(),
-                loaded_inertia,
-                link_from_payload,
-                payload_inertia: payload.inertia,
-            },
-            payload_after,
-            removed_relative_energy_j,
-            balance,
-        },
-        reaction,
-    })
 }
 
 fn reconfiguration_controls(controls: PayloadControls<'_>) -> ReconfigurationControls<'_> {

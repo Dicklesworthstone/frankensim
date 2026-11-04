@@ -9,8 +9,10 @@
 #[path = "bilateral/release.rs"]
 pub mod release;
 
+use super::super::spatial_loads::implicit::distance::{
+    BilateralImpulseConfig, BilateralImpulseResponse, BilateralLoop,
+};
 use super::*;
-use super::super::spatial_loads::implicit::distance::joint;
 use fs_math::dd::Dd;
 
 /// Original capture with the native event that transmitted its mismatch.
@@ -23,6 +25,18 @@ pub struct BilateralPayloadCapture {
     /// payload rigidly; it is not the physical pre-capture inventory.
     /// Native source/reaction work here is in the lab frame. The complete
     /// inventory reaction work uses capture.balance.accounting_boost_world.
+    pub reaction: Option<BilateralImpulseResponse>,
+}
+
+/// One simultaneous inventory capture with its shared mixed-constraint event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BilateralPayloadBatchCapture {
+    /// Complete many-body-before/loaded-tree-after inventory and physical audit.
+    /// Attachment handles and payload states retain the authored input order.
+    pub capture: PayloadBatchCapture,
+    /// Auxiliary loaded-tree mismatch event, absent for exact empty-loop
+    /// delegation. Its initial state carries every payload rigidly, and its
+    /// lab-frame work is distinct from the complete inventory's energy account.
     pub reaction: Option<BilateralImpulseResponse>,
 }
 
@@ -58,70 +72,67 @@ pub fn capture_payload(
     config: BilateralImpulseConfig,
     cancelled: impl FnMut() -> bool,
 ) -> Result<BilateralPayloadCapture, PayloadError> {
-    if loops.is_empty() {
-        return super::capture_payload(
-            model, state, target_link, payload, rows, controls, cancelled,
-        )
-        .map(|capture| BilateralPayloadCapture {
-            capture,
-            reaction: None,
-        });
-    }
-    super::capture_evaluated(
+    let result = capture_payloads(
         model,
         state,
-        target_link,
-        payload,
+        &[PayloadCaptureInput {
+            target_link,
+            payload,
+        }],
+        loops,
         rows,
         controls,
-        Some((loops, config)),
+        config,
         cancelled,
-    )
+    )?;
+    Ok(BilateralPayloadCapture {
+        capture: super::single_capture(result.capture),
+        reaction: result.reaction,
+    })
 }
 
+/// Capture several finite bodies in one closed-mechanism momentum event.
+///
+/// All arriving momentum mismatches are accumulated on the original accepted
+/// geometry. One fully loaded inertia and one native mixed impulse solve then
+/// determine the complete carrier/link recoil, retaining cross responses
+/// between payloads, material closures and gears. Only that combined endpoint
+/// receives physical speed admission. The original batch owner keeps the
+/// inventory stack and the complete nonnegative capture-loss quadratic.
+///
+/// Repeated targets are allowed; their handles must later be released in reverse
+/// input order on each link. Every actual carried mismatch is formed in the same
+/// payload axes and translating frame. A zero total source preserves admitted
+/// finite tangency defects after combined geometry/rank/condition admission.
+/// Source-free capture may still remove incoming relative energy when opposing
+/// payload mismatches cancel; that loss remains in the physical inventory.
+///
+/// Empty material loops reproduce the original batch capture exactly. The
+/// existing capture and constraint-work budgets apply to the whole event.
+///
+/// # Errors
+/// Invalid/empty inventory, native state or limits, unresolved mixed rows,
+/// momentum/energy/work admission or cancellation leaves all inputs unchanged.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn capture_response(
-    loaded: &ArticulatedModel,
+pub fn capture_payloads(
+    model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
-    target: usize,
-    payload: PayloadState,
-    link_from_payload: Se3,
-    before: &Kinematics,
-    boost: Vec3,
+    inputs: &[PayloadCaptureInput],
     loops: &[BilateralLoop],
     rows: &[JointConstraint],
     controls: PayloadControls<'_>,
     config: BilateralImpulseConfig,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<BilateralImpulseResponse, PayloadError> {
-    poll(cancelled)?;
-    // Form the weak incoming-minus-carried signal before applying inertia.
-    // Both twists use the original common translating inertial frame.
-    let carried = payload_at_link(before, target, link_from_payload, payload.inertia)?;
-    let incoming = twist_in_frame(payload.twist_body, payload.world_from_body, boost)?;
-    // Use the exact same payload axes for both boost subtractions. An already
-    // carried payload then has exactly zero mismatch, including finite admitted
-    // tangency defects; reconstruction must not invent a tiny activating source.
-    let carried = twist_in_frame(carried.twist_body, payload.world_from_body, boost)?;
-    let mismatch = payload
-        .inertia
-        .momentum(incoming.minus(carried))?
-        .transform_by(&link_from_payload);
-    let mut body = vec![Wrench::default(); loaded.link_count()];
-    body[target] = mismatch;
-    let response = joint::apply_impulses(
-        loaded,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BilateralPayloadBatchCapture, PayloadError> {
+    super::batch::capture_evaluated(
+        model,
         state,
-        &vec![0.0; loaded.dof_count()],
-        &body,
-        loops,
+        inputs,
         rows,
-        config,
-        &mut *cancelled,
-    )?;
-    admit_condition(response.reciprocal_condition, controls)?;
-    poll(cancelled)?;
-    Ok(response)
+        controls,
+        (!loops.is_empty()).then_some((loops, config)),
+        cancelled,
+    )
 }
 
 /// The inventory's existing condition policy also bounds the complete mixed row
@@ -179,7 +190,12 @@ pub(super) fn project_constraint_impulses(
     poll(cancelled)?;
     let base = evaluated.body_wrench[0].transform_by(&model.links()[0].parent_from_child_zero());
     let mut generalized = base.to_array().to_vec();
-    for (index, (&body, &joint)) in evaluated.generalized_force.iter().zip(joint_impulses).enumerate() {
+    for (index, (&body, &joint)) in evaluated
+        .generalized_force
+        .iter()
+        .zip(joint_impulses)
+        .enumerate()
+    {
         if index % 64 == 0 {
             poll(cancelled)?;
         }
@@ -219,7 +235,11 @@ pub(super) fn constraint_work(
         if index % 64 == 0 {
             poll(cancelled)?;
         }
-        let old = twist_in_frame(before.body_twist[index], before.world_from_link[index], boost)?;
+        let old = twist_in_frame(
+            before.body_twist[index],
+            before.world_from_link[index],
+            boost,
+        )?;
         let new = twist_in_frame(after.body_twist[index], after.world_from_link[index], boost)?;
         for ((impulse, old), new) in impulse
             .to_array()
@@ -244,8 +264,5 @@ pub(super) fn constraint_work(
         work = work + Dd::from_f64(impulse) * mean;
     }
     poll(cancelled)?;
-    finite(
-        work.to_f64(),
-        "payload common-frame mixed constraint work",
-    )
+    finite(work.to_f64(), "payload common-frame mixed constraint work")
 }

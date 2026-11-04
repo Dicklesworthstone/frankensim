@@ -6219,3 +6219,31 @@ input permutations and fixed-scene/boost covariance; singleton equality and
 existing locked-joint response; and late inventory, work and final-cancellation
 refusal with exact retry. Pinned nightly Rust formatting/parsing completed.
 Native compilation and numerical execution remain unrun in this session.
+
+
+### Simultaneous payload capture through closed mechanisms
+
+`inventory::bilateral::capture_payloads` connects the original many-payload
+inventory owner to the mixed distance/spherical/gear impulse event. Every
+incoming-minus-actual-carried momentum mismatch is accumulated by the existing
+compensated spatial sum, then all loaded inertias and constraint cross responses
+enter one native event. Singleton and batch capture share this lifecycle; the
+obsolete separate singleton lifecycle is removed. Empty material loops retain
+the original batch path.
+
+The same final state determines every outgoing attached velocity and the full
+nonnegative capture-loss quadratic. Opposing incoming mismatches can cancel
+the mechanism's source while still removing relative energy; such an event
+preserves admitted finite tangency defects. Exact release-handle stacks,
+common-frame actual constraint work, condition policy and endpoint speed
+admission retain their original owners.
+
+Four focused regression groups cover independent two-payload reduction and
+loaded continuation, combined endpoint limits, repeated-link inventory with
+opposing arrivals, large common boosts and finite constraint work, exact
+single/empty delegation and atomic refusal/cancellation. Source/API and
+independent exact-rational oracle checks were completed. Edition-2024 parsing
+and formatting pass with available nightly-2026-08-31 rustfmt; the repository's
+pinned nightly-2026-07-06 is unavailable. Native compilation and numerical test
+execution remain **UNRUN**: no existing FrankenSim native dependency graph,
+DSR or RCH is available in this runtime. This is not a native test-pass claim.

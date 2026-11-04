@@ -6,13 +6,17 @@
 
 use super::{
     PayloadAttachment, PayloadBalance, PayloadControls, PayloadError, PayloadState, account_boost,
-    combine_inertias, energy_in_frame, energy_in_frame_many, finish_common_frame_balance, finite,
-    payload_at_link, poll, system_totals, system_totals_many, twist_in_frame, validate_inputs,
+    bilateral, combine_inertias, energy_in_frame, energy_in_frame_many,
+    finish_common_frame_balance, finite, payload_at_link, poll, system_totals, system_totals_many,
+    twist_in_frame, validate_inputs,
 };
 use crate::articulated::motion::reconfigure::constraints::{
     JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
 };
 use crate::articulated::motion::reconfigure::state_kinematics;
+use crate::articulated::motion::spatial_loads::implicit::distance::{
+    BilateralImpulseConfig, BilateralLoop, joint,
+};
 use crate::articulated::motion::{FreeFloatingMotionState, SpatialSum};
 use crate::articulated::{
     ArticulatedModel, BaseState, FreeFloatingBaseState, Link, forward_kinematics,
@@ -77,15 +81,28 @@ pub struct PayloadBatchCapture {
 ///
 /// Contact discovery, finite grasp duration, overlapping-volume validity,
 /// independent moving articulations and thermal conversion are caller-owned.
-#[allow(clippy::too_many_lines)]
 pub fn capture_payloads(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
     inputs: &[PayloadCaptureInput],
     constraints: &[JointConstraint],
     controls: PayloadControls<'_>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<PayloadBatchCapture, PayloadError> {
+    capture_evaluated(model, state, inputs, constraints, controls, None, cancelled)
+        .map(|result| result.capture)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn capture_evaluated(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    inputs: &[PayloadCaptureInput],
+    constraints: &[JointConstraint],
+    controls: PayloadControls<'_>,
+    bilateral_rows: Option<(&[BilateralLoop], BilateralImpulseConfig)>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<bilateral::BilateralPayloadBatchCapture, PayloadError> {
     poll(&mut cancelled)?;
     let first = inputs
         .first()
@@ -141,102 +158,167 @@ pub fn capture_payloads(
         &mut cancelled,
     )?;
     let boost = account_boost(model, &before_kin)?;
-    let boost_base = state
-        .base
-        .world_from_base
-        .rotation()
-        .inverse()
-        .rotate(boost)?;
-    let centered = forward_kinematics(
-        model,
-        BaseState::prescribed(
-            state.base.world_from_base,
-            state
-                .base
-                .twist_body
-                .minus(Twist::new(Vec3::default(), boost_base)),
-            Twist::zero(),
-        ),
-        &state.joint_position,
-        &state.joint_velocity,
-    )?;
-    poll(&mut cancelled)?;
-    let mut sums = Vec::with_capacity(model.link_count());
-    for (index, link) in model.links().iter().enumerate() {
-        if index % 64 == 0 {
-            poll(&mut cancelled)?;
-        }
-        let body = link.inertia().momentum(centered.body_twist[index])?;
-        let mut sum = SpatialSum::default();
-        sum.add_world_wrench(body.force, body.torque, &[]);
-        sums.push(sum);
-    }
-    for (index, (input, attachment)) in inputs.iter().zip(&attachments).enumerate() {
-        if index % 64 == 0 {
-            poll(&mut cancelled)?;
-        }
-        let incoming = input
-            .payload
-            .inertia
-            .momentum(twist_in_frame(
-                input.payload.twist_body,
-                input.payload.world_from_body,
-                boost,
-            )?)?
-            .transform_by(&attachment.link_from_payload);
-        sums[input.target_link].add_world_wrench(incoming.force, incoming.torque, &[]);
-    }
-    let mut body_momenta = Vec::with_capacity(sums.len());
-    for (index, sum) in sums.into_iter().enumerate() {
-        if index % 64 == 0 {
-            poll(&mut cancelled)?;
-        }
-        body_momenta.push(sum.checked_wrench("simultaneous capture link momentum")?);
-    }
-    poll(&mut cancelled)?;
-    let solved = free_floating_impulse_delta(
-        &model_after,
-        &state.joint_position,
-        &vec![0.0; model.dof_count()],
-        &body_momenta,
-    )?;
-    poll(&mut cancelled)?;
-    let mut state_after = FreeFloatingMotionState {
-        base: FreeFloatingBaseState::new(
-            state.base.world_from_base,
-            solved.base.plus(Twist::new(Vec3::default(), boost_base)),
-        ),
-        joint_position: state.joint_position.clone(),
-        joint_velocity: solved.joint,
-    };
-    let mut impulse = vec![0.0; 6 + model.dof_count()];
-    let mut multipliers = Vec::new();
-    if !constraints.is_empty() {
-        let mut prepared = PreparedJointConstraints::new(
-            &model_after,
-            &state.joint_position,
-            constraints,
-            controls.minimum_reciprocal_condition,
-            &mut cancelled,
-        )?;
-        let rhs: Vec<_> = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?
-            .into_iter()
-            .map(|value| -value)
+    let (state_after, impulse, multipliers, reaction) = if let Some((loops, config)) =
+        bilateral_rows
+    {
+        let mut sums: Vec<_> = (0..model.link_count())
+            .map(|_| SpatialSum::default())
             .collect();
-        let response = prepared.solve_response(&rhs, &mut cancelled)?;
-        state_after.base.twist_body = state_after.base.twist_body.plus(response.base_delta);
-        for (index, delta) in response.joint_delta.iter().enumerate() {
+        for (index, (input, attachment)) in inputs.iter().zip(&attachments).enumerate() {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            state_after.joint_velocity[index] = finite(
-                state_after.joint_velocity[index] + delta,
-                "payload final joint rate",
+            let payload = input.payload;
+            let carried = payload_at_link(
+                &before_kin,
+                input.target_link,
+                attachment.link_from_payload,
+                payload.inertia,
             )?;
+            // Resolve each weak mismatch before applying inertia. The same
+            // payload axes and boost subtraction preserve an exactly carried
+            // input as zero even when finite tangent defects are admitted.
+            let incoming = twist_in_frame(payload.twist_body, payload.world_from_body, boost)?;
+            let carried = twist_in_frame(carried.twist_body, payload.world_from_body, boost)?;
+            let mismatch = payload
+                .inertia
+                .momentum(incoming.minus(carried))?
+                .transform_by(&attachment.link_from_payload);
+            sums[input.target_link].add_world_wrench(mismatch.force, mismatch.torque, &[]);
         }
-        impulse[6..].copy_from_slice(&response.joint_effort);
-        multipliers = response.multipliers;
-    }
+        let mut body_impulses = Vec::with_capacity(sums.len());
+        for (index, sum) in sums.into_iter().enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            body_impulses.push(sum.checked_wrench("simultaneous capture momentum mismatch")?);
+        }
+        poll(&mut cancelled)?;
+        let reaction = joint::apply_impulses(
+            &model_after,
+            state,
+            &vec![0.0; model.dof_count()],
+            &body_impulses,
+            loops,
+            constraints,
+            config,
+            &mut cancelled,
+        )?;
+        bilateral::admit_condition(reaction.reciprocal_condition, controls)?;
+        poll(&mut cancelled)?;
+        let state_after = FreeFloatingMotionState {
+            base: reaction.impulse.base_after,
+            joint_position: state.joint_position.clone(),
+            joint_velocity: reaction.impulse.joint_velocity_after.clone(),
+        };
+        let impulse = bilateral::project_constraint_impulses(
+            &model_after,
+            state,
+            &reaction.constraint_body_impulses,
+            &reaction.constraint_joint_impulses,
+            &mut cancelled,
+        )?;
+        let multipliers = reaction.joint_multipliers.clone();
+        (state_after, impulse, multipliers, Some(reaction))
+    } else {
+        let boost_base = state
+            .base
+            .world_from_base
+            .rotation()
+            .inverse()
+            .rotate(boost)?;
+        let centered = forward_kinematics(
+            model,
+            BaseState::prescribed(
+                state.base.world_from_base,
+                state
+                    .base
+                    .twist_body
+                    .minus(Twist::new(Vec3::default(), boost_base)),
+                Twist::zero(),
+            ),
+            &state.joint_position,
+            &state.joint_velocity,
+        )?;
+        poll(&mut cancelled)?;
+        let mut sums = Vec::with_capacity(model.link_count());
+        for (index, link) in model.links().iter().enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            let body = link.inertia().momentum(centered.body_twist[index])?;
+            let mut sum = SpatialSum::default();
+            sum.add_world_wrench(body.force, body.torque, &[]);
+            sums.push(sum);
+        }
+        for (index, (input, attachment)) in inputs.iter().zip(&attachments).enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            let incoming = input
+                .payload
+                .inertia
+                .momentum(twist_in_frame(
+                    input.payload.twist_body,
+                    input.payload.world_from_body,
+                    boost,
+                )?)?
+                .transform_by(&attachment.link_from_payload);
+            sums[input.target_link].add_world_wrench(incoming.force, incoming.torque, &[]);
+        }
+        let mut body_momenta = Vec::with_capacity(sums.len());
+        for (index, sum) in sums.into_iter().enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            body_momenta.push(sum.checked_wrench("simultaneous capture link momentum")?);
+        }
+        poll(&mut cancelled)?;
+        let solved = free_floating_impulse_delta(
+            &model_after,
+            &state.joint_position,
+            &vec![0.0; model.dof_count()],
+            &body_momenta,
+        )?;
+        poll(&mut cancelled)?;
+        let mut state_after = FreeFloatingMotionState {
+            base: FreeFloatingBaseState::new(
+                state.base.world_from_base,
+                solved.base.plus(Twist::new(Vec3::default(), boost_base)),
+            ),
+            joint_position: state.joint_position.clone(),
+            joint_velocity: solved.joint,
+        };
+        let mut impulse = vec![0.0; 6 + model.dof_count()];
+        let mut multipliers = Vec::new();
+        if !constraints.is_empty() {
+            let mut prepared = PreparedJointConstraints::new(
+                &model_after,
+                &state.joint_position,
+                constraints,
+                controls.minimum_reciprocal_condition,
+                &mut cancelled,
+            )?;
+            let rhs: Vec<_> = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?
+                .into_iter()
+                .map(|value| -value)
+                .collect();
+            let response = prepared.solve_response(&rhs, &mut cancelled)?;
+            state_after.base.twist_body = state_after.base.twist_body.plus(response.base_delta);
+            for (index, delta) in response.joint_delta.iter().enumerate() {
+                if index % 64 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                state_after.joint_velocity[index] = finite(
+                    state_after.joint_velocity[index] + delta,
+                    "payload final joint rate",
+                )?;
+            }
+            impulse[6..].copy_from_slice(&response.joint_effort);
+            multipliers = response.multipliers;
+        }
+        (state_after, impulse, multipliers, None)
+    };
     let final_rows = admit_constraints(
         constraints,
         &state_after.joint_position,
@@ -291,16 +373,29 @@ pub fn capture_payloads(
             maximum_j: controls.maximum_energy_exchange_j,
         });
     }
-    let initial_rows = apply_rows(constraints, &state.joint_velocity, &mut cancelled)?;
-    let mut reaction_work_j = 0.0;
-    for (index, multiplier) in multipliers.iter().enumerate() {
-        poll(&mut cancelled)?;
-        reaction_work_j = finite(
-            reaction_work_j
-                + multiplier * (0.5 * initial_rows[index] + 0.5 * final_rows.velocity[index]),
-            "payload reaction work",
-        )?;
-    }
+    let reaction_work_j = if let Some(reaction) = &reaction {
+        bilateral::constraint_work(
+            &reaction.constraint_body_impulses,
+            &reaction.constraint_joint_impulses,
+            &before_kin,
+            &after_kin,
+            &state.joint_velocity,
+            &state_after.joint_velocity,
+            boost,
+            &mut cancelled,
+        )?
+    } else {
+        let initial_rows = apply_rows(constraints, &state.joint_velocity, &mut cancelled)?;
+        let mut work = 0.0;
+        for (index, multiplier) in multipliers.iter().enumerate() {
+            poll(&mut cancelled)?;
+            work = finite(
+                work + multiplier * (0.5 * initial_rows[index] + 0.5 * final_rows.velocity[index]),
+                "payload reaction work",
+            )?;
+        }
+        work
+    };
     let kinetic_before_j = energy_in_frame_many(
         model,
         &before_kin,
@@ -329,12 +424,15 @@ pub fn capture_payloads(
         &mut cancelled,
     )?;
     poll(&mut cancelled)?;
-    Ok(PayloadBatchCapture {
-        model_after,
-        state_after,
-        attachments,
-        payloads_after,
-        removed_relative_energy_j,
-        balance,
+    Ok(bilateral::BilateralPayloadBatchCapture {
+        capture: PayloadBatchCapture {
+            model_after,
+            state_after,
+            attachments,
+            payloads_after,
+            removed_relative_energy_j,
+            balance,
+        },
+        reaction,
     })
 }
