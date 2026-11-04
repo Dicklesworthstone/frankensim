@@ -676,6 +676,27 @@ finite energy and force while refusing a smooth tangent; crossing the fold or
 maximum approach refuses. No phase switch, snap impulse or heat is inferred.
 The original path-mean force supplies reciprocal contact work to `fs-couple`.
 
+`normal_patch::adhesive::motion::JkrNormalMotion` adds finite relative normal
+inertia with a held external force and the frozen original JKR source. Each
+attached substep condenses the kinetic/contact discrete-gradient equations to
+one safeguarded scalar root using the original path mean and its derivative;
+detached flight is exact. Original touch and displacement-fold events split
+time, preserve velocity and expose only the source's released storage. Ordered
+fixed-capacity events, signed reaction impulse and its first time moment let
+native free-body coordinates restore the same trajectory. Independent kinetic
+work, contact storage, momentum and coordinate-moment checks gate the complete
+proposal. Turning extrema, force extrema and any intervening effective-potential
+barrier are checked before accepting a smooth path. Explicit source, travel,
+speed, force, trial, root, event and cancellation limits publish no partial
+state. An initially marginal attached fold refuses; detached touch at zero
+attaches once at offset zero. Nine original-source regression groups cover
+capture versus rebound from original snap losses, near-fold escape, exact free
+flight and event timing, equilibrium moments, second-order smooth convergence
+against independent force integration, wrong-root refinement and bounded retry.
+This is one fixed normal with quasistatic contact radius; general elastic
+networks, contact waves, finite-range attraction and automatic heat deposition
+are outside this owner's scope.
+
 `interface_binding::adhesive_shear::SourceAdhesiveShear` selects constant
 junction shear from explicit `adhesive_static_shear_strength` and
 `adhesive_kinetic_shear_strength` claims in Pa at the SAME ordered interface and

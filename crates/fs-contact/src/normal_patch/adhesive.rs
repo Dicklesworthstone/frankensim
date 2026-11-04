@@ -20,6 +20,8 @@
 pub mod fixture;
 /// Conservative full-stick Griffith coupling of normal adhesion and shear.
 pub mod mixed_mode;
+/// Finite normal inertia, original branch events and explicit released energy.
+pub mod motion;
 /// Same-source thermal changes at an explicitly retained normal control.
 pub mod temperature;
 mod work;
