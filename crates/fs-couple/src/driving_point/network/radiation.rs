@@ -26,7 +26,8 @@ mod molecular;
 pub use molecular::MolecularRadiatingNetwork;
 pub use prepared::{
     PreparedRadiatingFarField, PreparedRadiatingMicrophones, PreparedRadiatingNetwork,
-    RadiatingSourceResponse, RadiatingSourceStatistics,
+    PreparedRadiatingWelchBin, RadiatingSourceResponse, RadiatingSourceStatistics,
+    RadiatingWelchLimits,
 };
 
 /// One actual opening on a closed, outward-oriented, capped surface. All other

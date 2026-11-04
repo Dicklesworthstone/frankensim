@@ -30259,3 +30259,71 @@ Applications retain channel identity/geometry/calibration metadata beside WAV
 bytes. This is settled harmonic observation and offline file export; it adds
 no source process, propagation, transient onset, per-channel normalization,
 automatic speaker mapping or inference of ensemble statistics from one draw.
+
+### Recorded generator coherence through the original loaded exterior
+
+`driving_point::network::radiation::PreparedRadiatingNetwork::prepare_welch_bin`
+binds one measured interior frequency bin to its exact original loaded network
+and retained exterior operator. Recorded channel labels **and** SI source
+quantities must equal the canonical `NetworkSourceCoordinate` order. Pressure
+channels are open-circuit generator pressures before the complete original
+source impedance; prescribed flow channels are graph-inward m³/s. Frequency,
+order and units are checked even for silent records. DC and Nyquist bins refuse.
+
+`PreparedRadiatingWelchBin` borrows the original `WelchCrossSpectrum`, retaining
+its acquisition and window provenance. It maps each segment factor through the
+original loaded source-to-port flow bank, changes graph inflow to outward
+opening flow exactly once, and sums complex contributions before any quadratic
+observation. The original mutual radiation matrix, scalar/coupled generator
+impedances and conventional/regional/molecular duct propagation remain bound.
+Internal pressure is never used as an exterior pressure proxy.
+
+Cold `RadiatingWelchLimits` admits the complete segment count, logical factor
+storage and mapping work before allocation. The cache contains only
+`segments * openings` complex peak flow values; its fixed ceiling is 4096
+segments and 32 openings, or 2 MiB logical storage. The admitted product count is
+`segments * sources * (openings + 2)`, including the shared peak conversion's
+two scaling products per source. Checked counts and allocation refusal publish
+no partial preparation. Cancellation polls each segment, with at most the
+original 32-source/32-opening bounded composition between polls. These are
+logical ceilings, not RSS or latency guarantees. Authored coherence retains its
+separate rank-32 limit.
+
+Repeated `evaluate_into` calls reuse the original duct measured contraction for
+all p/p, U/U and p/U moments and signed generator/interface/dissipation/network
+work. Cached outward-flow factors reach the original BEM p/u field owner.
+`PreparedRadiatingMicrophones::welch_bin` retains the complete complex Hermitian
+microphone bin CSD and actual near-field pressure/velocity directional response.
+`PreparedRadiatingFarField::{observe_welch_bin,evaluate_welch_bin}` reuse the
+original positive angular quadrature, physical exterior medium and requested
+directions. All measured factors enter one convergence decision for the actual
+covariance, including weak angular residuals exposed by source cancellation.
+Individual source self-powers cannot certify that convergence.
+
+The shared Welch owner applies `sqrt(2*df)` once; each original harmonic owner
+applies the peak time-average half once. Outputs are bin-integrated moments and
+watts, not per-Hz densities. The original signed exterior surface work is already
+included in network external-load power; observing it never adds a second
+radiation debit. A quiet microphone does not imply zero source dissipation or
+zero radiated power elsewhere. Overlapping recorded segment factors do not
+establish independent trials, stationarity, confidence, a time realization or
+cross-frequency coherence.
+
+Each runtime owner retains its own explicit work cap; the cold opening mapping
+is not charged or repeated during observations. Exact owner-pointer binding
+rejects otherwise same-shaped substitute preparations. `evaluate_into`
+invalidates all statistics getters before work and after any refusal or
+cancellation. Microphone failures return no slice; caller-provided angular
+output must be discarded on any error, as in the original angular API.
+
+Validation boundary: a native retained-operator harness executes the production
+adapter and original Welch, duct work, BEM field/microphone/angular and
+`CancelGate` methods with independently specified analytical duct maps and
+manufactured exterior columns. Six passing cases cover 40 mixed-SI factors,
+rectangular/Hann normalization, cross-receiver phase, signed heat/load work,
+pressure-null reactive velocity, covariance-specific angular convergence,
+identity/frequency/units, limits, cancellation and replay. This does **not**
+execute graph/material/BEM assembly or establish mesh convergence. Two additional
+repository regression tests exercise the original loaded graph and exterior
+preparation when the complete constellation is available. Full Cargo/DSR was not
+run here because seven required sibling repositories are absent.

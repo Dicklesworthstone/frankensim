@@ -19,6 +19,8 @@ const FACTOR_ENTRIES: usize = MAX_NETWORK_PORTS * MAX_NETWORK_PORTS;
 
 mod angular;
 pub use angular::PreparedRadiatingFarField;
+mod welch;
+pub use welch::{PreparedRadiatingWelchBin, RadiatingWelchLimits};
 
 /// The complete interior propagation owner, never a substituted scalar loss.
 #[derive(Clone, Copy)]

@@ -8,6 +8,7 @@ use fs_duct::network::{
 
 mod angular;
 mod molecular;
+mod welch;
 
 const FIELD_BUDGET: HarmonicWorkBudget = HarmonicWorkBudget {
     maximum_products: 100_000,

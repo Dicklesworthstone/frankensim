@@ -54,6 +54,54 @@ impl PreparedRadiatingFarField<'_, '_> {
         self.radiation.cached_angular_directions()
     }
 
+    /// Measured generator bin dP/dΩ [W/sr] at the original requested directions.
+    /// Source-to-opening composition was admitted and performed once by the
+    /// measured bin; this runtime allowance bounds the original angular owner.
+    pub fn observe_welch_bin(
+        &self,
+        measured: &PreparedRadiatingWelchBin<'_, '_>,
+        budget: HarmonicWorkBudget,
+        output_w_per_sr: &mut [f64],
+        gate: &CancelGate,
+    ) -> Result<(), ExteriorNetworkError> {
+        if !std::ptr::eq(self.owner, measured.owner) {
+            return Err(bad("measured angular bin belongs to another preparation"));
+        }
+        poll(gate)?;
+        Ok(self.radiation.observe_coherence_modes(
+            &measured.opening_factors,
+            measured.segments,
+            budget,
+            output_w_per_sr,
+            || gate.is_requested(),
+        )?)
+    }
+
+    /// Measured directional powers and total outgoing power/moments [W].
+    /// All original segment factors enter the SAME positive quadrature ladder;
+    /// convergence is tested against this actual measured covariance. Summing
+    /// separately converged segment powers could miss a different required
+    /// angular resolution. This observation adds no radiation-work debit.
+    pub fn evaluate_welch_bin(
+        &self,
+        measured: &PreparedRadiatingWelchBin<'_, '_>,
+        budget: HarmonicWorkBudget,
+        output_w_per_sr: &mut [f64],
+        gate: &CancelGate,
+    ) -> Result<RadiatedPowerMoments, ExteriorNetworkError> {
+        if !std::ptr::eq(self.owner, measured.owner) {
+            return Err(bad("measured angular bin belongs to another preparation"));
+        }
+        poll(gate)?;
+        Ok(self.radiation.evaluate_coherence_modes(
+            &measured.opening_factors,
+            measured.segments,
+            budget,
+            output_w_per_sr,
+            || gate.is_requested(),
+        )?)
+    }
+
     /// Requested-direction coherent amplitudes only; no power integration.
     pub fn observe_coherent(
         &self,
