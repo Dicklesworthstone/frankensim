@@ -11,9 +11,11 @@ use super::{
 };
 use crate::helmholtz::molecular::MolecularRadiation;
 use crate::observation_transfers::{
-    MAX_OBSERVATION_ENTRIES, PreparedHarmonicObservation, SourceId, TransferError, cap, finite,
+    HarmonicWorkBudget, MAX_OBSERVATION_ENTRIES, PreparedHarmonicObservation, SourceId,
+    TransferError, cap, finite,
     harmonic::{self, Sum},
 };
+use fs_fft::welch::WelchCrossSpectrum;
 use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 
@@ -414,7 +416,107 @@ impl PreparedMolecularResponse {
             balance_residual_w,
         })
     }
+
+    /// Measured input, exterior and wall-absorption powers [W] in one Welch bin.
+    /// Every factor drives the ORIGINAL three work matrices through [`Self::power_w`].
+    /// Cross-source phases and mixed structural/aperture coordinate units survive.
+    /// `recorded_order` must exactly match `sources()`, and the bin must match
+    /// this preparation's original molecular frequency. No material query,
+    /// acoustic solve, source covariance matrix or load fit is performed.
+    ///
+    /// Wall work is accumulated from its own matrix, never obtained by
+    /// subtracting large input/exterior powers. Exterior work includes eventual
+    /// molecular heat and outgoing flux; it is not far-field power at infinity.
+    /// All channels retain their sign and the raw final balance residual.
+    ///
+    /// The shared peak-bin view applies sqrt(2 df) once and the coherent owner
+    /// retains its time-average half. These are bin watts, not W/Hz. Record
+    /// leakage/resolution remain; no cross-frequency covariance, overlapping-
+    /// segment independence, statistical confidence or passivity is inferred.
+    ///
+    /// `source_scratch` must have exactly one entry per source and is unspecified
+    /// on return. Only this caller-owned vector is reused; queries allocate
+    /// nothing. The budget counts segments * (3*sources² + 5*sources) matrix,
+    /// peak-conversion and outer work products. Cancellation publishes no power.
+    #[allow(clippy::too_many_arguments)]
+    pub fn power_welch_bin(
+        &self,
+        spectrum: &WelchCrossSpectrum,
+        bin: usize,
+        recorded_order: &[SourceId],
+        budget: HarmonicWorkBudget,
+        source_scratch: &mut [C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularResponsePower, MolecularObservationError> {
+        poll(&mut cancelled)?;
+        let view = harmonic::welch::source_bin(
+            spectrum,
+            bin,
+            self.harmonic.angular_frequency_rad_s(),
+            self.sources(),
+            recorded_order,
+        )?;
+        let n = self.sources().len();
+        if source_scratch.len() != n {
+            return Err(invalid("recorded molecular source scratch shape"));
+        }
+        cap(view.segment_count(), harmonic::MAX_MODES)?;
+        cap(budget.maximum_products, harmonic::MAX_PRODUCTS)?;
+        let work = n
+            .checked_mul(n)
+            .and_then(|matrix| matrix.checked_mul(3))
+            .and_then(|matrix| n.checked_mul(5).and_then(|extra| matrix.checked_add(extra)))
+            .and_then(|per_factor| per_factor.checked_mul(view.segment_count()))
+            .ok_or_else(|| invalid("recorded molecular work extent overflow"))?;
+        cap(work, budget.maximum_products)?;
+        let mut sums = [Sum::default(); 3];
+        for factor in view.factors() {
+            poll(&mut cancelled)?;
+            for (source, (out, &coefficient)) in source_scratch.iter_mut().zip(factor).enumerate() {
+                if source % 256 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                *out = harmonic::welch::peak(view, coefficient)?;
+            }
+            let power = self.power_w(source_scratch, &mut cancelled)?;
+            for (sum, value) in sums.iter_mut().zip([
+                power.driving_power_w,
+                power.exterior_power_w,
+                power.absorbed_wall_power_w,
+            ]) {
+                sum.add(C64::from_re(value));
+            }
+        }
+        let [driving_power_w, exterior_power_w, absorbed_wall_power_w] =
+            sums.map(|sum| sum.finish().re);
+        let mut balance = Sum::default();
+        for value in [driving_power_w, -exterior_power_w, -absorbed_wall_power_w] {
+            balance.add(C64::from_re(value));
+        }
+        let balance_residual_w = balance.finish().re;
+        if [
+            driving_power_w,
+            exterior_power_w,
+            absorbed_wall_power_w,
+            balance_residual_w,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+        {
+            return Err(invalid("nonfinite recorded molecular work"));
+        }
+        poll(&mut cancelled)?;
+        Ok(MolecularResponsePower {
+            driving_power_w,
+            exterior_power_w,
+            absorbed_wall_power_w,
+            balance_residual_w,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod welch_tests;

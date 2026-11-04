@@ -6,6 +6,8 @@ use crate::helmholtz::aperture::{
     project_real_velocity_rows, reciprocity_and_passivity, reciprocity_defect,
 };
 use crate::helmholtz::bc::{IncidentSource, Monopole};
+use crate::observation_transfers::{HarmonicWorkBudget, harmonic};
+use fs_fft::welch::WelchCrossSpectrum;
 
 pub mod directivity;
 pub use directivity::{
@@ -364,21 +366,124 @@ impl BoundaryPortImpedance {
     }
 
     /// Average harmonic work delivered to radiation plus passive walls [W].
-    /// Coherent cross terms and their phases are retained exactly.
+    /// Coherent cross terms and their phases are retained. The original
+    /// row contraction is allocation-free and uses compensated reductions.
     pub fn input_power_w(&self, rates: &[C64]) -> Result<f64, IterativeObservationError> {
-        let efforts = self.resisting_efforts(rates)?;
-        let power = 0.5
-            * rates
-                .iter()
-                .zip(efforts)
-                .map(|(&v, f)| (v.conj() * f).re)
-                .sum::<f64>();
+        self.input_power_cancellable(rates, &mut || false)
+    }
+
+    /// Total source input work [W] in one measured interior Welch bin.
+    /// Recorded channels must exactly match the original finite source kinds,
+    /// order and SI coordinate-rate units. The same full mutual impedance
+    /// contracts each coherent factor before work is added across factors.
+    /// This includes radiation and passive-wall work; this matrix alone does
+    /// not identify their separate contributions or validate discrete passivity.
+    /// Negative numerical work remains signed, without clipping or repair.
+    ///
+    /// The shared bin view applies sqrt(2 df) once, and the original quadratic
+    /// owner applies the peak time-average half once. Outputs are bin watts,
+    /// not W/Hz. Window leakage and resolution remain; no cross-frequency
+    /// covariance or statistical confidence is inferred.
+    ///
+    /// `source_scratch` has one entry per original source, is reused for every
+    /// factor, and is unspecified on return. Evaluation allocates nothing.
+    /// Work admission counts segments * (sources² + 3*sources): matrix terms,
+    /// two-component peak conversions and outer work products. Cancellation
+    /// returns no partial power and polls at factor/row/source boundaries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn input_power_welch_bin(
+        &self,
+        spectrum: &WelchCrossSpectrum,
+        bin: usize,
+        recorded_order: &[SourceId],
+        budget: HarmonicWorkBudget,
+        source_scratch: &mut [C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, IterativeObservationError> {
+        poll_power(&mut cancelled)?;
+        let view =
+            harmonic::welch::source_bin(spectrum, bin, self.omega, &self.sources, recorded_order)?;
+        let n = self.sources.len();
+        if source_scratch.len() != n {
+            return Err(TransferError::Invalid("recorded port source scratch shape").into());
+        }
+        cap(view.segment_count(), harmonic::MAX_MODES)?;
+        cap(budget.maximum_products, harmonic::MAX_PRODUCTS)?;
+        let work = n
+            .checked_mul(n)
+            .and_then(|matrix| n.checked_mul(3).and_then(|extra| matrix.checked_add(extra)))
+            .and_then(|per_factor| per_factor.checked_mul(view.segment_count()))
+            .ok_or(TransferError::Invalid("recorded port work extent overflow"))?;
+        cap(work, budget.maximum_products)?;
+        let mut sum = crate::ComplexSum::default();
+        for factor in view.factors() {
+            poll_power(&mut cancelled)?;
+            for (source, (out, &coefficient)) in source_scratch.iter_mut().zip(factor).enumerate() {
+                if source % 256 == 0 {
+                    poll_power(&mut cancelled)?;
+                }
+                *out = harmonic::welch::peak(view, coefficient)?;
+            }
+            sum.add(C64::from_re(
+                self.input_power_cancellable(source_scratch, &mut cancelled)?,
+            ));
+        }
+        let power = sum.finish().re;
+        if !power.is_finite() {
+            return Err(TransferError::Invalid("nonfinite recorded source input power").into());
+        }
+        poll_power(&mut cancelled)?;
+        Ok(power)
+    }
+
+    fn input_power_cancellable(
+        &self,
+        rates: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, IterativeObservationError> {
+        poll_power(cancelled)?;
+        let n = self.sources.len();
+        if rates.len() != n || rates.iter().any(|&value| !finite(value)) {
+            return Err(TransferError::Invalid(
+                "port rates must match the finite source coordinates",
+            )
+            .into());
+        }
+        let mut work = crate::ComplexSum::default();
+        for (&rate, row) in rates.iter().zip(self.impedance.chunks_exact(n)) {
+            poll_power(cancelled)?;
+            let mut effort = crate::ComplexSum::default();
+            for (source, (&z, &value)) in row.iter().zip(rates).enumerate() {
+                if source % 256 == 0 {
+                    poll_power(cancelled)?;
+                }
+                effort.add(z * value);
+            }
+            let effort = effort.finish();
+            if !finite(effort) {
+                return Err(TransferError::Invalid("nonfinite port resisting effort").into());
+            }
+            work.add(C64::from_re((rate.conj() * effort).re));
+        }
+        let power = 0.5 * work.finish().re;
         if !power.is_finite() {
             return Err(TransferError::Invalid("nonfinite source input power").into());
         }
+        poll_power(cancelled)?;
         Ok(power)
+    }
+}
+
+fn poll_power(cancelled: &mut impl FnMut() -> bool) -> Result<(), IterativeObservationError> {
+    if cancelled() {
+        Err(TransferError::Cancelled.into())
+    } else {
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod welch_tests;

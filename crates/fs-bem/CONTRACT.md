@@ -2840,3 +2840,36 @@ dependent angular refusal, identity, work and cancellation/replay. The leaf
 uses explicit analytic source-column fixtures and nominal outer error types;
 it does not claim a boundary solve. A separate original-boundary-solution
 integration test is included but remains unrun without the constellation.
+
+## Measured source work and explicit wall absorption
+
+`BoundaryPortImpedance::input_power_welch_bin` and
+`PreparedMolecularResponse::power_welch_bin` accept original-kind/order
+source histories through the shared exact-frequency Welch peak-bin view.
+A caller-owned source vector streams each measured factor into the original
+full mutual work contraction. No complete source covariance, new load law,
+material query or boundary solve is introduced.
+
+Boundary-port input work shares an allocation-free compensated row contraction
+with its original scalar coherent query. It reports total radiation-plus-wall
+input work; that impedance alone cannot separately identify wall absorption.
+Molecular evaluation reuses the original three-matrix `power_w` owner,
+separately accumulating driving, exterior and wall powers before reporting the
+raw balance residual. Weak wall absorption is never inferred by subtraction,
+negative channels are never clipped, and molecular exterior work is not
+relabeled as far-field power at infinity.
+
+Queries enforce matrix/factor work and exact scratch extent, poll cancellation
+at bounded factor/row/source boundaries and return no partial power. Bin
+bandwidth and peak time averaging are applied once. Finite-record leakage and
+resolution remain; no new source, stationarity, statistical-confidence or
+passivity authority is inferred. Existing finite-surface port admission does
+not become a compact point-source self-load model.
+
+Six native retained-matrix tests pass for complex phase and mixed coordinates,
+Hann bin units, destructive/partial coherence, signed work, preserved weak
+wall loss, source order, scratch/work admission and cancellation/replay. They
+compile the exact quadratic and shared observation algorithms; the molecular
+carrier omits unused material/boundary storage and supplies no material
+behavior. An additional original-material, passive-wall BEM integration
+regression is authored but unrun without the constellation dependencies.
