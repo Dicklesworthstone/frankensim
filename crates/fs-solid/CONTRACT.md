@@ -6947,3 +6947,53 @@ zero-only/empty spectra, and source/budget/cancellation refusals. New modules
 passed pinned Rust formatting and syntax parsing. Full dependency compilation
 and those integration executions remain outstanding in this constrained session;
 the leaf checks are not a full native frame validation or performance benchmark.
+
+## Native frame hereditary time histories
+
+`PreparedFrameResonance::prepare_transient` and
+`PreparedFrameRelaxation::prepare_transient` retain the original assembled
+descriptor and prepare the existing complete `fs-phs` quadratic flow and its
+integral observers for one fixed clock. Every native displacement, momentum,
+original material memory and ordinary boundary state advances together under
+held nodal forces. Off-diagonal consistent inertia, nonproportional viscosity,
+Maxwell reaction and mutual boundary structure remain intact. No modal loss
+ratio, fitted impedance or split held-velocity constitutive update replaces the
+source. Algebraic boundary constraints explicitly refuse this ordinary time
+path; AC/pole support is unchanged. Material time evolution requires an explicit
+continuous-law support band `[0, f64::MAX]` rad/s, without extrapolating a finite
+measured frequency band.
+
+Native reports retain kinetic, equilibrium and attached storage, independently
+integrated original frame and attached resistance heat, held-force work, zero
+stationary-support work, a polarized storage change and original integrated
+q/p residuals. Each Maxwell coordinate also retains its original element,
+layer, source-arm and strain identity, elastic/viscous extension, opposing
+force, storage and interval heat. Material and boundary heat are subaccounts
+of attached heat, never additional energy charges. Explicit relaxed,
+unrelaxed or per-coordinate initial history and complete-state restart retain
+dark constrained memory. Time, motion and all memory observations publish
+together after all gates; refusal leaves the accepted history unchanged.
+Preparation has explicit complete dimension, byte and work bounds. Successful
+warm steps allocate no memory and prepare no exponential. Reference geometry,
+fixed temperature and stationary supports apply; no thermal destination is
+invented by this mechanical runtime.
+
+Five focused regression definitions cover all three analytic coupled Maxwell
+decay rates with and without held forcing; dark memory and explicit startup;
+full two-member consistent mass, nonproportional viscosity and mutual boundary
+heat against independent physical-equation integration; refusal/retry; and
+finite-frequency/algebraic boundary refusal. Three small native checks of the
+unmodified production heat-form helpers, linked to the existing production
+`fs_math` artifact, passed for nonproportional mass pullback, mutual Q/R cross
+terms and exact source partition. These do not execute the complete prepared
+flow. Full native integration execution remains outstanding in this
+resource-constrained environment.
+
+## Original element partitions of native viscoelastic heat
+
+`ViscoForceStep.element_steps` exposes storage, mean mechanical/eigenstrain
+work and true Kelvin–Voigt/Maxwell heat in original element connectivity order.
+`ViscoElements` retains each element's mass and volume from the same
+consistent-mass quadrature. Existing aggregate accounts are unchanged; element
+receipts partition those accounts and are not added again. The native element
+regression suite is authored; full Cargo execution remains outstanding.

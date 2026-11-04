@@ -21,6 +21,10 @@ use fs_phs::harmonic::{
     MAX_HARMONIC_DIMENSION, PoleOptions, ResonanceRegion,
 };
 use fs_phs::{DescriptorPortHamiltonian, PhsError, PortHamiltonian, QuadraticStorage, Storage};
+use std::sync::Arc;
+
+/// Complete native held-force histories with physical dissipation accounts.
+pub mod transient;
 
 /// Existing physical load owner. Ordinary and constrained laws use one assembly.
 #[derive(Clone, Copy)]
@@ -188,7 +192,7 @@ fn relative(residual: C64, scale: f64) -> Result<f64, FrameCoupledError> {
     })
 }
 
-/// Immutable original-coordinate model, prepared once for AC and pole queries.
+/// Immutable original-coordinate model for AC, poles and exact native histories.
 ///
 /// State order is `[q, p=M*v, original load state]` with q/p in `free_dofs()`
 /// order. The load's trailing multipliers remain algebraic. In every returned
@@ -196,6 +200,8 @@ fn relative(residual: C64, scale: f64) -> Result<f64, FrameCoupledError> {
 /// `port_output` / `output` is the same velocity in external force-port order.
 /// No normalization of a modal vector is a claim of unit physical energy.
 pub struct PreparedFrameResonance {
+    ndof: usize,
+    system: Arc<DescriptorPortHamiltonian>,
     free_dofs: Vec<usize>,
     load_dimension: usize,
     load_differential_dimension: usize,
@@ -413,6 +419,8 @@ impl Frame2d {
         )?;
         poll(cx)?;
         Ok(PreparedFrameResonance {
+            ndof: n,
+            system: Arc::new(system),
             free_dofs,
             load_dimension: nl,
             load_differential_dimension: ndl,
@@ -505,6 +513,11 @@ fn mass_inverse(
 }
 
 impl PreparedFrameResonance {
+    /// Original full node-major coordinate count, including stationary supports.
+    pub const fn ndof(&self) -> usize {
+        self.ndof
+    }
+
     /// Original node-major [ux, uy, theta] map. Supported coordinates stay zero.
     pub fn free_dofs(&self) -> &[usize] {
         &self.free_dofs

@@ -1,4 +1,4 @@
-//! Source-authored longitudinal Maxwell memory in native frame AC and poles.
+//! Source-authored longitudinal Maxwell memory in native frame AC, poles and time histories.
 //!
 //! The original member supplies E_infinity. Every positive layer arm contributes
 //! its original delta_E and tau through the geometry-owned axial and two bending
@@ -11,6 +11,9 @@
 //! delta_K(s)=k*s/(s+1/tau); the implementation never eliminates these states.
 
 mod memory;
+
+/// Complete native Maxwell histories on the shared exact transient owner.
+pub mod transient;
 
 use super::coupled::{
     FrameCoupledControls, FrameCoupledError, FrameDynamicPortLoad, FramePortDynamics,
