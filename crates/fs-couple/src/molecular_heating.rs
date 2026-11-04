@@ -14,10 +14,15 @@
 //! Quadrature convergence and a sufficiently small heating interval remain
 //! separate physical requirements.
 
+use crate::{
+    cavity_phs::piston::thermal::{HeatExchangeSolve, feedback},
+    finite_gas_thermal::FiniteGasThermalEnvironment,
+};
 use fs_bem::observation_transfers::{
     HarmonicVolumeQuadrature, MolecularObservationError, PreparedMolecularAbsorption,
     PreparedMolecularResponse,
 };
+use fs_conduction::lumped::LumpedThermalEnvironment;
 use fs_material::{
     MaterialError,
     relaxation::{RelaxationAbsorption, RelaxationState, RelaxingMedium},
@@ -227,6 +232,48 @@ impl<'a> MolecularGasHeatLoad<'a> {
     pub const fn absorbed_power_w(&self) -> f64 { self.absorbed_power_w }
     #[must_use]
     pub const fn absorbed_energy_j(&self) -> f64 { self.absorbed_energy_j }
+
+    /// Bind this exact acoustic heat load into the existing reciprocal finite
+    /// gas/body thermal solver without exposing a second heat-input seam.
+    ///
+    /// The environment always starts from this load's ORIGINAL accepted gas and
+    /// supplies exactly `absorbed_energy_j()` as the gas-side external heat.
+    /// Convection, body enthalpy, radiation and reciprocal solid-to-gas exchange
+    /// remain owned by `FiniteGasThermalEnvironment`. This prevents callers
+    /// from first heating the gas and then accidentally crediting the same
+    /// molecular absorption again during body exchange.
+    ///
+    /// All numerical controls are admitted before the environment is published.
+    /// The returned object is still a proposal owner: neither gas nor body is
+    /// mutated until its own `advance` call succeeds and the caller accepts it.
+    pub fn finite_body_environment<'b>(
+        &'b self,
+        body: &'b LumpedThermalEnvironment,
+        gas_solve: GasEnergySolve,
+        exchange: HeatExchangeSolve,
+        maximum_gas_temperature_increment_k: f64,
+    ) -> Result<FiniteGasThermalEnvironment<'b>, MolecularHeatingError> {
+        gas_solve.validate()?;
+        feedback::admit::<fs_conduction::ConductionError>(exchange)
+            .map_err(|_| MolecularHeatingError::Invalid(
+                "invalid reciprocal finite-body heat-exchange controls",
+            ))?;
+        if !maximum_gas_temperature_increment_k.is_finite()
+            || maximum_gas_temperature_increment_k <= 0.0
+        {
+            return Err(MolecularHeatingError::Invalid(
+                "finite positive maximum gas temperature increment required",
+            ));
+        }
+        Ok(FiniteGasThermalEnvironment {
+            gas: self.gas,
+            body,
+            gas_heat_j: self.absorbed_energy_j,
+            gas_solve,
+            exchange,
+            maximum_gas_temperature_increment_k,
+        })
+    }
 
     /// Apply this load once to a candidate cloned from the ORIGINAL parcel.
     ///
