@@ -27,8 +27,9 @@ use fs_math::dd::Dd;
 
 mod lubricated;
 pub use lubricated::{
-    DryLubricatedDiskExchange2, DryLubricatedSlidersExchange2, FiniteLubricationSlider2,
-    LubricationPlane2, PlaneLubricationExchange2, SliderLubricationExchange2,
+    DryLubricatedDiskExchange2, DryLubricatedSlidersExchange2, DryTranslatingPlanesExchange2,
+    FiniteLubricationPlane2, FiniteLubricationSlider2, LubricationPlane2,
+    PlaneLubricationExchange2, SliderLubricationExchange2, TranslatingPlaneExchange2,
 };
 use lubricated::{FilmTotals2, PreparedPlanes2};
 
@@ -286,12 +287,12 @@ impl DryDisk2 {
             config,
             cancel,
             None,
+            |receipt| Ok(receipt.motion),
         )
-        .map(|receipt| receipt.motion.motion)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_inner(
+    fn step_inner<R>(
         &mut self,
         grid: &mut Grid,
         external_impulse: [f64; 2],
@@ -300,7 +301,8 @@ impl DryDisk2 {
         config: DryDiskCouplingConfig2,
         cancel: &CancelGate,
         planes: Option<&PreparedPlanes2>,
-    ) -> Result<DryLubricatedSlidersExchange2, DryDiskError2> {
+        finish: impl FnOnce(DryLubricatedDiskExchange2) -> Result<R, DryDiskError2>,
+    ) -> Result<R, DryDiskError2> {
         checkpoint(cancel)?;
         config.admit()?;
         admit_grid(grid, self.disk.dims)?;
@@ -525,7 +527,12 @@ impl DryDisk2 {
             jacobian_condition: condition,
         };
         let plane_receipts = if let Some(planes) = planes {
-            planes.admit_endpoint(candidate.body.center, radius, cancel)?;
+            planes.admit_endpoint(
+                candidate.body.center,
+                candidate.exchange.velocity_midpoint,
+                radius,
+                cancel,
+            )?;
             planes.receipts(
                 candidate.exchange.velocity_midpoint,
                 candidate.exchange.angular_velocity_midpoint,
@@ -543,17 +550,9 @@ impl DryDisk2 {
             plane_work: candidate.films.plane_work,
             dissipated_energy: candidate.films.dissipation,
         };
-        // Finite slider motion, guide reactions and their independent balance
-        // are prepared before the sole accepted body/fluid publication.
-        let receipt = if let Some(planes) = planes {
-            planes.finish_sliders(receipt, moment_origin, cancel)?
-        } else {
-            DryLubricatedSlidersExchange2 {
-                combined_momentum_residual: receipt.motion.combined_momentum_residual,
-                motion: receipt,
-                sliders: Vec::new(),
-            }
-        };
+        // Every finite surface's endpoint, guide reaction and independent
+        // balance is prepared before the sole body/fluid publication.
+        let receipt = finish(receipt)?;
         checkpoint(cancel)?;
         grid.stream_from(&self.disk.post);
         self.disk.body = candidate.body;

@@ -10243,3 +10243,43 @@ These are direct original numerical-owner checks with unused runtime/pool,
 body-motion and unrelated API wrappers omitted. Full Cargo, DSR, cross-ISA
 and performance gates were not run. The fixed-occupancy and prescribed-wall-
 kinematics limits of the curved owner remain unchanged.
+
+
+### Finite translating plane carriers on the physical D2Q9 disk
+
+FiniteLubricationPlane2 and
+DryDisk2::step_with_translating_lubrication_planes advance finite normal
+AND tangential plane momentum within the original dry-disk/fluid transaction.
+The supplied mass is per unit out-of-plane depth; center and surface point
+are distinct. Orientation remains fixed. The guide receives only a pure
+reaction couple, with zero work and no supported linear impulse.
+
+The original UnderResolvedCylinderPair2 owner supplies the normal
+resistance, cutoff and gap floor at the actual first-half-drift geometry.
+The shared finite-mass elimination condenses normal and tangent resistance
+independently with k/(1+k/(2m)), using one carrier mass. Both enter every
+existing three-unknown dry-fluid candidate, with no later impulse kick or
+extra fluid collision. Original cylinder spin resistance is unchanged.
+
+Each accepted carrier moves its center AND plane point through both free
+half-drifts. The second uses its solved endpoint velocity. Admission checks
+the actual carrier/disk endpoint gap, never a prescribed-wall extrapolation.
+With fixed normal, the relative gap is affine within each drift; positive
+start/midpoint/endpoint gaps exclude crossing along these two trajectories.
+Complete vector low-Mach admission applies before, at midpoint and after.
+
+Actual carrier momentum and kinetic increments, authored loads/work and
+the orientation-guide couple are independently checked before native
+publication. The aggregate exterior-fluid/dry-disk/carrier momentum account
+includes guide couples as external sources. Refusal/cancellation preserves
+all accepted states. Only infallible assignments publish the already
+admitted finite endpoints.
+
+Focused native tests reconstruct three successive two-plane steps from
+actual changing geometry, coefficient laws, momentum and work. They check
+recoil that rescues a falsely predicted held-wall crossing, true first/last
+drift crossings, complete vector speed refusal, exact retry and inactive
+parity. This supplies missing-film physics, not resolved moving walls,
+finite face extents, contact or a thermal destination. The inherited
+implicit midpoint method is not L-stable; physical stiff-film relaxation
+still needs time resolution.

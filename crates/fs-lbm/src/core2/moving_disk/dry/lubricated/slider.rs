@@ -183,6 +183,7 @@ impl DryDisk2 {
             config,
             cancel,
             Some(&prepared),
+            |receipt| prepared.finish_sliders(receipt, moment_origin, cancel),
         )?;
         // All fallible work precedes the existing native publication. These
         // copies publish exactly the already-admitted finite endpoints.
@@ -190,6 +191,49 @@ impl DryDisk2 {
             *slider = response.state_after;
         }
         Ok(receipt)
+    }
+}
+
+/// Shared finite-mass midpoint elimination for each orthogonal film mode.
+pub(super) struct CondensedResistance2 {
+    pub(super) effective: f64,
+    pub(super) retained: f64,
+    pub(super) recoil: f64,
+}
+
+impl CondensedResistance2 {
+    pub(super) fn new(m: f64, k: f64) -> Result<Self, DryDiskError2> {
+        if !(m.is_finite() && m > 0.0 && k.is_finite() && k >= 0.0) {
+            return Err(DryDiskError2::Invalid(
+                "invalid finite film mass or resistance",
+            ));
+        }
+        // Never form k/(2m) on the stiff/light branch: it can overflow even
+        // though the condensed resistance has the finite limit 2m.
+        let (effective, retained, recoil) = if k <= m {
+            let ratio = 0.5 * (k / m);
+            (
+                k / (1.0 + ratio),
+                1.0 / (1.0 + ratio),
+                ratio / (1.0 + ratio),
+            )
+        } else {
+            let ratio = m / k;
+            (
+                m / (0.5 + ratio),
+                ratio / (0.5 + ratio),
+                0.5 / (0.5 + ratio),
+            )
+        };
+        Ok(Self {
+            effective,
+            retained,
+            recoil,
+        })
+    }
+
+    pub(super) fn midpoint(&self, free: f64, speed: f64) -> f64 {
+        self.retained * free + self.recoil * speed
     }
 }
 
@@ -210,23 +254,11 @@ impl PreparedSlider2 {
         k: f64,
     ) -> Result<Self, DryDiskError2> {
         let m = initial.mass;
-        // Never form k/(2m) on the stiff/light branch: it can overflow even
-        // though the condensed resistance has the finite limit 2m.
-        let (effective_resistance, retained_fraction, recoil_fraction) = if k <= m {
-            let ratio = 0.5 * (k / m);
-            (
-                k / (1.0 + ratio),
-                1.0 / (1.0 + ratio),
-                ratio / (1.0 + ratio),
-            )
-        } else {
-            let ratio = m / k;
-            (
-                m / (0.5 + ratio),
-                ratio / (0.5 + ratio),
-                0.5 / (0.5 + ratio),
-            )
-        };
+        let CondensedResistance2 {
+            effective: effective_resistance,
+            retained: retained_fraction,
+            recoil: recoil_fraction,
+        } = CondensedResistance2::new(m, k)?;
         let free_midpoint = initial.tangential_velocity + (0.5 * external) / m;
         let velocity = initial.velocity();
         let center = core::array::from_fn(|a| (0.5 * velocity[a]) + initial.center[a]);

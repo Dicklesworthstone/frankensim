@@ -1180,3 +1180,436 @@ fn finite_slider_refusal_and_cancellation_preserve_all_state_and_exact_retry() {
     assert_eq!(disk.body(), fresh_disk.body());
     assert_eq!(sliders, fresh_sliders);
 }
+
+use fs_lbm::core2::moving_disk::FiniteLubricationPlane2;
+
+fn finite_plane_momentum(plane: FiniteLubricationPlane2, origin: [f64; 2]) -> [f64; 3] {
+    let momentum = plane.velocity().map(|v| plane.mass() * v);
+    let center = plane.center();
+    [
+        momentum[0],
+        momentum[1],
+        cross([center[0] - origin[0], center[1] - origin[1]], momentum),
+    ]
+}
+
+#[test]
+fn translating_planes_close_actual_motion_momentum_and_work_over_changing_gaps() {
+    let origin = [-7.0, 26.0];
+    let viscosity = 0.001;
+    let (mut grid, mut disk) = fixture(0.4);
+    grid.rebind_gravity([1e-6, -2e-6], &mut Vec::new()).unwrap();
+    let normals = [[0.0, 1.0], [0.6, 0.8]];
+    let mut planes = core::array::from_fn::<_, 2, _>(|i| {
+        let surface = plane(
+            &disk,
+            normals[i],
+            0.025,
+            [[0.003, 0.002], [-0.002, 0.001]][i],
+        )
+        .with_tangential(0.03, 0.001)
+        .unwrap();
+        FiniteLubricationPlane2::new(surface, [0.04, 0.7][i], [8.1 + i as f64, 6.3]).unwrap()
+    });
+    let original = planes;
+    let authored = [[0.0002, -0.0001], [-0.0003, 0.0002]];
+    let radius = disk.radius();
+    for _ in 0..3 {
+        let initial = planes;
+        let mut before = joint(&grid, &disk, origin);
+        for plane in planes {
+            let p = finite_plane_momentum(plane, origin);
+            for a in 0..3 {
+                before[a] += p[a];
+            }
+        }
+        let report = disk
+            .step_with_translating_lubrication_planes(
+                &mut grid,
+                [0.0005, -0.0002],
+                0.0003,
+                origin,
+                viscosity,
+                &mut planes,
+                &authored,
+                Default::default(),
+                &gate(),
+            )
+            .unwrap();
+        let native = &report.motion.motion;
+        let mut actual = joint(&grid, &disk, origin);
+        let mut expected = core::array::from_fn::<_, 3, _>(|a| {
+            native.physical_external_impulse[a]
+                + native.represented_fluid_forcing_impulse[a]
+                + native.boundary_fluid_impulse[a]
+                + if a == 2 {
+                    native.periodic_angular_impulse
+                } else {
+                    0.0
+                }
+        });
+        for i in 0..2 {
+            let previous = initial[i];
+            let after = planes[i];
+            let response = report.planes[i];
+            let film = report.motion.planes[i];
+            let n = normals[i];
+            let t = [-n[1], n[0]];
+            let midpoint = core::array::from_fn::<_, 2, _>(|a| {
+                0.5 * (previous.velocity()[a] + after.velocity()[a])
+            });
+            let plane_midpoint = core::array::from_fn::<_, 2, _>(|a| {
+                previous.plane().point()[a] + 0.5 * previous.velocity()[a]
+            });
+            let gap = dot(
+                [
+                    native.collision_center[0] - plane_midpoint[0],
+                    native.collision_center[1] - plane_midpoint[1],
+                ],
+                n,
+            ) - radius;
+            let normal_k = 3.0
+                * std::f64::consts::PI
+                * std::f64::consts::SQRT_2
+                * viscosity
+                * radius.powf(1.5)
+                * (gap.max(previous.plane().minimum_gap()).powf(-1.5)
+                    - previous.plane().cutoff_gap().powf(-1.5));
+            let tangent_k = if gap < 0.03 {
+                std::f64::consts::PI
+                    * viscosity
+                    * (8.0 * radius).sqrt()
+                    * (gap.max(0.001).powf(-0.5) - 0.03_f64.powf(-0.5))
+            } else {
+                0.0
+            };
+            close(film.native.resistance_increment, normal_k, 2e-12);
+            close(film.tangential_resistance_increment, tangent_k, 3e-15);
+            close(
+                film.native.effective_gap,
+                gap.max(previous.plane().minimum_gap()),
+                3e-15,
+            );
+            for (direction, k) in [(n, normal_k), (t, tangent_k)] {
+                let free = dot(previous.velocity(), direction)
+                    + dot(authored[i], direction) / (2.0 * after.mass());
+                let effective = k / (1.0 + k / (2.0 * after.mass()));
+                let expected_impulse =
+                    -effective * (dot(native.native.velocity_midpoint, direction) - free);
+                close(
+                    dot([film.body_impulse[0], film.body_impulse[1]], direction),
+                    expected_impulse,
+                    2e-15,
+                );
+            }
+            close(
+                film.native.normal_gap_velocity,
+                dot(
+                    [
+                        native.native.velocity_midpoint[0] - midpoint[0],
+                        native.native.velocity_midpoint[1] - midpoint[1],
+                    ],
+                    n,
+                ),
+                2e-15,
+            );
+            for a in 0..2 {
+                close(response.velocity_midpoint[a], midpoint[a], 1e-16);
+                close(
+                    after.mass() * (after.velocity()[a] - previous.velocity()[a]),
+                    authored[i][a] + film.plane_impulse[a],
+                    2e-15,
+                );
+                close(after.center()[a] - previous.center()[a], midpoint[a], 2e-15);
+                close(
+                    after.plane().point()[a] - previous.plane().point()[a],
+                    midpoint[a],
+                    2e-15,
+                );
+                close(
+                    after.plane().point()[a] - after.center()[a],
+                    previous.plane().point()[a] - previous.center()[a],
+                    3e-15,
+                );
+            }
+            assert_eq!(after.plane().normal(), previous.plane().normal());
+            let actual_energy = 0.5
+                * after.mass()
+                * (dot(after.velocity(), after.velocity())
+                    - dot(previous.velocity(), previous.velocity()));
+            close(
+                actual_energy,
+                dot(authored[i], midpoint) + film.plane_work,
+                3e-18,
+            );
+            close(response.kinetic_energy_change, actual_energy, 3e-18);
+            close(response.work_residual, 0.0, 3e-18);
+            let arm = [
+                response.collision_center[0] - origin[0],
+                response.collision_center[1] - origin[1],
+            ];
+            close(
+                response.guide_couple,
+                -film.plane_impulse[2] + cross(arm, [film.plane_impulse[0], film.plane_impulse[1]]),
+                2e-15,
+            );
+            close(
+                film.body_center_couple,
+                -tangent_k * radius * radius * native.native.angular_velocity_midpoint,
+                2e-15,
+            );
+            vector(response.momentum_residual, [0.0; 3], 3e-15);
+            let p = finite_plane_momentum(after, origin);
+            for a in 0..3 {
+                actual[a] += p[a];
+                expected[a] +=
+                    response.external_impulse[a] + if a == 2 { response.guide_couple } else { 0.0 };
+            }
+        }
+        for a in 0..3 {
+            close(actual[a] - before[a], expected[a], 3e-11);
+        }
+        vector(report.combined_momentum_residual, [0.0; 3], 3e-11);
+        close(
+            report.motion.body_work + report.motion.plane_work + report.motion.dissipated_energy,
+            0.0,
+            3e-17,
+        );
+        assert!(report.motion.dissipated_energy >= 0.0);
+    }
+    assert!((planes[0].velocity()[1] - original[0].velocity()[1]).abs() > 1e-4);
+    assert!((planes[0].plane().point()[1] - original[0].plane().point()[1]).abs() > 1e-4);
+}
+
+#[test]
+fn finite_normal_recoil_uses_its_solved_gap_when_held_wall_motion_would_cross() {
+    let (mut grid, disk) = fixture(0.4);
+    let mut body = disk.body();
+    body.velocity = [0.0; 2];
+    body.angular_velocity = 0.0;
+    let mut disk = DryDisk2::new(&grid, disk.radius(), body, disk.angle()).unwrap();
+    let surface = plane(&disk, [0.0, 1.0], 0.012, [0.0, 0.02]);
+    let mut planes = [FiniteLubricationPlane2::new(surface, 0.02, [8.0, 5.0]).unwrap()];
+    let report = disk
+        .step_with_translating_lubrication_planes(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [-7.0, 26.0],
+            0.001,
+            &mut planes,
+            &[[0.0; 2]],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let actual_gap = disk.body().center[1] - planes[0].plane().point()[1] - disk.radius();
+    let held_gap =
+        disk.body().center[1] - surface.translated(1.0).unwrap().point()[1] - disk.radius();
+    assert!(
+        held_gap < 0.0,
+        "a held-wall endpoint would falsely reject this native response"
+    );
+    assert!(actual_gap > 0.0);
+    assert!(
+        planes[0].velocity()[1] < 0.0,
+        "finite midpoint recoil reverses this stiff approach"
+    );
+    let response = report.planes[0];
+    let impulse = report.motion.planes[0].plane_impulse;
+    close(0.02 * (planes[0].velocity()[1] - 0.02), impulse[1], 2e-16);
+    close(
+        response.kinetic_energy_change,
+        report.motion.planes[0].plane_work,
+        2e-18,
+    );
+    vector(report.combined_momentum_residual, [0.0; 3], 3e-11);
+}
+
+#[test]
+fn translating_plane_empty_and_inactive_films_keep_native_parity_and_free_vector_acceleration() {
+    let (mut grid, mut disk) = fixture(0.4);
+    let mut expected_grid = grid.clone();
+    let mut expected_disk = disk.clone();
+    let expected = expected_disk
+        .step(
+            &mut expected_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let mut empty_grid = grid.clone();
+    let mut empty_disk = disk.clone();
+    let empty = empty_disk
+        .step_with_translating_lubrication_planes(
+            &mut empty_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut [],
+            &[],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(empty.motion.motion, expected);
+    assert_eq!(empty_grid.f, expected_grid.f);
+    let surface = plane(&disk, [0.6, 0.8], 0.8, [0.003, -0.002])
+        .with_tangential(0.03, 0.001)
+        .unwrap();
+    let initial = FiniteLubricationPlane2::new(surface, 2.0, [8.0, 5.0]).unwrap();
+    let mut planes = [initial];
+    let authored = [0.004, -0.006];
+    let report = disk
+        .step_with_translating_lubrication_planes(
+            &mut grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut planes,
+            &[authored],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(report.motion.motion, expected);
+    assert_eq!(grid.f, expected_grid.f);
+    assert_eq!(disk.body(), expected_disk.body());
+    for a in 0..2 {
+        close(
+            planes[0].velocity()[a],
+            initial.velocity()[a] + authored[a] / initial.mass(),
+            1e-18,
+        );
+        let drift = initial.velocity()[a] + 0.5 * authored[a] / initial.mass();
+        close(
+            planes[0].plane().point()[a] - initial.plane().point()[a],
+            drift,
+            2e-15,
+        );
+    }
+    assert_eq!(report.motion.body_impulse, [0.0; 3]);
+    assert_eq!(report.planes[0].guide_couple, 0.0);
+    close(
+        report.planes[0].kinetic_energy_change,
+        report.planes[0].external_work,
+        2e-20,
+    );
+}
+
+#[test]
+fn translating_plane_crossing_speed_and_cancellation_refuse_atomically_then_retry_exactly() {
+    let (mut grid, disk) = fixture(0.4);
+    let mut body = disk.body();
+    body.velocity = [0.0; 2];
+    body.angular_velocity = 0.0;
+    let mut disk = DryDisk2::new(&grid, disk.radius(), body, disk.angle()).unwrap();
+    let point = [body.center[0], body.center[1] - disk.radius() - 0.012];
+    // Both film modes are inactive; the late candidate's normal acceleration
+    // crosses a gap that the old held-wall endpoint would incorrectly admit.
+    let surface = LubricationPlane2::new(point, [0.0, 1.0], [0.0; 2], 0.005, 0.001).unwrap();
+    let mut planes = [FiniteLubricationPlane2::new(surface, 1.0, [8.0, 5.0]).unwrap()];
+    let initial_grid = grid.clone();
+    let initial_disk = disk.clone();
+    let initial_planes = planes;
+    for authored in [[0.0, 0.04], [0.13, -0.13]] {
+        // The second case has individually small components but violates the
+        // full vector low-Mach envelope; it moves away and cannot hit the gap guard.
+        assert!(
+            disk.step_with_translating_lubrication_planes(
+                &mut grid,
+                [0.0; 2],
+                0.0,
+                [0.0; 2],
+                0.001,
+                &mut planes,
+                &[authored],
+                Default::default(),
+                &gate(),
+            )
+            .is_err()
+        );
+        assert_eq!(grid.f, initial_grid.f);
+        assert_eq!(disk.body(), initial_disk.body());
+        assert_eq!(disk.angle(), initial_disk.angle());
+        assert_eq!(planes, initial_planes);
+    }
+    // First-half crossing must refuse even if a later authored impulse would
+    // reverse the carrier: the impulse has not occurred during that drift.
+    let crossing = LubricationPlane2::new(point, [0.0, 1.0], [0.0, 0.03], 0.005, 0.001).unwrap();
+    let mut crossing_planes = [FiniteLubricationPlane2::new(crossing, 1.0, [8.0, 5.0]).unwrap()];
+    let crossing_before = crossing_planes;
+    assert!(
+        disk.step_with_translating_lubrication_planes(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut crossing_planes,
+            &[[0.0, -0.1]],
+            Default::default(),
+            &gate(),
+        )
+        .is_err()
+    );
+    assert_eq!(crossing_planes, crossing_before);
+    assert_eq!(grid.f, initial_grid.f);
+    let cancelled = gate();
+    cancelled.request();
+    assert_eq!(
+        disk.step_with_translating_lubrication_planes(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut planes,
+            &[[0.0; 2]],
+            Default::default(),
+            &cancelled,
+        )
+        .unwrap_err(),
+        DryDiskError2::Cancelled
+    );
+    assert_eq!(grid.f, initial_grid.f);
+    assert_eq!(planes, initial_planes);
+    let mut fresh_grid = initial_grid;
+    let mut fresh_disk = initial_disk;
+    let mut fresh_planes = initial_planes;
+    let actual = disk
+        .step_with_translating_lubrication_planes(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut planes,
+            &[[0.0, -0.004]],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let expected = fresh_disk
+        .step_with_translating_lubrication_planes(
+            &mut fresh_grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut fresh_planes,
+            &[[0.0, -0.004]],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(grid.f, fresh_grid.f);
+    assert_eq!(disk.body(), fresh_disk.body());
+    assert_eq!(planes, fresh_planes);
+}

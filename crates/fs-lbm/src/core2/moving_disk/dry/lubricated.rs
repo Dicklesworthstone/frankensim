@@ -5,8 +5,14 @@ use crate::core2::{UnderResolvedCylinderPair2, UnderResolvedLubricationExchange2
 
 mod slider;
 use slider::PreparedSlider2;
+
+mod translating;
 pub use slider::{
     DryLubricatedSlidersExchange2, FiniteLubricationSlider2, SliderLubricationExchange2,
+};
+use translating::PreparedTranslation2;
+pub use translating::{
+    DryTranslatingPlanesExchange2, FiniteLubricationPlane2, TranslatingPlaneExchange2,
 };
 
 /// A translating prescribed plane, with its unit normal directed into fluid.
@@ -202,8 +208,8 @@ pub struct PlaneLubricationExchange2 {
     pub tangential_resistance_increment: f64,
     /// Impulse work delivered to the dry disk at its solved midpoint velocity.
     pub body_work: f64,
-    /// Impulse work received by the plane surface. The finite-slider adapter
-    /// stores this in slider kinetic energy; prescribed planes use a reservoir.
+    /// Impulse work received by the plane surface. Finite carriers store this
+    /// in kinetic energy; prescribed planes use a reservoir.
     pub plane_work: f64,
     /// Nonnegative normal plus sliding/spinning loss per lattice tick.
     pub dissipated_energy: f64,
@@ -223,7 +229,7 @@ pub struct DryLubricatedDiskExchange2 {
     /// Film work received by the disk, separate from authored/source work.
     pub body_work: f64,
     /// Film work received by the planes: reservoir work for prescribed planes,
-    /// or kinetic transfer when nested in the finite-slider receipt.
+    /// or kinetic transfer when nested in a finite-carrier receipt.
     pub plane_work: f64,
     /// Nonnegative missing-film loss: `-(body_work + plane_work)` up to roundoff.
     /// No thermal destination is invented or advanced by this owner.
@@ -285,8 +291,8 @@ impl DryDisk2 {
             config,
             cancel,
             Some(&prepared),
+            Ok,
         )
-        .map(|receipt| receipt.motion)
     }
 }
 
@@ -306,6 +312,7 @@ struct PreparedPlane2 {
     footpoint: [f64; 2],
     endpoint: LubricationPlane2,
     slider: Option<PreparedSlider2>,
+    translation: Option<PreparedTranslation2>,
 }
 pub(super) struct PreparedPlanes2(Vec<PreparedPlane2>);
 impl PreparedPlanes2 {
@@ -381,12 +388,20 @@ impl PreparedPlanes2 {
     pub(super) fn admit_endpoint(
         &self,
         center: [f64; 2],
+        velocity_midpoint: [f64; 2],
         radius: f64,
         cancel: &CancelGate,
     ) -> Result<(), DryDiskError2> {
         for plane in &self.0 {
             checkpoint(cancel)?;
-            positive_gap(center, plane.endpoint, radius)?;
+            let endpoint = if let Some(translation) = &plane.translation {
+                // The finite plane's second half-drift uses its SOLVED
+                // endpoint velocity, never the held-wall extrapolation.
+                translation.endpoint(velocity_midpoint)?.0.plane()
+            } else {
+                plane.endpoint
+            };
+            positive_gap(center, endpoint, radius)?;
         }
         Ok(())
     }
@@ -436,6 +451,7 @@ impl PreparedPlane2 {
             footpoint,
             endpoint: plane.translated(1.0)?,
             slider: None,
+            translation: None,
         })
     }
 
@@ -454,9 +470,16 @@ impl PreparedPlane2 {
         }
         let mut pair = self.pair;
         pair.surface_velocities[0] = velocity;
-        let native = pair.correction(origin);
+        let (translation, native) = match &self.translation {
+            Some(plane) => {
+                let response = plane.response(velocity);
+                (Some(response), plane.normal_exchange(response, origin)?)
+            }
+            None => (None, pair.correction(origin)),
+        };
+        let wall_velocity = translation.map_or(pair.surface_velocities[1], |r| r.velocity_midpoint);
         let mut body_work = dot(native.first_solid_impulse, velocity);
-        let mut plane_work = dot(native.second_solid_impulse, pair.surface_velocities[1]);
+        let mut plane_work = dot(native.second_solid_impulse, wall_velocity);
         let mut body_impulse = [
             native.first_solid_impulse[0],
             native.first_solid_impulse[1],
@@ -474,6 +497,12 @@ impl PreparedPlane2 {
                     slider.retained_fraction * delta,
                     -slider.effective_resistance * delta,
                     slider.midpoint(speed),
+                )
+            } else if let Some(response) = translation {
+                (
+                    response.tangent_rate,
+                    response.tangent_impulse,
+                    response.tangent_midpoint,
                 )
             } else {
                 let slip = dot(subtract(velocity, pair.surface_velocities[1]), self.tangent);
@@ -500,7 +529,7 @@ impl PreparedPlane2 {
                     tangent_impulse,
                 );
             body_work += dot(tangent_impulse, velocity) + body_center_couple * angular_velocity;
-            if self.slider.is_some() {
+            if self.slider.is_some() || translation.is_some() {
                 plane_work -= tangent_load * wall_speed;
                 dissipated_energy += -tangent_load * slip + k * spin_speed * spin_speed;
             } else {
