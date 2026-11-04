@@ -5,6 +5,9 @@ use super::*;
 use fs_vpm::farfield3d::FarField;
 use fs_vpm::filament3d::{FilamentWake, WakeKinematics, WakeSegment};
 
+pub(super) mod tree;
+pub use tree::{BoundedWakeFieldSample, PreparedWakeTreeField, WakeTreeFieldReport};
+
 /// An immutable field snapshot of a real connected near/far wake.
 ///
 /// The physical component includes the sheet's bound closing line. It replaces
@@ -174,7 +177,7 @@ impl PreparedWakeField {
                 "reduce sample points or raise the explicit source-visit limit",
             ));
         }
-        sample_field_impl(state, grid, component_mask, Some(self), &mut cancelled)
+        sample_field_impl(state, grid, component_mask, Some(self), None, &mut cancelled)
     }
 
     pub(super) fn selected_core_radius(&self, mask: u32) -> f64 {

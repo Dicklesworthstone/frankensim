@@ -30,7 +30,8 @@ use fs_vpm::filament3d::{
 };
 
 mod wake;
-pub use wake::PreparedWakeField;
+pub use wake::{BoundedWakeFieldSample, PreparedWakeField, PreparedWakeTreeField, WakeTreeFieldReport};
+pub use fs_vpm::filament3d::WakeTreeAccuracy;
 
 /// Component bit: mean atmosphere (log law).
 pub const C_MEAN_ATMO: u32 = 1 << 0;
@@ -472,7 +473,7 @@ pub fn sample_field(
     grid: &GridSpec,
     component_mask: u32,
 ) -> Result<FieldSampleSet, Refusal> {
-    sample_field_impl(state, grid, component_mask, None, &mut || false)
+    sample_field_impl(state, grid, component_mask, None, None, &mut || false)
 }
 
 fn sample_field_impl(
@@ -480,6 +481,7 @@ fn sample_field_impl(
     grid: &GridSpec,
     component_mask: u32,
     wake: Option<&PreparedWakeField>,
+    mut acceleration: Option<&mut wake::tree::TreeFieldQuery<'_>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<FieldSampleSet, Refusal> {
     wake::checkpoint(cancelled)?;
@@ -598,7 +600,12 @@ fn sample_field_impl(
         let mut g = analytic_grad(state, component_mask, p, tick);
         let mut source_regular = true;
         if let Some(wake) = wake {
-            if let Some(value) = wake.kinematics(p, component_mask, cancelled)? {
+            let value = if let Some(query) = acceleration.as_deref_mut() {
+                query.kinematics(p, component_mask, cancelled)?
+            } else {
+                wake.kinematics(p, component_mask, cancelled)?
+            };
+            if let Some(value) = value {
                 for a in 0..3 {
                     u[a] += value.velocity[a];
                     for b in 0..3 {
@@ -640,10 +647,18 @@ fn sample_field_impl(
             let mut up = u_at(state, ambient_mask, pp, tick);
             let mut um = u_at(state, ambient_mask, pm, tick);
             if let Some(wake) = wake {
-                match (
-                    wake.velocity(pp, component_mask, cancelled)?,
-                    wake.velocity(pm, component_mask, cancelled)?,
-                ) {
+                let values = if let Some(query) = acceleration.as_deref_mut() {
+                    (
+                        query.velocity(pp, component_mask, cancelled)?,
+                        query.velocity(pm, component_mask, cancelled)?,
+                    )
+                } else {
+                    (
+                        wake.velocity(pp, component_mask, cancelled)?,
+                        wake.velocity(pm, component_mask, cancelled)?,
+                    )
+                };
+                match values {
                     (Some(vp), Some(vm)) => {
                         for a in 0..3 {
                             up[a] += vp[a];
@@ -702,7 +717,11 @@ fn sample_field_impl(
                     })
             });
         if let Some(wake) = wake {
-            in_core |= wake.in_core(p, component_mask, cancelled)?;
+            in_core |= if let Some(query) = acceleration.as_deref_mut() {
+                query.in_core(p, component_mask, cancelled)?
+            } else {
+                wake.in_core(p, component_mask, cancelled)?
+            };
         }
         let omega = [g[2][1] - g[1][2], g[0][2] - g[2][0], g[1][0] - g[0][1]];
         let strain = det::sqrt(s2);

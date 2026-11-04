@@ -322,3 +322,209 @@ fn overflowing_vortex_invariants_never_mark_a_sample_valid() {
     assert!(!sample.validity_mask[0]);
     assert!(sample.normalized_divergence(0).is_none());
 }
+
+
+#[test]
+fn prepared_tree_exact_mode_matches_physical_field_and_snapshot_identity() {
+    use fs_flyer::fieldsvc::WakeTreeAccuracy;
+
+    let (mut near, far) = fixture();
+    let far = FarField::aggregate(&mut near, 4, 2, far.mode, far.shed_dt_s).unwrap();
+    let field = PreparedWakeField::new(&near, &far, true, 1000, || false).unwrap();
+    let mut tree = field.prepare_tree(2, usize::MAX, 100000, || false).unwrap();
+    let grid = GridSpec {
+        nx: 3,
+        ny: 2,
+        ..grid([-0.73, 0.24, 1.72])
+    };
+    let mask = C_PHYSICAL_WAKE | C_GROUND_IMAGES | C_MEAN_ATMO;
+    let exact = field.sample(&state(), &grid, mask, 100000, || false).unwrap();
+    let sampled = tree
+        .sample(
+            &state(),
+            &grid,
+            mask,
+            WakeTreeAccuracy {
+                absolute_velocity_error_mps: 0.0,
+                absolute_gradient_error_per_s: 0.0,
+            },
+            100000,
+            || false,
+        )
+        .unwrap();
+    assert!(tree.preparation_report().work_used > 0);
+    assert!(tree.node_count() > 0);
+    assert_eq!(sampled.report.accepted_cells, 0);
+    assert_eq!(sampled.report.maximum_velocity_error_bound_mps, 0.0);
+    assert_eq!(sampled.report.maximum_gradient_error_bound_per_s, 0.0);
+    assert_eq!(sampled.report.maximum_fd_divergence_error_bound_per_s, 0.0);
+    assert_eq!(
+        sampled.sample.meta.field_source_snapshot_id,
+        exact.meta.field_source_snapshot_id,
+    );
+    assert_eq!(sampled.sample.validity_mask, exact.validity_mask);
+    assert_eq!(sampled.sample.singularity_core_mask, exact.singularity_core_mask);
+    for n in 0..grid.n_points() {
+        for i in 0..3 {
+            close(sampled.sample.u[n][i], exact.u[n][i], 2e-13);
+            close(sampled.sample.omega[n][i], exact.omega[n][i], 2e-13);
+            for j in 0..3 {
+                close(sampled.sample.grad_u[n][i][j], exact.grad_u[n][i][j], 2e-13);
+            }
+        }
+        close(sampled.sample.q_criterion[n], exact.q_criterion[n], 2e-13);
+        close(sampled.sample.lambda2[n], exact.lambda2[n], 2e-13);
+    }
+    claim_total_flow(&sampled.sample).unwrap();
+}
+
+#[test]
+fn tree_field_accelerates_distant_queries_with_separate_derivative_and_fd_bounds() {
+    use fs_flyer::fieldsvc::WakeTreeAccuracy;
+
+    let (near, far) = fixture();
+    let field = PreparedWakeField::new(&near, &far, true, 1000, || false).unwrap();
+    let mut tree = field.prepare_tree(2, usize::MAX, 100000, || false).unwrap();
+    let grid = GridSpec {
+        nx: 3,
+        ny: 2,
+        ..grid([100.0, 100.0, 80.0])
+    };
+    let mask = C_PHYSICAL_WAKE | C_GROUND_IMAGES;
+    let exact = field.sample(&state(), &grid, mask, 100000, || false).unwrap();
+    for accuracy in [
+        WakeTreeAccuracy {
+            absolute_velocity_error_mps: 1e-5,
+            absolute_gradient_error_per_s: 1e-6,
+        },
+        WakeTreeAccuracy {
+            absolute_velocity_error_mps: 1e-9,
+            absolute_gradient_error_per_s: 1e-10,
+        },
+    ] {
+        let sampled = tree
+            .sample(&state(), &grid, mask, accuracy, 100000, || false)
+            .unwrap();
+        let report = sampled.report;
+        assert!(report.accepted_cells > 0);
+        assert!(
+            report.direct_interactions
+                < 16 * field.segment_count() as u64 * grid.n_points() as u64
+        );
+        assert!(report.maximum_velocity_error_bound_mps <= accuracy.absolute_velocity_error_mps);
+        assert!(report.maximum_gradient_error_bound_per_s <= accuracy.absolute_gradient_error_per_s);
+        assert!(
+            report.maximum_fd_divergence_error_bound_per_s
+                <= accuracy.absolute_gradient_error_per_s
+        );
+        assert_eq!(sampled.sample.validity_mask, exact.validity_mask);
+        assert_eq!(sampled.sample.singularity_core_mask, exact.singularity_core_mask);
+        for n in 0..grid.n_points() {
+            let velocity_error = (0..3)
+                .map(|i| (sampled.sample.u[n][i] - exact.u[n][i]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let gradient_error = sampled.sample.grad_u[n]
+                .iter()
+                .flatten()
+                .zip(exact.grad_u[n].iter().flatten())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let curl_error = (0..3)
+                .map(|i| (sampled.sample.omega[n][i] - exact.omega[n][i]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(velocity_error <= report.maximum_velocity_error_bound_mps + 2e-13);
+            assert!(gradient_error <= report.maximum_gradient_error_bound_per_s + 2e-13);
+            assert!(curl_error <= report.maximum_vorticity_error_bound_per_s() + 4e-13);
+            assert!(
+                (sampled.sample.div_finite_difference[n] - exact.div_finite_difference[n]).abs()
+                    <= report.maximum_fd_divergence_error_bound_per_s + 2e-11
+            );
+        }
+    }
+}
+
+#[test]
+fn tree_field_preserves_ground_reflection_and_core_masks() {
+    use fs_flyer::fieldsvc::WakeTreeAccuracy;
+
+    let (near, far) = fixture();
+    let field = PreparedWakeField::new(&near, &far, true, 1000, || false).unwrap();
+    let mut tree = field.prepare_tree(2, usize::MAX, 100000, || false).unwrap();
+    let accuracy = WakeTreeAccuracy {
+        absolute_velocity_error_mps: 1e-7,
+        absolute_gradient_error_per_s: 1e-7,
+    };
+    let plane = grid([-0.77, 0.3, 0.0]);
+    let physical = tree
+        .sample(&state(), &plane, C_PHYSICAL_WAKE, accuracy, 100000, || false)
+        .unwrap();
+    let images = tree
+        .sample(&state(), &plane, C_GROUND_IMAGES, accuracy, 100000, || false)
+        .unwrap();
+    for i in 0..3 {
+        let sign = if i == 2 { -1.0 } else { 1.0 };
+        close(images.sample.u[0][i], sign * physical.sample.u[0][i], 2e-13);
+        close(images.sample.omega[0][i], -sign * physical.sample.omega[0][i], 2e-13);
+    }
+    let point = grid(near.line_nodes[0]);
+    let exact = field.sample(&state(), &point, C_PHYSICAL_WAKE, 100000, || false).unwrap();
+    let sampled = tree
+        .sample(&state(), &point, C_PHYSICAL_WAKE, accuracy, 100000, || false)
+        .unwrap();
+    assert!(sampled.sample.validity_mask[0]);
+    assert!(sampled.sample.singularity_core_mask[0]);
+    assert_eq!(sampled.sample.singularity_core_mask, exact.singularity_core_mask);
+}
+
+#[test]
+fn tree_field_budget_cancellation_retry_and_singular_mask_are_atomic() {
+    use fs_flyer::fieldsvc::WakeTreeAccuracy;
+
+    let (near, far) = fixture();
+    let field = PreparedWakeField::new(&near, &far, true, 1000, || false).unwrap();
+    assert!(field.prepare_tree(2, 0, 100000, || false).is_err());
+    assert!(field.prepare_tree(2, usize::MAX, 0, || false).is_err());
+    let mut tree = field.prepare_tree(2, usize::MAX, 100000, || false).unwrap();
+    let grid = grid([0.3, 0.2, 1.6]);
+    let mask = C_PHYSICAL_WAKE | C_GROUND_IMAGES;
+    let accuracy = WakeTreeAccuracy {
+        absolute_velocity_error_mps: 1e-7,
+        absolute_gradient_error_per_s: 1e-7,
+    };
+    let first = tree.sample(&state(), &grid, mask, accuracy, 100000, || false).unwrap();
+    let work = first.report.work_used;
+    assert!(work > 0);
+    assert!(tree.sample(&state(), &grid, mask, accuracy, work - 1, || false).is_err());
+    let mut polls = 0;
+    assert!(
+        tree.sample(&state(), &grid, mask, accuracy, 100000, || {
+            polls += 1;
+            polls == 7
+        })
+        .is_err()
+    );
+    let retry = tree.sample(&state(), &grid, mask, accuracy, work, || false).unwrap();
+    assert_eq!(retry.sample.digest(), first.sample.digest());
+    assert_eq!(retry.report, first.report);
+    let ambient = tree
+        .sample(&state(), &grid, C_MEAN_ATMO, accuracy, 0, || false)
+        .unwrap();
+    assert_eq!(ambient.report.work_used, 0);
+
+    let mut near = near;
+    for row in &mut near.rows {
+        row.core2_m2 = 0.0;
+    }
+    let far = FarField { mode: WakeCoreEvolutionMode::Frozen, ..far };
+    let field = PreparedWakeField::new(&near, &far, false, 1000, || false).unwrap();
+    let mut tree = field.prepare_tree(2, usize::MAX, 100000, || false).unwrap();
+    let point = GridSpec { origin_m: near.line_nodes[0], ..grid };
+    let singular = tree
+        .sample(&state(), &point, C_PHYSICAL_WAKE, accuracy, 100000, || false)
+        .unwrap();
+    assert!(!singular.sample.validity_mask[0]);
+    assert!(singular.sample.normalized_divergence(0).is_none());
+}

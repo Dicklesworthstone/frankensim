@@ -2243,3 +2243,37 @@ selected-source native evidence, not a workspace, cross-platform, real-time
 or new timestep-order gate. Continuation supplies an algebraic branch anchor,
 not dynamic wing stall, wake inertia or an additional fluid closure.
 
+## Prepared tree evaluation of connected wake fields
+
+`PreparedWakeField::prepare_tree` prepares the existing VPM source tree once
+under separate byte and work limits. Its returned `PreparedWakeTreeField`
+borrows the immutable source identity and reuses source geometry, moments,
+source indices and traversal scratch. Physical and reflected ground probes use
+one tree. The extra tree byte limit excludes the already owned exact snapshot.
+
+`PreparedWakeTreeField::sample` runs the original field-service assembly,
+tensor invariants, masks and finite-difference divergence through this prepared
+source evaluator. One request-wide work limit covers all physical/image center,
+FD and core queries. A full Jacobian query accepts an expansion only under both
+velocity and Frobenius-gradient error limits; exact leaves retain the original
+finite-core kernel and zero-core singular masking. Core masks use exact source
+distances with conservative tree pruning, so their final pass does not restore
+a full source scan at every distant grid point.
+
+The requested absolute limits are shared between physical and image systems.
+The `BoundedWakeFieldSample` wrapper retains the requested accuracy and actual
+work and maximum error allowances beside the original arrays. Curl and analytic
+divergence bounds follow from the Jacobian norm. The six FD velocity probes use
+a tightened tolerance accounting for division by the original FD step; their
+reported propagated approximation allowance fits the requested gradient limit.
+FD discretization bias, atmospheric model error, nonlinear Q/lambda2 uncertainty,
+trajectory error and directed-rounding certification remain outside that claim.
+Invalid source points retain the existing invalid mask. Zero tolerance evaluates
+original source order exactly, with compensated sums; floating-point reduction
+may differ from the older un-compensated exact field by roundoff.
+
+Focused regressions compare exact-mode fields and source identity, distant
+accepted expansions and achieved error bounds, image axial-curl reflection,
+exact core masks, request-wide work exhaustion, cancellation/retry and zero-core
+masking. Native Rust compilation and execution were unavailable for this
+extension; the independent numerical expansion cross-check is separate evidence.
