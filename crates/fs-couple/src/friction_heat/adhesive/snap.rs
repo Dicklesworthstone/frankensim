@@ -13,7 +13,7 @@
 
 use fs_blake3::ContentHash;
 use fs_contact::normal_patch::adhesive::{
-    JkrBranch, JkrError, JkrJump, JkrState, SourceJkrSphereContact,
+    JkrBranch, JkrError, JkrJump, JkrState, SourceJkrSphereContact, motion::JkrNormalMotionState,
 };
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_thermal::enthalpy::{
@@ -21,6 +21,8 @@ use fs_thermal::enthalpy::{
 };
 use fs_tribo::{DissipationStep, HeatPartition, TriboError, WorkLedger};
 use std::collections::BTreeMap;
+
+mod normal_motion;
 
 /// Finite work and heat accuracy budgets, all chosen by the caller.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -105,6 +107,7 @@ pub struct JkrSnapHeat<'s> {
     partition: HeatPartition,
     outside_destination: Option<String>,
     stamp: JkrSnapHeatStamp,
+    normal_motion_state: Option<JkrNormalMotionState>,
     accepted_time_s: f64,
     ledger: WorkLedger,
 }
@@ -224,6 +227,7 @@ impl<'s> JkrSnapHeat<'s> {
                 revision: 0,
                 state: initial,
             },
+            normal_motion_state: None,
             accepted_time_s: thermal.time_s(),
             ledger: WorkLedger::default(),
         })
@@ -252,12 +256,39 @@ impl<'s> JkrSnapHeat<'s> {
     /// Every jump is taken from the original source, including an exact fold.
     /// Smooth elastic segments deposit exactly zero. The thermal state may have
     /// advanced since the previous accepted transfer, but cannot move backward.
+    /// Once `propose_normal_motion` binds a sealed motion continuation, use that
+    /// method for later intervals; prescribed endpoints cannot erase its clock.
     /// All releases in this batch enter at its CURRENT thermal time; no thermal
     /// evolution between batch events is implied. Call once per event when that
     /// intervening transport matters. Cost is O(segments + native cell clone),
     /// with one caloric application and bounded cancellation checks per segment.
     #[allow(clippy::too_many_arguments)]
     pub fn propose<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        expected: JkrSnapHeatStamp,
+        endpoints_m: &[f64],
+        expected_final: JkrState,
+        controls: JkrSnapHeatControls,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<JkrSnapHeatCandidate<'s, 'm>, JkrSnapHeatError> {
+        if self.normal_motion_state.is_some() {
+            return Err(JkrSnapHeatError::Invalid(
+                "normal-motion heat history requires its sealed continuation",
+            ));
+        }
+        self.propose_segments(
+            thermal,
+            expected,
+            endpoints_m,
+            expected_final,
+            controls,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propose_segments<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
         expected: JkrSnapHeatStamp,
@@ -339,6 +370,7 @@ impl<'s> JkrSnapHeat<'s> {
                 revision,
                 state,
             },
+            normal_motion_state: self.normal_motion_state,
             accepted_time_s: thermal.time_s(),
             ledger,
         };

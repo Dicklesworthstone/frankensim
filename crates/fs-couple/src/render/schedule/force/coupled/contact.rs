@@ -513,6 +513,9 @@ pub mod adhesive_dmt;
 /// Event-resolved sourced junction friction on the original free modal bodies.
 pub mod adhesive_events;
 
+/// Normal JKR attachment and pull-off with native free-body motion and explicit release energy.
+pub mod adhesive_normal_events;
+
 /// Resolved junction events through an original native elastic connection.
 pub mod adhesive_elastic_events;
 
