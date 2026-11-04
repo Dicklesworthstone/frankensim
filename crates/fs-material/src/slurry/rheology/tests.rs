@@ -380,3 +380,137 @@ fn invalid_declarations_and_nonfinite_queries_refuse() {
         ))
     ));
 }
+
+#[test]
+fn g1_radial_newtonian_profile_matches_poiseuille_and_wall_traction() {
+    let fluid = card(0.0, 5.0, 1.0); // mu=0.5 Pa.s.
+    let pipe = pipe();
+    let radius = 0.05_f64;
+    for sign in [-1.0, 1.0] {
+        let dp = Pressure::new(sign * 1_000.0);
+        let profile = pipe.profile_at_pressure(&fluid, state(), dp).unwrap();
+        assert!(core::ptr::eq(profile.source(), &fluid));
+        assert_eq!(profile.conditions(), state());
+        assert_eq!(
+            *profile.flow(),
+            pipe.flow_at_pressure(&fluid, state(), dp).unwrap()
+        );
+        for r in [
+            0.0,
+            1e-18,
+            0.0125,
+            0.025,
+            0.0375,
+            radius.next_down(),
+            radius,
+        ] {
+            let sample = profile.sample(Length::new(r)).unwrap();
+            let velocity = sign * 50.0 * (radius - r) * (radius + r);
+            let gradient = -sign * 100.0 * r;
+            close(sample.axial_velocity.value(), velocity, 5e-14);
+            close(sample.radial_velocity_gradient.value(), gradient, 5e-14);
+            close(sample.radial_shear_stress.value(), 0.5 * gradient, 5e-14);
+            close(sample.dissipation.value(), 0.5 * gradient * gradient, 1e-13);
+        }
+    }
+}
+
+#[test]
+fn g1_bingham_plug_moves_without_viscous_heat_and_static_plug_carries_stress() {
+    let fluid = card(10.0, 5.0, 1.0);
+    let pipe = pipe();
+    let profile = pipe
+        .profile_at_pressure(&fluid, state(), Pressure::new(8_000.0))
+        .unwrap();
+    for r in [0.0, 0.01, 0.02, 0.025] {
+        let sample = profile.sample(Length::new(r)).unwrap();
+        close(sample.axial_velocity.value(), 0.25, 2e-14);
+        close(sample.radial_shear_stress.value(), -400.0 * r, 2e-14);
+        assert_eq!(sample.radial_velocity_gradient.value(), 0.0);
+        assert_eq!(sample.dissipation.value(), 0.0);
+    }
+    let sample = profile.sample(Length::new(0.04)).unwrap();
+    close(sample.axial_velocity.value(), 0.16, 2e-14);
+    close(sample.radial_velocity_gradient.value(), -12.0, 2e-14);
+    close(sample.dissipation.value(), 192.0, 2e-14);
+    let static_profile = pipe
+        .profile_at_pressure(&fluid, state(), Pressure::new(2_000.0))
+        .unwrap();
+    let static_sample = static_profile.sample(Length::new(0.025)).unwrap();
+    assert_eq!(static_sample.axial_velocity.value(), 0.0);
+    assert_eq!(static_sample.radial_velocity_gradient.value(), 0.0);
+    assert_eq!(static_sample.dissipation.value(), 0.0);
+    close(static_sample.radial_shear_stress.value(), -2.5, 2e-14);
+}
+
+#[test]
+fn g1_radial_velocity_and_heat_integrate_to_the_existing_hydraulic_solution() {
+    for n in [0.5, 0.8, 1.0, 1.4] {
+        let fluid = card(7.0, 12.0, n);
+        let profile = pipe()
+            .profile_at_pressure(&fluid, state(), Pressure::new(-16_000.0))
+            .unwrap();
+        // Independent midpoint volume quadrature of u and tau*du/dr, not
+        // the owner's integrated gamma*r² polynomial or its dp*Q shortcut.
+        let dr = 0.05 / 32_768.0;
+        let (mut flow, mut heat) = (0.0, 0.0);
+        for i in 0..32_768 {
+            let r = (f64::from(i) + 0.5) * dr;
+            let area = 2.0 * core::f64::consts::PI * r * dr;
+            let sample = profile.sample(Length::new(r)).unwrap();
+            flow += sample.axial_velocity.value() * area;
+            heat += sample.dissipation.value() * area * 10.0;
+        }
+        close(flow, profile.flow().volumetric_flow.value(), 5e-9);
+        close(heat, profile.flow().dissipated_power.value(), 5e-9);
+        let sample = profile.sample(Length::new(0.04)).unwrap();
+        let ShearResponse::Yielded {
+            stress,
+            dissipation,
+        } = fluid
+            .stress_at_shear_rate(sample.radial_velocity_gradient, state())
+            .unwrap()
+        else {
+            panic!("outer annulus must yield")
+        };
+        close(stress.value(), sample.radial_shear_stress.value(), 3e-13);
+        close(dissipation.value(), sample.dissipation.value(), 3e-13);
+    }
+}
+
+#[test]
+fn g0_radial_profile_retains_thin_annulus_and_refuses_unsupported_queries() {
+    let fluid = card(10.0, 5.0, 1.0);
+    let pipe = pipe();
+    let profile = pipe
+        .profile_at_pressure(&fluid, state(), Pressure::new(4_000.0_f64.next_up()))
+        .unwrap();
+    assert!(
+        profile
+            .sample(Length::new(0.0))
+            .unwrap()
+            .axial_velocity
+            .value()
+            > 0.0
+    );
+    let near_wall = profile.sample(Length::new(0.05_f64.next_down())).unwrap();
+    assert!(near_wall.axial_velocity.value() > 0.0);
+    assert!(near_wall.dissipation.value() > 0.0);
+    let wall = profile.sample(Length::new(0.05)).unwrap();
+    assert_eq!(wall.axial_velocity.value(), 0.0);
+    assert_eq!(
+        wall.radial_velocity_gradient.value(),
+        -profile.flow().wall_shear_rate.value()
+    );
+    for r in [-1.0, f64::NAN, f64::INFINITY, 0.05_f64.next_up()] {
+        assert!(profile.sample(Length::new(r)).is_err());
+    }
+    let cold = SlurryConditions {
+        temperature: Temperature::new(280.0),
+        ..state()
+    };
+    assert!(
+        pipe.profile_at_pressure(&fluid, cold, Pressure::new(8_000.0))
+            .is_err()
+    );
+}

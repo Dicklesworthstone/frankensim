@@ -1351,9 +1351,18 @@ a predicted transition. Overflow, positive underflow and unsupported conditions
 refuse; no turbulent, settling, entrance, elevation or pump-efficiency correction
 is inferred.
 
-The six rheology tests check Poiseuille and Buckingham–Reiner limits,
+`profile_at_pressure` retains the same accepted flow and borrowed source to
+evaluate axial velocity, radial traction, velocity gradient and local irreversible
+heat without allocation or quadrature. A moving or stationary plug can carry
+stress with zero local heat. Complementary radial coordinates preserve near-axis
+shear and thin yielded annuli; the no-slip wall has zero velocity and finite
+viscous heating. This frozen-state profile adds no heat/advection evolution.
+
+The rheology tests check Poiseuille and Buckingham–Reiner limits,
 independent radial quadrature for a noninteger exponent, signed reversal,
-inverse residuals, yield behavior, source limits and numerical refusal. The
+inverse residuals, yield behavior, source limits and numerical refusal. Radial
+velocity and heat independently integrate to the original flow and pressure work,
+including thinning and thickening laws, with near-axis and wall regressions. The
 stream adapter has a separate real-pack mass/volume-basis regression.
 `cargo run -p fs-material --example mineral_pipe -- 0.005 0.6` exposes an
 authored pressure-sizing example; its parameters are not a plant calibration.

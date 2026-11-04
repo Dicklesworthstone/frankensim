@@ -1,5 +1,5 @@
 use super::*;
-use fs_qty::{Length, Power, Pressure, VolumetricFlowRate};
+use fs_qty::{Length, Power, Pressure, Velocity, VolumetricFlowRate};
 
 /// Fully developed, incompressible, homogeneous circular-pipe flow with no slip.
 /// The caller declares a laminar wall-rate ceiling; this type does not infer a
@@ -28,6 +28,110 @@ pub struct PipeFlow {
     pub plug_radius: Length,
     /// Pressure times volume flow, always nonnegative; excludes pump losses.
     pub dissipated_power: Power,
+}
+
+/// Prepared analytic radial profile of the SAME accepted pipe-flow solution.
+/// The original source and conditions are retained; sampling performs no material
+/// queries, numerical quadrature or allocations. This is a frozen isothermal
+/// law, not a temperature/advection solver or an entrance-flow model.
+#[derive(Clone, Debug)]
+pub struct PipeProfile<'a> {
+    source: &'a HerschelBulkleyCard,
+    conditions: SlurryConditions,
+    flow: PipeFlow,
+    radius_m: f64,
+    plug_fraction: f64,
+    yielded_fraction: f64,
+    inverse_n: f64,
+    plug_speed_m_s: f64,
+}
+
+/// Local axial flow and irreversible heating, in coherent SI.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PipeProfileSample {
+    /// Signed axial velocity; zero at the no-slip wall.
+    pub axial_velocity: Velocity,
+    /// Physical sigma_rz on the outward radial face, opposite the pressure drop.
+    pub radial_shear_stress: Stress,
+    /// du_z/dr, with the same sign as radial_shear_stress.
+    pub radial_velocity_gradient: Frequency,
+    /// sigma_rz * du_z/dr [W/m³]. A stressed unyielded plug generates no heat.
+    pub dissipation: DissipationDensity,
+}
+
+impl<'a> PipeProfile<'a> {
+    /// Original source-qualified constitutive law, without a replacement fit.
+    pub const fn source(&self) -> &'a HerschelBulkleyCard {
+        self.source
+    }
+    /// Actual frozen source conditions admitted by the pipe solve.
+    pub const fn conditions(&self) -> SlurryConditions {
+        self.conditions
+    }
+    /// Accepted integrated flow, plug radius and total hydraulic dissipation.
+    pub const fn flow(&self) -> &PipeFlow {
+        &self.flow
+    }
+
+    /// Evaluate one radius from the centreline to the wall, inclusively.
+    ///
+    /// With m=1/n, z=(tau_w-tau_y)/tau_w and t=(r/R-1+z)/z in the
+    /// yielded annulus, u=R*z*gamma_w*(1-t^(m+1))/(m+1). Inside the
+    /// plug, t=0 and the velocity is constant. The near-wall difference uses
+    /// expm1 and a compensated log(1-x), retaining small positive wall velocities.
+    /// Unsupported radii and unrepresentable nonzero responses refuse.
+    pub fn sample(&self, radius: Length) -> Result<PipeProfileSample, SlurryError> {
+        let r = radius.value();
+        admit("radial position", r, [0.0, self.radius_m])?;
+        let stress = -self.flow.wall_stress.value() * (r / self.radius_m);
+        let wall_rate = self.flow.wall_shear_rate.value().abs();
+        let (speed, rate) = if wall_rate == 0.0 {
+            (0.0, 0.0)
+        } else if r == self.radius_m {
+            (0.0, wall_rate)
+        } else {
+            let distance = (self.radius_m - r) / self.radius_m;
+            // Complementary coordinates preserve both the tiny near-axis
+            // Newtonian shear and the thin near-wall yielded annulus.
+            let t = if r <= 0.5 * self.radius_m {
+                (r / self.radius_m - self.plug_fraction) / self.yielded_fraction
+            } else {
+                (self.yielded_fraction - distance) / self.yielded_fraction
+            };
+            if t <= 0.0 {
+                (self.plug_speed_m_s, 0.0)
+            } else {
+                let log_t = if t < 0.5 {
+                    det::ln(t)
+                } else {
+                    let x = -distance / self.yielded_fraction;
+                    let rounded = 1.0 + x;
+                    det::ln(rounded) + (x - (rounded - 1.0)) / rounded
+                };
+                let rate = positive(
+                    wall_rate * det::exp(self.inverse_n * log_t),
+                    "local pipe shear rate is unrepresentable",
+                )?;
+                let speed = positive(
+                    self.plug_speed_m_s * -det::expm1((self.inverse_n + 1.0) * log_t),
+                    "local pipe velocity is unrepresentable",
+                )?;
+                (speed, rate)
+            }
+        };
+        let gradient = -rate.copysign(self.flow.pressure_drop.value());
+        let heat = stress * gradient;
+        require(
+            stress.is_finite() && heat.is_finite() && (rate == 0.0 || heat > 0.0),
+            "local pipe stress or dissipation is unrepresentable",
+        )?;
+        Ok(PipeProfileSample {
+            axial_velocity: Velocity::new(speed.copysign(self.flow.pressure_drop.value())),
+            radial_shear_stress: Stress::new(stress),
+            radial_velocity_gradient: Frequency::new(gradient),
+            dissipation: DissipationDensity::new(heat),
+        })
+    }
 }
 
 /// An inverse result with its achieved signed flow residual and bounded work.
@@ -84,6 +188,45 @@ impl LaminarCircularPipe {
             [0.0, self.maximum_laminar_wall_rate.value()],
         )?;
         self.response(card, dp, wall, rate)
+    }
+
+    /// Prepare the exact radial velocity, shear and heat profile after the
+    /// existing source/laminar admission and integrated pressure-flow solve.
+    /// No-slip, plug motion and local dissipation all use that same solution.
+    pub fn profile_at_pressure<'a>(
+        &self,
+        card: &'a HerschelBulkleyCard,
+        state: SlurryConditions,
+        pressure_drop: Pressure,
+    ) -> Result<PipeProfile<'a>, SlurryError> {
+        let flow = self.flow_at_pressure(card, state, pressure_drop)?;
+        let inverse_n = 1.0 / card.parameters.flow_index.value();
+        let plug_fraction = if flow.wall_shear_rate.value() == 0.0 {
+            1.0
+        } else {
+            card.parameters.yield_stress.value() / flow.wall_stress.value().abs()
+        };
+        let (yielded_fraction, plug_speed_m_s) = if flow.wall_shear_rate.value() == 0.0 {
+            (0.0, 0.0)
+        } else {
+            let wall = flow.wall_stress.value().abs();
+            let z = (wall - card.parameters.yield_stress.value()) / wall;
+            let speed = positive(
+                self.radius.value() * z * (flow.wall_shear_rate.value().abs() / (inverse_n + 1.0)),
+                "pipe plug velocity is unrepresentable",
+            )?;
+            (z, speed)
+        };
+        Ok(PipeProfile {
+            source: card,
+            conditions: state,
+            flow,
+            radius_m: self.radius.value(),
+            plug_fraction,
+            yielded_fraction,
+            inverse_n,
+            plug_speed_m_s,
+        })
     }
 
     /// Invert monotone Q versus wall rate inside the source and laminar ceilings.

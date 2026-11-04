@@ -20,7 +20,7 @@ use fs_qty::{Dimensionless, Frequency, Qty, Stress, Temperature};
 
 #[path = "rheology/pipe.rs"]
 mod pipe;
-pub use pipe::{LaminarCircularPipe, PipeFlow, PressureSolution};
+pub use pipe::{LaminarCircularPipe, PipeFlow, PipeProfile, PipeProfileSample, PressureSolution};
 
 /// Local irreversible heating in watts per cubic metre.
 pub type DissipationDensity = Qty<-1, 1, -3, 0, 0, 0>;
