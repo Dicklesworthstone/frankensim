@@ -1,5 +1,32 @@
 # fs-solid CONTRACT
 
+## Static elasticity preserves the original force scale
+
+The plane P1/Q1 and native P1 tetrahedral, TET10, HEX8, HEX20 and HEX27 static
+thermal/mechanical solves use `fs_solver::checked_cg` with their original
+stiffness and Jacobi preconditioner. The shared solver normalizes only its
+iteration right-hand sides, restores physical displacement, and checks the
+returned result against the original force equation. A small recursive residual
+alone cannot publish a solution. Up to two defect corrections share the original
+total iteration cap; true-residual tolerances and source/material/load identities
+retain their existing meanings. Context-bearing solves poll cancellation through
+the same owner, including before publication.
+
+Plane prescribed displacements enter the free force through the existing exact
+column elimination. Their auxiliary identity rows remain homogeneous during
+iteration, so metres never mask a force residual; the prescribed values are
+restored exactly afterward. Plane-stress Lame reduction is evaluated directly,
+without squaring the modulus or passing through a singular three-dimensional
+bulk modulus. No stiffness, strain, constitutive law, thermal load, reaction,
+or energy is rescaled physically.
+
+Regression cases cover signed traction and stress-unit rescaling over ordinary,
+tiny and large finite magnitudes, exact zero load, nonzero supports, and original
+thermal/mechanical stress, energy and support reactions across element families.
+They keep large-force strains small by scaling the modulus with the force. These
+are numerical/model identities, not measured extreme-material applicability or
+an additional finite-deformation claim.
+
 ## Native interval work in deposited strips
 
 `deposition::LayeredStrip` integrates each original material point's

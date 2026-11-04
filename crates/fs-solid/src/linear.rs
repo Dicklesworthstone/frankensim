@@ -10,7 +10,7 @@
 
 use crate::SolidError;
 use crate::mesh2::{Mesh2, Patch, quad_points, shapes_at};
-use fs_solver::krylov::CgState;
+use fs_solver::checked_cg::{CheckedCgConfig, CheckedCgError, checked_cg};
 use fs_solver::op::CsrOp;
 use fs_sparse::precond::Precond;
 use fs_sparse::{Coo, Csr};
@@ -69,10 +69,14 @@ pub struct LinearProblem<'m> {
 #[must_use]
 pub fn lame(youngs: f64, poisson: f64, plane: PlaneKind) -> (f64, f64) {
     let mu = 0.5 * youngs / (1.0 + poisson);
-    let lambda = youngs * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson));
     match plane {
-        PlaneKind::Strain => (lambda, mu),
-        PlaneKind::Stress => (2.0 * lambda * mu / (lambda + 2.0 * mu), mu),
+        PlaneKind::Strain => (
+            youngs * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson)),
+            mu,
+        ),
+        // Reduce analytically before evaluating: forming lambda*mu needlessly
+        // squares the stress scale and overflows/underflows for finite moduli.
+        PlaneKind::Stress => (youngs * poisson / ((1.0 + poisson) * (1.0 - poisson)), mu),
     }
 }
 
@@ -120,6 +124,11 @@ impl LinearProblem<'_> {
             for node in self.mesh.patch_nodes(*patch) {
                 let p = self.mesh.nodes[node];
                 let val = g(p[0], p[1]);
+                if val.iter().any(|value| !value.is_finite()) {
+                    return Err(SolidError::InvalidInput {
+                        what: format!("prescribed displacement at node {node} must be finite"),
+                    });
+                }
                 fixed.insert(2 * node, val[0]);
                 fixed.insert(2 * node + 1, val[1]);
             }
@@ -165,24 +174,45 @@ impl LinearProblem<'_> {
                 }
             }
         }
-        // Identity rows for fixed DOFs.
-        for (&dof, &val) in &fixed {
+        // Fixed columns have already entered the physical free-force RHS.
+        // Keep identity rows homogeneous during the solve: known displacement
+        // values in metres must not enter a force residual in newtons. Restore
+        // these prescribed values exactly after the free equilibrium is checked.
+        for &dof in fixed.keys() {
             coo.push(dof, dof, 1.0);
-            rhs[dof] = val;
+            rhs[dof] = 0.0;
         }
         let a = coo.assemble();
         let m = Jacobi::new(&a);
         let op = CsrOp::symmetric(a);
-        let mut st = CgState::new(&op, &m, &rhs);
-        let _ = st.run(&op, &m, 1e-12, 40_000);
-        let rr = st.rel_residual();
+        let mut solved = checked_cg(
+            &op,
+            &m,
+            &rhs,
+            CheckedCgConfig {
+                tolerance: 1e-12,
+                max_iterations: 40_000,
+                max_corrections: 2,
+            },
+            |_| Ok::<_, SolidError>(()),
+        )
+        .map_err(|error| match error {
+            CheckedCgError::InvalidInput(what) => SolidError::InvalidInput { what: what.into() },
+            CheckedCgError::Interrupted(error) => error,
+        })?;
+        let rr = solved.report.rel_residual;
         if !rr.is_finite() || rr > 1e-8 {
             return Err(SolidError::SolveFailed {
-                iters: st.iters,
+                iters: solved.report.iters,
                 rel_residual: rr,
             });
         }
-        Ok((0..n).map(|i| [st.x[2 * i], st.x[2 * i + 1]]).collect())
+        for (&dof, &value) in &fixed {
+            solved.x[dof] = value;
+        }
+        Ok((0..n)
+            .map(|i| [solved.x[2 * i], solved.x[2 * i + 1]])
+            .collect())
     }
 
     /// One element's stiffness and body-force load (B-matrix form,
@@ -348,4 +378,206 @@ pub fn l2_h1_error(
         }
     }
     (l2.max(0.0).sqrt(), h1.max(0.0).sqrt())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relative_free_force_residual(
+        problem: &LinearProblem<'_>,
+        u: &[[f64; 2]],
+        traction: f64,
+    ) -> f64 {
+        let (lambda, mu) = lame(problem.youngs, problem.poisson, problem.plane);
+        let mut force = vec![0.0; 2 * u.len()];
+        for conn in &problem.mesh.elems {
+            let (k, _) = problem.element(conn, lambda, mu);
+            for (a, &node_a) in conn.iter().enumerate() {
+                for i in 0..2 {
+                    for (b, &node_b) in conn.iter().enumerate() {
+                        for j in 0..2 {
+                            force[2 * node_a + i] += k[2 * a + i][2 * b + j] * u[node_b][j];
+                        }
+                    }
+                }
+            }
+        }
+        for &(a, b) in problem.mesh.patch_edges(Patch::Right).unwrap() {
+            let [ax, ay] = problem.mesh.nodes[a];
+            let [bx, by] = problem.mesh.nodes[b];
+            let half_edge_force = 0.5 * (bx - ax).hypot(by - ay) * traction;
+            force[2 * a] -= half_edge_force;
+            force[2 * b] -= half_edge_force;
+        }
+        for (patch, _) in &problem.dirichlet {
+            for node in problem.mesh.patch_nodes(*patch) {
+                force[2 * node] = 0.0;
+                force[2 * node + 1] = 0.0;
+            }
+        }
+        for &(patch, component) in &problem.symmetry {
+            for node in problem.mesh.patch_nodes(patch) {
+                force[2 * node + component] = 0.0;
+            }
+        }
+        force
+            .into_iter()
+            .fold(0.0_f64, |norm, value| norm.hypot(value / traction))
+    }
+
+    // A traction-loaded rectangle has an exact affine solution. Scaling every
+    // stress-like quantity leaves the strain unchanged, so even the large-force
+    // checks stay inside small-strain elasticity. Test both signs and the native
+    // element/formulation choices without comparing two solver implementations.
+    #[test]
+    fn g1_static_elasticity_preserves_strain_across_signed_stress_scales() {
+        for mesh in [
+            Mesh2::quads(2.0, 1.0, 3, 2),
+            Mesh2::triangles(2.0, 1.0, 3, 2),
+        ] {
+            for plane in [PlaneKind::Stress, PlaneKind::Strain] {
+                for formulation in [Formulation::Standard, Formulation::BBar] {
+                    for stress_scale in [1.0, 1e-180, 1e180] {
+                        for sign in [-1.0, 1.0] {
+                            let youngs = 2.4e6 * stress_scale;
+                            let poisson = 0.25;
+                            let traction = sign * 1e-3 * youngs;
+                            let load = |_: f64, _: f64| [traction, 0.0];
+                            let problem = LinearProblem {
+                                mesh: &mesh,
+                                youngs,
+                                poisson,
+                                plane,
+                                formulation,
+                                body_force: None,
+                                dirichlet: vec![],
+                                traction: vec![(Patch::Right, &load)],
+                                symmetry: vec![(Patch::Left, 0), (Patch::Bottom, 1)],
+                            };
+                            let u = problem.solve().expect("finite small-strain traction solve");
+                            assert!(relative_free_force_residual(&problem, &u, traction) < 1e-9);
+                            let strain = match plane {
+                                PlaneKind::Stress => [sign * 1e-3, -poisson * sign * 1e-3],
+                                PlaneKind::Strain => [
+                                    (1.0 - poisson * poisson) * sign * 1e-3,
+                                    -poisson * (1.0 + poisson) * sign * 1e-3,
+                                ],
+                            };
+                            for (point, actual) in mesh.nodes.iter().zip(&u) {
+                                for c in 0..2 {
+                                    let expected = strain[c] * point[c];
+                                    assert!(
+                                        (actual[c] - expected).abs() < 2e-12,
+                                        "{plane:?}/{formulation:?}, scale {stress_scale:e}, \
+                                         sign {sign}, component {c}: {} != {expected}",
+                                        actual[c]
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_nonzero_supports_do_not_mask_free_force_equilibrium() {
+        let mesh = Mesh2::quads(2.0, 1.0, 3, 2);
+        for stress_scale in [1.0, 1e-180, 1e180] {
+            let youngs = 2.4e6 * stress_scale;
+            let extension = -1e-3;
+            let poisson = 0.25;
+            let translation = 0.002;
+            let support = |_: f64, y: f64| [translation, -poisson * extension * y];
+            let load = |_: f64, _: f64| [youngs * extension, 0.0];
+            let problem = LinearProblem {
+                mesh: &mesh,
+                youngs,
+                poisson,
+                plane: PlaneKind::Stress,
+                formulation: Formulation::Standard,
+                body_force: None,
+                dirichlet: vec![(Patch::Left, &support)],
+                traction: vec![(Patch::Right, &load)],
+                symmetry: vec![],
+            };
+            let u = problem
+                .solve()
+                .expect("finite force and prescribed-displacement solve");
+            assert!(relative_free_force_residual(&problem, &u, youngs * extension) < 1e-9);
+            for (point, actual) in mesh.nodes.iter().zip(&u) {
+                let expected = [
+                    translation + extension * point[0],
+                    -poisson * extension * point[1],
+                ];
+                for c in 0..2 {
+                    assert!(
+                        (actual[c] - expected[c]).abs() < 2e-12,
+                        "scale {stress_scale:e}, component {c}: {} != {}",
+                        actual[c],
+                        expected[c]
+                    );
+                }
+                if point[0] == 0.0 {
+                    assert_eq!(*actual, support(point[0], point[1]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_tiny_traction_remains_linear_and_zero_load_remains_exact() {
+        let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+        for amplitude in [0.0, 1e-180, -1e-180, 1e-80, -1.0, 1.0] {
+            let load = |_: f64, _: f64| [amplitude, 0.0];
+            let u = LinearProblem {
+                mesh: &mesh,
+                youngs: 1000.0,
+                poisson: 0.0,
+                plane: PlaneKind::Stress,
+                formulation: Formulation::Standard,
+                body_force: None,
+                dirichlet: vec![],
+                traction: vec![(Patch::Right, &load)],
+                symmetry: vec![(Patch::Left, 0), (Patch::Bottom, 1)],
+            }
+            .solve()
+            .expect("nonzero finite traction cannot disappear");
+            for (point, actual) in mesh.nodes.iter().zip(&u) {
+                if amplitude == 0.0 {
+                    assert_eq!(*actual, [0.0; 2]);
+                } else {
+                    assert!(
+                        (actual[0] / amplitude - point[0] / 1000.0).abs() < 2e-12,
+                        "amplitude {amplitude:e}: scaled displacement {}",
+                        actual[0] / amplitude
+                    );
+                    assert!((actual[1] / amplitude).abs() < 2e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_nonfinite_prescriptions_refuse_even_when_every_node_is_fixed() {
+        let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+        let invalid = |_: f64, _: f64| [f64::NAN, 0.0];
+        let problem = LinearProblem {
+            mesh: &mesh,
+            youngs: 1000.0,
+            poisson: 0.25,
+            plane: PlaneKind::Stress,
+            formulation: Formulation::Standard,
+            body_force: None,
+            dirichlet: vec![(Patch::Left, &invalid), (Patch::Right, &invalid)],
+            traction: vec![],
+            symmetry: vec![],
+        };
+        assert!(matches!(
+            problem.solve(),
+            Err(SolidError::InvalidInput { .. })
+        ));
+    }
 }

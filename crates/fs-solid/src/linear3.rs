@@ -47,8 +47,8 @@ pub use fs_material::state_point::{ElasticTensorBasis, ElasticTensorNotation, El
 pub use fs_material::tensor::{
     StrainTensorBasis, StrainTensorNotation, StressTensorBasis, StressTensorNotation,
 };
-use fs_solver::krylov::CgState;
-use fs_solver::op::{CsrOp, LinearOp};
+use fs_solver::checked_cg::{CheckedCgConfig, CheckedCgError, checked_cg};
+use fs_solver::op::CsrOp;
 use fs_sparse::{Coo, Csr};
 
 /// Fully integrated quadratic hexahedra using the shared quadratic assembler.
@@ -2421,38 +2421,33 @@ impl TetLinearElasticProblem<'_> {
                 validate_rigid_mode_constraints(self.nodes_m, self.tetrahedra, self.fixed_dofs)?;
                 let preconditioner = Jacobi::new(&assembly.stiffness);
                 let operator = CsrOp::symmetric(assembly.stiffness);
-                let mut state = CgState::new(&operator, &preconditioner, &load.reduced_force_n);
-                while state.iters < config.maximum_iterations
-                    && state.rel_residual() >= config.relative_residual_tolerance
-                {
-                    cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-                    let remaining = config.maximum_iterations - state.iters;
-                    let _ = state.run(
-                        &operator,
-                        &preconditioner,
-                        config.relative_residual_tolerance,
-                        remaining.min(64),
-                    );
-                }
-                let mut applied = vec![0.0; state.x.len()];
-                operator.apply(&state.x, &mut applied);
-                let residual_norm = euclidean_norm(
-                    load.reduced_force_n
-                        .iter()
-                        .zip(&applied)
-                        .map(|(force, ku)| force - ku),
-                );
-                let force_norm = euclidean_norm(load.reduced_force_n.iter().copied());
-                let true_relative_residual = residual_norm / force_norm.max(f64::MIN_POSITIVE);
+                let solved = checked_cg(
+                    &operator,
+                    &preconditioner,
+                    &load.reduced_force_n,
+                    CheckedCgConfig {
+                        tolerance: config.relative_residual_tolerance,
+                        max_iterations: config.maximum_iterations,
+                        max_corrections: 2,
+                    },
+                    |_| cx.checkpoint().map_err(|_| TetElasticError::Cancelled),
+                )
+                .map_err(|error| match error {
+                    CheckedCgError::InvalidInput(what) => {
+                        TetElasticError::InvalidStaticSolveConfig { what }
+                    }
+                    CheckedCgError::Interrupted(error) => error,
+                })?;
+                let true_relative_residual = solved.report.rel_residual;
                 if !true_relative_residual.is_finite()
                     || true_relative_residual > config.relative_residual_tolerance
                 {
                     return Err(TetElasticError::StaticSolveFailed {
-                        iterations: state.iters,
+                        iterations: solved.report.iters,
                         true_relative_residual,
                     });
                 }
-                (state.x, state.iters, true_relative_residual)
+                (solved.x, solved.report.iters, true_relative_residual)
             };
         let mut flat = vec![0.0; self.nodes_m.len() * 3];
         for (&full_dof, &value) in load.free_dofs.iter().zip(&reduced_displacement) {
@@ -5040,6 +5035,65 @@ mod tests {
                 constrained_rank: 0,
             })
         ));
+    }
+
+    #[test]
+    fn g1_static_tetrahedral_force_scaling_retains_residual_and_reactions() {
+        let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let tets = [[0, 1, 2, 3]];
+        // Only vertex 1's x displacement is free: epsilon_xx=u_1x and
+        // its exact stiffness is C_xxxx times the reference volume 1/6.
+        let fixed = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11];
+        with_cx(|cx| {
+            for scale in [1.0, 1e-180, 1e180] {
+                let mat = material(120.0 * scale, 6.0);
+                let zero = TetThermalStrainState::try_new(
+                    300.0,
+                    300.0,
+                    [0.0; 6],
+                    mat.material_state_identity,
+                    ContentHash([0x42; 32]),
+                    0.01,
+                )
+                .unwrap();
+                let field = TetThermalStrainField::Uniform(&zero);
+                let problem = reference_problem(&nodes, &tets, &mat, &fixed);
+                for sign in [-1.0, 1.0] {
+                    let force = sign * 0.001 * mat.stiffness_mandel_pa()[0][0] / 6.0;
+                    let forces = [(3, force)];
+                    let solved = problem
+                        .solve_thermal_displacement_with_nodal_forces(
+                            field,
+                            &forces,
+                            TetStaticSolveConfig::default(),
+                            cx,
+                        )
+                        .unwrap();
+                    assert!((solved.displacement_m()[1][0] - sign * 0.001).abs() < 1e-14);
+                    assert!(solved.true_relative_residual() < 1e-12);
+                    assert!(solved.iterations() > 0 && solved.iterations() <= 40_000);
+                    let response = problem
+                        .recover_thermal_stress_with_nodal_forces(
+                            &solved,
+                            field,
+                            &forces,
+                            ContentHash([0x51; 32]),
+                            0.01,
+                            cx,
+                        )
+                        .unwrap();
+                    let internal = response.nodal_internal_force_n();
+                    assert!((internal[1][0] / force - 1.0).abs() < 1e-12);
+                    assert!((internal[0][0] / force + 1.0).abs() < 1e-12);
+                    assert!(
+                        (response.elements()[0].stress_mandel_pa()[0] / force - 6.0).abs() < 1e-12
+                    );
+                    for &dof in &fixed {
+                        assert_eq!(solved.displacement_m()[dof / 3][dof % 3], 0.0);
+                    }
+                }
+            }
+        });
     }
 
     #[test]

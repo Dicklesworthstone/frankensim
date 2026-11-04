@@ -3,7 +3,7 @@
 //! admission remain in the existing isoparametric owners.
 use super::super::{
     QuadraticThermalStrainField, TetAssemblyBudget, TetElasticError, TetMaterialField,
-    TetStaticSolveConfig, add_nodal_forces_to_thermal_load, euclidean_norm, hash_usize,
+    TetStaticSolveConfig, add_nodal_forces_to_thermal_load, hash_usize,
     validate_rigid_mode_constraints,
 };
 use super::{
@@ -12,8 +12,8 @@ use super::{
 use crate::linear::{Formulation, Jacobi};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
-use fs_solver::krylov::CgState;
-use fs_solver::op::{CsrOp, LinearOp};
+use fs_solver::checked_cg::{CheckedCgConfig, CheckedCgError, checked_cg};
+use fs_solver::op::CsrOp;
 
 /// Integrated response of one isoparametric element in mesh-frame Mandel coordinates.
 ///
@@ -272,37 +272,31 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
         )?;
         let preconditioner = Jacobi::new(&assembly.stiffness);
         let operator = CsrOp::symmetric(assembly.stiffness);
-        let mut state = CgState::new(&operator, &preconditioner, &load.reduced_force_n);
-        while state.iters < config.maximum_iterations
-            && state.rel_residual() >= config.relative_residual_tolerance
-        {
-            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            let remaining = config.maximum_iterations - state.iters;
-            let _ = state.run(
-                &operator,
-                &preconditioner,
-                config.relative_residual_tolerance,
-                remaining.min(64),
-            );
-        }
-        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-        let mut applied = vec![0.0; state.x.len()];
-        operator.apply(&state.x, &mut applied);
-        let residual = euclidean_norm(
-            load.reduced_force_n
-                .iter()
-                .zip(&applied)
-                .map(|(force, ku)| force - ku),
-        );
-        let force = euclidean_norm(load.reduced_force_n.iter().copied());
-        let relative = residual / force.max(f64::MIN_POSITIVE);
+        let solved = checked_cg(
+            &operator,
+            &preconditioner,
+            &load.reduced_force_n,
+            CheckedCgConfig {
+                tolerance: config.relative_residual_tolerance,
+                max_iterations: config.maximum_iterations,
+                max_corrections: 2,
+            },
+            |_| cx.checkpoint().map_err(|_| TetElasticError::Cancelled),
+        )
+        .map_err(|error| match error {
+            CheckedCgError::InvalidInput(what) => {
+                TetElasticError::InvalidStaticSolveConfig { what }
+            }
+            CheckedCgError::Interrupted(error) => error,
+        })?;
+        let relative = solved.report.rel_residual;
         if !relative.is_finite() || relative > config.relative_residual_tolerance {
             return Err(TetElasticError::StaticSolveFailed {
-                iterations: state.iters,
+                iterations: solved.report.iters,
                 true_relative_residual: relative,
             });
         }
-        (state.x, state.iters, relative)
+        (solved.x, solved.report.iters, relative)
     };
     let mut displacement_m = vec![[0.0; 3]; nodes_m.len()];
     for (index, (&dof, &value)) in load.free_dofs.iter().zip(&reduced).enumerate() {

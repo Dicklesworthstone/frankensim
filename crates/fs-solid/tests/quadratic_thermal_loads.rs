@@ -153,6 +153,114 @@ fn g1_dead_traction_and_thermal_expansion_share_quadratic_equilibrium() {
     });
 }
 
+#[test]
+fn g1_thermal_and_mechanical_equilibrium_survives_signed_stress_rescaling() {
+    with_cx(|cx| {
+        for scale in [1.0, 1e-180, 1e180] {
+            let law = material(2e6 * scale, 0.0);
+            for sign in [-1.0, 1.0] {
+                let actual = thermal(&law, sign * 0.00025);
+                let auxiliary = thermal(&law, sign * 0.001);
+                let field = TetThermalStrainField::Uniform(&actual);
+                macro_rules! check {
+                    ($problem:expr, $nodes:expr) => {{
+                        let problem = $problem;
+                        let nodes: &[[f64; 3]] = $nodes;
+                        let equivalent = problem
+                            .assemble_thermal_load(TetThermalStrainField::Uniform(&auxiliary), cx)
+                            .unwrap();
+                        let forces: Vec<_> = nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, point)| point[0] == 1.0)
+                            .map(|(node, _)| {
+                                (3 * node, equivalent.full_equivalent_force_n[3 * node])
+                            })
+                            .collect();
+                        let force_scale = sign * 2000.0 * scale;
+                        assert!(
+                            (forces.iter().map(|(_, f)| f / force_scale).sum::<f64>() - 1.0).abs()
+                                < 1e-12
+                        );
+                        let response = problem
+                            .solve_thermal_response_with_nodal_forces(
+                                field,
+                                &forces,
+                                TetStaticSolveConfig::default(),
+                                FRAME,
+                                0.01,
+                                cx,
+                            )
+                            .unwrap();
+                        assert!(response.true_relative_residual() <= 1e-10);
+                        for (point, u) in nodes.iter().zip(response.displacement_m()) {
+                            assert!((u[0] - sign * 0.00125 * point[0]).abs() < 1e-11);
+                            assert!(u[1].abs() < 1e-11 && u[2].abs() < 1e-11);
+                        }
+                        for element in response.elements() {
+                            assert!(
+                                (element.mean_stress_mandel_pa()[0] / force_scale - 1.0).abs()
+                                    < 1e-9
+                            );
+                        }
+                        let reaction: f64 = nodes
+                            .iter()
+                            .zip(response.nodal_force_balance_n())
+                            .filter(|(point, _)| point[0] == 0.0)
+                            .map(|(_, force)| force[0] / force_scale)
+                            .sum();
+                        assert!((reaction + 1.0).abs() < 1e-9);
+                        assert!((response.elastic_energy_j() / scale - 1.0).abs() < 1e-8);
+                    }};
+                }
+                let (nodes, elements) = promote(&block([1; 3], [1.0; 3]), cx);
+                let fixed = clamp_left(&nodes);
+                check!(
+                    QuadraticTetProblem {
+                        nodes_m: &nodes,
+                        elements: &elements,
+                        materials: TetMaterialField::Uniform(&law),
+                        fixed_dofs: &fixed,
+                        budget: TetAssemblyBudget::standard(),
+                        quadrature: tet_support::Q,
+                    },
+                    &nodes
+                );
+                for family in hex_support::FAMILIES {
+                    let mesh = hex_support::mesh([1; 3], [1.0; 3], family, cx);
+                    let fixed = clamp_left(&mesh.nodes_m);
+                    check!(hex_support::problem(&mesh, &law, &fixed), &mesh.nodes_m);
+                }
+                let nodes = [
+                    [0., 0., 0.],
+                    [1., 0., 0.],
+                    [1., 1., 0.],
+                    [0., 1., 0.],
+                    [0., 0., 1.],
+                    [1., 0., 1.],
+                    [1., 1., 1.],
+                    [0., 1., 1.],
+                ];
+                let fixed = clamp_left(&nodes);
+                for formulation in [fs_solid::Formulation::Standard, fs_solid::Formulation::BBar] {
+                    check!(
+                        fs_solid::linear3::hex8::Hex8ElasticProblem {
+                            nodes_m: &nodes,
+                            hexahedra: &[[0, 1, 2, 3, 4, 5, 6, 7]],
+                            materials: TetMaterialField::Uniform(&law),
+                            fixed_dofs: &fixed,
+                            budget: TetAssemblyBudget::standard(),
+                            formulation,
+                            stiffness_points_per_dir: 2,
+                        },
+                        &nodes
+                    );
+                }
+            }
+        }
+    });
+}
+
 fn check_fixed(pure: &QuadraticThermalResponse, loaded: &QuadraticThermalResponse) {
     assert_eq!(loaded.iterations(), 0);
     assert_eq!(loaded.displacement_m(), pure.displacement_m());
