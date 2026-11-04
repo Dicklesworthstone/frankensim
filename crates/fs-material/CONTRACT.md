@@ -6928,6 +6928,48 @@ Rustfmt parsing and source/API review passed; these new Rust numerical tests
 and the example were not executed because required constellation sibling
 checkouts are absent in the current environment.
 
+### Adaptive finite effusion networks
+
+`network::transport::effusion::trajectory::advance_candidate` advances a complete
+requested interval through the original simultaneous gas transaction. Internal
+transport, independent vacuum outlets, prescribed molecular reservoirs and
+qualified drifting reservoirs all resample the actual finite gas state at every
+native step. Geometry, reservoir states and authored relative velocities remain
+fixed during the interval. The existing moving-vessel owners remain responsible
+for motion, force and inertial energy transforms.
+
+One full native step is compared with two half steps. Only the accepted halves
+enter the endpoint and physical accounts. Dimensional local tolerances cover
+temperature, pressure, every species inventory (including newly supplied
+species), gross directional species streams and source-relative energy. The
+second half-step's boundary energy is translated into the trial's original
+partial-enthalpy chart before comparison. A large formation-energy datum cannot
+hide a thermal error. This is a first-order local error estimate, not a global
+accuracy certificate; tighter tolerances require temporal convergence checks.
+
+Typed withdrawal, caloric-solve and internal-flow equilibrium/entropy overshoot
+refusals can reduce the trial interval. Invalid sources, unsupported regimes,
+unrepresentable arithmetic and cancellation remain hard refusals. Native calls,
+accepted intervals and retained history rows are bounded. Any refusal leaves
+every caller-owned parcel unchanged, including after earlier internal steps.
+
+The complete interval checks actual original/final total and species inventories
+against accepted streams. Actual endpoint internal energy is independently
+checked in a fixed reference for each exact original caloric source; original
+enthalpy/internal-energy increments remove formation datums before arithmetic.
+The accumulated native caloric residual is retained and checked separately.
+All conservation budgets apply once to the entire interval, without multiplication
+by the number of steps. Open paths make no closed-system entropy claim.
+
+G1/G3/G4 fixtures cover monatomic and diatomic analytic vacuum blowdown over three
+tolerance rungs, shared gross-withdrawal retries, deterministic caloric-reference
+invariance, new-species supply through two finite chambers with vacuum
+fractionation, source refusal, work exhaustion and late cancellation. The
+`effusion_blowdown` example accepts a final `fixed|adaptive` argument; fixed mode
+remains the default, and adaptive mode treats `dt_s` as its CSV reporting interval.
+These are numerical checks with synthetic material sources, not measured
+validation of an aperture or collision regime.
+
 ## Source-bound Prony histories and exact stress control
 
 `visco::stress_control::StressControlledMaxwell` extends the existing
