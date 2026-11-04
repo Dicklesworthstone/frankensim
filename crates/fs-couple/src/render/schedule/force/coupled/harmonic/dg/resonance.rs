@@ -14,7 +14,7 @@ use fs_phs::harmonic::resonance::search_resonance;
 /// A main-bore side port and its finite branch's exterior are distinct locations.
 #[derive(Clone, Copy, Debug)]
 pub enum DgHarmonicObservation<'a> {
-    /// Signed physical mechanical displacement or velocity projection.
+    /// Signed physical mechanical displacement, velocity or acceleration projection.
     Modal(ModalHarmonicObservation<'a>),
     /// Main-bore port pressure [Pa], including the driving inlet if selected.
     BorePressure(PortId),

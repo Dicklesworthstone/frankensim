@@ -872,6 +872,7 @@ fn local_loaded_observations_use_original_pressure_planes_and_flow_signs() {
     controls.measure_half_power_bandwidth = false;
     for observation in [
         Observe::Modal(ModalHarmonicObservation::Velocity(&[1.0])),
+        Observe::Modal(ModalHarmonicObservation::Acceleration(&[1.0])),
         Observe::BorePressure(INLET),
         Observe::BoreInflow(INLET),
         Observe::BranchPressure {
@@ -911,7 +912,13 @@ fn local_loaded_observations_use_original_pressure_planes_and_flow_signs() {
             )
             .unwrap();
         let expected = match observation {
-            Observe::Modal(_) => response.modal.velocity_m_sqrt_kg_per_s[0],
+            Observe::Modal(ModalHarmonicObservation::Velocity(_)) => {
+                response.modal.velocity_m_sqrt_kg_per_s[0]
+            }
+            Observe::Modal(ModalHarmonicObservation::Acceleration(_)) => {
+                response.modal.displacement_m_sqrt_kg[0]
+                    .scale(-response.modal.omega_rad_s * response.modal.omega_rad_s)
+            }
             Observe::BorePressure(_) => response.inlet_pressure_pa,
             Observe::BoreInflow(_) => response.inlet_flow_m3_s,
             Observe::BranchPressure { .. } => {
