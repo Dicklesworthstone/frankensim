@@ -165,7 +165,7 @@ pub struct OrthotropicElastic {
 }
 
 impl OrthotropicElastic {
-    /// Construct with positivity + compliance-definiteness spot checks.
+    /// Construct with positivity and positive-definite compliance checks.
     ///
     /// # Errors
     /// [`MaterialError::Parameters`] on non-positive moduli or an
@@ -190,53 +190,93 @@ impl OrthotropicElastic {
             g,
             strain_limit,
         };
-        // Thermodynamic requirement: the 3×3 normal-block compliance must
-        // be positive definite (leading principal minors > 0).
-        let s = law.normal_compliance();
-        let m1 = s[0][0];
-        let m2 = s[0][0] * s[1][1] - s[0][1] * s[1][0];
-        let m3 = s[0][0] * (s[1][1] * s[2][2] - s[1][2] * s[2][1])
-            - s[0][1] * (s[1][0] * s[2][2] - s[1][2] * s[2][0])
-            + s[0][2] * (s[1][0] * s[2][1] - s[1][1] * s[2][0]);
-        if !(m1 > 0.0 && m2 > 0.0 && m3 > 0.0) {
+        // Congruence by diag(sqrt(E_i)) removes stress units before testing
+        // definiteness. Raw 1/E minors cube the stress scale and can underflow
+        // to zero or overflow to infinity for the same physical compliance.
+        let (_, lower) = law.normal_cholesky();
+        if lower.iter().flatten().any(|value| !value.is_finite())
+            || (0..3).any(|i| lower[i][i] <= 0.0)
+        {
             return Err(MaterialError::Parameters {
                 what: "orthotropic compliance is not positive definite \
                        (Poisson ratios thermodynamically inadmissible)"
                     .to_string(),
             });
         }
+        if law
+            .stiffness()
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            return Err(MaterialError::Parameters {
+                what: "orthotropic stiffness is not representable".to_string(),
+            });
+        }
         Ok(law)
     }
 
-    fn normal_compliance(&self) -> [[f64; 3]; 3] {
-        let [e1, e2, e3] = self.e;
-        let [nu12, nu13, nu23] = self.nu;
-        // Symmetry: ν21/E2 = ν12/E1 etc.
-        [
-            [1.0 / e1, -nu12 / e1, -nu13 / e1],
-            [-nu12 / e1, 1.0 / e2, -nu23 / e2],
-            [-nu13 / e1, -nu23 / e2, 1.0 / e3],
-        ]
+    // S = D^-1 R D^-1, D = diag(sqrt(E_i)), R = L L^T with unit diagonal.
+    // Per-axis normalization retains orthotropy without forming E_i*E_j or
+    // dimensioned compliance determinants. No eigenvalue floor is introduced.
+    fn normal_cholesky(&self) -> ([f64; 3], [[f64; 3]; 3]) {
+        let roots = self.e.map(fs_math::det::sqrt);
+        let coupling = |nu: f64, i: usize, j: usize| {
+            let ratio = roots[j] / roots[i];
+            if ratio.is_finite() {
+                -nu * ratio
+            } else {
+                // A representable coupling can combine a tiny Poisson ratio
+                // with an overflowing modulus-root ratio.
+                -(nu * roots[j]) / roots[i]
+            }
+        };
+        let a = coupling(self.nu[0], 0, 1);
+        let b = coupling(self.nu[1], 0, 2);
+        let c = coupling(self.nu[2], 1, 2);
+        let minor2 = (1.0 - a) * (1.0 + a);
+        let remainder = (-a).mul_add(b, c);
+        let determinant = minor2.mul_add((1.0 - b) * (1.0 + b), -remainder * remainder);
+        let l11 = fs_math::det::sqrt(minor2);
+        (
+            roots,
+            [
+                [1.0, 0.0, 0.0],
+                [a, l11, 0.0],
+                [b, remainder / l11, fs_math::det::sqrt(determinant / minor2)],
+            ],
+        )
     }
 
     /// The constant stiffness: inverse of the normal-block compliance +
     /// diagonal shear.
     #[must_use]
     pub fn stiffness(&self) -> Tangent6 {
-        let s = self.normal_compliance();
-        // Invert the 3×3 by cofactors.
-        let det = s[0][0] * (s[1][1] * s[2][2] - s[1][2] * s[2][1])
-            - s[0][1] * (s[1][0] * s[2][2] - s[1][2] * s[2][0])
-            + s[0][2] * (s[1][0] * s[2][1] - s[1][1] * s[2][0]);
-        let inv = |r: usize, c: usize| -> f64 {
-            let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
-            let (c1, c2) = ((c + 1) % 3, (c + 2) % 3);
-            (s[c1][r1] * s[c2][r2] - s[c1][r2] * s[c2][r1]) / det
-        };
+        let (roots, lower) = self.normal_cholesky();
+        let mut inverse_lower = [[0.0; 3]; 3];
+        for column in 0..3 {
+            for row in column..3 {
+                let mut value = if row == column { 1.0 } else { 0.0 };
+                for k in column..row {
+                    value = (-lower[row][k]).mul_add(inverse_lower[k][column], value);
+                }
+                inverse_lower[row][column] = value / lower[row][row];
+            }
+        }
         let mut c6 = [[0.0f64; 6]; 6];
-        for (i, row) in c6.iter_mut().enumerate().take(3) {
-            for (j, slot) in row.iter_mut().enumerate().take(3) {
-                *slot = inv(i, j);
+        for i in 0..3 {
+            for j in i..3 {
+                let inverse = (j..3).fold(0.0, |sum, k| {
+                    inverse_lower[k][i].mul_add(inverse_lower[k][j], sum)
+                });
+                let modulus = if i == j {
+                    self.e[i]
+                } else {
+                    roots[i] * roots[j]
+                };
+                let stiffness = modulus * inverse;
+                c6[i][j] = stiffness;
+                c6[j][i] = stiffness;
             }
         }
         let [g12, g23, g31] = self.g;
@@ -285,5 +325,149 @@ impl SmallStrainLaw for OrthotropicElastic {
             vec!["misaligned-axis use requires a rotation the caller owns".to_string()],
             0.02,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(actual: f64, expected: f64, tolerance: f64) {
+        assert!(actual.is_finite() && expected.is_finite());
+        assert!(
+            (actual - expected).abs() <= tolerance * actual.abs().max(expected.abs()),
+            "{actual:e} != {expected:e}"
+        );
+    }
+
+    #[test]
+    fn g0_orthotropic_stress_inverts_engineering_compliance() {
+        let law = OrthotropicElastic::new(
+            [140e9, 10e9, 7e9],
+            [0.31, 0.24, 0.35],
+            [5e9, 3e9, 4e9],
+            0.02,
+        )
+        .unwrap();
+        // Independent engineering-compliance response to all six stresses.
+        let stress = [2e7, -1e7, 3e6, 4e6, -5e6, 6e6];
+        let [e1, e2, e3] = law.e;
+        let [nu12, nu13, nu23] = law.nu;
+        let strain = [
+            (stress[0] - nu12 * stress[1] - nu13 * stress[2]) / e1,
+            -nu12 * stress[0] / e1 + (stress[1] - nu23 * stress[2]) / e2,
+            -nu13 * stress[0] / e1 - nu23 * stress[1] / e2 + stress[2] / e3,
+            stress[3] / (2.0 * law.g[0]),
+            stress[4] / (2.0 * law.g[1]),
+            stress[5] / (2.0 * law.g[2]),
+        ];
+        for (actual, expected) in law.stress(&strain, &()).into_iter().zip(stress) {
+            close(actual, expected, 8e-15);
+        }
+        let stiffness = law.stiffness();
+        for i in 0..6 {
+            for j in 0..6 {
+                assert_eq!(stiffness[i][j].to_bits(), stiffness[j][i].to_bits());
+            }
+        }
+        for poisson in [-0.8, 0.0, 0.3, 0.4999] {
+            let isotropic = IsotropicElastic::new(1.3e9, poisson, 0.02).unwrap();
+            let shear = isotropic.lame().1;
+            let orthotropic =
+                OrthotropicElastic::new([1.3e9; 3], [poisson; 3], [shear; 3], 0.02).unwrap();
+            for (actual, expected) in orthotropic
+                .stiffness()
+                .iter()
+                .flatten()
+                .zip(isotropic.stiffness().iter().flatten())
+            {
+                close(*actual, *expected, 3e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_orthotropic_stiffness_preserves_the_stress_scale() {
+        let e = [140.0, 10.0, 7.0];
+        let g = [5.0, 3.0, 4.0];
+        let nu = [0.31, 0.24, 0.35];
+        let reference = OrthotropicElastic::new(e, nu, g, 0.02).unwrap();
+        let strain = [0.001, -0.002, 0.0003, 0.004, -0.001, 0.002];
+        for scale in [1e-240, 1e-120, 1e-20, 1.0, 1e20, 1e120, 1e240] {
+            let law = OrthotropicElastic::new(e.map(|v| scale * v), nu, g.map(|v| scale * v), 0.02)
+                .unwrap();
+            for (actual, expected) in law
+                .stiffness()
+                .iter()
+                .flatten()
+                .zip(reference.stiffness().iter().flatten())
+            {
+                close(actual / scale, *expected, 2e-14);
+            }
+            for (actual, expected) in law
+                .stress(&strain, &())
+                .into_iter()
+                .zip(reference.stress(&strain, &()))
+            {
+                close(actual / scale, expected, 2e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_orthotropic_axis_normalization_retains_large_modulus_contrast() {
+        // This dimensionless SPD compliance is independent of the three
+        // modulus scales. Its inverse is an analytic reference, not a solve
+        // through the implementation being tested.
+        let e: [f64; 3] = [1e-240, 1e240, 1.0];
+        let coupling = [[0.0, 0.2, 0.1], [0.2, 0.0, 0.3], [0.1, 0.3, 0.0]];
+        let cofactors = [[0.91, 0.23, 0.16], [0.23, 0.99, 0.32], [0.16, 0.32, 0.96]];
+        for axes in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let moduli = axes.map(|i| e[i]);
+            let poisson = |i: usize, j: usize| {
+                coupling[axes[i]][axes[j]] * moduli[i].sqrt() / moduli[j].sqrt()
+            };
+            let law = OrthotropicElastic::new(
+                moduli,
+                [poisson(0, 1), poisson(0, 2), poisson(1, 2)],
+                [1.0; 3],
+                0.02,
+            )
+            .unwrap();
+            let stiffness = law.stiffness();
+            for i in 0..3 {
+                for j in 0..3 {
+                    let scale = moduli[i].sqrt() * moduli[j].sqrt();
+                    close(
+                        stiffness[i][j] / scale,
+                        cofactors[axes[i]][axes[j]] / 0.848,
+                        2e-14,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_orthotropic_admission_does_not_depend_on_stress_units() {
+        for scale in [1e-240, 1.0, 1e240] {
+            for nu in [
+                [0.5; 3],
+                [0.9; 3],
+                [-1.0; 3],
+                [1.0, 0.0, 0.0],
+                [f64::NAN; 3],
+            ] {
+                assert!(OrthotropicElastic::new([scale; 3], nu, [scale; 3], 0.02).is_err());
+            }
+        }
+        assert!(OrthotropicElastic::new([1.0; 3], [0.0; 3], [f64::MAX; 3], 0.02).is_err());
     }
 }
