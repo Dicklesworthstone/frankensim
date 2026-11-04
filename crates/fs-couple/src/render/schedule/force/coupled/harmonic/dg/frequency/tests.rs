@@ -725,3 +725,340 @@ fn loaded_zero_force_slope_and_refusals_keep_all_original_histories() {
     assert_eq!(load.state(), &original);
     assert_eq!(system.samples_rendered(), 0);
 }
+
+fn resonance_controls() -> super::super::resonance::ResonanceControls {
+    super::super::resonance::ResonanceControls {
+        absolute_frequency_tolerance_rad_s: 1e-4,
+        relative_frequency_tolerance: 1e-10,
+        maximum_evaluations: 256,
+        measure_half_power_bandwidth: true,
+    }
+}
+
+#[test]
+fn loaded_driven_peaks_keep_source_memory_gaps_and_mutual_terminal_port_order() {
+    use super::super::resonance::{DgHarmonicObservation as Observe, ModalHarmonicObservation};
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator();
+    let force = [C64::new(1e-5, -4e-6)];
+    let column = [0.003];
+    let memory = system.material_memory().to_vec();
+    let air = system.radiation_state().to_vec();
+    let interval = (1720.0, 1950.0);
+    for circular in [false, true] {
+        let mut original: Option<(f64, f64)> = None;
+        for reverse in [false, true] {
+            let load = loaded(circular, reverse);
+            let state = load.state().clone();
+            let branch_state = load.branches()[0].state().clone();
+            let terminal_state = load.terminal().unwrap().pole_states().to_vec();
+            let channel_state = load.terminal_channels()[0]
+                .channel()
+                .unwrap()
+                .velocities_m_s()
+                .to_vec();
+            let motion = system
+                .driven_resonance_with_load(
+                    &force,
+                    &load,
+                    &column,
+                    Observe::Modal(ModalHarmonicObservation::Displacement(&[1.0])),
+                    interval,
+                    resonance_controls(),
+                    WORK,
+                    &gate,
+                )
+                .unwrap();
+            let pressure = system
+                .driven_resonance_with_load(
+                    &force,
+                    &load,
+                    &column,
+                    Observe::TerminalPressure(SIDE),
+                    interval,
+                    resonance_controls(),
+                    WORK,
+                    &gate,
+                )
+                .unwrap();
+            // A local acoustic observation includes its dispersive transfer.
+            // Its true driven peak need not coincide with the body's motion.
+            assert!(
+                (motion.peak.angular_frequency_rad_s - pressure.peak.angular_frequency_rad_s).abs()
+                    > 1e-4
+            );
+            for (result, pressure_observation) in [(&motion, false), (&pressure, true)] {
+                let field = |response: &DgLoadedModalHarmonicResponse| {
+                    if pressure_observation {
+                        let terminal = response.terminal.as_ref().unwrap();
+                        terminal.pressure_pa[terminal
+                            .ports
+                            .iter()
+                            .position(|port| *port == SIDE)
+                            .unwrap()]
+                    } else {
+                        response.modal.displacement_m_sqrt_kg[0]
+                    }
+                };
+                let response = system
+                    .harmonic_response_with_load(
+                        result.peak.angular_frequency_rad_s,
+                        &force,
+                        &load,
+                        &column,
+                        WORK,
+                        &gate,
+                    )
+                    .unwrap();
+                close(result.observation, field(&response));
+                assert!(
+                    (result.observation_derivative / result.observation)
+                        .re
+                        .abs()
+                        < 2e-5
+                );
+                let band = result.half_power.unwrap();
+                for edge in [band.lower, band.upper] {
+                    let response = system
+                        .harmonic_response_with_load(
+                            edge.angular_frequency_rad_s,
+                            &force,
+                            &load,
+                            &column,
+                            WORK,
+                            &gate,
+                        )
+                        .unwrap();
+                    let ratio = field(&response).norm_sq() / result.observation.norm_sq();
+                    assert!((ratio - 0.5).abs() < 2e-5, "half-height ratio {ratio}");
+                }
+                assert!(band.bandwidth_rad_s > 0.0);
+                assert!(result.maximum_relative_residual < 1e-9);
+            }
+            if let Some((old_motion, old_pressure)) = original {
+                assert!((motion.peak.angular_frequency_rad_s - old_motion).abs() < 2e-4);
+                assert!((pressure.peak.angular_frequency_rad_s - old_pressure).abs() < 2e-4);
+            }
+            original = Some((
+                motion.peak.angular_frequency_rad_s,
+                pressure.peak.angular_frequency_rad_s,
+            ));
+            assert_eq!(load.state(), &state);
+            assert_eq!(load.branches()[0].state(), &branch_state);
+            assert_eq!(load.terminal().unwrap().pole_states(), terminal_state);
+            assert_eq!(
+                load.terminal_channels()[0]
+                    .channel()
+                    .unwrap()
+                    .velocities_m_s(),
+                channel_state
+            );
+        }
+    }
+    assert_eq!(system.material_memory(), memory);
+    assert_eq!(system.radiation_state(), air);
+    assert_eq!(system.samples_rendered(), 0);
+}
+
+#[test]
+fn local_loaded_observations_use_original_pressure_planes_and_flow_signs() {
+    use super::super::resonance::{DgHarmonicObservation as Observe, ModalHarmonicObservation};
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator();
+    let load = loaded(false, true);
+    let force = [C64::new(1e-5, -4e-6)];
+    let column = [0.003];
+    let mut controls = resonance_controls();
+    controls.measure_half_power_bandwidth = false;
+    for observation in [
+        Observe::Modal(ModalHarmonicObservation::Velocity(&[1.0])),
+        Observe::BorePressure(INLET),
+        Observe::BoreInflow(INLET),
+        Observe::BranchPressure {
+            branch: SIDE,
+            port: OUTLET,
+        },
+        Observe::BranchInflow {
+            branch: SIDE,
+            port: OUTLET,
+        },
+        Observe::TerminalOutwardFlow(SIDE),
+        Observe::ChannelPressureDrop(SIDE),
+        Observe::ChannelFlow(SIDE),
+        Observe::ChannelPressureDrop(OUTLET),
+    ] {
+        let peak = system
+            .driven_resonance_with_load(
+                &force,
+                &load,
+                &column,
+                observation,
+                (1720.0, 1950.0),
+                controls,
+                WORK,
+                &gate,
+            )
+            .unwrap();
+        assert!(peak.half_power.is_none());
+        let response = system
+            .harmonic_response_with_load(
+                peak.peak.angular_frequency_rad_s,
+                &force,
+                &load,
+                &column,
+                WORK,
+                &gate,
+            )
+            .unwrap();
+        let expected = match observation {
+            Observe::Modal(_) => response.modal.velocity_m_sqrt_kg_per_s[0],
+            Observe::BorePressure(_) => response.inlet_pressure_pa,
+            Observe::BoreInflow(_) => response.inlet_flow_m3_s,
+            Observe::BranchPressure { .. } => {
+                response
+                    .channels
+                    .iter()
+                    .find(|channel| channel.port == SIDE)
+                    .unwrap()
+                    .duct_pressure_pa
+            }
+            Observe::BranchInflow { .. } => {
+                -response
+                    .channels
+                    .iter()
+                    .find(|channel| channel.port == SIDE)
+                    .unwrap()
+                    .outward_flow_m3_s
+            }
+            Observe::TerminalOutwardFlow(_) | Observe::ChannelFlow(_) => {
+                response
+                    .channels
+                    .iter()
+                    .find(|channel| channel.port == SIDE)
+                    .unwrap()
+                    .outward_flow_m3_s
+            }
+            Observe::ChannelPressureDrop(port) => {
+                let channel = response
+                    .channels
+                    .iter()
+                    .find(|channel| channel.port == port)
+                    .unwrap();
+                channel.duct_pressure_pa - channel.exterior_pressure_pa
+            }
+            _ => unreachable!(),
+        };
+        close(peak.observation, expected);
+        assert!((peak.observation_derivative / peak.observation).re.abs() < 2e-5);
+    }
+    assert_eq!(load.state().step_count(), 0);
+    assert_eq!(system.samples_rendered(), 0);
+}
+
+#[test]
+fn bare_loaded_peak_and_native_source_refusals_preserve_all_histories() {
+    use super::super::resonance::{
+        DgHarmonicObservation as Observe, ModalHarmonicObservation, ResonanceSearchError,
+    };
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator();
+    let duct = bare();
+    let force = [C64::new(1e-5, -4e-6)];
+    let column = [0.003];
+    let observation = Observe::Modal(ModalHarmonicObservation::Velocity(&[1.0]));
+    let result = system
+        .driven_resonance_with_duct(
+            &force,
+            &duct,
+            INLET,
+            &column,
+            observation,
+            (1600.0, 1950.0),
+            resonance_controls(),
+            WORK,
+            &gate,
+        )
+        .unwrap();
+    assert!(result.half_power.is_some());
+    let original = system
+        .harmonic_response_with_duct(
+            result.peak.angular_frequency_rad_s,
+            &force,
+            &duct,
+            INLET,
+            &column,
+            WORK,
+            &gate,
+        )
+        .unwrap();
+    close(
+        result.observation,
+        original.modal.velocity_m_sqrt_kg_per_s[0],
+    );
+    let load = loaded(false, false);
+    let state = load.state().clone();
+    let memory = system.material_memory().to_vec();
+    let air = system.radiation_state().to_vec();
+    // Terminal/branch band violations and unknown physical locations retain
+    // native errors. A known exact closure flow must not become a noise peak.
+    let outside_branch_band =
+        1.01 * load.branches()[0].duct().viscothermal_band_rad_s().unwrap()[1];
+    for (observation, interval, work) in [
+        (observation, (80.0, 1950.0), WORK),
+        (observation, (1720.0, outside_branch_band), WORK),
+        (observation, (1720.0, 1950.0), 1),
+        (Observe::BorePressure(PortId(999)), (1720.0, 1950.0), WORK),
+        (
+            Observe::TerminalPressure(PortId(999)),
+            (1720.0, 1950.0),
+            WORK,
+        ),
+        (
+            Observe::BranchPressure {
+                branch: SIDE,
+                port: PortId(999),
+            },
+            (1720.0, 1950.0),
+            WORK,
+        ),
+        (Observe::BoreInflow(OUTLET), (1720.0, 1950.0), WORK),
+        (Observe::TerminalOutwardFlow(OUTLET), (1720.0, 1950.0), WORK),
+        (Observe::ChannelFlow(OUTLET), (1720.0, 1950.0), WORK),
+    ] {
+        let result = system.driven_resonance_with_load(
+            &force,
+            &load,
+            &column,
+            observation,
+            interval,
+            resonance_controls(),
+            work,
+            &gate,
+        );
+        assert!(
+            matches!(&result, Err(ResonanceSearchError::Source(_))),
+            "{observation:?} {interval:?} work={work}: {result:?}"
+        );
+    }
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        system.driven_resonance_with_load(
+            &force,
+            &load,
+            &column,
+            observation,
+            (1720.0, 1950.0),
+            resonance_controls(),
+            WORK,
+            &cancelled,
+        ),
+        Err(ResonanceSearchError::Source(
+            DgHarmonicCouplingError::Modal(ModalCouplingError::Cancelled)
+        )) | Err(ResonanceSearchError::Cancelled)
+    ));
+    assert_eq!(load.state(), &state);
+    assert_eq!(system.material_memory(), memory);
+    assert_eq!(system.radiation_state(), air);
+    assert_eq!(system.samples_rendered(), 0);
+}

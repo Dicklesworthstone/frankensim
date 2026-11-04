@@ -16,6 +16,8 @@ pub use frequency::{DgHarmonicBranchDerivative, DgHarmonicChannelDerivative,
     TerminalChannelHarmonicDerivative};
 /// Free modes of the full original mechanical, material and acoustic pencil.
 pub mod poles;
+/// Driven physical peaks and widths with every attached acoustic owner retained.
+pub mod resonance;
 
 /// Original terminal real-state phasors and physical outward port exchange.
 /// The admitted source's passivity reports do not supply a generic storage

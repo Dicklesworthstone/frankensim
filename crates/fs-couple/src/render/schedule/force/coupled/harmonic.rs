@@ -7,6 +7,8 @@ use fs_math::{c64::C64, det};
 pub mod dg;
 mod frequency;
 pub use frequency::ModalHarmonicFrequencyResponse;
+/// Observed driven peaks and half-power widths of the complete coupled owner.
+pub mod resonance;
 
 /// Dense response capacity; no retained mode or acoustic pole is truncated.
 pub const MAX_HARMONIC_UNKNOWNS: usize = 1024;
