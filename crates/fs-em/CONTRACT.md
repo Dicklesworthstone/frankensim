@@ -2623,21 +2623,39 @@ source products and reductions retain double-double precision. There is one
 cycle-mean factor of one half. Reflected power and local energy backflow keep
 their physical negative signs; no detector absorption law is inferred.
 
-A query uses O(N²) ordered modal-pair contractions, O(W²+H²) cached spatial
-kernels for an N=W*H grid, and no FFT or new material/film solve. Explicit pair
-and logical-storage limits admit the work before allocation; the conservative
-storage allowance includes the original beam workspace and axis caches.
+A query factors the exact Cartesian rectangle kernel into two double-double
+axis actions. For an N=W*H grid it performs N*(W+H) three-component magnetic-
+vector contractions and N final vector cross products, retaining every
+original cross-mode term algebraically. The existing `maximum_mode_pairs`
+field bounds those actual axis contraction terms. The query retains
+O(W²+H²) cached spatial kernels and one O(N) complex double-double intermediate
+grid, with no FFT or new material/film solve. Explicit work and logical-storage
+limits admit the computation before reconstruction; storage includes the
+original beam workspace, both axis caches and the intermediate vectors.
 Cancellation polls during cache construction, modal reconstruction and bounded
-pair batches, returning no partial measurement. These are operation/storage
-bounds, not a throughput claim. The source remains the authored periodic field;
+batches of both axis actions, returning no partial measurement. These are
+operation/storage bounds, not a throughput claim. The source remains the
+authored periodic field;
 apertures outside its cell observe its periodic continuation. Isolated-edge
 convergence, detector back-action, quantum efficiency and temporal exposure
 remain separate questions.
+
+An O(N) preflight conditionally rescales extreme magnetic amplitudes by an
+exact power of two before the axis actions, restoring both DD components only
+after the electric contraction and cycle-mean factor. Inexact source scaling,
+lost DD halving components and unrepresentable restored flux refuse explicitly.
+This bounds intermediate magnetic-sum overflow; it is not a general extension
+of the DD exponent range for every possible reassociation.
 
 Focused native kernel tests cover analytic fringe position/width response,
 positive subwavelength dark-fringe power, independent direct vector-field
 area quadrature including evanescent and backward waves, whole-cell
 orthogonality, detector subdivision, darkness, resource limits and cancellation.
+They also compare a nonsquare grid with the complete all-pairs expression,
+including distant-detector phases, positive two-axis dark-fringe power, exact
+axis-work admission, and cancellation and replay during both separable actions.
+Additional range regressions compare huge-H/small-E transport with a finite
+all-pairs reference and check explicit scaling, halving and output refusals.
 Source-backed integration tests exercise the public original-film/beam adapter,
 TIR, reflected power and refusal replay; their full Cargo execution requires
 the constellation dependencies.

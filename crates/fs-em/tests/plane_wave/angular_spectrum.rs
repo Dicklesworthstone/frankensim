@@ -531,7 +531,7 @@ fn finite_detector_resolves_original_beam_fringe_width_position_and_weak_dark_fl
     let q = core::f64::consts::TAU / 32.0;
     let kz = det::sqrt(1.0 - q * q);
     let bounds = AngularSpectrumApertureLimits {
-        maximum_mode_pairs: 16,
+        maximum_mode_pairs: 20,
         maximum_workspace_bytes: 1 << 20,
     };
     for sign in [1.0, -1.0] {
@@ -591,7 +591,7 @@ fn finite_detector_keeps_original_reflection_tir_and_whole_cell_power() {
         .collect();
     let beam = PlanarAngularSpectrum::prepare(&stack, grid, &samples, limits(), || false).unwrap();
     let bounds = AngularSpectrumApertureLimits {
-        maximum_mode_pairs: 64,
+        maximum_mode_pairs: 48,
         maximum_workspace_bytes: 1 << 20,
     };
     let detector = AngularSpectrumAperture::try_new([-3.0, 0.7], [32.0, 16.0]).unwrap();
@@ -624,7 +624,7 @@ fn finite_detector_keeps_original_reflection_tir_and_whole_cell_power() {
             0.0,
             detector,
             AngularSpectrumApertureLimits {
-                maximum_mode_pairs: 63,
+                maximum_mode_pairs: 47,
                 ..bounds
             },
             || false

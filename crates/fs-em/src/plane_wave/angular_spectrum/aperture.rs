@@ -50,10 +50,12 @@ impl AngularSpectrumAperture {
 }
 
 /// Logical query bounds, checked before allocation or modal reconstruction.
-/// A query contracts N² ordered mode pairs; the two axis caches need at most
-/// 2*N² additional bounded scalar kernel evaluations. Numerical storage includes
-/// the original beam workspace and both axis-pair caches. Caller inputs,
-/// previously retained outputs and allocator overhead are excluded.
+/// For N=W*H original modes, `maximum_mode_pairs` bounds N*(W+H) axis
+/// contractions of a three-component magnetic vector. Another N vector cross
+/// products complete the query; W²+H² scalar kernel evaluations build the two
+/// axis caches. Numerical buffer storage includes the original beam workspace,
+/// both axis-pair caches, and N three-component complex double-double vectors.
+/// Caller inputs, previously retained outputs and allocator overhead are excluded.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumApertureLimits {
     pub maximum_mode_pairs: usize,
@@ -93,8 +95,10 @@ impl PreparedAperture {
             .width
             .checked_mul(grid.height)
             .ok_or_else(|| bad("aperture mode count overflow"))?;
-        let pairs = n
-            .checked_mul(n)
+        let pairs = grid
+            .width
+            .checked_add(grid.height)
+            .and_then(|axes| n.checked_mul(axes))
             .ok_or_else(|| bad("aperture pair count overflow"))?;
         let axis_pairs = grid
             .width
@@ -107,6 +111,10 @@ impl PreparedAperture {
             .ok_or_else(|| bad("aperture axis cache extent overflow"))?;
         let workspace_bytes = axis_pairs
             .checked_mul(core::mem::size_of::<[Dd; 2]>())
+            .and_then(|bytes| {
+                n.checked_mul(core::mem::size_of::<[[Dd; 2]; 3]>())
+                    .and_then(|scratch| bytes.checked_add(scratch))
+            })
             .and_then(|bytes| bytes.checked_add(beam_workspace_bytes))
             .ok_or_else(|| bad("aperture workspace extent overflow"))?;
         if pairs > limits.maximum_mode_pairs || workspace_bytes > limits.maximum_workspace_bytes {
@@ -138,37 +146,93 @@ impl PreparedAperture {
         })
     }
 
+    #[allow(clippy::float_cmp)] // Exact binary scale/component round trips are admission checks.
     pub(super) fn measure(
         &self,
         electric: &[[C64; 3]],
         magnetic: &[[C64; 3]],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AngularSpectrumApertureReading, AngularSpectrumError> {
+        poll(cancelled)?;
         let n = self.grid.width * self.grid.height;
         if electric.len() != n || magnetic.len() != n {
             return Err(bad("aperture fields must cover the original modal grid"));
         }
+        let restore = magnetic_scale(magnetic, cancelled)?;
+        let reduction = 1.0 / restore;
+        // W(i,j)=Wx(ix,jx)*Wy(iy,jy), so apply the two exact axis
+        // kernels to H* before contracting with E. Keep every complex part
+        // in DD: rounding an intermediate field to C64 would erase weak
+        // detector-null power. This local scratch also leaves a prepared
+        // aperture reusable without mutation after cancellation or failure.
+        let mut y_magnetic = Vec::new();
+        y_magnetic
+            .try_reserve_exact(n)
+            .map_err(|_| bad("aperture field workspace allocation failed"))?;
+        for row in 0..self.grid.height {
+            for column in 0..self.grid.width {
+                poll(cancelled)?;
+                let mut field = [[Dd::ZERO; 2]; 3];
+                for source_row in 0..self.grid.height {
+                    if source_row % 32 == 0 {
+                        poll(cancelled)?;
+                    }
+                    let weight = self.y[row * self.grid.height + source_row];
+                    let h = magnetic[source_row * self.grid.width + column];
+                    for (output, value) in field.iter_mut().zip(h) {
+                        add_weighted(
+                            output,
+                            [
+                                Dd::from_f64(value.re * reduction),
+                                Dd::from_f64(-value.im * reduction),
+                            ],
+                            weight,
+                        );
+                    }
+                }
+                y_magnetic.push(field);
+            }
+        }
         let mut sum = [Dd::ZERO; 3];
         for (i, e) in electric.iter().enumerate() {
             poll(cancelled)?;
-            let row_i = i / self.grid.width;
-            let column_i = i % self.grid.width;
-            for (j, h) in magnetic.iter().enumerate() {
-                if j % 32 == 0 {
+            let row = i / self.grid.width;
+            let column = i % self.grid.width;
+            let mut field = [[Dd::ZERO; 2]; 3];
+            for source_column in 0..self.grid.width {
+                if source_column % 32 == 0 {
                     poll(cancelled)?;
                 }
-                let x = self.x[column_i * self.grid.width + j % self.grid.width];
-                let y = self.y[row_i * self.grid.height + j / self.grid.width];
-                let weight = [x[0] * y[0] - x[1] * y[1], x[0] * y[1] + x[1] * y[0]];
-                for (axis, (a, b)) in [(1, 2), (2, 0), (0, 1)].into_iter().enumerate() {
-                    sum[axis] =
-                        sum[axis] + product(e[a], h[b], weight) - product(e[b], h[a], weight);
+                let weight = self.x[column * self.grid.width + source_column];
+                let h = y_magnetic[row * self.grid.width + source_column];
+                for (output, value) in field.iter_mut().zip(h) {
+                    add_weighted(output, value, weight);
                 }
+            }
+            for (axis, (a, b)) in [(1, 2), (2, 0), (0, 1)].into_iter().enumerate() {
+                sum[axis] = sum[axis] + Dd::from_f64(e[a].re) * field[b][0]
+                    - Dd::from_f64(e[a].im) * field[b][1]
+                    - Dd::from_f64(e[b].re) * field[a][0]
+                    + Dd::from_f64(e[b].im) * field[a][1];
             }
         }
         let half = Dd::from_f64(0.5);
-        let mean_poynting_w_m2 = sum.map(|value| (value * half).to_f64());
-        let normal_power_w = (sum[2] * half * Dd::from_f64(self.aperture.area_m2)).to_f64();
+        let mut mean = sum.map(|value| value * half);
+        if restore != 1.0 {
+            for (value, original) in mean.iter_mut().zip(sum) {
+                let (hi, lo) = (value.hi * restore, value.lo * restore);
+                if !hi.is_finite() || !lo.is_finite() {
+                    return Err(bad("aperture Poynting mean is unrepresentable"));
+                }
+                // Refuse a lost DD component even if the rounded mean survived.
+                if value.hi * 2.0 != original.hi || value.lo * 2.0 != original.lo {
+                    return Err(bad("aperture scaled Poynting mean underflows"));
+                }
+                *value = Dd::from_pair(hi, lo);
+            }
+        }
+        let mean_poynting_w_m2 = mean.map(Dd::to_f64);
+        let normal_power_w = (mean[2] * Dd::from_f64(self.aperture.area_m2)).to_f64();
         if mean_poynting_w_m2
             .iter()
             .chain(&[normal_power_w])
@@ -182,6 +246,44 @@ impl PreparedAperture {
             normal_power_w,
         })
     }
+}
+
+/// |Wx|,|Wy| <= 1 bound a complex component by 4*N times its input maximum.
+/// Keep another factor-four headroom for finite DD sums. Binary scaling is
+/// conditional, exact on every admitted source component, and restored only
+/// after the electric contraction; ordinary field arithmetic is unchanged.
+#[allow(clippy::float_cmp)] // Exact binary scale/component round trips are admission checks.
+fn magnetic_scale(
+    magnetic: &[[C64; 3]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, AngularSpectrumError> {
+    let mut largest = 0.0_f64;
+    for fields in magnetic.chunks(128) {
+        poll(cancelled)?;
+        for value in fields.iter().flatten().flat_map(|v| [v.re, v.im]) {
+            if !value.is_finite() {
+                return Err(bad("aperture magnetic field is unrepresentable"));
+            }
+            largest = largest.max(value.abs());
+        }
+    }
+    let limit = f64::MAX / (16.0 * magnetic.len() as f64);
+    let mut restore = 1.0;
+    while largest > limit {
+        largest *= 0.5;
+        restore *= 2.0;
+    }
+    if restore != 1.0 {
+        for fields in magnetic.chunks(128) {
+            poll(cancelled)?;
+            for value in fields.iter().flatten().flat_map(|v| [v.re, v.im]) {
+                if (value / restore) * restore != value {
+                    return Err(bad("aperture magnetic scaling loses a nonzero component"));
+                }
+            }
+        }
+    }
+    Ok(restore)
 }
 
 fn axis_weights(
@@ -223,11 +325,9 @@ fn axis_weights(
     Ok(weights)
 }
 
-fn product(e: C64, h: C64, weight: [Dd; 2]) -> Dd {
-    let [er, ei, hr, hi] = [e.re, e.im, h.re, h.im].map(Dd::from_f64);
-    let real = er * hr + ei * hi;
-    let imaginary = ei * hr - er * hi;
-    real * weight[0] - imaginary * weight[1]
+fn add_weighted(output: &mut [Dd; 2], value: [Dd; 2], weight: [Dd; 2]) {
+    output[0] = output[0] + value[0] * weight[0] - value[1] * weight[1];
+    output[1] = output[1] + value[0] * weight[1] + value[1] * weight[0];
 }
 
 #[cfg(test)]
@@ -328,6 +428,56 @@ mod tests {
                 actual.normal_power_w,
                 expected * width * 2.0,
                 expected * width * 4e-10,
+            );
+        }
+    }
+
+    #[test]
+    fn g1_two_axis_dark_fringe_retains_positive_aperture_power() {
+        let grid = AngularSpectrumGrid {
+            width: 2,
+            height: 2,
+            spacing_m: [1.0; 2],
+        };
+        let signs = [C64::ONE, -C64::ONE, -C64::ONE, C64::ONE];
+        let e = signs.map(|value| [C64::ZERO, value, C64::ZERO]);
+        let h = signs.map(|value| [-value, C64::ZERO, C64::ZERO]);
+        for width_x in [1e-4, 1e-8, 1e-10] {
+            let width_y = 1.7 * width_x;
+            let aperture = AngularSpectrumAperture::try_new(
+                [-width_x / 2.0, -width_y / 2.0],
+                [width_x, width_y],
+            )
+            .unwrap();
+            let prepared = PreparedAperture::prepare(
+                grid,
+                aperture,
+                0,
+                limits(),
+                |i| if i == 0 { 1.0 } else { -1.0 },
+                |i| if i == 0 { 1.0 } else { -1.0 },
+                &mut || false,
+            )
+            .unwrap();
+            let actual = prepared.measure(&e, &h, &mut || false).unwrap();
+            // Ey=-4 sin(x) sin(y), Hx=-Ey, so <Sz> is exactly
+            // 2*(1-sinc(width_x))*(1-sinc(width_y)). Use independent
+            // small-window series: both axis contractions must retain their
+            // dark-fringe residual before these residuals are multiplied.
+            let one_minus_sinc = |width: f64| {
+                let square = width * width;
+                square / 6.0 * (1.0 - square / 20.0 + square * square / 840.0)
+            };
+            let expected = 2.0 * one_minus_sinc(width_x) * one_minus_sinc(width_y);
+            let expected_power = expected * aperture.area_m2();
+            assert!(actual.mean_poynting_w_m2[2] > 0.0);
+            assert!(actual.normal_power_w > 0.0);
+            assert_eq!(actual.mean_poynting_w_m2[..2], [0.0; 2]);
+            close(actual.mean_poynting_w_m2[2], expected, expected * 3e-10);
+            close(
+                actual.normal_power_w,
+                expected_power,
+                expected_power * 3e-10,
             );
         }
     }
@@ -488,6 +638,212 @@ mod tests {
     }
 
     #[test]
+    fn g3_separable_transport_matches_all_pairs_at_exact_axis_work_limit() {
+        let grid = AngularSpectrumGrid {
+            width: 4,
+            height: 8,
+            spacing_m: [1.0; 2],
+        };
+        let n = grid.width * grid.height;
+        let work = n * (grid.width + grid.height);
+        assert!(work < n * n);
+        let kx = [-0.8, 0.17, 1.3, -0.23];
+        let ky = [0.0, 0.14, -0.23, 1.1, -0.75, 0.37, -0.41, 1.23];
+        let e: Vec<[C64; 3]> = (0..n)
+            .map(|i| {
+                core::array::from_fn(|c| {
+                    C64::new(0.13 * (i + c + 1) as f64, -0.07 * (i * c + 2) as f64)
+                })
+            })
+            .collect();
+        let h: Vec<[C64; 3]> = (0..n)
+            .map(|i| {
+                core::array::from_fn(|c| {
+                    C64::new(-0.11 * (i + 2 * c + 1) as f64, 0.19 * (i + c + 3) as f64)
+                })
+            })
+            .collect();
+        let exact = AngularSpectrumApertureLimits {
+            maximum_mode_pairs: work,
+            maximum_workspace_bytes: (grid.width * grid.width + grid.height * grid.height)
+                * core::mem::size_of::<[Dd; 2]>()
+                + n * core::mem::size_of::<[[Dd; 2]; 3]>(),
+        };
+        for origin in [[-0.41, 0.27], [1e13 + 0.25, -3e12 + 0.5]] {
+            let aperture = AngularSpectrumAperture::try_new(origin, [1.1, 0.9]).unwrap();
+            // Refuse before evaluating any mode or allocating either cache.
+            assert!(
+                PreparedAperture::prepare(
+                    grid,
+                    aperture,
+                    0,
+                    AngularSpectrumApertureLimits {
+                        maximum_mode_pairs: work - 1,
+                        ..exact
+                    },
+                    |_| panic!("work refused after reading a wavevector"),
+                    |_| panic!("work refused after reading a wavevector"),
+                    &mut || false,
+                )
+                .is_err()
+            );
+            let prepared = PreparedAperture::prepare(
+                grid,
+                aperture,
+                0,
+                exact,
+                |i| kx[i],
+                |i| ky[i],
+                &mut || false,
+            )
+            .unwrap();
+            let actual = prepared.measure(&e, &h, &mut || false).unwrap();
+            // Independent all-pairs reduction of the original E_i cross H_j*.
+            // Nonuniform axes and distant windows expose phase/sign/index swaps.
+            let mut expected = [Dd::ZERO; 3];
+            for (i, e) in e.iter().enumerate() {
+                for (j, h) in h.iter().enumerate() {
+                    let x = prepared.x[(i % grid.width) * grid.width + j % grid.width];
+                    let y = prepared.y[(i / grid.width) * grid.height + j / grid.width];
+                    let weight = [x[0] * y[0] - x[1] * y[1], x[0] * y[1] + x[1] * y[0]];
+                    let product = |e: C64, h: C64| {
+                        let [er, ei, hr, hi] = [e.re, e.im, h.re, h.im].map(Dd::from_f64);
+                        (er * hr + ei * hi) * weight[0] - (ei * hr - er * hi) * weight[1]
+                    };
+                    for (axis, (a, b)) in [(1, 2), (2, 0), (0, 1)].into_iter().enumerate() {
+                        expected[axis] = expected[axis] + product(e[a], h[b]) - product(e[b], h[a]);
+                    }
+                }
+            }
+            for (actual, expected) in actual.mean_poynting_w_m2.into_iter().zip(expected) {
+                let expected = (expected * Dd::from_f64(0.5)).to_f64();
+                close(actual, expected, 1e-14 * expected.abs().max(1.0));
+            }
+            close(
+                actual.normal_power_w,
+                (expected[2] * Dd::from_f64(0.5) * Dd::from_f64(aperture.area_m2)).to_f64(),
+                1e-14 * actual.normal_power_w.abs().max(1.0),
+            );
+            // Both axis passes can be cancelled without changing later results.
+            for stop in [3, 2 * n + 4] {
+                let mut polls = 0;
+                assert!(matches!(
+                    prepared.measure(&e, &h, &mut || {
+                        polls += 1;
+                        polls == stop
+                    }),
+                    Err(AngularSpectrumError::Cancelled)
+                ));
+                assert_eq!(prepared.measure(&e, &h, &mut || false).unwrap(), actual);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_scaled_magnetic_action_preserves_finite_all_pairs_transport() {
+        let grid = AngularSpectrumGrid {
+            width: 2,
+            height: 2,
+            spacing_m: [1.0; 2],
+        };
+        let kx = [1.0, -1.0];
+        let ky = [0.7, -0.7];
+        let aperture = AngularSpectrumAperture::try_new([-0.12, -0.125], [0.5, 0.25]).unwrap();
+        let prepared = PreparedAperture::prepare(
+            grid,
+            aperture,
+            0,
+            limits(),
+            |i| kx[i],
+            |i| ky[i],
+            &mut || false,
+        )
+        .unwrap();
+        let e: [[C64; 3]; 4] = core::array::from_fn(|i| {
+            [
+                C64::new(0.4e-308, -0.2e-308),
+                C64::new(1e-308, (i + 1) as f64 * 0.2e-308),
+                C64::new(-0.3e-308, 0.1e-308),
+            ]
+        });
+        let h = [[
+            C64::new(-1e308, 0.2e308),
+            C64::new(0.3e308, -0.1e308),
+            C64::new(0.2e308, 0.15e308),
+        ]; 4];
+        // This first-axis Hx sum exceeds f64 even though every E_i H_j*
+        // product and the actual vector flux remain finite.
+        let half_phase = (ky[0] - ky[1]) * aperture.extent_m[1] * 0.5;
+        assert!(!(h[0][0].re * (1.0 + half_phase.sin() / half_phase)).is_finite());
+        let actual = prepared.measure(&e, &h, &mut || false).unwrap();
+        // Independent finite all-pairs reference: integrate each exponential
+        // directly and multiply E by H before applying its window weight.
+        let window = |delta: f64, axis: usize| {
+            let half_phase = delta * aperture.extent_m[axis] * 0.5;
+            let sinc = if delta == 0.0 {
+                1.0
+            } else {
+                half_phase.sin() / half_phase
+            };
+            let phase = -delta * (aperture.origin_m[axis] + aperture.extent_m[axis] * 0.5);
+            C64::new(sinc * phase.cos(), sinc * phase.sin())
+        };
+        let mut expected = [0.0; 3];
+        for (i, e) in e.iter().enumerate() {
+            for (j, h) in h.iter().enumerate() {
+                let weight = window(kx[i % 2] - kx[j % 2], 0) * window(ky[i / 2] - ky[j / 2], 1);
+                for (axis, (a, b)) in [(1, 2), (2, 0), (0, 1)].into_iter().enumerate() {
+                    expected[axis] += 0.5 * ((e[a] * h[b].conj() - e[b] * h[a].conj()) * weight).re;
+                }
+            }
+        }
+        for (actual, expected) in actual.mean_poynting_w_m2.into_iter().zip(expected) {
+            close(actual, expected, expected.abs().max(1.0) * 2e-14);
+        }
+        close(
+            actual.normal_power_w,
+            expected[2] * aperture.area_m2(),
+            2e-14,
+        );
+        // A representable integrated power cannot hide an overflowing mean.
+        let large_e = [[C64::ZERO, C64::ONE, C64::ZERO]; 4];
+        assert!(prepared.measure(&large_e, &h, &mut || false).is_err());
+    }
+
+    #[test]
+    fn g0_scaled_magnetic_range_failures_do_not_hide_nonzero_components() {
+        let grid = AngularSpectrumGrid {
+            width: 1,
+            height: 1,
+            spacing_m: [1.0; 2],
+        };
+        let prepared = PreparedAperture::prepare(
+            grid,
+            AngularSpectrumAperture::try_new([0.0; 2], [1.0; 2]).unwrap(),
+            0,
+            limits(),
+            |_| 0.0,
+            |_| 0.0,
+            &mut || false,
+        )
+        .unwrap();
+        let e = [[C64::ONE, C64::ZERO, C64::ZERO]];
+        for bits in [1, 17] {
+            // The common factor is 16: one source vanishes, while the other
+            // stays nonzero but loses a bit. Both must be explicitly refused.
+            let tiny = f64::from_bits(bits);
+            let h = [[C64::from_re(1e308), C64::from_re(tiny), C64::ZERO]];
+            assert!(prepared.measure(&e, &h, &mut || false).is_err());
+        }
+        // Source reduction is now exact, but halving the scaled DD total
+        // would erase a nonzero physical mean. Refuse instead of returning zero.
+        let tiny = f64::from_bits(16);
+        assert!(tiny * 0.5 > 0.0);
+        let h = [[C64::from_re(1e308), C64::from_re(tiny), C64::ZERO]];
+        assert!(prepared.measure(&e, &h, &mut || false).is_err());
+    }
+
+    #[test]
     fn g0_g4_area_work_storage_and_cancellation_refusals_preserve_inputs() {
         for (origin, extent) in [
             ([f64::NAN, 0.0], [1.0; 2]),
@@ -506,7 +862,9 @@ mod tests {
         let aperture = AngularSpectrumAperture::try_new([0.0; 2], [1.0; 2]).unwrap();
         let exact = AngularSpectrumApertureLimits {
             maximum_mode_pairs: 16,
-            maximum_workspace_bytes: 123 + 8 * core::mem::size_of::<[Dd; 2]>(),
+            maximum_workspace_bytes: 123
+                + 8 * core::mem::size_of::<[Dd; 2]>()
+                + 4 * core::mem::size_of::<[[Dd; 2]; 3]>(),
         };
         let prepare = |limits, cancelled: &mut dyn FnMut() -> bool| {
             PreparedAperture::prepare(
