@@ -214,12 +214,39 @@ fn inlet_state<L: CaloricLaw>(
     speed: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Primitive, Error<L::Error>> {
+    let temperature = static_temperature(
+        gas,
+        reservoir.temperature,
+        reservoir.pressure,
+        speed,
+        cancelled,
+    )?;
+    inlet_at_temperature(gas, reservoir, temperature, speed, cancelled)
+}
+
+/// Convert stagnation enthalpy to static temperature without imposing an
+/// isentrope. A mixing interface may own a different pressure relation.
+pub(crate) fn static_temperature<L: CaloricLaw>(
+    gas: &L,
+    stagnation_temperature: f64,
+    pressure: f64,
+    speed: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error<L::Error>> {
+    poll(cancelled)?;
     let target = 0.5 * speed * speed;
-    if !speed.is_finite() || speed < 0.0 || !target.is_finite() {
-        return Err(Error::Invalid("reservoir inlet kinetic energy"));
+    if !positive(pressure) || !speed.is_finite() || speed < 0.0 || !target.is_finite() {
+        return Err(Error::Invalid("reservoir inlet pressure or kinetic energy"));
+    }
+    if !(gas.domain().minimum_temperature..=gas.domain().maximum_temperature)
+        .contains(&stagnation_temperature)
+    {
+        return Err(Error::CaloricPath(
+            "stagnation temperature outside declared interval",
+        ));
     }
     let mut lo = gas.domain().minimum_temperature;
-    let mut hi = reservoir.temperature;
+    let mut hi = stagnation_temperature;
     let available = enthalpy_difference(gas, lo, hi, cancelled)?;
     let tolerance =
         gas.domain().absolute_energy_tolerance + gas.domain().relative_energy_tolerance * target;
@@ -229,15 +256,15 @@ fn inlet_state<L: CaloricLaw>(
         ));
     }
     let cp0 = gas
-        .heat_capacities(hi, reservoir.pressure, cancelled)
+        .heat_capacities(hi, pressure, cancelled)
         .map_err(Error::Source)?
         .cp;
     let mut t = (hi - target / cp0).clamp(lo, hi);
     for _ in 0..gas.domain().maximum_iterations {
         poll(cancelled)?;
-        let residual = enthalpy_difference(gas, t, reservoir.temperature, cancelled)? - target;
+        let residual = enthalpy_difference(gas, t, stagnation_temperature, cancelled)? - target;
         if residual.abs() <= tolerance {
-            return inlet_at_temperature(gas, reservoir, t, speed, cancelled);
+            return Ok(t);
         }
         if residual > 0.0 {
             lo = t;
@@ -245,7 +272,7 @@ fn inlet_state<L: CaloricLaw>(
             hi = t;
         }
         let cp = gas
-            .heat_capacities(t, reservoir.pressure, cancelled)
+            .heat_capacities(t, pressure, cancelled)
             .map_err(Error::Source)?
             .cp;
         let trial = t + residual / cp;

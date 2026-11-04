@@ -92,14 +92,103 @@ fn an_open_lip_meters_the_mouth_through_continuity_with_the_bores_wave() {
         open.flux.mass * gas.stagnation_enthalpy(mouth.temperature).unwrap()
     );
     // The cup face rises by the interior's simple wave, rho c times the face speed.
-    let face_density = open.pressure_pa / (gas.gas_constant() * mouth.temperature);
+    let wave = gas
+        .end_wave(interior, -1.0, open.pressure_pa, || false)
+        .unwrap();
     let rise = open.pressure_pa - interior.pressure;
-    let acoustic = interior.density * interior.sound_speed * open.flux.mass / face_density;
+    let acoustic = interior.density * interior.sound_speed * wave.primitive.velocity;
     println!(
         "open lip: face rise {rise:.3} Pa, rho c u {acoustic:.3} Pa, jet {:.3} m/s, flow {:.4e} kg/s",
         jet.velocity, open.mass_flow_kg_s
     );
     assert!((rise - acoustic).abs() <= 1e-2 * rise);
+}
+
+#[test]
+fn an_open_lip_closes_static_pressure_mass_and_total_enthalpy_together() {
+    let gas = specimen();
+    let interior = state(&gas, 101_325.0, 0.0);
+    // This specimen's Cp/R=3.5+0.001*T is known independently of the
+    // production caloric inversion. Include substantial pressure and area
+    // ratios so retaining the mouth temperature cannot pass the energy check.
+    for (mouth_pressure, opening) in [
+        (104_325.0, OPENING_M2),
+        (136_325.0, 0.75 * INLET_M2),
+        (202_650.0, 0.5 * INLET_M2),
+    ] {
+        let mouth = state(&gas, mouth_pressure, 0.0);
+        let open = lip_face(&gas, interior, mouth, opening, INLET_M2).unwrap();
+        let wave = gas
+            .end_wave(interior, -1.0, open.pressure_pa, || false)
+            .unwrap();
+        let velocity = wave.primitive.velocity;
+        assert!(velocity > 0.0);
+        let density = open.flux.mass / velocity;
+        let temperature = open.pressure_pa / (gas.gas_constant() * density);
+        let cooling = mouth.temperature - temperature;
+        let kinetic = 0.5 * velocity * velocity;
+        let enthalpy_drop =
+            gas.gas_constant() * cooling * (3.5 + 0.001 * mouth.temperature - 0.0005 * cooling);
+        assert!(temperature >= gas.domain().minimum_temperature && cooling > 0.0);
+        assert!(
+            (enthalpy_drop - kinetic).abs() <= 2e-8 + 2e-9 * kinetic,
+            "p0={mouth_pressure}, kinetic={kinetic}, caloric drop={enthalpy_drop}"
+        );
+        assert!(
+            (open.flux.momentum - (open.flux.mass * velocity + open.pressure_pa)).abs()
+                <= 1e-10 * open.pressure_pa
+        );
+        let (jet, _) = gas.nozzle_exit(mouth, open.pressure_pa, || false).unwrap();
+        let metered = jet.density * jet.velocity * opening;
+        assert!((open.mass_flow_kg_s / metered - 1.0).abs() <= 2e-9);
+        // Adiabatic mixing converts the nozzle jet's excess kinetic energy
+        // back into heat; the slower face still lies below stagnation T.
+        assert!(velocity < jet.velocity && temperature > jet.temperature);
+        assert_eq!(
+            open.flux.energy,
+            open.flux.mass * gas.stagnation_enthalpy(mouth.temperature).unwrap()
+        );
+        let face_energy =
+            open.flux.mass * (gas.stagnation_enthalpy(temperature).unwrap() + kinetic);
+        assert!((open.flux.energy - face_energy).abs() <= 2e-9 * open.flux.energy.abs());
+        let cp_r = 3.5 + 0.001 * temperature;
+        let sound_speed = (cp_r / (cp_r - 1.0) * gas.gas_constant() * temperature).sqrt();
+        assert!(open.flux.signal_speed >= velocity + sound_speed - 1e-10 * sound_speed);
+    }
+}
+
+#[test]
+fn a_cold_auxiliary_pressure_does_not_refuse_supported_choked_lip_inflow() {
+    let gas = specimen();
+    let interior = state(&gas, 101_325.0, 0.0);
+    let mouth = state(&gas, 6.0 * interior.pressure, 0.0);
+    let upper = gas
+        .end_wave(interior, -1.0, mouth.pressure, || false)
+        .unwrap();
+    assert!(matches!(
+        gas.stagnation_to_static_state(
+            mouth.temperature,
+            mouth.pressure,
+            upper.primitive.velocity,
+            || false
+        ),
+        Err(GasError::CaloricPath(_))
+    ));
+    let open = lip_face(&gas, interior, mouth, OPENING_M2, INLET_M2).unwrap();
+    assert!(open.pressure_pa > interior.pressure && open.pressure_pa < mouth.pressure);
+    let (jet, choked) = gas.nozzle_exit(mouth, open.pressure_pa, || false).unwrap();
+    assert!(choked);
+    let metered = jet.density * jet.velocity * OPENING_M2;
+    assert!((open.mass_flow_kg_s / metered - 1.0).abs() < 2e-9);
+    let wave = gas
+        .end_wave(interior, -1.0, open.pressure_pa, || false)
+        .unwrap();
+    let density = open.flux.mass / wave.primitive.velocity;
+    let temperature = open.pressure_pa / (gas.gas_constant() * density);
+    assert!(temperature >= gas.domain().minimum_temperature && temperature < mouth.temperature);
+    let total_enthalpy = gas.stagnation_enthalpy(temperature).unwrap()
+        + 0.5 * wave.primitive.velocity * wave.primitive.velocity;
+    assert!((open.flux.energy / open.flux.mass - total_enthalpy).abs() < 1e-8 * total_enthalpy);
 }
 
 #[test]

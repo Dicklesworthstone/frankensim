@@ -718,6 +718,15 @@ The relations a port needs are public and source-owned:
 - `FrozenGas::nozzle_exit(donor, back, cancelled)` is the steady isentropic
   exit of a stagnation donor into a back pressure, with choking; its
   incompressible limit is Bernoulli and its stagnation enthalpy is the donor's.
+- `FrozenGas::stagnation_to_static_state(T0, pressure, velocity, cancelled)`
+  recovers the static face state from `h(T0)-h(T)=velocity^2/2`, with signed
+  axial velocity and caller-owned pressure. It reuses the reservoir's bounded
+  inversion of original source enthalpy differences and temperature-dependent
+  Cp. Density, sound speed and conservative-state precision are admitted by
+  that same source. This closes energy after adiabatic jet mixing without
+  imposing an isentrope or replacing the caller's pressure/choking law. An
+  exhausted cold source path refuses. Analytic constant/variable-Cp tests
+  cover both velocity signs, formation-reference invariance and cancellation.
 - `stagnation_enthalpy(T)`, `face_flux(face, signal)` and
   `inflow_flux(face, T0, signal)` (energy flux = mass flux times the donor's
   stagnation enthalpy) close a face from one state.

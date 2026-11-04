@@ -8421,11 +8421,22 @@ None.
   bore's static end state into the mouth. The face pressure solves continuity
   between the metered lip flow and the bore's own end wave (a strictly
   monotone residual, bracketed between the closed-end pressure and the mouth
-  pressure, Illinois false position to 1e-12 of the bracket). Inflow energy is
-  mass flux times the mouth's stagnation enthalpy. The lip advances once per
-  gas step by its exact zero-order-hold split under the face pressure. The bell
-  flow is averaged per mechanics sample and observed by the multirate baffled
-  receiver.
+  pressure, Illinois false position to 1e-12 of the bracket). If an auxiliary
+  high-pressure trial exhausts the inflow's cold source path, bounded bisection
+  first finds a supported upper residual; it never clamps the temperature or
+  refuses a supported root merely because that auxiliary trial was too cold.
+  Inflow energy is mass flux times the mouth's stagnation enthalpy. The
+  mixed-out face's static temperature solves
+  `h(T_mouth)-h(T_face)=u_face^2/2` through the shared gas owner's original
+  variable-Cp caloric inversion. Continuity and final mass, momentum and energy
+  fluxes use that same source-admitted face state; the face's density and sound
+  speed reflect its kinetic cooling. Regressions check an independent
+  variable-Cp enthalpy integral at elevated pressure, nozzle continuity,
+  pressure-wave compatibility, the linear limit, reverse flow and supported
+  choked inflow behind an unsupported auxiliary pressure trial. The lip
+  advances once per gas step by its exact zero-order-hold split under the face
+  pressure. The bell flow is averaged per mechanics sample and observed by the
+  multirate baffled receiver.
   - **Lip file:** `bore nonlinear <max_cell_m> <mechanics_per_output<=16>
     <gas_steps_per_mechanics<=64> <wall_poles> <band_lo_hz> <band_hi_hz>
     <wall_error<1>`. It needs `ambient thermochemical ...` with its source packs
@@ -8439,9 +8450,9 @@ None.
     declared band: on 20-8000 Hz at 1 %, 24 poles resolve radii up to about
     6 mm and 64 (the fs-phs cap) up to about 35 mm; a 61 mm trumpet bell needs
     a declared error of 7e-2 at 64 poles.
-  - **Limits:** inflow mixes out at the mouth temperature; reverse flow
-    uses the static end state as donor; the cup is a lumped volume on the first
-    cell; valves refuse. The field keeps to the NASA-9 region that holds the
+  - **Limits:** reverse flow uses the static end state as donor; the cup is a
+    lumped volume on the first cell; valves refuse. The field keeps to the
+    NASA-9 region that holds the
     room for every species (the McBride air packs split at 1000 K and state no
     caloric continuity across it); a state that would leave it refuses. A test
     builds that air from the data/matdb/seed-v1 McBride tables: the old fixed

@@ -232,6 +232,99 @@ fn nozzle_exit_has_the_incompressible_bernoulli_limit_and_face_flux_is_consisten
 }
 
 #[test]
+fn stagnation_to_static_matches_variable_cp_energy_and_is_reference_invariant() {
+    // Independent integral for the manufactured Cp(T)=3.5+b*T, R=1 source:
+    // h(T0)-h(T) = (3.5+b*T0)*cooling - b*cooling^2/2.
+    let mut baseline = Vec::new();
+    for formation in [0.0, -1e18, 1e18] {
+        let mut results = Vec::new();
+        for slope in [0.0, 0.4] {
+            let source = gas(slope, formation);
+            let t0 = 10.0;
+            for velocity in [-6.0_f64, -0.2, 0.0, 0.2, 6.0] {
+                let kinetic = 0.5 * velocity * velocity;
+                let cp0 = 3.5 + slope * t0;
+                let cooling = 2.0 * kinetic / (cp0 + (cp0 * cp0 - 2.0 * slope * kinetic).sqrt());
+                let expected_t = t0 - cooling;
+                for pressure in [0.5, 10.0, 30.0] {
+                    let face = source
+                        .stagnation_to_static_state(t0, pressure, velocity, || false)
+                        .unwrap();
+                    assert_eq!(face.velocity, velocity);
+                    assert!((face.temperature - expected_t).abs() < 4e-11);
+                    assert!((face.density / (pressure / expected_t) - 1.0).abs() < 4e-11);
+                    assert!((face.pressure / pressure - 1.0).abs() < 4e-15);
+                    let energy = source.stagnation_enthalpy(face.temperature).unwrap() + kinetic;
+                    let h0 = source.stagnation_enthalpy(t0).unwrap();
+                    assert!((energy - h0).abs() < 2e-10 + 2e-12 * kinetic);
+                    let euler = source.face_flux(face, 0.0).unwrap();
+                    let supplied = source.inflow_flux(face, t0, 0.0).unwrap();
+                    assert_eq!(euler.mass, supplied.mass);
+                    assert_eq!(euler.momentum, supplied.momentum);
+                    assert!((euler.energy - supplied.energy).abs() <= 2e-10 * supplied.mass.abs());
+                    results.push(face);
+                }
+            }
+        }
+        if formation == 0.0 {
+            baseline = results;
+        } else {
+            assert_eq!(results, baseline);
+        }
+    }
+}
+
+#[test]
+fn stagnation_to_static_refuses_exhausted_source_paths_and_cancels() {
+    let original = gas(0.4, 0.0);
+    let mut domain = original.domain();
+    domain.minimum_temperature = 9.999;
+    let source = FrozenGas::new(original.source().clone(), domain, || false).unwrap();
+    let supported = source
+        .stagnation_to_static_state(10.0, 9.0, 0.05, || false)
+        .unwrap();
+    assert!(supported.temperature >= domain.minimum_temperature && supported.temperature < 10.0);
+    assert!(matches!(
+        source.stagnation_to_static_state(10.0, 9.0, 0.2, || false),
+        Err(Error::CaloricPath(_))
+    ));
+    for temperature in [9.998, 50.001, f64::NAN] {
+        assert!(matches!(
+            source.stagnation_to_static_state(temperature, 9.0, 0.0, || false),
+            Err(Error::CaloricPath(_))
+        ));
+    }
+    for (pressure, velocity) in [
+        (0.0, 0.0),
+        (-1.0, 0.0),
+        (f64::NAN, 0.0),
+        (9.0, f64::INFINITY),
+    ] {
+        assert!(matches!(
+            source.stagnation_to_static_state(10.0, pressure, velocity, || false),
+            Err(Error::Invalid(_))
+        ));
+    }
+    let mut calls = 0;
+    source
+        .stagnation_to_static_state(10.0, 9.0, 0.05, || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    for stop in [1, calls / 2, calls] {
+        let mut count = 0;
+        assert_eq!(
+            source.stagnation_to_static_state(10.0, 9.0, 0.05, || {
+                count += 1;
+                count >= stop
+            }),
+            Err(Error::Cancelled)
+        );
+    }
+}
+
+#[test]
 fn nozzle_pressure_drop_is_resolved_down_to_adjacent_pressures() {
     // Independent integrated isentrope for Cp(T)=3.5+b*T and R=1:
     // 3.5*ln(T0/T)+b*(T0-T)=ln(p0/pb). ln_1p keeps the oracle's

@@ -182,6 +182,37 @@ impl FrozenGas {
         Ok(enthalpy)
     }
 
+    /// Static state reached from stagnation temperature [K] at caller-owned
+    /// pressure [Pa] and signed axial velocity [m/s].
+    ///
+    /// The original source solves `h(T0) - h(T) = velocity^2 / 2` with its
+    /// temperature-dependent heat capacity and bounded caloric inversion. No
+    /// state is extrapolated beyond the declared temperature interval. This
+    /// closes the energy of an adiabatic, work-free inlet, including a jet that
+    /// mixes to a slower face velocity. The caller supplies the pressure/drop
+    /// law and any choking limit; this relation does not impose an isentrope.
+    pub fn stagnation_to_static_state(
+        &self,
+        stagnation_temperature: f64,
+        pressure: f64,
+        velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Primitive, Error> {
+        let temperature = shared::static_temperature(
+            self,
+            stagnation_temperature,
+            pressure,
+            velocity.abs(),
+            &mut cancelled,
+        )
+        .map_err(wave_error)?;
+        poll(&mut cancelled)?;
+        let density = (pressure / self.gas_constant()) / temperature;
+        let face = self.state_at(density, velocity, pressure)?.1;
+        poll(&mut cancelled)?;
+        Ok(face)
+    }
+
     /// Euler flux through a stationary face that carries `face`, oriented
     /// along the increasing duct coordinate. `signal_speed` is raised to the
     /// face's own `|u| + c` when smaller.
