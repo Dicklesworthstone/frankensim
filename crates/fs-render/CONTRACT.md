@@ -2888,6 +2888,32 @@ unsupported infrared properties, multiple-scattered reabsorption or
 material-temperature feedback. Scattered power remains radiation and is never
 converted to heat.
 
+### Prompt fluorescence and absorbed heat
+
+`volumes::heating::fluorescence::{FluorescenceSource, FluorescentOpticalHeating}`
+adds prompt Stokes fluorescence to original exact beam deposition and the same
+native enthalpy observer. The supplied source retains its identity, excitation
+and temperature domains, photon quantum yield, and 1–16 discrete emission
+nodes with normalized photon weights. Escaping power uses each emitted photon's
+energy relative to the absorbed pump photon. Positive nonradiative and Stokes
+losses alone heat mapped cells, preserving small heat without subtracting
+nearly equal radiant powers. The full absorbed pump account remains separate;
+native accepted substeps integrate heat and escaping radiation transactionally
+on the same clock, without repeating optical traversal.
+
+The absorption-only grid must describe the complete fixed, open, index-one,
+non-scattering optical environment. Every occupied cell must have exactly zero
+absorption at every emitted wavelength, including cells outside the pump ray.
+An absorption view stripped from a reflecting, refracting or scattering scene
+does not establish this model. Self-absorption, unsupported wavelengths,
+anti-Stokes emission, mismatched medium identity, scattered pump power,
+excessive preparation counts, cancellation and temperature-domain escape
+refuse. This consumer does not infer fluorescence lifetime or excited-state
+storage, saturation, bleaching, cascades or calibrated source data. Independent
+photon/energy closure, native temperature response, thin/opaque and yield limits,
+one-ULP Stokes heat, domain refusals and transactional rollback have focused
+regressions in `tests/optical_heating/fluorescence.rs`.
+
 ### Temperature-dependent optical heating
 
 `volumes::heating::feedback::TemperatureOpticalHeating` retains source-bound

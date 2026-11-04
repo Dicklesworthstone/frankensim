@@ -40,6 +40,9 @@ pub mod joint;
 /// Passive volumetric emission, reabsorption and bath exchange on native thermal cells.
 pub mod exchange;
 
+/// Prompt Stokes fluorescence with verified transparent escape and native heat.
+pub mod fluorescence;
+
 mod ensemble_statistics;
 
 /// Retained SI power accounting for the original wavelength packet.
