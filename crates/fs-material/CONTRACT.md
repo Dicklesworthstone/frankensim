@@ -12422,10 +12422,81 @@ G0/G3 tests in `tests/liquid_miscibility.rs` cover temperature-driven splitting
 and remixing, unequal molar masses, independent species/mass/volume balances,
 source claim retention, nonlinear composition tables, pure limits, wrong
 composition basis, unsupported sources and atomic cancellation. Fixtures are
-synthetic numerical checks, not measured pair fits. The constitutive scope is
-isothermal bulk binary liquid equilibrium at fixed pressure; it excludes
-vapor/solid phases, finite-rate mixing, nucleation, capillary interfaces,
-spatial phase separation and a coupled caloric evolution.
+synthetic numerical checks, not measured pair fits. The prescribed-temperature
+entry point is bulk binary liquid equilibrium at fixed pressure. The separately
+bound caloric path below closes thermal changes. Both paths exclude vapor/solid
+phases, finite-rate mixing, nucleation, capillarity and spatial phase separation.
+
+### Finite isothermal mixing and its heat duty
+
+`BinaryLiquidSolutionLaw::mix_isothermal` combines two finite equilibrium
+inventories at the same temperature and fixed pressure. Both must retain the
+same original pair law, ordered species/molar masses, material claims, query
+context and source roles. Immutable binding data are shared across results;
+identically reconstructed bindings are accepted. Independent component sums
+enter the original equilibrium/source resolver, so the result carries actual
+phase amounts, masses, source-dependent volumes and transport properties.
+
+The required heat **into the liquid** is the change in equilibrium mixing
+enthalpy, with the actual coexistence phases included. Pure-component caloric
+datums cancel because each species and temperature are unchanged. The source
+mixture Cp is not a second heat contribution. Gibbs and liquid entropy changes
+are retained separately; a reservoir at the prescribed temperature receives
+`-Q` and `-Q/T`. Combined entropy generation is `-delta G/T`, equal to
+`delta S_liquid-Q/T` to roundoff. Common molar contributions are subtracted
+before inventory scaling, so identical intensive states incur exactly zero
+heat. Raw near-zero signed roundoff is not clamped into a physical source.
+
+G0/G1/G3 tests in `tests/liquid_miscibility/mixing.rs` cover analytic ideal,
+endothermic and exothermic mixing, phase-split heat duty, source-resolved volume
+changes, both component balances, input interchange, immutable source/law
+ownership, final-source refusal, overflow and cancellation atomicity. This is
+an equilibrium isothermal heat duty, not an adiabatic temperature solve,
+kinetics, stirring work or an interfacial-energy model. The external heat owner
+must accept the opposite account; no transport Cp consistency is inferred.
+
+### Source-bound caloric mixing and thermal storage
+
+`liquid::solution::caloric::BinaryLiquidCaloricLaw` binds the original mixture
+law to two explicit pure-component `IsobaricHeatCapacityLaw` sources. Species
+order, common datum and the original typed static pressure must match. The
+adapter preserves each source law, identity and usage receipt, converts every
+original Cp breakpoint from mass to molar units using the declared molar mass,
+and delegates all thermal balance to `fs-thermochem::solution::caloric`.
+The caller qualifies the sources as the named pure liquids; a label or the
+dimensions of Cp cannot establish that chemical qualification. Transport Cp
+is neither used as a second excess heat term nor certified as consistent with
+the independently supplied pair free energy.
+
+`equilibrate`, `mix` and `add_heat` preserve both component inventories and
+immutable source ownership. Different-temperature mixing and heating/cooling
+resolve the temperature from sensible plus nonideal mixing enthalpy. Numerical
+temperature trials perform no material-source queries. The final material
+refresh consumes the EXACT accepted thermodynamic equilibrium, avoiding another
+coexistence solve or normalization. Its phase-specific density, viscosity,
+conductivity, volumes and masses therefore belong to the accepted caloric
+temperature and compositions. A failed final source refresh, mismatched owner,
+unrepresentable sum or last-poll cancellation publishes no result.
+
+`caloric::storage::BinaryLiquidThermalStorage` makes the same fixed-composition
+equilibrium available to the existing `fs-thermal` enthalpy timeline. Zero
+specific enthalpy is the cold equilibrium endpoint; heat increments and the
+inverse temperature use the original caloric owner. Its conservative slope
+bound uses the minimum pure sensible capacity: changing equilibrium
+compositions adds nonnegative heat capacity for the symmetric pair law.
+No second integrator or approximate latent-heat chart is introduced. This is
+bulk, fixed-composition isobaric storage; phase-resolved transport must still
+be refreshed through the original material adapter. Optional entropy,
+advection and identity-dependent thermal capabilities remain unavailable.
+
+Focused source tests cover ordered molar conversion, original source retention,
+unequal-temperature mixing with variable Cp, closed heating/cooling, exact
+accepted phase identity, pressure/datum/source mismatches and atomic refusal.
+Thermal timeline tests check prescribed heat through a phase-count transition;
+the hydrostatic consumer checks independently calculated interfaces, buoyancy
+and native motion from the resulting thermal endpoints. These are synthetic
+numerical fixtures. They do not establish measured pair accuracy or a combined
+thermal, gravitational and mechanical energy balance while interfaces move.
 
 
 ### Qualified molecular momentum moments

@@ -130,10 +130,14 @@ impl PureLiquidHeatCapacityV1 {
             if b > a {
                 let cp_a = interpolate(pair, a);
                 let cp_b = interpolate(pair, b);
-                sum.add(checked(
-                    (0.5 * cp_a + 0.5 * cp_b) * (b - a),
-                    "sensible increment",
-                )?)?;
+                let increment =
+                    checked((cp_a + 0.5 * (cp_b - cp_a)) * (b - a), "sensible increment")?;
+                if increment <= 0.0 {
+                    return Err(BinaryCaloricErrorV1::Arithmetic(
+                        "positive sensible increment underflows",
+                    ));
+                }
+                sum.add(increment)?;
             }
             if pair[1].0 >= hi {
                 break;
@@ -321,6 +325,29 @@ impl BinaryLiquidCaloricModelV1 {
         cancelled: impl FnMut() -> bool,
     ) -> Result<BinaryCaloricBalanceV1, BinaryCaloricErrorV1> {
         self.solve(&[initial], heat_input_j, controls, cancelled)
+    }
+
+    /// Direct enthalpy change between two states of the SAME conserved inventory.
+    /// Pure sensible increments and excess-product differences use the same
+    /// arithmetic as heat transactions; no subtraction of large reference
+    /// energies is needed by a thermal-storage or conduction consumer.
+    pub fn enthalpy_change_j(
+        &self,
+        initial: &BinaryCaloricStateV1,
+        final_state: &BinaryCaloricStateV1,
+    ) -> Result<f64, BinaryCaloricErrorV1> {
+        let owns = |state: &BinaryCaloricStateV1| {
+            Arc::ptr_eq(&self.owner, &state.owner) || self.owner == state.owner
+        };
+        if !owns(initial)
+            || !owns(final_state)
+            || initial.component_moles != final_state.component_moles
+        {
+            return Err(BinaryCaloricErrorV1::Invalid(
+                "enthalpy increment requires the same caloric owner and component inventory",
+            ));
+        }
+        self.enthalpy_increment(&[initial], final_state)
     }
 
     fn solve(
@@ -546,7 +573,14 @@ fn inventory(n: [f64; 2]) -> Result<(f64, [f64; 2]), BinaryCaloricErrorV1> {
 }
 fn interpolate(pair: &[(f64, f64)], t: f64) -> f64 {
     let weight = (t - pair[0].0) / (pair[1].0 - pair[0].0);
-    (1.0 - weight) * pair[0].1 + weight * pair[1].1
+    // Work from the nearer positive endpoint. Splitting both capacities into
+    // weighted terms can erase subnormals; subtracting from the far endpoint
+    // can instead cancel a small capacity at the other end of a steep segment.
+    if weight <= 0.5 {
+        pair[0].1 + weight * (pair[1].1 - pair[0].1)
+    } else {
+        pair[1].1 + (1.0 - weight) * (pair[0].1 - pair[1].1)
+    }
 }
 fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0

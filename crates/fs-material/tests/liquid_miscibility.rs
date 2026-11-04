@@ -1,5 +1,10 @@
 //! G0/G3 source-backed liquid miscibility. Synthetic constitutive data are
 //! deliberately nonideal; these fixtures are not measurements of real liquids.
+#[path = "liquid_miscibility/caloric.rs"]
+mod caloric;
+#[path = "liquid_miscibility/mixing.rs"]
+mod mixing;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

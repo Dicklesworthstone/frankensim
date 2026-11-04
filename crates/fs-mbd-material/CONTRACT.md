@@ -961,6 +961,14 @@ unequal-molar-mass species conservation, density sorting, exact retained phase
 masses, independently calculated interface heights and buoyancy, changed native
 motion and cancellation before publication.
 
+The `sourced_heat_crosses_miscibility_gap_and_changes_native_buoyancy`
+regression carries an independently computed sensible-plus-mixing heat input
+through `BinaryLiquidCaloricLaw`'s temperature solve, original phase transport,
+finite interface heights and native body motion. Its synthetic pure-Cp source
+endpoints are explicitly qualified, with no measured-pair accuracy claim. The
+caloric and mechanical accounting windows remain separate snapshots; this is
+not a combined thermal/gravitational energy balance during interface motion.
+
 ### Conserved finite immiscible layers
 
 `FiniteLayeredHydrostaticTank` retains one checked source snapshot and one

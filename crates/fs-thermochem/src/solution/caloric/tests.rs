@@ -73,6 +73,27 @@ fn g1_variable_cp_integrates_each_source_segment_and_preserves_tiny_increments()
         cp.enthalpy_change_j_per_mol(Temperature::new(99.0), Temperature::new(200.0))
             .is_err()
     );
+
+    // Positive capacities may be subnormal; their crossed-segment integral
+    // remains representable over a sufficiently large temperature interval.
+    let smallest = f64::from_bits(1);
+    let cp = source("A", smallest);
+    assert_eq!(
+        cp.enthalpy_change_j_per_mol(Temperature::new(300.0), Temperature::new(600.0))
+            .unwrap(),
+        smallest * 300.0,
+    );
+    assert!(matches!(
+        cp.enthalpy_change_j_per_mol(
+            Temperature::new(300.0),
+            Temperature::new(300.0_f64.next_up()),
+        ),
+        Err(BinaryCaloricErrorV1::Arithmetic(_)),
+    ));
+    let model = model(0.0, 0.0, [smallest; 2]);
+    let initial = pure(&model, 500.0, [1.0, 0.0]);
+    let unchanged = model.add_heat(&initial, 0.0, controls(), || false).unwrap();
+    assert_eq!(unchanged.final_state().temperature(), initial.temperature());
 }
 
 #[test]
@@ -232,6 +253,18 @@ fn g0_heat_balance_retains_a_small_input_against_a_large_reference_energy() {
     let result = model.add_heat(&initial, heat, policy, || false).unwrap();
     assert_eq!(result.final_state().temperature().value(), target);
     near(result.energy_residual_j(), 0.0, 1.0);
+    let increment = model
+        .enthalpy_change_j(&initial, result.final_state())
+        .unwrap();
+    near(increment, heat, 1.0);
+    assert_eq!(
+        model
+            .enthalpy_change_j(result.final_state(), &initial)
+            .unwrap(),
+        -increment
+    );
+    let other_inventory = pure(&model, 700.0, [2e15, 1e15]);
+    assert!(model.enthalpy_change_j(&initial, &other_inventory).is_err());
 }
 
 #[test]

@@ -10,10 +10,17 @@
 //! This is isothermal bulk liquid equilibrium at the source's fixed pressure.
 //! The caller supplies compatible pair parameters, component molar masses and
 //! mixture-property data. It does not infer chemical identity from a material
-//! name, include vapor/solid phases, solve a heat balance, or evolve nucleation,
-//! diffusion, entrainment or interfaces. Each phase can enter existing flow,
+//! name, include vapor/solid phases, solve an adiabatic heat balance, or evolve
+//! nucleation, diffusion, entrainment or interfaces. Each phase can enter existing flow,
 //! heat and buoyancy consumers through the shared transport traits. There is
 //! deliberately no single-fluid transport implementation for a two-phase result.
+
+/// Closed isobaric mixing/heating from the original pure-liquid Cp sources.
+pub mod caloric;
+mod mixing;
+pub use mixing::BinaryLiquidMixing;
+
+use std::sync::Arc;
 
 use super::ResolvedLiquidState;
 use crate::MaterialError;
@@ -71,6 +78,19 @@ pub struct BinaryLiquidSolutionLaw<'a> {
     point: QueryPoint,
     temperature_axis: String,
     composition_axis: String,
+    owner: Arc<BinaryLiquidOwner>,
+}
+
+// Preserve the complete original binding, including source roles and optional
+// density-expansion paths, once per law rather than copying receipts per parcel.
+// Structural equality also admits an identically reconstructed immutable law.
+#[derive(Clone, Debug, PartialEq)]
+struct BinaryLiquidOwner {
+    thermodynamics: BinaryRegularSolutionV1,
+    molar_masses: [MolarMass; 2],
+    reference: ResolvedLiquidState,
+    temperature_axis: String,
+    composition_axis: String,
 }
 
 impl<'a> BinaryLiquidSolutionLaw<'a> {
@@ -115,6 +135,13 @@ impl<'a> BinaryLiquidSolutionLaw<'a> {
             Temperature::new(point.axes()[temperature_axis]),
             point.axes()[composition_axis],
         )?;
+        let owner = Arc::new(BinaryLiquidOwner {
+            thermodynamics: thermodynamics.clone(),
+            molar_masses,
+            reference: reference.clone(),
+            temperature_axis: temperature_axis.to_owned(),
+            composition_axis: composition_axis.to_owned(),
+        });
         Ok(Self {
             thermodynamics,
             molar_masses,
@@ -123,6 +150,7 @@ impl<'a> BinaryLiquidSolutionLaw<'a> {
             point,
             temperature_axis: temperature_axis.to_owned(),
             composition_axis: composition_axis.to_owned(),
+            owner,
         })
     }
 
@@ -171,6 +199,34 @@ impl<'a> BinaryLiquidSolutionLaw<'a> {
             options,
             &mut cancelled,
         )?;
+        self.resolve_equilibrium(equilibrium, component_moles, &mut cancelled)
+    }
+
+    // Materialize the original accepted phase selection without another root
+    // solve or composition normalization. Both prescribed-T and caloric paths
+    // share inventory allocation, original source refresh and atomic publication.
+    fn resolve_equilibrium(
+        &self,
+        equilibrium: BinaryPhaseEquilibriumV1,
+        component_moles: [f64; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ResolvedBinaryLiquidEquilibrium, BinaryLiquidError> {
+        poll(&mut cancelled)?;
+        if component_moles.iter().any(|n| !n.is_finite() || *n < 0.0) {
+            return Err(BinaryLiquidError::Invalid(
+                "component amounts must be finite nonnegative mol",
+            ));
+        }
+        let total_moles = positive_value(component_moles[0] + component_moles[1], "total amount")?;
+        let temperature = equilibrium.feed().temperature();
+        let fractions = equilibrium.feed().mole_fractions();
+        if (component_moles[0] > 0.0 && fractions[0] == 0.0)
+            || (component_moles[1] > 0.0 && fractions[0] == 1.0)
+        {
+            return Err(BinaryLiquidError::Arithmetic(
+                "nonzero component lost in the source's first-species coordinate",
+            ));
+        }
         let mut inventories = [[0.0; 2]; 2];
         let phases = equilibrium.phases();
         if phases.len() == 1 {
@@ -248,6 +304,7 @@ impl<'a> BinaryLiquidSolutionLaw<'a> {
             component_moles,
             total_mass_kg: total_mass,
             total_volume_m3: volume,
+            owner: Arc::clone(&self.owner),
         })
     }
 
@@ -348,6 +405,7 @@ pub struct ResolvedBinaryLiquidEquilibrium {
     component_moles: [f64; 2],
     total_mass_kg: f64,
     total_volume_m3: f64,
+    owner: Arc<BinaryLiquidOwner>,
 }
 
 impl ResolvedBinaryLiquidEquilibrium {
