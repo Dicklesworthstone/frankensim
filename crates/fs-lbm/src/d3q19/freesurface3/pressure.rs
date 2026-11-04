@@ -194,7 +194,7 @@ impl FreeSurface3 {
         gate: &CancelGate,
         boundary: &GasPressure3<'_>,
     ) -> Result<(), FreeSurfaceError3> {
-        if self.redistribution.preserves_momentum() {
+        if self.redistribution.preserves_momentum() || self.body_acceleration.is_some() {
             let mut candidate = self.clone();
             candidate.step_inner(gate, None, None, Some(boundary))?;
             check_cancel(gate)?;

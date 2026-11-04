@@ -371,9 +371,12 @@ pub struct FreeSurface3 {
     worst_step_violation: f64,
     /// Smoothed fill field, refreshed at the top of each step.
     fill_smooth: BTreeMap<u64, [f64; TILE_CELLS]>,
-    /// Actual force frame of each wet population, when it differs from the
-    /// uniform reference gravity. This history travels with population state.
+    /// Accepted force frame of each wet population. Independent held fields
+    /// omit a uniform reference frame; acceleration keeps a complete history.
     local_force: Option<BTreeMap<(u64, usize), [f64; 3]>>,
+    /// Explicit body acceleration. Its complete accepted F=rho*a history is
+    /// retained in local_force; None preserves historical held-force semantics.
+    body_acceleration: Option<[f64; 3]>,
 }
 
 impl core::fmt::Debug for FreeSurface3 {
@@ -386,6 +389,7 @@ impl core::fmt::Debug for FreeSurface3 {
             .field("planar_contact", &self.planar_contact)
             .field("planar_piston", &self.planar_piston)
             .field("geometry_epoch", &self.geometry_epoch)
+            .field("body_acceleration", &self.body_acceleration)
             .field("carry", &self.carry)
             .field("conversions", &self.conversions)
             .field("worst_step_violation", &self.worst_step_violation)
@@ -596,6 +600,7 @@ impl FreeSurface3 {
             worst_step_violation: 0.0,
             fill_smooth: BTreeMap::new(),
             local_force: None,
+            body_acceleration: None,
         };
 
         // Interface insertion: any fluid cell with a gas neighbor.
@@ -1161,11 +1166,11 @@ impl FreeSurface3 {
     /// publication. Cancellation preserves populations, tracked mass and all
     /// conversion counters. Once publication begins its conversion cascade
     /// finishes; a later cancellation request is observed by the next step.
-    /// Both conservative momentum modes evaluate the entire step on a private
-    /// candidate; conversion/cancellation refusal also preserves populations
-    /// and the accepted receipt.
+    /// Both conservative momentum modes and the explicit body-acceleration
+    /// mode evaluate the entire step on a private candidate; any later refusal
+    /// also preserves populations, force history and the accepted receipt.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
-        if self.redistribution.preserves_momentum() {
+        if self.redistribution.preserves_momentum() || self.body_acceleration.is_some() {
             check_cancel(gate)?;
             let mut candidate = self.clone();
             candidate.step_inner(gate, None, None, None)?;
@@ -1195,6 +1200,7 @@ impl FreeSurface3 {
         mut moving_wall: Option<&mut motion::PlanarWallStep3>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
+        self.admit_body_acceleration_mode()?;
         if let Some(field) = &self.local_sigma {
             self.admit_surface_tensions(field, gate)?;
         }
@@ -1352,6 +1358,10 @@ impl FreeSurface3 {
                         (local_force, local_force.iter().any(|&value| value != 0.0))
                     };
                 let mut new_f = [0.0f64; Q3];
+                // Density-aware pressure uses the endpoint force rho_next*a.
+                // Its even source is linear in that unknown density; retain
+                // only the actual missing gas links for one scalar closure.
+                let mut body_pressure_source: Option<[f64; Q3]> = None;
                 // One geometry and boundary velocity serve every missing gas
                 // population. Interior cells never compute capillary curvature.
                 let mut gas_equilibrium = pressure::GasEquilibrium3::default();
@@ -1389,7 +1399,12 @@ impl FreeSurface3 {
                                         },
                                     )?;
                                     let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
-                                    if correct_pressure_source {
+                                    if let Some(acceleration) = self.body_acceleration {
+                                        body_pressure_source.get_or_insert([0.0; Q3])[q] =
+                                            0.5 * (forcing::source(q, physical_velocity, acceleration)
+                                                + forcing::source(OPP3[q], physical_velocity, acceleration));
+                                        value
+                                    } else if correct_pressure_source {
                                         value
                                             - 0.5
                                                 * (forcing::source(
@@ -1411,12 +1426,28 @@ impl FreeSurface3 {
                     }
                     };
                 }
+                if let Some(coefficients) = body_pressure_source {
+                    forcing::close_body_pressure(&mut new_f, coefficients)?;
+                }
                 new_populations.push((key, lane, new_f));
             }
         }
         check_cancel(gate)?;
         for (key, lane, f) in new_populations {
             let slot = self.grid.slot_of(key).expect("active");
+            if let Some(acceleration) = self.body_acceleration {
+                if f.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                    return Err(FreeSurfaceError3::Transport(
+                        "body acceleration needs positive finite endpoint populations",
+                    ));
+                }
+                // Natural density evolution changes the endpoint source. Do
+                // NOT reframe f here: j_phys = sum(f e) + F_next/2 must retain
+                // the physical half impulse from F_next-F_previous.
+                let force = forcing::body_force(f.iter().sum(), acceleration)?;
+                *self.local_force.as_mut().expect("acceleration force history")
+                    .get_mut(&(key, lane)).expect("accepted wet force") = force;
+            }
             self.grid.set_populations(slot, lane, f);
         }
         for (key, lane, dm) in mass_delta {
@@ -1450,6 +1481,7 @@ impl FreeSurface3 {
         mut transport: Option<&mut MassTransport3>,
         tolerance: f64,
     ) -> Result<(), FreeSurfaceError3> {
+        self.admit_body_acceleration_mode()?;
         let mut momentum = if self.redistribution.preserves_momentum() {
             Some(conversion_momentum::ConversionMomentum3::new(self)?)
         } else { None };
@@ -1551,7 +1583,13 @@ impl FreeSurface3 {
                 } else {
                     rho_avg = 1.0;
                 }
-                let force = if self.local_force.is_some() {
+                let mut initial = equilibrium3(rho_avg, u_avg);
+                let force = if let Some(acceleration) = self.body_acceleration {
+                    // A birth is initialization, not an elapsed force update.
+                    // Its own canonical density sets its half-source frame.
+                    forcing::preserve_density(&mut initial, rho_avg)?;
+                    forcing::body_force(rho_avg, acceleration)?
+                } else if self.local_force.is_some() {
                     if cnt > 0.0 {
                         for axis in 0..3 {
                             force_avg[axis] /= cnt;
@@ -1565,7 +1603,6 @@ impl FreeSurface3 {
                 } else {
                     self.grid.collision().1
                 };
-                let mut initial = equilibrium3(rho_avg, u_avg);
                 if !legacy {
                     initial = forcing::reframe(initial, u_avg, [0.0; 3], force)?;
                 } else if self.local_force.is_some() {

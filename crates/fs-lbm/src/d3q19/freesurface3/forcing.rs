@@ -3,6 +3,60 @@
 use super::*;
 use crate::d3q19::{W3, guo_projection3};
 
+#[cfg(test)]
+mod acceleration_tests;
+
+pub(super) fn body_force(rho: f64, acceleration: [f64; 3]) -> Result<[f64; 3], FreeSurfaceError3> {
+    let force = acceleration.map(|value| rho * value);
+    if !rho.is_finite() || rho <= 0.0
+        || force.iter().zip(acceleration).any(|(&value, a)| {
+            !value.is_finite() || a != 0.0 && value == 0.0
+        })
+    {
+        return Err(FreeSurfaceError3::Transport(
+            "body acceleration requires positive density and representable rho*a",
+        ));
+    }
+    Ok(force)
+}
+
+/// Preserve the existing explicit physical boundary velocity while evaluating
+/// its even Guo pressure source in the endpoint density-dependent force frame.
+/// Missing gas populations obey f_q=base_q-rho*A_q; all other A_q are zero.
+/// Thus rho=sum(base)/(1+sum(A)), without an iteration or a force reframe.
+pub(super) fn close_body_pressure(
+    populations: &mut [f64; Q3],
+    coefficients: [f64; Q3],
+) -> Result<(), FreeSurfaceError3> {
+    let denominator = 1.0 + coefficients.iter().sum::<f64>();
+    let rho = populations.iter().sum::<f64>() / denominator;
+    if coefficients.iter().any(|value| !value.is_finite())
+        || !denominator.is_finite() || denominator <= 0.0
+        || !rho.is_finite() || rho <= 0.0
+    {
+        return Err(FreeSurfaceError3::Transport(
+            "density-dependent gas pressure has no positive representable closure",
+        ));
+    }
+    for (population, coefficient) in populations.iter_mut().zip(coefficients) {
+        *population -= rho * coefficient;
+    }
+    let actual: f64 = populations.iter().sum();
+    let allowance = 64.0 * f64::EPSILON * populations.iter().map(|value| value.abs()).sum::<f64>();
+    if !allowance.is_finite() || (actual - rho).abs() > allowance {
+        return Err(FreeSurfaceError3::Transport(
+            "density-dependent pressure closure exceeds population roundoff",
+        ));
+    }
+    preserve_density(populations, rho)?;
+    if populations.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+        return Err(FreeSurfaceError3::Transport(
+            "body acceleration needs positive finite endpoint populations",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn source(q: usize, velocity: [f64; 3], force: [f64; 3]) -> f64 {
     let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
     let eu = e.iter().zip(velocity).map(|(e, u)| e * u).sum();
@@ -116,6 +170,87 @@ pub(super) fn retarget_velocity(
 }
 
 impl FreeSurface3 {
+    /// Explicit lattice body acceleration [dx/dt²], when selected. None is the
+    /// historical uniform/reference-density or independently held local force.
+    /// Some([0; 3]) remains an acceleration-owned zero load, not unknown forcing.
+    #[must_use]
+    pub const fn body_acceleration(&self) -> Option<[f64; 3]> {
+        self.body_acceleration
+    }
+
+    /// Select or change a piecewise-held body acceleration with F=rho*a.
+    ///
+    /// This is a change of the accepted Guo representation, with no elapsed
+    /// time or physical impulse. Each cell retains its canonical density,
+    /// tracked mass, physical velocity and force-corrected stress. The next
+    /// collision supplies F_n, and streaming publishes F_next=rho_next*a
+    /// WITHOUT reframing populations: endpoint physical momentum includes the
+    /// new half source. Gas pressure and interface birth use that same law.
+    ///
+    /// An existing independent local-force field (including thermal buoyancy)
+    /// cannot be replaced implicitly. LegacyGlobal replay also refuses; its
+    /// historical raw-velocity pressure/conversion convention is unchanged.
+    /// Invalid loads, inadmissible populations or cancellation leave all
+    /// accepted populations, force history and acceleration unchanged.
+    pub fn rebind_body_acceleration(
+        &mut self,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.rebind_body_acceleration_checked(acceleration, || check_cancel(gate))
+    }
+
+    /// Same candidate admission under an existing Cx/owner cancellation scope.
+    pub(crate) fn rebind_body_acceleration_checked(
+        &mut self,
+        acceleration: [f64; 3],
+        mut checkpoint: impl FnMut() -> Result<(), FreeSurfaceError3>,
+    ) -> Result<(), FreeSurfaceError3> {
+        checkpoint()?;
+        if acceleration.iter().any(|value| !value.is_finite()) {
+            return Err(FreeSurfaceError3::Transport("body acceleration must be finite"));
+        }
+        if self.redistribution == ConversionRedistribution3::LegacyGlobal {
+            return Err(FreeSurfaceError3::Transport(
+                "body acceleration cannot use historical LegacyGlobal force semantics",
+            ));
+        }
+        if self.body_acceleration.is_none() && self.local_force.is_some() {
+            return Err(FreeSurfaceError3::Transport(
+                "body acceleration cannot replace an independent local-force owner",
+            ));
+        }
+        let mut forces = BTreeMap::new();
+        for (&key, tile) in &self.tiles {
+            checkpoint()?;
+            let slot = self.grid.slot_of(key).expect("active");
+            for lane in 0..TILE_CELLS {
+                if tile.cells[lane] == Cell3::Gas { continue; }
+                let populations = self.grid.populations(slot, lane);
+                if populations.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                    return Err(FreeSurfaceError3::Transport(
+                        "body acceleration requires positive finite accepted populations",
+                    ));
+                }
+                forces.insert((key, lane), body_force(populations.iter().sum(), acceleration)?);
+            }
+        }
+        self.rebind_force_field_inner(forces, true, checkpoint)?;
+        self.body_acceleration = Some(acceleration);
+        Ok(())
+    }
+
+    pub(super) fn admit_body_acceleration_mode(&self) -> Result<(), FreeSurfaceError3> {
+        if self.body_acceleration.is_some()
+            && self.redistribution == ConversionRedistribution3::LegacyGlobal
+        {
+            return Err(FreeSurfaceError3::Transport(
+                "body acceleration cannot use historical LegacyGlobal force semantics",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn reference_force(&self) -> [f64; 3] {
         self.grid.collision().1
     }
@@ -150,6 +285,21 @@ impl FreeSurface3 {
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
+        if self.body_acceleration.is_some() {
+            return Err(FreeSurfaceError3::Transport(
+                "independent local forces cannot replace the body-acceleration owner",
+            ));
+        }
+        self.rebind_force_field_inner(forces, false, || check_cancel(gate))
+    }
+
+    fn rebind_force_field_inner(
+        &mut self,
+        forces: BTreeMap<(u64, usize), [f64; 3]>,
+        retain_uniform_history: bool,
+        mut checkpoint: impl FnMut() -> Result<(), FreeSurfaceError3>,
+    ) -> Result<(), FreeSurfaceError3> {
+        checkpoint()?;
         let wet = self
             .tiles
             .values()
@@ -168,7 +318,7 @@ impl FreeSurface3 {
         let uniform = self.grid.collision().1;
         let mut replacements = Vec::new();
         for (&key, tile) in &self.tiles {
-            check_cancel(gate)?;
+            checkpoint()?;
             let slot = self.grid.slot_of(key).expect("active");
             for lane in 0..TILE_CELLS {
                 if tile.cells[lane] == Cell3::Gas {
@@ -197,14 +347,19 @@ impl FreeSurface3 {
                 }
                 let velocity = core::array::from_fn(|d| raw[d] + 0.5 * previous[d] / rho);
                 let populations = reframe(populations, velocity, previous, next)?;
+                if retain_uniform_history && populations.iter().any(|value| *value <= 0.0) {
+                    return Err(FreeSurfaceError3::Transport(
+                        "body acceleration needs positive reframed populations",
+                    ));
+                }
                 replacements.push((slot, lane, populations));
             }
         }
-        check_cancel(gate)?;
+        checkpoint()?;
         for (slot, lane, populations) in replacements {
             self.grid.set_populations(slot, lane, populations);
         }
-        self.local_force = if forces.values().all(|&force| force == uniform) {
+        self.local_force = if !retain_uniform_history && forces.values().all(|&force| force == uniform) {
             None
         } else {
             Some(forces)

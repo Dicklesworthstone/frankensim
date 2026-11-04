@@ -4968,6 +4968,32 @@ the first honest rows, but cannot mint a citable pass or failure. Both reference
 ISA rows, floor authorization, durable LBM ledger recording, and sealed tile
 tuning remain explicit follow-on acceptance work.
 
+## Density-proportional acceleration on the sparse free surface
+
+`FreeSurface3::rebind_body_acceleration` selects a held lattice acceleration
+with actual cell force `F=rho*a`. The complete accepted force history travels
+with the original populations. Replacing the acceleration preserves canonical
+density, physical velocity and force-corrected stress without advancing time.
+During a native step, collision uses the initial force and the streamed endpoint
+uses its new density times the same acceleration, without a fictitious reframe.
+This retains the trapezoidal source impulse of the original Guo convention.
+
+Missing gas-link populations retain the existing explicit physical boundary
+velocity and solve their density-dependent even source through one scalar
+linear closure. New interfaces enter their own density-dependent source frame.
+Existing force entries are updated in place; there is no second fluid solver or
+iterative pressure solve. Normal and pressure-loaded steps are transactional in
+this mode. Independently bound local forces and LegacyGlobal replay refuse;
+the historical reference-density constructors keep their original behavior.
+The original low-Mach, capillary, topology and work-budget limitations remain.
+This adds no liquid EOS, thermal expansion or phase-density volume source.
+
+The `body_acceleration` integration regressions specify equal acceleration at
+unequal densities, load switching, an independent affine-density endpoint
+impulse and discrete atmosphere/wall hydrostatics in all six directions.
+Focused native tests also cover physical stress through rebinding, gas-pressure
+moments, interface birth, continuing mass/strain/motion operations and refusal.
+
 ## Material-bound isothermal free surface
 
 `material::free_surface::plan_free_surface_from_material` lowers a frozen
