@@ -10066,6 +10066,24 @@ and 101 unequal-mass scatter identities were evaluated, with the latter closing
 within 2.23e-15 J. Native Rust typechecking, tests and runtime benchmarks remain
 unexecuted because the shared filesystem is full and memory is constrained.
 
+`advance_material_momentum_with_viscosity_and_pressure_profile` admits one
+opposed pair of pressure reservoirs with the original normal-traction and
+zero tangential-velocity-trace convention. Remaining planes retain closed
+no-slip or symmetry conditions. `FvBoundary::Outlet` identifies the two
+viscous mouths; the staggered pressure profile is their sole pressure owner.
+Actual evolving M/V supplies both interior and boundary half-cell inertia.
+Native mirrored mouth rows mirror that inertia by the same factor, and their
+existing half-volume weight restores physical impulse, work and molecular heat.
+One-sided mouth impulses reach their adjacent cell once. The viscous predictor
+uses zero reservoir pressure; the following original pressure/material step
+applies the authored profile once. Only molecular dissipation enters h.
+Temporal, scatter, projection and advective losses remain numerical accounts.
+The split remains first order with frozen source viscosity and fixed geometry.
+Regression sources specify an independent unequal-density three-face diffusion
+solution, pressure-driven viscous throughflow with a complete split energy
+identity, and incompatible-pressure/trace/boundary refusal. General opening
+configurations and nonzero tangential reservoir traces are not admitted.
+
 ## Rigid motion and actual link torque on a flooded free-surface wall
 
 `FreeSurface3::planar_rigid_wall_motion_candidate` and the material owner's

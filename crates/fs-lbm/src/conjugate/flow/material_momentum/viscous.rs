@@ -1,5 +1,6 @@
 //! Source-viscosity diffusion and physical heating before the original advance.
 
+use super::super::StaggeredBoundaryPressure;
 use super::super::density_projection::face_dual_mass;
 use super::*;
 use crate::conjugate::simple::FvBoundary;
@@ -22,7 +23,10 @@ pub struct MaterialMomentumViscosityInput<'a> {
     /// current material state; actual M/V, not source reference rho, is inertia.
     pub sources: &'a [Option<&'a dyn FluidTransport>],
     /// Closed no-slip walls, optionally moving tangentially, or symmetry.
-    /// Solid voxels remain stationary no-slip. Openings are not admitted.
+    /// The pressure-profile entry additionally admits one opposed `Outlet`
+    /// pair: normal traction with zero tangential trace, not legacy static
+    /// pressure/zero-gradient openings. Their pressure comes only from the
+    /// separate profile. Solid voxels remain stationary no-slip.
     pub boundaries: [FvBoundary; 6],
 }
 
@@ -69,10 +73,111 @@ impl FlowField {
     /// # Errors
     /// Native admission, source evaluation, solve, physical-balance, caloric
     /// representation, transport or cancellation refusal publishes no state.
-    #[allow(clippy::too_many_lines)] // one atomic composition of original owners
     pub fn advance_material_momentum_with_viscosity(
         &self,
         domain: &VoxelDomain,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        self.advance_viscous_material(
+            domain,
+            [FlowFace::Wall; 6],
+            None,
+            None,
+            input,
+            viscosity,
+            controls,
+            viscosity_controls,
+            gate,
+        )
+    }
+
+    /// Evolve actual material inertia through one opposed reservoir pair,
+    /// retaining native molecular stress, heat, pressure work and mass routes.
+    ///
+    /// Exactly two opposed `Free` planes must correspond to `Outlet` in the
+    /// viscosity input; remaining planes are `Wall` with no-slip or symmetry
+    /// viscosity conditions. Each mouth prescribes normal traction and zero
+    /// tangential velocity trace. Nonuniform mechanical pressure is supplied
+    /// by the original staggered profile; it does not set thermodynamic rho.
+    /// The entering material's mass, enthalpy and velocity remain explicit in
+    /// `input`, including flow reversal. The supplied incoming velocity must
+    /// have zero tangential components at either reservoir mouth.
+    ///
+    /// The native viscosity predictor uses actual boundary half-cell inertia
+    /// with zero normal traction. The following force/pressure stage applies
+    /// the reservoir load exactly once and retains its original work account.
+    /// Only physical molecular stress loss enters h; pressure, projection,
+    /// temporal, scatter and advective numerical losses do not become heat.
+    ///
+    /// This is the same first-order frozen-viscosity split on fixed geometry.
+    /// Arbitrary opening configurations, nonzero tangential reservoir traces,
+    /// an EOS and a complete Navier-Stokes accuracy claim are not supplied.
+    ///
+    /// # Errors
+    /// Unsupported boundary combinations, conflicting pressure authority or
+    /// any original source, work, transport or cancellation gate returns no
+    /// candidate and leaves all inputs unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_viscosity_and_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        poll(gate)?;
+        let axis = (0..3)
+            .find(|&a| faces[2 * a] == FlowFace::Free && faces[2 * a + 1] == FlowFace::Free)
+            .ok_or_else(|| refuse("viscous pressure flow needs one opposed reservoir pair"))?;
+        for f in 0..6 {
+            if f / 2 == axis {
+                if !matches!(viscosity.boundaries[f], FvBoundary::Outlet)
+                    || input.boundary_velocity_m_s[f]
+                        .is_some_and(|u| (0..3).any(|a| a != axis && u[a] != 0.0))
+                {
+                    return Err(refuse(
+                        "reservoir pressure belongs to the profile and tangential trace must be zero",
+                    ));
+                }
+            } else if faces[f] != FlowFace::Wall
+                || !matches!(
+                    viscosity.boundaries[f],
+                    FvBoundary::Wall { .. } | FvBoundary::Symmetry
+                )
+            {
+                return Err(refuse(
+                    "viscous pressure flow admits one opposed pair and closed sides",
+                ));
+            }
+        }
+        self.advance_viscous_material(
+            domain,
+            faces,
+            Some(profile),
+            Some(axis),
+            input,
+            viscosity,
+            controls,
+            viscosity_controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_viscous_material(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        pressure_mouth_axis: Option<usize>,
         input: MaterialMomentumAdvanceInput<'_>,
         viscosity: MaterialMomentumViscosityInput<'_>,
         controls: MaterialMomentumAdvanceControls,
@@ -98,7 +203,7 @@ impl FlowField {
         finite_positive("flow.viscosity_duration", duration)?;
         let reconstructed = self.reconstruct_material_momentum(
             domain,
-            [FlowFace::Wall; 6],
+            faces,
             input.material.mass_kg,
             input.momentum_kg_m_s,
             controls.mechanics.reconstruction,
@@ -156,6 +261,16 @@ impl FlowField {
                         Some(neighbor),
                     );
                 }
+                if pressure_mouth_axis == Some(a) {
+                    for side in 0..2 {
+                        let f = 2 * a + side;
+                        if domain.neighbor(c, f).is_none() {
+                            let (slot, _) = reconstructed.field.slot(domain, c, f);
+                            masses[slot] =
+                                face_dual_mass(domain, &reconstructed.density_kg_m3, c, f, None);
+                        }
+                    }
+                }
             }
         }
         let viscous = kick(
@@ -167,6 +282,7 @@ impl FlowField {
                 viscosity_pa_s: &molecular,
                 face_mass_kg: face_mass,
                 boundaries: viscosity.boundaries,
+                pressure_mouth_axis,
                 duration_s: duration,
             },
             viscosity_controls,
@@ -204,20 +320,20 @@ impl FlowField {
         }
         let represented = represented.to_f64();
         finite("flow.viscosity_represented_heat", represented)?;
-        let advance = self.advance_material_momentum(
-            domain,
-            [FlowFace::Wall; 6],
-            MaterialMomentumAdvanceInput {
-                material: MaterialAdvectionInput {
-                    specific_enthalpy_j_kg: &enthalpy,
-                    ..input.material
-                },
-                momentum_kg_m_s: &viscous.momentum_kg_m_s,
-                ..input
+        let heated = MaterialMomentumAdvanceInput {
+            material: MaterialAdvectionInput {
+                specific_enthalpy_j_kg: &enthalpy,
+                ..input.material
             },
-            controls,
-            gate,
-        )?;
+            momentum_kg_m_s: &viscous.momentum_kg_m_s,
+            ..input
+        };
+        let advance = match profile {
+            Some(profile) => self.advance_material_momentum_with_pressure_profile(
+                domain, faces, profile, heated, controls, gate,
+            )?,
+            None => self.advance_material_momentum(domain, faces, heated, controls, gate)?,
+        };
         poll(gate)?;
         Ok(ViscousMaterialMomentumAdvance {
             advance,

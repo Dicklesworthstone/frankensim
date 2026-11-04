@@ -62,6 +62,9 @@ pub(in crate::conjugate) struct NativeMaterialViscosityInput<'a> {
     /// Produced by the ORIGINAL density projection's face_dual_mass.
     pub face_mass_kg: [Vec<f64>; 3],
     pub boundaries: [FvBoundary; 6],
+    /// One opposed normal-traction pair, with zero viscous-stage pressure and
+    /// zero tangential trace. The following projection owns reservoir loading.
+    pub pressure_mouth_axis: Option<usize>,
     pub duration_s: f64,
 }
 
@@ -113,13 +116,20 @@ pub(in crate::conjugate) fn kick(
         || input.mass_kg.len() != n
         || input.momentum_kg_m_s.len() != n
         || input.viscosity_pa_s.len() != n
-        || input
-            .boundaries
-            .iter()
-            .any(|b| !matches!(b, FvBoundary::Wall { .. } | FvBoundary::Symmetry))
+    {
+        return Err(refuse("viscosity requires bounded original cells"));
+    }
+    if input.pressure_mouth_axis.is_some_and(|a| a >= 3)
+        || input.boundaries.iter().enumerate().any(|(f, b)| {
+            if input.pressure_mouth_axis == Some(f / 2) {
+                !matches!(b, FvBoundary::Outlet)
+            } else {
+                !matches!(b, FvBoundary::Wall { .. } | FvBoundary::Symmetry)
+            }
+        })
     {
         return Err(refuse(
-            "viscosity requires bounded original cells and closed walls/symmetry",
+            "viscosity needs closed walls/symmetry or one opposed zero-pressure traction pair",
         ));
     }
     finite_positive("flow.viscosity_duration", input.duration_s)?;
@@ -149,11 +159,13 @@ pub(in crate::conjugate) fn kick(
         &config,
     );
     solver.set_material_transport(input.viscosity_pa_s, None, gate)?;
+    solver.pressure_work_axis = input.pressure_mouth_axis;
     // This is only molecular diffusion. The enclosing owner subsequently
     // applies body force, pressure and material convection, each once.
     solver.creeping = true;
+    let mut face_mass = input.face_mass_kg;
     for (a, fluxes) in input.field.face_arrays().into_iter().enumerate() {
-        if fluxes.len() != solver.vel[a].len() || input.face_mass_kg[a].len() != fluxes.len() {
+        if fluxes.len() != solver.vel[a].len() || face_mass[a].len() != fluxes.len() {
             return Err(refuse(
                 "viscosity face arrays differ from the original grid",
             ));
@@ -171,10 +183,15 @@ pub(in crate::conjugate) fn kick(
                     ));
                 }
                 Kind::Unknown(_) => {
-                    finite_positive("flow.viscosity_face_mass", input.face_mass_kg[a][i])?;
+                    finite_positive("flow.viscosity_face_mass", face_mass[a][i])?;
                 }
                 Kind::Outlet(_) => {
-                    return Err(refuse("viscous pressure openings are not admitted"));
+                    finite_positive("flow.viscosity_face_mass", face_mass[a][i])?;
+                    // Existing traction rows mirror the interior cell: every
+                    // stress coefficient is twice its physical half-cell value.
+                    // Mirror inertia by the SAME factor; audit uses weight 1/2.
+                    face_mass[a][i] *= 2.0;
+                    finite_positive("flow.viscosity_mirrored_face_mass", face_mass[a][i])?;
                 }
                 Kind::Fixed(_) => {}
             }
@@ -186,7 +203,7 @@ pub(in crate::conjugate) fn kick(
         scheme: TimeScheme::BackwardEuler,
         previous: solver.vel.clone(),
         older: None,
-        face_mass_kg: Some(input.face_mass_kg),
+        face_mass_kg: Some(face_mass),
     });
     let mut relative = f64::INFINITY;
     let mut residual_impulse = f64::INFINITY;
@@ -290,13 +307,12 @@ fn audit(
         for &i in &solver.comps[a].unknowns {
             poll(gate)?;
             let at = solver.comps[a].coords(i);
-            let mut minus = at;
-            minus[a] -= 1;
+            let (minus, plus, weight) = solver.power_face_cells(a, i);
             let m = cell_of(solver.n, minus);
-            let p = cell_of(solver.n, at);
+            let p = cell_of(solver.n, plus);
             let old = Dd::from_f64(time.previous[a][i]);
             let delta = Dd::from_f64(solver.vel[a][i]) - old;
-            let native_mass = Dd::from_f64(inertia[a][i]);
+            let native_mass = Dd::from_f64(weight * inertia[a][i]);
             let physical_impulse = native_mass * delta;
             let represented = physical_impulse.to_f64();
             finite("flow.viscosity_impulse", represented)?;
@@ -314,9 +330,17 @@ fn audit(
             let change = native_mass * delta * (old + half * delta);
             native_change = native_change + change;
             time_loss = time_loss + half * native_mass * delta * delta;
-            let half_mass = Dd::from_f64(0.5 * mass[m] + 0.5 * mass[p]);
-            let half_momentum =
-                half * (Dd::from_f64(original[m][a]) + Dd::from_f64(original[p][a]));
+            let (half_mass, half_momentum) = if weight == 0.5 {
+                (
+                    Dd::from_f64(0.5 * mass[m]),
+                    half * Dd::from_f64(original[m][a]),
+                )
+            } else {
+                (
+                    Dd::from_f64(0.5 * mass[m] + 0.5 * mass[p]),
+                    half * (Dd::from_f64(original[m][a]) + Dd::from_f64(original[p][a])),
+                )
+            };
             // Virtual common face work minus actual native kinetic change.
             // This keeps M/V and Q/A/impulse representation work explicit,
             // including low components before a large velocity datum cancels.
@@ -346,8 +370,10 @@ fn audit(
                 if impulses[a][index] == 0.0 {
                     0.0
                 } else {
-                    let neighbor = domain.neighbor(c, f).expect("active interior viscous face");
-                    impulses[a][index] / (0.5 * mass[c] + 0.5 * mass[neighbor])
+                    let half_mass = domain.neighbor(c, f).map_or(0.5 * mass[c], |neighbor| {
+                        0.5 * mass[c] + 0.5 * mass[neighbor]
+                    });
+                    impulses[a][index] / half_mass
                 }
             };
             let left = kick(false);
