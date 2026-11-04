@@ -373,6 +373,77 @@ impl<'a> PreparedExactTones<'a> {
         Ok(())
     }
 
+    /// Internal composition seam: retain the original total-input trajectory and
+    /// separately integrate one declared source's work on that trajectory. The
+    /// caller supplies reusable packing scratch; no additional owner or heat law
+    /// is introduced. Neither source work nor interface work is an energy remainder.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_source_work_into(
+        &mut self,
+        initial: &[f64],
+        cosine: &[f64],
+        sine: &[f64],
+        end: Option<(&[f64], &[f64])>,
+        source_cosine: &[f64],
+        source_sine: &[f64],
+        source_end: Option<(&[f64], &[f64])>,
+        work_input: &mut [f64],
+        next: &mut [f64],
+        average_output: &mut [f64],
+    ) -> Result<(PreparedStepRecord, f64), PhsError> {
+        self.check_outputs(next, average_output)?;
+        let count = self.port_dim() * self.tone_count();
+        if source_cosine.len() != count
+            || source_sine.len() != count
+            || !finite(source_cosine)
+            || !finite(source_sine)
+            || self.affine != source_end.is_some()
+            || source_end.is_some_and(|(c, s)| {
+                c.len() != count || s.len() != count || !finite(c) || !finite(s)
+            })
+            || work_input.len() < self.scratch.input.len()
+        {
+            return Err(refuse(
+                "continuous-tone source-work input or scratch extent",
+            ));
+        }
+        let record = self.evaluate(initial, cosine, sine, end)?;
+        let work_input = &mut work_input[..self.scratch.input.len()];
+        if let Some((end_cosine, end_sine)) = source_end {
+            affine::combine(
+                &self.mapping,
+                self.unique.len(),
+                source_cosine,
+                source_sine,
+                end_cosine,
+                end_sine,
+                &mut self.scratch.sums,
+                work_input,
+            )?;
+        } else {
+            combine_tones(
+                &self.mapping,
+                self.unique.len(),
+                source_cosine,
+                source_sine,
+                &mut self.scratch.sums,
+                work_input,
+            )?;
+        }
+        let system = self.system.get();
+        system.storage.gradient(initial, &mut self.scratch.effort);
+        let source_work = self.power.source_work_into(
+            &self.scratch.effort,
+            &self.scratch.derivative,
+            &self.scratch.input,
+            work_input,
+            &mut self.scratch.coordinates,
+        )?;
+        next.copy_from_slice(&self.scratch.endpoint);
+        average_output.copy_from_slice(&self.scratch.output);
+        Ok((record, source_work))
+    }
+
     fn evaluate(
         &mut self,
         initial: &[f64],

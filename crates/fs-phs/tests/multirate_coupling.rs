@@ -4,6 +4,9 @@ use fs_phs::multirate::{
 };
 use fs_phs::{PortHamiltonian, QuadraticStorage, Storage, duffing_oscillator, mass_spring_damper};
 
+#[path = "multirate_coupling/continuous.rs"]
+mod continuous;
+
 fn exact(substeps: usize) -> Clock {
     Clock { substeps, method: IntegrationMethod::ExactQuadratic, maximum_contact_step_s: None }
 }

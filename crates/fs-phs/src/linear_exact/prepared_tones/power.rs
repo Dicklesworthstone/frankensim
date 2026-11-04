@@ -177,11 +177,33 @@ impl TonePower {
                 * self.scales[i]
                 / self.rate;
         }
-        let supplied = self.evaluate(&self.work, effort, derivative, input, coordinates)?;
+        let supplied = self.evaluate(&self.work, effort, derivative, input, None, coordinates)?;
         for (value, observation) in heat.iter_mut().zip(&self.heat) {
-            *value = self.evaluate(observation, effort, derivative, input, coordinates)?;
+            *value = self.evaluate(observation, effort, derivative, input, None, coordinates)?;
         }
         Ok(supplied)
+    }
+
+    /// Integrate a declared source against the output of the COMPLETE physical
+    /// trajectory. Only the right bilinear factor changes: source oscillators
+    /// are autonomous, so that factor has no initial physical-state columns.
+    /// This retains small external work even beside a large interface exchange.
+    pub(super) fn source_work_into(
+        &self,
+        effort: &[f64],
+        derivative: &[f64],
+        physical_input: &[f64],
+        source_input: &[f64],
+        coordinates: &mut [f64],
+    ) -> Result<f64, PhsError> {
+        self.evaluate(
+            &self.work,
+            effort,
+            derivative,
+            physical_input,
+            Some(source_input),
+            coordinates,
+        )
     }
 
     fn evaluate(
@@ -190,6 +212,7 @@ impl TonePower {
         effort: &[f64],
         derivative: &[f64],
         input: &[f64],
+        source_input: Option<&[f64]>,
         coordinates: &mut [f64],
     ) -> Result<f64, PhsError> {
         if observation.left.is_empty() {
@@ -221,7 +244,14 @@ impl TonePower {
             let left = left.value();
             if let Some(right) = &observation.right {
                 let mut value = Sum::default();
-                for (&a, &x) in right[i * d..(i + 1) * d].iter().zip(z.iter()) {
+                for (j, (&a, &x)) in right[i * d..(i + 1) * d].iter().zip(z.iter()).enumerate() {
+                    let x = if j >= l + self.n {
+                        source_input.map_or(x, |source| {
+                            self.source_scales[j - l - self.n] * source[j - l - self.n]
+                        })
+                    } else {
+                        x
+                    };
                     value.add(a * x);
                 }
                 integral.add(left * value.value());

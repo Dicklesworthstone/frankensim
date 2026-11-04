@@ -1049,6 +1049,31 @@ on 2:4 clocks (including regeneration with zero mean forces), check bitwise
 held/repeated-history equivalence with multiple ports, close nonlinear
 storage/heat/work, and exercise malformed-history and cancellation retry.
 
+`with_continuous_sources` prepares the original `PreparedExactTones` owner on
+either exact-quadratic native clock. `step_sources` then accepts simultaneous
+continuous cosine/sine sources and optional affine envelopes, independently on
+each side; the other side may retain its original nonlinear held/substep path.
+The same source owner composes with rectangular `PowerTransfer` connections.
+Both envelope endpoints use the common window's start carrier phase. Native
+subintervals restrict that same envelope and rotate its carrier; they do not
+replace it by sampled forces. The original physical state, damping and heat
+remain complete, and the existing held-interface solve/LU is reused.
+
+External work contracts the declared source against the complete physical
+trajectory through the original paired power factors. It is neither total
+work minus interface work nor an energy-balance remainder, so a tiny source
+remains observable beside a much larger internal exchange. The held interface
+still uses actual integrated outputs. Preparation admits added source coordinates
+and reusable buffers through an explicit dense budget; warm source steps use
+cached phases and factors. Refusal/cancellation preserves both accepted states,
+source phases and the prior interface guess. Source-phase helpers rotate accepted
+end coefficients for continuation. Common-window refinement remains necessary.
+
+`tests/multirate_coupling/continuous.rs` checks analytic zero-mean regenerative
+forcing, independent affine multi-tone motion/work/heat, tiny source work,
+continuous piston/chamber transfer, mixed nonlinear clocks, three-rung convergence
+to the coupled physical ODE, capacity and input refusals, and cancellation retry.
+
 Quadratic pairs prepare the complete affine interface response and its LU once.
 Nonlinear pairs retain the original Gonzalez `StepWorkspace`, with bounded
 interface Newton updates and at most 32 selected ports per side. Caller-declared local pole
