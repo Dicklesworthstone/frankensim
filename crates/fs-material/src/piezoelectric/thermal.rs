@@ -63,6 +63,9 @@ impl ThermalLongitudinalPiezoelectric {
         temperature_axis: &str,
         temperature_range_k: [f64; 2],
     ) -> Result<Self, PiezoelectricError> {
+        if original.tensor_reduction().is_some() {
+            return Err(PiezoelectricError::Invalid("tensor-reduced piezoelectric material requires a tensor-aware thermal law"));
+        }
         let mut slopes = [0.0; 3];
         let mut reference_temperature_k = 0.0;
         for (i, name) in [COMPLIANCE_33_E_PROPERTY, STRAIN_CHARGE_33_PROPERTY,
@@ -141,6 +144,9 @@ impl ThermalLongitudinalPiezoelectric {
 
     pub fn at_material(&self, material: &LongitudinalPiezoelectric)
         -> Result<ResolvedThermalPiezoelectric, PiezoelectricError> {
+        if material.tensor_reduction().is_some() {
+            return Err(PiezoelectricError::Invalid("tensor-reduced piezoelectric material requires a tensor-aware thermal law"));
+        }
         admit_source_temperature_refresh(self.original.material(),material.material()).map_err(field_error)?;
         let temperature = material.material().query_point().iter()
             .find_map(|(name,value)| (name == &self.temperature_axis).then_some(*value))

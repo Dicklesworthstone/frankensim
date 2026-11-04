@@ -4961,6 +4961,24 @@ open-circuit condition, strain/field amplitude envelope, nonlinearity,
 hysteresis, damping, thermal update or experimental validation is claimed by
 this fixed-condition material owner; physical consumers own those operations.
 
+`TensorPiezoelectric::longitudinal(n)` derives the existing longitudinal law
+from that same complete tensor and density. For unit n in the current frame,
+it assumes `T=t n⊗n` and `E=E_n n`: transverse stress and transverse electric
+field vanish, while transverse strain and D may be nonzero. With
+`r=mandel(n⊗n)`, prepared native elastic solves give `s=r.C^-1.r`,
+`d=n.e.C^-1.r`, and `epsilon_T=n.(epsilon_S+e.C^-1.e^T).n`. The reciprocal
+energy therefore retains lateral/shear relaxation and signed orientation.
+The original material bundle remains unchanged, with no synthesized scalar
+source claims; a separate receipt binds the tensor identity, frame and unit
+direction into the longitudinal law identity. Existing rod/circuit consumers
+can use this law directly. Synthetic G1/G3 tests reconstruct its response and
+energy from full strain-charge source data, and check co-rotation, direction
+reversal, source preservation and the scalar thermal adapter's explicit refusal.
+This homogeneous constraint is not a claim about insulating lateral faces,
+fringing fields, finite-wavelength rod modes or bulk charge-free waves. The
+scalar affine thermal owner refuses tensor reductions until a tensor-aware
+caloric law is supplied.
+
 ## Explicit liquid source admission for evolving shear rate
 
 `ResolvedLiquidSurfaceState::try_for_shear_rate_evolution` retains the original

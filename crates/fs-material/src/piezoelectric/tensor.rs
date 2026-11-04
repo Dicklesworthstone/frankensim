@@ -25,13 +25,16 @@ use fs_la::factor::{Cholesky, cholesky};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
-use super::{COMPLIANCE_DIMS, PiezoelectricError, STRAIN_CHARGE_DIMS};
+use super::{
+    COMPLIANCE_DIMS, LongitudinalPiezoelectric, PiezoelectricError, STRAIN_CHARGE_DIMS,
+    TensorLongitudinalReduction,
+};
 use crate::field_storage::ELECTRIC_PERMITTIVITY_DIMS;
 use crate::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_material_state_point,
 };
-use crate::tensor::{mandel_rotation, matmul3, rotate_mandel};
+use crate::tensor::{mandel_basis, mandel_rotation, matmul3, rotate_mandel};
 
 /// Directional bulk acoustic modes with the electrical wave constraint explicit.
 pub mod waves;
@@ -472,6 +475,60 @@ impl TensorPiezoelectric {
     /// Original fixed-reference density at the same material state [kg/m³].
     pub const fn density_kg_m3(&self) -> f64 {
         self.density
+    }
+
+    /// Reduce the SAME tensor to a homogeneous longitudinal sensor/actuator law.
+    /// With unit direction n in the current frame, stress is `T=t n⊗n` and
+    /// electric field is `E=E_n n`: transverse stresses and transverse E vanish,
+    /// while transverse strain and transverse D may relax. These are explicit
+    /// constitutive constraints, not a finite specimen's lateral boundary solve.
+    /// In particular, they are not the charge-free bulk-wave condition n.D=0.
+    ///
+    /// Writing r=mandel(n⊗n), two prepared elastic solves supply
+    /// `s=r.C^-1.r`, `d=n.e.C^-1.r`, and
+    /// `epsilon_T=n.(epsilon_S+e.C^-1.e^T).n`. Taking 1/C33 or e33/C33
+    /// would miss transverse and shear relaxation in an anisotropic solid.
+    /// The original source bundle is retained unchanged; direction/frame and
+    /// tensor identity are recorded separately rather than inventing claims.
+    /// Geometry, small-signal envelopes, lateral electrical constraints, finite
+    /// wavelength effects and thermal evolution remain the consumer's concern.
+    pub fn longitudinal(&self, direction: [f64; 3]) -> Result<LongitudinalPiezoelectric> {
+        let scale = direction.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+        if direction.iter().any(|x| !x.is_finite()) || scale == 0.0 {
+            return Err(invalid(
+                "longitudinal tensor direction must be finite and nonzero",
+            ));
+        }
+        let scaled = direction.map(|x| x / scale);
+        let length = fs_math::det::sqrt(dot(&scaled, &scaled));
+        let n = scaled.map(|x| if x == 0.0 { 0.0 } else { x / length });
+        let basis = mandel_basis();
+        let r: [f64; 6] = core::array::from_fn(|a| {
+            (0..3).fold(0.0, |sum, i| {
+                (0..3).fold(sum, |sum, j| (basis[a][i][j] * n[i]).mul_add(n[j], sum))
+            })
+        });
+        let electric_stress: [f64; 6] = core::array::from_fn(|a| {
+            (0..3).fold(0.0, |sum, i| self.coupling[i][a].mul_add(n[i], sum))
+        });
+        let mechanical_strain = self.elastic_factor.solve(r)?;
+        let electric_strain = self.elastic_factor.solve(electric_stress)?;
+        let compliance_e = dot(&r, &mechanical_strain);
+        let d = dot(&electric_stress, &mechanical_strain);
+        let epsilon_t =
+            dot(&n, &apply(&self.permittivity, &n)) + dot(&electric_stress, &electric_strain);
+        LongitudinalPiezoelectric::prepare(
+            self.material.clone(),
+            compliance_e,
+            d,
+            epsilon_t,
+            self.density,
+            Some(TensorLongitudinalReduction {
+                tensor_identity: self.identity,
+                frame_identity: self.frame,
+                direction: n,
+            }),
+        )
     }
 
     /// Express all three blocks in one new, explicitly named frame. `rotation`

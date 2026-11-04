@@ -7,9 +7,10 @@ use fs_matdb::{
 };
 use fs_material::field_storage::ELECTRIC_PERMITTIVITY_DIMS;
 use fs_material::piezoelectric::tensor::{STRESS_CHARGE_DIMS, TensorPiezoelectric};
-use fs_material::piezoelectric::{COMPLIANCE_DIMS, STRAIN_CHARGE_DIMS};
+use fs_material::piezoelectric::thermal::ThermalLongitudinalPiezoelectric;
+use fs_material::piezoelectric::{COMPLIANCE_DIMS, PiezoelectricError, STRAIN_CHARGE_DIMS};
 use fs_material::state_point::MaterialPropertySelection;
-use fs_material::tensor::{mandel_rotation, rotation};
+use fs_material::tensor::{mandel_basis, mandel_rotation, rotation};
 use fs_qty::{Density, Dims, Pressure};
 
 const FRAME: ContentHash = ContentHash([7; 32]);
@@ -157,8 +158,7 @@ fn strain_charge_source(s: C, d: E, epsilon_t: P) -> MaterialCard {
     })
 }
 
-#[test]
-fn g1_strain_charge_datasheet_form_retains_sources_and_reciprocal_response() {
+fn strain_charge_coefficients() -> (C, E, P) {
     let mut s: C = core::array::from_fn(|i| {
         core::array::from_fn(|j| {
             if i == j {
@@ -180,6 +180,12 @@ fn g1_strain_charge_datasheet_form_retains_sources_and_reciprocal_response() {
         [1e-9, 2.5e-8, -2e-10],
         [0.0, -2e-10, 2e-8],
     ];
+    (s, d, epsilon_t)
+}
+
+#[test]
+fn g1_strain_charge_datasheet_form_retains_sources_and_reciprocal_response() {
+    let (s, d, epsilon_t) = strain_charge_coefficients();
     let card = strain_charge_source(s, d, epsilon_t);
     let material = TensorPiezoelectric::resolve_strain_charge(
         &card,
@@ -345,6 +351,31 @@ fn g1_open_short_and_signed_longitudinal_limits() {
         let mut e = [[0.0; 6]; 3];
         e[2][2] = coupling;
         let material = law(c, e, p);
+        let longitudinal = material.longitudinal([0.0, 0.0, 1.0]).unwrap();
+        near(
+            longitudinal.compliance_at_fixed_field_pa_inv(),
+            1e-11,
+            1e-26,
+            1e-15,
+        );
+        near(
+            longitudinal.strain_charge_coefficient_m_v(),
+            coupling / 1e11,
+            1e-26,
+            1e-15,
+        );
+        near(
+            longitudinal.axially_clamped_permittivity_f_m(),
+            2e-8,
+            1e-23,
+            1e-15,
+        );
+        near(
+            longitudinal.open_circuit_modulus_pa(),
+            1e11 + coupling * coupling / 2e-8,
+            1e-5,
+            1e-15,
+        );
         let mut strain = [0.0; 6];
         strain[2] = 1e-5;
         let short = material.field_response(strain, [0.0; 3]).unwrap();
@@ -378,6 +409,182 @@ fn g1_open_short_and_signed_longitudinal_limits() {
             1e-15,
         );
     }
+}
+
+#[test]
+fn g1_longitudinal_reduction_recovers_anisotropic_strain_charge_work() {
+    let (s, d, epsilon_t) = strain_charge_coefficients();
+    let card = strain_charge_source(s, d, epsilon_t);
+    let tensor = TensorPiezoelectric::resolve_strain_charge(
+        &card,
+        &point(),
+        MaterialPropertySelection::SingleClaimOnly,
+        FRAME,
+    )
+    .unwrap();
+    let n = [1.0 / 3.0, 2.0 / 3.0, -2.0 / 3.0];
+    let reduced = tensor.longitudinal(n).unwrap();
+    let basis = mandel_basis();
+    let r: [f64; 6] = core::array::from_fn(|a| {
+        (0..3)
+            .map(|i| (0..3).map(|j| basis[a][i][j] * n[i] * n[j]).sum::<f64>())
+            .sum()
+    });
+    let scalar = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+    let compliance = scalar(&r, &apply(&s, &r));
+    let direct = scalar(&n, &apply(&d, &r));
+    let dielectric = scalar(&n, &apply(&epsilon_t, &n));
+    near(
+        reduced.compliance_at_fixed_field_pa_inv(),
+        compliance,
+        1e-25,
+        1e-13,
+    );
+    near(
+        reduced.strain_charge_coefficient_m_v(),
+        direct,
+        1e-24,
+        1e-13,
+    );
+    near(
+        reduced.permittivity_at_fixed_stress_f_m(),
+        dielectric,
+        1e-22,
+        1e-13,
+    );
+    assert_eq!(reduced.material(), tensor.material());
+    assert_eq!(reduced.material().card_identity(), card.content_hash());
+    assert_eq!(reduced.material().properties().len(), 64);
+    assert!(
+        reduced
+            .material()
+            .property("piezoelectric_compliance_33_at_constant_field")
+            .is_none()
+    );
+    let receipt = reduced.tensor_reduction().unwrap();
+    assert_eq!(receipt.tensor_identity, tensor.identity());
+    assert_eq!(receipt.frame_identity, FRAME);
+    for i in 0..3 {
+        near(receipt.direction[i], n[i], 2e-16, 0.0);
+    }
+    // The original full strain-charge source is the independent reference. It
+    // includes every lateral/shear compliance and coupling, not just C33/e33.
+    for (axial_stress, axial_field) in [(2e6, 0.0), (0.0, -4000.0), (2e6, -4000.0)] {
+        let stress = r.map(|x| x * axial_stress);
+        let field = n.map(|x| x * axial_field);
+        let mechanical = apply(&s, &stress);
+        let strain: [f64; 6] = core::array::from_fn(|a| {
+            mechanical[a] + (0..3).map(|i| d[i][a] * field[i]).sum::<f64>()
+        });
+        let charge = apply(&d, &stress);
+        let dielectric = apply(&epsilon_t, &field);
+        let displacement: [f64; 3] = core::array::from_fn(|i| charge[i] + dielectric[i]);
+        let axial_strain = scalar(&r, &strain);
+        let axial_displacement = scalar(&n, &displacement);
+        let full = tensor.field_response(strain, field).unwrap();
+        let response = reduced.response(axial_strain, axial_displacement).unwrap();
+        near(response.stress_pa, axial_stress, 5e-8, 1e-13);
+        near(response.electric_field_v_m, axial_field, 2e-9, 1e-13);
+        near(
+            response.stored_energy_j_m3,
+            full.stored_energy_j_m3,
+            1e-11,
+            1e-13,
+        );
+        near(
+            response.stored_energy_j_m3,
+            0.5 * (axial_stress * axial_strain + axial_field * axial_displacement),
+            1e-11,
+            1e-13,
+        );
+    }
+}
+
+#[test]
+fn g3_longitudinal_tensor_reduction_preserves_orientation_and_relaxation() {
+    let (c, e, p) = coefficients();
+    let tensor = law(c, e, p);
+    let axial = tensor.longitudinal([0.0, 0.0, 1.0]).unwrap();
+    assert!((axial.compliance_at_fixed_field_pa_inv() * c[2][2] - 1.0).abs() > 0.01);
+    assert!((axial.strain_charge_coefficient_m_v() * c[2][2] - e[2][2]).abs() > 0.1);
+    let direction = [1.0, 2.0, 2.0];
+    let reduced = tensor.longitudinal(direction).unwrap();
+    assert_eq!(reduced, tensor.longitudinal([10.0, 20.0, 20.0]).unwrap());
+    let reversed = tensor.longitudinal(direction.map(|x| -x)).unwrap();
+    near(
+        reversed.compliance_at_fixed_field_pa_inv(),
+        reduced.compliance_at_fixed_field_pa_inv(),
+        0.0,
+        1e-14,
+    );
+    near(
+        reversed.permittivity_at_fixed_stress_f_m(),
+        reduced.permittivity_at_fixed_stress_f_m(),
+        0.0,
+        1e-14,
+    );
+    near(
+        reversed.strain_charge_coefficient_m_v(),
+        -reduced.strain_charge_coefficient_m_v(),
+        0.0,
+        1e-14,
+    );
+    assert_ne!(reversed.identity(), reduced.identity());
+    let q = rotation([1.0 / 3.0_f64.sqrt(); 3], 0.73);
+    let rotated = tensor.rotated(ContentHash([9; 32]), q).unwrap();
+    let moved = rotated.longitudinal(apply(&q, &direction)).unwrap();
+    near(
+        moved.compliance_at_fixed_field_pa_inv(),
+        reduced.compliance_at_fixed_field_pa_inv(),
+        1e-25,
+        1e-13,
+    );
+    near(
+        moved.strain_charge_coefficient_m_v(),
+        reduced.strain_charge_coefficient_m_v(),
+        1e-24,
+        1e-13,
+    );
+    near(
+        moved.permittivity_at_fixed_stress_f_m(),
+        reduced.permittivity_at_fixed_stress_f_m(),
+        1e-22,
+        1e-13,
+    );
+    assert_eq!(moved.material(), reduced.material());
+    assert_eq!(
+        moved.tensor_reduction().unwrap().tensor_identity,
+        rotated.identity()
+    );
+    assert_eq!(
+        moved.tensor_reduction().unwrap().frame_identity,
+        ContentHash([9; 32])
+    );
+    assert_ne!(moved.identity(), reduced.identity());
+}
+
+#[test]
+fn g0_longitudinal_tensor_direction_and_thermal_boundaries_are_explicit() {
+    let (c, e, p) = coefficients();
+    let card = source(c, e, p, |_| {});
+    let tensor = law(c, e, p);
+    for direction in [[0.0; 3], [f64::NAN, 0.0, 1.0], [1.0, f64::INFINITY, 0.0]] {
+        assert!(tensor.longitudinal(direction).is_err());
+    }
+    let reduced = tensor.longitudinal([1.0, 0.0, 0.0]).unwrap();
+    for direction in [
+        [f64::MAX, 0.0, 0.0],
+        [f64::MIN_POSITIVE / 4.0, 0.0, 0.0],
+        [1.0, -0.0, 0.0],
+    ] {
+        assert_eq!(tensor.longitudinal(direction).unwrap(), reduced);
+    }
+    assert!(matches!(
+        ThermalLongitudinalPiezoelectric::new(&card, &reduced, "T", [250.0, 400.0]),
+        Err(PiezoelectricError::Invalid(
+            "tensor-reduced piezoelectric material requires a tensor-aware thermal law"
+        ))
+    ));
 }
 
 #[test]

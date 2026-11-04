@@ -1,7 +1,8 @@
 //! Source-bound, reversible longitudinal piezoelectricity at a fixed material state.
 //!
 //! The declared material direction is axis 3, with transverse stress free and
-//! electric field and displacement along that axis. The source convention is
+//! electric field along that axis; D is the longitudinal displacement component.
+//! The source convention is
 //! `strain = s_E stress + d E`, `D = d stress + epsilon_T E`. These are the
 //! small-signal strain/charge equations, e.g. PI's *Fundamentals of Piezo
 //! Technology*, Electromechanics and Assignment of Axes:
@@ -15,8 +16,10 @@
 //! Its derivatives, rather than two independently tuned gains, supply stress
 //! and electric field. No material name selects a coefficient.
 
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, QuantitySpec};
+use std::sync::Arc;
 
 use crate::field_storage::ELECTRIC_PERMITTIVITY_DIMS;
 use crate::state_point::{
@@ -25,10 +28,10 @@ use crate::state_point::{
     resolve_material_state_point,
 };
 
-/// Reversible caloric response of the original coupled compliance block.
-pub mod thermal;
 /// Source-bound three-dimensional stress-charge tensors and frame transforms.
 pub mod tensor;
+/// Reversible caloric response of the original coupled compliance block.
+pub mod thermal;
 
 /// Axial `s33^E` [1/Pa], with other stresses zero and electric field fixed.
 pub const COMPLIANCE_33_E_PROPERTY: &str = "piezoelectric_compliance_33_at_constant_field";
@@ -61,19 +64,39 @@ impl core::fmt::Display for PiezoelectricError {
 }
 impl std::error::Error for PiezoelectricError {}
 
+/// Declared projection of a complete tensor law into a longitudinal material.
+/// The original tensor and its source bundle remain authoritative; this receipt
+/// does not create new measured scalar property claims. Mechanical stress is
+/// `T=t n⊗n` and electric field is `E=E_n n`. Transverse electric displacement
+/// may be nonzero; insulating lateral surfaces are not imposed by this reduction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TensorLongitudinalReduction {
+    /// Identity of the complete tensor, including its source-to-current-frame map.
+    pub tensor_identity: ContentHash,
+    /// Frame in which the longitudinal direction is expressed.
+    pub frame_identity: ContentHash,
+    /// Oriented unit direction n. Reversing it reverses the signed d coefficient.
+    pub direction: [f64; 3],
+}
+
 /// One complete fixed source snapshot; coefficients are never refreshed silently
-/// during a trajectory. The property names declare the common longitudinal
-/// direction and stress/field conventions. This is a one-dimensional reduction,
-/// not an inference of a complete tensor or its off-axis response.
+/// during a trajectory. Scalar property names or an explicit tensor reduction
+/// declare the common longitudinal direction and stress/field conventions.
+/// A scalar source does not imply a complete tensor or its off-axis response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LongitudinalPiezoelectric {
-    material: ResolvedMaterialStatePoint,
+    // Rod and native circuit candidates clone this law during every accepted
+    // interval. Share the immutable source receipts, especially full tensors'
+    // 64-property bundles, instead of copying their provenance on each trial.
+    material: Arc<ResolvedMaterialStatePoint>,
     compliance_e: f64,
     d: f64,
     epsilon_t: f64,
     epsilon_axial: f64,
     e: f64,
     density: f64,
+    tensor_reduction: Option<TensorLongitudinalReduction>,
+    identity: ContentHash,
 }
 
 /// Derivatives and value of the SAME electric-displacement/strain energy.
@@ -157,6 +180,20 @@ impl LongitudinalPiezoelectric {
         let d = coefficient(STRAIN_CHARGE_33_PROPERTY, STRAIN_CHARGE_DIMS)?;
         let epsilon_t = coefficient(PERMITTIVITY_33_T_PROPERTY, ELECTRIC_PERMITTIVITY_DIMS)?;
         let density = coefficient(DENSITY_PROPERTY, Density::DIMS)?;
+        Self::prepare(material, compliance_e, d, epsilon_t, density, None)
+    }
+
+    // Shared admission for original scalar roles and a projection of an already
+    // admitted full tensor. Only the latter may bypass scalar source-role lookup.
+    fn prepare(
+        material: ResolvedMaterialStatePoint,
+        compliance_e: f64,
+        d: f64,
+        epsilon_t: f64,
+        density: f64,
+        tensor_reduction: Option<TensorLongitudinalReduction>,
+    ) -> Result<Self, PiezoelectricError> {
+        let invalid = PiezoelectricError::Invalid;
         let e = d / compliance_e;
         let reduction = d * e;
         let epsilon_axial = epsilon_t - reduction;
@@ -179,14 +216,30 @@ impl LongitudinalPiezoelectric {
                 "positive compliance, density and epsilon_T-d^2/s_E are required for stable representable coupled storage",
             ));
         }
+        let mut hash =
+            DomainHasher::new("org.frankensim.fs-material.piezoelectric-longitudinal.v1");
+        hash.update(material.identity().as_bytes());
+        for value in [compliance_e, d, epsilon_t, epsilon_axial, e, density] {
+            hash.update(&value.to_bits().to_le_bytes());
+        }
+        hash.update(&[u8::from(tensor_reduction.is_some())]);
+        if let Some(reduction) = tensor_reduction {
+            hash.update(reduction.tensor_identity.as_bytes());
+            hash.update(reduction.frame_identity.as_bytes());
+            for value in reduction.direction {
+                hash.update(&value.to_bits().to_le_bytes());
+            }
+        }
         let result = Self {
-            material,
+            material: Arc::new(material),
             compliance_e,
             d,
             epsilon_t,
             epsilon_axial,
             e,
             density,
+            tensor_reduction,
+            identity: hash.finalize(),
         };
         if !result.open_circuit_modulus_pa().is_finite() {
             return Err(invalid("open-circuit stiffness is not representable"));
@@ -195,8 +248,17 @@ impl LongitudinalPiezoelectric {
     }
 
     /// Original complete source bundle, quantity descriptors and selected claims.
-    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+    pub fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
+    }
+    /// Identity of the complete source and constitutive law, including any
+    /// tensor projection's direction, frame and reduced coefficients.
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+    /// Tensor projection receipt, or None for original longitudinal scalar roles.
+    pub const fn tensor_reduction(&self) -> Option<&TensorLongitudinalReduction> {
+        self.tensor_reduction.as_ref()
     }
     /// Constant-field axial compliance `s33^E` [1/Pa].
     pub const fn compliance_at_fixed_field_pa_inv(&self) -> f64 {
