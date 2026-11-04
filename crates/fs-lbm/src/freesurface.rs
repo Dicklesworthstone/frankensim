@@ -51,9 +51,11 @@ pub enum ContactModel {
     Wetting,
 }
 
-/// Directional state selected from a dynamic wetting hysteresis bracket.
+/// Selected contact-line response, including an explicitly equilibrium closure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContactLineRegime2 {
+    /// An equilibrium boundary angle; no contact-line velocity or pinning law.
+    Equilibrium,
     /// The signed contact-line speed is below the negative pinning deadband.
     Receding,
     /// The signed contact-line speed lies inside the closed pinning deadband.

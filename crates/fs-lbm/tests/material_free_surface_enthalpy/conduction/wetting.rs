@@ -18,6 +18,9 @@ use fs_material::thermal::source::ThermalMaterialPoint;
 #[path = "wetting/gas.rs"]
 mod gas;
 
+#[path = "wetting/equilibrium.rs"]
+mod equilibrium;
+
 const WALL_CELL: [usize; 3] = [0, 1, 3];
 
 fn wetting_controls() -> FreeSurfaceWettingControls {

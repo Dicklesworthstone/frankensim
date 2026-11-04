@@ -15,14 +15,57 @@
 use super::*;
 use crate::d3q19::freesurface3::PlanarWall3;
 use crate::material::free_surface::wetting::{
-    CoxVoinovControls, CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingSample,
-    WettingThermalPoint,
+    CoxVoinovControls, CoxVoinovLaw, EquilibriumAngleOrigin, FreeSurfaceWettingControls,
+    FreeSurfaceWettingSample, WettingThermalPoint,
 };
 use fs_matdb::InterfaceSystemCard;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 
 impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+    /// Evolve an explicitly equilibrium wall using its local liquid temperature.
+    ///
+    /// Choose a sourced equilibrium angle or Young--Dupre from reversible
+    /// adhesion work and the SAME constant liquid/gas tension retained by the
+    /// native thermal law. The original ordered interface and selected claim
+    /// stay pinned. Every heat, conduction and flow candidate refreshes this
+    /// response before publication; a source-domain exit or loss of partial
+    /// wetting rolls back the complete thermal/flow step.
+    ///
+    /// This smooth, homogeneous stationary-wall closure supplies no pinning,
+    /// contact-line friction or dynamic-angle law. It cannot be combined with
+    /// the separate Cox/hysteresis or thermocapillary geometry owners. Changing
+    /// adhesion alters native capillary momentum, but does not invent surface
+    /// heat or establish a closed total surface/mechanical energy balance.
+    /// The local liquid-cell temperature approximates the interface temperature;
+    /// no separately solved solid/liquid interface temperature is inferred.
+    pub fn with_equilibrium_planar_wetting(
+        mut self,
+        wall: PlanarWall3,
+        card: &'m InterfaceSystemCard,
+        origin: EquilibriumAngleOrigin,
+        selection: MaterialPropertySelection,
+        maximum_wall_cells: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        if self.thermocapillary.is_some() || self.wetting.is_some() {
+            return Err(Error::Invalid(
+                "thermal equilibrium wetting requires its own constant-tension wall geometry",
+            ));
+        }
+        let binding = WettingBinding::try_equilibrium(
+            &mut self.flow, wall, card, origin, selection, self.law.temperature_axis(),
+            maximum_wall_cells, gate,
+        )?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        poll(gate)?;
+        self.wetting = Some(binding);
+        Ok(self)
+    }
+
     /// Couple the original Cox boundary to an explicitly sourced outer gas.
     /// Its actual mu_gas divided by the local mu_liquid(T) supplies the two-phase
     /// wedge ratio. The two phases retain separate temperatures and receipts;
@@ -141,7 +184,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             .and_then(WettingBinding::cox_voinov_law)
     }
 
-    /// Original selected interface bundle, including both angle claims.
+    /// Original selected equilibrium or hysteresis interface source bundle.
     #[must_use]
     pub fn wetting_source(&self) -> Option<&ResolvedInterfaceStatePoint> {
         self.wetting.as_ref().map(WettingBinding::source)

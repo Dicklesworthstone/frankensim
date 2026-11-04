@@ -7488,6 +7488,37 @@ regressions, not passing native or experimental evidence.
 Focused command:
 `cargo test -p fs-lbm --test material_free_surface_enthalpy conduction::capillarity::wetting`.
 
+`with_equilibrium_planar_wetting` adds an explicitly equilibrium alternative
+on that same thermal/native transaction. It selects either an original
+equilibrium-angle claim or the existing Young--Dupre law from reversible
+`equilibrium-work-of-adhesion` W(T) and the SAME source-declared constant
+liquid/gas tension retained by the thermal material bundle. The actual local
+liquid caloric temperature refreshes the selected interface claim before
+collision, at conductive substeps, and after advection. Source substitution,
+loss of partial wetting (`0 < W < 2 sigma`), and the original tension source's
+domain exit refuse the complete step. Dry numerical ghosts retain reference
+conditions. Unchanged reference-temperature sources are reused verbatim,
+without per-cell claim resolution.
+
+Equilibrium samples retain their explicit angle origin and
+`ContactLineRegime2::Equilibrium`; they contain the original work or angle
+receipt, without fabricated hysteresis claims or a contact-speed query.
+This boundary does not need a resolved contact-line velocity, and therefore
+does not reject locally flat filling stencils merely for a zero tangential
+gradient. Adding Cox dynamics refuses rather than turning equilibrium work
+into a measured advancing/receding bracket. The separate thermocapillary
+geometry remains incompatible: varying sigma requires that original owner,
+not freezing a temperature-dependent tension source here. The local-cell
+interface-temperature approximation, stationary homogeneous-wall assumption
+and absence of closed surface-energy/heat accounting remain explicit.
+
+Four focused regressions in
+`tests/material_free_surface_enthalpy/conduction/wetting/equilibrium.rs`
+cover constant-source native parity, local W(T) feedback into the same
+momentum step with conserved mass and explicit heat, original-source and
+partial-wetting rollback/retry, and refusal of an implicit Cox extension.
+They are synthetic numerical tests, not experimental wetting validation.
+
 
 ### Source-bound DC current on the free-surface thermal trajectory
 

@@ -1,4 +1,4 @@
-//! Source-pinned hysteresis drives the existing planar capillary boundary.
+//! Source-pinned equilibrium or hysteresis drives the native planar boundary.
 //!
 //! This explicit geometric closure estimates contact-line speed from successive
 //! accepted wall-adjacent VOF fields. It does not identify wall-fluid velocity
@@ -7,6 +7,8 @@
 //! In the deadband, the measured angle is projected onto the sourced interval.
 //! That is a bounded hysteresis closure, not a proof of exact pinning, calibrated
 //! dynamic wetting, or closed surface/mechanical/thermal energy conservation.
+//! The thermal owner can instead select local equilibrium explicitly, updating
+//! its original angle or reversible adhesion work without a contact-speed law.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,6 +29,9 @@ use fs_qty::{Dims, QuantitySpec};
 
 mod cox_voinov;
 pub use cox_voinov::{CoxVoinovControls, CoxVoinovLaw, CoxVoinovSample};
+mod equilibrium;
+use equilibrium::EquilibriumWetting;
+pub use fs_material::liquid::surface::adhesion::EquilibriumAngleOrigin;
 
 /// Local liquid properties supplied by the existing enthalpy source owner.
 #[derive(Clone, Copy)]
@@ -52,24 +57,30 @@ pub struct FreeSurfaceWettingControls {
     pub maximum_wall_cells: usize,
 }
 
-/// One accepted contact estimate and the two ORIGINAL source endpoint claims.
+/// One accepted contact response and its ORIGINAL source claims.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfaceWettingSample {
     /// Positive is advancing liquid along its outward in-wall normal [m/s].
+    /// Zero for an equilibrium closure, which does not infer contact-line speed.
     pub signed_speed_m_s: f64,
-    /// Direction/deadband selection; `Pinned` does not certify zero line motion.
+    /// Equilibrium closure or direction/deadband selection. `Pinned` does not
+    /// certify zero line motion; `Equilibrium` does not evaluate line speed.
     pub regime: ContactLineRegime2,
     /// Geometric angle through liquid from the accepted first-cell fill [rad].
     pub geometric_angle_radians: f64,
     /// Angle used by the next native curvature reconstruction [rad].
     pub applied_angle_radians: f64,
+    /// Explicit equilibrium-angle origin, absent for a hysteresis closure.
+    pub equilibrium: Option<EquilibriumAngleOrigin>,
     /// Optional explicit hydrodynamic prediction, separate from static source claims.
     pub hydrodynamic: Option<CoxVoinovSample>,
     /// Explicit outer-phase transport source, including its own temperature,
     /// pressure and composition. Shared by this wall field, never substituted
     /// for the liquid/interface temperature. None for a declared fixed ratio.
     pub outer_gas: Option<Arc<ResolvedThermochemicalGasState>>,
-    /// Both pinned endpoint claims, ordered surfaces, source point and receipts.
+    /// Original selected claims, ordered surfaces, source point and receipts.
+    /// An equilibrium source has one angle or adhesion-work claim, not invented
+    /// advancing/receding measurements.
     pub material: ResolvedInterfaceStatePoint,
 }
 
@@ -150,6 +161,7 @@ pub(super) struct WettingPhysics<'m> {
     pub(super) source: ResolvedInterfaceStatePoint,
     pub(super) controls: FreeSurfaceWettingControls,
     hydrodynamic: Option<HydrodynamicWetting>,
+    equilibrium: Option<EquilibriumWetting>,
 }
 
 impl<'s> MaterialFreeSurface3<'s> {
@@ -185,15 +197,25 @@ impl<'m> WettingBinding<'m> {
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         checkpoint(gate)?;
+        let physics = WettingPhysics::try_new(&flow.scaling, card, selection, controls, gate)?;
+        Self::with_physics(flow, wall, physics, gate)
+    }
+
+    fn with_physics(
+        flow: &mut MaterialFreeSurface3<'_>,
+        wall: PlanarWall3,
+        physics: WettingPhysics<'m>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        checkpoint(gate)?;
         if flow.scaling.planar_wetting.is_some() || !flow.lattice.admits_dynamic_planar_wetting() {
             return Err(Error::Invalid(
-                "dynamic planar wetting requires otherwise neutral walls",
+                "evolving planar wetting requires otherwise neutral walls",
             ));
         }
-        let physics = WettingPhysics::try_new(&flow.scaling, card, selection, controls, gate)?;
         let geometry = flow
             .lattice
-            .planar_wall_fill(wall, controls.maximum_wall_cells, gate)?;
+            .planar_wall_fill(wall, physics.controls.maximum_wall_cells, gate)?;
         let mut candidate = Self {
             physics,
             wall,
@@ -268,6 +290,7 @@ impl<'m> WettingPhysics<'m> {
             source,
             controls,
             hydrodynamic: None,
+            equilibrium: None,
         })
     }
 }
@@ -366,6 +389,11 @@ impl WettingPhysics<'_> {
         checkpoint(gate)?;
         if self.hydrodynamic.is_some() {
             return Err(Error::Invalid("contact line already owns a Cox model"));
+        }
+        if self.equilibrium.is_some() {
+            return Err(Error::Invalid(
+                "equilibrium wetting cannot acquire an implicit hysteresis or Cox rate law",
+            ));
         }
         if scaling.material.rheology_axes().is_some() {
             return Err(Error::Invalid(
@@ -529,12 +557,18 @@ impl WettingBinding<'_> {
             let old_fill = previous.map_or(current.fill, |map| {
                 map.get(&position).map_or(0.0, |g| g.fill)
             });
-            let speed = contact_speed(
-                current.fill - old_fill,
-                current.tangent_gradient,
-                scaling.cell_size_m(),
-                scaling.timestep_s(),
-            )?;
+            let speed = if self.physics.equilibrium.is_some() {
+                // Equilibrium contact angles need no resolved speed. In
+                // particular a filling, locally flat wall stencil is valid.
+                0.0
+            } else {
+                contact_speed(
+                    current.fill - old_fill,
+                    current.tangent_gradient,
+                    scaling.cell_size_m(),
+                    scaling.timestep_s(),
+                )?
+            };
             let temperature = temperatures
                 .and_then(|(axis, field)| field.get(&position).map(|&t| (axis, t)));
             result.insert(position, self.physics.sample(current.angle_radians, speed, temperature, gate)?);
@@ -552,6 +586,9 @@ impl WettingPhysics<'_> {
         temperature: Option<(&str, WettingThermalPoint)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceWettingSample, Error> {
+        if let Some(equilibrium) = &self.equilibrium {
+            return self.equilibrium_sample(equilibrium, geometric_angle_radians, temperature, gate);
+        }
         // A hydrodynamic prediction uses zero-speed endpoint measurements.
         // Its rate dependence must never be laundered into a material receipt.
         let query_speed = if self.hydrodynamic.is_some() {
@@ -610,6 +647,7 @@ impl WettingPhysics<'_> {
             regime,
             geometric_angle_radians,
             applied_angle_radians,
+            equilibrium: None,
             hydrodynamic,
             outer_gas: self.hydrodynamic.as_ref().and_then(|binding| binding.outer_gas.clone()),
             material,
