@@ -129,6 +129,126 @@ fn g1_variable_calorics_keep_the_original_entropy_and_energy_references() {
 }
 
 #[test]
+fn g1_near_vacuum_mixture_outlets_admit_the_sonic_face_without_a_cold_conservative_tail() {
+    use crate::multicomponent::tests::{gas as mixture, source};
+    use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+    let gas = mixture(vec![
+        source("A", R, 3.5, 0.0, 30.0),
+        source("B", 2.0 * R, 3.5, 0.4, -60.0),
+        source("absent-C", 0.5 * R, 4.5, 0.2, 7.0),
+    ]);
+    let densities = [0.35, 0.65, 0.0];
+    // Independent variable-Cp sonic oracle for this exact three-species fixture.
+    // Cp(T)=a+b*T, Rmix=r. Integrating in sqrt(T) removes the cold singularity.
+    let r = 0.675_f64;
+    let a = 3.5 * r;
+    let b = 0.13;
+    let initial_temperature = 1.0 / r;
+    let acoustic = |t: f64| (r * t * (a + b * t) / (a - r + b * t)).sqrt();
+    let invariant = |t: f64| {
+        let panels = 512;
+        let start = t.sqrt();
+        let width = (initial_temperature.sqrt() - start) / panels as f64;
+        let integrand = |z: f64| 2.0 * ((a + b * z * z) * (a - r + b * z * z) / r).sqrt();
+        let mut value = integrand(start) + integrand(initial_temperature.sqrt());
+        for panel in 1..panels {
+            value +=
+                if panel % 2 == 0 { 2.0 } else { 4.0 } * integrand(start + panel as f64 * width);
+        }
+        value * width / 3.0
+    };
+    let (mut low, mut high) = (0.001_f64, initial_temperature);
+    for _ in 0..64 {
+        let t = low.midpoint(high);
+        if invariant(t) > acoustic(t) {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    let temperature = low.midpoint(high);
+    let speed = acoustic(temperature);
+    let pressure = ((a * (temperature / initial_temperature).ln()
+        + b * (temperature - initial_temperature))
+        / r)
+        .exp();
+    let density = pressure / (r * temperature);
+    let mass = density * speed;
+    let thermal =
+        (a - r) * (temperature - 0.001) + 0.5 * b * (temperature * temperature - 0.001_f64.powi(2));
+    let enthalpy = thermal + r * temperature + 0.5 * speed * speed;
+    let inside = gas.conserved(&densities, 0.0, 1.0).unwrap();
+    let bath = gas.conserved(&[0.0, 2e-12, 0.0], 0.0, 1e-12).unwrap();
+    for normal in [-1.0, 1.0] {
+        for backpressure in [0.01, 1e-12] {
+            let mut flux = [f64::NAN; 5];
+            let receipt = gas
+                .pressure_outlet_flux(inside.as_cell(), normal, backpressure, &mut flux, || false)
+                .unwrap();
+            close(flux[0], normal * 0.35 * mass);
+            close(flux[1], normal * 0.65 * mass);
+            assert_eq!(flux[2], 0.0);
+            close(flux[3], mass * speed + pressure);
+            close(flux[4], normal * mass * enthalpy);
+            assert!(receipt.signal_speed >= 2.0 * speed - 1e-9);
+        }
+        let mut reservoir = [f64::NAN; 5];
+        gas.reservoir_flux(
+            inside.as_cell(),
+            bath.as_cell(),
+            normal,
+            &mut reservoir,
+            || false,
+        )
+        .unwrap();
+        close(reservoir[0], normal * 0.35 * mass);
+        close(reservoir[1], normal * 0.65 * mass);
+        assert_eq!(reservoir[2], 0.0);
+        close(reservoir[3], mass * speed + pressure);
+        close(reservoir[4], normal * mass * enthalpy);
+
+        let shear = [0.2, -0.3];
+        let mut spatial = [f64::NAN; 7];
+        gas.pressure_outlet_spatial_flux(
+            SpatialCell {
+                partial_densities: &densities,
+                normal_momentum: 0.0,
+                transverse_momentum: shear,
+                energy: inside.energy + 0.5 * (shear[0] * shear[0] + shear[1] * shear[1]),
+            },
+            normal,
+            1e-12,
+            &mut spatial,
+            || false,
+        )
+        .unwrap();
+        for k in 0..4 {
+            close(spatial[k], reservoir[k]);
+        }
+        close(spatial[4], normal * mass * shear[0]);
+        close(spatial[5], normal * mass * shear[1]);
+        close(
+            spatial[6],
+            normal * mass * (enthalpy + 0.5 * (shear[0] * shear[0] + shear[1] * shear[1])),
+        );
+    }
+
+    // A source window that excludes the sonic state still refuses. Only an
+    // unused remote tail may be omitted; the actual face is never extrapolated.
+    let mut domain = gas.domain();
+    domain.minimum_temperature = 1.4;
+    let restricted = MixtureGas::new(gas.source().clone(), domain, || false).unwrap();
+    let inside = restricted.conserved(&densities, 0.0, 1.0).unwrap();
+    let mut refused = [37.0; 5];
+    assert!(matches!(
+        restricted.pressure_outlet_flux(inside.as_cell(), 1.0, 1e-12, &mut refused, || false,),
+        Err(Error::CharacteristicPath(_))
+    ));
+    assert_eq!(refused, [37.0; 5]);
+}
+
+#[test]
 fn g3_planar_and_spatial_outlets_transport_all_shear_work_once() {
     let gas = caloric_gas(true, 0.0);
     let densities = [0.3, 0.7];

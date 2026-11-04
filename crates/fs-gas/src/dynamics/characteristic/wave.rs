@@ -329,9 +329,24 @@ pub(super) fn sample_outflow<L: CaloricLaw>(
     if wave.primitive.pressure >= inside.pressure {
         return Err(Error::CaloricPath("unsupported straddling pressure shock"));
     }
-    let mut lo = wave.primitive.temperature;
-    let mut hi = inside.temperature;
     let tolerance = velocity_tolerance(gas, inside, wave.primitive);
+    sonic_outflow(
+        gas,
+        inside,
+        wave.primitive.temperature,
+        tolerance,
+        cancelled,
+    )
+}
+
+fn sonic_outflow<L: CaloricLaw>(
+    gas: &L,
+    inside: Primitive,
+    mut lo: f64,
+    tolerance: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Primitive, Error<L::Error>> {
+    let mut hi = inside.temperature;
     for _ in 0..gas.domain().maximum_iterations {
         poll(cancelled)?;
         let t = lo.midpoint(hi);
@@ -354,7 +369,7 @@ pub(super) fn sample_outflow<L: CaloricLaw>(
 
 /// Recover a supported sonic outlet when the requested downstream pressure
 /// would extend an unused part of the expansion fan below the source window.
-/// The admitted cold endpoint must already lie beyond the sonic characteristic;
+/// The source's cold endpoint characteristic must already lie beyond sonic;
 /// otherwise even the interface state requires unsupported colder gas.
 pub(super) fn cold_outflow<L: CaloricLaw>(
     gas: &L,
@@ -364,27 +379,44 @@ pub(super) fn cold_outflow<L: CaloricLaw>(
     poll(cancelled)?;
     let minimum = gas.domain().minimum_temperature;
     let tolerance = base_velocity_tolerance(gas, inside);
-    let endpoint = fan_state(gas, inside, minimum, 0.25 * tolerance, cancelled)?;
-    let head = inside.velocity - inside.sound_speed;
-    let tail = endpoint.velocity - endpoint.sound_speed;
+    // Only the caloric characteristic is needed to bracket the sonic face.
+    // Constructing an unused conservative state at Tmin can lose its zero
+    // sensible energy beneath the finite kinetic energy, or round the species
+    // density/pressure conversion just outside the temperature interval.
+    let capacities = gas
+        .heat_capacities(minimum, inside.pressure, cancelled)
+        .map_err(Error::Source)?;
+    let acoustic_squared = (capacities.cp / capacities.cv) * gas.gas_constant() * minimum;
+    let velocity = inside.velocity
+        + WallSolver::new(gas).rarefaction_integral(
+            minimum,
+            inside.temperature,
+            0.25 * tolerance,
+            cancelled,
+        )?;
+    if !positive(acoustic_squared) || !velocity.is_finite() {
+        return Err(Error::CaloricPath("invalid cold outflow characteristic"));
+    }
+    let sound_speed = det::sqrt(acoustic_squared);
+    let tail = velocity - sound_speed;
     if tail < 0.0 {
         return Err(Error::CaloricPath(
             "sonic outflow state lies below the source temperature minimum",
         ));
     }
-    let wave = checked_wave(PressureWave {
-        primitive: endpoint,
-        jump: inside.velocity - endpoint.velocity,
-        derivative: 1.0 / (endpoint.density * endpoint.sound_speed),
-        signal_speed: (inside.velocity.abs() + inside.sound_speed)
-            .max(endpoint.velocity.abs() + endpoint.sound_speed),
-        head_speed: head,
-        tail_speed: tail,
-    })?;
-    let sampled = sample_outflow(gas, inside, wave, cancelled)?;
+    let endpoint_speed = velocity.abs() + sound_speed;
+    if !positive(endpoint_speed) {
+        return Err(Error::Invalid("unrepresentable cold outflow wave speed"));
+    }
+    let tolerance = tolerance.max(
+        gas.domain().absolute_energy_tolerance / endpoint_speed
+            + (gas.domain().relative_energy_tolerance + 128.0 * f64::EPSILON) * endpoint_speed,
+    );
+    let sampled = sonic_outflow(gas, inside, minimum, tolerance, cancelled)?;
     Ok((
         sampled,
-        wave.signal_speed
+        (inside.velocity.abs() + inside.sound_speed)
+            .max(endpoint_speed)
             .max(sampled.velocity.abs() + sampled.sound_speed),
     ))
 }
