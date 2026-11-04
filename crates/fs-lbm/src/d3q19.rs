@@ -53,7 +53,7 @@ pub use boundary::{
     WallRotor3, WallRotorError3, WallRotorExchange3, WallRotorResponse3, WallRotorsExchange3,
 };
 pub use coupled::{
-    ForceRebindError3, PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3,
+    ForceRebindError3, PlateStepError3, PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3,
     shear_rate3, update_tau3, update_tau3_field,
 };
 pub(crate) use coupled::{force_corrected_shear_rate3, force_corrected_stress3};

@@ -76,6 +76,72 @@ fn zero_heat_preserves_the_existing_forced_step_in_both_dimensions() {
 }
 
 #[test]
+fn trt_source_steps_retain_native_flow_and_thermal_history() {
+    use fs_lbm::core2::CollisionModel2;
+
+    let mut two = ThermalLbm::slab(3, 6, 0.9, 0.8, 1e-5);
+    let mut direct2 = ThermalLbm::slab(3, 6, 0.9, 0.8, 1e-5);
+    let mut three = ThermalLbm3::slab(3, 1, 6, 0.9, 0.8, 1e-5);
+    let mut direct3 = ThermalLbm3::slab(3, 1, 6, 0.9, 0.8, 1e-5);
+    for slab in [&mut two, &mut direct2] {
+        slab.grid.collision = CollisionModel2::Trt { magic: 3.0 / 16.0 };
+        slab.gpop[10][0] += 0.01;
+    }
+    for slab in [&mut three, &mut direct3] {
+        slab.grid.set_trt_magic(3.0 / 16.0).unwrap();
+        slab.gpop[10][0] += 0.01;
+    }
+    for step in 0..12 {
+        let load = if step < 5 { 2e-5 } else { -1e-5 };
+        let force2 = [[load, 1e-5]; 24];
+        let force3 = [[load, -0.5 * load, 1e-5]; 24];
+        direct2.step_with_external_forces(&force2).unwrap();
+        direct3.step_with_external_forces(&force3).unwrap();
+        two.step_with_sources(&[0.0; 24], &force2, limits()).unwrap();
+        three.step_with_sources(&[0.0; 24], &force3, limits()).unwrap();
+        assert_eq!(two.grid.f, direct2.grid.f);
+        assert_eq!(two.gpop, direct2.gpop);
+        assert_eq!(three.grid.f, direct3.grid.f);
+        assert_eq!(three.gpop, direct3.gpop);
+        assert_eq!(three.grid.trt_magic(), Some(3.0 / 16.0));
+    }
+}
+
+#[test]
+fn trt_material_heat_and_force_use_the_original_physical_scaling() {
+    use fs_lbm::material::{MaterialThermalSlab3, plan_scaling_from_material};
+    use fs_lbm::thermal::sources::HeatSourceLimits;
+    use fs_material::fluid_transport::FluidTransportState;
+
+    let material = FluidTransportState::try_new(1000.0, 4000.0, 0.6, 0.001).unwrap();
+    let scale = plan_scaling_from_material(&material, 1e-4, 1e-3, 0.001).unwrap();
+    let input = MaterialThermalSlab3 {
+        nx: 2, ny: 1, nz: 6,
+        bottom_temperature_k: 310.0, top_temperature_k: 300.0,
+        gravity_m_s2: 0.0, expansion_per_k: 0.0, max_cells: 16,
+    };
+    let mut actual = scale.thermal_slab3(input).unwrap();
+    let mut direct = scale.thermal_slab3(input).unwrap();
+    actual.lattice.grid.set_trt_magic(3.0 / 16.0).unwrap();
+    direct.lattice.grid.set_trt_magic(3.0 / 16.0).unwrap();
+    let native_force = [scale.force_density_lattice(20.0).unwrap(), 0.0, 0.0];
+    for _ in 0..12 {
+        actual.step_with_power_density(
+            &[0.0; 16], &[[20.0, 0.0, 0.0]; 16],
+            HeatSourceLimits {
+                max_cells: 16, temperature_range_k: [290.0, 320.0],
+                balance_tolerance_j: 1e-10,
+            },
+        ).unwrap();
+        direct.lattice.step_with_external_forces(&[native_force; 16]).unwrap();
+        assert_eq!(actual.lattice.grid.f, direct.lattice.grid.f);
+        assert_eq!(actual.lattice.gpop, direct.lattice.gpop);
+        assert_eq!(actual.lattice.grid.trt_magic(), Some(3.0 / 16.0));
+    }
+    assert!(actual.lattice.grid.moments3(actual.lattice.grid.idx(0, 0, 3)).1[0] > 0.0);
+}
+
+#[test]
 fn heating_drives_buoyancy_in_the_same_step_without_erasing_external_loads() {
     let mut a = ThermalLbm::slab(3, 8, 0.9, 0.8, 0.01);
     let n = a.gpop.len(); let i = a.grid.idx(1, 4); let before = a.temperature(1, 4);

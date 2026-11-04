@@ -14,7 +14,7 @@
 //! fast path: those carry frozen bit-semantics goldens and stay untouched;
 //! this is the correctness-first reference rung, mirroring how the 2-D
 //! extensions run on the plain grid. Collision reuses the shared
-//! [`collide_cell3`](super::collide_cell3) kernel (BGK + Guo forcing), so the collision algebra
+//! [`collide_cell3`](super::collide_cell3) kernel (BGK or TRT with Guo forcing), so the collision algebra
 //! is written exactly once.
 //!
 //! Temperature rides a D3Q7 advection-diffusion population (rest + six
@@ -28,7 +28,7 @@
 //! determinism hash stays a replay-checked CANDIDATE until the
 //! GOLDEN_POLICY four-quadrant ceremony, as in the 40p2 precedent).
 
-use super::{CollisionModel3, E3, OPP3, Q3, collision_kernel3, equilibrium3};
+use super::{CollisionError3, CollisionModel3, E3, OPP3, Q3, collision_kernel3, equilibrium3};
 use crate::rheology::{
     PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
 };
@@ -64,8 +64,34 @@ pub struct PlatesGrid3 {
     /// its Guo half-source frame. Use [`Self::rebind_forcing`] when replacing a
     /// held load on an evolved state without adding an instantaneous impulse.
     pub fext: Vec<[f64; 3]>,
+    // The material/rheology owner retains tau per cell. Only the independent
+    // even/odd product belongs to this selector; no reference viscosity is copied.
+    pub(crate) trt_magic: Option<f64>,
     post: Vec<[f64; Q3]>,
 }
+
+/// A collision selection or plate-grid step was refused without publishing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlateStepError3 {
+    /// Dimensions and original population, relaxation, force or scratch storage disagree.
+    Layout,
+    /// The native D3Q19 collision rejected a cell or its relaxation parameters.
+    Collision {
+        /// Original x-fastest cell index, including both wall layers.
+        cell: usize,
+        /// The original cell collision diagnostic.
+        source: CollisionError3,
+    },
+}
+impl core::fmt::Display for PlateStepError3 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Layout => write!(f, "D3Q19 plate-grid dimensions and storage disagree"),
+            Self::Collision { cell, source } => write!(f, "D3Q19 plate-grid cell {cell}: {source}"),
+        }
+    }
+}
+impl std::error::Error for PlateStepError3 {}
 
 /// A plate-grid force proposal was refused before accepted fields changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,8 +138,66 @@ impl PlatesGrid3 {
             f: vec![f0; cells],
             tau: vec![tau; cells],
             fext: vec![[0.0; 3]; cells],
+            trt_magic: None,
             post: vec![f0; cells],
         }
+    }
+
+    /// Select TRT while retaining every cell's current viscosity, populations
+    /// and held force. Later material/rheology tau changes retain this product.
+    ///
+    /// `magic=3/16` removes the viscosity-dependent halfway-wall offset for
+    /// fully developed, uniformly forced planar Poiseuille flow. It does not
+    /// establish that property for spatially varying viscosity or arbitrary flow.
+    /// All fluid-cell even/odd rates must be representable before publication.
+    pub fn set_trt_magic(&mut self, magic: f64) -> Result<(), PlateStepError3> {
+        self.admit_collision(Some(magic))?;
+        self.trt_magic = Some(magic);
+        Ok(())
+    }
+
+    /// Restore the original BGK collision without changing cell viscosity or state.
+    pub fn set_bgk_collision(&mut self) -> Result<(), PlateStepError3> {
+        self.admit_collision(None)?;
+        self.trt_magic = None;
+        Ok(())
+    }
+
+    /// Authored TRT product, or `None` for the original BGK collision.
+    #[must_use]
+    pub fn trt_magic(&self) -> Option<f64> {
+        self.trt_magic
+    }
+
+    /// Native collision law at an original cell index, using its current tau.
+    /// As with [`Self::moments3`], an index outside the storage panics.
+    #[must_use]
+    pub fn collision_model_at(&self, cell: usize) -> CollisionModel3 {
+        plate_collision(self.tau[cell], self.trt_magic)
+    }
+
+    fn checked_layout(&self) -> Result<(usize, usize), PlateStepError3> {
+        let plane = self.nx.checked_mul(self.ny).filter(|&n| n > 0);
+        let count = plane.and_then(|n| n.checked_mul(self.nz));
+        let Some((plane, count)) = plane.zip(count).filter(|_| self.nz >= 4) else {
+            return Err(PlateStepError3::Layout);
+        };
+        if [self.f.len(), self.tau.len(), self.fext.len(), self.post.len()]
+            .iter().any(|&length| length != count)
+        {
+            return Err(PlateStepError3::Layout);
+        }
+        Ok((plane, count))
+    }
+
+    fn admit_collision(&self, magic: Option<f64>) -> Result<(), PlateStepError3> {
+        let (plane, count) = self.checked_layout()?;
+        for cell in plane..count - plane {
+            plate_collision(self.tau[cell], magic)
+                .validate()
+                .map_err(|source| PlateStepError3::Collision { cell, source })?;
+        }
+        Ok(())
     }
 
     /// Linear cell index.
@@ -257,12 +341,26 @@ impl PlatesGrid3 {
         }
     }
 
-    /// One collide-force-stream step: shared BGK + Guo collision per
+    /// One collide-force-stream step: selected BGK/TRT + Guo collision per
     /// fluid cell (per-cell τ and force), then pull streaming with
     /// halfway bounce-back at the z-plates and periodic x/y wrap.
     /// Traversal is x-fastest, then y, then z — pinned and
     /// single-threaded.
+    /// # Panics
+    /// If the checked native step refuses the state; see [`Self::try_step`].
     pub fn step(&mut self) {
+        self.try_step().expect("plate-channel state must admit native collision");
+    }
+
+    /// Checked collision and streaming using the existing reusable scratch.
+    ///
+    /// All collisions complete before streaming publishes any population.
+    /// Invalid layout, parameters, incoming state or collision output therefore
+    /// leaves populations, forces, relaxation times and the selector untouched.
+    /// Scratch may change on refusal; retry overwrites every active entry.
+    /// This adds no population allocation or extra collision pass.
+    pub fn try_step(&mut self) -> Result<(), PlateStepError3> {
+        self.checked_layout()?;
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
         let collide = collision_kernel3();
         for z in 1..nz - 1 {
@@ -271,10 +369,10 @@ impl PlatesGrid3 {
                     let i = self.idx(x, y, z);
                     self.post[i] = collide(
                         self.f[i],
-                        CollisionModel3::Bgk { tau: self.tau[i] },
+                        self.collision_model_at(i),
                         self.fext[i],
                     )
-                    .expect("plate-channel state stays admissible for BGK/Guo collision");
+                    .map_err(|source| PlateStepError3::Collision { cell: i, source })?;
                 }
             }
         }
@@ -298,6 +396,14 @@ impl PlatesGrid3 {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+fn plate_collision(tau: f64, trt_magic: Option<f64>) -> CollisionModel3 {
+    match trt_magic {
+        Some(magic) => CollisionModel3::Trt { tau, magic },
+        None => CollisionModel3::Bgk { tau },
     }
 }
 

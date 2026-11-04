@@ -11054,3 +11054,26 @@ temperature/composition changes require a newly admitted source state.
 `tests/material_film.rs` covers both viscosity bases, pinned temperature and
 receipt preservation, dimensional growth, explicit capillarity omission and
 rheology refusal using synthetic source inputs, without a calibration claim.
+
+## TRT on coupled laminar plate flow and heat
+
+`PlatesGrid3::{set_trt_magic,set_bgk_collision,collision_model_at}` selects
+the original D3Q19 BGK/TRT kernel while retaining each cell's current
+material/rheology tau and held Guo force. `try_step` admits original storage
+and completes every collision in reusable scratch before streaming; a late
+cell refusal leaves accepted populations, forces, tau and selection unchanged.
+No new collision law, per-step allocation or extra collision pass is introduced.
+BGK remains the default.
+
+Original D2Q9/D2Q5 and D3Q19/D3Q7 source transactions admit TRT, preserve its
+product through snapshots, and validate every implied odd relaxation before
+accepting a local viscosity field. Heat/force units, thermal balance, source
+history and rollback stay in the common thermal/material owners. Other
+D2Q9 collision operators retain their previous refusal.
+
+Regressions in `d3q19_coupled`, `thermal_sources` and `local_thermal_transport`
+cover planar flow with a BGK slip control, constitutive retuning, refusal/retry,
+native/source thermal history, physical source conversion and spatial relaxation.
+The 3/16 wall-location claim is restricted to uniformly forced, fully developed,
+constant-viscosity planar flow. It does not certify variable-viscosity wall
+accuracy, interface flow, nonlinear convection or global stability.

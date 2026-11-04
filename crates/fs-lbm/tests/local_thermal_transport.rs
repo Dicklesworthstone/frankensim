@@ -110,3 +110,63 @@ fn malformed_rates_and_failed_candidates_do_not_change_any_state() {
     assert_eq!(a.grid.f,f); assert_eq!(a.gpop,g); assert_eq!(a.grid.fext,loads);
     assert_eq!(a.grid.tau,vec![0.8;16]); assert_eq!(a.tau_g,0.9);
 }
+
+#[test]
+fn trt_local_viscosity_retains_the_product_and_rejects_unrepresentable_odd_rates() {
+    use fs_lbm::core2::CollisionModel2;
+
+    let mut two = ThermalLbm::slab(2, 6, 0.8, 0.9, 0.0);
+    let mut direct2 = ThermalLbm::slab(2, 6, 0.8, 0.9, 0.0);
+    let mut three = ThermalLbm3::slab(2, 1, 6, 0.8, 0.9, 0.0);
+    let mut direct3 = ThermalLbm3::slab(2, 1, 6, 0.8, 0.9, 0.0);
+    for slab in [&mut two, &mut direct2] {
+        slab.grid.collision = CollisionModel2::Trt { magic: 3.0 / 16.0 };
+    }
+    for slab in [&mut three, &mut direct3] {
+        slab.grid.set_trt_magic(3.0 / 16.0).unwrap();
+    }
+    let force2 = [[1e-5, 0.0]; 16];
+    let force3 = [[1e-5, 0.0, 0.0]; 16];
+    let heat = [0.0; 16];
+    for step in 0..8 {
+        let mut momentum = [0.8; 16];
+        for (cell, tau) in momentum.iter_mut().enumerate() {
+            *tau += 0.01 * ((cell + step) % 5) as f64;
+        }
+        direct2.grid.tau.copy_from_slice(&momentum);
+        direct3.grid.tau.copy_from_slice(&momentum);
+        let rates = RelaxationField { momentum: &momentum, thermal: &[0.9; 16] };
+        direct2.step_with_external_forces(&force2).unwrap();
+        direct3.step_with_external_forces(&force3).unwrap();
+        two.step_with_sources_and_transport(&heat, &force2, rates, limits(16)).unwrap();
+        three.step_with_sources_and_transport(&heat, &force3, rates, limits(16)).unwrap();
+        assert_eq!(two.grid.f, direct2.grid.f);
+        assert_eq!(two.gpop, direct2.gpop);
+        assert_eq!(three.grid.f, direct3.grid.f);
+        assert_eq!(three.gpop, direct3.gpop);
+        assert_eq!(two.grid.tau, [0.8; 16]);
+        assert_eq!(three.grid.tau, [0.8; 16]);
+        assert_eq!(three.grid.trt_magic(), Some(3.0 / 16.0));
+    }
+    let before2 = (two.grid.f.clone(), two.gpop.clone(), two.grid.fext.clone());
+    let before3 = (three.grid.f.clone(), three.gpop.clone(), three.grid.fext.clone());
+    let mut momentum = [0.8; 16];
+    momentum[13] = f64::MAX;
+    let bad = RelaxationField { momentum: &momentum, thermal: &[0.9; 16] };
+    assert!(two.step_with_sources_and_transport(&heat, &force2, bad, limits(16)).is_err());
+    assert!(three.step_with_sources_and_transport(&heat, &force3, bad, limits(16)).is_err());
+    assert_eq!((&two.grid.f, &two.gpop, &two.grid.fext), (&before2.0, &before2.1, &before2.2));
+    assert_eq!((&three.grid.f, &three.gpop, &three.grid.fext), (&before3.0, &before3.1, &before3.2));
+    assert_eq!(two.grid.tau, [0.8; 16]);
+    assert_eq!(three.grid.tau, [0.8; 16]);
+    direct2.grid.tau.fill(0.8);
+    direct3.grid.tau.fill(0.8);
+    two.step_with_sources(&heat, &force2, limits(16)).unwrap();
+    three.step_with_sources(&heat, &force3, limits(16)).unwrap();
+    direct2.step_with_external_forces(&force2).unwrap();
+    direct3.step_with_external_forces(&force3).unwrap();
+    assert_eq!(two.grid.f, direct2.grid.f);
+    assert_eq!(three.grid.f, direct3.grid.f);
+    assert_eq!(two.gpop, direct2.gpop);
+    assert_eq!(three.gpop, direct3.gpop);
+}

@@ -2,7 +2,7 @@
 //!
 //! These are numerical relaxation times, not another material law. Scalars
 //! per cell describe isotropic transport with uniform thermal storage. The
-//! existing BGK, low-Mach and boundary approximations remain in force.
+//! existing BGK/TRT, low-Mach and boundary approximations remain in force.
 
 use super::{
     ThermalLbm, ThermalLbm3, ThermalSourceBalance, ThermalSourceError,
@@ -16,6 +16,8 @@ use super::{
 /// Flow uses nu=(tau-1/2)/3 in both dimensions. Heat uses alpha=(tau-1/2)/3
 /// for D2Q5, but alpha=(tau-1/2)/4 for D3Q7; equal physical diffusivity does NOT
 /// generally mean equal thermal relaxation times.
+/// With TRT, the grid's authored product is retained and every implied odd
+/// relaxation must also be representably finite and greater than one half.
 ///
 /// The fields are held fixed over this one step. They do not reset populations
 /// or persist into subsequent calls. Existing scalar diagnostics such as

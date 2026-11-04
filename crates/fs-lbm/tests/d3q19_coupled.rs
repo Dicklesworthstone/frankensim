@@ -309,3 +309,104 @@ fn lbm3x_007_forced_rheology_recovers_physical_strain_and_viscosity() {
         }
     }
 }
+
+/// G1/G3: the original plate owner retains TRT when its molecular viscosity
+/// is changed by the shared constitutive update. Compare physical velocities
+/// with the continuum profile, including a discriminating BGK control.
+#[test]
+fn trt_plate_poiseuille_retains_wall_location_across_rheology_updates() {
+    fn error(tau: f64, axis: usize, trt: bool) -> f64 {
+        let height = 8;
+        let rho = 1.4;
+        let acceleration = if axis == 0 { 2e-6 } else { -2e-6 };
+        let mut grid = PlatesGrid3::plates(1, 1, height, 0.8);
+        grid.f.fill(equilibrium3(rho, [0.0; 3]));
+        if trt {
+            grid.set_trt_magic(3.0 / 16.0).unwrap();
+        }
+        let nu = (tau - 0.5) / 3.0;
+        update_tau3(&mut grid, Rheology::Newtonian { nu });
+        if trt {
+            assert_eq!(grid.trt_magic(), Some(3.0 / 16.0));
+            assert!(matches!(
+                grid.collision_model_at(1),
+                fs_lbm::d3q19::CollisionModel3::Trt { magic, .. } if magic == 3.0 / 16.0
+            ));
+        }
+        let mut force = [0.0; 3];
+        force[axis] = rho * acceleration;
+        grid.rebind_forcing(&vec![force; grid.f.len()]).unwrap();
+        let mass = grid.total_mass();
+        for _ in 0..8_000 {
+            grid.try_step().unwrap();
+        }
+        assert!((grid.total_mass() / mass - 1.0).abs() < 2e-11);
+        let peak = acceleration.abs() * (height * height) as f64 / (8.0 * nu);
+        let mut worst = 0.0_f64;
+        for z in 1..=height {
+            let y = z as f64 - 0.5;
+            let expected = acceleration * y * (height as f64 - y) / (2.0 * nu);
+            let actual = grid.moments3(grid.idx(0, 0, z)).1;
+            worst = worst.max((actual[axis] - expected).abs() / peak);
+            assert!(actual[2].abs() < 1e-12);
+        }
+        worst
+    }
+    for tau in [0.65, 0.9, 1.7] {
+        for axis in [0, 1] {
+            let relative = error(tau, axis, true);
+            assert!(relative < 1e-7, "tau={tau}, axis={axis}, error={relative}");
+        }
+    }
+    assert!(error(1.7, 0, false) > 0.05, "BGK control must detect wall slip");
+}
+
+/// G0: selection and late collision refusal publish no physical state;
+/// retry overwrites rejected scratch, and restoring BGK retains default bits.
+#[test]
+fn trt_plate_selection_and_late_collision_refusal_are_atomic() {
+    use fs_lbm::d3q19::PlateStepError3;
+
+    let setup = || {
+        let mut grid = PlatesGrid3::plates(2, 1, 4, 0.8);
+        grid.perturb(0x5eed, 0.001);
+        grid.rebind_forcing(&vec![[1e-5, -2e-5, 0.0]; grid.f.len()]).unwrap();
+        grid
+    };
+    let mut grid = setup();
+    grid.set_trt_magic(3.0 / 16.0).unwrap();
+    let before = (grid.f.clone(), grid.tau.clone(), grid.fext.clone());
+    for magic in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE] {
+        assert!(grid.set_trt_magic(magic).is_err());
+        assert_eq!(grid.trt_magic(), Some(3.0 / 16.0));
+        assert_eq!((&grid.f, &grid.tau, &grid.fext), (&before.0, &before.1, &before.2));
+    }
+    let last = grid.idx(1, 0, 4);
+    grid.tau[last] = f64::MAX; // finite even rate, but odd tau rounds to 1/2
+    assert!(matches!(grid.try_step(), Err(PlateStepError3::Collision { cell, .. }) if cell == last));
+    assert_eq!((&grid.f, &grid.fext), (&before.0, &before.2));
+    assert_eq!(grid.tau[last], f64::MAX);
+    assert_eq!(grid.trt_magic(), Some(3.0 / 16.0));
+    grid.tau[last] = 0.8;
+    let mut reference = setup();
+    reference.set_trt_magic(3.0 / 16.0).unwrap();
+    grid.try_step().unwrap();
+    reference.try_step().unwrap();
+    assert_eq!(grid.f, reference.f);
+
+    let mut original = setup();
+    let mut restored = setup();
+    restored.set_trt_magic(3.0 / 16.0).unwrap();
+    restored.set_bgk_collision().unwrap();
+    assert_eq!(restored.trt_magic(), None);
+    for _ in 0..4 {
+        original.step();
+        restored.try_step().unwrap();
+        assert_eq!(original.f, restored.f);
+    }
+    let state = restored.f.clone();
+    restored.nx = 0;
+    assert_eq!(restored.try_step(), Err(PlateStepError3::Layout));
+    assert!(restored.set_trt_magic(3.0 / 16.0).is_err());
+    assert_eq!(restored.f, state);
+}

@@ -14,7 +14,7 @@ pub mod transport;
 
 use super::{ThermalForcingError, ThermalLbm};
 use crate::core2::{Cell, CollisionModel2};
-use crate::d3q19::ThermalLbm3;
+use crate::d3q19::{CollisionModel3, ThermalLbm3};
 
 /// Explicit limits for one checked, transactional source-coupled step.
 #[derive(Debug, Clone, Copy)]
@@ -132,6 +132,7 @@ pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn advance(&mut self, forces: &[[f64; D]]) -> Result<(), ThermalForcingError>;
     fn momentum_relaxation(&self) -> &[f64];
     fn momentum_relaxation_mut(&mut self) -> &mut [f64];
+    fn momentum_relaxation_valid(&self, tau: &[f64]) -> bool;
     fn advance_local(&mut self, forces: &[[f64; D]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError>;
     fn advance_tensor(&mut self, forces: &[[f64; D]], diffusion: super::tensor::DiffusivityField<'_, D>) -> Result<(), ThermalForcingError>;
 }
@@ -201,7 +202,12 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
     }
     let source: f64 = heat[plane..cells-plane].iter().sum();
     if !source.is_finite() { return Err(invalid("summed source is not representable")); }
-    if let Some(field) = transport { field.admit(cells)?; }
+    if let Some(field) = transport {
+        field.admit(cells)?;
+        if !state.momentum_relaxation_valid(field.momentum) {
+            return Err(invalid("local transport is incompatible with the selected collision rates"));
+        }
+    }
     if let Some(field) = diffusion { field.admit(cells)?; }
     let (mut candidate, weights) = state.snapshot();
     if let Some(field) = transport {
@@ -257,6 +263,12 @@ fn flow_valid<const Q: usize, const D: usize>(f: &[[f64; Q]], tau: &[f64], fext:
         })
 }
 
+// Both lattices use the same even/odd TRT relaxation law. Reuse the native
+// checked model's admission rather than a second formula for the odd rate.
+fn trt_rates_valid(tau: &[f64], magic: f64) -> bool {
+    tau.iter().all(|&tau| CollisionModel3::Trt { tau, magic }.validate().is_ok())
+}
+
 impl Slab<2, 5> for ThermalLbm {
     fn layout(&self) -> Result<(usize, usize), ThermalSourceError> {
         let g = &self.grid;
@@ -288,13 +300,20 @@ impl Slab<2, 5> for ThermalLbm {
     fn flow_valid(&self) -> bool {
         let g = &self.grid;
         flow_valid(&g.f, &g.tau, &g.fext, self.tau_g) && self.gbeta.is_finite() && self.t_ref.is_finite()
-            && g.periodic_x && !g.periodic_y && matches!(g.collision, CollisionModel2::Bgk)
+            && g.periodic_x && !g.periodic_y && self.momentum_relaxation_valid(&g.tau)
             && g.g.iter().all(|x| x.is_finite())
             && g.flags.iter().enumerate().all(|(i, flag)| *flag == if i < g.nx || i >= g.f.len()-g.nx { Cell::Wall } else { Cell::Fluid })
     }
     fn advance(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> { self.step_with_external_forces(forces) }
     fn momentum_relaxation(&self) -> &[f64] { &self.grid.tau }
     fn momentum_relaxation_mut(&mut self) -> &mut [f64] { &mut self.grid.tau }
+    fn momentum_relaxation_valid(&self, tau: &[f64]) -> bool {
+        match self.grid.collision {
+            CollisionModel2::Bgk => true,
+            CollisionModel2::Trt { magic } => trt_rates_valid(tau, magic),
+            _ => false,
+        }
+    }
     fn advance_local(&mut self, forces: &[[f64; 2]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
         self.step_with_local_thermal_relaxation(forces, thermal_tau)
     }
@@ -326,6 +345,7 @@ impl Slab<3, 7> for ThermalLbm3 {
         let mut s = Self::slab(g.nx, g.ny, g.nz-2, 1.0, self.tau_g, self.gbeta);
         let weights = s.gpop[0];
         s.grid.f.clone_from(&g.f); s.grid.tau.clone_from(&g.tau); s.grid.fext.clone_from(&g.fext);
+        s.grid.trt_magic = g.trt_magic();
         s.gpop.clone_from(&self.gpop);
         s.advection_history.clone_from(&self.advection_history);
         s.t_bottom = self.t_bottom; s.t_top = self.t_top; s.t_ref = self.t_ref;
@@ -335,10 +355,14 @@ impl Slab<3, 7> for ThermalLbm3 {
     fn incoming() -> (usize, usize) { (5, 6) }
     fn flow_valid(&self) -> bool {
         flow_valid(&self.grid.f, &self.grid.tau, &self.grid.fext, self.tau_g) && self.gbeta.is_finite() && self.t_ref.is_finite()
+            && self.momentum_relaxation_valid(&self.grid.tau)
     }
     fn advance(&mut self, forces: &[[f64; 3]]) -> Result<(), ThermalForcingError> { self.step_with_external_forces(forces) }
     fn momentum_relaxation(&self) -> &[f64] { &self.grid.tau }
     fn momentum_relaxation_mut(&mut self) -> &mut [f64] { &mut self.grid.tau }
+    fn momentum_relaxation_valid(&self, tau: &[f64]) -> bool {
+        self.grid.trt_magic().is_none_or(|magic| trt_rates_valid(tau, magic))
+    }
     fn advance_local(&mut self, forces: &[[f64; 3]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
         self.step_with_local_thermal_relaxation(forces, thermal_tau)
     }
@@ -352,8 +376,8 @@ impl ThermalLbm {
     /// one step. Includes walls in each input array; wall heating must be zero.
     /// Both temperature half-kicks, flow, heat transport and the measured wall
     /// balance must pass before the candidate replaces the original state.
-    /// This checked path supports the constructor's periodic BGK slab, not
-    /// edited obstacle masks or alternative collision operators.
+    /// This checked path supports the periodic slab with BGK or TRT collision.
+    /// Edited obstacle masks and other collision operators remain unsupported.
     pub fn step_with_sources(&mut self, heat_per_step: &[f64], forces: &[[f64; 2]], limits: ThermalSourceLimits) -> Result<ThermalSourceBalance, ThermalSourceError> {
         source_step_mapped::<Self, 2, 5, _>(self, heat_per_step, forces, limits, Ok)
     }
