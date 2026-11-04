@@ -54,10 +54,8 @@ mod nonideal_tests;
 #[cfg(test)]
 use fs_material::osmosis::IdealDiluteSolution;
 use fs_material::osmosis::polarization::PolarizedMembraneTransport;
-use fs_material::osmosis::{
-    AqueousSolution, FiniteSolubilityError, FiniteSolubilitySolution, MembraneTransport,
-    OsmosisError,
-};
+use fs_material::osmosis::solubility::{FiniteSolubilityError, FiniteSolubilitySolution};
+use fs_material::osmosis::{AqueousSolution, MembraneTransport, OsmosisError};
 
 /// Maximum independently conserved species, including any retained solid stocks.
 pub const MAX_OSMOTIC_SPECIES: usize = 64;

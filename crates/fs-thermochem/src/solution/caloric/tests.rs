@@ -518,10 +518,16 @@ fn g1_mixing_entropy_retains_both_initial_compositions_and_excess_entropy() {
 #[test]
 fn g0_mixing_entropy_is_invariant_to_common_enthalpy_datum_and_partition() {
     let original = model(0.7, 200.0, [80.0, 120.0]);
-    let mut capacities = (*original.heat_capacities()).clone();
-    for source in &mut capacities {
-        source.reference_temperature = Temperature::new(900.0);
-    }
+    let capacities = [("A", 80.0), ("B", 120.0)].map(|(name, cp)| {
+        PureLiquidHeatCapacityV1::new(
+            SpeciesId::new(name).unwrap(),
+            Temperature::new(900.0),
+            [100.0, 1000.0]
+                .map(|t| (Temperature::new(t), MolarThermalQuantityV1::new(cp)))
+                .to_vec(),
+        )
+        .unwrap()
+    });
     let rebased =
         BinaryLiquidCaloricModelV1::new(original.thermodynamics().clone(), capacities).unwrap();
     let run = |model: &BinaryLiquidCaloricModelV1| {

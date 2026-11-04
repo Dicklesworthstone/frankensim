@@ -35,6 +35,51 @@ its constant-enthalpy temperature treatment is documented in
 For ionic solids, IUPAC defines the solubility product in terms of ion
 activities: <https://goldbook.iupac.org/terms/view/S05742>.
 
+## Finite dissolution and precipitation in one thermal bath
+
+`solution::solubility::caloric::SolubilityCaloricModelV1` closes an isobaric
+heat input against one incompressible solvent and 1–64 independently soluble
+neutral components. It retains separate dissolved and solid stocks, complete
+component totals, exact original solvent volume, and one shared temperature.
+An initial state may explicitly contain unequilibrated phase inventories;
+zero applied heat then gives adiabatic dissolution or precipitation.
+
+Every component binds its original `IdealSolubilityV1` and one explicitly
+declared common dissolved/solid molar heat-capacity curve. Equal sensible
+curves keep the phase enthalpy difference equal to the law's original constant
+dissolution enthalpy at every admitted temperature. Solvent and full component
+stocks each contribute sensible heat once; changing dissolved amount contributes
+the original phase enthalpy once. The shared `MolarHeatCapacityCurveV1` extracts
+the existing exact piecewise-linear Cp integration without implying a phase
+qualification. `PureLiquidHeatCapacityV1` preserves its liquid-specific meaning.
+
+The closed first-law increment integrates Cp directly from the initial to trial
+temperature and uses the change in dissolved amount. It never subtracts two
+large reference enthalpies. Equilibrium enthalpy is continuous at solid
+exhaustion and strictly increases with temperature: positive sensible capacity
+is augmented by n_dissolved*(delta_H)^2/(R*T^2) for each saturated component.
+One bounded scalar bisection therefore resolves the common bath without an
+inner chemical solve. Trial evaluations allocate nothing and construct accepted
+phase arrays only once. The original pair and Cp domains, explicit temperature
+bracket, energy/temperature tolerances and iteration budget remain binding;
+out-of-domain heat and late cancellation refuse without changing input state.
+
+`prepare_at_solvent_volume` preserves a material consumer's exact volume
+representation while deriving its solvent amount once from the declared molar
+volume. Amount-based preparation remains available. Original source identity,
+ordered totals, phase partitions, solvent amount/volume and direct energy
+residuals remain inspectable. Independent analytic cases cover both signs of
+dissolution enthalpy, precipitation, opposed phase transfers into one bath,
+solid exhaustion/recrystallization, variable Cp, small heat increments,
+volume roundoff, work limits and immutable refusal.
+
+This is the thermal closure of the stated ideal neutral-solute approximation.
+It supplies no electrolyte activities, common-ion chemistry, pressure-dependent
+solubility, variable-pressure work, separate phase temperatures, phase-dependent
+Cp difference, nucleation or finite dissolution kinetics. Unequal phase heat
+capacities require a compatible temperature-dependent dissolution law; numeric
+caller coefficients do not authenticate measured material data.
+
 ## Binary liquid miscibility and source-owned thermodynamic forces
 
 `solution::BinaryRegularSolutionV1` retains two explicit ordered species and a

@@ -23,9 +23,12 @@ use fs_qty::Temperature;
 use std::sync::Arc;
 
 mod entropy;
+mod heat_capacity;
+
+pub use heat_capacity::{MAX_CALORIC_KNOTS_V1, MolarHeatCapacityCurveV1};
 
 /// Maximum source points per pure-component heat-capacity curve.
-pub const MAX_LIQUID_CALORIC_KNOTS_V1: usize = 4096;
+pub const MAX_LIQUID_CALORIC_KNOTS_V1: usize = MAX_CALORIC_KNOTS_V1;
 
 /// Invalid caloric data, unsupported heat target, or incomplete thermal solve.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,14 +56,12 @@ impl From<BinarySolutionErrorV1> for BinaryCaloricErrorV1 {
 }
 
 /// Explicit pure-liquid Cp(T), in J/(mol K), with no excess-mixture contribution.
-/// Linear interpolation preserves positive Cp between the admitted knots.
 /// Source identity, pressure and the pure-liquid qualification belong to the
-/// caller; this numerical law neither infers nor authenticates them.
+/// caller. The numerical integration is shared with other explicitly qualified
+/// phases; this wrapper continues to identify only pure-liquid evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PureLiquidHeatCapacityV1 {
-    species: SpeciesId,
-    reference_temperature: Temperature,
-    knots: Vec<(f64, f64)>,
+    curve: MolarHeatCapacityCurveV1,
 }
 impl PureLiquidHeatCapacityV1 {
     /// Retain 2..=4096 strictly increasing positive temperature knots. All Cp
@@ -70,95 +71,26 @@ impl PureLiquidHeatCapacityV1 {
         reference_temperature: Temperature,
         knots: Vec<(Temperature, MolarThermalQuantityV1)>,
     ) -> Result<Self, BinaryCaloricErrorV1> {
-        if !(2..=MAX_LIQUID_CALORIC_KNOTS_V1).contains(&knots.len())
-            || knots
-                .iter()
-                .any(|(t, cp)| !positive(t.value()) || !positive(cp.value()))
-            || knots.windows(2).any(|w| w[0].0.value() >= w[1].0.value())
-            || !reference_temperature.value().is_finite()
-            || reference_temperature.value() < knots[0].0.value()
-            || reference_temperature.value() > knots[knots.len() - 1].0.value()
-        {
-            return Err(BinaryCaloricErrorV1::Invalid(
-                "pure-liquid Cp curve or datum",
-            ));
-        }
         Ok(Self {
-            species,
-            reference_temperature,
-            knots: knots
-                .into_iter()
-                .map(|(t, cp)| (t.value(), cp.value()))
-                .collect(),
+            curve: MolarHeatCapacityCurveV1::new(species, reference_temperature, knots)?,
         })
     }
-
     pub const fn species(&self) -> &SpeciesId {
-        &self.species
+        self.curve.species()
     }
     pub const fn reference_temperature(&self) -> Temperature {
-        self.reference_temperature
+        self.curve.reference_temperature()
     }
     pub fn temperature_domain(&self) -> [Temperature; 2] {
-        [
-            Temperature::new(self.knots[0].0),
-            Temperature::new(self.knots[self.knots.len() - 1].0),
-        ]
+        self.curve.temperature_domain()
     }
-
-    /// Exact integral of the declared piecewise-linear Cp interpolation [J/mol].
-    /// Integrates only crossed segments, using their local temperature spans;
-    /// cooling is the exact negative of the same ascending integration.
+    /// Exact integral of the original piecewise-linear Cp [J/mol].
     pub fn enthalpy_change_j_per_mol(
         &self,
         from: Temperature,
         to: Temperature,
     ) -> Result<f64, BinaryCaloricErrorV1> {
-        self.admit(from.value())?;
-        self.admit(to.value())?;
-        let (lo, hi, sign) = if from.value() <= to.value() {
-            (from.value(), to.value(), 1.0)
-        } else {
-            (to.value(), from.value(), -1.0)
-        };
-        if lo == hi {
-            return Ok(0.0);
-        }
-        let start = self
-            .knots
-            .partition_point(|&(t, _)| t <= lo)
-            .saturating_sub(1);
-        let mut sum = Sum::default();
-        for pair in self.knots[start..].windows(2) {
-            let a = lo.max(pair[0].0);
-            let b = hi.min(pair[1].0);
-            if b > a {
-                let cp_a = interpolate(pair, a);
-                let cp_b = interpolate(pair, b);
-                let increment =
-                    checked((cp_a + 0.5 * (cp_b - cp_a)) * (b - a), "sensible increment")?;
-                if increment <= 0.0 {
-                    return Err(BinaryCaloricErrorV1::Arithmetic(
-                        "positive sensible increment underflows",
-                    ));
-                }
-                sum.add(increment)?;
-            }
-            if pair[1].0 >= hi {
-                break;
-            }
-        }
-        checked(sign * sum.value()?, "sensible integral")
-    }
-
-    fn admit(&self, t: f64) -> Result<(), BinaryCaloricErrorV1> {
-        if !t.is_finite() || t < self.knots[0].0 || t > self.knots[self.knots.len() - 1].0 {
-            Err(BinaryCaloricErrorV1::Invalid(
-                "temperature outside pure-liquid Cp source",
-            ))
-        } else {
-            Ok(())
-        }
+        self.curve.enthalpy_change_j_per_mol(from, to)
     }
 }
 
@@ -197,7 +129,7 @@ impl BinaryLiquidCaloricModelV1 {
     ) -> Result<Self, BinaryCaloricErrorV1> {
         if heat_capacity[0].species() != &thermodynamics.species()[0]
             || heat_capacity[1].species() != &thermodynamics.species()[1]
-            || heat_capacity[0].reference_temperature != heat_capacity[1].reference_temperature
+            || heat_capacity[0].reference_temperature() != heat_capacity[1].reference_temperature()
         {
             return Err(BinaryCaloricErrorV1::Invalid(
                 "ordered pure-liquid species or common caloric datum",
@@ -286,7 +218,8 @@ impl BinaryLiquidCaloricModelV1 {
         let mut h = Sum::default();
         for (n, source) in component_moles.iter().zip(&self.owner.heat_capacity) {
             h.add(checked(
-                n * source.enthalpy_change_j_per_mol(source.reference_temperature, temperature)?,
+                n * source
+                    .enthalpy_change_j_per_mol(source.reference_temperature(), temperature)?,
                 "sensible enthalpy",
             )?)?;
         }

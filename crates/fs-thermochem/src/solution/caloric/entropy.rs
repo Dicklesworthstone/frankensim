@@ -2,13 +2,13 @@
 
 use super::{
     BinaryCaloricErrorV1, BinaryCaloricStateV1, BinaryLiquidCaloricModelV1,
-    PureLiquidHeatCapacityV1, Sum, checked, interpolate, positive,
+    MolarHeatCapacityCurveV1, PureLiquidHeatCapacityV1, Sum, checked, interpolate, positive,
 };
 use fs_math::det::ln;
 use fs_qty::Temperature;
 use std::sync::Arc;
 
-impl PureLiquidHeatCapacityV1 {
+impl MolarHeatCapacityCurveV1 {
     /// Analytical integral of the original piecewise-linear Cp(T)/T [J/(mol K)].
     /// Only crossed source segments are visited. Local positive weights retain
     /// small temperature changes without subtracting reference entropies or
@@ -59,6 +59,17 @@ impl PureLiquidHeatCapacityV1 {
             }
         }
         checked(sign * sum.value()?, "sensible entropy integral")
+    }
+}
+
+impl PureLiquidHeatCapacityV1 {
+    /// Analytical integral of the original pure-liquid Cp(T)/T [J/(mol K)].
+    pub fn entropy_change_j_per_mol_k(
+        &self,
+        from: Temperature,
+        to: Temperature,
+    ) -> Result<f64, BinaryCaloricErrorV1> {
+        self.curve.entropy_change_j_per_mol_k(from, to)
     }
 }
 

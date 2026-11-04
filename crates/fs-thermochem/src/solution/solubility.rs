@@ -21,6 +21,8 @@
 //! reaction/speciation owners. No nucleation barrier, metastable supersaturation,
 //! dissolution rate, solid volume, or caloric evolution is supplied here.
 
+pub mod caloric;
+
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_math::det::{exp, ln};
 use fs_qty::{Amount, AmountConcentration, Temperature, Volume};
