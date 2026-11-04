@@ -263,6 +263,11 @@ impl PreparedHarmonicReadout<'_> {
         self.source_clock
     }
 
+    /// Ordered physical factor identities retained through microphone processing.
+    pub fn factor_coordinates(&self) -> &[HarmonicFactorCoordinate<'_>] {
+        self.coordinates
+    }
+
     /// Original pressure-only ensemble. Its zero velocity dimension explicitly
     /// prevents a processed channel from claiming a spatial intensity vector.
     pub fn ensemble(&self) -> &PreparedHarmonicEnsemble<0> {

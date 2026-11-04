@@ -28,7 +28,7 @@ mod quadratic;
 mod sampled;
 pub use fs_fft::harmonic_window::HarmonicProductSpectrumLimits;
 pub use quadratic::{AcousticFieldComponent, AcousticProductSpectrum};
-pub use sampled::{HarmonicSampleBudget, HarmonicSampleClock};
+pub use sampled::{HarmonicFieldSample, HarmonicSampleBudget, HarmonicSampleClock};
 
 mod ensemble;
 pub use ensemble::{

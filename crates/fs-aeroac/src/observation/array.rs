@@ -14,6 +14,12 @@ pub use readout::{
     HarmonicReadoutBudget, HarmonicReadoutTap, PreparedHarmonicReadout, WindowedHarmonicReadoutPair,
 };
 
+mod realization;
+pub use realization::{
+    HarmonicFactorDraw, HarmonicRealizationBudget, PreparedHarmonicArrayRealization,
+    RealizedHarmonicReceiver,
+};
+
 /// One explicitly shared zero-mean coefficient in the physical source model.
 /// All receiver ensembles bind their factor at this index to this identity.
 /// Distinct coordinates retain the original ensemble's uncorrelated-factor

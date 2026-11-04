@@ -72,6 +72,16 @@ pub struct HarmonicSampleBudget {
     pub max_tone_samples: usize,
 }
 
+/// Simultaneous real pressure and particle velocity at one physical receiver.
+/// These are instantaneous point samples, not RMS amplitudes or window means.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HarmonicFieldSample<const D: usize> {
+    /// Acoustic pressure [Pa].
+    pub pressure_pa: f64,
+    /// Actual particle velocity [m/s] in the original Cartesian frame.
+    pub particle_velocity_m_s: [f64; D],
+}
+
 impl<const D: usize> PreparedHarmonicField<D> {
     /// Admit an entire sample range before a streaming writer changes output.
     /// Empty requests are allowed; an out-of-band line refuses even at a null.
@@ -81,12 +91,27 @@ impl<const D: usize> PreparedHarmonicField<D> {
         first_sample: u64,
         sample_count: u64,
     ) -> Result<(), AeroacError> {
+        self.validate_sample_range_cancellable(clock, first_sample, sample_count, || false)
+    }
+
+    /// Admit the complete clock/bandwidth range with bounded cancellation polls.
+    pub fn validate_sample_range_cancellable(
+        &self,
+        clock: HarmonicSampleClock,
+        first_sample: u64,
+        sample_count: u64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        poll(&mut cancelled)?;
         let end = first_sample
             .checked_add(sample_count)
             .ok_or_else(|| invalid("harmonic sample counter overflow"))?;
         clock.validate_index(first_sample)?;
         clock.validate_index(end)?;
-        for line in &self.lines {
+        for (index, line) in self.lines.iter().enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
             if line.frequency_hz >= 0.5 * f64::from(clock.sample_rate_hz) {
                 return Err(invalid(
                     "harmonic field contains a line at or above output Nyquist",
@@ -97,7 +122,7 @@ impl<const D: usize> PreparedHarmonicField<D> {
                 .map_err(window_error)?;
             phase_hz_from_clock_dd(line.frequency_hz, clock.time_at(end)?).map_err(window_error)?;
         }
-        Ok(())
+        poll(&mut cancelled)
     }
 
     /// Real pressure [Pa] on the original source clock, with coherent sums
@@ -111,25 +136,68 @@ impl<const D: usize> PreparedHarmonicField<D> {
         time_s: Dd,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, AeroacError> {
-        poll(&mut cancelled)?;
+        Ok(self
+            .field_sample(time_s, false, &mut cancelled)?
+            .pressure_pa)
+    }
+
+    /// Simultaneous real pressure and velocity on the original source clock.
+    /// Each line's phase is computed once and shared by every component.
+    pub fn field_at_clock_dd(&self, time_s: Dd) -> Result<HarmonicFieldSample<D>, AeroacError> {
+        self.field_at_clock_dd_cancellable(time_s, || false)
+    }
+
+    /// Allocation-free field evaluation with bounded cancellation polls.
+    pub fn field_at_clock_dd_cancellable(
+        &self,
+        time_s: Dd,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<HarmonicFieldSample<D>, AeroacError> {
+        self.field_sample(time_s, true, &mut cancelled)
+    }
+
+    fn field_sample(
+        &self,
+        time_s: Dd,
+        include_velocity: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HarmonicFieldSample<D>, AeroacError> {
+        poll(cancelled)?;
         if !time_s.hi.is_finite() || !time_s.lo.is_finite() {
             return Err(nonfinite("harmonic pressure source clock"));
         }
         let mut pressure = Dd::ZERO;
+        let mut velocity = [Dd::ZERO; D];
         for (index, line) in self.lines.iter().enumerate() {
             if index % 64 == 0 {
-                poll(&mut cancelled)?;
+                poll(cancelled)?;
             }
             let [real, imaginary] =
                 phase_hz_from_clock_dd(line.frequency_hz, time_s).map_err(window_error)?;
             pressure = pressure + line.pressure.re * real - line.pressure.im * imaginary;
+            if include_velocity {
+                for (sum, amplitude) in velocity.iter_mut().zip(&line.velocity) {
+                    *sum = *sum + amplitude.re * real - amplitude.im * imaginary;
+                }
+            }
         }
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let pressure_pa = pressure.to_f64();
-        if !pressure.hi.is_finite() || !pressure.lo.is_finite() || !pressure_pa.is_finite() {
-            return Err(nonfinite("sampled harmonic pressure"));
+        let particle_velocity_m_s = velocity.map(Dd::to_f64);
+        if !pressure.hi.is_finite()
+            || !pressure.lo.is_finite()
+            || !pressure_pa.is_finite()
+            || velocity
+                .iter()
+                .any(|v| !v.hi.is_finite() || !v.lo.is_finite())
+            || particle_velocity_m_s.iter().any(|v| !v.is_finite())
+        {
+            return Err(nonfinite("sampled harmonic field"));
         }
-        Ok(pressure_pa)
+        Ok(HarmonicFieldSample {
+            pressure_pa,
+            particle_velocity_m_s,
+        })
     }
 
     /// Allocation-free O(samples * distinct lines) observation. Every sample is
@@ -167,10 +235,52 @@ impl<const D: usize> PreparedHarmonicField<D> {
         }
         let count = u64::try_from(output.len())
             .map_err(|_| invalid("harmonic sample count exceeds u64"))?;
-        self.validate_sample_range(clock, first_sample, count)?;
+        self.validate_sample_range_cancellable(clock, first_sample, count, &mut cancelled)?;
         for (offset, value) in output.iter_mut().enumerate() {
             let time = clock.time_at(first_sample + offset as u64)?;
             *value = self.pressure_at_clock_dd_cancellable(time, &mut cancelled)?;
+        }
+        poll(&mut cancelled)
+    }
+
+    /// Sample the actual pressure/velocity field at absolute integer indices.
+    /// Output is caller-owned; every physical line must lie below Nyquist even
+    /// when its coherent amplitude cancels. No velocity is inferred from p/(rho*c).
+    /// A runtime failure may leave a prefix in `output`; discard that buffer.
+    pub fn sample_field_into(
+        &self,
+        clock: HarmonicSampleClock,
+        first_sample: u64,
+        output: &mut [HarmonicFieldSample<D>],
+        budget: HarmonicSampleBudget,
+    ) -> Result<(), AeroacError> {
+        self.sample_field_into_cancellable(clock, first_sample, output, budget, || false)
+    }
+
+    /// Allocation-free, bounded field sampling with cancellation checks.
+    pub fn sample_field_into_cancellable(
+        &self,
+        clock: HarmonicSampleClock,
+        first_sample: u64,
+        output: &mut [HarmonicFieldSample<D>],
+        budget: HarmonicSampleBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        poll(&mut cancelled)?;
+        if output.len() > budget.max_samples
+            || output
+                .len()
+                .checked_mul(self.lines.len())
+                .is_none_or(|work| work > budget.max_tone_samples)
+        {
+            return Err(invalid("harmonic field sampling exceeds the work budget"));
+        }
+        let count = u64::try_from(output.len())
+            .map_err(|_| invalid("harmonic sample count exceeds u64"))?;
+        self.validate_sample_range_cancellable(clock, first_sample, count, &mut cancelled)?;
+        for (offset, sample) in output.iter_mut().enumerate() {
+            let time = clock.time_at(first_sample + offset as u64)?;
+            *sample = self.field_at_clock_dd_cancellable(time, &mut cancelled)?;
         }
         poll(&mut cancelled)
     }
