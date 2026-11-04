@@ -40,7 +40,7 @@ pub struct OpenBoundaryMomentumTransport3 {
 // Opposing reservoir pressure impulses can dwarf the net transfer. Retain
 // their low bits until the shared receipt is rounded, as for body reactions.
 #[derive(Default)]
-pub(super) struct OpenTransport {
+pub(in super::super) struct OpenTransport {
     mass: Dd,
     impulse: [Dd; 3],
     angular: [Dd; 3],
@@ -49,7 +49,7 @@ pub(super) struct OpenTransport {
 }
 
 impl OpenTransport {
-    pub(super) fn add_links(
+    pub(in super::super) fn add_links(
         &mut self,
         post: &[f64; Q3],
         mask: u32,
@@ -120,7 +120,7 @@ impl OpenTransport {
 }
 
 impl BoundaryGrid3 {
-    pub(super) fn reconstruct_immersed_open_faces(
+    pub(in super::super) fn reconstruct_immersed_open_faces(
         &mut self,
         next: &mut [Vec<Tile>; Q3],
         transport: OpenTransport,

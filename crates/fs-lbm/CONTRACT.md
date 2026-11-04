@@ -10123,7 +10123,7 @@ This is fixed-occupancy curved geometry with prescribed surface kinematics,
 including tangential rotation of invariant spheres/cylinders. It neither
 advances a solid pose nor remaps newly covered/uncovered fluid. Existing
 moving-body owners remain authoritative for evolving immersed geometry.
-Regularized reservoir faces refuse in this entrypoint. There is no general
+Regularized reservoir faces have their own measured exchange below. There is no general
 GCL, full-solver Galilean-invariance, calibrated body-drag, complete fluid-energy
 or global second-order convergence claim.
 
@@ -10180,3 +10180,44 @@ introduced. Focused regressions in
 the actual surface root and liquid resistance, finite-gas reciprocal energy and
 step admission, exact equilibrium, late refusal with identical accepted retry,
 and the original implicit endpoint residual.
+
+## Curved D3Q19 walls with native open reservoirs
+
+`step_with_curved_walls` also admits the original velocity/pressure open faces.
+It streams the actual curved populations first, then invokes the SAME cached,
+regularized open-face owner used by immersed-body coupling. The first-interior
+stress and prescribed velocity/density use their native Guo force frame,
+including spatially varying held forces and existing inlet profiles. At mixed
+wall/open nodes, the native mask retains every curved or halfway wall-owned
+population; only the open directions reconstruct.
+
+`CurvedWallStep3::open` reports reservoir mass, linear impulse and angular
+impulse TO the fluid. The shared compensated accumulator counts the temporary
+open-link reflection and every actual reconstruction delta, including the
+replacement of tangential populations on face interiors. These are direct
+operator contributions, not a residual inferred from a whole-domain balance.
+They remain distinct from curved-body reaction, other walls, held volume-force
+input and periodic coordinate transport. BFL population mass drift remains
+measured without renormalization. Reservoir exchange is not attributed to the
+body, and is not labeled pressure work or a complete fluid-energy balance.
+
+The candidate reservoir populations and accounts finish before the existing
+single publication swap. A late reconstruction, arithmetic or cancellation
+refusal preserves accepted populations and geometry. The open-face cache,
+post/next population buffers and compensated boundary owner are reused; no
+second collision law, reservoir law or whole-volume balance scan is added.
+
+Four focused G0/G1/G3 native regressions pass: exact halfway recovery for both
+velocity/pressure and pressure/pressure ends on all three axes and all four
+collision families; rotating curved-body mass/linear/angular balance with
+separate reservoir, periodic, stationary-wall, uniform and spatially varying
+force contributions; wall-corner population preservation and steady
+pressure-driven flow between fractional walls; and late reservoir-account
+overflow without publication. The resolved 96x16x4 duct with a 14.6-cell gap
+has relative axial-profile error 0.009887809049680325 under a 3% budget. A
+6.6-cell gap gave 0.046973215227596746 and is outside that envelope; no global
+order claim follows. The six original curved-boundary regressions also pass.
+These are direct original numerical-owner checks with unused runtime/pool,
+body-motion and unrelated API wrappers omitted. Full Cargo, DSR, cross-ISA
+and performance gates were not run. The fixed-occupancy and prescribed-wall-
+kinematics limits of the curved owner remain unchanged.

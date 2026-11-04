@@ -30,7 +30,7 @@ use super::{
 mod collision;
 use collision::ImmersedRelaxation3;
 
-mod open;
+pub(super) mod open;
 pub use open::OpenBoundaryMomentumTransport3;
 use open::OpenTransport;
 

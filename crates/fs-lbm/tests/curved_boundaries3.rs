@@ -525,3 +525,266 @@ fn geometry_donor_and_late_failure_refuse_without_fluid_publication() {
     assert!(CurvedWall3::from_level_set(&grid, |_| -1.0, 48, 1e-12, &gate).is_err());
     assert!(CurvedWall3::from_level_set(&grid, |_| f64::NAN, 48, 1e-12, &gate).is_err());
 }
+
+#[test]
+fn open_halfway_retains_native_populations_for_all_axes_and_collision_models() {
+    let gate = CancelGate::new();
+    for model in MODELS {
+        for axis in 0..3 {
+            for pressure_inlet in [false, true] {
+                let mut faces = [FaceBoundary3::stationary_wall(); 6];
+                let mut inlet = [0.0; 3];
+                inlet[axis] = 0.014;
+                faces[2 * axis] = if pressure_inlet {
+                    FaceBoundary3::Pressure { density: 1.003 }
+                } else {
+                    FaceBoundary3::Velocity { velocity: inlet }
+                };
+                faces[2 * axis + 1] = FaceBoundary3::Pressure { density: 0.999 };
+                let make = || {
+                    let mut grid = BoundaryGrid3::with_collision_model(
+                        8,
+                        8,
+                        8,
+                        model,
+                        [1e-6, -2e-6, 3e-6],
+                        BoundarySpec3::new(faces),
+                    );
+                    seed(&mut grid);
+                    grid
+                };
+                let (mut original, mut curved) = (make(), make());
+                let links = original.boundary_links();
+                let wall = CurvedWall3::new(
+                    &curved,
+                    &links
+                        .iter()
+                        .map(|&link| CurvedWallLink3 {
+                            link,
+                            fraction: 0.5,
+                        })
+                        .collect::<Vec<_>>(),
+                    &gate,
+                )
+                .unwrap();
+                for _ in 0..2 {
+                    let native = original.step_with_wall_momentum(&links, [0.7, -1.3, 2.1]);
+                    let result = curved
+                        .step_with_curved_walls(&wall, |_| [0.0; 3], [0.7, -1.3, 2.1], &gate)
+                        .unwrap();
+                    assert_eq!(native, result.curved);
+                    assert_eq!(result.other_walls.measured_links, 0);
+                    assert!(result.open.open_links > 0);
+                    assert_eq!(result.open.reconstructed_cells, 2 * 8 * 8);
+                    for (a, b) in snapshots(&original)
+                        .into_iter()
+                        .flatten()
+                        .zip(snapshots(&curved).into_iter().flatten())
+                    {
+                        assert_eq!(a.to_bits(), b.to_bits(), "{model:?}, axis {axis}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rotating_curved_body_in_open_flow_closes_separate_population_accounts() {
+    let gate = CancelGate::new();
+    let center = [6.0; 3];
+    let origin = [0.7, -1.3, 2.1];
+    let omega = [0.002, -0.003, 0.004];
+    let sdf = |p: [f64; 3]| {
+        ((p[0] - center[0]).powi(2) + (p[1] - center[1]).powi(2) + (p[2] - center[2]).powi(2))
+            .sqrt()
+            - 2.3
+    };
+    let p = FaceBoundary3::Periodic;
+    let w = FaceBoundary3::stationary_wall();
+    for model in MODELS {
+        let mut grid = BoundaryGrid3::with_collision_model(
+            12,
+            12,
+            12,
+            model,
+            [1e-6, -2e-6, 3e-6],
+            BoundarySpec3::new([
+                FaceBoundary3::Velocity {
+                    velocity: [0.014, 0.0, 0.0],
+                },
+                FaceBoundary3::Pressure { density: 0.999 },
+                p,
+                p,
+                w,
+                w,
+            ]),
+        );
+        grid.voxelize_sdf(sdf);
+        seed(&mut grid);
+        grid.rebind_force_field(|cell| {
+            [
+                2e-7 * cell[2] as f64,
+                -1e-7 * cell[0] as f64,
+                3e-7 * cell[1] as f64,
+            ]
+        });
+        let wall = CurvedWall3::from_level_set(&grid, sdf, 48, 1e-12, &gate).unwrap();
+        assert!(wall.links().any(|l| l.fraction < 0.5));
+        assert!(wall.links().any(|l| l.fraction > 0.5));
+        for _ in 0..3 {
+            let before = inventory(&grid, origin);
+            let result = grid
+                .step_with_curved_walls(
+                    &wall,
+                    |link| {
+                        cross(
+                            omega,
+                            core::array::from_fn(|i| link.intersection()[i] - center[i]),
+                        )
+                    },
+                    origin,
+                    &gate,
+                )
+                .unwrap();
+            let after = inventory(&grid, origin);
+            assert!(result.open.open_links > 0);
+            assert!(result.periodic.face_crossings > 0);
+            assert!(result.other_walls.measured_links > 0);
+            near(
+                after.0 - before.0,
+                result.curved.fluid_mass_change
+                    + result.other_walls.fluid_mass_change
+                    + result.open.mass_change,
+                3e-9,
+            );
+            for i in 0..3 {
+                near(
+                    after.1[i] - before.1[i],
+                    result.curved.fluid_population_impulse[i]
+                        + result.other_walls.fluid_population_impulse[i]
+                        + result.open.impulse[i]
+                        + result.body_force_impulse[i],
+                    3e-11,
+                );
+                near(
+                    after.2[i] - before.2[i],
+                    result.curved.fluid_population_angular_impulse[i]
+                        + result.other_walls.fluid_population_angular_impulse[i]
+                        + result.open.angular_impulse[i]
+                        + result.periodic.angular_momentum_change[i]
+                        + result.body_force_angular_impulse[i],
+                    3e-10,
+                );
+                near(
+                    result.curved.wall_impulse[i] + result.curved.fluid_population_impulse[i],
+                    result.curved.wall_velocity_mass_impulse[i],
+                    3e-13,
+                );
+            }
+            // The reservoir owns the measured input, not a force assigned to
+            // the rotating obstacle. The original prescribed moment survives.
+            near3(grid.velocity(0, 6, 6), [0.014, 0.0, 0.0], 3e-14);
+        }
+    }
+}
+
+#[test]
+fn fractional_open_duct_preserves_wall_corners_and_develops_pressure_driven_flow() {
+    let gate = CancelGate::new();
+    let (nx, ny) = (96, 16);
+    let (lower, upper) = (0.7, ny as f64 - 0.7);
+    let sdf = |p: [f64; 3]| (p[1] - lower).min(upper - p[1]);
+    let p = FaceBoundary3::Periodic;
+    let w = FaceBoundary3::stationary_wall();
+    let (inlet, outlet, tau) = (1.001, 0.999, 0.8);
+    let mut grid = BoundaryGrid3::new(
+        nx,
+        ny,
+        4,
+        tau,
+        [0.0; 3],
+        BoundarySpec3::new([
+            FaceBoundary3::Pressure { density: inlet },
+            FaceBoundary3::Pressure { density: outlet },
+            w,
+            w,
+            p,
+            p,
+        ]),
+    );
+    grid.voxelize_sdf(sdf);
+    let wall = CurvedWall3::from_level_set(&grid, sdf, 48, 1e-12, &gate).unwrap();
+    let corner = wall
+        .links()
+        .find(|link| link.link.cell == [0, 1, 1] && E3[link.link.direction] == (-1, 1, 0))
+        .unwrap();
+    let [x, y, z] = corner.link.cell;
+    let q = corner.link.direction;
+    let post = collide_cell3(grid.populations(x, y, z), grid.collision_model(), [0.0; 3]).unwrap();
+    let width = 2.0 * corner.fraction;
+    let expected = post[OPP3[q]] / width + (width - 1.0) / width * post[q];
+    let result = grid
+        .step_with_curved_walls(&wall, |_| [0.0; 3], [0.0; 3], &gate)
+        .unwrap();
+    assert_eq!(grid.populations(x, y, z)[q].to_bits(), expected.to_bits());
+    assert!(grid.open_link_mask(x, y, z) & (1 << q) == 0);
+    assert_eq!(result.open.reconstructed_cells, 2 * (ny - 2) * 4);
+    for _ in 0..9600 {
+        let _ = grid
+            .step_with_curved_walls(&wall, |_| [0.0; 3], [0.0; 3], &gate)
+            .unwrap();
+    }
+    // On-site pressure locations are x=0.5 and x=nx-0.5; physical walls lie
+    // at the level-set intersections, not the voxel halfway planes.
+    let viscosity = (tau - 0.5) / 3.0;
+    let pressure_gradient = (inlet - outlet) / (3.0 * (nx - 1) as f64);
+    let (mut error, mut norm) = (0.0, 0.0);
+    for y in 1..ny - 1 {
+        let position = y as f64 + 0.5;
+        let expected =
+            pressure_gradient * (position - lower) * (upper - position) / (2.0 * viscosity);
+        let actual = grid.velocity(nx / 2, y, 2)[0];
+        error += (actual - expected).powi(2);
+        norm += expected * expected;
+    }
+    let relative = (error / norm).sqrt();
+    eprintln!("fractional open-duct velocity error: {relative:e}");
+    assert!(
+        relative < 0.03,
+        "resolved open-duct velocity error {relative:e}"
+    );
+}
+
+#[test]
+fn late_open_reconstruction_overflow_does_not_publish_populations() {
+    let gate = CancelGate::new();
+    let p = FaceBoundary3::Periodic;
+    let mut grid = BoundaryGrid3::new(
+        4,
+        4,
+        4,
+        0.8,
+        [0.0; 3],
+        BoundarySpec3::new([
+            FaceBoundary3::Pressure { density: 1e200 },
+            FaceBoundary3::Pressure { density: 1.0 },
+            p,
+            p,
+            p,
+            p,
+        ]),
+    );
+    let wall = CurvedWall3::new(&grid, &[], &gate).unwrap();
+    let before = snapshots(&grid);
+    let error = grid
+        .step_with_curved_walls(&wall, |_| unreachable!(), [0.0, 1e200, 0.0], &gate)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        fs_lbm::d3q19::BoundaryStepError3::WallMomentum {
+            reason: "open-boundary momentum account overflowed"
+        }
+    ));
+    assert_eq!(snapshots(&grid), before);
+}

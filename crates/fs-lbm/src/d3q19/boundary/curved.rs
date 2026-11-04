@@ -6,11 +6,12 @@
 //! Geometry and occupancy are fixed during a step; this is not a fresh-cell
 //! remapper or a displacement/volume-conservation model.
 
-use super::partial_saturation::{cross, low_mach};
+use super::partial_saturation::open::OpenTransport;
+use super::partial_saturation::{PartialSaturationError3, cross, low_mach};
 use super::{
-    BoundaryGrid3, BoundaryLink3, BoundaryStepError3, CancelGate, E3, Face3, FaceBoundary3,
-    NO_FLUID_SOURCE, OPP3, PeriodicMomentumTransport3, PullSource, Q3, StreamView, TILE_CELLS,
-    WallMomentumExchange3, cell_force, effective_wall_velocity, wall_population,
+    BoundaryGrid3, BoundaryLink3, BoundaryStepError3, CancelGate, E3, NO_FLUID_SOURCE, OPP3,
+    OpenBoundaryMomentumTransport3, PeriodicMomentumTransport3, PullSource, Q3, StreamView,
+    TILE_CELLS, WallMomentumExchange3, cell_force, effective_wall_velocity, wall_population,
 };
 
 type Result<T> = core::result::Result<T, BoundaryStepError3>;
@@ -62,7 +63,7 @@ pub struct CurvedWall3 {
 
 impl CurvedWall3 {
     /// Bind a unique canonical (tile, lane, direction) selection of native wall
-    /// links. An empty selection is valid and recovers the ordinary closed step.
+    /// links. An empty selection is valid and recovers the ordinary native step.
     /// A short link requires a real opposite-side fluid donor; no wall, solid,
     /// open reservoir or unresolved one-cell gap is substituted for that donor.
     pub fn new(grid: &BoundaryGrid3, links: &[CurvedWallLink3], gate: &CancelGate) -> Result<Self> {
@@ -247,6 +248,9 @@ pub struct CurvedWallStep3 {
     pub body_force_angular_impulse: [f64; 3],
     /// Actual periodic coordinate transport, distinct from surface torque.
     pub periodic: PeriodicMomentumTransport3,
+    /// Actual native velocity/pressure reservoir exchange TO the fluid.
+    /// Includes regularization corrections; separate from all wall reactions.
+    pub open: OpenBoundaryMomentumTransport3,
 }
 
 impl BoundaryGrid3 {
@@ -261,8 +265,12 @@ impl BoundaryGrid3 {
     /// not insert/remove fluid cells or advance a rigid body's pose.
     ///
     /// All four native collision models and held Guo forces retain their own
-    /// original law. Wall/periodic domains are admitted; regularized open faces
-    /// refuse because their separate reservoir exchange is not owned here.
+    /// original law. Native velocity/pressure faces reconstruct the unpublished
+    /// streamed candidate using the same regularized stress and Guo force frame
+    /// as ordinary stepping. Their actual population mass/linear/angular input
+    /// is returned separately in `open`, including the reconstruction of
+    /// tangential populations at face interiors. Wall-owned corner links keep
+    /// the curved or native wall population; they are never counted as open.
     ///
     /// BFL interpolation can change population mass. The returned measured mass
     /// change is not repaired or reclassified as physical swept volume. The
@@ -285,14 +293,6 @@ impl BoundaryGrid3 {
         if !moment_origin.into_iter().all(f64::is_finite) {
             return Err(invalid("curved wall moment origin must be finite"));
         }
-        if Face3::ALL.into_iter().any(|face| {
-            matches!(
-                self.boundaries.face(face),
-                FaceBoundary3::Velocity { .. } | FaceBoundary3::Pressure { .. }
-            )
-        }) {
-            return Err(invalid("curved wall stepping requires wall/periodic faces"));
-        }
         self.try_collide_with_gate(Some(gate))?;
         let periodic = self.periodic_momentum_transport(gate).map_err(|_| {
             if gate.is_requested() {
@@ -314,6 +314,7 @@ impl BoundaryGrid3 {
             };
             let mut curved = WallMomentumExchange3::default();
             let mut other_walls = WallMomentumExchange3::default();
+            let mut open = OpenTransport::default();
             let mut body_force_impulse = [0.0; 3];
             let mut body_force_angular_impulse = [0.0; 3];
             let mut cursor = 0;
@@ -322,6 +323,14 @@ impl BoundaryGrid3 {
                 for lane in 0..TILE_CELLS {
                     if self.solid[tile] & (1u64 << lane) != 0 {
                         continue;
+                    }
+                    let open_mask = self.open_link_masks[tile].0[lane];
+                    if open_mask != 0 {
+                        // Account for the native temporary open-link reflection.
+                        // The shared face owner adds its actual reconstruction
+                        // delta after every curved population has been written.
+                        let post = self.post.each_ref().map(|field| field[tile].0[lane]);
+                        open.add_links(&post, open_mask, self.coords(tile, lane), moment_origin);
                     }
                     let mut values = view.pull_cell(tile, lane);
                     let mask = self.link_masks[tile].0[lane];
@@ -423,6 +432,16 @@ impl BoundaryGrid3 {
                 }
             }
             debug_assert_eq!(cursor, wall.links.len());
+            let open = self
+                .reconstruct_immersed_open_faces(&mut next, open, moment_origin, gate)
+                .map_err(|error| match error {
+                    PartialSaturationError3::Cancelled => BoundaryStepError3::Cancelled,
+                    PartialSaturationError3::Cell { cell, .. } => {
+                        BoundaryStepError3::Unphysical { cell }
+                    }
+                    PartialSaturationError3::Invalid { reason } => invalid(reason),
+                    _ => invalid("native open-face reconstruction refused"),
+                })?;
             let curved = curved.checked()?;
             let other_walls = other_walls.checked()?;
             if !body_force_impulse
@@ -439,6 +458,7 @@ impl BoundaryGrid3 {
                 body_force_impulse,
                 body_force_angular_impulse,
                 periodic,
+                open,
             })
         })();
         if outcome.is_ok() {
