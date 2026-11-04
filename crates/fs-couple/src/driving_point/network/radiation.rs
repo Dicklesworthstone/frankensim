@@ -25,6 +25,9 @@ mod prepared;
 mod molecular;
 pub use molecular::MolecularRadiatingNetwork;
 pub use prepared::{
+    PreparedRadiatingWelchBand, PreparedRadiatingWelchBandFarField,
+    PreparedRadiatingWelchBandMicrophones, RadiatingWelchBandCoverage,
+    RadiatingWelchBandLimits, RadiatingWelchBandPowerMoments, RadiatingWelchBandStatistics,
     PreparedRadiatingFarField, PreparedRadiatingMicrophones, PreparedRadiatingNetwork,
     PreparedRadiatingWelchBin, RadiatingSourceResponse, RadiatingSourceStatistics,
     RadiatingWelchLimits,

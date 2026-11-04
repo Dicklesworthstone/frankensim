@@ -19,6 +19,12 @@ const FACTOR_ENTRIES: usize = MAX_NETWORK_PORTS * MAX_NETWORK_PORTS;
 
 mod angular;
 pub use angular::PreparedRadiatingFarField;
+mod band;
+pub use band::{
+    PreparedRadiatingWelchBand, PreparedRadiatingWelchBandFarField,
+    PreparedRadiatingWelchBandMicrophones, RadiatingWelchBandCoverage,
+    RadiatingWelchBandLimits, RadiatingWelchBandPowerMoments, RadiatingWelchBandStatistics,
+};
 mod welch;
 pub use welch::{PreparedRadiatingWelchBin, RadiatingWelchLimits};
 

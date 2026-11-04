@@ -7,6 +7,7 @@ use fs_duct::network::{
 };
 
 mod angular;
+mod band;
 mod molecular;
 mod welch;
 

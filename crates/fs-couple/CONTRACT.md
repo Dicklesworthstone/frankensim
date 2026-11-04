@@ -30551,3 +30551,79 @@ actual-owner tests are authored for mixed-bank temperature feedback, independent
 two-cell thermal balance, source-joule change, clock continuation, and atomic
 endpoint optical-domain refusal. They remain unrun while the full Cargo/DSR
 workspace is blocked by the missing sibling checkouts.
+
+### Stationary selected-bin observations of the loaded exterior
+
+`driving_point::network::radiation::PreparedRadiatingWelchBand::stationary`
+binds an explicitly selected, strictly increasing set of original
+`PreparedRadiatingWelchBin` values. It borrows the exact same
+`WelchCrossSpectrum` acquisition and original `RadiatingNetwork` across every
+bin. Canonical source labels/SI quantities, graph port order, opening source
+kinds/order and receiver identities must agree, including for silence.
+Conventional propagation retains one identical `LossModel`; molecular
+propagation must borrow the **exact same** `MolecularNetwork` reservoir owner.
+Mixed propagation kinds or replacement molecular owners refuse. Original
+frequency-dependent source/load impedances remain explicitly authored per bin.
+
+This API declares a stationary-bin sum in which cross-frequency products
+average to zero. Neither Welch segmentation nor matching array shapes proves
+that assumption. The consumer does not synthesize a waveform, construct
+cross-frequency coherence, interpolate missing source/transfer data, infer
+uniform spacing of selected frequencies, or infer unselected bins to be silent.
+`bins()` retains exact discrete indices and their original preparations;
+`coverage()` reports selected versus available interior-bin counts. DC and
+Nyquist always remain absent, including when every interior bin is selected.
+This metadata does not establish measured bandwidth, leakage control or
+stationarity.
+
+The original bin adapters have already applied shared `sqrt(2*df)` and the
+original harmonic time-average half. Band observations sum those integrated
+moments once, with no additional df, peak/RMS, or one-sided multiplier.
+
+`statistics` prepares bounded reusable original per-bin buffers and aggregate
+port p/p, U/U, p/U and exterior p/u statistics. Evaluation preserves the original
+signed generator, source dissipation, interface, network and external-load work.
+`microphones` prepares the **same physical patterns** at each original receiver
+for every bin, preserving frequency-dependent near-field pressure/velocity and
+complex inter-microphone phase. Its selected-bin Hermitian CSD remains in Pa².
+`far_field` requires original angular preparations at all selected frequencies,
+with identical requested directions and exterior fluid. Every actual measured
+covariance must pass its own original positive quadrature convergence. Original
+per-bin convergence reports remain accessible; summing powers does not create
+a broadband convergence certificate. Exterior surface work already belongs to
+network external-load power; outgoing observations never add another debit.
+
+The band admits at most 4096 selected bins plus explicit totals for original
+opening-factor bytes and already performed mapping products. It never copies
+those factors. Observation constructors admit complete retained logical bytes
+before allocation, including original per-bin buffers and port-label payloads
+where applicable; borrowed original operators and allocator overhead are
+excluded. Repeated evaluations allocate nothing and repeat no propagation,
+boundary solve or source-to-opening composition. Original per-bin budgets stay
+independently enforced. The additional whole-band work gate conservatively sums
+those per-bin allowances plus the documented reduction count; unused allowances
+cannot weaken another bin's gate. All arithmetic counts are checked.
+
+Stationary reductions use componentwise compensated sums. Microphone and
+directional observations accumulate while processing each bin, avoiding extra
+bins-by-microphones² or bins-by-directions result banks. Cancellation polls each
+bin and bounded reduction chunks. Any identity, finite, work, convergence or
+cancellation refusal hides **all** band observation getters, including after a
+previous success. There is no partially published band result.
+
+Validation boundary: five passing native tests execute the production band
+modules and original retained Welch/duct/field/microphone/angular owners with
+independently specified analytical passive source/outlet maps and separated
+monopole columns. Sparse frequencies 256, 640 and 1152 Hz test full reciprocal
+mutual loading, delays, signed source heat, exterior work, physical p/u and
+Hermitian microphone moments; analytical sphere integrals independently match
+outgoing power and directional moments, including active boundary work.
+Rectangular and Hann normalization, exact acquisition/SI/model refusals,
+coverage, storage/work limits, cancellation/replay, missing angular bins,
+direction mismatch and one-bin convergence failure are covered. A targeted
+propagation-identity test covers conventional mismatch, mixed kinds and exact
+molecular-owner identity using opaque identity markers; it does not execute a
+molecular constitutive solve. The native proof does not execute original
+material, graph or BEM assembly. One additional public original-assembly band
+regression is authored but unrun. Full Cargo/DSR remains unavailable because
+seven constellation sibling repositories are absent.
