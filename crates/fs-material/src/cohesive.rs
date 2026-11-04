@@ -13,6 +13,8 @@
 //! penalty remains (frictionless reclosure, not exact nonpenetration). No healing,
 //! fatigue, automatic bond creation, implicit temperature dependence, calibrated
 //! adhesion, evolving contact geometry or finite-rotation objectivity is claimed.
+//! After accepted complete failure, opening and shear no longer have an adhesive
+//! range or rate limit; the original normal-penetration limit still applies.
 //! `temperature` explicitly transfers common-mode history to a newly supplied
 //! temperature state, with separate parameter-work and damage-release accounts.
 //!
@@ -100,6 +102,8 @@ impl BilinearCohesive {
     #[must_use]
     pub fn failure_separation_m(&self) -> f64 { self.failure }
     #[must_use]
+    /// Adhesive separation range while bonds survive; after accepted failure,
+    /// only the independent normal compressive penetration uses this bound.
     pub fn maximum_separation_m(&self) -> f64 { self.maximum_separation }
     #[must_use]
     pub fn strength_pa(&self) -> f64 { self.strength }
@@ -215,6 +219,10 @@ impl<'a> CohesivePoint<'a> {
     }
     #[must_use]
     pub fn stored_energy_j_m2(&self) -> f64 {
+        if self.failed() {
+            let compression = self.jump[0].min(0.0);
+            return (0.5*self.law.compression_stiffness*compression)*compression;
+        }
         if self.law.mixed_mode.is_some() { return self.mixed_stored_energy(); }
         let active = active(self.jump);
         let stiffness = self.law.stiffness*self.law.intact(self.maximum);
@@ -237,7 +245,7 @@ impl<'a> CohesivePoint<'a> {
     /// This fixed-size operation is bounded O(1); batch owners poll cancellation.
     pub fn trial(&self, jump_m: [f64; 3], energy_tolerance_j_m2: f64)
         -> Result<CohesiveStep<'a>, CohesiveError> {
-        if self.law.viscosity.is_some() {
+        if self.law.viscosity.is_some() && !self.failed() {
             return Err(CohesiveError::Invalid("physical bond viscosity requires trial_over_time and an explicit time interval"));
         }
         self.trial_equilibrium(jump_m, energy_tolerance_j_m2)
@@ -248,7 +256,8 @@ impl<'a> CohesivePoint<'a> {
     fn trial_equilibrium(&self, jump_m: [f64; 3], energy_tolerance_j_m2: f64)
         -> Result<CohesiveStep<'a>, CohesiveError> {
         positive(energy_tolerance_j_m2)?;
-        if norm(jump_m)? > self.law.maximum_separation { return Err(CohesiveError::SeparationLimit); }
+        self.require_jump(jump_m, self.law.maximum_separation)?;
+        if self.failed() { return self.trial_failed(jump_m, energy_tolerance_j_m2); }
         if self.law.mixed_mode.is_some() { return self.trial_mixed(jump_m, energy_tolerance_j_m2); }
         let radius = norm(active(jump_m))?;
         let old_radius = norm(active(self.jump))?;
@@ -278,6 +287,40 @@ impl<'a> CohesivePoint<'a> {
         let tangent_pa_m = classical.then_some(branch_tangent_pa_m);
         Ok(CohesiveStep { point, traction_pa, tangent_pa_m, branch_tangent_pa_m,
             energy: CohesiveEnergy { work, stored_change, dissipated, defect } })
+    }
+
+    // Only ACCEPTED failure removes the adhesive domain. An interval starting
+    // with surviving bonds still obeys its full calibrated range, even if its
+    // proposed endpoint would rupture them. Compression is a separate law.
+    fn require_jump(&self, jump: [f64; 3], maximum: f64) -> Result<(), CohesiveError> {
+        let measure = if self.failed() {
+            for value in jump { finite(value)?; }
+            -jump[0].min(0.0)
+        } else {
+            norm(jump)?
+        };
+        if measure > maximum { Err(CohesiveError::SeparationLimit) } else { Ok(()) }
+    }
+
+    // No inactive stiffness norm, strength surface or damage coordinate is
+    // evaluated on a detached gap. In particular, a large finite separation
+    // cannot create 0*infinity storage in a failed mixed-mode bond.
+    fn trial_failed(&self, jump: [f64; 3], tolerance: f64)
+        -> Result<CohesiveStep<'a>, CohesiveError> {
+        let point = Self { jump, ..*self };
+        let a = self.jump[0].min(0.0);
+        let b = jump[0].min(0.0);
+        let factor = 0.5*self.law.compression_stiffness*(b-a);
+        let work = finite(factor*b + factor*a)?;
+        let stored_change = finite(point.stored_energy_j_m2()-self.stored_energy_j_m2())?;
+        let defect = finite(work-stored_change)?;
+        if defect.abs() > tolerance { return Err(CohesiveError::EnergyDefect(defect)); }
+        let traction_pa = [finite(self.law.compression_stiffness*b)?, 0.0, 0.0];
+        let mut tangent = [[0.0; 3]; 3];
+        if jump[0] < 0.0 { tangent[0][0] = self.law.compression_stiffness; }
+        Ok(CohesiveStep { point, traction_pa, tangent_pa_m: (jump[0] != 0.0).then_some(tangent),
+            branch_tangent_pa_m: tangent,
+            energy: CohesiveEnergy { work, stored_change, dissipated: 0.0, defect } })
     }
 
     fn tangent(&self, next: &Self, radius: f64) -> Result<([[f64; 3]; 3], bool), CohesiveError> {

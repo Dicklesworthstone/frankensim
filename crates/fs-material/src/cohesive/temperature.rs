@@ -70,9 +70,7 @@ impl CohesivePoint<'_> {
                 "temperature transfer cannot change the cohesive envelope model",
             ));
         }
-        if norm(self.jump)? > law.maximum_separation {
-            return Err(CohesiveError::SeparationLimit);
-        }
+        self.require_jump(self.jump, law.maximum_separation)?;
         if self.law == law {
             return Ok(CohesiveTemperatureStep {
                 point: CohesivePoint { law, ..*self },
@@ -96,14 +94,17 @@ impl CohesivePoint<'_> {
                     None => None,
                 };
                 point.maximum = if let Some(history) = point.mixed_history {
-                    equivalent_maximum(
+                    let retained = equivalent_maximum(
                         history.onset_sqrt_energy,
                         history.failure_sqrt_energy,
                         intact,
                         |value| history.intact(value),
-                    )?
-                    .max(coordinate(p, self.jump)?)
-                    .min(history.failure_sqrt_energy)
+                    )?;
+                    if intact == 0.0 {
+                        retained
+                    } else {
+                        retained.max(coordinate(p, self.jump)?).min(history.failure_sqrt_energy)
+                    }
                 } else {
                     0.0
                 };
@@ -111,16 +112,24 @@ impl CohesivePoint<'_> {
             point.fracture_reference = point
                 .mixed_history
                 .map_or(0.0, |history| history.fracture(point.maximum));
-            let g = active(self.jump);
-            let recoverable = 0.5 * (p.normal_stiffness_pa_m * g[0]) * g[0]
-                + 0.5 * (p.tangential_stiffness_pa_m * g[1]) * g[1]
-                + 0.5 * (p.tangential_stiffness_pa_m * g[2]) * g[2];
-            intact * recoverable
+            if intact == 0.0 {
+                0.0
+            } else {
+                let g = active(self.jump);
+                let recoverable = 0.5 * (p.normal_stiffness_pa_m * g[0]) * g[0]
+                    + 0.5 * (p.tangential_stiffness_pa_m * g[1]) * g[1]
+                    + 0.5 * (p.tangential_stiffness_pa_m * g[2]) * g[2];
+                intact * recoverable
+            }
         } else {
             let intact = self.law.intact(self.maximum);
             let retained =
                 equivalent_maximum(law.onset, law.failure, intact, |value| law.intact(value))?;
-            point.maximum = retained.max(norm(active(self.jump))?).min(law.failure);
+            point.maximum = if intact == 0.0 {
+                retained
+            } else {
+                retained.max(norm(active(self.jump))?).min(law.failure)
+            };
             point.fracture_reference = law.fracture(point.maximum);
             let stiffness = law.stiffness * intact;
             active(self.jump)

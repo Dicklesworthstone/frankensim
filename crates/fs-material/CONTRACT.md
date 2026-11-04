@@ -5829,6 +5829,16 @@ already resolved multiphysics interface bundle into the existing
 separation is supplied separately and must include complete failure. No bulk
 material name, absent property, or geometric proximity creates an adhesive bond.
 
+Once complete failure has been accepted, opening and shear may continue beyond
+that obsolete adhesive range. Only the independent normal penetration remains
+bounded; every component must still be finite. The failed path evaluates the
+original compression penalty without inactive adhesive energy norms, preserving
+fracture loss exactly and adding no new bond work. The same rule applies to
+endpoint, timed, mean-traction/tangent and temperature-transfer paths. A step
+starting with surviving bonds still enforces the full separation/rate domain.
+Fixed frames, original trace correspondence and the structural owner's own
+displacement limits remain in force; no new sliding-contact geometry is inferred.
+
 The full bundle, exact source selections, ordered surfaces and texture frames
 remain accessible. The canonical fixed-external-condition policy applies to
 both value dependence and applicability: evolving gap, damage, stress, rate or
@@ -6444,7 +6454,8 @@ Focused native G1/G3 tests compare the modulus and all first/second derivatives 
 `BilinearCohesive::with_viscosity` selects explicit Kelvin--Voigt traction
 `(1-d) eta_i gdot_i` with independent normal/shear interface viscosities in Pa s/m.
 `trial_over_time` requires positive physical time and a declared jump-rate limit;
-untimed trials refuse this law. The original intrinsic common-mode or frozen-onset
+untimed trials refuse while bonds survive. After accepted complete failure no
+dashpot remains, so untimed continuation is also admitted. The original common-mode or frozen-onset
 BK fracture owner still owns damage and storage. Normal viscosity acts in both
 opening and compression while bonds survive, and all viscous traction vanishes
 after complete failure; the separate compression penalty remains.

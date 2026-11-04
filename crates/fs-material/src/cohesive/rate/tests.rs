@@ -228,7 +228,13 @@ fn ruptured_bonds_allow_fast_separation_and_reclosure_without_dashpot_work() {
             .equilibrium
             .point;
         assert!(failed.failed());
-        for end in [[0.008, 0.002, -0.001], [-0.001, 0.002, -0.001]] {
+        for end in [
+            [0.008, 0.002, -0.001],
+            [-0.001, 0.002, -0.001],
+            [0.03, 0.2, -0.1],
+            [-0.001, 0.2, -0.1],
+            [1e200, 1e200, -1e200],
+        ] {
             let (step, mean, pressure) = failed
                 .trial_over_time_with_damage_weighted_compression(end, 0.001, 1e-8)
                 .unwrap();
@@ -247,16 +253,44 @@ fn ruptured_bonds_allow_fast_separation_and_reclosure_without_dashpot_work() {
             assert_eq!(step.viscous_dissipated_j_m2, 0.0);
             assert_eq!(step.equilibrium.energy.dissipated, 0.0);
             assert!(step.equilibrium.point.failed());
+            assert_eq!(step.equilibrium.point.dissipated_j_m2(), failed.dissipated_j_m2());
+            assert_eq!(step.equilibrium.point.mixed_mode_history(), failed.mixed_mode_history());
             assert_eq!(
                 step.branch_tangent_pa_m,
                 step.equilibrium.branch_tangent_pa_m
             );
+            // With every dashpot removed, untimed and timed force/path APIs
+            // agree, including separations whose inactive elastic energy would
+            // overflow. No arbitrary time interval is needed for dead bonds.
+            assert_eq!(failed.trial(end, 1e-8).unwrap(), step.equilibrium);
+            let untimed = failed.trial_with_mean_traction_tangent(end, 1e-8).unwrap();
+            let timed = failed
+                .trial_over_time_with_mean_traction_tangent(end, 0.001, 1e-8)
+                .unwrap();
+            assert_eq!(untimed.0, step.equilibrium);
+            assert_eq!(untimed.1, mean);
+            assert_eq!(timed.1, mean);
+            assert_eq!(timed.2, untimed.2);
+            let expected_tangent = if closed < 0.0 {
+                0.5 * 2e9 * closed * (closed - 2.0 * 0.006) / (closed - 0.006).powi(2)
+            } else {
+                0.0
+            };
+            let tangent = untimed.2.unwrap();
+            close(tangent[0][0], expected_tangent, 1e-13);
+            for (i, row) in tangent.iter().enumerate() {
+                for (j, &entry) in row.iter().enumerate() {
+                    if i != 0 || j != 0 { assert_eq!(entry, 0.0); }
+                }
+            }
         }
         assert_eq!(failed.jump_m(), [0.006, 0.0, 0.0]);
         assert!(matches!(
-            failed.trial_over_time([0.03, 0.0, 0.0], 0.001, 1e-8),
+            failed.trial_over_time([-0.03, 0.0, 0.0], 0.001, 1e-8),
             Err(CohesiveError::SeparationLimit)
         ));
+        assert!(failed.trial([1.0, f64::NAN, 0.0], 1e-8).is_err());
+        assert!(failed.trial([f64::INFINITY, 0.0, 0.0], 1e-8).is_err());
         assert!(
             failed
                 .trial_over_time([0.008, 0.0, 0.0], 0.0, 1e-8)
@@ -276,6 +310,12 @@ fn rate_applicability_still_covers_every_interval_that_starts_with_surviving_bon
             .point;
         assert!(damaged.damage() > 0.0 && !damaged.failed());
         for old in [virgin, damaged] {
+            // A surviving interface cannot skip its calibrated distance range
+            // by proposing an already-detached endpoint in a single interval.
+            assert!(matches!(
+                old.trial_over_time([0.03, 0.0, 0.0], 1.0, 1e-8),
+                Err(CohesiveError::SeparationLimit)
+            ));
             // Even an endpoint beyond complete rupture traverses live dashpots.
             assert!(matches!(
                 old.trial_over_time([0.006, 0.0, 0.0], 0.001, 1e-8),

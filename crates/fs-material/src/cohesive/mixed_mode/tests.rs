@@ -231,7 +231,12 @@ fn compression_shear_and_invalid_data_keep_explicit_bounds() {
     assert!(shear.point.failed());
     close(shear.energy.dissipated, 400.0, 1e-12);
     let saved = shear.point;
-    assert!(saved.trial([0.1, 0.0, 0.0], 1e-8).is_err());
+    assert!(saved.trial([-0.1, 0.0, 0.0], 1e-8).is_err());
+    assert!(compression.trial([0.1, 0.0, 0.0], 1e-8).is_err());
+    let detached = saved.trial([0.1, 0.0, 0.0], 1e-8).unwrap();
+    assert_eq!(detached.traction_pa, [0.0; 3]);
+    assert_eq!(detached.energy.dissipated, 0.0);
+    close(detached.point.dissipated_j_m2(), 400.0, 1e-12);
     assert_eq!(saved, shear.point);
     let mut p = parameters();
     p.bk_exponent = 0.5;

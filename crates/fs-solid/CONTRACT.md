@@ -5566,7 +5566,13 @@ material law while retaining mass, velocity, history and clock. Original normal
 compression remains available on reclosure. The default is the existing
 frictionless penalty law; the explicit sourced damaged-area extension below
 adds residual shear resistance. Neither is exact nonpenetration or newly
-discovered contact. Immutable
+discovered contact. Accepted failure also releases the material's former
+opening/shear separation and dashpot-rate restrictions; its independent normal
+penetration bound and the structural displacement/velocity bounds still apply.
+Native P1 regressions continue both free bodies' mass-weighted centres beyond
+the adhesive range with unchanged momenta, and source-temperature regression
+retains the detached displacement, original claims and spent fracture work.
+Immutable
 candidate publication makes late cancellation, material-domain refusal, failed
 work gates and exhausted solves leave the entire accepted trajectory intact.
 

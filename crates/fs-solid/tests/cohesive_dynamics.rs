@@ -203,12 +203,14 @@ fn prescribed_jump_external_force_and_physical_viscosity_have_independent_work()
 }
 
 #[test]
-fn failed_adhesive_keeps_native_fast_motion_and_reclosure_after_its_dashpots_disappear() {
+fn failed_adhesive_keeps_native_motion_beyond_its_old_range_and_rate_with_reclosure() {
     with_cx(|cx| {
         let assembled = scalar_tet(cx);
         let mass = CsrOp::symmetric(assembled.mass);
         let elastic = CsrOp::symmetric(assembled.stiffness);
-        let law = law().with_viscosity(CohesiveViscosity::new(4.0, 7.0, 0.1).unwrap());
+        let law = BilinearCohesive::new(1000.0, 1.0, 0.002, 1000.0, 0.007)
+            .unwrap()
+            .with_viscosity(CohesiveViscosity::new(4.0, 7.0, 0.1).unwrap());
         let system = CohesiveSystem::new(&elastic, vec![patch(&law)], budget()).unwrap();
         // Rupture slowly within the adhesive rate domain before adopting the
         // same state and original consistent mass as a detached moving solid.
@@ -238,6 +240,7 @@ fn failed_adhesive_keeps_native_fast_motion_and_reclosure_after_its_dashpots_dis
                 1e-10,
             );
             if velocity > 0.0 {
+                assert!(u > law.maximum_separation_m());
                 // Independent midpoint solution of M u'' + K_bulk u = 0;
                 // detached adhesive contributes neither stiffness nor viscosity.
                 let expected = (u0 * (1.0 - 25.0 * h * h) + h * velocity) / (1.0 + 25.0 * h * h);
@@ -435,9 +438,11 @@ fn source_bound_deformable_p1_bodies_fracture_then_keep_separate_momenta() {
                 }
             })
             .collect();
+        let mut native_config = config();
+        native_config.solve.maximum_displacement_m = 0.1;
         let mut motion = system
             .bonded_state()
-            .into_dynamics(&mass, initial.clone(), 0.0, config())
+            .into_dynamics(&mass, initial.clone(), 0.0, native_config)
             .unwrap();
         let initial_momenta = body_momenta(&mass, &initial);
         let initial_energy = 0.5
@@ -496,6 +501,31 @@ fn source_bound_deformable_p1_bodies_fracture_then_keep_separate_momenta() {
         for patch in system.patches() {
             assert_eq!(patch.source().unwrap().resolved(), source.resolved());
         }
+
+        // The original free bodies' mass-weighted centres remain ballistic
+        // beyond the old adhesive range; internal deformation may continue.
+        // Each body has unit mass, so M*u sums give its centre displacement.
+        let centres = body_momenta(&mass, motion.state().displacements_m());
+        let mut detached = motion.clone();
+        for count in 1..=2 {
+            let step = detached.advance(&[0.0; 24], &[[0.0; 3]; 3], 0.02, cx).unwrap();
+            assert_eq!(step.cohesive_energy_j.dissipated, 0.0);
+            assert_eq!(step.viscous_dissipated_j, 0.0);
+            assert!(step.mean_traction_pa.iter().all(|&mean| mean == [0.0; 3]));
+            let position = body_momenta(&mass, step.motion.state().displacements_m());
+            let momentum = body_momenta(&mass, step.motion.velocity_m_s());
+            for body in 0..2 {
+                for c in 0..3 {
+                    close(momentum[body][c], separated_momenta[body][c], 2e-9);
+                    close(position[body][c], centres[body][c]
+                        + separated_momenta[body][c] * (0.02 * f64::from(count)), 2e-9);
+                }
+            }
+            close(step.energy_residual_j, 0.0, 2e-9);
+            detached = step.motion;
+        }
+        assert!(detached.state().points().iter()
+            .all(|point| point.jump_m()[0] > source.law().maximum_separation_m()));
 
         // Physical body forces reverse the separated bodies. The same failed
         // quadrature histories recover normal compression without rebonding,
