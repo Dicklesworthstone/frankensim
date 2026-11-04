@@ -18,7 +18,8 @@ use operator::Operator;
 /// Explicit source, nonlinear-work and publication bounds for native motion.
 #[derive(Clone, Copy, Debug)]
 pub struct GasMembraneMotionControls {
-    /// Original isentropic source inversion; no caloric law is substituted.
+    /// First-parcel isentropic source inversion; an opposing sealed parcel
+    /// retains the independent controls in `model.sealed_exterior()`.
     pub gas: GasEntropySolve,
     /// Original Newton--Krylov controls for each implicit time step.
     pub time: ImplicitSolveConfig,
@@ -113,24 +114,31 @@ pub struct GasMembraneMotionStep {
     pub gas_energy_change_j: f64,
     /// Reversible work by the gas, equal to minus its internal-energy change.
     pub work_by_gas_j: f64,
+    /// Opposing parcel's native interval Delta U; zero for a fixed reservoir.
+    pub exterior_gas_energy_change_j: f64,
+    /// Reversible work by that opposing parcel, equal to minus its Delta U.
+    pub work_by_exterior_gas_j: f64,
     /// Native fixed-perimeter swept volume between the accepted shapes [m3].
     pub swept_volume_change_m3: f64,
-    /// Held absolute exterior pressure times the actual native swept volume.
+    /// Held reservoir pressure times native swept volume; zero for sealed gas.
     pub exterior_pressure_work_j: f64,
     /// Held nodal dead forces dotted with the accepted displacement increment.
     pub dead_load_work_j: f64,
-    /// Delta kinetic + Delta membrane + Delta gas + exterior work - dead work.
+    /// Delta kinetic + Delta membrane + BOTH gas Delta U + reservoir work - dead work.
     /// This numerical defect is not material damping or a heat source.
     pub integration_defect_j: f64,
     pub evaluations: usize,
+    /// Coupled geometry proposals, each reconstructing one or two parcels.
+    /// Repeated tangent actions reuse both states, not additional inversions.
     pub gas_trials: usize,
 }
 
 /// Continuing full-coordinate motion on one immutable cavity/source binding.
 ///
 /// The same prescribed perimeter, original reference masses, source entropy,
-/// composition and constant absolute exterior pressure apply throughout. Every
-/// accepted shape carries the actual native gas volume, pressure and temperature.
+/// composition and exterior binding apply throughout. Every accepted shape
+/// carries both native gas volumes, pressures and temperatures when the exterior
+/// is sealed, or the first gas and its held exterior pressure otherwise.
 /// Dead forces may change between held intervals. No source is advanced until
 /// the native solve, fresh endpoint source check and energy gate all succeed.
 ///
@@ -312,22 +320,38 @@ impl<'m, 'p> GasMembraneMotion<'m, 'p> {
             Dd::from_f64(accepted.strain_energy_j) - Dd::from_f64(self.accepted.strain_energy_j);
         let gas_change = Dd::from_f64(accepted.gas_volume.stored_energy_change_j)
             - Dd::from_f64(self.accepted.gas_volume.stored_energy_change_j);
+        let exterior_gas_change = Dd::from_f64(
+            accepted
+                .exterior_gas
+                .as_ref()
+                .map_or(0.0, |gas| gas.gas_volume.stored_energy_change_j),
+        ) - Dd::from_f64(
+            self.accepted
+                .exterior_gas
+                .as_ref()
+                .map_or(0.0, |gas| gas.gas_volume.stored_energy_change_j),
+        );
         let swept = self.model.patch.pressure_work_j(
             &self.accepted.displacement_m,
             &accepted.displacement_m,
             1.0,
             &mut || operator.cancelled(),
         )?;
-        let exterior_work = self.model.exterior_pressure_pa * swept;
-        let defect = (kinetic_change + membrane_change + gas_change + Dd::from_f64(exterior_work)
-            - dead_work)
-            .to_f64();
+        let exterior_work = self.model.exterior.reservoir_work_j(swept);
+        let mut defect =
+            kinetic_change + membrane_change + gas_change + Dd::from_f64(exterior_work) - dead_work;
+        if accepted.exterior_gas.is_some() {
+            defect = defect + exterior_gas_change;
+        }
+        let defect = defect.to_f64();
         let frame = GasMembraneMotionStep {
             time,
             kinetic_energy_change_j: kinetic_change.to_f64(),
             membrane_energy_change_j: membrane_change.to_f64(),
             gas_energy_change_j: gas_change.to_f64(),
             work_by_gas_j: -gas_change.to_f64(),
+            exterior_gas_energy_change_j: exterior_gas_change.to_f64(),
+            work_by_exterior_gas_j: -exterior_gas_change.to_f64(),
             swept_volume_change_m3: swept,
             exterior_pressure_work_j: exterior_work,
             dead_load_work_j: dead_work.to_f64(),
@@ -339,6 +363,7 @@ impl<'m, 'p> GasMembraneMotion<'m, 'p> {
             frame.kinetic_energy_change_j,
             frame.membrane_energy_change_j,
             frame.gas_energy_change_j,
+            frame.exterior_gas_energy_change_j,
             swept,
             exterior_work,
             frame.dead_load_work_j,

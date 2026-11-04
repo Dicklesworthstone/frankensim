@@ -28,8 +28,9 @@ impl<'a> GasMembrane<'a> {
     /// Solve this original coupled equilibrium, then lower its COMPLETE tangent
     /// through the original membrane reference mass and dense modal owner.
     ///
-    /// K = K_membrane - (p-pe) Hess(V) - (dp/dV) grad(V) grad(V)^T.
-    /// The single accepted native gas state supplies every tangent column; the
+    /// K = K_membrane - (p1-p2) Hess(V1) - (p1' + p2') grad(V1) grad(V1)^T,
+    /// where each derivative is with respect to its own gas volume and p2'=0
+    /// for a fixed exterior. The accepted native gases supply every column; the
     /// modal lowering performs no additional gas inversion. The full positive
     /// discrete spectrum, source-sheet linearization and native modal residual
     /// gates apply. `settings` bounds the dense leaf to at most 128 free DOFs.
@@ -70,6 +71,7 @@ impl<'a> GasMembrane<'a> {
                 "two-sided gas modes need equilibrium strictly inside volume and temperature brackets",
             ));
         }
+        self.exterior.admit_modes(equilibrium.exterior_gas.as_ref())?;
         let patch: &'a MembranePatch = self.patch;
         let gradient_all =
             patch.pressure_load_n(&equilibrium.displacement_m, 1.0, &mut cancelled)?;
@@ -162,8 +164,9 @@ impl<'a> GasMembraneVibration<'a> {
     }
 
     /// First-order absolute-gas-pressure perturbation [Pa]: (dp/dV) B.q.
-    /// Exterior pressure is held constant, so this is also the pressure-jump
-    /// perturbation. Its restoring force is ALREADY in the eigenvalue pencil.
+    /// This always observes the FIRST parcel. It equals the pressure-jump
+    /// perturbation only for a fixed exterior. Both gases' restoring forces
+    /// are ALREADY in the eigenvalue pencil.
     pub fn pressure_perturbation_pa(&self, coordinates: &[f64]) -> Result<f64, GasMembraneError> {
         let pressure =
             self.pressure_volume_derivative_pa_m3() * self.volume_perturbation_m3(coordinates)?;
@@ -171,6 +174,42 @@ impl<'a> GasMembraneVibration<'a> {
             return Err(GasMembraneError::Invalid(
                 "modal gas pressure is unrepresentable",
             ));
+        }
+        Ok(pressure)
+    }
+
+    /// Original opposing dp/dV2 [Pa/m3], or zero for a fixed-pressure reservoir.
+    pub fn exterior_pressure_volume_derivative_pa_m3(&self) -> f64 {
+        self.solution.equilibrium.exterior_gas.as_ref().map_or(0.0, |gas| {
+            gas.pressure.pressure_volume_derivative_pa_m3
+        })
+    }
+
+    /// Opposing pressure perturbation [Pa], with delta V2 = -delta V1.
+    /// A held-pressure exterior returns zero after admitting the coordinates.
+    pub fn exterior_pressure_perturbation_pa(
+        &self,
+        coordinates: &[f64],
+    ) -> Result<f64, GasMembraneError> {
+        let pressure = -self.exterior_pressure_volume_derivative_pa_m3()
+            * self.volume_perturbation_m3(coordinates)?;
+        if !pressure.is_finite() {
+            return Err(GasMembraneError::Invalid("modal opposing pressure is unrepresentable"));
+        }
+        Ok(pressure)
+    }
+
+    /// Perturbation of p1-p2 [Pa]. This observes the restoring pressure already
+    /// assembled into the modes; applying it as another load doubles stiffness.
+    pub fn pressure_jump_perturbation_pa(
+        &self,
+        coordinates: &[f64],
+    ) -> Result<f64, GasMembraneError> {
+        let derivative = self.pressure_volume_derivative_pa_m3()
+            + self.exterior_pressure_volume_derivative_pa_m3();
+        let pressure = derivative * self.volume_perturbation_m3(coordinates)?;
+        if !pressure.is_finite() {
+            return Err(GasMembraneError::Invalid("modal pressure jump is unrepresentable"));
         }
         Ok(pressure)
     }

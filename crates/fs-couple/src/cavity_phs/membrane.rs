@@ -11,6 +11,9 @@ mod vibration;
 pub use vibration::GasMembraneVibration;
 mod motion;
 pub use motion::{GasMembraneMotion, GasMembraneMotionControls, GasMembraneMotionError, GasMembraneMotionStep};
+mod exterior;
+pub use exterior::{ExteriorGasEvaluation, SealedMembraneExterior};
+use exterior::Exterior;
 
 use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntropySolve};
 use fs_material::thermochemical_gas::energy::parcel::mechanics::{
@@ -182,7 +185,8 @@ fn finite_vectors(values: &[[f64; 3]], n: usize) -> bool {
 ///
 /// The supplied gas volume is the actual cavity volume at `reference_m`.
 /// Positive membrane orientation points OUT of this gas; the remaining cavity
-/// wall is rigid. Absolute exterior pressure is explicit and held constant.
+/// wall is rigid. The exterior is either an explicit held absolute pressure or
+/// a second source parcel bound by `with_sealed_exterior`.
 /// The native perimeter check is mandatory even when the initial pressure jump
 /// is zero. There must be 1..=256 free Cartesian coordinates; this is the
 /// original gas mechanical-load bound, not a membrane mesh-resolution claim.
@@ -198,7 +202,7 @@ pub struct GasMembrane<'a> {
     reference_strain_energy_j: f64,
     fixed: Vec<Option<f64>>,
     free_dofs: Vec<usize>,
-    exterior_pressure_pa: f64,
+    exterior: Exterior,
     volume_interval_m3: [f64; 2],
 }
 
@@ -214,6 +218,10 @@ pub struct GasMembraneEvaluation {
     pub gas_volume: GasVolumeStep,
     /// Absolute pressure and same-state acoustic bulk modulus.
     pub pressure: GasPressureResponse,
+    /// Actual opposing absolute pressure, from the fixed boundary or second gas.
+    pub exterior_pressure_pa: f64,
+    /// Opposing sealed source at the same shape; absent for a fixed reservoir.
+    pub exterior_gas: Option<ExteriorGasEvaluation>,
     /// Internal force minus dead and net-pressure loads [N]. Prescribed rows
     /// are support reactions; all physical pressure loads are retained there.
     pub residual_n: Vec<[f64; 3]>,
@@ -223,9 +231,10 @@ pub struct GasMembraneEvaluation {
     pub strain_energy_j: f64,
     /// Held dead loads dotted with the actual displacement change [J].
     pub dead_load_work_j: f64,
-    /// Work against the explicit constant exterior pressure [J].
+    /// Work against the explicit constant exterior pressure [J]; zero for a
+    /// sealed exterior, whose stored energy is in `exterior_gas.gas_volume`.
     pub exterior_pressure_work_j: f64,
-    /// Delta membrane storage + native gas Delta U + exterior work - dead work.
+    /// Delta membrane storage + BOTH native gas Delta U + reservoir work - dead work.
     /// Gas pressure work is counted through Delta U, never again as p_final*dV.
     pub potential_energy_change_j: f64,
 }
@@ -275,7 +284,7 @@ impl<'a> GasMembrane<'a> {
             reference_strain_energy_j: 0.0,
             fixed: fixed.to_vec(),
             free_dofs,
-            exterior_pressure_pa,
+            exterior: Exterior::Pressure(exterior_pressure_pa),
             volume_interval_m3,
         };
         model.admit_shape(reference_m)?;
@@ -360,10 +369,12 @@ impl<'a> GasMembrane<'a> {
         }
         let (gas, gas_volume) = self.gas.at_volume(volume, controls, &mut *cancelled)?;
         let pressure = gas.pressure_response()?;
+        let exterior_gas = self.exterior.trial(swept, &mut *cancelled)?;
+        let exterior_pressure = self.exterior.pressure_pa(exterior_gas.as_ref());
         let gradient_all = self.patch.pressure_load_n(displacement, 1.0, &mut *cancelled)?;
         let gradient: Vec<_> = self.free_dofs.iter().map(|&i| gradient_all[i / 3][i % 3]).collect();
-        let forces = gas.forces(&gradient, self.exterior_pressure_pa)?;
-        let net_pressure = pressure.pressure_pa - self.exterior_pressure_pa;
+        let forces = gas.forces(&gradient, exterior_pressure)?;
+        let net_pressure = pressure.pressure_pa - exterior_pressure;
         let mut residual_n = membrane.internal_gradient_n;
         let (mut dead_work, mut correction) = (0.0, 0.0);
         for node in 0..displacement.len() {
@@ -383,9 +394,17 @@ impl<'a> GasMembrane<'a> {
         for (&dof, force) in self.free_dofs.iter().zip(forces) {
             residual_n[dof / 3][dof % 3] -= force;
         }
-        let exterior_work = self.exterior_pressure_pa * swept;
-        let potential = (membrane.strain_energy_j - self.reference_strain_energy_j)
+        let exterior_work = self.exterior.reservoir_work_j(swept);
+        let mut potential = (membrane.strain_energy_j - self.reference_strain_energy_j)
             + gas_volume.stored_energy_change_j + exterior_work - dead_work;
+        if let Some(exterior) = &exterior_gas {
+            use fs_math::dd::Dd;
+            potential = (Dd::from_f64(membrane.strain_energy_j)
+                - Dd::from_f64(self.reference_strain_energy_j)
+                + Dd::from_f64(gas_volume.stored_energy_change_j)
+                + Dd::from_f64(exterior.gas_volume.stored_energy_change_j)
+                - Dd::from_f64(dead_work)).to_f64();
+        }
         if !finite_vectors(&residual_n, displacement.len())
             || ![dead_work, exterior_work, potential].iter().all(|x| x.is_finite())
         {
@@ -395,6 +414,7 @@ impl<'a> GasMembrane<'a> {
         Ok(Trial {
             value: GasMembraneEvaluation {
                 displacement_m: displacement.to_vec(), gas, gas_volume, pressure, residual_n,
+                exterior_pressure_pa: exterior_pressure, exterior_gas,
                 swept_volume_m3: swept, strain_energy_j: membrane.strain_energy_j,
                 dead_load_work_j: dead_work, exterior_pressure_work_j: exterior_work,
                 potential_energy_change_j: potential,
@@ -434,9 +454,12 @@ impl<'a> GasMembrane<'a> {
         let internal = self.patch.tangent_apply(displacement, &full_direction, &mut *cancelled)?;
         let hessian = self.patch.pressure_tangent_apply(displacement, &full_direction, 1.0, &mut *cancelled)?;
         let hessian: Vec<_> = self.free_dofs.iter().map(|&i| hessian[i / 3][i % 3]).collect();
-        let pressure = trial.value.gas.tangent(
-            &trial.gradient, self.exterior_pressure_pa, direction, &hessian,
+        let mut pressure = trial.value.gas.tangent(
+            &trial.gradient, trial.value.exterior_pressure_pa, direction, &hessian,
         )?;
+        if let Some(exterior) = &trial.value.exterior_gas {
+            exterior.add_bulk_tangent(&trial.gradient, direction, &mut pressure)?;
+        }
         let action: Vec<_> = self.free_dofs.iter().zip(pressure)
             .map(|(&i, load)| internal[i / 3][i % 3] - load).collect();
         if action.iter().any(|v| !v.is_finite()) {

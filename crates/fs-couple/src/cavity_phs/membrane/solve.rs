@@ -7,7 +7,8 @@ use std::cell::{Cell, RefCell};
 /// Original material and membrane solver controls; neither tolerance is inferred.
 #[derive(Clone, Copy, Debug)]
 pub struct GasMembraneSolve {
-    /// Source entropy inversion, including the initial gas temperature.
+    /// First-parcel entropy inversion, including its initial temperature.
+    /// A sealed exterior retains its own independent source controls.
     pub gas: GasEntropySolve,
     /// Original force/displacement Newton controls and work/allocation bounds.
     pub membrane: MembraneSolveSettings,
@@ -22,7 +23,8 @@ pub struct GasMembraneSolution {
     pub newton: NewtonReport,
     /// Residual/tangent callbacks plus initial and fresh final physical checks.
     pub evaluations: usize,
-    /// Actual gas/geometry proposals; repeated Krylov actions reuse one trial.
+    /// Coupled geometry proposals, each reconstructing one or two source parcels.
+    /// Repeated Krylov actions reuse both gases at the unchanged trial shape.
     pub gas_trials: usize,
 }
 

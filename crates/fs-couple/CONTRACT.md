@@ -290,6 +290,44 @@ midpoint pressure balance, original variable-caloric/PR endpoint states, and
 complete rollback after energy, source, cancellation or work-budget refusal.
 Test presence does not claim native execution.
 
+
+### Two finite gas chambers sharing a membrane
+
+`GasMembrane::with_sealed_exterior` replaces the held exterior-pressure reservoir
+with a second original ideal or Peng–Robinson parcel. `SealedMembraneExterior`
+supplies that parcel's independent positive volume interval and native
+entropy-solve controls; existing per-call controls continue to govern the first
+parcel. The two source-temperature domains may be disjoint. Both chambers share
+the same fixed-perimeter membrane geometry: its native swept volume `s` gives
+`V1 = V1_reference + s` and `V2 = V2_reference - s`. Neither parcel exchanges
+heat or mass, and both retain their source, composition, mass and reference
+entropy.
+
+The shared trial supplies actual `p1 - p2` traction and the tangent
+`K_membrane - (p1-p2) Hess(V1) - (dp1/dV1 + dp2/dV2) grad(V1) grad(V1)^T`.
+Native gas-load actions provide both compressibilities. The geometric pressure
+term is counted once using the pressure difference, including near pressure
+balance. Both source states are cached at the same shape and reused by the
+existing equilibrium, modal and generalized-alpha owners. Reported gas-trial
+counts denote coupled geometry proposals, each reconstructing one or two
+parcels with their independently bounded original entropy inversions.
+
+Evaluations expose both native gas states and volume-work reports. Potentials
+and motion defects include both internal-energy changes once; separate
+opposing-gas energy/work fields distinguish them from fixed-reservoir pressure
+work, which is zero for the sealed exterior. Both accepted volumes and their
+independent temperature brackets must admit local modal perturbations.
+`pressure_perturbation_pa` retains its first-parcel meaning; explicit
+exterior-pressure and pressure-jump observations include the equal-and-opposite
+volume changes. Their restoring forces already belong to the modal pencil.
+
+All existing geometry/source, time-step, energy, budget and cancellation gates
+precede atomic publication of mechanics and both gases. A refusal from either
+side preserves the accepted state/history. Existing homogeneous-gas,
+stationary-support, coordinate-cap and numerical-energy-defect boundaries
+remain unchanged. Four focused native regression cases cover the new physical
+behavior; their presence does not assert execution.
+
 ## Original spatial gas sources in three-dimensional pressure acoustics
 
 `cavity_modal::interior::heterogeneous::AxialGasInterior` binds the original
