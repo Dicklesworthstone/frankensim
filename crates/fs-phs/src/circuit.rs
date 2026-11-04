@@ -52,6 +52,8 @@ use crate::{DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord, s
 pub mod capacitance;
 /// Grounded reciprocal multi-terminal passive conductance.
 pub mod conductance;
+/// Averaged synchronous bridge conversion on original flux/charge coordinates.
+pub mod converter;
 use conductance::ConductanceBlock;
 
 /// One circuit branch between two node indices (node 0 is GROUND).

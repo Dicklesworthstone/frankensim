@@ -1,5 +1,46 @@
 # fs-phs — Contract
 
+## Averaged bidirectional power conversion
+
+`circuit::converter::AveragedBuckBoost` assembles the original flux and both bus
+charges of a non-inverting four-switch synchronous converter. For high-side
+connection fractions `a,b`, its equations are `L di/dt = a Vin - b Vout - R i`,
+`Cin dVin/dt = Iin - a i`, and `Cout dVout/dt = Iout + b i`. Both external currents
+enter the stage. Buck uses `(a,b)=(d,1)` and boost `(1,1-d)`; reverse current is
+retained. The same fractions enter both sides of each power exchange through
+the native skew structure. All three original storage coordinates survive duty
+changes without projection or fictitious stored-energy adjustment.
+
+The winding and four conducting channels contribute their actual nonnegative
+duty-weighted resistances to the original resistance operator. The prepared
+held-duty/held-current path reuses `PreparedExactZoh`: complete trajectory,
+actual interval-mean terminal voltages, independent positive conduction-heat
+integral, and the original energy gate. Its five heat entries partition that
+same native heat; they never add a second loss debit. Each terminal's work is
+its held current times the integrated voltage, including reverse power.
+Native preparation is cold; successful warm calls add no allocation or matrix
+exponential. Final cancellation or arithmetic refusal publishes neither output
+buffer. The unconsumed pHS is available for existing physical interconnection,
+source impedance, load, or multirate owners, whose additional losses must retain
+their own identity.
+
+This is a numerical forced-synchronous averaged lane with frozen linear L/C
+and on-resistances. Source provenance, material/temperature support, electrical
+limits and small-switching-ripple validity remain caller responsibilities.
+It supplies no PWM events, dead time, switching/gate/recovery/diode loss, DCM,
+semiconductor card, saturation or thermal evolution. Squared averaged current
+does not include unresolved ripple RMS loss. No fitted efficiency compensates
+for those missing effects. Topology/averaging reference: TI SLVA535B (2018),
+https://www.ti.com/lit/an/slva535b/slva535b.pdf; loss distinction: Analog Devices
+AN-140, https://www.analog.com/en/resources/app-notes/an-140.html.
+
+Focused G1/G2/G3 coverage compares buck/boost/reverse equilibria, lossless
+three-coordinate transients and voltage-time integrals, freewheel exponential
+heat, duty changes against an independent current/voltage ODE, and the actual
+source-impedance/load interconnection. Admission, zero-duration and cancellation
+checks retain original flux/charge and retry semantics. These are authored
+checks, not a full switching-device or drive-stack qualification.
+
 ## Physical acoustic terminal flow
 
 `acoustic_outlet::acoustic_chain_with_outlet_flow` returns the original loaded
