@@ -1,7 +1,9 @@
 //! Prepared full-space pressure solves and their original physical work.
 
 use super::super::tri_quadrature;
-use super::{HeterogeneousError, HeterogeneousHelmholtzFe, finite, invalid, poll};
+use super::{
+    HeterogeneousError, HeterogeneousHelmholtzFe, VolumeVelocitySource, finite, invalid, poll,
+};
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::{Coo, Csr};
@@ -70,8 +72,11 @@ pub struct HeterogeneousPressureField {
     /// Coefficients [Pa] in the ORIGINAL hierarchical H1 basis. Only the vertex
     /// coordinates are point values; use the model's `pressure_at` for others.
     pub pressure_pa: Vec<C64>,
-    /// Net input work `Re(integral(conj(p) v_imposed))/2` [W].
+    /// Total boundary and volume-source work [W], with peak phasor factor 1/2.
     pub input_power_w: f64,
+    /// Signed `Re(integral(conj(p) s))/2` [W], already included in input power.
+    /// Coherent sources may individually absorb work; this is not bulk heat.
+    pub volume_source_power_w: f64,
     /// Passive boundary heat `integral(Re(Y) |p|^2)/2` [W]. Bulk heat is zero.
     pub boundary_dissipation_w: f64,
     /// Time-averaged kinetic energy `p^H K_rho p/(4 omega^2)` [J].
@@ -315,6 +320,60 @@ impl PreparedHeterogeneous<'_, '_, '_> {
     ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
         poll(cancelled)?;
         let load = self.model.velocity_load(inward_velocity, cancelled)?;
+        self.solve_projected(&load, cancelled)
+    }
+
+    /// Drive the SAME full-pressure factor with simultaneous boundary motion
+    /// and original-volume sources. Each amplitude is a complex peak volume
+    /// flow [m^3/s] in `exp(+i omega t)`. Sources interfere before observation
+    /// and work evaluation; no source normalization or propagation is repeated.
+    pub fn solve_with_volume_sources(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
+        poll(cancelled)?;
+        super::source::admit_count(sources.len())?;
+        for &(source, amplitude) in sources {
+            source.validate(self.model)?;
+            if !finite(amplitude) {
+                return Err(invalid("finite harmonic volume-flow amplitude required").into());
+            }
+        }
+        let mut load = self.model.velocity_load(inward_velocity, cancelled)?;
+        for (row, value) in load.iter_mut().enumerate() {
+            poll(cancelled)?;
+            let mut real = Dd::from_f64(value.re);
+            let mut imaginary = Dd::from_f64(value.im);
+            for &(source, amplitude) in sources {
+                real = real + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude.re);
+                imaginary = imaginary + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude.im);
+            }
+            *value = C64::new(real.to_f64(), imaginary.to_f64());
+        }
+        let mut field = self.solve_projected(&load, cancelled)?;
+        let mut work = Dd::from_f64(0.0);
+        for &(source, amplitude) in sources {
+            poll(cancelled)?;
+            let pressure = source.harmonic_pressure(&field.pressure_pa);
+            work = work
+                + Dd::from_f64(pressure.re) * Dd::from_f64(amplitude.re)
+                + Dd::from_f64(pressure.im) * Dd::from_f64(amplitude.im);
+        }
+        field.volume_source_power_w = 0.5 * work.to_f64();
+        if !field.volume_source_power_w.is_finite() {
+            return Err(invalid("harmonic volume-source work overflow").into());
+        }
+        poll(cancelled)?;
+        Ok(field)
+    }
+
+    fn solve_projected(
+        &self,
+        load: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
         let rhs = load
             .iter()
             .map(|v| C64::new(-self.omega * v.im, self.omega * v.re))
@@ -345,7 +404,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
                         limit: self.residual_tolerance,
                     });
                 }
-                return self.field(pressure, &load, backward_error, cancelled);
+                return self.field(pressure, load, backward_error, cancelled);
             }
             for (r, &scale) in residual.iter_mut().zip(&self.scales) {
                 *r = r.scale(scale);
@@ -441,6 +500,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         Ok(HeterogeneousPressureField {
             pressure_pa,
             input_power_w,
+            volume_source_power_w: 0.0,
             boundary_dissipation_w,
             kinetic_energy_j,
             compressional_energy_j,

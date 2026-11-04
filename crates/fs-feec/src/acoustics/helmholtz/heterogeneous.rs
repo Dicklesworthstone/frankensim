@@ -49,6 +49,9 @@ pub use observation::{
     HeterogeneousSurfaceProbe, SurfaceProbeLimits, TransientAcousticSample,
 };
 
+mod source;
+pub use source::{MAX_VOLUME_SOURCES, VolumeVelocitySource};
+
 /// Broadband evolution in the original pressure-potential coordinates.
 pub mod time;
 

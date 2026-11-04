@@ -1626,6 +1626,36 @@ reused for these spatially varying fluids. Assembly and harmonic operations
 poll cancellation; modal cancellation brackets the existing single-window
 modal owner, which has no internal callback.
 
+### Distributed sources in heterogeneous fluids
+
+`HeterogeneousHelmholtzFe::volume_velocity_source` projects a prescribed signed
+spatial density [m^-3] against every original hierarchical pressure test.
+It retains the original operator identity and explicit source quadrature; a
+volume-flow amplitude [m^3/s] gives the continuity source `s` [1/s]. The shape
+is neither normalized nor replaced by a singular point. Source sampling occurs
+once, independently of material assembly, and original callback errors survive.
+
+`PreparedHeterogeneous::solve_with_volume_sources` and the sparse time owner's
+`step_with_volume_sources` compose these sources with the original boundary
+velocities before solving. They reuse the same factors, physical residuals,
+pressure observations and work checks. For `exp(+i omega t)` the pressure RHS
+is `i omega integral(phi s)`; the potential-time RHS is `integral(phi s)`.
+No extra density, sound speed, volume or face-area factor enters either path.
+The signed volume-source power/work subtotal uses the same solved pressure and
+is already included in total input work. It is external work, not bulk heat.
+Coherent sources interfere before field and intensity evaluation; reversing
+injection can extract compression energy.
+
+Focused G1/G3 regressions cover an independently solved distributed source in
+an anechoic duct with mesh refinement and power balance, sealed compression
+across a density interface, simultaneous boundary forcing, coherent cancellation,
+weak and reversed drives, source reuse, and transactional refusals. These are
+prescribed linear acoustic sources, not a resolved bubble, thermal expansion,
+mass-transfer or combustion model. Callers must derive source amplitudes from
+their physical owners and resolve source shape, h/p and observation bandwidth.
+At most 128 simultaneous volume-source columns are admitted per query; the
+bounded exact owner's original augmented-state limits apply additionally.
+
 ### Broadband heterogeneous pressure waves
 
 `heterogeneous::time` advances the same full spatial operator in pressure
@@ -1673,6 +1703,16 @@ scales condition the original mass inverse, storage and interconnection.
 The inverse is checked against every original mass entry. No eigenmode is
 truncated, frequency matched, retuned or pinned to remove the gauge.
 
+`prepare_exact_time_with_volume_sources` admits the same original-volume
+source loads alongside the boundary ports. `step_with_volume_sources` takes
+separate held boundary velocities [m/s] and volume flows [m^3/s], retaining
+their distinct integrated pressure observations [Pa m^2 s] and [Pa s]. Both
+source families share the original complete trajectory and independent loss
+Gramian; their signed work appears exactly once in total input work. No new
+dynamic states or source callbacks enter a warm step. Analytic compression at
+air/water SI scales and a joint boundary-drive/volume-extraction polynomial
+check the complete pressure field and the integrated signed source work.
+
 `ExactVelocityPort` binds a dimensionless piecewise-linear inward-velocity
 shape to the original boundary quadrature. Step amplitudes have units m/s.
 Different ports may overlap and interfere; a source may share a real-admittance
@@ -1684,7 +1724,8 @@ quadrature nor an energy remainder. Returned pressure/potential states retain
 the original material/geometry identity and work with existing field probes.
 
 Preparation is a bounded dense small-domain path, using the existing full-state
-exponential owner. The current cap is `2*(2*pressure_dofs + ports + 1) <= 256`,
+exponential owner. The current cap is
+`2*(2*pressure_dofs + boundary_ports + volume_sources + 1) <= 256`,
 in addition to the caller's original-DOF, dense-cache byte and multiply-work
 limits. With zero or one port this permits at most 63 pressure DOFs. Larger
 fields refuse without reducing the basis or changing propagators. Warm steps

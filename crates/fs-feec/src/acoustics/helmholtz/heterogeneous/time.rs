@@ -137,8 +137,10 @@ pub struct HeterogeneousTimeWork {
     pub final_energy_j: f64,
     /// Symmetric bilinear energy difference, avoiding endpoint subtraction.
     pub delta_energy_j: f64,
-    /// `h * integral(p_mid v_in_mid)` with the original velocity trace.
+    /// Total boundary and volume-source work at the same midpoint pressure.
     pub input_work_j: f64,
+    /// Signed `h * integral(p_mid s_mid)` [J], already included in input work.
+    pub volume_source_work_j: f64,
     /// `h * integral(Y p_mid^2)`, independently of stored-energy change.
     pub boundary_dissipation_j: f64,
     /// Maximum normalized residual of dynamics and pressure-potential kinematics.
@@ -397,6 +399,51 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         self.step_projected(initial, &load, cancelled)
     }
 
+    /// Advance with simultaneous original boundary and volume injection.
+    /// Volume-flow amplitudes [m^3/s] are evaluated at the SAME midpoint as
+    /// boundary velocities. The full sparse factor and physical residual/work
+    /// checks are reused; source callbacks and material assembly do not recur.
+    pub fn step_with_volume_sources(
+        &self,
+        initial: &HeterogeneousTimeState<'_, '_, '_>,
+        inward_velocity: &[RealVelocityTrace],
+        sources: &[(&super::VolumeVelocitySource<'_, '_, '_>, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousTimeStep<'m, 'f, 'c>, HeterogeneousError> {
+        poll(cancelled)?;
+        self.validate_state(initial)?;
+        super::source::admit_count(sources.len())?;
+        for &(source, amplitude) in sources {
+            source.validate(self.model)?;
+            if !amplitude.is_finite() {
+                return Err(invalid("finite midpoint volume-flow amplitude required").into());
+            }
+        }
+        let mut load = self.model.geometry.boundary_linear_load(inward_velocity)?;
+        for (row, value) in load.iter_mut().enumerate() {
+            poll(cancelled)?;
+            let mut sum = Dd::from_f64(*value);
+            for &(source, amplitude) in sources {
+                sum = sum + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude);
+            }
+            *value = sum.to_f64();
+        }
+        let mut result = self.step_projected(initial, &load, cancelled)?;
+        let mut work = Dd::from_f64(0.0);
+        for &(source, amplitude) in sources {
+            poll(cancelled)?;
+            let pressure = source.midpoint_pressure(&initial.pressure, &result.state.pressure);
+            work = work
+                + Dd::from_f64(pressure) * Dd::from_f64(amplitude) * Dd::from_f64(self.duration_s);
+        }
+        result.work.volume_source_work_j = work.to_f64();
+        if !result.work.volume_source_work_j.is_finite() {
+            return Err(invalid("midpoint volume-source work overflow").into());
+        }
+        poll(cancelled)?;
+        Ok(result)
+    }
+
     // Original sparse midpoint solve with an already projected volume load.
     // Mechanical-wall condensation uses this same factor/correction path;
     // its physical boundary work is checked separately after reconstruction.
@@ -583,6 +630,7 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
             final_energy_j: final_energy.total_j(),
             delta_energy_j: change,
             input_work_j: input.to_f64(),
+            volume_source_work_j: 0.0,
             boundary_dissipation_j: self.duration_s * loss,
             backward_error,
         };
