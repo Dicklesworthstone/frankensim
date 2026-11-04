@@ -84,6 +84,8 @@ impl OsmoticNetwork {
         if self.species.len() != 1
             || self.diffusion_controls.is_none()
             || self.implicit_multicomponent.is_some()
+            || self.implicit_salt.is_some()
+            || self.electroneutral_diffusion.is_some()
             || self.zero_current_diffusion().is_some()
         {
             return Err(OsmoticNetworkError::Invalid(
@@ -222,7 +224,6 @@ impl ImplicitBinaryDiffusion {
         if initial == 0.0 {
             return Err(OsmoticNetworkError::StepUnderflow);
         }
-        let (mut lower, mut upper) = (0.0, scale);
         // Exact for linear binary diffusion; otherwise only a bounded first
         // trial. Its saturated form never overflows scale + initial.
         let estimate = if initial.is_finite() {
@@ -234,65 +235,120 @@ impl ImplicitBinaryDiffusion {
         } else {
             0.5 * scale
         };
-        let mut candidate = if estimate > lower && estimate < upper {
-            estimate
-        } else {
-            0.5 * scale
-        };
-        let mut last_residual = initial;
-        for _ in 0..self.controls.maximum_iterations {
-            poll(cancelled)?;
-            if candidate <= lower || candidate >= upper {
-                break;
-            }
-            let transfer = direction * candidate;
-            let next = [
-                finite(amounts[0] - transfer)?,
-                finite(amounts[1] + transfer)?,
-            ];
-            if next.iter().any(|&value| !nonnegative(value)) {
-                return Err(OsmoticNetworkError::Invalid(
-                    "binary equilibrium transfer leaves the nonnegative inventory bracket",
-                ));
-            }
-            for i in 0..2 {
-                self.trial[i]
-                    .replace_inventories(volumes[i], &next[i..i + 1])
-                    .map_err(source)?;
-            }
-            let flux = self.sample(link, controls, evaluations, cancelled)?;
-            let predicted = integrated_flux(dt, link.area_m2, flux);
-            // Check BOTH actual rounded changes, not merely the nominal root
-            // coordinate. Infinite exposure or a zero rounded flux at equilibrium
-            // cannot create an Inf<=Inf or an underflowed rate-form false root.
-            let residuals = [
-                (amounts[0] - next[0]) - predicted,
-                (next[1] - amounts[1]) - predicted,
-            ];
-            last_residual = residuals[0].abs().max(residuals[1].abs());
-            if predicted.is_finite()
-                && residuals.iter().all(|v| v.is_finite())
-                && last_residual <= tolerance
-            {
-                if next == amounts {
-                    return Err(OsmoticNetworkError::StepUnderflow);
-                }
+        let coordinate = solve_bounded_transfer(
+            [0.0, scale],
+            estimate,
+            self.controls.maximum_iterations,
+            TransferResidual {
+                signed_residual: -initial,
+                residual_mol: initial,
+                maximum_mol: tolerance,
+            },
+            |candidate| {
                 poll(cancelled)?;
-                return Ok(transfer);
-            }
-            let signed_residual = (transfer - predicted) * direction;
-            if signed_residual > 0.0 {
-                upper = candidate;
-            } else {
-                lower = candidate;
-            }
-            candidate = lower + 0.5 * (upper - lower);
-        }
-        Err(OsmoticNetworkError::ImplicitDiffusionConvergence {
-            residual_mol: last_residual,
-            maximum_mol: tolerance,
-        })
+                let transfer = direction * candidate;
+                let next = [
+                    finite(amounts[0] - transfer)?,
+                    finite(amounts[1] + transfer)?,
+                ];
+                if next.iter().any(|&value| !nonnegative(value)) {
+                    return Err(OsmoticNetworkError::Invalid(
+                        "binary equilibrium transfer leaves the nonnegative inventory bracket",
+                    ));
+                }
+                for i in 0..2 {
+                    self.trial[i]
+                        .replace_inventories(volumes[i], &next[i..i + 1])
+                        .map_err(source)?;
+                }
+                let flux = self.sample(link, controls, evaluations, cancelled)?;
+                let predicted = integrated_flux(dt, link.area_m2, flux);
+                // Check BOTH actual rounded changes, not merely the nominal root
+                // coordinate. Infinite exposure or a zero rounded flux at equilibrium
+                // cannot create an Inf<=Inf or an underflowed rate-form false root.
+                let residuals = [
+                    (amounts[0] - next[0]) - predicted,
+                    (next[1] - amounts[1]) - predicted,
+                ];
+                let residual = TransferResidual {
+                    signed_residual: (transfer - predicted) * direction,
+                    residual_mol: if predicted.is_finite()
+                        && residuals.iter().all(|value| value.is_finite())
+                    {
+                        residuals[0].abs().max(residuals[1].abs())
+                    } else {
+                        f64::INFINITY
+                    },
+                    maximum_mol: tolerance,
+                };
+                if residual.converged() {
+                    if next == amounts {
+                        return Err(OsmoticNetworkError::StepUnderflow);
+                    }
+                    poll(cancelled)?;
+                }
+                Ok(residual)
+            },
+        )?;
+        Ok(direction * coordinate)
     }
+}
+
+/// One original amount-equation sample. The signed nominal residual locates
+/// the scalar root; only the actual rounded-inventory residual admits it.
+#[derive(Clone, Copy)]
+pub(super) struct TransferResidual {
+    pub signed_residual: f64,
+    pub residual_mol: f64,
+    pub maximum_mol: f64,
+}
+
+impl TransferResidual {
+    pub(super) fn converged(self) -> bool {
+        self.residual_mol.is_finite()
+            && self.maximum_mol.is_finite()
+            && self.residual_mol <= self.maximum_mol
+    }
+}
+
+/// Shared bounded scalar owner for neutral-solute and charge-neutral salt
+/// exchange. The caller supplies an admitted physical bracket and evaluates
+/// original constitutive equations; infinite predictions may bracket a root
+/// but cannot satisfy its rounded-inventory acceptance gate.
+pub(super) fn solve_bounded_transfer(
+    [mut lower, mut upper]: [f64; 2],
+    estimate: f64,
+    maximum_iterations: usize,
+    mut last: TransferResidual,
+    mut sample: impl FnMut(f64) -> Result<TransferResidual, OsmoticNetworkError>,
+) -> Result<f64, OsmoticNetworkError> {
+    let mut candidate = if estimate > lower && estimate < upper {
+        estimate
+    } else {
+        lower + 0.5 * (upper - lower)
+    };
+    for _ in 0..maximum_iterations {
+        if candidate <= lower || candidate >= upper {
+            break;
+        }
+        last = sample(candidate)?;
+        if last.converged() {
+            return Ok(candidate);
+        }
+        if last.signed_residual.is_nan() {
+            break;
+        }
+        if last.signed_residual > 0.0 {
+            upper = candidate;
+        } else {
+            lower = candidate;
+        }
+        candidate = lower + 0.5 * (upper - lower);
+    }
+    Err(OsmoticNetworkError::ImplicitDiffusionConvergence {
+        residual_mol: last.residual_mol,
+        maximum_mol: last.maximum_mol,
+    })
 }
 
 // Multiply three finite factors by pairing the smallest and largest magnitudes

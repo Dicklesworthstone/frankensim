@@ -5,16 +5,24 @@
 //! the enclosing full/two-half comparison controls their first-order temporal
 //! error. This mode admits no water/membrane connections, so a closed mixing
 //! free-energy decrease does not omit mechanical pressure/volume work.
-//! An explicit zero-current option evolves neutral ionic inventories on a
-//! forest using the original electrochemical force and source-qualified face.
-//! Ionic stages retain the same adaptive timeline and every physical gate.
+//! A zero-current option evolves neutral ionic inventories on a forest, with
+//! optional charge-constrained implicit binary-salt exchange. General closed
+//! graphs can select a native global potential solve and simultaneous molecular
+//! updates. These ionic paths share the original source-qualified face and the
+//! same adaptive timeline, conservation, charge and free-energy gates.
 
 mod electrical;
+mod electroneutral;
 mod implicit;
+mod implicit_salt;
 mod multicomponent;
+pub(crate) use electroneutral::ElectroneutralDiffusion;
+pub use electroneutral::{ElectroneutralDiffusionControls, ElectroneutralDiffusionReport};
 pub use fs_material::osmosis::diffusion::electrical::ZeroCurrentDiffusion;
 pub(crate) use implicit::ImplicitBinaryDiffusion;
 pub use implicit::ImplicitBinaryDiffusionControls;
+pub(crate) use implicit_salt::ImplicitSaltDiffusion;
+pub use implicit_salt::ImplicitSaltDiffusionControls;
 pub(crate) use multicomponent::ImplicitMulticomponentDiffusion;
 pub use multicomponent::ImplicitMulticomponentDiffusionControls;
 
@@ -37,12 +45,15 @@ use std::sync::Arc;
 pub struct SolutionDiffusionControls {
     pub constitutive: SolutionDiffusionSolve,
     /// Largest withdrawal / original individual donor amount at each split pair
-    /// stage, in (0,1). This is not a whole-window withdrawal fraction.
+    /// stage, in (0,1). Global electrical stages instead sum ALL outgoing
+    /// withdrawals per donor species before checking this same bound.
+    /// This is not a whole-window withdrawal fraction.
     pub maximum_species_fraction: f64,
     /// Absolute closed-window individual-species balance allowance [mol].
     pub amount_balance_tolerance_mol: f64,
     /// Absolute original-to-final mixing-free-energy increase allowance [J].
-    /// This same limit also applies to every accepted physical pair step.
+    /// This same limit also applies to every accepted physical pair step, or
+    /// the simultaneous whole-network stage under a global electrical closure.
     pub free_energy_tolerance_j: f64,
 }
 
@@ -443,11 +454,16 @@ pub(super) fn sweep(
     links: &mut [SolutionDiffusionLink],
     mut implicit: Option<&mut ImplicitBinaryDiffusion>,
     mut multicomponent: Option<&mut ImplicitMulticomponentDiffusion>,
+    mut salt: Option<&mut ImplicitSaltDiffusion>,
+    electrical: Option<&mut ElectroneutralDiffusion>,
     dt: f64,
     controls: SolutionDiffusionControls,
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
+    if let Some(electrical) = electrical {
+        return electrical.sweep(cells, links, dt, controls, evaluations, cancelled);
+    }
     for link in links.iter_mut() {
         poll(cancelled)?;
         if link.area_m2 == 0.0 {
@@ -480,6 +496,18 @@ pub(super) fn sweep(
                 evaluations,
                 &mut transfers[..n],
                 cancelled,
+            )?;
+            true
+        } else if let Some(implicit) = salt.as_deref_mut() {
+            implicit.transfers_into(
+                left,
+                right,
+                link,
+                dt,
+                controls.constitutive,
+                evaluations,
+                cancelled,
+                &mut transfers[..n],
             )?;
             true
         } else {

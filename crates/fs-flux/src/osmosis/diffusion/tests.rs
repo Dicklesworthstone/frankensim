@@ -9,7 +9,9 @@ use fs_thermochem::{SpeciesId, transport::maxwell_stefan::MaxwellStefanMolarSolv
 use std::sync::Arc;
 
 mod electrical;
+mod electroneutral;
 mod implicit;
+mod implicit_salt;
 mod multicomponent;
 mod source;
 

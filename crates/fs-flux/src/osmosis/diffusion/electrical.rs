@@ -48,8 +48,9 @@ impl OsmoticNetwork {
     /// Zero-area closed links impose no electrical constraint.
     ///
     /// Uses the original explicit conservative sweep and adaptive full/two-half
-    /// timeline. The current independent-transfer implicit solvers are refused:
-    /// their nonlinear trial coordinates do not preserve electroneutrality.
+    /// timeline, optionally followed by `with_implicit_salt_diffusion` for a
+    /// two-ion charge-constrained backward-Euler stage. Independent-transfer
+    /// implicit solvers are refused: their coordinates do not preserve charge.
     /// The byte budget includes the temporary forest check as well as the one
     /// shared retained ionic assignment, never one copy per molecular link.
     pub fn with_zero_current_diffusion(
@@ -76,6 +77,8 @@ impl OsmoticNetwork {
             || electrical.valences().len() != self.species.len()
             || self.implicit_diffusion.is_some()
             || self.implicit_multicomponent.is_some()
+            || self.implicit_salt.is_some()
+            || self.electroneutral_diffusion.is_some()
         {
             return Err(OsmoticNetworkError::Invalid(
                 "zero-current transport needs an unadvanced explicit molecular network and one original valence per solute",
@@ -134,8 +137,13 @@ impl OsmoticNetwork {
         Ok(self)
     }
 
-    /// The one common immutable ionic assignment, if selected.
+    /// The common ionic assignment for the zero-current FOREST closure.
+    /// Returns None for a general global-potential network, whose edges may
+    /// carry finite circulating current.
     pub fn zero_current_diffusion(&self) -> Option<&ZeroCurrentDiffusion> {
+        if self.electroneutral_diffusion.is_some() {
+            return None;
+        }
         self.diffusion
             .first()
             .and_then(|link| link.zero_current_diffusion())

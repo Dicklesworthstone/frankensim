@@ -3209,8 +3209,9 @@ All compartments must be initially neutral within the absolute molar budget.
 Positive-area molecular paths must form a forest. Their independently floating
 zero-current voltages then admit a potential on each connected component.
 Cyclic ionic paths, independent ionic membrane leaks and both existing
-independent-transfer implicit choices refuse. No global circulating-current or
-electrode model is silently inferred. Closed zero-area links constrain neither
+independent-transfer implicit choices refuse in this forest mode. General
+closed graphs use the separately selected global electrical closure below.
+No electrode model is inferred. Closed zero-area links constrain neither
 current nor potential. A single shared ionic assignment is charged to prepared
 storage, with a bounded fallibly allocated forest check at preparation.
 
@@ -3230,6 +3231,94 @@ divalent nonideal uphill salt transport, independent Na/K/Cl salts on a neutral
 intermediate face, original source-coefficient refresh, salt-ODE refinement,
 coupled water/ion dynamics, exact empty states, singular ionic fronts,
 late cancellation/retry, complete-window work and topology/implicit refusals.
+
+### Implicit charge-neutral binary-salt exchange
+
+`with_implicit_salt_diffusion(ImplicitSaltDiffusionControls, byte_budget)` selects
+backward Euler on a prepared zero-current forest with exactly two declared
+opposite ions. Their gcd-reduced positive stoichiometry defines one conserved
+salt extent: `Delta n_i = nu_i*q`, with `sum z_i*nu_i=0`. Original species order
+and valences are retained. Neither a counterion nor salt dissociation is inferred.
+Neutral spectators, multiple independent salts and global-current graphs refuse
+this particular integration choice.
+
+Every nonlinear probe uses both actual rounded endpoint inventories and the
+original zero-current Maxwell--Stefan law. All original source pairs refresh at
+the trial's endpoints and neutral face. The existing bounded scalar bracket
+owner is shared with neutral one-solute diffusion; it does not copy a second
+constitutive or root-solving implementation. An original-law bracket check and
+bounded interior expansion admit small declared charge-roundoff offsets without
+sampling a fabricated concentration floor.
+
+Convergence requires BOTH rounded backward-Euler amount equations for EACH ion,
+each with absolute plus actual-transfer-relative tolerance. A charge projection,
+large background inventory, infinite predicted exposure or one ion's small
+residual cannot replace those equations. Two original solution buffers are
+prepared within the caller's byte budget; constant-data stages allocate no
+vectors. All probes, full/two-half comparisons and rejected steps share one
+complete-window evaluation limit. The original withdrawal, source, charge,
+passivity, time-accuracy and atomic publication gates remain mandatory.
+
+The same stage supports fully retaining water paths at their actual changed
+volumes. Focused regressions cover unequal-volume stiff ambipolar exchange,
+nonideal mixed/reversed/reduced valences, stiff adaptive evolution, nonlinear
+source refresh and source-domain refusal, moving-water coupling, work and late
+cancellation rollback, exact empty states and singular ionic-front refusal.
+
+### Globally electroneutral diffusion on closed graphs
+
+`with_electroneutral_diffusion(ionic_policy, ElectroneutralDiffusionControls,
+byte_budget)` selects a global floating potential for an unadvanced molecular
+network, including cycles and disconnected components.
+`with_electroneutral_solution_transport` prepares that closure with optional
+fully retaining water paths and the correct ionic face from its FIRST source
+query. The policy supplies explicit valences and absolute inventory-charge
+accuracy; finite edge current is admitted. This does not add electrodes,
+imposed current/voltage ports, Poisson charge storage or caloric heating.
+
+Each original material owner supplies its affine current response
+`q = q_chemical - G*(psi_right-psi_left)`, with `psi=F*phi/(RT)` and positive
+conductance when carriers exist. Area-weighted charge continuity gives a sparse
+graph Laplacian. One gauge per conducting component removes the nullspace;
+independent component scaling and diagonal preconditioning feed the ORIGINAL
+native checked-CG owner, including its recomputed residual and bounded defect
+corrections. No dense graph matrix or replacement Krylov recurrence is introduced.
+Exactly carrier-free edges contribute no electrical constraint and require no
+seeded ions. Every component, including isolated nodes, retains charge admission.
+
+After the potential solve, each edge performs one original combined-force replay
+at its bound physical face and EXACT resolved source matrix. The response and
+replay cannot see different callback coefficients. Actual replayed edge currents
+must satisfy the explicit absolute charge-rate budget at EVERY node, including
+the gauge nodes. Circulating currents are allowed; independently zeroing every
+edge current would violate potential compatibility on a general loop.
+
+All species transfers are assembled simultaneously from this common state.
+Gross outgoing withdrawals are summed per donor species, both signs of each
+transfer are retained, and actual rounded inventories satisfy charge and global
+species conservation before publication. Pairwise chemical free energy may rise
+while electrical work passes between links; the finite-step gate therefore
+checks the GLOBAL original mixing free-energy change. Original material replay
+independently checks combined chemical/electrical entropy against friction.
+Post-transfer source qualification covers every original face before the
+private trial state changes. Retained-water stages and whole-window total
+mixing/mechanical potential remain on the original adaptive timeline.
+
+Face preparation/replay counts and native potential iterations have separate
+whole-window limits, including discarded adaptive probes. The step report gives
+those counts and maximum checked node-current, edge-current and voltage-drop
+magnitudes; it does not present an earlier trial potential as a final snapshot.
+Prepared admission counts reusable arrays, transient bound responses/resolved
+matrices and a conservative native-CG numerical-payload allowance. Native CG and
+source queries allocate; original receipt strings and allocator overhead remain
+outside this payload estimate. This is not an allocation-free or peak-RSS claim.
+Independent-transfer and pairwise-salt implicit options are excluded because
+their trial coordinates do not enforce the global node-current equations.
+
+Focused regressions cover an independently reduced circulating-current circuit,
+compatible loop potentials, per-species conservation and global energy decrease,
+isolated/carrier-free components, complete-window work and late-cancellation
+rollback, and explicit storage/integration-mode refusal.
 
 ## Coupled nonideal water and molecular solution transport
 
@@ -3254,8 +3343,8 @@ all source links are requalified after water and after the complete molecular
 sweep. Pinned-source and physical-domain failures stay hard refusals. Only typed
 water root/bracket failures and finite-step withdrawal/passivity failures may
 shrink the step.
-The optional binary or multisolute backward-Euler choice above changes only the molecular
-stage on this same timeline; its source samples use the actual post-water
+The optional neutral binary, multisolute or charge-neutral salt backward-Euler
+choice changes only the molecular stage on this same timeline; its source samples use the actual post-water
 volumes, and its nonlinear work/refusal limits retain whole-window rollback.
 
 The coupled potential is `Phi = F_mix + sum(Psi(V))`, with `dPsi/dV=p(V)` from

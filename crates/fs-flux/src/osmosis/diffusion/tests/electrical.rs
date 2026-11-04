@@ -488,7 +488,7 @@ fn retained_water_and_ionic_diffusion_share_one_neutral_finite_network() {
         .unwrap(),
     )
     .unwrap();
-    let mut system = OsmoticNetwork::with_coupled_solution_transport(
+    let system = OsmoticNetwork::with_coupled_solution_transport(
         vec!["solute-0".into(), "solute-1".into()],
         vec![cell(&model, &[100.0, 100.0]), cell(&model, &[20.0, 20.0])],
         vec![membrane],
@@ -499,23 +499,36 @@ fn retained_water_and_ionic_diffusion_share_one_neutral_finite_network() {
         },
         1 << 22,
     )
-    .unwrap()
-    .with_zero_current_diffusion(ionic(), 1 << 22)
     .unwrap();
-    let report = system.advance(5.0, numerical(1e-4), || false).unwrap();
-    assert!(system.compartments()[0].solution().solvent_volume_m3() > VOLUME);
-    assert!(system.compartments()[0].solution().solute_moles()[0] < 100.0 * VOLUME);
-    assert!(
-        report
-            .coupled_potential_change
-            .unwrap()
-            .total_potential_change_j
-            < 0.0
-    );
-    assert!(report.water_balance_residual_m3.abs() < 1e-18);
-    for cell in system.compartments() {
-        ionic()
-            .admit_inventories(cell.solution().solute_moles())
-            .unwrap();
+    let global = system
+        .clone()
+        .with_electroneutral_diffusion(ionic(), ElectroneutralDiffusionControls::default(), 1 << 22)
+        .unwrap();
+    let system = system
+        .with_zero_current_diffusion(ionic(), 1 << 22)
+        .unwrap();
+    for mut system in [
+        system.clone(),
+        system
+            .with_implicit_salt_diffusion(ImplicitSaltDiffusionControls::default(), 1 << 22)
+            .unwrap(),
+        global,
+    ] {
+        let report = system.advance(5.0, numerical(1e-4), || false).unwrap();
+        assert!(system.compartments()[0].solution().solvent_volume_m3() > VOLUME);
+        assert!(system.compartments()[0].solution().solute_moles()[0] < 100.0 * VOLUME);
+        assert!(
+            report
+                .coupled_potential_change
+                .unwrap()
+                .total_potential_change_j
+                < 0.0
+        );
+        assert!(report.water_balance_residual_m3.abs() < 1e-18);
+        for cell in system.compartments() {
+            ionic()
+                .admit_inventories(cell.solution().solute_moles())
+                .unwrap();
+        }
     }
 }

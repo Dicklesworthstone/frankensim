@@ -125,6 +125,8 @@ impl OsmoticNetwork {
             || self.diffusion_controls.is_none()
             || self.implicit_diffusion.is_some()
             || self.zero_current_diffusion().is_some()
+            || self.implicit_salt.is_some()
+            || self.electroneutral_diffusion.is_some()
         {
             return Err(OsmoticNetworkError::Invalid(
                 "multicomponent implicit diffusion needs at least two original neutral solutes and prepared molecular links",

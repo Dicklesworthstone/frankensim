@@ -96,7 +96,9 @@ fn volume_cell(model: &Arc<VirialSolutionModel>, volume: f64, c: f64) -> Osmotic
     .unwrap()
 }
 
-fn multicomponent_material(model: &Arc<VirialSolutionModel>) -> MaterialSolutionMaxwellStefan {
+pub(super) fn multicomponent_material(
+    model: &Arc<VirialSolutionModel>,
+) -> MaterialSolutionMaxwellStefan {
     let key = PropertyKey::new("shared manufactured mixture mobility", DIMS);
     let mut claims = ClaimSet::new();
     claims

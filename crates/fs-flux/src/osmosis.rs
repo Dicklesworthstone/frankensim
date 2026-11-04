@@ -27,16 +27,19 @@
 //! chemical-potential laws. Separate owners provide finite-storage films in
 //! [`transient`] and ideal fast-ion water exchange in [`donnan`]. None supplies
 //! solvent inertia, a heat balance or mechanical inertia.
-//! Water transport and constant-data diffusion advances allocate no memory.
+//! Water transport and constant-data pairwise diffusion allocate no memory.
 //! Material-sourced solution diffusion allocates transient original queries and
 //! receipts; its prepared-storage estimate is not a peak-memory bound. Failed,
 //! cancelled or exhausted advances publish neither state nor time.
 //! [`coupled`] combines retained-water and independent molecular pathways using
 //! the original pressure-law primitive and mixing free energy in one account.
-//! Explicit molecular paths can select a floating zero-current ionic closure
-//! on a forest, retaining neutral inventories and original source-qualified
-//! forces. This excludes independent-transfer implicit ionic trials and general
-//! circulating-current, double-layer or electrochemical reaction models.
+//! Molecular paths can select a floating zero-current ionic closure on a forest,
+//! including a charge-constrained implicit binary-salt stage. General closed
+//! graphs can instead solve globally compatible diffusion potentials and
+//! circulating currents with native checked CG and simultaneous species updates.
+//! That global option allocates bounded transient numerical payloads. Both
+//! retain the original source-qualified forces; neither supplies double layers
+//! or electrochemical reactions.
 
 /// Nonideal Maxwell–Stefan diffusion at fixed solvent volume on this timeline.
 pub mod diffusion;
@@ -105,6 +108,14 @@ pub enum OsmoticNetworkError {
     ImplicitMulticomponentConvergence {
         scaled_residual: f64,
         diagnosis: Option<fs_solver::NewtonStallDiagnosis>,
+    },
+    /// The native graph potential solve failed its recomputed residual gate.
+    ElectroneutralPotentialConvergence { relative_residual: f64 },
+    /// Actual original ionic fluxes violate charge continuity at a compartment.
+    ElectroneutralChargeRate {
+        compartment: usize,
+        residual_mol_s: f64,
+        maximum_mol_s: f64,
     },
     /// Time integration exhausted its accepted-step or rejection budget.
     WorkBudget,
@@ -508,6 +519,8 @@ pub struct OsmoticStepReport {
     /// Material-source qualification queries are additional work: each sourced
     /// face evaluates three original claims per binary pair, and proposed/final
     /// sweep states repeat this qualification. They are not scalar residuals.
+    /// Global electrical stages count one affine preparation and one native
+    /// combined-force replay per active face; CG iterations are reported separately.
     pub residual_evaluations: usize,
     /// Largest accepted step-doubling error divided by its requested scale.
     pub maximum_scaled_error: f64,
@@ -525,6 +538,9 @@ pub struct OsmoticStepReport {
     /// Closed coupled-window source mixing and pressure-primitive changes.
     /// Present only for `with_coupled_solution_transport`; no heat balance.
     pub coupled_potential_change: Option<coupled::CoupledPotentialChange>,
+    /// Global electrical solves, including discarded adaptive probes. Present
+    /// only for the deliberately selected electroneutral network closure.
+    pub electroneutral_diffusion: Option<diffusion::ElectroneutralDiffusionReport>,
 }
 
 /// Prepared closed network. Public compartments are read-only checkpoints;
@@ -538,6 +554,8 @@ pub struct OsmoticNetwork {
     diffusion_controls: Option<diffusion::SolutionDiffusionControls>,
     implicit_diffusion: Option<diffusion::ImplicitBinaryDiffusion>,
     implicit_multicomponent: Option<diffusion::ImplicitMulticomponentDiffusion>,
+    implicit_salt: Option<diffusion::ImplicitSaltDiffusion>,
+    electroneutral_diffusion: Option<diffusion::ElectroneutralDiffusion>,
     coupled_controls: Option<coupled::CoupledSolutionControls>,
     work: Vec<OsmoticCompartment>,
     coarse: Vec<OsmoticCompartment>,
@@ -679,6 +697,8 @@ impl OsmoticNetwork {
             diffusion_controls: None,
             implicit_diffusion: None,
             implicit_multicomponent: None,
+            implicit_salt: None,
+            electroneutral_diffusion: None,
             coupled_controls: None,
             workspace_bytes: required,
             time_s: 0.0,
@@ -703,8 +723,9 @@ impl OsmoticNetwork {
 
     /// Advance exactly the requested interval with conservative, positive
     /// exchange and bounded adaptive substeps. Membrane stages are implicit;
-    /// molecular stages use paired fluxes at their current volumes, with an
-    /// optional deliberately selected backward-Euler solve. Pass
+    /// molecular stages use conservative fluxes at their current volumes, with
+    /// deliberately selected pairwise backward Euler or global electrical
+    /// continuity when configured. Pass
     /// `|| cx.checkpoint().is_err()` to use the shared execution scope.
     /// Cancellation is polled per scalar iteration, membrane and publication.
     pub fn advance(
@@ -726,6 +747,12 @@ impl OsmoticNetwork {
         if let Some(implicit) = &mut self.implicit_multicomponent {
             implicit.begin_window();
         }
+        if let Some(implicit) = &mut self.implicit_salt {
+            implicit.begin_window();
+        }
+        if let Some(electrical) = &mut self.electroneutral_diffusion {
+            electrical.begin_window();
+        }
         let (water_before, amounts_before) = totals(&self.cells, self.species.len());
         let mut report = OsmoticStepReport {
             interval_s: [self.time_s, end_time],
@@ -738,6 +765,7 @@ impl OsmoticNetwork {
             species_count: self.species.len(),
             diffusion_free_energy_change_j: None,
             coupled_potential_change: None,
+            electroneutral_diffusion: None,
         };
         let mut elapsed = 0.0;
         let mut step = duration_s.min(controls.maximum_step_s);
@@ -760,6 +788,8 @@ impl OsmoticNetwork {
                     &mut self.diffusion,
                     self.implicit_diffusion.as_mut(),
                     self.implicit_multicomponent.as_mut(),
+                    self.implicit_salt.as_mut(),
+                    self.electroneutral_diffusion.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     step,
@@ -773,6 +803,8 @@ impl OsmoticNetwork {
                     &mut self.diffusion,
                     self.implicit_diffusion.as_mut(),
                     self.implicit_multicomponent.as_mut(),
+                    self.implicit_salt.as_mut(),
+                    self.electroneutral_diffusion.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -786,6 +818,8 @@ impl OsmoticNetwork {
                     &mut self.diffusion,
                     self.implicit_diffusion.as_mut(),
                     self.implicit_multicomponent.as_mut(),
+                    self.implicit_salt.as_mut(),
+                    self.electroneutral_diffusion.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -899,6 +933,10 @@ impl OsmoticNetwork {
             }
         }
         poll(&mut cancelled)?;
+        report.electroneutral_diffusion = self
+            .electroneutral_diffusion
+            .as_ref()
+            .map(|electrical| electrical.report());
         core::mem::swap(&mut self.cells, &mut self.work);
         self.time_s = end_time;
         Ok(report)
@@ -1020,6 +1058,8 @@ fn sweep_all(
     links: &mut [diffusion::SolutionDiffusionLink],
     implicit: Option<&mut diffusion::ImplicitBinaryDiffusion>,
     multicomponent: Option<&mut diffusion::ImplicitMulticomponentDiffusion>,
+    salt: Option<&mut diffusion::ImplicitSaltDiffusion>,
+    electrical: Option<&mut diffusion::ElectroneutralDiffusion>,
     physical: Option<diffusion::SolutionDiffusionControls>,
     coupled: Option<coupled::CoupledSolutionControls>,
     dt: f64,
@@ -1034,6 +1074,8 @@ fn sweep_all(
             links,
             implicit,
             multicomponent,
+            salt,
+            electrical,
             coupled,
             dt,
             controls,
@@ -1047,6 +1089,8 @@ fn sweep_all(
             links,
             implicit,
             multicomponent,
+            salt,
+            electrical,
             dt,
             physical,
             evaluations,
