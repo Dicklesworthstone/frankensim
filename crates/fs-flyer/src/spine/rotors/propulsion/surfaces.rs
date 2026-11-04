@@ -229,7 +229,7 @@ impl<'a> LiftingSurfaces<'a> {
         let q = 0.5 * rho * speed2;
         if !rho.is_finite()
             || rho <= 0.0
-            || !cg_air.to_array().iter().all(|v| v.is_finite())
+            || ![cg_air.x, cg_air.y, cg_air.z].iter().all(|v| v.is_finite())
             || !speed2.is_finite()
             || speed2 <= 1.0
             || !q.is_finite()
@@ -242,7 +242,7 @@ impl<'a> LiftingSurfaces<'a> {
         }
         let direction = cg_air.scale(1.0 / speed2.sqrt());
         for (group, &load) in self.groups.iter().zip(group_forces) {
-            if !load.to_array().iter().all(|v| v.is_finite()) {
+            if ![load.x, load.y, load.z].iter().all(|v| v.is_finite()) {
                 return Err(reject("lifting-surfaces-invalid", "nonfinite grouped circulatory load"));
             }
             let transverse = load - direction.scale(load.dot(direction));
@@ -253,8 +253,8 @@ impl<'a> LiftingSurfaces<'a> {
             }
             force = force - direction.scale(drag);
         }
-        if !force.to_array().iter().all(|v| v.is_finite())
-            || !moment.to_array().iter().all(|v| v.is_finite())
+        if ![force.x, force.y, force.z].iter().all(|v| v.is_finite())
+            || ![moment.x, moment.y, moment.z].iter().all(|v| v.is_finite())
         {
             return Err(reject("lifting-surfaces-invalid", "unrepresentable total aerodynamic wrench"));
         }
