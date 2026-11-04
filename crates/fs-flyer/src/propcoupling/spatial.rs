@@ -78,15 +78,30 @@ impl DiskAxes {
             let axial = dot(offset, self.directions[k]);
             let radial: [f64; 3] =
                 core::array::from_fn(|j| offset[j] - axial * self.directions[k][j]);
-            let radial_sq = dot(radial, radial);
-            if !axial.is_finite() || !radial_sq.is_finite() {
+            // Evaluate the disk's dimensionless law without squaring raw
+            // metre-scale distances: hypot prevents intermediate overflow.
+            let axial_ratio = axial / radius_m;
+            let radial_ratio = radial[0].hypot(radial[1]).hypot(radial[2]) / radius_m;
+            if !axial_ratio.is_finite() || !radial_ratio.is_finite() {
                 return Err(invalid("disk-relative geometry overflow"));
             }
-            // Scale first: the dimensionless law avoids overflow in dx²+R²
-            // for large but representable geometry. It is the same 2R model.
-            factors[k] = wash_factor(axial / radius_m, radial_sq.sqrt() / radius_m, 1.0);
+            factors[k] = wash_factor(axial_ratio, radial_ratio, 1.0);
         }
         Ok(factors)
+    }
+
+    #[cfg(test)]
+    fn large_radius_regression() {
+        let axes = Self::new([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).unwrap();
+        let unit = axes.wash_factors([0.5, 0.25, 0.125], [[0.0; 3]; 2], 1.0).unwrap();
+        let huge = axes.wash_factors(
+            [0.5e155, 0.25e155, 0.125e155],
+            [[0.0; 3]; 2],
+            1.0e155,
+        ).unwrap();
+        for i in 0..2 {
+            assert!((unit[i] - huge[i]).abs() < 1e-12);
+        }
     }
 
     pub(crate) fn wash_map(
