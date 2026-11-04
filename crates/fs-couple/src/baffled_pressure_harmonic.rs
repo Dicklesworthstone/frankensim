@@ -85,10 +85,24 @@ struct Sum {
 
 impl Sum {
     fn add(&mut self, value: C64) {
-        let adjusted = value - self.correction;
-        let next = self.value + adjusted;
-        self.correction = (next - self.value) - adjusted;
-        self.value = next;
+        // Neumaier's correction must survive a later cancellation of the large
+        // terms. Kahan alone loses the small field in [large, small, -large],
+        // which can erase a quiet radiator or a signed surface-mode residual.
+        fn component(sum: &mut f64, correction: &mut f64, value: f64) {
+            let next = *sum + value;
+            *correction += if sum.abs() >= value.abs() {
+                (*sum - next) + value
+            } else {
+                (value - next) + *sum
+            };
+            *sum = next;
+        }
+        component(&mut self.value.re, &mut self.correction.re, value.re);
+        component(&mut self.value.im, &mut self.correction.im, value.im);
+    }
+
+    fn total(self) -> C64 {
+        self.value + self.correction
     }
 }
 
@@ -307,8 +321,8 @@ impl Prepared {
             }
             for sum in &sums {
                 let column = Column {
-                    pressure: sum[0].value,
-                    velocity: std::array::from_fn(|c| sum[c + 1].value),
+                    pressure: sum[0].total(),
+                    velocity: std::array::from_fn(|c| sum[c + 1].total()),
                 };
                 if !finite_field(&column.field(omega_rho)) {
                     return Err("harmonic Rayleigh transfer overflow".into());
@@ -391,8 +405,8 @@ impl Prepared {
                 }
             }
             pending[receiver] = Column {
-                pressure: sums[0].value,
-                velocity: std::array::from_fn(|c| sums[c + 1].value),
+                pressure: sums[0].total(),
+                velocity: std::array::from_fn(|c| sums[c + 1].total()),
             }
             .field(self.omega_rho);
             if !finite_field(&pending[receiver]) {

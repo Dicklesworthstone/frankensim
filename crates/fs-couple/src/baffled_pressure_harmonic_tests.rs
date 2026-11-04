@@ -399,3 +399,126 @@ fn complete_receiver_arrays_and_budgets_keep_coherent_order_and_transactional_ou
         .is_err()
     );
 }
+
+/// G3: cancelling source coordinates must not remove an independent quiet
+/// radiator, regardless of the order in which the coordinates are supplied.
+#[test]
+fn destructive_source_interference_preserves_the_quiet_vector_field() {
+    let positions = [[0.11, -0.17, 0.4], [-0.2, 0.13, 0.7]];
+    let prepared = Prepared::new(
+        &[patch(0.0, vec![1.0; 3])],
+        3,
+        &positions,
+        3100.0,
+        medium(),
+        Options::default(),
+        || false,
+    )
+    .unwrap();
+    let quiet = C64::new(0.25, -0.75);
+    let large = C64::from_re(2.0_f64.powi(60));
+    let patterns = [
+        FirstOrder::default(),
+        FirstOrder::new(0.0, [1.0, -2.0, 3.0]).unwrap(),
+    ];
+    let mut reference = [Field::default(); 2];
+    let mut reference_mics = [C64::ZERO; 2];
+    prepared
+        .evaluate_into(&[C64::ZERO, quiet, C64::ZERO], &mut reference)
+        .unwrap();
+    prepared
+        .observe_into(
+            &[C64::ZERO, quiet, C64::ZERO],
+            &patterns,
+            &mut reference_mics,
+        )
+        .unwrap();
+    for source in [
+        [large, quiet, -large],
+        [large, -large, quiet],
+        [quiet, large, -large],
+        [quiet, -large, large],
+        [-large, large, quiet],
+        [-large, quiet, large],
+    ] {
+        let mut fields = [Field::default(); 2];
+        let mut microphones = [C64::ZERO; 2];
+        prepared.evaluate_into(&source, &mut fields).unwrap();
+        prepared
+            .observe_into(&source, &patterns, &mut microphones)
+            .unwrap();
+        for (actual, expected) in fields.iter().zip(&reference) {
+            close(actual.pressure_pa, expected.pressure_pa, 2e-15);
+            for c in 0..3 {
+                close(
+                    actual.particle_velocity_m_s[c],
+                    expected.particle_velocity_m_s[c],
+                    2e-15,
+                );
+                close(
+                    actual.pressure_gradient_pa_m[c],
+                    expected.pressure_gradient_pa_m[c],
+                    2e-15,
+                );
+            }
+        }
+        for (actual, expected) in microphones.into_iter().zip(reference_mics) {
+            close(actual, expected, 2e-15);
+        }
+    }
+}
+
+/// G3: a signed decomposition of a surface basis must agree with its net basis
+/// before a source is applied. The large terms cancel at the quadrature stage.
+#[test]
+fn signed_surface_cancellation_preserves_the_quiet_transfer() {
+    let position = [[0.11, -0.17, 0.4]];
+    let reference = Prepared::new(
+        &[patch(0.0, vec![1.0])],
+        1,
+        &position,
+        3100.0,
+        medium(),
+        Options::default(),
+        || false,
+    )
+    .unwrap()
+    .transfer(0, 0)
+    .unwrap();
+    let large = 2.0_f64.powi(60);
+    for shapes in [
+        [large, 1.0, -large],
+        [large, -large, 1.0],
+        [1.0, large, -large],
+        [1.0, -large, large],
+        [-large, large, 1.0],
+        [-large, 1.0, large],
+    ] {
+        let surface = shapes.map(|shape| patch(0.0, vec![shape]));
+        let actual = Prepared::new(
+            &surface,
+            1,
+            &position,
+            3100.0,
+            medium(),
+            Options::default(),
+            || false,
+        )
+        .unwrap()
+        .transfer(0, 0)
+        .unwrap();
+        close(actual.pressure_pa, reference.pressure_pa, 2e-15);
+        for c in 0..3 {
+            close(
+                actual.particle_velocity_m_s[c],
+                reference.particle_velocity_m_s[c],
+                2e-15,
+            );
+            close(
+                actual.pressure_gradient_pa_m[c],
+                reference.pressure_gradient_pa_m[c],
+                2e-15,
+            );
+        }
+    }
+}
