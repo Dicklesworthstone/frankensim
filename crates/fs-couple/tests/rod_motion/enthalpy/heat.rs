@@ -5,6 +5,7 @@ use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, CircuitThermalCoefficien
         heat::{HeatAssembly, HeatNetworkError, HeatNetworkSample, MaterialHeatNetwork, PreparedHeatNetwork}}};
 use fs_couple::rod_motion::enthalpy::{
     RodAngularViscosity, RodBendingViscosity, RodHeatError, RodTorsionalViscosity,
+    RodTransverseViscosity,
 };
 use fs_conduction::transient::deposition::{
     contact::{ContactCell, MaterialContactLink},
@@ -202,6 +203,15 @@ impl HeatAssembly for FiniteHeat<'_, '_, '_> {
 
 #[test]
 fn finite_heat_assembly_changes_continuing_rod_motion_and_keeps_both_angular_heats_once() {
+    finite_heat_assembly_case(false);
+}
+
+#[test]
+fn finite_heat_assembly_cools_native_rod_while_depositing_transverse_heat_once() {
+    finite_heat_assembly_case(true);
+}
+
+fn finite_heat_assembly_case(include_transverse: bool) {
     let spec = Spec { viscosity: Some(ViscositySpec { value_pa_s: 3.0, slope_pa_s_k: 0.01,
         lower_k: 200.0, upper_k: 500.0, upper_rad_s: f64::MAX }),
         bending_viscosity: Some(ViscositySpec { value_pa_s: 8.0, slope_pa_s_k: 0.02,
@@ -238,6 +248,9 @@ fn finite_heat_assembly_changes_continuing_rod_motion_and_keeps_both_angular_hea
                     torsional: Some(RodTorsionalViscosity { property: "shear_viscosity", selections: &selections }),
                     bending: Some(RodBendingViscosity { property: "bending_viscosity", selections: &selections }),
                 };
+                let transverse_viscosity = RodTransverseViscosity {
+                    property: "shear_viscosity", selections: &selections,
+                };
                 let initial_total = owner.mechanical_internal_energy_j().unwrap() + total_heat(&thermal);
                 let loads = [RodNodalWrench::default(); 2];
                 let spatial = PreparedRodLoads::new(&loads, &[[0.0; 3]; 2], &[], &gate).unwrap();
@@ -252,12 +265,17 @@ fn finite_heat_assembly_changes_continuing_rod_motion_and_keeps_both_angular_hea
                     assembly.conductance_w_k = active_conductance;
                     let before = owner.mechanical().model()
                         .segment_strain_states(owner.mechanical().pose(), &gate).unwrap()[0];
-                    let report = if step == 1 {
-                        owner.step_heat_assembly(&mut thermal, dt, &loads,
-                            &assembly, cx, viscosity, controls(dt), solve(), &[0.0; 2], &gate)
-                    } else {
-                        owner.step_spatial_heat_assembly(&mut thermal, 2.0 * dt, &spatial,
-                            &assembly, cx, viscosity, controls(dt), solve(), &[0.0; 2], &gate)
+                    let report = match (include_transverse, step == 1) {
+                        (true, true) => owner.step_heat_assembly_with_transverse(
+                            &mut thermal, dt, &loads, &assembly, cx, viscosity,
+                            transverse_viscosity, controls(dt), solve(), &[0.0; 2], &gate),
+                        (true, false) => owner.step_spatial_heat_assembly_with_transverse(
+                            &mut thermal, 2.0 * dt, &spatial, &assembly, cx, viscosity,
+                            transverse_viscosity, controls(dt), solve(), &[0.0; 2], &gate),
+                        (false, true) => owner.step_heat_assembly(&mut thermal, dt, &loads,
+                            &assembly, cx, viscosity, controls(dt), solve(), &[0.0; 2], &gate),
+                        (false, false) => owner.step_spatial_heat_assembly(&mut thermal, 2.0 * dt, &spatial,
+                            &assembly, cx, viscosity, controls(dt), solve(), &[0.0; 2], &gate),
                     }.unwrap();
                     trials += report.material_trials;
                     assert_eq!(assembly.calls.get(), trials);
@@ -267,6 +285,12 @@ fn finite_heat_assembly_changes_continuing_rod_motion_and_keeps_both_angular_hea
                     assert!(torsional.mechanical_heat_j > 0.0 && bending.mechanical_heat_j > 0.0);
                     near(torsional.deposited_heat_j, torsional.mechanical_heat_j, 1e-17);
                     near(bending.deposited_heat_j, bending.mechanical_heat_j, 1e-17);
+                    assert_eq!(report.transverse.is_some(), include_transverse);
+                    let transverse_total = if let Some(transverse) = &report.transverse {
+                        assert!(transverse.mechanical_heat_j > 0.0);
+                        near(transverse.deposited_heat_j, transverse.mechanical_heat_j, 1e-17);
+                        transverse.mechanical_heat_j
+                    } else { 0.0 };
                     let next: [f64; 2] = core::array::from_fn(|i| thermal.temperature_k(CellId(i as u64)).unwrap());
                     let after = owner.mechanical().model()
                         .segment_strain_states(owner.mechanical().pose(), &gate).unwrap()[0];
@@ -274,10 +298,12 @@ fn finite_heat_assembly_changes_continuing_rod_motion_and_keeps_both_angular_hea
                     let eta_b = temperatures.map(|t| 8.0 + 0.02 * (t - 300.0));
                     let torsional_weight: f64 = (0..2).map(|i| eta_s[i] * 2.0 * geometry(i, 2).1).sum();
                     let bending_weight: f64 = (0..2).map(|i| eta_b[i] * geometry(i, 2).1).sum();
+                    let transverse_weight: f64 = (0..2).map(|i| 0.8 * eta_s[i] * geometry(i, 2).0).sum();
                     let mut caloric_entropy = 0.0;
                     let mut mechanical_entropy = 0.0;
                     let mut torsional_entropy = 0.0;
                     let mut bending_entropy = 0.0;
+                    let mut transverse_entropy = 0.0;
                     for i in 0..2 {
                         let (area, second) = geometry(i, 2);
                         let capacity = RHO * LENGTH * area * spec.cp;
@@ -291,25 +317,33 @@ fn finite_heat_assembly_changes_continuing_rod_motion_and_keeps_both_angular_hea
                             - next[i] * new_p.1 + temperatures[i] * old_p.1);
                         let shear_heat = torsional.mechanical_heat_j * eta_s[i] * 2.0 * second / torsional_weight;
                         let bend_heat = bending.mechanical_heat_j * eta_b[i] * second / bending_weight;
+                        let transverse_heat = transverse_total * (0.8 * eta_s[i] * area) / transverse_weight;
                         near(torsional.layers[i].viscosity_pa_s, eta_s[i], 1e-12);
                         near(bending.layers[i].viscosity_pa_s, eta_b[i], 1e-12);
                         near(torsional.layers[i].heat_j, shear_heat, 1e-17);
                         near(bending.layers[i].heat_j, bend_heat, 1e-17);
+                        if let Some(transverse) = &report.transverse {
+                            near(transverse.layers[i].viscosity_pa_s, eta_s[i], 1e-12);
+                            near(transverse.layers[i].shear_correction, 0.8, 0.0);
+                            near(transverse.layers[i].heat_j, transverse_heat, 1e-17);
+                        }
                         near(report.layers[i].reversible_heat_j, reversible, 1e-12);
                         // Independent finite-cell balance: transport and reversible
-                        // work remain distinct from both actual intrinsic losses.
+                        // work remain distinct from each actual intrinsic loss.
                         let transport = dt * active_conductance * (next[1 - i] - next[i]);
                         near(capacity * (next[i] - temperatures[i]),
-                            transport + reversible + shear_heat + bend_heat, 3e-11);
+                            transport + reversible + shear_heat + bend_heat + transverse_heat, 3e-11);
                         caloric_entropy += capacity * (next[i] / temperatures[i]).ln();
                         mechanical_entropy += LENGTH * (new_p.1 - old_p.1);
                         torsional_entropy += shear_heat / next[i];
                         bending_entropy += bend_heat / next[i];
+                        transverse_entropy += transverse_heat / next[i];
                     }
                     near(report.entropy.caloric_storage_change_j_k, caloric_entropy, 2e-12);
                     near(report.entropy.mechanical_storage_change_j_k, mechanical_entropy, 2e-12);
                     near(report.entropy.torsional_generation_j_k, torsional_entropy, 2e-15);
                     near(report.entropy.bending_generation_j_k, bending_entropy, 2e-15);
+                    near(report.entropy.transverse_generation_j_k, transverse_entropy, 2e-15);
                     near(report.entropy.conduction_generation_j_k,
                         dt * active_conductance * (next[0] - next[1]).powi(2) / (next[0] * next[1]), 2e-12);
                     assert!(!report.entropy.has_unclassified_external_sources);
@@ -326,12 +360,24 @@ fn finite_heat_assembly_changes_continuing_rod_motion_and_keeps_both_angular_hea
                 let saved = (owner.mechanical().pose().clone(), owner.mechanical().linear_momenta_kg_m_s().to_vec(),
                     owner.mechanical().body_spins_kg_m2_s().to_vec(), owner.layers().to_vec(), thermal.cells().clone());
                 assembly.refuse.set(true);
-                assert!(matches!(owner.step_heat_assembly(&mut thermal, 3.0 * dt, &loads, &assembly, cx,
-                    viscosity, controls(dt), solve(), &[0.0; 2], &gate), Err(RodHeatError::Heat(SourceError::Refused))));
+                let refused = if include_transverse {
+                    owner.step_heat_assembly_with_transverse(&mut thermal, 3.0 * dt, &loads, &assembly, cx,
+                        viscosity, transverse_viscosity, controls(dt), solve(), &[0.0; 2], &gate)
+                } else {
+                    owner.step_heat_assembly(&mut thermal, 3.0 * dt, &loads, &assembly, cx,
+                        viscosity, controls(dt), solve(), &[0.0; 2], &gate)
+                };
+                assert!(matches!(refused, Err(RodHeatError::Heat(SourceError::Refused))));
                 assembly.refuse.set(false);
                 assembly.cancel.set(true);
-                assert!(matches!(owner.step_spatial_heat_assembly(&mut thermal, 3.0 * dt, &spatial, &assembly, cx,
-                    viscosity, controls(dt), solve(), &[0.0; 2], &gate), Err(RodHeatError::Rod(CircuitEnthalpyError::Cancelled))));
+                let cancelled = if include_transverse {
+                    owner.step_spatial_heat_assembly_with_transverse(&mut thermal, 3.0 * dt, &spatial, &assembly, cx,
+                        viscosity, transverse_viscosity, controls(dt), solve(), &[0.0; 2], &gate)
+                } else {
+                    owner.step_spatial_heat_assembly(&mut thermal, 3.0 * dt, &spatial, &assembly, cx,
+                        viscosity, controls(dt), solve(), &[0.0; 2], &gate)
+                };
+                assert!(matches!(cancelled, Err(RodHeatError::Rod(CircuitEnthalpyError::Cancelled))));
                 assert_eq!(owner.mechanical().pose(), &saved.0);
                 assert_eq!(owner.mechanical().linear_momenta_kg_m_s(), saved.1);
                 assert_eq!(owner.mechanical().body_spins_kg_m2_s(), saved.2);

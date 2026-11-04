@@ -25,6 +25,8 @@ mod bending;
 mod heat;
 #[path = "enthalpy/torsional.rs"]
 mod torsional;
+#[path = "enthalpy/transverse.rs"]
+mod transverse;
 
 pub(super) const LENGTH: f64 = 0.8;
 pub(super) const RADIUS: f64 = 0.05;

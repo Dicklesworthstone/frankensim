@@ -25061,12 +25061,43 @@ segments and mechanisms. They report separate transverse heat, support
 reactions and the signed integration defect before publishing a candidate.
 Explicit zero viscosity preserves the preexisting trajectory. Sources must
 match the original mechanics and supply broadband fixed-state support.
-This Kelvin section model does not resolve cross-sectional warping, hereditary
-shear relaxation, thermal deposition or thermal feedback. Elastic-wave and
+This Kelvin section model does not resolve cross-sectional warping or hereditary
+shear relaxation. The fixed-state native step owns no thermal reservoir; the
+finite-cell connection below supplies explicit thermal feedback. Elastic-wave and
 splitting accuracy still require timestep refinement. Focused G0/G1/G3/G4
 tests exercise manufactured two-direction decay and independent heat, stiff
 viscosity, a three-clock refinement ladder, zero-law parity, rigid motion,
 source mismatch and cancellation. They do not establish measured calibration.
+
+## Finite-cell heating from intrinsic transverse rod shear
+
+`RodThermoelasticSystem::step_material_viscous_with_transverse` and its spatial
+counterpart add an independent `RodTransverseViscosity` selection to the existing
+axial, bending and torsional choices. The compatible
+`step_heat_assembly_with_transverse` and spatial counterpart carry the same
+selection through original contact, radiation, coolant and reservoir transport.
+Every path uses one native mechanical advance and the same caloric transaction;
+the original selection structs and existing entrypoint arguments are retained.
+
+Each segment's actual two-direction shear heat is distributed by its original
+`kappa * eta_i * A_i` coefficients into the original whole-layer cells. The
+section supplies the shear correction exactly once. Layer heat capacity affects
+the resulting temperature, not the dissipation weights. Scaled partitioning
+retains representable small deposits at extreme source contrast, and both
+segment and total heat closure are gated before publication. The interval's
+sources stay frozen during thermal trials. The SAME selected claims must
+support the accepted endpoint; subsequent intervals resolve the heated state.
+
+`RodThermoelasticReport::transverse` retains source sections, destinations and
+actual deposits, with independent `transverse_generation_j_k = sum(Q/T_end)`
+under the existing endpoint thermal quadrature. This internal conversion enters
+the finite stores once and is excluded from external thermal supply. Reversible
+exchange, other physical losses and numerical defects keep separate accounts.
+Source exhaustion, cancellation or a late energy/assembly refusal leaves both
+accepted histories unchanged. Focused regressions cover unequal layer capacities,
+independent oscillator heat, heated source refresh, simultaneous loss mechanisms,
+world/spatial loading, zero-law parity and endpoint-refusal retry. No hereditary
+shear law, phase transition or deformation-dependent heat geometry is added.
 
 ## Finite-cell heating from intrinsic shaft viscosity
 

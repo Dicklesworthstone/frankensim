@@ -2,7 +2,7 @@
 //!
 //! This adapter replaces only the transport evaluation in the existing finite
 //! enthalpy residual. Native motion, full layer Psi/S/U, reversible exchange,
-//! intrinsic axial/bending/torsional heat and endpoint source refresh keep their one owner.
+//! intrinsic axial/transverse/bending/torsional heat and endpoint source refresh keep their one owner.
 use super::*;
 use crate::circuit_enthalpy::{CircuitThermalCoefficients, contacts::heat::{
     HeatAssembly, HeatNetworkError,
@@ -64,7 +64,7 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
         gate: &CancelGate,
     ) -> core::result::Result<RodThermoelasticReport<A::Sample>, RodHeatError<A::Error>> {
         self.step_heat_with_loads(thermal, target_s, StageLoads::World(loads), assembly, cx,
-            viscosity.into(), mechanical_controls, controls, energy_guess_j, gate)
+            viscosity.into(), None, mechanical_controls, controls, energy_guess_j, gate)
     }
 
     /// The same complete finite-heat transaction with original material-point
@@ -85,7 +85,51 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
         gate: &CancelGate,
     ) -> core::result::Result<RodThermoelasticReport<A::Sample>, RodHeatError<A::Error>> {
         self.step_heat_with_loads(thermal, target_s, StageLoads::Spatial(loads), assembly, cx,
-            viscosity.into(), mechanical_controls, controls, energy_guess_j, gate)
+            viscosity.into(), None, mechanical_controls, controls, energy_guess_j, gate)
+    }
+
+    /// Complete contact, radiation and coolant transport with independently
+    /// selected transverse shear viscosity. All material losses share the same
+    /// native mechanical interval, original caloric cells and thermal solve.
+    /// The existing assembly admission, source errors and joint rollback apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_heat_assembly_with_transverse<'v, A: HeatAssembly + ?Sized>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        target_s: f64,
+        loads: &[RodNodalWrench],
+        assembly: &A,
+        cx: &Cx<'_>,
+        viscosity: impl Into<RodMaterialViscosity<'v>>,
+        transverse: RodTransverseViscosity<'_>,
+        mechanical_controls: RodMotionControls,
+        controls: RodThermoelasticSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+    ) -> core::result::Result<RodThermoelasticReport<A::Sample>, RodHeatError<A::Error>> {
+        self.step_heat_with_loads(thermal, target_s, StageLoads::World(loads), assembly, cx,
+            viscosity.into(), Some(transverse), mechanical_controls, controls, energy_guess_j, gate)
+    }
+
+    /// The same complete shear-heating transaction with original material-point
+    /// forces and body/world-held free couples.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_spatial_heat_assembly_with_transverse<'v, A: HeatAssembly + ?Sized>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        target_s: f64,
+        loads: &PreparedRodLoads,
+        assembly: &A,
+        cx: &Cx<'_>,
+        viscosity: impl Into<RodMaterialViscosity<'v>>,
+        transverse: RodTransverseViscosity<'_>,
+        mechanical_controls: RodMotionControls,
+        controls: RodThermoelasticSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+    ) -> core::result::Result<RodThermoelasticReport<A::Sample>, RodHeatError<A::Error>> {
+        self.step_heat_with_loads(thermal, target_s, StageLoads::Spatial(loads), assembly, cx,
+            viscosity.into(), Some(transverse), mechanical_controls, controls, energy_guess_j, gate)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -93,6 +137,7 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
         &mut self, thermal: &mut DepositionSimulation<'_>, target_s: f64,
         loads: StageLoads<'_>, assembly: &A, cx: &Cx<'_>,
         viscosity: RodMaterialViscosity<'_>,
+        transverse: Option<RodTransverseViscosity<'_>>,
         mechanical_controls: RodMotionControls, controls: RodThermoelasticSolve,
         energy_guess_j: &[f64], gate: &CancelGate,
     ) -> core::result::Result<RodThermoelasticReport<A::Sample>, RodHeatError<A::Error>> {
@@ -116,8 +161,8 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
         if !routes.is_empty() {
             return Err(invalid("rod heat assembly cannot discard electrical contact work").into());
         }
-        let result = self.step_with_transport(thermal, target_s, loads,
-            viscosity, &trial,
+        let result = self.step_with_transport_and_transverse(thermal, target_s, loads,
+            viscosity, transverse, &trial,
             mechanical_controls, controls, energy_guess_j, gate);
         match result {
             Err(CircuitEnthalpyError::Invalid(SOURCE_REFUSAL)) => match trial.failure.into_inner() {
