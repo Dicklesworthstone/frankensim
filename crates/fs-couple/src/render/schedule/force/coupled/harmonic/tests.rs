@@ -320,6 +320,58 @@ fn harmonic_bare_lossless_air_pole_is_a_finite_joint_antiresonance() {
 }
 
 #[test]
+fn harmonic_high_q_components_and_air_keep_their_original_frequency_detuning() {
+    // G1: compare the public mechanical and explicit-air response with the
+    // original frequency laws evaluated by independent double-double squares.
+    // Neither a tiny linear-solve residual nor a coarse frequency sweep can
+    // detect a diagonal that lost significant digits before factorization.
+    use fs_math::dd::Dd;
+    let detuning = |natural, drive| {
+        let w = Dd::from_f64(natural);
+        let d = Dd::from_f64(drive);
+        (w * w - d * d).to_f64()
+    };
+    let gate = CancelGate::new_clock_free();
+    let natural = core::f64::consts::TAU * 440.0;
+    let zeta = 2e-14;
+    let bare = CoupledModalSystem::new(vec![mode(natural, zeta)], vec![],
+        config(), &gate).unwrap();
+    let force = C64::new(1e-12, -3e-13);
+    for drive in [f64::from_bits(natural.to_bits() - 37), natural,
+        f64::from_bits(natural.to_bits() + 53)]
+    {
+        let response = bare.harmonic_response(drive, &[force], 1000, &gate).unwrap();
+        let dynamic = C64::new(detuning(natural, drive), -2.0 * drive * zeta * natural);
+        close(response.displacement_m_sqrt_kg[0], force / dynamic);
+        power_closes(&response);
+    }
+
+    let air_frequency = 777.123_456_f64;
+    let coupling = 0.001;
+    let loaded = CoupledModalSystem::new(vec![mode(1000.0, 0.01)], vec![],
+        config(), &gate).unwrap().with_radiation_load(
+            &Model { ports: 1, poles: vec![Pole {
+                omega: air_frequency, zeta, coupling: vec![coupling],
+            }] }, &[0], 1, &gate).unwrap();
+    let force = C64::new(1e-5, -3e-6);
+    for drive in [f64::from_bits(air_frequency.to_bits() - 37), air_frequency,
+        f64::from_bits(air_frequency.to_bits() + 53)]
+    {
+        let response = loaded.harmonic_response(drive, &[force], 1000, &gate).unwrap();
+        let body = C64::new(detuning(1000.0, drive), -20.0 * drive);
+        let air = C64::new(detuning(air_frequency, drive),
+            -2.0 * drive * zeta * air_frequency);
+        let cross = C64::new(0.0, -drive * coupling);
+        let determinant = body * air + cross * cross;
+        close(response.displacement_m_sqrt_kg[0], force * air / determinant);
+        close(response.radiation_state[0], cross * force / determinant);
+        power_closes(&response);
+    }
+    assert_eq!(bare.samples_rendered(), 0);
+    assert_eq!(loaded.samples_rendered(), 0);
+}
+
+#[test]
 fn harmonic_material_channels_retain_source_order_and_independent_physical_heat() {
     // G1/G3: three distinct constitutive reservoirs on signed two-mode forms.
     // Their heat is obtained independently from each ODE, including a genuine

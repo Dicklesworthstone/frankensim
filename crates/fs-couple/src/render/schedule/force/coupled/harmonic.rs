@@ -71,6 +71,33 @@ impl ModalHarmonicResponse {
 fn complex_finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
+fn component_scale(z: C64) -> f64 {
+    z.re.abs().max(z.im.abs())
+}
+
+// Frequencies, not pre-rounded stiffness entries, own these diagonal laws.
+// Subtracting two rounded squares loses the detuning of a high-Q mode even
+// when the subsequent linear solve has an excellent backward residual.
+fn frequency_detuning(natural: f64, drive: f64) -> f64 {
+    (natural - drive) * (natural + drive)
+}
+
+// Restore a physical amplitude without first forming an unrepresentable
+// scale ratio. At least one of these orders has a normal intermediate when
+// the final value is representable and the inputs are finite/nonzero.
+fn restore_amplitude(value: f64, numerator: f64, denominator: f64) -> f64 {
+    let ratio = numerator / denominator;
+    if ratio.is_normal() {
+        value * ratio
+    } else {
+        let product = value * numerator;
+        if product.is_normal() || value == 0.0 {
+            product / denominator
+        } else {
+            (value / denominator) * numerator
+        }
+    }
+}
 fn lu_error(error: LuComplexError) -> ModalCouplingError {
     match error {
         LuComplexError::Cancelled => ModalCouplingError::Cancelled,
@@ -141,12 +168,17 @@ impl<'a> HarmonicFactor<'a> {
         if matrix.iter().any(|&a| !complex_finite(a)) {
             return Err(invalid("harmonic operator overflow"));
         }
-        let scale = matrix.iter().map(|a| a.abs()).fold(0.0_f64, f64::max);
+        let scale = matrix.iter().map(|&a| component_scale(a)).fold(0.0_f64, f64::max);
         if !scale.is_finite() || scale == 0.0 {
             return Err(invalid("harmonic operator has no finite scale"));
         }
         let scaled: Vec<_> = matrix.iter()
             .map(|a| C64::new(a.re / scale, a.im / scale)).collect();
+        if matrix.iter().zip(&scaled).any(|(a, b)| {
+            (a.re != 0.0 && b.re == 0.0) || (a.im != 0.0 && b.im == 0.0)
+        }) {
+            return Err(invalid("harmonic operator scaling loses a nonzero coefficient"));
+        }
         let factor = lu_complex_with_cancel(&scaled, dimension, || gate.is_requested())
             .map_err(lu_error)?;
         Ok(Self { matrix, dimension, scale, factor })
@@ -158,29 +190,74 @@ impl<'a> HarmonicFactor<'a> {
         poll(Some(gate))?;
         let Self { matrix, dimension, scale, factor } = self;
         let dimension = *dimension;
+        if force.len() > dimension || force.iter().any(|&f| !complex_finite(f)) {
+            return Err(invalid("harmonic right-hand side must be finite and fit the operator"));
+        }
+        let mut force_scale = force.iter().map(|&f| component_scale(f)).fold(0.0_f64, f64::max);
         let mut state = vec![C64::ZERO; dimension];
-        for (x, f) in state.iter_mut().zip(force) {
-            *x = C64::new(f.re / scale, f.im / scale);
+        if force_scale == 0.0 {
+            poll(Some(gate))?;
+            return Ok((state, 0.0));
         }
-        if state.iter().any(|&x| !complex_finite(x)) {
-            return Err(invalid("harmonic force scaling overflow"));
+        let prepare_rhs = |state: &mut [C64], rhs_scale: f64| {
+            state.fill(C64::ZERO);
+            for (x, f) in state.iter_mut().zip(force) {
+                *x = C64::new(f.re / rhs_scale, f.im / rhs_scale);
+                if !complex_finite(*x)
+                    || (f.re != 0.0 && x.re == 0.0) || (f.im != 0.0 && x.im == 0.0)
+                {
+                    return false;
+                }
+            }
+            true
+        };
+        let normalized = prepare_rhs(&mut state, force_scale);
+        if normalized {
+            factor.solve_with_cancel(&mut state, || gate.is_requested()).map_err(lu_error)?;
         }
-        factor.solve_with_cancel(&mut state, || gate.is_requested()).map_err(lu_error)?;
-        if state.iter().any(|&x| !complex_finite(x)) {
-            return Err(invalid("harmonic response is not representable"));
+        if !normalized || state.iter().any(|&x| !complex_finite(x)) {
+            // A near-singular operator can overflow the unit-force response
+            // while the actual weak physical response is finite. Likewise,
+            // normalizing disparate finite forces can erase a small input.
+            // Retry ONCE with the original F/operator_scale RHS, retaining
+            // the same factor and every nonzero input. This is an amplitude
+            // change only: no regularization, clipping or extra factorization.
+            force_scale = *scale;
+            if !prepare_rhs(&mut state, force_scale) {
+                return Err(invalid("harmonic force scaling cannot retain the complete finite input"));
+            }
+            factor.solve_with_cancel(&mut state, || gate.is_requested()).map_err(lu_error)?;
+            if state.iter().any(|&x| !complex_finite(x)) {
+                return Err(invalid("harmonic response is not representable"));
+            }
         }
         let mut residual_norm = 0.0_f64;
         let mut operator_norm = 0.0_f64;
-        let state_norm = state.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-        let force_norm = force.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        // Check the original equations in equivalent normalized coordinates:
+        // (A / operator_scale) y = F / force_scale. Scaling the residual by
+        // max(1, |y|) avoids both tiny-force underflow and high-Q overflow.
+        // The gate no longer depends on the authored excitation amplitude;
+        // it remains a backward residual, not a high-Q forward-error bound.
+        let state_scale = state.iter().map(|&x| component_scale(x))
+            .fold(1.0_f64, f64::max);
+        let state_norm = state.iter().map(|x|
+            C64::new(x.re / state_scale, x.im / state_scale).abs())
+            .fold(0.0_f64, f64::max);
+        let force_norm = force.iter().map(|x|
+            C64::new(x.re / force_scale / state_scale, x.im / force_scale / state_scale).abs())
+            .fold(0.0_f64, f64::max);
         for i in 0..dimension {
             poll(Some(gate))?;
             let rhs = force.get(i).copied().unwrap_or(C64::ZERO);
-            let mut residual = -rhs;
+            let mut residual = -C64::new(rhs.re / force_scale / state_scale,
+                rhs.im / force_scale / state_scale);
             let mut row_norm = 0.0;
             for (j, &x) in state.iter().enumerate() {
-                residual = residual + matrix[i * dimension + j] * x;
-                row_norm += matrix[i * dimension + j].abs();
+                let a = matrix[i * dimension + j];
+                let a = C64::new(a.re / scale, a.im / scale);
+                let x = C64::new(x.re / state_scale, x.im / state_scale);
+                residual = residual + a * x;
+                row_norm += a.abs();
             }
             if !complex_finite(residual) || !row_norm.is_finite() {
                 return Err(invalid("harmonic residual overflow"));
@@ -196,6 +273,18 @@ impl<'a> HarmonicFactor<'a> {
         if relative > tolerance {
             return Err(ModalCouplingError::SolveResidual { relative, tolerance });
         }
+        for x in &mut state {
+            let physical = C64::new(restore_amplitude(x.re, force_scale, *scale),
+                restore_amplitude(x.im, force_scale, *scale));
+            if !complex_finite(physical)
+                || (x.re != 0.0 && physical.re == 0.0)
+                || (x.im != 0.0 && physical.im == 0.0)
+            {
+                return Err(invalid("harmonic physical response is not representable"));
+            }
+            *x = physical;
+        }
+        poll(Some(gate))?;
         Ok((state, relative))
     }
 }
@@ -388,7 +477,7 @@ impl CoupledModalSystem {
             poll(Some(gate))?;
             let w = mode.angular_frequency_rad_s;
             matrix[i * dimension + i] = C64::new(
-                w * w - omega_sq,
+                frequency_detuning(w, omega_rad_s),
                 -omega_rad_s * (2.0 * mode.damping_ratio * w),
             );
         }
@@ -437,7 +526,7 @@ impl CoupledModalSystem {
                 poll(Some(gate))?;
                 let index = n + j;
                 matrix[index * dimension + index] = C64::new(
-                    pole.omega * pole.omega - omega_sq,
+                    frequency_detuning(pole.omega, omega_rad_s),
                     -omega_rad_s * (2.0 * pole.zeta * pole.omega),
                 );
                 for (&i, &g) in air.source_modes.iter().zip(&pole.coupling) {
@@ -594,3 +683,6 @@ impl CoupledModalSystem {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod accuracy_tests;
