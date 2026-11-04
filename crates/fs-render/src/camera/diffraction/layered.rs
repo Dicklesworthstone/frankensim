@@ -158,10 +158,10 @@ impl PhysicalCamera {
         if self.aperture.is_pinhole() {
             return Err(CameraError::InvalidDiffraction);
         }
-        self.admit_diffraction_projection()?;
         self.layered_diffraction = Some(policy);
         self.diffraction = None;
         self.defocused_diffraction = None;
+        self.admit_diffraction_projection()?;
         Ok(self)
     }
 

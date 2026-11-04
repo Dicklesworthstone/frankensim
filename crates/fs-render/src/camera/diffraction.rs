@@ -189,10 +189,10 @@ impl PhysicalCamera {
         if self.aperture.is_pinhole() {
             return Err(CameraError::InvalidDiffraction);
         }
-        self.admit_diffraction_projection()?;
         self.defocused_diffraction = Some(policy);
         self.diffraction = None;
         self.layered_diffraction = None;
+        self.admit_diffraction_projection()?;
         Ok(self)
     }
 
@@ -579,6 +579,18 @@ impl PhysicalCamera {
         let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
         for &wavelength in wavelengths_nm {
             let lambda_m = wavelength * 1.0e-9;
+            #[cfg(feature = "tracer")]
+            let lambda_m = if !self.has_diffraction() {
+                // Geometric immersed lenses use the physical wavelength in
+                // their surrounding medium for opening-scale admission. An
+                // explicit medium is refused by the wave-imaging policies.
+                match &self.dispersive_lens {
+                    Some(lens) => lambda_m / lens.exterior_phase_index(wavelength)?,
+                    None => lambda_m,
+                }
+            } else {
+                lambda_m
+            };
             let relative = 0.5 * (lambda_m / radius_m);
             if !wavelength.is_finite()
                 || wavelength <= 0.0

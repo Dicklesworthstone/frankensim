@@ -265,3 +265,132 @@ fn g0_lens_source_domain_and_actual_exterior_index_are_not_silently_changed() {
         );
     });
 }
+
+#[test]
+fn g1_immersed_dispersive_exterior_reaches_native_rays_beer_and_detector_electrons() {
+    with_cx(|cx, _| {
+        let exterior = TabulatedIor::try_new_in_band(
+            core::array::from_fn(|i| {
+                let wavelength = 8000.0 + 750.0 * i as f64;
+                DielectricIorSample::try_new_in_band(
+                    wavelength,
+                    1.2 + (11000.0 - wavelength) * 1e-5,
+                )
+                .unwrap()
+            }),
+            750.0,
+        )
+        .unwrap();
+        let glass = DielectricGlass::new(
+            exterior,
+            BeerLambertAbsorption::try_constant(0.2).unwrap(),
+            GlassProvenance::Custom,
+        );
+        let lens_material = crate::dielectric::SellmeierIor::try_new_in_band(
+            [3.0, 0.0, 0.0],
+            [0.0; 3],
+            (8000.0, 14000.0),
+        )
+        .unwrap();
+        let lens = DispersiveThinLens::try_new_in_medium(
+            11000.0,
+            &[ThinLensElement::try_new(lens_material.into(), 20.0, -20.0).unwrap()],
+            exterior.into(),
+        )
+        .unwrap();
+        let camera = PhysicalCamera::try_look_at(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            CameraProjection::try_focal_sensor(lens.reference_focal_length_m(), 0.002).unwrap(),
+            2.0,
+            Aperture::try_circular(0.001).unwrap(),
+        )
+        .unwrap()
+        .with_geometric_dispersive_lens(lens)
+        .unwrap();
+        let raster = CurvedCameraRaster::try_new(&camera, 2, 2).unwrap();
+        let geometry = geometry();
+        let media = [SceneMedium::Homogeneous(&glass)];
+        let native =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, bindings(), 100_000).unwrap();
+        let emitters = [infrared_emitter(3.0)];
+        let scene = CurvedCameraScene::try_new(cx, &native, &emitters, None).unwrap();
+        let sensor =
+            QuantumEfficiencySensor::try_new(vec![(8000.0, [0.8]), (14000.0, [0.8])]).unwrap();
+        let sample = raster
+            .sample_pixel_sensor(cx, &scene, &sensor, 0, settings(), 73, 1, 6)
+            .unwrap();
+        assert_ne!(sample.camera_rays()[0].dir, sample.camera_rays()[1].dir);
+        let inverse_sensor = (2.0 / 1.2 - 1.0) * 40.0 - 0.5;
+        let mut raster_tangent = None;
+        let (mut energy, mut electrons) = (0.0, 0.0);
+        for ((ray, draw), path) in sample
+            .camera_rays()
+            .iter()
+            .zip(sample.detector_wavelengths())
+            .zip(sample.spectral_samples())
+        {
+            let wavelength = draw.wavelength_nm();
+            let ambient = 1.2 + (11000.0 - wavelength) * 1e-5;
+            near(path.launch_phase_index(), ambient, 3e-16);
+            let power = (2.0 / ambient - 1.0) * 40.0;
+            let pupil = ray.origin.delta_from(camera.eye());
+            let axial = ray.dir.dot(camera.forward());
+            let recovered_raster = [
+                ray.dir.dot(camera.right()) / axial
+                    - pupil.dot(camera.right()) * (inverse_sensor - power),
+                ray.dir.dot(camera.up()) / axial
+                    - pupil.dot(camera.up()) * (inverse_sensor - power),
+            ];
+            if let Some(reference) = raster_tangent {
+                for (a, b) in recovered_raster.into_iter().zip(reference) {
+                    near(a, b, 2e-15);
+                }
+            } else {
+                raster_tangent = Some(recovered_raster);
+            }
+            let length = 2.0 / axial;
+            near(
+                path.path().traveled_m(),
+                length,
+                settings().event.surface_tolerance_m / axial,
+            );
+            // Surface isolation retains its declared spatial tolerance;
+            // attenuation uses the path length actually transported.
+            let radiance = 3.0 * (-0.2 * path.path().traveled_m()).exp();
+            // Camera and emitter occupy the SAME dispersive material. The
+            // original n_camera²/n_source² factor is one, not an extra n².
+            near(path.radiance_w_m2_sr_nm(), radiance, 2e-12);
+            let power = radiance * 6000.0 * 0.8 / 4.0;
+            energy += power;
+            // Photon energy retains VACUUM wavelength although the lens's
+            // opening admission uses its shorter medium wavelength.
+            electrons += power * wavelength * 1e-9 / (6.626_070_15e-34 * 299_792_458.0);
+        }
+        near(sample.qe_weighted_radiance_w_m2_sr()[0], energy, 2e-8);
+        near(
+            sample.photoelectron_rate_per_m2_sr()[0],
+            electrons,
+            electrons * 2e-12,
+        );
+        assert_eq!(
+            sample,
+            raster
+                .sample_pixel_sensor(cx, &scene, &sensor, 0, settings(), 73, 1, 6)
+                .unwrap()
+        );
+
+        let different = infrared_glass();
+        let media = [SceneMedium::Homogeneous(&different)];
+        let native =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, bindings(), 100_000).unwrap();
+        let scene = CurvedCameraScene::try_new(cx, &native, &emitters, None).unwrap();
+        assert_eq!(
+            raster
+                .sample_pixel_sensor(cx, &scene, &sensor, 0, settings(), 73, 1, 6)
+                .unwrap_err(),
+            CurvedRasterError::Camera(CameraError::DispersiveLensOutsideModel),
+        );
+    });
+}

@@ -277,15 +277,10 @@ impl<'a> CurvedCameraRaster<'a> {
                 LensSample::try_new(unit(lens[0]), unit(lens[1]))?,
                 &wavelengths_nm,
             )?;
-        let mut trace_lane = |lane: usize| {
+        let mut trace_lane = |lane: usize| -> Result<CameraRadianceSample, CurvedRasterError> {
             let result = trace(&render_cx, rays[lane], wavelengths_nm[lane], lane)?;
-            if self.camera.dispersive_lens().is_some() && result.launch_phase_index() != 1.0 {
-                // The native prescription has an index-one exterior. Retain
-                // the actual transport launch index, including GRIN, rather
-                // than silently applying a vacuum lensmaker law underwater.
-                return Err(CurvedRasterError::Camera(
-                    CameraError::DispersiveLensOutsideModel,
-                ));
+            if let Some(lens) = self.camera.dispersive_lens() {
+                lens.admit_exterior_phase_index(wavelengths_nm[lane], result.launch_phase_index())?;
             }
             Ok(result)
         };

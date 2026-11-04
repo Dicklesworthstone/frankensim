@@ -1,6 +1,6 @@
-//! Longitudinal dispersion of coincident, paraxial thin elements in index one.
+//! Longitudinal dispersion of coincident, paraxial thin elements.
 //!
-//! Each element contributes `P(lambda) = (n(lambda)-1)*(Cf-Cb)` in inverse
+//! In index one, each element contributes `P(lambda) = (n(lambda)-1)*(Cf-Cb)` in inverse
 //! metres and phase `-pi*P(lambda)*r^2/lambda`. Powers add because their
 //! transmission functions multiply at the same pupil plane. The sensor is
 //! at `1/t = P(reference)-1/focus`, so propagation from source depth z leaves
@@ -12,6 +12,11 @@
 //! These are ideal quadratic phase elements, not finite-thickness spherical
 //! lenses. Surface aberrations, coatings, absorption and polarization are
 //! deliberately not inferred from the supplied material phase-index law.
+//! Geometric cameras may additionally retain an explicit surrounding material:
+//! their inverse focal length is `(n_lens/n_exterior-1)*(Cf-Cb)`. The same
+//! medium occupies both sides, so the usual object/sensor conjugacy survives.
+//! See OpenStax, *University Physics III*, section 2.4, lens maker's equation:
+//! <https://openstax.org/books/university-physics-volume-3/pages/2-4-thin-lenses>.
 
 use std::sync::Arc;
 
@@ -19,14 +24,14 @@ use super::super::{CameraError, PhysicalCamera};
 use super::{LensSample, PolygonPupil, SpectralCameraRay, annular};
 use crate::dielectric::DielectricIor;
 use fs_exec::Cx;
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 
 /// One ideal thin optical element with a native material phase-index law.
 ///
 /// Signed curvatures are reciprocals of surface radii, in inverse metres:
 /// a converging biconvex element has positive front and negative back
 /// curvature when light travels from the object toward the sensor. Zero is
-/// a plane surface. The surrounding medium has refractive index exactly one.
+/// a plane surface. The prescription separately selects the surrounding medium.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThinLensElement {
     ior: DielectricIor,
@@ -76,6 +81,8 @@ struct Prescription {
     reference_power_per_m: f64,
     elements: Vec<ThinLensElement>,
     reference_indices: Vec<f64>,
+    exterior_ior: Option<DielectricIor>,
+    reference_exterior_index: f64,
 }
 
 /// Material-driven longitudinal chromatic aberration of a thin lens stack.
@@ -105,16 +112,45 @@ impl DispersiveThinLens {
     /// This does not truncate the mathematical scalar PSF's infinite tails.
     pub const MAXIMUM_PARAXIAL_SLOPE: f64 = 0.1;
 
-    /// Construct a positive-power reference lens from native optical materials.
+    /// Construct a positive-power reference lens in index one from native materials.
     /// Only construction allocates; camera interpolation shares the immutable
     /// bounded prescription, and spectral evaluation allocates nothing.
     pub fn try_new(
         reference_wavelength_nm: f64,
         elements: &[ThinLensElement],
     ) -> Result<Self, CameraError> {
+        Self::prepare(reference_wavelength_nm, elements, None)
+    }
+
+    /// Retain an explicit homogeneous surrounding phase-index law on both
+    /// sides of a geometric thin-lens prescription. Native absolute indices
+    /// determine the relative contrast at each original vacuum wavelength;
+    /// neither an air-relative fit nor a group index is substituted.
+    ///
+    /// The camera's sampled exterior index must equal this law at every lane.
+    /// Source bands and table gap limits remain intact. This is a transparent,
+    /// unit-transmission ideal lens; exterior absorption/scattering along scene
+    /// paths remains owned by the original transport. Wave diffraction refuses
+    /// this explicit-medium prescription until its pupil propagator supports it.
+    pub fn try_new_in_medium(
+        reference_wavelength_nm: f64,
+        elements: &[ThinLensElement],
+        exterior_ior: DielectricIor,
+    ) -> Result<Self, CameraError> {
+        Self::prepare(reference_wavelength_nm, elements, Some(exterior_ior))
+    }
+
+    fn prepare(
+        reference_wavelength_nm: f64,
+        elements: &[ThinLensElement],
+        exterior_ior: Option<DielectricIor>,
+    ) -> Result<Self, CameraError> {
         if elements.is_empty() || elements.len() > Self::MAX_ELEMENTS {
             return Err(CameraError::InvalidDispersiveLens);
         }
+        let reference_exterior_index = exterior_ior
+            .map_or(Ok(1.0), |ior| ior.eval(reference_wavelength_nm))
+            .map_err(|_| CameraError::InvalidDispersiveLens)?;
         let reference_indices = elements
             .iter()
             .map(|element| {
@@ -128,7 +164,12 @@ impl DispersiveThinLens {
             elements
                 .iter()
                 .zip(&reference_indices)
-                .map(|(element, &index)| Ok((index - 1.0) * element.curvature_difference())),
+                .map(|(element, &index)| {
+                    Ok(
+                        (index - reference_exterior_index) / reference_exterior_index
+                            * element.curvature_difference(),
+                    )
+                }),
         )?;
         if reference_power_per_m <= 0.0 || !(1.0 / reference_power_per_m).is_finite() {
             return Err(CameraError::InvalidDispersiveLens);
@@ -139,6 +180,8 @@ impl DispersiveThinLens {
                 reference_power_per_m,
                 elements: elements.to_vec(),
                 reference_indices,
+                exterior_ior,
+                reference_exterior_index,
             }),
         })
     }
@@ -155,13 +198,47 @@ impl DispersiveThinLens {
         &self.prescription.elements
     }
 
+    /// Original surrounding material law; `None` is the index-one constructor.
+    #[must_use]
+    pub fn exterior_ior(&self) -> Option<&DielectricIor> {
+        self.prescription.exterior_ior.as_ref()
+    }
+
+    /// Exterior phase index at an original vacuum wavelength [nm].
+    pub fn exterior_phase_index(&self, wavelength_nm: f64) -> Result<f64, CameraError> {
+        if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
+            return Err(CameraError::DispersiveLensOutsideModel);
+        }
+        self.exterior_ior().map_or(Ok(1.0), |ior| {
+            ior.eval(wavelength_nm)
+                .map_err(|_| CameraError::DispersiveLensOutsideModel)
+        })
+    }
+
+    /// Bind camera geometry to the actual local transport index. Equality is
+    /// exact: the same native material evaluation can be shared by both owners.
+    /// A different medium is not silently substituted into the lens maker law.
+    pub fn admit_exterior_phase_index(
+        &self,
+        wavelength_nm: f64,
+        actual_phase_index: f64,
+    ) -> Result<(), CameraError> {
+        if actual_phase_index != self.exterior_phase_index(wavelength_nm)? {
+            return Err(CameraError::DispersiveLensOutsideModel);
+        }
+        Ok(())
+    }
+
     /// Inclusive common support [vacuum nm] of the original material laws.
     /// Construction requires the reference wavelength to belong to every law.
     #[must_use]
     pub fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        let exterior = self
+            .exterior_ior()
+            .map_or((0.0, f64::INFINITY), DielectricIor::wavelength_bounds_nm);
         self.elements()
             .iter()
-            .fold((0.0_f64, f64::INFINITY), |(minimum, maximum), element| {
+            .fold(exterior, |(minimum, maximum), element| {
                 let (low, high) = element.ior.wavelength_bounds_nm();
                 (minimum.max(low), maximum.min(high))
             })
@@ -183,12 +260,13 @@ impl DispersiveThinLens {
     /// Signed powers at other wavelengths remain meaningful to the phase
     /// model; the camera separately admits its total pupil phase.
     pub fn power_per_m(&self, wavelength_nm: f64) -> Result<f64, CameraError> {
+        let exterior = self.exterior_phase_index(wavelength_nm)?;
         compensated_power(self.elements().iter().map(|element| {
             let index = element
                 .ior
                 .eval(wavelength_nm)
                 .map_err(|_| CameraError::DispersiveLensOutsideModel)?;
-            Ok((index - 1.0) * element.curvature_difference())
+            Ok((index - exterior) / exterior * element.curvature_difference())
         }))
     }
 
@@ -199,6 +277,8 @@ impl DispersiveThinLens {
         if wavelength_nm == self.reference_wavelength_nm() {
             return Ok(0.0);
         }
+        let exterior = self.exterior_phase_index(wavelength_nm)?;
+        let reference_exterior = self.prescription.reference_exterior_index;
         compensated_power(
             self.elements()
                 .iter()
@@ -208,7 +288,20 @@ impl DispersiveThinLens {
                         .ior
                         .eval(wavelength_nm)
                         .map_err(|_| CameraError::DispersiveLensOutsideModel)?;
-                    Ok((reference_index - index) * element.curvature_difference())
+                    let difference = if self.exterior_ior().is_none() {
+                        // Preserve the original index-one arithmetic exactly.
+                        reference_index - index
+                    } else {
+                        // Subtract cross products before division. Double-double
+                        // products retain weak chromatic contrast even when
+                        // both ordinary index ratios round to the same value.
+                        let n0 = Dd::from_f64(reference_index);
+                        let n = Dd::from_f64(index);
+                        let e0 = Dd::from_f64(reference_exterior);
+                        let e = Dd::from_f64(exterior);
+                        ((n0 * e - n * e0) / (e0 * e)).to_f64()
+                    };
+                    Ok(difference * element.curvature_difference())
                 }),
         )
     }
@@ -246,6 +339,7 @@ impl DispersiveThinLens {
         let half_tan = super::super::half_ratio(sensor, distance);
         if camera.aperture.is_pinhole()
             || camera.diffraction.is_some()
+            || (self.exterior_ior().is_some() && camera.has_diffraction())
             || (focal - expected_focal).abs() > tolerance
             || radius / camera.focus_distance_m > Self::MAXIMUM_PARAXIAL_SLOPE
             || radius / distance > Self::MAXIMUM_PARAXIAL_SLOPE
@@ -288,6 +382,9 @@ fn compensated_power(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod immersion_tests;
 
 #[cfg(test)]
 mod tests {
@@ -524,8 +621,8 @@ impl PhysicalCamera {
     /// therefore needs its own outgoing ray through the sampled pupil. This
     /// geometric-optics approximation omits diffraction; it never superposes
     /// geometric blur on the wave PSF. The original diffraction attachment
-    /// remains separate. The scene must supply refractive index exactly one
-    /// at the camera pupil, matching the prescription's exterior medium.
+    /// remains separate. The scene's phase index at each sampled pupil point
+    /// must match the prescription's original exterior law at that wavelength.
     pub fn with_geometric_dispersive_lens(
         mut self,
         lens: DispersiveThinLens,
@@ -548,7 +645,8 @@ impl PhysicalCamera {
     /// `u + p*(1/t-P(lambda))`. Since `1/t=P(reference)-1/focus`, the stable
     /// material index difference supplies the chromatic change. Group index
     /// does not determine this direction. All wavelengths retain the original
-    /// source bands/gaps and optical-opening admission `lambda/width <= 0.01`.
+    /// source bands/gaps and optical-opening admission
+    /// `lambda_vac/(n_exterior*width) <= 0.01`.
     /// The entire pupil's outgoing paraxial slope must remain at most 0.1.
     /// No wavelength extrapolation, diffraction, or lateral color is inferred.
     pub fn generate_geometric_spectral_rays_from_tangent_offsets<const N: usize>(
