@@ -11370,6 +11370,31 @@ are explicit; the original three-argument angle/power table remains available.
 The fourth argument `interior` instead resolves the same beam inside that warm
 layer, including its two boundary faces and evanescent/standing fields.
 
+### Finite acoustic sensor footprints
+
+`RectangularAcousticWindow` adds an exact uniform rectangular observation
+footprint parallel to the original planar interfaces. Exterior windows use
+the corresponding entrance/exit point-field origin; interior windows use depth
+from the selected layer's front face. Analytic sinc overlaps integrate the
+original coherent tangential phases, yielding spatially averaged complex
+pressure and velocity, separately integrated time/spatial mean squares, and
+active/reactive intensity. Squaring an averaged pressure does not substitute
+for the integrated acoustic energy.
+Double-double wavevector differences, sinc decrements and quadratic weights
+retain positive narrow-window energy and heat at a dark interference fringe.
+
+`PreparedLayerAcousticSpectrum::window_with_heat` integrates the original
+coherent viscous and thermal constitutive heating, including all velocity
+directions; heat is not reconstructed from spatially averaged fields.
+Zero-thickness layers admit interface fields but refuse heat density. The
+observation uses O(N) scratch storage and explicitly budgeted N(N+1)/2 component
+pairs, polls cancellation during component preparation and pair integration,
+and performs no source queries or new boundary solve. It remains a passive
+sensor footprint on the original infinite planar solution; it adds no aperture
+clipping, edge diffraction, temporal exposure or thermal evolution. Nonfinite
+or negative quadratic results refuse rather than being presented as physical
+power.
+
 ### Local coherent acoustic heating
 
 `PreparedLayerAcousticSpectrum::field_with_heat` observes the same original

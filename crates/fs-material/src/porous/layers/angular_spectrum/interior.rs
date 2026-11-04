@@ -125,6 +125,25 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
 }
 
 impl<'s, 'p, 'a> PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
+    pub(super) fn heat_scales(&self) -> [f64; 2] {
+        self.fields.heat_scales
+    }
+
+    pub(super) fn component_field(
+        &self,
+        index: usize,
+        depth: f64,
+    ) -> Result<PlaneField, AcousticSpectrumError> {
+        let prepared = self.spectrum.stack.prepared_layers();
+        PreparedLayerFields::component_field(
+            prepared,
+            &prepared.layers[self.layer_index],
+            &self.spectrum.components[index],
+            &self.fields.waves[index],
+            depth,
+        )
+    }
+
     /// The original prepared coherent incident/reflected/transmitted spectrum.
     pub const fn spectrum(&self) -> &'s PreparedAcousticSpectrum<'p, 'a> {
         self.spectrum
@@ -296,74 +315,91 @@ impl PreparedLayerFields {
             if local.front_amplitude.log == f64::NEG_INFINITY {
                 continue;
             }
-            let step = local.transfer;
-            let mut amplitude = local.front_amplitude.clone();
-            let (pressure, normal_velocity) = if depth == 0.0 {
-                (step.front_pressure, step.front_velocity)
-            } else {
-                // An inverse local matrix is well conditioned over an
-                // optically short distance. It also preserves a small depth
-                // that would round away in thickness-depth for a long layer.
-                let forward = -step.normal_wavenumber.im * depth <= 0.5;
-                let distance = if forward { depth } else { thickness - depth };
-                let partial = PreparedLayer {
-                    source: match layer.source {
-                        Layer::Porous { law, .. } => Layer::Porous {
-                            law,
-                            thickness_m: distance,
-                        },
-                        Layer::FluidGap { .. } => Layer::FluidGap {
-                            thickness_m: distance,
-                        },
-                        Layer::FluidLayer { fluid, .. } => Layer::FluidLayer {
-                            fluid,
-                            thickness_m: distance,
-                        },
-                    },
-                    ..*layer
-                };
-                // J T(d) J = T(-d), J=diag(1,-1), so the existing bounded
-                // backward matrix also supplies the forward solution.
-                let (p0, v0) = if forward {
-                    (step.front_pressure, -step.front_velocity)
-                } else {
-                    (step.back_pressure, step.back_velocity)
-                };
-                let (p, v, scale, kn) =
-                    prepared.propagate_layer(&partial, component.cosine, p0, v0)?;
-                if forward {
-                    amplitude.add(log_scaled(if kn.im == 0.0 { 16.0 } else { 8.0 }, scale));
-                    if kn.im != 0.0 {
-                        amplitude.add(-kn.im * depth);
-                        amplitude.rotate(kn.re * depth);
-                    }
-                } else {
-                    // Cancel full-minus-remaining distances symbolically.
-                    // Even an opaque layer can have a finite entrance field.
-                    amplitude.add(det::ln(scale) - det::ln(step.normalization));
-                    amplitude.add(kn.im * depth);
-                    amplitude.rotate(-kn.re * depth);
-                }
-                (p, if forward { -v } else { v })
-            };
-            let field = PlaneField {
-                pressure: amplitude.coefficient(pressure, 0.0)?,
-                velocity: [
-                    amplitude.coefficient(pressure * local.tangential_velocity_per_pa[0], 0.0)?,
-                    amplitude.coefficient(pressure * local.tangential_velocity_per_pa[1], 0.0)?,
-                    amplitude.coefficient(
-                        normal_velocity,
-                        det::ln(component.cosine) - det::ln(prepared.z0),
-                    )?,
-                ],
-            };
             sum.add(
-                field,
+                Self::component_field(prepared, layer, component, local, depth)?,
                 propagation(component, [position_m[0], position_m[1], 0.0], C64::ZERO)?,
             )?;
         }
         let sample = sum.finish()?;
         poll(cancelled)?;
         Ok(sample)
+    }
+
+    // The same original local propagation serves point and finite-window
+    // observations. This is at x=y=0; callers apply the transverse phase.
+    fn component_field(
+        prepared: &RigidBackedLayers<'_>,
+        layer: &PreparedLayer<'_>,
+        component: &PreparedPlaneWave,
+        local: &LayerWave,
+        depth: f64,
+    ) -> Result<PlaneField, AcousticSpectrumError> {
+        let thickness = layer.source.thickness_m();
+        if local.front_amplitude.log == f64::NEG_INFINITY {
+            return Ok(PlaneField {
+                pressure: C64::ZERO,
+                velocity: [C64::ZERO; 3],
+            });
+        }
+        let step = local.transfer;
+        let mut amplitude = local.front_amplitude.clone();
+        let (pressure, normal_velocity) = if depth == 0.0 {
+            (step.front_pressure, step.front_velocity)
+        } else {
+            // An inverse local matrix is well conditioned over an
+            // optically short distance. It also preserves a small depth
+            // that would round away in thickness-depth for a long layer.
+            let forward = -step.normal_wavenumber.im * depth <= 0.5;
+            let distance = if forward { depth } else { thickness - depth };
+            let partial = PreparedLayer {
+                source: match layer.source {
+                    Layer::Porous { law, .. } => Layer::Porous {
+                        law,
+                        thickness_m: distance,
+                    },
+                    Layer::FluidGap { .. } => Layer::FluidGap {
+                        thickness_m: distance,
+                    },
+                    Layer::FluidLayer { fluid, .. } => Layer::FluidLayer {
+                        fluid,
+                        thickness_m: distance,
+                    },
+                },
+                ..*layer
+            };
+            // J T(d) J = T(-d), J=diag(1,-1), so the existing bounded
+            // backward matrix also supplies the forward solution.
+            let (p0, v0) = if forward {
+                (step.front_pressure, -step.front_velocity)
+            } else {
+                (step.back_pressure, step.back_velocity)
+            };
+            let (p, v, scale, kn) = prepared.propagate_layer(&partial, component.cosine, p0, v0)?;
+            if forward {
+                amplitude.add(log_scaled(if kn.im == 0.0 { 16.0 } else { 8.0 }, scale));
+                if kn.im != 0.0 {
+                    amplitude.add(-kn.im * depth);
+                    amplitude.rotate(kn.re * depth);
+                }
+            } else {
+                // Cancel full-minus-remaining distances symbolically.
+                // Even an opaque layer can have a finite entrance field.
+                amplitude.add(det::ln(scale) - det::ln(step.normalization));
+                amplitude.add(kn.im * depth);
+                amplitude.rotate(-kn.re * depth);
+            }
+            (p, if forward { -v } else { v })
+        };
+        Ok(PlaneField {
+            pressure: amplitude.coefficient(pressure, 0.0)?,
+            velocity: [
+                amplitude.coefficient(pressure * local.tangential_velocity_per_pa[0], 0.0)?,
+                amplitude.coefficient(pressure * local.tangential_velocity_per_pa[1], 0.0)?,
+                amplitude.coefficient(
+                    normal_velocity,
+                    det::ln(component.cosine) - det::ln(prepared.z0),
+                )?,
+            ],
+        })
     }
 }

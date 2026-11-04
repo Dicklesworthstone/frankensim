@@ -24,6 +24,11 @@ pub use super::elastic::stack::{
 };
 pub(in crate::porous::layers) use interior::PreparedLayerFields;
 pub use interior::{AcousticLayerSample, PreparedLayerAcousticSpectrum};
+mod aperture;
+pub use aperture::{
+    AcousticLayerWindowSample, AcousticWindowBudget, AcousticWindowSample,
+    MAX_ACOUSTIC_WINDOW_PAIRS, RectangularAcousticWindow,
+};
 
 /// Hard ceiling on cached coherent plane-wave components.
 pub const MAX_ANGULAR_SPECTRUM_COMPONENTS: usize = 4096;
@@ -362,13 +367,24 @@ impl FieldSum {
         Ok(())
     }
 
-    fn finish(self) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
+    fn finish_fields(self) -> Result<PlaneField, AcousticSpectrumError> {
         let fields: [C64; 4] =
             core::array::from_fn(|i| C64::new(self.0[2 * i].to_f64(), self.0[2 * i + 1].to_f64()));
-        let pressure = fields[0];
-        let velocity = [fields[1], fields[2], fields[3]];
+        if fields.iter().any(|&value| !finite(value)) {
+            return Err(AcousticSpectrumError::Invalid(
+                "nonfinite coherent acoustic field",
+            ));
+        }
+        Ok(PlaneField {
+            pressure: fields[0],
+            velocity: [fields[1], fields[2], fields[3]],
+        })
+    }
+
+    fn finish(self) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
+        let PlaneField { pressure, velocity } = self.finish_fields()?;
         let intensity = velocity.map(|v| pressure.scale(0.5) * v.conj());
-        if fields.iter().chain(&intensity).any(|&value| !finite(value)) {
+        if intensity.iter().any(|&value| !finite(value)) {
             return Err(AcousticSpectrumError::Invalid(
                 "nonfinite coherent acoustic field or intensity",
             ));
