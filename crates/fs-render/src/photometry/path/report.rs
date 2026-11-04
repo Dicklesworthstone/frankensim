@@ -4,7 +4,9 @@ use crate::tracer::Sampler;
 use fs_evidence::{NumericalCertificate, NumericalKind};
 use std::io::{self, Write};
 
-use super::{DiffuseTransportRemainder, PathIlluminanceJob, PathLuminanceJob, PointFixtureSampling};
+use super::{
+    DiffuseTransportRemainder, PathIlluminanceJob, PathLuminanceJob, PointFixtureSampling,
+};
 
 /// Sampling uncertainty of an accepted path estimate, in the units named by
 /// the measurement accessor. This does not include numerical, calibration,
@@ -189,7 +191,11 @@ impl PathErrorBudget {
             SamplingUncertainty::EstimatedIidStandardError {
                 samples,
                 standard_error,
-            } => (samples, "estimated-iid-standard-error", Some(standard_error)),
+            } => (
+                samples,
+                "estimated-iid-standard-error",
+                Some(standard_error),
+            ),
             SamplingUncertainty::CorrelatedSamples { samples } => {
                 (samples, "correlated-samples", None)
             }
@@ -237,12 +243,14 @@ impl PathErrorBudget {
             PointFixtureSampling::Importance {
                 connections_per_vertex,
             } => ("importance", Some(connections_per_vertex)),
+            PointFixtureSampling::ImportanceCdf {
+                connections_per_vertex,
+            } => ("importance-cdf", Some(connections_per_vertex)),
         };
         write!(
             writer,
             ",{},{},{policy},",
-            self.calculation.seed,
-            self.calculation.max_depth
+            self.calculation.seed, self.calculation.max_depth
         )?;
         match connections {
             Some(count) => write!(writer, "{count}")?,
@@ -251,8 +259,7 @@ impl PathErrorBudget {
         write!(
             writer,
             ",{},{},\"",
-            self.calculation.photometry_semantics_version,
-            self.calculation.path_semantics_version
+            self.calculation.photometry_semantics_version, self.calculation.path_semantics_version
         )?;
         for part in self.calculation.observer_id.split_inclusive('"') {
             writer.write_all(part.as_bytes())?;
@@ -280,7 +287,8 @@ impl PathErrorBudget {
         write!(writer, ",{sampler},")?;
         write_optional(
             writer,
-            self.diffuse_transport_remainder.map(|r| r.max_scattering_gain()),
+            self.diffuse_transport_remainder
+                .map(|r| r.max_scattering_gain()),
         )?;
         writer.write_all(b",")?;
         write_optional(
@@ -421,13 +429,9 @@ mod tests {
     #[test]
     fn csv_keeps_volume_contraction_and_measurement_units_explicit() {
         let mut value = report();
-        let remainder = DiffuseTransportRemainder::from_envelope(
-            4,
-            0.25,
-            0.5,
-            fs_ivl::Interval::point(8.0),
-        )
-        .unwrap();
+        let remainder =
+            DiffuseTransportRemainder::from_envelope(4, 0.25, 0.5, fs_ivl::Interval::point(8.0))
+                .unwrap();
         value.diffuse_transport_remainder = Some(remainder);
         assert_eq!(
             value.transport_truncation_upper_bound(),
@@ -440,7 +444,26 @@ mod tests {
         );
         let mut bytes = Vec::new();
         value.write_csv_row(&mut bytes).unwrap();
-        assert!(String::from_utf8(bytes).unwrap().ends_with(",0.25,8,iid,0.5,0.5\n"));
+        assert!(
+            String::from_utf8(bytes)
+                .unwrap()
+                .ends_with(",0.25,8,iid,0.5,0.5\n")
+        );
+        assert!(value.total_error_bound.is_none());
+    }
+
+    #[test]
+    fn csv_identifies_cdf_selection_without_strengthening_error_claims() {
+        let mut value = report();
+        value.calculation.path_semantics_version = super::super::PHOTOMETRIC_PATH_SEMANTICS_VERSION;
+        value.point_sampling = PointFixtureSampling::ImportanceCdf {
+            connections_per_vertex: 8,
+        };
+        let mut bytes = Vec::new();
+        value.write_csv_row(&mut bytes).unwrap();
+        let csv = String::from_utf8(bytes).unwrap();
+        assert!(csv.contains(",importance-cdf,8,6,13,"));
+        assert!(csv.contains(",estimated-iid-standard-error,0,no-claim,unknown,unknown,"));
         assert!(value.total_error_bound.is_none());
     }
 

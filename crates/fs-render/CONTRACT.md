@@ -5431,6 +5431,45 @@ or sharp material lobes, so variance and error per second remain scene-dependent
 Path semantics version 6 adds this policy. The headless stage example accepts
 `--point-connections K` with either path mode; omitted means `All`.
 
+#### Streaming inverse-CDF point selection
+
+`PointFixtureSampling::ImportanceCdf { connections_per_vertex }` is an additional
+opt-in policy on the same camera/probe jobs. It uses the same receiver-dependent
+beam, inverse-square and cosine/phase weights, with two complete source sweeps.
+The first admits every candidate and its scaled weight sum. It then generates
+1-to-32 independent 53-bit integer draws in a separate Philox domain, sorts a
+fixed-size stack array, and sweeps those draws through recomputed prefix weights.
+Original draw slots determine final accumulation order. No source or fixture
+identity is merged, and no per-vertex heap allocation is introduced.
+
+Each CDF endpoint becomes an integer threshold `ceil(CDF * 2^53)`. The proposal
+probability is the actual integer interval width divided by `2^53`, including
+rounding of the CDF. Every positive candidate must retain a positive interval;
+zero or non-increasing intervals refuse, even after all requested draws have
+selected a source. The final endpoint must cover the entire random grid.
+These probabilities affect proposal selection and inverse-probability weights;
+physical intensity, source spectra and calibrated lumens retain their original
+owners. Floating-point evaluation and the physical model remain unqualified.
+
+Selected sources use the same native visibility, Beer attenuation, spectral
+BSDF/phase response and multiplicity coalescing as the reservoir policy. All
+active source distances are checked before angular/receiver filtering. The
+direct point-fixture lux cached by a probe remains the full source sum. New
+selection draws remain part of one whole path sample, so existing IID standard
+errors and correlated-sample qualifications retain their meanings. Cancellation
+and serial/parallel/progressive replay use the existing path commit boundary.
+
+Selection uses `O(N + K log K)` work, `O(K)` random draws and `O(K)` bounded stack
+storage, while evaluating source intensity and receiver response twice. It is
+still a full source traversal and can cost more than reservoirs for small `K`
+or expensive angular/phase laws. Native duplicate coalescing retains bounded
+`O(K^2)` comparisons. No throughput or variance-per-time improvement is claimed.
+Default `All` and existing `Importance` retain their arithmetic and
+random addresses. Path semantics version 13 identifies this extension; CSV
+reports use `importance-cdf`, and the headless stage example accepts
+`--point-cdf-connections K` in either path mode, mutually exclusive with
+`--point-connections K`.
+
 ### Prepared geometry for calibrated transport
 
 Each immutable photometric scene prepares a spatial index over its admitted

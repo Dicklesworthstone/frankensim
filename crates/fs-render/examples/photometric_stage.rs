@@ -19,6 +19,9 @@
 //! This is uniform slope-space redistribution at the exit pupil.
 //! Append `--point-connections 4` to sample at most four point-fixture
 //! connections per path vertex; direct calculation-grid lux remains exact.
+//! Use `--point-cdf-connections 4` for two source sweeps with randomness only
+//! for the requested connections. This alternative may help large rigs with
+//! many connection draws; no runtime improvement is assumed for this scene.
 //! Append `--camera-lens 50 24 2.8 12` to `--paths` for a 50 mm focal length,
 //! 24 mm active sensor height, f/2.8 aperture and 12 m axial focus distance.
 //! The image remains pupil-averaged luminance; exposure is not applied.
@@ -78,7 +81,7 @@ fn report_path_context(context: PathCalculationContext) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--haze-phase CSV] [--panels] [--projector-focus METRES] [--projector-split BEAMS ANGLE_DEG] [--projector-frost HALF_X_DEG HALF_Y_DEG SCATTERED_FRACTION TRANSMISSION] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options except haze phase require a path mode; splitting and frost require a projector; camera lens requires --paths";
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--haze-phase CSV] [--panels] [--projector-focus METRES] [--projector-split BEAMS ANGLE_DEG] [--projector-frost HALF_X_DEG HALF_Y_DEG SCATTERED_FRACTION TRANSMISSION] [--point-connections K | --point-cdf-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options except haze phase require a path mode; splitting and frost require a projector; camera lens requires --paths";
     let (mode, option_start) = match args.first().map(String::as_str) {
         Some(mode @ ("--csv" | "--paths" | "--total-csv")) => (mode, 1),
         _ => ("", 0),
@@ -88,7 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut projector_focus_m = None;
     let mut projector_split = None;
     let mut projector_diffuser = None;
-    let mut point_connections = None;
+    let mut point_sampling = None;
     let mut camera_lens = None;
     let mut haze_phase = None;
     let mut extra = args[option_start..].iter();
@@ -101,12 +104,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 workers = Some(extra.next().ok_or(USAGE)?.parse::<usize>()?);
             }
             "--panels" if !panels => panels = true,
-            "--point-connections" if point_connections.is_none() => {
+            point_flag @ ("--point-connections" | "--point-cdf-connections")
+                if point_sampling.is_none() =>
+            {
                 let count = extra.next().ok_or(USAGE)?.parse::<u32>()?;
                 if !(1..=MAX_POINT_CONNECTIONS_PER_VERTEX).contains(&count) {
                     return Err("point connections must be between 1 and 32".into());
                 }
-                point_connections = Some(count);
+                point_sampling = Some(if point_flag == "--point-cdf-connections" {
+                    PointFixtureSampling::ImportanceCdf {
+                        connections_per_vertex: count,
+                    }
+                } else {
+                    PointFixtureSampling::Importance {
+                        connections_per_vertex: count,
+                    }
+                });
             }
             "--projector-focus" if projector_focus_m.is_none() => {
                 let distance = extra.next().ok_or(USAGE)?.parse::<f64>()?;
@@ -163,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "--total-csv" => (false, false, true),
         _ => return Err(USAGE.into()),
     };
-    if (workers.is_some() || panels || projector_focus_m.is_some() || point_connections.is_some())
+    if (workers.is_some() || panels || projector_focus_m.is_some() || point_sampling.is_some())
         && !(paths || total_csv)
     {
         return Err(USAGE.into());
@@ -201,7 +214,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             projector_focus_m,
             projector_split,
             projector_diffuser,
-            point_connections,
+            point_sampling,
             camera_lens,
             haze_phase.unwrap_or(PhaseFunction::HenyeyGreenstein { g: 0.7 }),
             execution.as_ref(),
@@ -245,7 +258,7 @@ fn run(
     projector_focus_m: Option<f64>,
     projector_split: Option<(usize, f64)>,
     projector_diffuser: Option<ParaxialBoxDiffuser>,
-    point_connections: Option<u32>,
+    point_sampling: Option<PointFixtureSampling>,
     camera_lens: Option<(CameraProjection, Aperture, f64)>,
     phase: PhaseFunction,
     execution: Option<&RenderExecutionConfig>,
@@ -379,7 +392,7 @@ fn run(
             projector_focus_m,
             projector_split,
             projector_diffuser,
-            point_connections,
+            point_sampling,
             phase,
             execution,
         );
@@ -438,7 +451,7 @@ fn run_paths(
     projector_focus_m: Option<f64>,
     projector_split: Option<(usize, f64)>,
     projector_diffuser: Option<ParaxialBoxDiffuser>,
-    point_connections: Option<u32>,
+    point_sampling: Option<PointFixtureSampling>,
     phase: PhaseFunction,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
@@ -605,11 +618,7 @@ fn run_paths(
         MassScatteringSpectrum::constant(0.025)?,
         phase,
     )?;
-    let point_sampling = point_connections.map_or(PointFixtureSampling::All, |count| {
-        PointFixtureSampling::Importance {
-            connections_per_vertex: count,
-        }
-    });
+    let point_sampling = point_sampling.unwrap_or_default();
     if !total_csv {
         println!(
             "Point-fixture path sampling: {point_sampling:?}; direct probe lux uses all fixtures"

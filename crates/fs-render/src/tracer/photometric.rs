@@ -771,6 +771,21 @@ pub(super) fn surface_contribution(
             |incoming| Ok(normal.dot(incoming).max(0.0)),
             response,
         ),
+        PointFixtureSampling::ImportanceCdf {
+            connections_per_vertex,
+        } => point_sampling::contribution_cdf(
+            scene,
+            fixtures,
+            cx,
+            medium,
+            point,
+            wavelengths,
+            rng,
+            depth,
+            connections_per_vertex,
+            |incoming| Ok(normal.dot(incoming).max(0.0)),
+            response,
+        ),
     }
 }
 
@@ -803,6 +818,25 @@ pub(super) fn volume_contribution(
         PointFixtureSampling::Importance {
             connections_per_vertex,
         } => point_sampling::contribution(
+            scene,
+            fixtures,
+            cx,
+            Some(medium),
+            point,
+            wavelengths,
+            rng,
+            depth,
+            connections_per_vertex,
+            |towards_source| {
+                Ok(phase
+                    .eval_packet(wavelengths, incoming_travel.dot(towards_source))?
+                    .pdf)
+            },
+            response,
+        ),
+        PointFixtureSampling::ImportanceCdf {
+            connections_per_vertex,
+        } => point_sampling::contribution_cdf(
             scene,
             fixtures,
             cx,

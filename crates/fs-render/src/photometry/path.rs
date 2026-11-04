@@ -41,13 +41,12 @@ pub use report::{
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 12 adds passive paraxial projector diffusion. Version 11's passive
-/// tabulated diffuse reflectance remains supported at every bounce. Existing
-/// undiffused sources retain their arithmetic and sample addresses. The shared
-/// phase laws, CIE observer, physical camera, splitters and filters remain
-/// authoritative.
+/// Version 13 adds opt-in streaming inverse-CDF point-source selection. The
+/// existing full sum and reservoir policy retain their arithmetic and sample
+/// addresses. Native projector diffusion, tabulated diffuse reflectance, phase
+/// laws, CIE observer, physical camera, splitters and filters remain authoritative.
 /// Active point fixtures with glass still require missing specular connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 12;
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 13;
 
 /// Maximum sampled point-fixture connections at one surface or volume vertex.
 /// The bounded proposal storage is local to that path, with no per-vertex heap
@@ -78,6 +77,24 @@ pub enum PointFixtureSampling {
         /// [`MAX_POINT_CONNECTIONS_PER_VERTEX`], included in each whole path.
         connections_per_vertex: u32,
     },
+    /// Select independent connections from the same receiver-dependent
+    /// importance using two source sweeps and a bounded inverse-CDF sampler.
+    /// This generates random draws only for the requested connections, while
+    /// recomputing source distances, angular intensity and receiver response
+    /// on the second sweep. It trades that extra evaluation for less reservoir
+    /// work; runtime and variance per second remain scene-dependent.
+    ///
+    /// Selection weights use the actual interval probabilities on the 53-bit
+    /// random grid. A positive source whose interval loses represented support
+    /// refuses. Every active source retains the original distance checks;
+    /// storage is fixed-size, and native shadow/spectral/medium transport and
+    /// exact probe direct lux are unchanged. This policy has its own replay
+    /// addresses and does not promise sublinear source traversal.
+    ImportanceCdf {
+        /// Positive independent connection draws, at most
+        /// [`MAX_POINT_CONNECTIONS_PER_VERTEX`], included in each whole path.
+        connections_per_vertex: u32,
+    },
 }
 
 impl PointFixtureSampling {
@@ -86,8 +103,13 @@ impl PointFixtureSampling {
             Self::All => Ok(()),
             Self::Importance {
                 connections_per_vertex,
+            }
+            | Self::ImportanceCdf {
+                connections_per_vertex,
             } if (1..=MAX_POINT_CONNECTIONS_PER_VERTEX).contains(&connections_per_vertex) => Ok(()),
-            Self::Importance { .. } => Err(PhotometryError::InvalidOptions),
+            Self::Importance { .. } | Self::ImportanceCdf { .. } => {
+                Err(PhotometryError::InvalidOptions)
+            }
         }
     }
 }
