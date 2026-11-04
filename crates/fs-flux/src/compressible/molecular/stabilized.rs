@@ -60,6 +60,35 @@ impl MolecularStabilization {
     }
 }
 
+/// Private composing-step account. Only extrema reset when a whole split is
+/// retried; spent operator work is never refunded.
+pub(in crate::compressible) struct StepWork {
+    pub controls: MolecularStabilization,
+    pub evaluations: usize,
+    pub maximum_stages_used: usize,
+    pub maximum_scaled_parabolic_number: f64,
+}
+impl StepWork {
+    pub fn new(controls: MolecularStabilization) -> Self {
+        Self {
+            controls,
+            evaluations: 0,
+            maximum_stages_used: 0,
+            maximum_scaled_parabolic_number: 0.0,
+        }
+    }
+
+    pub fn reset_extrema(&mut self) {
+        self.maximum_stages_used = 0;
+        self.maximum_scaled_parabolic_number = 0.0;
+    }
+
+    pub fn record(&mut self, stages: usize, number: f64) {
+        self.maximum_stages_used = self.maximum_stages_used.max(stages);
+        self.maximum_scaled_parabolic_number = self.maximum_scaled_parabolic_number.max(number);
+    }
+}
+
 impl IntervalFailure for MolecularError {
     fn is_terminal(&self) -> bool {
         matches!(

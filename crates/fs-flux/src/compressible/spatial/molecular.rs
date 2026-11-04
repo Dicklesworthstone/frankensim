@@ -17,7 +17,7 @@ pub use fs_gas::multicomponent::dissipation::WallThermalCondition;
 use fs_qty::{Pressure, Temperature};
 
 mod coupled;
-pub use coupled::{MolecularEuler3d, MolecularStepReport3d};
+pub use coupled::{MolecularEuler3d, MolecularStepReport3d, StabilizedMolecularStepReport3d};
 mod stabilized;
 pub use stabilized::StabilizedMolecularReport3d;
 

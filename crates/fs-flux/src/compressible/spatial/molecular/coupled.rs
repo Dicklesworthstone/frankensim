@@ -1,4 +1,6 @@
 use super::*;
+use crate::compressible::molecular::stabilized::StepWork;
+use crate::compressible::mixture::molecular::stabilized::IntervalFailure;
 
 /// One completely accepted three-dimensional molecular/Euler/molecular step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,12 +27,26 @@ pub struct MolecularStepReport3d {
     pub conservation_residual: Totals,
 }
 
+/// Complete three-dimensional coupled interval and actual RKL2 work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedMolecularStepReport3d {
+    /// Original accepted molecular/advection/molecular physical balances.
+    pub transport: MolecularStepReport3d,
+    /// All molecular evaluations across both halves and discarded whole trials.
+    pub operator_evaluations: usize,
+    /// Largest stage count in the final accepted pair of molecular halves.
+    pub maximum_stages_used: usize,
+    /// Largest scaled parabolic number in the final accepted molecular halves.
+    pub maximum_scaled_parabolic_number: f64,
+}
+
 /// Atomic source-driven three-dimensional compressible viscous/thermal flow.
 ///
 /// A symmetric molecular/advection/molecular composition retains one actual
 /// accepted duration. A shorter Euler step or a refused later stage restarts
-/// the complete trial from the accepted field. Both molecular stages use SSP
-/// RK2; smooth MUSCL Euler permits second-order splitting, while limiting or
+/// the complete trial from the accepted field. Molecular halves use SSP RK2
+/// by default or opt-in RKL2; smooth MUSCL Euler permits second-order splitting,
+/// while limiting or
 /// first-order fallback reduces order. No entropy, turbulence, physical shock
 /// thickness or experimental-accuracy certificate is implied.
 pub struct MolecularEuler3d<L> {
@@ -250,7 +266,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         controls: MolecularStepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, MolecularError> {
-        self.step_impl(maximum_duration, controls, None, cancelled)
+        self.step_impl(maximum_duration, controls, None, None, cancelled)
     }
 
     /// Sustain a driven viscous/channel flow with conservative body work.
@@ -278,8 +294,85 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             maximum_duration,
             controls,
             Some((force, force_controls, workspace)),
+            None,
             cancelled,
         )
+    }
+
+    /// Compose RKL2 molecular halves around the original volumetric Euler step.
+    ///
+    /// One cumulative evaluation budget covers both halves and discarded whole
+    /// trials. Native wall, SGS, reservoir, source and hyperbolic CFL admission
+    /// remain active. Refusal publishes no field, clock, load or report.
+    pub fn step_stabilized(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        stabilization: MolecularStabilization,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, MolecularError> {
+        let mut work = StepWork::new(stabilization);
+        let transport = self.step_impl(
+            maximum_duration, controls, None, Some(&mut work), cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    /// Stabilize both molecular halves around native force/advection/force.
+    /// Body work and wall transfer retain separate original physical accounts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_stabilized_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        stabilization: MolecularStabilization,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, MolecularError> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.accepted.states.len(), &mut cancelled)?;
+        workspace.admit(self.accepted.states.len())?;
+        if !active {
+            return self.step_stabilized(maximum_duration, controls, stabilization, cancelled);
+        }
+        let mut work = StepWork::new(stabilization);
+        let transport = self.step_impl(
+            maximum_duration, controls, Some((force, force_controls, workspace)),
+            Some(&mut work), cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    fn molecular_half(
+        &mut self,
+        duration: Time,
+        controls: MolecularControl,
+        stabilization: Option<&mut StepWork>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularReport3d, MolecularError> {
+        match stabilization {
+            None => self.molecular.advance(&mut self.trial, duration, controls, cancelled),
+            Some(work) => {
+                let report = self.molecular.advance_stabilized_with_budget(
+                    &mut self.trial, duration, controls, work.controls,
+                    &mut work.evaluations, cancelled,
+                )?;
+                work.record(report.maximum_stages_used, report.maximum_scaled_parabolic_number);
+                Ok(report.transport)
+            }
+        }
     }
 
     fn step_impl(
@@ -287,6 +380,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         maximum_duration: Time,
         controls: MolecularStepControl,
         mut forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
+        mut stabilization: Option<&mut StepWork>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, MolecularError> {
         poll(&mut cancelled)?;
@@ -300,6 +394,10 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             return Err(MolecularError::Invalid(
                 "coupled molecular duration or controls",
             ));
+        }
+        if let Some(work) = stabilization.as_deref() {
+            work.controls.controller(controls.molecular)?;
+            self.molecular.prepare_stabilized(work.controls.maximum_extra_workspace_bytes)?;
         }
         let before = checked_totals(
             &self.accepted.states,
@@ -325,6 +423,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         let mut dt = maximum_duration.value().min(controls.advection.cfl / rate);
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
+            if let Some(work) = stabilization.as_deref_mut() {
+                work.reset_extrema();
+            }
             if !positive(dt * 0.5) {
                 return Err(MolecularError::Invalid("unrepresentable coupled duration"));
             }
@@ -336,10 +437,10 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 .copy_from_slice(&self.accepted.boundary_impulses);
             let mut shortened = None;
             let attempt = (|| {
-                let first = self.molecular.advance(
-                    &mut self.trial,
+                let first = self.molecular_half(
                     Time::new(0.5 * dt),
                     controls.molecular,
+                    stabilization.as_deref_mut(),
                     &mut cancelled,
                 )?;
                 self.boundary_trial
@@ -372,10 +473,10 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     }
                     *total = add_totals(*total, *impulse);
                 }
-                let second = self.molecular.advance(
-                    &mut self.trial,
+                let second = self.molecular_half(
                     Time::new(0.5 * dt),
                     controls.molecular,
+                    stabilization.as_deref_mut(),
                     &mut cancelled,
                 )?;
                 for (i, (total, impulse)) in self
@@ -444,7 +545,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     self.last_step = Some(report);
                     return Ok(report);
                 }
-                Err(MolecularError::Cancelled) => return Err(MolecularError::Cancelled),
+                Err(error) if error.is_terminal() => return Err(error),
                 Err(error) => {
                     if retry == controls.maximum_coupling_retries {
                         return Err(MolecularError::CouplingRetries {

@@ -117,3 +117,103 @@ fn rkl_work_storage_and_late_cancellation_preserve_the_complete_planar_state() {
     assert_eq!(report, expected);
     assert_eq!(flow.states(), probe.states());
 }
+
+#[test]
+fn rkl_coupled_heat_uses_the_common_physical_interval_and_complete_balance() {
+    let initial = planar(12, |x| [
+        1.0, 0.0, 0.0,
+        2.0 + 0.1 * (2.0 * std::f64::consts::PI * x[0]).sin(),
+    ]);
+    let source = law(&initial, 0.01, 0.0, 5.0);
+    let mut flow = MolecularEuler2d::new(initial, source, || false).unwrap();
+    let report = flow.step_stabilized(
+        Time::new(0.001), MolecularStepControl::default(),
+        MolecularStabilization::default(), || false,
+    ).unwrap();
+    let physical = report.transport;
+    assert!(report.maximum_stages_used > 2);
+    assert_eq!(physical.coupling_retries, 0);
+    assert_eq!(physical.first.before, physical.before);
+    assert_eq!(physical.first.after, physical.advection.before);
+    assert_eq!(physical.second.before, physical.advection.after);
+    assert_eq!(physical.second.after, physical.after);
+    assert_eq!(physical.first.elapsed.value() * 2.0, physical.elapsed.value());
+    assert_eq!(physical.second.elapsed, physical.first.elapsed);
+    assert_eq!(physical.advection.elapsed, physical.elapsed);
+    assert_eq!(flow.flow().time(), physical.elapsed);
+    assert_eq!(flow.last_step().copied(), Some(physical));
+    for residual in physical.conservation_residual.array() {
+        close(residual, 0.0, 4e-12);
+    }
+}
+
+#[test]
+fn rkl_coupled_work_is_shared_between_halves_and_refusal_preserves_history() {
+    let mut flow = coupled();
+    let controls = MolecularStepControl::default();
+    let selected = MolecularStabilization::default();
+    flow.step_stabilized(Time::new(0.001), controls, selected, || false).unwrap();
+    let states = flow.flow().states().to_vec();
+    let time = flow.flow().time();
+    let previous = flow.last_step().copied();
+    let loads = SIDES.map(|s| flow.boundary_impulses(s).to_vec());
+    // Each s=2 half requires three evaluations, so five cannot finish both.
+    assert!(matches!(
+        flow.step_stabilized(
+            Time::new(0.001), controls,
+            MolecularStabilization { maximum_operator_evaluations: 5, ..selected }, || false,
+        ),
+        Err(MolecularError::Law(DissipationError::OperatorWorkLimit {
+            operator_evaluations: 5, ..
+        }))
+    ));
+    assert_eq!(flow.flow().states(), states);
+    assert_eq!(flow.flow().time(), time);
+    assert_eq!(flow.last_step().copied(), previous);
+    for (i, side) in SIDES.into_iter().enumerate() {
+        assert_eq!(flow.boundary_impulses(side), loads[i]);
+    }
+    let report = flow.step_stabilized(
+        Time::new(0.001), controls,
+        MolecularStabilization { maximum_operator_evaluations: 6, ..selected }, || false,
+    ).unwrap();
+    assert_eq!(report.operator_evaluations, 6);
+    assert_eq!(report.transport.coupling_retries, 0);
+}
+
+#[test]
+fn rkl_forced_uniform_flow_recovers_exact_body_impulse_and_kinetic_work() {
+    let velocity = [0.2, -0.1];
+    let acceleration = [0.5, -0.25];
+    let initial = planar(4, |_| [1.0, velocity[0], velocity[1], 2.0]);
+    let mass = initial.totals().mass;
+    let source = law(&initial, 0.02, 0.003, 0.05);
+    let mut flow = MolecularEuler2d::new(initial, source, || false).unwrap();
+    let mut workspace = forcing_workspace(flow.flow());
+    let report = flow.step_stabilized_with_forcing(
+        Time::new(0.01), MolecularStepControl::default(),
+        MolecularStabilization { maximum_operator_evaluations: 6, ..MolecularStabilization::default() },
+        BodyForce2d::UniformAcceleration(acceleration), ForceControl2d { maximum_mach: 2.0 },
+        &mut workspace, || false,
+    ).unwrap();
+    let dt = report.transport.elapsed.value();
+    assert_eq!(dt, 0.01);
+    assert_eq!(report.operator_evaluations, 6);
+    let mut kinetic_change = 0.0;
+    for axis in 0..2 {
+        let next = velocity[axis] + acceleration[axis] * dt;
+        close(report.transport.source_change.impulse[axis], mass * acceleration[axis] * dt, 3e-13);
+        kinetic_change += 0.5 * mass * (next * next - velocity[axis] * velocity[axis]);
+    }
+    close(report.transport.source_change.work, kinetic_change, 3e-13);
+    for q in flow.flow().states() {
+        let p = q.primitive(flow.flow().gas(), || false).unwrap();
+        close(p.temperature, 2.0, 3e-13);
+        for axis in 0..2 {
+            close(p.velocity[axis], velocity[axis] + acceleration[axis] * dt, 3e-13);
+        }
+    }
+    for residual in report.transport.conservation_residual.array() {
+        close(residual, 0.0, 4e-12);
+    }
+}

@@ -122,3 +122,124 @@ fn rkl_heated_walls_use_the_same_signed_recurrence_and_keep_last_accepted_loads(
         assert_eq!(op.boundary_impulses(side), loads[i]);
     }
 }
+
+#[test]
+fn rkl_forced_spatial_retries_keep_spent_work_and_replay_one_physical_state() {
+    use crate::compressible::spatial::{BodyForce3d, ForceControl3d};
+    let force = BodyForce3d::UniformAcceleration([20.0, 0.0, 0.0]);
+    let cap = ForceControl3d { maximum_mach: 10.0 };
+    let controls = MolecularStepControl::default();
+    let selected = MolecularStabilization::default();
+    let make = || {
+        let initial = cube(3, |_| [1.0, 0.0, 0.0, 0.0, 2.0]);
+        let source = law(initial.gas(), 0.0, 0.0, 0.0);
+        let mut flow = MolecularEuler3d::new(initial, source, || false).unwrap();
+        let mut work = flow.flow().forcing_workspace(40 * 27).unwrap();
+        flow.step_stabilized_with_forcing(
+            Time::new(0.001), controls, selected, force, cap, &mut work, || false,
+        ).unwrap();
+        (flow, work)
+    };
+    let (mut probe, mut work) = make();
+    let before = probe.flow().totals();
+    let mut polls = 0;
+    let report = probe.step_stabilized_with_forcing(
+        Time::new(1.0), controls, selected, force, cap, &mut work,
+        || { polls += 1; false },
+    ).unwrap();
+    let physical = report.transport;
+    assert!(physical.coupling_retries > 0);
+    assert_eq!(physical.first.elapsed.value() * 2.0, physical.elapsed.value());
+    assert_eq!(physical.second.elapsed, physical.first.elapsed);
+    assert_eq!(physical.advection.elapsed, physical.elapsed);
+    let speed0 = before.momentum[0] / before.mass;
+    let speed1 = speed0 + 20.0 * physical.elapsed.value();
+    close(physical.source_change.impulse[0], before.mass * (speed1 - speed0), 3e-13);
+    close(physical.source_change.work, 0.5 * before.mass * (speed1 * speed1 - speed0 * speed0), 3e-13);
+    for residual in physical.conservation_residual.array() {
+        close(residual, 0.0, 4e-12);
+    }
+    let (mut direct, mut direct_work) = make();
+    let replay = direct.step_stabilized_with_forcing(
+        physical.elapsed, controls, selected, force, cap, &mut direct_work, || false,
+    ).unwrap();
+    assert_eq!(replay.transport.coupling_retries, 0);
+    assert_eq!(replay.transport.first, physical.first);
+    assert_eq!(replay.transport.advection, physical.advection);
+    assert_eq!(replay.transport.second, physical.second);
+    assert_eq!(direct.flow().states(), probe.flow().states());
+    assert!(report.operator_evaluations > replay.operator_evaluations);
+
+    // A cap sufficient for the final duration cannot pay for discarded probes.
+    let (mut limited, mut limited_work) = make();
+    let states = limited.flow().states().to_vec();
+    let time = limited.flow().time();
+    let previous = limited.last_step().copied();
+    let loads = BoundarySide::ALL.map(|s| limited.boundary_impulses(s).to_vec());
+    assert!(matches!(
+        limited.step_stabilized_with_forcing(
+            Time::new(1.0), controls,
+            MolecularStabilization { maximum_operator_evaluations: replay.operator_evaluations, ..selected },
+            force, cap, &mut limited_work, || false,
+        ),
+        Err(MolecularError::Law(
+            fs_gas::multicomponent::dissipation::DissipationError::OperatorWorkLimit { .. }
+        ))
+    ));
+    assert_eq!(limited.flow().states(), states);
+    assert_eq!(limited.flow().time(), time);
+    assert_eq!(limited.last_step().copied(), previous);
+    for (i, side) in BoundarySide::ALL.into_iter().enumerate() {
+        assert_eq!(limited.boundary_impulses(side), loads[i]);
+    }
+    let (mut interrupted, mut interrupted_work) = make();
+    let mut count = 0;
+    assert_eq!(
+        interrupted.step_stabilized_with_forcing(
+            Time::new(1.0), controls, selected, force, cap, &mut interrupted_work,
+            || { count += 1; count == polls },
+        ),
+        Err(MolecularError::Cancelled)
+    );
+    assert_eq!(interrupted.flow().states(), states);
+    assert_eq!(interrupted.flow().time(), time);
+    assert_eq!(interrupted.last_step().copied(), previous);
+    for (i, side) in BoundarySide::ALL.into_iter().enumerate() {
+        assert_eq!(interrupted.boundary_impulses(side), loads[i]);
+    }
+    let completed = interrupted.step_stabilized_with_forcing(
+        Time::new(1.0), controls, selected, force, cap, &mut interrupted_work, || false,
+    ).unwrap();
+    assert_eq!(completed, report);
+    assert_eq!(interrupted.flow().states(), probe.flow().states());
+}
+
+#[test]
+fn rkl_spatial_coupling_closes_heated_wall_energy_across_both_halves() {
+    let initial = field(
+        gas(0.0), CartesianGrid::new(4, 3, 2, 0.25, 0.3, 0.4).unwrap(),
+        WALLS, |_| [1.0, 0.0, 0.0, 0.0, 2.0],
+    );
+    let source = law(initial.gas(), 0.01, 0.003, 5.0);
+    let mut flow = MolecularEuler3d::new(initial, source, || false).unwrap();
+    for side in BoundarySide::ALL {
+        flow = flow.with_wall(side, MolecularWall3d::NoSlip {
+            velocity: [0.0; 3],
+            thermal: WallThermalCondition::Isothermal(fs_qty::Temperature::new(3.0)),
+        }).unwrap();
+    }
+    let report = flow.step_stabilized(
+        Time::new(0.005), MolecularStepControl::default(),
+        MolecularStabilization::default(), || false,
+    ).unwrap();
+    let physical = report.transport;
+    assert!(report.maximum_stages_used > 2);
+    assert!(physical.after.energy > physical.before.energy);
+    assert!(physical.first.boundary_change.energy > 0.0);
+    assert!(physical.second.boundary_change.energy > 0.0);
+    let outward: f64 = BoundarySide::ALL.into_iter()
+        .flat_map(|s| flow.boundary_impulses(s)).map(|q| q.energy).sum();
+    close(outward + physical.boundary_change.energy, 0.0, 3e-12);
+    close(physical.after.energy - physical.before.energy, physical.boundary_change.energy, 4e-12);
+    assert_eq!(flow.last_step().copied(), Some(physical));
+}

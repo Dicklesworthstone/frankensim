@@ -14,7 +14,9 @@ use fs_gas::multicomponent::dissipation::{DissipationError, TransportLaw};
 use fs_qty::{Pressure, Temperature};
 
 mod coupled;
-pub use coupled::{MolecularEuler2d, MolecularStepControl, MolecularStepReport};
+pub use coupled::{
+    MolecularEuler2d, MolecularStepControl, MolecularStepReport, StabilizedMolecularStepReport,
+};
 pub(in crate::compressible) mod stabilized;
 pub use stabilized::{MolecularStabilization, StabilizedMolecularReport};
 mod wall;

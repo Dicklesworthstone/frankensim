@@ -1403,6 +1403,25 @@ Cancellation, exhausted work and insufficient extra storage cannot publish a
 partial field or boundary load; successful pure molecular updates do not
 advance Euler time.
 
+The same frozen-composition `MolecularEuler2d` and `MolecularEuler3d` owners
+expose `step_stabilized` and `step_stabilized_with_forcing`. Both route through
+the ORIGINAL complete molecular/advection/molecular retry loop, with RKL2
+replacing only the two molecular integrators. The Euler reconstruction, forced
+impulse/work, Mach admission, reservoir CFL, wall conditions and selected SGS
+operators retain their original implementations. Any shorter or refused middle
+step restarts the complete split from its accepted state.
+
+One actual-evaluation counter spans BOTH molecular halves and every discarded
+whole-step trial. It is never reset by a retry, and exhaustion terminates the
+call immediately. Returned stage/parabolic extrema describe the final accepted
+halves; total work also includes discarded attempts. The stabilized report
+wraps the original physical report, which remains available through
+`last_step()`. Complete coupled refusal preserves the accepted field, clock,
+all boundary loads and prior report. Regressions cover accelerated thermal
+coupling, exact uniform-force impulse/work, shared half-step budgets, spent
+work across CFL retries, final-duration replay, late cancellation and heated
+wall energy across both halves.
+
 Focused regressions compare planar and anisotropic volumetric thermal modes
 with independently derived discrete Laplacian eigenvalues, check time
 refinement and reduced operator work, recover viscous shear decay and conversion
