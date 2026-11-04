@@ -31868,3 +31868,32 @@ sample bits. Rapidly varying bands have no stationary spectrum or instantaneous
 in-band RMS guarantee, and feedback-driven random edges need not preserve
 unconditional covariance. This is a stable stochastic colour model, not a
 resolved turbulence model or additional experimental noise calibration.
+
+
+### Full-state driven resonance frequency tangents
+
+`BemLoadedModes::harmonic_response_batch_with_frequency_derivative` evaluates
+T*y=f and T*y_omega=f_omega-T_omega*y with one original boundary assembly and
+one balanced LU. The analytic pencil derivative includes mechanical inertia,
+complete Kelvin coupling, original acoustic A/B dispersion and every retained
+Maxwell memory state. Geometry, medium parameters, retained basis and attachment
+maps remain fixed; source phasor derivatives are optional explicit inputs.
+No acoustic-block inverse, frequency perturbation or pole fit is introduced.
+
+All returned displacement, velocity, boundary-pressure, boundary-velocity and
+memory tangents retain their original physical coordinates. Differentiated
+mechanical, acoustic and material rows are audited against the original
+unscaled equations, with the response owner's arithmetic rounding policy.
+Independent source-work, Kelvin-heat, Maxwell-heat and signed surface-work
+derivatives must close. These derivatives may be negative; they are not loss
+coefficients. Source and tangent amplitude normalization preserves the physical
+units of every returned quantity. Original and additional work/payload limits
+are separate; cancellation or refusal publishes no partial batch.
+
+Fixed real displacement/velocity and surface-pressure/velocity receivers use
+fs-modal's shared compensated `HarmonicTransferSample::project_real`, preserving
+coherent cancellation for local peak/notch/linewidth refinement. This supplies
+actual driven receiver slopes, not a spectral-completeness or continuum-error
+claim. G1/G3/G4/G5 regressions exercise an analytic dark Maxwell mode, full
+coupled frequency differences, differentiated physical work, unchanged primal
+responses, phase-dependent forcing, zero-force crossings, budgets and cancellation.

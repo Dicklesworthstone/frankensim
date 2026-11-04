@@ -29,6 +29,19 @@ pub struct HarmonicTransferSample {
 }
 
 impl HarmonicTransferSample {
+    /// Observe any fixed real linear receiver from a complete physical field
+    /// and its frequency tangent. Values and weights retain their caller-owned
+    /// units and ordering; source/receiver frequency dependence must already be
+    /// included in the supplied tangent. Compensated accumulation preserves
+    /// weak surviving terms beside large coherent cancellations.
+    pub fn project_real(
+        receiver: &[f64],
+        values: &[C64],
+        derivatives: &[C64],
+    ) -> Result<Self, HarmonicResponseError> {
+        project(receiver, values, derivatives)
+    }
+
     // Only its sign is used. Independent normalization avoids overflow from
     // squaring a high-Q response or multiplying its still larger derivative.
     fn slope(self) -> f64 {
@@ -52,7 +65,7 @@ impl HarmonicFrequencyResponse {
         &self,
         receiver: &[f64],
     ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
-        project(
+        HarmonicTransferSample::project_real(
             receiver,
             &self.response.displacement,
             &self.displacement_derivative,
@@ -66,7 +79,11 @@ impl HarmonicFrequencyResponse {
         &self,
         receiver: &[f64],
     ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
-        project(receiver, &self.response.velocity, &self.velocity_derivative)
+        HarmonicTransferSample::project_real(
+            receiver,
+            &self.response.velocity,
+            &self.velocity_derivative,
+        )
     }
 }
 
