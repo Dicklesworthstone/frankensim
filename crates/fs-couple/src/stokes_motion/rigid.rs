@@ -6,7 +6,10 @@
 //! The whole domain follows this body's translation and rotation. This is not
 //! independent obstacle motion, deformation, or a complete coupled-energy theorem.
 
+mod constraints;
 mod rheology;
+
+pub use self::constraints::{PlanarRigidConstraints, PlanarRigidSupport};
 
 use self::rheology::{FlowTrial, Newtonian};
 use super::search::{EndpointSearch, Observation, SearchError, maximum, sum};
@@ -41,6 +44,8 @@ pub struct PlanarRigidConfig {
 
 /// Explicit search region and separate dimensional acceptance for force/torque.
 /// These are local nonlinear-search controls, not a root-existence guarantee.
+/// A locked coordinate may use zero-width bounds containing zero and a zero
+/// probe step. Free coordinates require a positive-width interval and probe.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlanarRigidControls {
     pub velocity_bounds_m_s: [[f64; 2]; 2],
@@ -131,6 +136,8 @@ pub struct PlanarRigidStep<G = ()> {
     pub flow_solves: usize,
     pub fluid_force_n: [f64; 2],
     pub fluid_torque_n_m: f64,
+    /// Physical reaction/impulse from ideal stationary supports, about the COM.
+    pub support: PlanarRigidSupport,
     /// Endpoint stress paired with actual represented COM/angular drift [J].
     pub interface_work_j: f64,
     /// Physical endpoint wall-slip power times duration/depth, separate from work.
@@ -156,6 +163,7 @@ pub struct PlanarRigidMotion<'s, 'm, 'a, F: FluidTransport + ?Sized> {
     config: PlanarRigidConfig,
     edges: Vec<usize>,
     tangential_resistance_pa_s_per_m: Option<f64>,
+    constraints: PlanarRigidConstraints,
     body: RigidBodyState,
     rotation_rad: f64,
     schur: LuWorkspace,
@@ -314,6 +322,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
             config,
             edges,
             tangential_resistance_pa_s_per_m,
+            constraints: PlanarRigidConstraints::FREE,
             body,
             rotation_rad: 0.0,
             schur: LuWorkspace::new(3)?,
@@ -337,10 +346,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
         self.flow.material()
     }
 
-    /// Solve all three momentum equations from the same accepted histories.
+    /// Solve actual body momentum from the same accepted histories.
     ///
-    /// The shared bounded search uses three native response probes per Newton
-    /// linearization and original reusable LU. Force and torque have separate
+    /// Stationary coordinates return their physical support reactions. The
+    /// shared search probes only free coordinates (three for a free body)
+    /// with the original reusable LU. Force and torque have separate
     /// dimensional allowances; descent uses fixed-base physical scaling.
     /// Every trial is an actual original nonlinear solve. Exterior callbacks
     /// receive endpoint world points/normals on the rigidly moving domain.
@@ -401,6 +411,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
     ) -> Result<PlanarRigidStep<G>, PlanarRigidError> {
         poll(&mut cancelled)?;
         let dt = timestep_s;
+        let free_axes = self.constraints.free_axes();
         let bounds = [
             controls.velocity_bounds_m_s[0],
             controls.velocity_bounds_m_s[1],
@@ -420,7 +431,13 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
             || !positive(dt.recip())
             || !external.into_iter().all(f64::is_finite)
             || controls.maximum_flow_solves == 0
-            || !steps.into_iter().all(positive)
+            || steps.into_iter().enumerate().any(|(i, h)| {
+                if free_axes[i] {
+                    !positive(h)
+                } else {
+                    !nonnegative(h)
+                }
+            })
             || ![
                 controls.force_absolute_n,
                 controls.torque_absolute_n_m,
@@ -431,12 +448,18 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
             || ![controls.momentum_relative, controls.work_relative]
                 .into_iter()
                 .all(nonnegative)
-            || bounds
-                .into_iter()
-                .any(|[lo, hi]| !lo.is_finite() || !hi.is_finite() || !positive(hi - lo))
+            || bounds.into_iter().enumerate().any(|(i, [lo, hi])| {
+                !lo.is_finite()
+                    || !hi.is_finite()
+                    || if free_axes[i] {
+                        !positive(hi - lo)
+                    } else {
+                        lo > 0.0 || hi < 0.0
+                    }
+            })
         {
             return Err(invalid(
-                "finite timestep, rate bounds/probes, solve budget and physical tolerances required",
+                "finite time/tolerances and bounds/probes for free axes or stationary zero required",
             ));
         }
         let cfg = self.config;
@@ -481,7 +504,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
                 None => MaterialNavierStokesBoundary::Velocity { edge, value: &wall },
             },
         ));
-        let mut search = EndpointSearch::new(v0, bounds, steps);
+        let mut search = EndpointSearch::with_free_axes(v0, bounds, steps, free_axes);
         let mut last_residual = [f64::NAN; 3];
         for index in 0..controls.maximum_flow_solves {
             poll(&mut cancelled)?;
@@ -493,6 +516,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
                 Vec3::new(0.0, 0.0, impulse[2]),
             )?;
             let velocity = rates(momentum.state_after, self.properties)?;
+            if (0..3).any(|i| !free_axes[i] && velocity[i] != 0.0) {
+                return Err(invalid(
+                    "stationary support acquired nonzero native velocity",
+                ));
+            }
             if (0..3).any(|i| velocity[i] < bounds[i][0] || velocity[i] > bounds[i][1]) {
                 return Err(invalid(
                     "represented native rates escape the authored search box",
@@ -595,8 +623,18 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
             let inertia = increments.map(|v| v / dt);
             let spring: [f64; 3] = core::array::from_fn(|i| stiffness[i] * q1[i]);
             let dashpot: [f64; 3] = core::array::from_fn(|i| damping[i] * velocity[i]);
-            let residual = core::array::from_fn(|i| {
+            let physical_residual = core::array::from_fn(|i| {
                 sum([inertia[i], -wrench[i], -external[i], spring[i], dashpot[i]])
+            });
+            let support = PlanarRigidSupport::resolve(free_axes, physical_residual, drift, dt)?;
+            // A stationary support carries the entire missing load in its
+            // locked coordinate. Free coordinates retain the original equation.
+            let residual = core::array::from_fn(|i| {
+                if free_axes[i] {
+                    physical_residual[i]
+                } else {
+                    0.0
+                }
             });
             let limits = core::array::from_fn(|i| {
                 let absolute = if i == 2 {
@@ -674,6 +712,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarRigidMotion<'s, 'm, 'a, F> {
                     flow_solves: index + 1,
                     fluid_force_n: [wrench[0], wrench[1]],
                     fluid_torque_n_m: wrench[2],
+                    support,
                     interface_work_j: interface_work,
                     interface_slip_dissipation_j: slip_loss,
                     external_work_j: external_work,

@@ -28555,3 +28555,45 @@ impulse groups. Two owner-local tests passed for late-admission/final-cancellati
 atomicity in both bridges. Validation used bounded original-source Rust graphs;
 the full cavity wrapper received source review but its complete fixture and
 the full workspace/DSR lane were not executed.
+
+## Ideal supports in finite planar fluid-body momentum
+
+With `experimental-stokes-motion`,
+`stokes_motion::rigid::PlanarRigidMotion::set_constraints` selects stationary
+world x/y COM coordinates and/or principal-z rotation on the original native
+fluid-body owner. `PlanarRigidConstraints::SHAFT` fixes the COM while allowing
+spin; `FIXED` fixes all three coordinates; public flags also admit guided
+translation. Lock activation requires an exactly zero actual native rate.
+No momentum is projected away and no stopping impulse or lost energy is
+inferred. Unlocking changes no accepted body, fluid, geometry or clock.
+
+Newtonian and rheological entries retain one original mechanical loop and
+constitutive owner. Unlocked coordinates solve the same finite momentum
+equations. Locked coordinates retain exactly zero native rate and represented
+drift, and return the missing physical force/torque as `PlanarRigidSupport`.
+Reactions act ON the body, angular quantities are about its COM, and finite
+reaction impulses are checked independently. The stationary support performs
+zero work; its opposite load belongs to the external support, whose dynamics
+are not evolved. Existing fluid stress, slip loss, mechanical work and joint
+cancellation/publication gates remain binding.
+
+The shared response search probes only free coordinates and embeds them in
+the original small reusable LU with inactive identity rows/columns. No penalty
+stiffness, extra body solver or additional per-cell constitutive dispatch is
+introduced. A fully fixed body performs one native fluid solve and needs no
+response probe or LU solve. Locked coordinates may use zero-width bounds at
+zero and zero probe steps; the ordinary free path retains its prior controls.
+
+Four focused regressions cover x/y-guided closed-fluid added mass and reduced
+flow-solve count, a shear-thinning/thickening shaft with finite slip and actual
+support force, a fixed body carrying nonzero fluid stress in one solve, and
+exact activation/refusal, overflowing support impulse, final cancellation and
+deterministic retry. Five changed Rust files passed pinned nightly parsing.
+Native compilation and numerical execution remain unrun because storage is
+full and remote build tools are unavailable.
+
+These are ideal stationary world-aligned supports and a shaft through the COM.
+Off-COM hinges, moving supports, general Pfaffian constraints, independent
+obstacle motion, thermal deposition and whole-system passivity remain outside
+this owner. The underlying constant-density rigid-domain and finite-step
+angular-conservation limits are unchanged.

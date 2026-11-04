@@ -34,12 +34,25 @@ pub(super) struct EndpointSearch<const N: usize> {
     fraction: f64,
     bounds: [[f64; 2]; N],
     steps: [f64; N],
+    free_axes: [bool; N],
     // The only owners have two or three coordinates; keep their small
     // response matrix on the stack, including the existing two-axis lane.
     matrix: [f64; 9],
 }
 impl<const N: usize> EndpointSearch<N> {
     pub fn new(velocity: [f64; N], bounds: [[f64; 2]; N], steps: [f64; N]) -> Self {
+        Self::with_free_axes(velocity, bounds, steps, [true; N])
+    }
+
+    /// Locked coordinates are already stationary in the physical owner. Keep
+    /// them exact and omit their fluid probes; the small fixed-size linear
+    /// solve uses identity rows/columns for those inactive coordinates.
+    pub fn with_free_axes(
+        velocity: [f64; N],
+        bounds: [[f64; 2]; N],
+        steps: [f64; N],
+        free_axes: [bool; N],
+    ) -> Self {
         assert!(
             N == 2 || N == 3,
             "native endpoint search has two or three coordinates"
@@ -50,7 +63,13 @@ impl<const N: usize> EndpointSearch<N> {
             limits: [1.0; N],
         };
         Self {
-            requested: core::array::from_fn(|i| velocity[i].clamp(bounds[i][0], bounds[i][1])),
+            requested: core::array::from_fn(|i| {
+                if free_axes[i] {
+                    velocity[i].clamp(bounds[i][0], bounds[i][1])
+                } else {
+                    0.0
+                }
+            }),
             base: empty,
             probes: [empty; N],
             phase: Phase::Base,
@@ -58,6 +77,7 @@ impl<const N: usize> EndpointSearch<N> {
             fraction: 1.0,
             bounds,
             steps,
+            free_axes,
             matrix: [0.0; 9],
         }
     }
@@ -65,6 +85,13 @@ impl<const N: usize> EndpointSearch<N> {
         SearchError::Stalled {
             residual: self.base.residual,
         }
+    }
+    fn next_free_axis(&self, first: usize) -> Option<usize> {
+        (first..N).find(|&i| self.free_axes[i])
+    }
+    fn first_probe(&mut self) -> Result<(), SearchError<N>> {
+        let axis = self.next_free_axis(0).ok_or_else(|| self.stalled())?;
+        self.probe(axis)
     }
     fn probe(&mut self, axis: usize) -> Result<(), SearchError<N>> {
         self.requested = self.base.velocity;
@@ -84,10 +111,14 @@ impl<const N: usize> EndpointSearch<N> {
     }
     fn line_point(&mut self) -> Result<(), SearchError<N>> {
         self.requested = core::array::from_fn(|i| {
-            let [lo, hi] = self.bounds[i];
-            self.direction[i]
-                .mul_add(self.fraction, self.base.velocity[i])
-                .clamp(lo, hi)
+            if self.free_axes[i] {
+                let [lo, hi] = self.bounds[i];
+                self.direction[i]
+                    .mul_add(self.fraction, self.base.velocity[i])
+                    .clamp(lo, hi)
+            } else {
+                0.0
+            }
         });
         if !self.fraction.is_finite()
             || self.fraction <= 0.0
@@ -105,30 +136,40 @@ impl<const N: usize> EndpointSearch<N> {
         match self.phase {
             Phase::Base => {
                 self.base = observation;
-                self.probe(0)?;
+                self.first_probe()?;
             }
             Phase::Probe(axis) => {
                 self.probes[axis] = observation;
-                if axis + 1 < N {
-                    return self.probe(axis + 1);
+                if let Some(next) = self.next_free_axis(axis + 1) {
+                    return self.probe(next);
                 }
                 // Normalize using actual native probe changes, including their
                 // cross-coordinate rounding in the reconstructed direction.
                 let h: [f64; N] =
                     core::array::from_fn(|j| self.probes[j].velocity[j] - self.base.velocity[j]);
-                if h.into_iter().any(|x| !x.is_finite() || x == 0.0) {
+                if (0..N).any(|j| self.free_axes[j] && (!h[j].is_finite() || h[j] == 0.0)) {
                     return Err(self.stalled());
                 }
                 for row in 0..N {
                     for col in 0..N {
-                        self.matrix[N * row + col] = (self.probes[col].residual[row]
-                            - self.base.residual[row])
-                            / h[col]
-                            / self.base.limits[row];
+                        self.matrix[N * row + col] = if self.free_axes[row] && self.free_axes[col] {
+                            (self.probes[col].residual[row] - self.base.residual[row])
+                                / h[col]
+                                / self.base.limits[row]
+                        } else if row == col {
+                            1.0
+                        } else {
+                            0.0
+                        };
                     }
                 }
-                let rhs: [f64; N] =
-                    core::array::from_fn(|i| -self.base.residual[i] / self.base.limits[i]);
+                let rhs: [f64; N] = core::array::from_fn(|i| {
+                    if self.free_axes[i] {
+                        -self.base.residual[i] / self.base.limits[i]
+                    } else {
+                        0.0
+                    }
+                });
                 if !self.matrix.iter().copied().chain(rhs).all(f64::is_finite) {
                     return Err(SearchError::Invalid("unrepresentable coupled response"));
                 }
@@ -137,10 +178,18 @@ impl<const N: usize> EndpointSearch<N> {
                     .solve_into(&self.matrix[..N * N], &rhs, &mut correction)
                     .map_err(SearchError::LinearSolve)?;
                 self.direction = core::array::from_fn(|i| {
-                    sum(core::array::from_fn::<_, N, _>(|j| {
-                        ((self.probes[j].velocity[i] - self.base.velocity[i]) / h[j])
-                            * correction[j]
-                    }))
+                    if self.free_axes[i] {
+                        sum(core::array::from_fn::<_, N, _>(|j| {
+                            if self.free_axes[j] {
+                                ((self.probes[j].velocity[i] - self.base.velocity[i]) / h[j])
+                                    * correction[j]
+                            } else {
+                                0.0
+                            }
+                        }))
+                    } else {
+                        0.0
+                    }
                 });
                 if !self.direction.into_iter().all(f64::is_finite) {
                     return Err(SearchError::Invalid(
@@ -174,7 +223,7 @@ impl<const N: usize> EndpointSearch<N> {
                 let after = merit(observation.residual);
                 if before.is_finite() && after <= (1.0 - 1e-4 * self.fraction) * before {
                     self.base = observation;
-                    self.probe(0)?;
+                    self.first_probe()?;
                 } else {
                     self.fraction *= 0.5;
                     self.line_point()?;

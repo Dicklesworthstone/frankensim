@@ -14,6 +14,8 @@ use fs_material::fluid_transport::FluidTransportState;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_solid::Mesh2;
 
+#[path = "rigid/constraints.rs"]
+mod constraints;
 #[path = "rigid/rheology.rs"]
 mod rheology;
 
