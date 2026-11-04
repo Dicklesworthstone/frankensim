@@ -6,6 +6,9 @@ use fs_couple::friction_heat::third_body::{ThirdBodyHeatRoute, ThirdBodyHeatTole
 #[path = "layer/temperature.rs"]
 mod temperature;
 
+#[path = "layer/stretch.rs"]
+mod stretch;
+
 const LAYER: CellId = CellId(2);
 const LINKS: [u64; 2] = [17, 18];
 const CAPACITY: [f64; 3] = [2.0, 3.0, 0.025];

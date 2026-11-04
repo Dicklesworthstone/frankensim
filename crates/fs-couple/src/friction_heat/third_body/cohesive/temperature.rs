@@ -9,8 +9,9 @@
 //! finite adhesive cell and its two physical conduction paths.
 
 use super::{
-    CohesiveHeatError, CohesiveLayerHeatBinding, CohesiveLayerHeatControls,
-    CohesiveLayerHeatSource, HeatedCohesiveLayerCandidate, propose_deformable_cohesive_layer_heat,
+    CohesiveHeatError, CohesiveLayerDeformation, CohesiveLayerHeatBinding,
+    CohesiveLayerHeatControls, CohesiveLayerHeatSource, HeatedCohesiveLayerCandidate,
+    propose_deformable_cohesive_layer_heat_inner,
 };
 use fs_exec::CancelGate;
 use fs_solid::cohesive::CohesiveSystem;
@@ -84,6 +85,102 @@ pub fn propose_deformable_cohesive_layer_heat_with_temperature<'m, 'a, 's, 'b, '
 where
     'm: 's,
 {
+    propose_temperature_layer_heat_inner(
+        motion,
+        mean_force_n,
+        endpoint_prescribed_jumps_m,
+        dt_s,
+        temperature,
+        binding,
+        None,
+        thermal,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+/// Prescribed source-temperature weakening followed by the same native
+/// deforming-layer motion and heat solve. The original source/history transfer
+/// occurs once, at fixed jump. The accepted post-transfer bond must still
+/// survive and both mechanical endpoints must satisfy the explicit strain
+/// domain. Temperature-induced complete rupture therefore refuses this bonded
+/// heat route instead of conducting across an unmodeled crack.
+///
+/// Physical layer thickness follows the actual mechanical opening, while mass,
+/// caloric storage and original contact resistances remain unchanged. Signed
+/// coefficient work and fracture retain their separate nonthermal accounts.
+/// This is prescribed temperature continuation, not implicit thermoelastic
+/// feedback or an inferred surface-entropy model.
+#[allow(clippy::too_many_arguments)]
+pub fn propose_deformable_cohesive_layer_heat_with_temperature_and_deformation<
+    'm,
+    'a,
+    's,
+    'b,
+    't,
+    P,
+    E,
+>(
+    motion: &CohesiveMotion<'m, 'a>,
+    mean_force_n: &[f64],
+    endpoint_prescribed_jumps_m: &[[f64; 3]],
+    dt_s: f64,
+    temperature: CohesiveLayerHeatTemperature<'s, 'b>,
+    binding: CohesiveLayerHeatBinding<'_>,
+    deformation: CohesiveLayerDeformation,
+    thermal: &DepositionSimulation<'t>,
+    controls: CohesiveLayerHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(
+        &DepositionSimulation<'t>,
+        f64,
+        &DynamicsStep<'s, 'b>,
+    ) -> Result<CohesiveLayerHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<TemperatureHeatedCohesiveLayerCandidate<'s, 'b, 't, P>, CohesiveHeatError<E>>
+where
+    'm: 's,
+{
+    propose_temperature_layer_heat_inner(
+        motion,
+        mean_force_n,
+        endpoint_prescribed_jumps_m,
+        dt_s,
+        temperature,
+        binding,
+        Some(deformation),
+        thermal,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propose_temperature_layer_heat_inner<'m, 'a, 's, 'b, 't, P, E>(
+    motion: &CohesiveMotion<'m, 'a>,
+    mean_force_n: &[f64],
+    endpoint_prescribed_jumps_m: &[[f64; 3]],
+    dt_s: f64,
+    temperature: CohesiveLayerHeatTemperature<'s, 'b>,
+    binding: CohesiveLayerHeatBinding<'_>,
+    deformation: Option<CohesiveLayerDeformation>,
+    thermal: &DepositionSimulation<'t>,
+    controls: CohesiveLayerHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(
+        &DepositionSimulation<'t>,
+        f64,
+        &DynamicsStep<'s, 'b>,
+    ) -> Result<CohesiveLayerHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<TemperatureHeatedCohesiveLayerCandidate<'s, 'b, 't, P>, CohesiveHeatError<E>>
+where
+    'm: 's,
+{
     let check = || {
         if gate.is_requested() {
             Err(DepositionError::Cancelled)
@@ -103,12 +200,13 @@ where
         temperature.controls,
         &mut || gate.is_requested(),
     )?;
-    let heated = propose_deformable_cohesive_layer_heat(
+    let heated = propose_deformable_cohesive_layer_heat_inner(
         &transferred.motion,
         mean_force_n,
         endpoint_prescribed_jumps_m,
         dt_s,
         binding,
+        deformation,
         thermal,
         controls,
         energy_guess_j,

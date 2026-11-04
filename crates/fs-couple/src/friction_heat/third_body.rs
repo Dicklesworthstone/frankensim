@@ -166,11 +166,30 @@ impl ThirdBodyHeatRoute {
         conductivity: [f64; 3],
         resistance: [f64; 2],
     ) -> Result<[f64; 2], DepositionError> {
+        self.conductances_at_stretch(conductivity, resistance, 1.0)
+    }
+
+    // Fixed-area affine layer deformation. The material conductivity remains
+    // spatial: changing the physical half-thickness is equivalent to pulling
+    // its normal component back as k/lambda on the reference cell. The body
+    // distances and the two area-specific interface resistances do not change.
+    fn conductances_at_stretch(
+        &self,
+        conductivity: [f64; 3],
+        resistance: [f64; 2],
+        layer_normal_stretch: f64,
+    ) -> Result<[f64; 2], DepositionError> {
         let mut result = [0.0; 2];
         for side in 0..2 {
+            let layer_distance = finite(self.distances_m[side][1] * layer_normal_stretch)?;
+            if layer_distance <= 0.0 {
+                return Err(invalid(
+                    "positive representable physical layer thickness required",
+                ));
+            }
             result[side] = series_contact_conductance_w_k(
                 self.patches[side].link.area_m2,
-                self.distances_m[side],
+                [self.distances_m[side][0], layer_distance],
                 [conductivity[side], conductivity[2]],
                 resistance[side],
             )?;
@@ -262,6 +281,10 @@ pub struct ThirdBodyHeatTolerances {
 #[derive(Clone, Debug)]
 pub struct ThirdBodyHeatReport {
     pub layer_temperature_k: f64,
+    /// Current/reference layer thickness at fixed cross-sectional area. One
+    /// denotes the original reference-geometry route; material conductivity
+    /// remains the physical spatial value in either case.
+    pub layer_normal_stretch: f64,
     pub conductances_w_k: [f64; 2],
     /// Signed conduction into each body, including ordinary unequal-T exchange.
     pub body_heat_j: [f64; 2],
@@ -301,6 +324,7 @@ pub struct ThirdBodyHeatStep<'s, 'm> {
     thermal: BackwardEulerStep<'s, 'm>,
     route: &'s ThirdBodyHeatRoute,
     initial_layer_h_j_kg: f64,
+    layer_normal_stretch: f64,
 }
 
 impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
@@ -316,7 +340,31 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
             thermal: BackwardEulerStep::new(thermal, target_s, checkpoint)?,
             route,
             initial_layer_h_j_kg: thermal.cells()[&route.layer_cell()].specific_h_j_kg,
+            layer_normal_stretch: 1.0,
         })
+    }
+    /// Transport through a fixed-area affine deformation of the same layer.
+    /// Only its two physical half-thicknesses change. The original reference
+    /// mass, caloric law, body distances, contact areas and area-specific
+    /// resistances stay with their original owners. Endpoint backward Euler
+    /// uses this endpoint stretch; refine steps to resolve deformation history.
+    ///
+    /// The mechanical owner must establish surviving attachment, compatible
+    /// kinematics and its strain domain. This operation does not infer cracks,
+    /// lateral-area changes, pressure work, or a constitutive heat capacity.
+    pub fn with_layer_normal_stretch(mut self, stretch: f64) -> Result<Self, DepositionError> {
+        if !stretch.is_finite() || stretch <= 0.0 {
+            return Err(invalid("layer normal stretch must be finite and positive"));
+        }
+        for distances in self.route.distances_m {
+            if finite(distances[1] * stretch)? <= 0.0 {
+                return Err(invalid(
+                    "positive representable physical layer thickness required",
+                ));
+            }
+        }
+        self.layer_normal_stretch = stretch;
+        Ok(self)
     }
     pub fn cell_ids(&self) -> &[CellId] {
         self.thermal.cell_ids()
@@ -335,10 +383,18 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
         resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
-        self.evaluate_entropy_option(energy_increments_j, |state, temperature| {
-            Ok(ThirdBodyThermoelasticInput { heat: resolve(state, temperature)?,
-                reversible_heat_j: 0.0, mechanical_entropy_change_j_k: 0.0 })
-        }, false, checkpoint)
+        self.evaluate_entropy_option(
+            energy_increments_j,
+            |state, temperature| {
+                Ok(ThirdBodyThermoelasticInput {
+                    heat: resolve(state, temperature)?,
+                    reversible_heat_j: 0.0,
+                    mechanical_entropy_change_j_k: 0.0,
+                })
+            },
+            false,
+            checkpoint,
+        )
     }
 
     /// Audit the SAME finite-layer candidate without another material callback.
@@ -356,10 +412,18 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
         resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
-        self.evaluate_entropy_option(energy_increments_j, |state, temperature| {
-            Ok(ThirdBodyThermoelasticInput { heat: resolve(state, temperature)?,
-                reversible_heat_j: 0.0, mechanical_entropy_change_j_k: 0.0 })
-        }, true, checkpoint)
+        self.evaluate_entropy_option(
+            energy_increments_j,
+            |state, temperature| {
+                Ok(ThirdBodyThermoelasticInput {
+                    heat: resolve(state, temperature)?,
+                    reversible_heat_j: 0.0,
+                    mechanical_entropy_change_j_k: 0.0,
+                })
+            },
+            true,
+            checkpoint,
+        )
     }
 
     /// The same thermal residual with signed reciprocal heat from an admitted
@@ -367,9 +431,12 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
     /// once. Reversible exchange is removed from external-source classification;
     /// its mechanical entropy is included separately when the audit is requested.
     pub fn evaluate_thermoelastic<P, E: From<DepositionError>>(
-        &self, energy_increments_j: &[f64],
-        resolve: impl FnOnce(&DepositionSimulation<'m>, f64)
-            -> Result<ThirdBodyThermoelasticInput<P>, E>,
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            f64,
+        ) -> Result<ThirdBodyThermoelasticInput<P>, E>,
         audit_entropy: bool,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
@@ -379,7 +446,10 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
     fn evaluate_entropy_option<P, E: From<DepositionError>>(
         &self,
         energy_increments_j: &[f64],
-        resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyThermoelasticInput<P>, E>,
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            f64,
+        ) -> Result<ThirdBodyThermoelasticInput<P>, E>,
         with_entropy: bool,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
@@ -391,8 +461,11 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
             |state: &DepositionSimulation<'m>| -> Result<StepCoefficients<Endpoint<P>>, E> {
                 let layer_id = self.route.layer_cell();
                 let temperature = state.temperature_k(layer_id)?;
-                let ThirdBodyThermoelasticInput { heat: input, reversible_heat_j,
-                    mechanical_entropy_change_j_k } = resolve(state, temperature)?;
+                let ThirdBodyThermoelasticInput {
+                    heat: input,
+                    reversible_heat_j,
+                    mechanical_entropy_change_j_k,
+                } = resolve(state, temperature)?;
                 finite(reversible_heat_j)?;
                 finite(mechanical_entropy_change_j_k)?;
                 if !input.dissipated_j.is_finite() || input.dissipated_j < 0.0 {
@@ -409,9 +482,11 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
                 if with_entropy {
                     entropy = Some(InterfaceEntropy::new(state, &sources_w, dt, &check)?);
                 }
-                let conductances = self
-                    .route
-                    .conductances(input.conductivity_w_m_k, input.area_resistance_m2_k_w)?;
+                let conductances = self.route.conductances_at_stretch(
+                    input.conductivity_w_m_k,
+                    input.area_resistance_m2_k_w,
+                    self.layer_normal_stretch,
+                )?;
                 let mut body_heat = [0.0; 2];
                 for side in 0..2 {
                     if conductances_w_k
@@ -478,22 +553,34 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
                 })
             };
         let trial = if with_entropy {
-            self.thermal.evaluate_with_entropy(energy_increments_j, coefficients, &check)?
+            self.thermal
+                .evaluate_with_entropy(energy_increments_j, coefficients, &check)?
         } else {
-            self.thermal.evaluate(energy_increments_j, coefficients, &check)?
+            self.thermal
+                .evaluate(energy_increments_j, coefficients, &check)?
         };
         let endpoint = trial.payload();
-        let entropy = entropy.map(|other_sources| {
-            // This is a finite thermal CELL, not a massless interface. Its
-            // energy residual already belongs to the original cell audit.
-            FrictionHeatEntropy::from_trial(
-                trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
-                other_sources, endpoint.dissipated, endpoint.temperature, 0.0,
-            )?.with_mechanical_storage(endpoint.mechanical_entropy_change,
-                endpoint.reversible, endpoint.temperature)
-        }).transpose()?;
+        let entropy = entropy
+            .map(|other_sources| {
+                // This is a finite thermal CELL, not a massless interface. Its
+                // energy residual already belongs to the original cell audit.
+                FrictionHeatEntropy::from_trial(
+                    trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
+                    other_sources,
+                    endpoint.dissipated,
+                    endpoint.temperature,
+                    0.0,
+                )?
+                .with_mechanical_storage(
+                    endpoint.mechanical_entropy_change,
+                    endpoint.reversible,
+                    endpoint.temperature,
+                )
+            })
+            .transpose()?;
         check()?;
         let report = ThirdBodyHeatReport {
+            layer_normal_stretch: self.layer_normal_stretch,
             layer_temperature_k: endpoint.temperature,
             conductances_w_k: endpoint.conductances,
             body_heat_j: endpoint.body_heat,
@@ -510,7 +597,9 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
             external_heat_j: endpoint.external,
             thermal: *trial.audit(),
             total_energy_residual_j: finite(
-                trial.audit().stored_energy_change_j - endpoint.external - endpoint.dissipated
+                trial.audit().stored_energy_change_j
+                    - endpoint.external
+                    - endpoint.dissipated
                     - endpoint.reversible,
             )?,
             entropy,

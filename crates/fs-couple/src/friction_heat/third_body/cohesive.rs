@@ -7,12 +7,14 @@
 //! Actual layer mass, caloric law, geometry and two source contact resistances
 //! remain with `ThirdBodyHeatStep`. No heat partition or extra capacity is added.
 //!
-//! This is a small-deformation, fixed material-reference, closed-normal-path
-//! split with frozen mechanical coefficients. The declared source must describe
+//! The default is a small-deformation, fixed material-reference, closed-normal-path
+//! split with frozen mechanical coefficients. The opt-in `deformation` entry
+//! follows the physical thickness of a surviving fixed-area adhesive layer.
+//! The declared source must describe
 //! this layer thickness; matching IDs/areas cannot establish that calibration.
 //! The original card's named third body is explicitly mapped to the thermal
-//! layer material. Evolving thickness and open cracks need their own geometry
-//! transfer. [`temperature`] stages original prescribed temperature successors
+//! layer material. Complete rupture, lateral-area changes and open cracks need
+//! their own geometry transfer. [`temperature`] stages original prescribed temperature successors
 //! and irreversible weakening before this same motion/heat increment. The
 //! optional entropy account covers
 //! caloric storage, conduction and viscous generation, not fracture/surface
@@ -37,6 +39,12 @@ pub mod temperature;
 pub use temperature::{
     CohesiveLayerHeatTemperature, TemperatureHeatedCohesiveLayerCandidate,
     propose_deformable_cohesive_layer_heat_with_temperature,
+    propose_deformable_cohesive_layer_heat_with_temperature_and_deformation,
+};
+
+mod deformation;
+pub use deformation::{
+    CohesiveLayerDeformation, propose_deformable_cohesive_layer_heat_with_deformation,
 };
 
 /// Explicit ordered assignment of one original surface to its thermal body.
@@ -128,6 +136,39 @@ pub fn propose_deformable_cohesive_layer_heat<'s, 'a, 't, P, E>(
     ) -> Result<CohesiveLayerHeatSource<P>, E>,
     gate: &CancelGate,
 ) -> Result<HeatedCohesiveLayerCandidate<'s, 'a, 't, P>, CohesiveHeatError<E>> {
+    propose_deformable_cohesive_layer_heat_inner(
+        motion,
+        mean_force_n,
+        endpoint_prescribed_jumps_m,
+        dt_s,
+        binding,
+        None,
+        thermal,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn propose_deformable_cohesive_layer_heat_inner<'s, 'a, 't, P, E>(
+    motion: &CohesiveMotion<'s, 'a>,
+    mean_force_n: &[f64],
+    endpoint_prescribed_jumps_m: &[[f64; 3]],
+    dt_s: f64,
+    binding: CohesiveLayerHeatBinding<'_>,
+    deformation: Option<CohesiveLayerDeformation>,
+    thermal: &DepositionSimulation<'t>,
+    controls: CohesiveLayerHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(
+        &DepositionSimulation<'t>,
+        f64,
+        &DynamicsStep<'s, 'a>,
+    ) -> Result<CohesiveLayerHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedCohesiveLayerCandidate<'s, 'a, 't, P>, CohesiveHeatError<E>> {
     let check = || {
         if gate.is_requested() {
             Err(DepositionError::Cancelled)
@@ -170,13 +211,14 @@ pub fn propose_deformable_cohesive_layer_heat<'s, 'a, 't, P, E>(
         ));
     }
     // This also checks unchanged original masses, materials, geometry and links.
-    let step = ThirdBodyHeatStep::new(thermal, target, binding.route, check)?;
+    let mut step = ThirdBodyHeatStep::new(thermal, target, binding.route, check)?;
     let source = patches[0].source().ok_or(CohesiveHeatError::Invalid(
         "finite adhesive heat requires the original sourced cohesive patch",
     ))?;
     let area = patches[0].area_m2();
     let layer = &thermal.cells()[&binding.route.layer_cell()];
-    let layer_area = layer.geometry.volume_m3 / (2.0 * binding.route.distances_m()[0][1]);
+    let reference_thickness = 2.0 * binding.route.distances_m()[0][1];
+    let layer_area = layer.geometry.volume_m3 / reference_thickness;
     if source.resolved().card_identity() != binding.card.content_hash()
         || binding.card.third_body() != Some(binding.layer_name)
         || binding.layer_name.trim().is_empty()
@@ -187,10 +229,26 @@ pub fn propose_deformable_cohesive_layer_heat<'s, 'a, 't, P, E>(
             .patches
             .iter()
             .any(|p| !same_area(area, p.link.area_m2))
-        || motion.state().points()[0].jump_m()[0] > 0.0
     {
         return Err(CohesiveHeatError::Invalid(
-            "original named adhesive, finite layer material, full patch areas and closed path required",
+            "original named adhesive, finite layer material and full patch areas required",
+        ));
+    }
+    let before = motion.state().points()[0];
+    if let Some(model) = deformation {
+        model
+            .normal_stretch(before.jump_m(), before.failed(), reference_thickness)
+            .map_err(CohesiveHeatError::Invalid)?;
+        // A changing lateral surface is not represented by the reference mesh.
+        // Explicit total source/reservoir powers retain their original owners.
+        if layer.boundary.htc_w_m2_k != 0.0 {
+            return Err(CohesiveHeatError::Invalid(
+                "deforming adhesive needs an adiabatic lateral surface or explicitly owned total heat",
+            ));
+        }
+    } else if before.jump_m()[0] > 0.0 {
+        return Err(CohesiveHeatError::Invalid(
+            "closed native adhesive path required",
         ));
     }
     for (side, cell_id) in binding.route.body_cells().into_iter().enumerate() {
@@ -213,11 +271,21 @@ pub fn propose_deformable_cohesive_layer_heat<'s, 'a, 't, P, E>(
     )?;
     if mechanical.motion.time_s() != target
         || mechanical.patch_dissipation.len() != 1
-        || mechanical.motion.state().points()[0].jump_m()[0] > 0.0
         || mechanical.friction_dissipated_j != 0.0
     {
         return Err(CohesiveHeatError::Invalid(
-            "finite adhesive heat needs a closed native path without unlocated surface friction",
+            "finite adhesive heat needs the original native endpoint without unlocated surface friction",
+        ));
+    }
+    let after = mechanical.motion.state().points()[0];
+    if let Some(model) = deformation {
+        let stretch = model
+            .normal_stretch(after.jump_m(), after.failed(), reference_thickness)
+            .map_err(CohesiveHeatError::Invalid)?;
+        step = step.with_layer_normal_stretch(stretch)?;
+    } else if after.jump_m()[0] > 0.0 {
+        return Err(CohesiveHeatError::Invalid(
+            "closed native adhesive path required",
         ));
     }
     let loss = mechanical.patch_dissipation[0];

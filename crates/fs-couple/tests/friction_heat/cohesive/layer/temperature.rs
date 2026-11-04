@@ -8,7 +8,7 @@ const OFFSETS: [[f64; 3]; 1] = [[-0.001, GAP, 0.0]];
 const DT: f64 = 0.01;
 const SURVIVAL: f64 = 17.0 / 27.0;
 
-fn temperature_material(environment: &str) -> (ResolvedBilinearCohesive, InterfaceSystemCard) {
+pub(super) fn temperature_material(environment: &str) -> (ResolvedBilinearCohesive, InterfaceSystemCard) {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for (name, dims, cold, hot) in [
@@ -108,7 +108,7 @@ fn temperature_material(environment: &str) -> (ResolvedBilinearCohesive, Interfa
     (source, card)
 }
 
-fn source_temperature<'s, 'a>(
+pub(super) fn source_temperature<'s, 'a>(
     target: &'s CohesiveSystem<'a>,
 ) -> CohesiveLayerHeatTemperature<'s, 'a> {
     CohesiveLayerHeatTemperature {
