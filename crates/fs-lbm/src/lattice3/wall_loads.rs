@@ -28,11 +28,11 @@ pub struct StationaryWallLink3 {
     pub position: [f64; 3],
 }
 
-struct MeasuredLink {
-    cell: usize,
-    incoming: usize,
-    solid: Option<usize>,
-    arm: [f64; 3],
+pub(super) struct MeasuredLink {
+    pub(super) cell: usize,
+    pub(super) incoming: usize,
+    pub(super) solid: Option<usize>,
+    pub(super) arm: [f64; 3],
 }
 
 /// Immutable sparse selection on a grid's fixed stationary wall topology.
@@ -41,7 +41,7 @@ struct MeasuredLink {
 pub struct WallMomentumProbe3<L: Lattice3<Q>, const Q: usize> {
     dims: [usize; 3],
     periodic: [bool; 3],
-    links: Vec<MeasuredLink>,
+    pub(super) links: Vec<MeasuredLink>,
     marker: PhantomData<L>,
 }
 
@@ -60,7 +60,32 @@ impl<L: Lattice3<Q>, const Q: usize> WallMomentumProbe3<L, Q> {
         self.links.len()
     }
 
-    fn validate(
+    /// Native wall descriptors in the exact order expected by a prescribed
+    /// moving-wall velocity field. This iterator allocates no storage.
+    pub fn wall_links(&self) -> impl ExactSizeIterator<Item = StationaryWallLink3> + '_ {
+        self.links.iter().map(|link| {
+            let p = coordinates(link.cell, self.dims);
+            let e = L::E[link.incoming];
+            let mut exterior_faces = [false; 6];
+            if link.solid.is_none() {
+                for a in 0..3 {
+                    let from = p[a] as isize - e[a] as isize;
+                    if !self.periodic[a] && (from < 0 || from >= self.dims[a] as isize) {
+                        exterior_faces[2 * a + usize::from(from >= 0)] = true;
+                    }
+                }
+            }
+            StationaryWallLink3 {
+                fluid_cell: p,
+                incoming_direction: e,
+                solid_cell: link.solid.map(|cell| coordinates(cell, self.dims)),
+                exterior_faces,
+                position: core::array::from_fn(|a| p[a] as f64 + 0.5 - 0.5 * f64::from(e[a])),
+            }
+        })
+    }
+
+    pub(super) fn validate(
         &self,
         grid: &Grid3<L, Q>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,

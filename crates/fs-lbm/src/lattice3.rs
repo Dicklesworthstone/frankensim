@@ -8,6 +8,8 @@ use core::{fmt, marker::PhantomData, ops::ControlFlow};
 use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
 use std::sync::Mutex;
 
+/// Prescribed tangential surface motion on the same fixed halfway walls.
+pub mod moving_walls;
 /// Source-preserving generalized-Newtonian viscosity on the existing 3-D step.
 pub mod rheology;
 mod sgs;
@@ -297,6 +299,15 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         collisions: Option<&[L::Collision]>,
         observe: impl FnOnce(&Self) -> Result<R, GridError3<L::Error>>,
     ) -> Result<R, GridError3<L::Error>> {
+        self.step_serial_with_wall_motion(cx, collisions, None, observe)
+    }
+    fn step_serial_with_wall_motion<R>(
+        &mut self,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        motion: Option<&moving_walls::WallMotion3<'_, L, Q>>,
+        observe: impl FnOnce(&Self) -> Result<R, GridError3<L::Error>>,
+    ) -> Result<R, GridError3<L::Error>> {
         let step = self
             .completed_steps
             .checked_add(1)
@@ -318,7 +329,10 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         }
         for (tile, chunk) in self.next.chunks_mut(64).enumerate() {
             cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
-            data.process(&self.post, chunk, tile * 64, true)?;
+            match motion {
+                Some(walls) => data.process_moving_walls(&self.post, chunk, tile * 64, walls)?,
+                None => data.process(&self.post, chunk, tile * 64, true)?,
+            }
         }
         let receipt = observe(self)?;
         cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
@@ -388,6 +402,16 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         collisions: Option<&[L::Collision]>,
         observe: impl FnOnce(&Self) -> Result<R, GridError3<L::Error>>,
     ) -> Result<R, GridError3<L::Error>> {
+        self.step_pooled_with_wall_motion(pool, gate, collisions, None, observe)
+    }
+    fn step_pooled_with_wall_motion<R, P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        collisions: Option<&[L::Collision]>,
+        motion: Option<&moving_walls::WallMotion3<'_, L, Q>>,
+        observe: impl FnOnce(&Self) -> Result<R, GridError3<L::Error>>,
+    ) -> Result<R, GridError3<L::Error>> {
         let step = self
             .completed_steps
             .checked_add(1)
@@ -404,7 +428,7 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
             marker: PhantomData,
         };
         run_pass(&data, &self.f, &mut self.post, false, pool, gate)?;
-        run_pass(&data, &self.post, &mut self.next, true, pool, gate)?;
+        run_pass_with_wall_motion(&data, &self.post, &mut self.next, true, pool, gate, motion)?;
         let receipt = observe(self)?;
         if gate.is_requested() {
             return Err(GridError3::Cancelled);
@@ -602,33 +626,41 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                     .map_err(|source| GridError3::Collision { cell, source })?;
                 macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
             } else {
-                let p = coordinates(cell, self.dims);
-                for q in 0..Q {
-                    let mut from = [0; 3];
-                    let mut wall = false;
-                    for a in 0..3 {
-                        let v = p[a] as isize - L::E[q][a] as isize;
-                        if v < 0 || v >= self.dims[a] as isize {
-                            if !self.periodic[a] {
-                                wall = true;
-                                break;
-                            }
-                            from[a] = v.rem_euclid(self.dims[a] as isize) as usize;
-                        } else {
-                            from[a] = v as usize;
-                        }
-                    }
-                    let source = (from[2] * self.dims[1] + from[1]) * self.dims[0] + from[0];
-                    output[q] = if wall || self.solid[source] {
-                        src[cell][L::OPP[q]]
-                    } else {
-                        src[source][q]
-                    };
-                }
+                self.pull_cell(src, output, cell);
                 macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
             }
         }
         Ok(())
+    }
+
+    // One native transport stencil for stationary and prescribed moving walls.
+    // Moving-wall corrections are applied before macroscopic admission, never
+    // to an already published or provisionally admitted stationary endpoint.
+    #[inline]
+    fn pull_cell(&self, src: &[[f64; Q]], output: &mut [f64; Q], cell: usize) {
+        let p = coordinates(cell, self.dims);
+        for q in 0..Q {
+            let mut from = [0; 3];
+            let mut wall = false;
+            for a in 0..3 {
+                let v = p[a] as isize - L::E[q][a] as isize;
+                if v < 0 || v >= self.dims[a] as isize {
+                    if !self.periodic[a] {
+                        wall = true;
+                        break;
+                    }
+                    from[a] = v.rem_euclid(self.dims[a] as isize) as usize;
+                } else {
+                    from[a] = v as usize;
+                }
+            }
+            let source = (from[2] * self.dims[1] + from[1]) * self.dims[0] + from[0];
+            output[q] = if wall || self.solid[source] {
+                src[cell][L::OPP[q]]
+            } else {
+                src[source][q]
+            };
+        }
     }
 }
 
@@ -646,6 +678,7 @@ struct StepKernel<'a, 'b, L: Lattice3<Q>, const Q: usize> {
     src: &'a [[f64; Q]],
     chunks: Vec<Mutex<&'a mut [[f64; Q]]>>,
     stream: bool,
+    motion: Option<&'a moving_walls::WallMotion3<'a, L, Q>>,
 }
 impl<L: Lattice3<Q>, const Q: usize> TileKernel for StepKernel<'_, '_, L, Q> {
     type Out = FirstError<L::Error>;
@@ -664,10 +697,15 @@ impl<L: Lattice3<Q>, const Q: usize> TileKernel for StepKernel<'_, '_, L, Q> {
             return ControlFlow::Break(Cancelled);
         }
         let outcome = match self.chunks[tile as usize].lock() {
-            Ok(mut chunk) => {
-                self.data
-                    .process(self.src, &mut chunk, tile as usize * 64, self.stream)
-            }
+            Ok(mut chunk) => match self.motion {
+                Some(walls) => {
+                    self.data
+                        .process_moving_walls(self.src, &mut chunk, tile as usize * 64, walls)
+                }
+                None => self
+                    .data
+                    .process(self.src, &mut chunk, tile as usize * 64, self.stream),
+            },
             Err(_) => Err(GridError3::Poisoned),
         };
         ControlFlow::Continue(FirstError(outcome.err()))
@@ -681,11 +719,23 @@ fn run_pass<L: Lattice3<Q>, const Q: usize, P: KernelRunner>(
     pool: &P,
     gate: &CancelGate,
 ) -> Result<(), GridError3<L::Error>> {
+    run_pass_with_wall_motion(data, src, dst, stream, pool, gate, None)
+}
+fn run_pass_with_wall_motion<L: Lattice3<Q>, const Q: usize, P: KernelRunner>(
+    data: &StepData<'_, L, Q>,
+    src: &[[f64; Q]],
+    dst: &mut [[f64; Q]],
+    stream: bool,
+    pool: &P,
+    gate: &CancelGate,
+    motion: Option<&moving_walls::WallMotion3<'_, L, Q>>,
+) -> Result<(), GridError3<L::Error>> {
     let kernel = StepKernel {
         data,
         src,
         chunks: dst.chunks_mut(64).map(Mutex::new).collect(),
         stream,
+        motion,
     };
     match pool.run_with_gate(&kernel, gate).0 {
         Ok(FirstError(None)) => Ok(()),
