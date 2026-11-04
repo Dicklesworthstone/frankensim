@@ -42,6 +42,68 @@ impl MaterialFlowResistance {
         Self::try_new(viscous, 0.0, area, diameter, (0.0, maximum_reynolds))
     }
 
+    /// Derive fully developed resistance between concentric stationary cylinders.
+    ///
+    /// For inner/outer radii r/R, the no-slip solution integrates to
+    /// `Q = pi dp [R^4-r^4-(R^2-r^2)^2/ln(R/r)] / (8 mu length)`.
+    /// This is the Newtonian limit of Huilgol and Georgiou (2020), equations
+    /// (18), (22), (23), <https://doi.org/10.1016/j.jnnfm.2020.104401>.
+    ///
+    /// The actual annular area supplies speed; `Dh = 2 (R-r)` supplies Reynolds
+    /// number. A narrow gap uses a convergent positive series instead of
+    /// subtracting nearly equal fourth-power terms. Zero inner radius selects
+    /// the circular-pipe limit exactly; a nonzero core retains its logarithmic
+    /// drag even when r/R underflows. Geometry is compiled once.
+    ///
+    /// The same Newtonian, developed-flow and applicability assumptions as
+    /// [`Self::circular_laminar`] apply. Eccentricity, moving cylinders, slip
+    /// and entrance effects are not modeled. An annular heat-transfer law
+    /// still needs its own wall conditions; circular Nusselt numbers do not
+    /// become applicable merely by substituting this hydraulic diameter.
+    ///
+    /// # Errors
+    /// Requires finite `0 <= r < R`, positive length and a Reynolds ceiling
+    /// in `(0,2300]`. Unrepresentable area, diameter or resistance refuses.
+    pub fn annular_laminar(
+        length: Length,
+        inner_radius: Length,
+        outer_radius: Length,
+        maximum_reynolds: f64,
+    ) -> Result<Self, ResistanceError> {
+        admit(&[length.value(), outer_radius.value()], maximum_reynolds)?;
+        let inner = inner_radius.value();
+        let outer = outer_radius.value();
+        if !inner.is_finite() || inner < 0.0 || inner >= outer {
+            return Err(ResistanceError::Invalid(
+                "annular radii must satisfy finite 0 <= inner < outer",
+            ));
+        }
+        if inner == 0.0 {
+            return Self::circular_laminar(length, Length::new(2.0 * outer), maximum_reynolds);
+        }
+        let gap = outer - inner;
+        let area = Area::new((PI * gap) * (outer + inner));
+        let diameter = Length::new(2.0 * gap);
+        let ratio = inner / outer;
+        let viscous = if ratio >= 0.5 {
+            let mean = 0.5 * outer + 0.5 * inner;
+            let correction = annular_gap_correction(0.5 * (gap / mean));
+            (6.0 / (PI * correction)) * (length.value() / mean) / gap / gap / gap
+        } else {
+            let ratio_squared = ratio * ratio;
+            let logarithm = if ratio > 0.0 {
+                -det::ln(ratio)
+            } else {
+                det::ln(outer) - det::ln(inner)
+            };
+            let difference = 1.0 - ratio_squared;
+            let factor =
+                1.0 - ratio_squared * ratio_squared - difference * difference / logarithm;
+            (8.0 / (PI * factor)) * (length.value() / outer) / outer / outer / outer
+        };
+        Self::try_new(viscous, 0.0, area, diameter, (0.0, maximum_reynolds))
+    }
+
     /// Derive fully developed resistance for a straight rectangular duct.
     ///
     /// With smaller side `h`, larger side `w`, and `a=h/w`,
@@ -74,6 +136,23 @@ impl MaterialFlowResistance {
         let viscous = (12.0 / correction) * (length.value() / w) / h / h / h;
         Self::try_new(viscous, 0.0, area, diameter, (0.0, maximum_reynolds))
     }
+}
+
+// With e=(R-r)/(R+r), the exact conductance is pi*mean*gap^3/(6*mu*L)
+// times C(e). Write A=atanh(e)/e and avoid subtracting 1/A from 1+e^2:
+// C = 3/4 * sum[(1/(2k+1)+1/(2k+3))*e^(2k)] / sum[e^(2k)/(2k+1)].
+// Here e <= 1/3; the denominator's omitted tail after k=16 is <2e-18.
+// No logarithm, small-gap subtraction or per-evaluation series is needed.
+fn annular_gap_correction(half_gap_over_mean: f64) -> f64 {
+    let z = half_gap_over_mean * half_gap_over_mean;
+    let mut denominator = 0.0;
+    let mut numerator = 0.0;
+    for k in (0..=16).rev() {
+        let n = f64::from(2 * k + 1);
+        denominator = 1.0 / n + z * denominator;
+        numerator = (1.0 / n + 1.0 / (n + 2.0)) + z * numerator;
+    }
+    0.75 * numerator / denominator
 }
 
 fn admit(lengths: &[f64], maximum_reynolds: f64) -> Result<(), ResistanceError> {
@@ -209,6 +288,111 @@ mod tests {
                 reference.dissipated_power_w,
             );
         }
+    }
+
+    #[test]
+    fn annular_pressure_matches_integrated_no_slip_velocity() {
+        for ratio in [0.1_f64, 0.25, 0.5, 0.75, 0.9] {
+            let law = MaterialFlowResistance::annular_laminar(
+                Length::new(1.0), Length::new(ratio), Length::new(1.0), 100.0,
+            ).unwrap();
+            // Independently integrate the radial Stokes velocity, with both
+            // stationary walls enforcing u=0. No conductance-series reuse.
+            let count = 8192;
+            let dr = (1.0 - ratio) / f64::from(count);
+            let mut integral = 0.0;
+            for j in 0..=count {
+                let r = ratio + f64::from(j) * dr;
+                let velocity = 0.25 * (1.0 - r * r
+                    + (1.0 - ratio * ratio) * r.ln() / (1.0 / ratio).ln());
+                let weight = if j == 0 || j == count { 1.0 }
+                    else if j % 2 == 0 { 2.0 } else { 4.0 };
+                integral += weight * r * velocity;
+            }
+            let flow_per_pressure = 2.0 * PI * dr * integral / 3.0;
+            let state = law.evaluate(&fluid(1.0, 1.0), MassFlowRate::new(1.0)).unwrap();
+            near(state.pressure_drop_pa, 1.0 / flow_per_pressure);
+            near(state.dpressure_dmass_flow, state.pressure_drop_pa);
+            near(state.dissipated_power_w, state.pressure_drop_pa);
+            near(law.flow_area().value(), PI * (1.0 - ratio * ratio));
+            near(law.reynolds_length().value(), 2.0 * (1.0 - ratio));
+        }
+    }
+
+    #[test]
+    fn annular_thin_gap_retains_the_cubic_parallel_plate_limit() {
+        for relative_gap in [1e-6, 1e-9, 1e-12, f64::EPSILON] {
+            let inner = 1.0 - relative_gap;
+            let gap = 1.0 - inner;
+            let mean = 0.5 * (1.0 + inner);
+            let law = MaterialFlowResistance::annular_laminar(
+                Length::new(2.0), Length::new(inner), Length::new(1.0), 100.0,
+            ).unwrap();
+            let q = 1e-6 * gap * gap;
+            let state = law.evaluate(&fluid(1000.0, 0.001), MassFlowRate::new(1000.0 * q)).unwrap();
+            // Plane Poiseuille between walls separated by gap, unrolled over
+            // circumference 2*pi*mean. Curvature changes this by O(gap^2).
+            let pressure = 6.0 * 0.001 * 2.0 * q / (PI * mean * gap.powi(3));
+            near(state.pressure_drop_pa, pressure);
+            near(state.reynolds, 1000.0 * q / (PI * mean * 0.001));
+            assert!(state.pressure_drop_pa.is_finite() && state.pressure_drop_pa > 0.0);
+        }
+    }
+
+    #[test]
+    fn annular_vanishing_core_retains_logarithmic_drag_and_exact_empty_core_limit() {
+        let circular = MaterialFlowResistance::circular_laminar(
+            Length::new(1.0), Length::new(2.0), 100.0,
+        ).unwrap();
+        assert_eq!(circular, MaterialFlowResistance::annular_laminar(
+            Length::new(1.0), Length::new(0.0), Length::new(1.0), 100.0,
+        ).unwrap());
+        let reference = circular.evaluate(&fluid(1.0, 1.0), MassFlowRate::new(1.0)).unwrap();
+        let mut previous = f64::INFINITY;
+        for inner in [1e-16_f64, 1e-64, 1e-200] {
+            let law = MaterialFlowResistance::annular_laminar(
+                Length::new(1.0), Length::new(inner), Length::new(1.0), 100.0,
+            ).unwrap();
+            let state = law.evaluate(&fluid(1.0, 1.0), MassFlowRate::new(1.0)).unwrap();
+            near(state.pressure_drop_pa, reference.pressure_drop_pa / (1.0 + 1.0 / inner.ln()));
+            assert!(state.pressure_drop_pa > reference.pressure_drop_pa);
+            assert!(state.pressure_drop_pa < previous);
+            previous = state.pressure_drop_pa;
+        }
+        // A representable dimensional law must not lose the inner wall merely
+        // because the radius ratio underflows or its reciprocal overflows.
+        let law = MaterialFlowResistance::annular_laminar(
+            Length::new(1e100), Length::new(1e-250), Length::new(1e90), 100.0,
+        ).unwrap();
+        let state = law.evaluate(&fluid(1.0, 1.0), MassFlowRate::new(1e90)).unwrap();
+        let pressure = (8.0 / PI) * 1e-170 / (1.0 - 1.0 / (340.0 * 10.0_f64.ln()));
+        assert!((state.pressure_drop_pa / pressure - 1.0).abs() < 2e-12);
+    }
+
+    #[test]
+    fn annular_signed_flow_and_si_rescaling_share_the_original_material_law() {
+        let make = |scale| MaterialFlowResistance::annular_laminar(
+            Length::new(0.4 * scale), Length::new(0.003 * scale),
+            Length::new(0.005 * scale), 1000.0,
+        ).unwrap();
+        let material = fluid(1000.0, 0.001);
+        let reference = make(1.0).evaluate(&material, MassFlowRate::new(0.001)).unwrap();
+        for scale in [1e-3, 3.0, 1e3] {
+            for sign in [-1.0_f64, 0.0, 1.0] {
+                let value = make(scale).evaluate(&material, MassFlowRate::new(sign * 0.001 * scale)).unwrap();
+                near(value.reynolds, sign.abs() * reference.reynolds);
+                near(value.pressure_drop_pa * scale * scale, sign * reference.pressure_drop_pa);
+                near(value.dissipated_power_w * scale, sign.abs() * reference.dissipated_power_w);
+                near(value.dpressure_dmass_flow * scale.powi(3), reference.dpressure_dmass_flow);
+            }
+        }
+        for (inner, outer) in [(-1.0, 1.0), (1.0, 1.0), (2.0, 1.0),
+            (0.0, 0.0), (f64::NAN, 1.0), (0.0, f64::INFINITY)] {
+            assert!(MaterialFlowResistance::annular_laminar(
+                Length::new(1.0), Length::new(inner), Length::new(outer), 100.0,
+            ).is_err());
+        }
+        assert!(make(1.0).evaluate(&material, MassFlowRate::new(10.0)).is_err());
     }
 
     #[test]

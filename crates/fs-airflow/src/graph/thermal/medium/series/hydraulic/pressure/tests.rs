@@ -288,3 +288,65 @@ fn boussinesq_keeps_original_density_for_head_and_one_reference_volume_for_all_l
         assert!(BoussinesqDensity::try_new(rho,bound).is_err());
     }
 }
+
+#[test]
+fn annular_resistance_selects_shared_mass_and_downstream_heat_transfer() {
+    use crate::graph::thermal::medium::convection::ForcedConvectionSettings;
+    use fs_convection::CorrelationId;
+    use fs_qty::Temperature;
+    let (inner, outer, radius) = (0.003_f64, 0.005_f64, 0.003_f64);
+    let annulus = MaterialFlowResistance::annular_laminar(
+        Length::new(0.4), Length::new(inner), Length::new(outer), 1500.0,
+    ).unwrap();
+    let pipe = MaterialFlowResistance::circular_laminar(
+        Length::new(0.2), Length::new(2.0 * radius), 1500.0,
+    ).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let mut values = Vec::new();
+    for mu in [0.001, 0.004] {
+        let sections = || vec![
+            PressureSection { resistance: annulus, medium: fluid(1000.0, mu) },
+            PressureSection { resistance: pipe, medium: fluid(1000.0, 0.001) },
+        ];
+        let solve = SeriesPressureFlow::solve(sections(), 10.0, budget(), &gate).unwrap();
+        // Exact annular Stokes flux and circular Poiseuille in series, with
+        // distinct actual section viscosities and one conserved mass rate.
+        let radial = outer.powi(4) - inner.powi(4)
+            - (outer * outer - inner * inner).powi(2) / (outer / inner).ln();
+        let resistance = 8.0 * mu * 0.4 / (core::f64::consts::PI * radial)
+            + 8.0 * 0.001 * 0.2 / (core::f64::consts::PI * radius.powi(4));
+        let q = 10.0 / resistance;
+        assert!((solve.mass_flow_kg_s() / (1000.0 * q) - 1.0).abs() < 2e-12);
+        near(solve.dissipated_power_w(), 10.0 * q);
+        near(solve.pressure_residual_pa(), 0.0);
+        assert_eq!(solve.evaluations()[0].law, annulus);
+        near(solve.evaluations()[0].transport.dynamic_viscosity_pa_s(), mu);
+
+        // Heat is evaluated in the downstream circular tube. Its Hausen law
+        // is NOT applied to the annulus by an equivalent-diameter substitution.
+        let heat = solve.forced_convection(1, CorrelationId::CircularDuctHausen,
+            Length::new(2.0 * radius), ForcedConvectionSettings {
+                length_over_hydraulic_diameter: Some(0.2 / (2.0 * radius)),
+                ..ForcedConvectionSettings::default()
+            }).unwrap();
+        let speed = q / (core::f64::consts::PI * radius * radius);
+        let re = 1000.0 * speed * (2.0 * radius) / 0.001;
+        let gz = re * 8.0 / (0.2 / (2.0 * radius));
+        let h = (3.66 + 0.0668 * gz / (1.0 + 0.04 * gz.powf(2.0 / 3.0)))
+            * 0.5 / (2.0 * radius);
+        near(heat.speed_m_s(), speed);
+        near(heat.convection().coefficient().value.value(), h);
+        assert!(core::ptr::eq(heat.medium(), &solve.sections()[1].medium));
+        assert_eq!(heat.convection().transport(), &solve.evaluations()[1].transport);
+        heat.convection().robin_boundary(Temperature::new(300.0)).unwrap();
+
+        let reverse = SeriesPressureFlow::solve(sections(), -10.0, budget(), &gate).unwrap();
+        assert_eq!(reverse.mass_flow_kg_s(), -solve.mass_flow_kg_s());
+        near(reverse.dissipated_power_w(), solve.dissipated_power_w());
+        let rest = SeriesPressureFlow::solve(sections(), 0.0, budget(), &gate).unwrap();
+        assert_eq!(rest.mass_flow_kg_s(), 0.0);
+        assert_eq!(rest.dissipated_power_w(), 0.0);
+        values.push((solve.mass_flow_kg_s(), h));
+    }
+    assert!(values[1].0 < values[0].0 && values[1].1 < values[0].1);
+}

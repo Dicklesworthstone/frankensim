@@ -16,6 +16,18 @@ evaluations compile rectangular geometry once; no series or allocation enters
 subsequent pressure/heat trials. The accelerated series' omitted correction is
 below 1e-23 before floating-point roundoff, not a physical error certificate.
 
+`annular_laminar` admits concentric stationary no-slip cylinders and compiles
+the integrated Newtonian radial Stokes solution into the same owner. Annular
+area supplies velocity and twice the radial gap supplies Reynolds length;
+circular drag is never inferred from that diameter. A positive 17-term series
+evaluated only at construction retains the cubic thin-gap conductance without
+cancelling fourth powers. A vanishing but nonzero core retains its logarithmic
+drag; exactly zero inner radius selects the original circular law. Eccentricity,
+moving walls and annular thermal boundary conditions require separate models.
+The pressure/convection regression places the annulus in series with a circular
+heated section, so its changed viscosity changes both flow and downstream heat
+transfer without applying a circular heat correlation to annular geometry.
+
 The caller selects a Reynolds ceiling in `(0,2300]`; this is an applicability
 screen, not a transition prediction. A developed Newtonian profile remains an
 authored assumption. Entrance effects, non-Newtonian stress, moving/slipping
