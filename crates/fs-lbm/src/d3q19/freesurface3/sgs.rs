@@ -14,8 +14,9 @@
 //! This does not supply independent bulk-viscosity control. This is weakly
 //! compressible, isothermal exploration:
 //! no subgrid free-surface, entrainment, wall damping, resolved heating, or
-//! turbulent-flow validation is supplied. WALE/Vreman require the full velocity
-//! gradient and cannot be reconstructed from this symmetric moment alone.
+//! turbulent-flow validation is supplied. The separate `prepare_gradient_sgs`
+//! and `step_with_gradient_sgs` path admits WALE/Vreman from the native full
+//! liquid velocity gradient; this symmetric stress path remains Smagorinsky.
 
 use std::collections::BTreeMap;
 
@@ -27,10 +28,13 @@ use crate::sgs3::{SgsConfig, SgsError, SgsModel, eddy_viscosity};
 use fs_exec::CancelGate;
 use fs_math::det;
 
+mod gradient;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum FreeSurfaceSgsError3 {
     Flow(FreeSurfaceError3),
     Closure(SgsError),
+    Kinematics(super::FreeSurfaceKinematicsError3),
     Invalid(&'static str),
     Cell {
         coordinates: [usize; 3],

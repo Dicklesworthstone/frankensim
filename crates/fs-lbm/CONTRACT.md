@@ -255,7 +255,8 @@ material label, inferred mixture law, thermal owner or yield history is added.
 `SgsConfig` controls and a reusable `FreeSurfaceSgsWorkspace3`. This path
 requires native BGK or TRT and Smagorinsky; central/cumulant collisions refuse.
 WALE and Vreman need information absent from a symmetric local moment and
-refuse. Acceptance use, invalid controls, and excess eddy/molecular viscosity
+refuse on this stress path; the separate full-gradient path is described below.
+Acceptance use, invalid controls, and excess eddy/molecular viscosity
 refuse without changing accepted flow. The zero coefficient follows the
 original native BGK or TRT collision path bit for bit.
 
@@ -10570,6 +10571,53 @@ These remain local infinite missing-film patches: no resolved moving wall,
 finite extent, contact, GCL, rotation or thermal destination is inferred.
 The inherited midpoint method is not L-stable; stiff relaxation still
 requires adequate time resolution.
+
+## Sparse liquid curl and full-gradient WALE/Vreman
+
+`FreeSurface3::kinematics` prepares an explicitly byte-budgeted
+`FreeSurfaceKinematicsWorkspace3` over active tiles, using actual retained
+Guo forces and native population density. Its borrowed view returns the shared
+`FlowKinematics3` (full gradient, curl, divergence, enstrophy, Q and stretching)
+at occupied liquid centers. Queries allocate nothing. The cache is rebuilt
+after each new preparation, including sparse slot reshuffles and piston motion;
+the view borrows the owner so geometry cannot change underneath a query.
+
+Centered and contiguous one-sided three-point differences are second order.
+When only one inward liquid neighbor exists, diagnostics expose their first
+order explicitly. No adjacent liquid on either side of an axis is a local
+`MissingDerivative` refusal. Gas, zero-fill interfaces, solid/inactive tiles,
+out-of-domain space and the current piston slab never supply fake stationary
+fluid. These are reconstructions from actual interior liquid velocities, not
+imposed wall-law gradients: transient prescribed wall velocities are not
+retained by this owner and are not guessed or extrapolated from wall nodes.
+The same rule avoids assuming an unmodeled free-surface tangential stress.
+
+`prepare_gradient_sgs` and `step_with_gradient_sgs` separately opt into the
+shared WALE/Vreman formulas using this full, force-centered gradient. Every
+occupied liquid cell needs second-order support; unresolved thin sheets refuse
+the whole step. Zero-fill interface ghosts retain the original molecular
+relaxation: they carry populations for gas reconstruction and mass exchange,
+but no occupied liquid supports an inferred gradient or modeled dissipation.
+Diagnostics still return None there. Reports count these native wet collision
+cells while assigning their zero liquid volume zero molecular and SGS power.
+The original stress-based Smagorinsky arithmetic is unchanged. BGK/TRT retain
+their molecular family and authored TRT product, with effective shear
+`tau = tau_molecular + 3*nu_t`. Eddy/molecular limits refuse rather than clamp.
+Reports weight deviatoric shear dissipation by native fill and density; modeled
+viscosity sees the full gradient, including antisymmetric rotation. No reported
+dissipation is added as heat. The original VOF owner performs collision, gas
+reconstruction, mass transport and conversion on one candidate before commit.
+Zero coefficient uses the original native step bit-for-bit on admitted support.
+
+Preparation and sparse scans checkpoint cancellation; rejected queries and
+steps never mutate accepted flow. The kinematics and native SGS tests cover analytic
+affine curl/stretching with unequal density and forcing, quadratic interface
+gradients in all orientations, solid/piston masks, under-resolved refusal,
+budget/cancel retry, full-gradient viscosity and fill-weighted power, and native
+BGK/TRT evolution with zero-coefficient controls, including a finite liquid
+block and its empty interface shell. These are exploration closures
+and resolved diagnostics, not turbulent-flow validation, entrainment physics,
+wall modeling, baroclinic generation or a complete vorticity evolution equation.
 
 ## Finite solids in the implicit moving-liquid surface solve
 

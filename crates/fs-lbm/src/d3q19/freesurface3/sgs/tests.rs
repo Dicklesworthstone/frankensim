@@ -29,6 +29,115 @@ fn assert_same(a: &FreeSurface3, b: &FreeSurface3) {
     }
 }
 
+#[test]
+fn gradient_sgs_advances_finite_liquid_with_molecular_empty_interface_shell() {
+    use crate::d3q19::freesurface3::FreeSurfaceKinematicsWorkspace3;
+
+    let gate = CancelGate::new_clock_free();
+    let mut liquid = FreeSurface3::new(
+        8,
+        8,
+        8,
+        0.8,
+        [0.0; 3],
+        0.0,
+        ContactModel3::Neutral,
+        |x, y, z| [x, y, z].iter().all(|v| (1..7).contains(v)),
+    )
+    .unwrap();
+    let mut ghosts = Vec::new();
+    // A valid native VOF checkpoint: a four-cell-wide occupied block, buffered
+    // from gas by collision-bearing but empty interface reconstruction cells.
+    // These carry the original populations; they are not standalone mock flow.
+    for key in liquid.grid.active_keys().to_vec() {
+        let slot = liquid.grid.slot_of(key).unwrap();
+        for lane in 0..TILE_CELLS {
+            let cell = liquid.tiles[&key].cells[lane];
+            if cell == Cell3::Gas {
+                continue;
+            }
+            let (x, y, z) = FreeSurface3::global_of(key, lane);
+            let coordinates = [x as usize, y as usize, z as usize];
+            if cell == Cell3::Interface {
+                liquid.tiles.get_mut(&key).unwrap().mass[lane] = 0.0;
+                ghosts.push((key, lane, coordinates));
+            }
+            let velocity = [
+                0.003 * (y as f64 - 3.5),
+                0.002 * (z as f64 - 3.5),
+                0.001 * (x as f64 - 3.5),
+            ];
+            liquid
+                .grid
+                .set_populations(slot, lane, equilibrium3(1.0, velocity));
+        }
+    }
+    liquid.assert_closure();
+    assert_eq!(ghosts.len(), 152);
+    let mut kinematics =
+        FreeSurfaceKinematicsWorkspace3::new(liquid.grid.active_tiles(), usize::MAX).unwrap();
+    let field = liquid.kinematics(&gate, &mut kinematics).unwrap();
+    for &(_, _, [x, y, z]) in &ghosts {
+        assert!(field.sample_at(x, y, z).unwrap().is_none());
+    }
+    assert!(field.sample_at(2, 2, 2).unwrap().is_some());
+    for trt in [false, true] {
+        let mut input = liquid.clone();
+        if trt {
+            input.set_trt_magic(0.25).unwrap();
+        }
+        let mass = input.ledger_mass();
+        let mut native = input.clone();
+        native.step_with_gate(&gate).unwrap();
+        for (model, disabled) in [
+            (SgsModel::Wale { cw: 0.4 }, SgsModel::Wale { cw: 0.0 }),
+            (SgsModel::Vreman { cv: 0.1 }, SgsModel::Vreman { cv: 0.0 }),
+        ] {
+            let config = SgsConfig {
+                model,
+                ..controls(0.0)
+            };
+            let mut workspace = FreeSurfaceSgsWorkspace3::default();
+            for &(key, lane, _) in &ghosts {
+                workspace.tau.insert((key, lane), 1.25); // stale modeled cache
+            }
+            let report = input
+                .prepare_gradient_sgs(&gate, config, &mut kinematics, &mut workspace)
+                .unwrap();
+            assert_eq!(report.wet_cells, 216);
+            assert_eq!(report.liquid_volume_lu, 64.0);
+            assert!(report.maximum_eddy_viscosity_lu > 0.0);
+            assert!(report.sgs_dissipation_lu > 0.0);
+            assert!(workspace.relaxation_at([2, 2, 2]).unwrap() > 0.8);
+            for &(_, _, coordinates) in &ghosts {
+                assert_eq!(
+                    workspace.relaxation_at(coordinates).unwrap().to_bits(),
+                    0.8f64.to_bits()
+                );
+            }
+            let mut zero = input.clone();
+            zero.step_with_gradient_sgs(
+                &gate,
+                SgsConfig {
+                    model: disabled,
+                    ..config
+                },
+                &mut kinematics,
+                &mut workspace,
+            )
+            .unwrap();
+            assert_same(&zero, &native);
+            let mut active = input.clone();
+            active
+                .step_with_gradient_sgs(&gate, config, &mut kinematics, &mut workspace)
+                .unwrap();
+            assert_eq!(active.collision_model(), input.collision_model());
+            assert!((active.ledger_mass() - mass).abs() < 1e-11);
+            assert_ne!(active.grid.state_bits(), input.grid.state_bits());
+        }
+    }
+}
+
 // Independent Hermite population reconstruction with physical Guo half-source.
 // The stress contains an authored isotropic part to detect dilatational
 // contamination of the deviatoric SGS fit.
