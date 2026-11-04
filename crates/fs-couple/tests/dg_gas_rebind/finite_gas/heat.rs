@@ -9,6 +9,9 @@ use fs_material::relaxation::{
 use fs_phs::linear_exact::DenseExponentialBudget;
 use fs_thermochem::SpeciesId;
 
+#[path = "heat/moving_aperture.rs"]
+mod moving_aperture;
+
 fn budget() -> DenseExponentialBudget {
     DenseExponentialBudget {
         max_dimension: 256,
@@ -260,7 +263,7 @@ fn complete_passage_heat_matches_resolved_shear_and_independent_caloric_balance(
     }
 }
 
-fn molecular_load() -> (DgPortLoad, ClosedGasParcel, FiniteGasDgSolve) {
+fn unadvanced_molecular_load() -> (DgPortLoad, ClosedGasParcel, FiniteGasDgSolve) {
     let cold = field(300.0, 1.0, 101_325.0, LENGTH);
     let source = load(&cold, false);
     let relaxation = RelaxationAbsorption::new(
@@ -313,7 +316,7 @@ fn molecular_load() -> (DgPortLoad, ClosedGasParcel, FiniteGasDgSolve) {
         duct.total_dofs() <= 128,
         "retain the complete native source state"
     );
-    let mut load = DgPortLoad::new_with_terminal(
+    let load = DgPortLoad::new_with_terminal(
         duct,
         DT,
         1e-11,
@@ -321,13 +324,18 @@ fn molecular_load() -> (DgPortLoad, ClosedGasParcel, FiniteGasDgSolve) {
         source.terminal().unwrap().clone(),
     )
     .unwrap();
-    let mut gas = inventory(&cold, main_volume());
+    let gas = inventory(&cold, main_volume());
     let solve = FiniteGasDgSolve {
         loss: FiniteGasDgLoss::UniformMolecularDiffusion {
             maximum_relative_error: 0.02,
         },
         ..controls()
     };
+    (load, gas, solve)
+}
+
+fn molecular_load() -> (DgPortLoad, ClosedGasParcel, FiniteGasDgSolve) {
+    let (mut load, mut gas, solve) = unadvanced_molecular_load();
     warm(&mut load, &mut gas, solve);
     (load, gas, solve)
 }

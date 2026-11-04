@@ -14696,12 +14696,36 @@ precede joint publication of gas, mechanics and the complete load.
 
 An attached upstream tract is refused before any trial: two independent
 finite gas inventories require a joint solve. The first-order fixed-volume
-partition does not infer mean-pressure prestress, thermodynamic mass flow
-from acoustic flow, or heating from mechanical/acoustic dissipation.
+partition does not infer mean-pressure prestress or thermodynamic mass flow
+from acoustic flow. Default callbacks retain explicit exported dissipation.
 Focused synthetic regressions cover scalar caloric/wave-work feedback,
 independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
+
+### Physical gas heat from the original moving-aperture load
+
+`ApertureDg::step_with_finite_gas_viscous_molecular_heat_controlled` returns
+main-bore molecular/viscous and main-inventory terminal-passage shear heat
+through the same caloric/material-work solve. Scalar, independent-pair and
+material-modal mechanics retain their original nonlinear/ExactZoh solve.
+One private marched moving owner supplies the actual held DG inlet and
+implicit outlet/branch flows. Later thermal and material-work trials reuse
+that proposal without repeating mechanics or acoustic source integration.
+
+Raw coupled-frame losses remain intact; the gas enclosure removes the internal
+transfer once. Mechanical damping, contact, gap/jet losses, independent-branch
+loss, wall/solid and numerical losses retain their exported ownership. No
+moving-gap, supply-passage or second-tract gas inventory is inferred. Original
+complete-state heat budgets, source refresh, the fixed-volume partition and
+atomic refusal remain in force.
+
+Four focused regression groups cover independent slit shear/caloric balance,
+actual moving-port molecular/viscous integrals with unequal blades, zero-main-
+heat/independent-branch identity, and budget/late-cancellation rollback. Source
+parsing and scoped whitespace checks completed before executor loss; recovered
+manual source patches were reviewed and verified through GitHub. Native
+coupled compilation and execution remain unverified.
 
 ## Finite regional gas transport on shared acoustic motion
 

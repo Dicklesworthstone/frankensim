@@ -10,6 +10,9 @@ pub mod series;
 /// Conservative finite gas transport through original moving acoustic sources.
 pub mod transport;
 
+mod heat;
+pub(crate) use heat::PreparedFiniteGasApertureHeat;
+
 use super::{ApertureDg, DgApertureFrame, accept_acoustic_candidate};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::ApertureDrive;
@@ -19,7 +22,7 @@ use crate::bernoulli_aperture::two_sided::LoadedAperture;
 use crate::bernoulli_aperture::wall::material::heated_finite_gas;
 use crate::dg_port::finite_gas::{
     FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgPortCandidate, FiniteGasDgPortStep,
-    FiniteGasDgSolve, admit_initial, prepare_after_step,
+    FiniteGasDgSolve, SourceHeat, admit_initial, prepare_after_step_with_heat,
 };
 use crate::dg_port::{DgPortLoad, sum_terminal_work};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
@@ -75,15 +78,18 @@ fn finish<S, E, C: FnMut() -> bool>(
     mut frame: DgApertureFrame,
     initial_energy_j: f64,
     controls: FiniteGasDgSolve,
+    heat: SourceHeat,
     evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C) -> Result<FiniteGasDgBackground<S>, E>,
     cancelled: &mut C,
 ) -> Result<(DgPortLoad, ClosedGasParcel, FiniteGasApertureDgStep<S>), FiniteGasDgError<E>> {
-    let FiniteGasDgPortCandidate { load, gas, step } = prepare_after_step(
+    let internal_heat_j = heat.total_j()?;
+    let FiniteGasDgPortCandidate { load, gas, step } = prepare_after_step_with_heat(
         original,
         marched,
         frame.duct.clone(),
         gas,
         controls,
+        heat,
         evolve,
         cancelled,
     )?;
@@ -91,9 +97,16 @@ fn finish<S, E, C: FnMut() -> bool>(
     frame.parameter_work_j = step.refresh.parameter_work_j;
     frame.stored_energy_j = frame.aperture.stored_energy_j + load.stored_energy_j();
     frame.storage_change_j = frame.stored_energy_j - initial_energy_j;
+    // Keep the original native/mechanical report intact. Only the combined
+    // finite-gas enclosure removes heat that has already entered gas storage.
+    let exported_loss_j = if internal_heat_j == 0.0 {
+        frame.inferred_total_dissipation_j
+    } else {
+        frame.inferred_total_dissipation_j - internal_heat_j
+    };
     let combined_energy_residual_j = ((step.gas_energy_change_j
         + frame.storage_change_j
-        + frame.inferred_total_dissipation_j
+        + exported_loss_j
         + sum_terminal_work(&frame.terminals))
         - frame.upstream_work_j
         - frame.body_work_j
@@ -185,6 +198,7 @@ impl ApertureDg {
             frame,
             initial_energy_j,
             controls,
+            SourceHeat::default(),
             evolve,
             cancelled,
         )?;
@@ -271,6 +285,7 @@ impl ApertureDg<LoadedAperture> {
             frame,
             initial_energy_j,
             controls,
+            SourceHeat::default(),
             evolve,
             cancelled,
         )?;

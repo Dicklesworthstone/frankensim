@@ -6,20 +6,20 @@ use crate::bernoulli_aperture::wall::material::{
 use crate::dg_port::DgPortTrial;
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct SourceHeat {
+pub(crate) struct SourceHeat {
     pub(super) main: FiniteGasDgInternalHeat,
     pub(super) terminal_viscous_heat_j: f64,
 }
 
 impl SourceHeat {
-    fn gas_heat(self) -> FiniteGasDgInternalHeat {
+    pub(crate) fn gas_heat(self) -> FiniteGasDgInternalHeat {
         FiniteGasDgInternalHeat {
             molecular_heat_j: self.main.molecular_heat_j,
             viscous_heat_j: self.main.viscous_heat_j + self.terminal_viscous_heat_j,
         }
     }
 
-    pub(super) fn total_j<E>(self) -> Result<f64, FiniteGasDgError<E>> {
+    pub(crate) fn total_j<E>(self) -> Result<f64, FiniteGasDgError<E>> {
         self.main.total_j()?;
         if !self.terminal_viscous_heat_j.is_finite() || self.terminal_viscous_heat_j < 0.0 {
             return Err(FiniteGasDgError::Invalid(
@@ -49,7 +49,7 @@ impl PreparedFiniteGasDgPortHeat {
 }
 
 impl DgPortTrial<'_> {
-    fn finite_gas_heat<E, C: FnMut() -> bool>(
+    pub(crate) fn finite_gas_heat<E, C: FnMut() -> bool>(
         &self,
         controls: FiniteGasDgSolve,
         budgets: FiniteGasDgHeatBudget,

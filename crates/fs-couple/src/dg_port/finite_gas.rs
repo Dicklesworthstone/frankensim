@@ -11,8 +11,7 @@
 pub mod transport;
 
 mod heat;
-pub(crate) use heat::PreparedFiniteGasDgPortHeat;
-use heat::SourceHeat;
+pub(crate) use heat::{PreparedFiniteGasDgPortHeat, SourceHeat};
 
 use super::{DgGasRefresh, DgPortGasUpdate, DgPortLoad, DgTerminalChannelKind};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -266,7 +265,7 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_after_step_with_heat<S, E, C: FnMut() -> bool>(
+pub(crate) fn prepare_after_step_with_heat<S, E, C: FnMut() -> bool>(
     original: &DgPortLoad,
     marched: &DgPortLoad,
     mut output: DgStepOutput,
