@@ -1,0 +1,17 @@
+frankensim-shell-assembly-options-v1
+# YellowDog (MB 16912, rulings 16036): a DOUBLE BASS body for the material_strings shell route, table bass-h19-s2d.tsv (48 parts, 11358 nodes, 17777 triangles,
+# 114 ties): Johannsson's published bass table (hansjohannsson.com/resources/mesbass.html) and Brown's total f-hole area mapped onto the il Cannone specimen
+# tables by bass_specimen-v2.py (MaroonOak's cello mapping); every mapped value and every ASSUMPTION is in spec2/PROVENANCE.tsv. Not a scanned bass.
+# Every choice is cello-h12.5-C.assembly's (itself cannone-h6.assembly's except the projection work and the one bridge): window 15 Hz-5 kHz, the same two violin
+# shell packs, the v4 maximum projection work; only the string point on the bridge differs.
+window-hz 15 5000
+projection-work 2199023255552
+reference-thickness-m 0.003
+pack spruce @body
+pack maple violin-maple-sycamore-sonderegger2013-shell-declared-lowband.fsmatpk
+# One string per card (a 1-string card needs a 1-bridge profile). The string meets the bridge at this point (x, y) [m] of the table (string-contacts.tsv of
+# spec2: spacing 85 mm E to G, Johannsson 4-string); it drives its bridge node along x.
+bridge-component bridge
+bridge-direction 1 0 0
+# G string
+bridge 0.042500 -0.181000

@@ -581,5 +581,79 @@ fn g0_assembly_refuses_ambiguous_frames_slave_supports_budgets_and_missing_fluid
     });
 }
 
+/// One synthetic part, clamped at x = 0, with no tie: the band guard is reached without the shell tie step.
+fn single_part_body(gate: &CancelGate) -> SharedMaterialShellAssemblyBody {
+    let mut input = body(gate);
+    input.specimen.components.truncate(1);
+    input.specimen.edge_ties.clear();
+    let width = 6 * input.specimen.components[0].specimen.mesh().nodes.len();
+    let mut row = vec![0.0; width];
+    row[6 * 5 + 2] = 1.0;
+    input.force_ports = vec![ShellAssemblyForcePort {
+        components: vec![row],
+    }];
+    input
+}
+
+#[test]
+fn g0_a_retained_mode_outside_a_part_band_is_refused_by_name_and_an_in_band_body_is_unchanged() {
+    with_cx(|_, gate| {
+        let original = single_part_body(gate);
+        let image = original
+            .specimen
+            .reduce(&original.reduction, &original.force_ports, gate)
+            .unwrap();
+        let (a, b) = image.eigenvalue_intervals()[0];
+        let w0 = (0.5 * (a + b)).sqrt();
+        // The part's source band starts above the lowest assembled mode: that mode is outside it.
+        let lo = 1.5 * w0;
+        let narrow = shell_material_in_band(700.0, 1000.0, None, (lo, 100_000.0), 2.0 * w0);
+        let mut input = original.clone();
+        input.specimen = original
+            .specimen
+            .with_region_material("part-0", "wood", &narrow, gate)
+            .unwrap();
+        let text = input
+            .specimen
+            .reduce(&input.reduction, &input.force_ports, gate)
+            .unwrap_err()
+            .to_string();
+        let hz = |w: f64| w / core::f64::consts::TAU;
+        let source = "region 'wood' (synthetic shell/solid/fixture rev 0)";
+        assert!(
+            text.contains("assembled shell mode lies outside original component material support"),
+            "{text}"
+        );
+        assert!(text.contains("first miss: mode 0 at "), "{text}");
+        assert!(
+            text.contains(&format!(
+                "component 'part-0', {source}, band [{:.3}, {:.3}] Hz",
+                hz(lo),
+                hz(100_000.0)
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "[part-0 | {source} | [{:.3}, {:.3}] Hz |",
+                hz(lo),
+                hz(100_000.0)
+            )),
+            "{text}"
+        );
+        // The same body with an identical, wide band still reduces, to the same bytes.
+        let same = original
+            .specimen
+            .with_region_material("part-0", "wood", &shell_material(700.0, 1000.0), gate)
+            .unwrap()
+            .reduce(&original.reduction, &original.force_ports, gate)
+            .unwrap();
+        assert_eq!(same.physical_modes(), image.physical_modes());
+        assert_eq!(same.force_ports(), image.force_ports());
+        assert_eq!(same.eigenvalue_intervals(), image.eigenvalue_intervals());
+        assert_eq!(same.damping().matrix_per_s(), image.damping().matrix_per_s());
+    });
+}
+
 #[path = "assembly/glue.rs"]
 mod glue;

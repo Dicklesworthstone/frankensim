@@ -1,0 +1,26 @@
+frankensim-material-strings-v3
+audio 48000 144000 8 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 4 N2 0.78084 O2 0.20946 Ar 0.00934 CO2 0.00036
+body violin-spruce-norway-viala2020-shell-declared-lowband.fsmatpk 0.655420581 0.422618348 0.003 256 1
+strings 1
+string bass-spirocore.fsmatpk 1.375 0.000889 tension 313.8128 64 0 0.8 200000 0.1
+section measured 1 temperature_known 0 playing_length diameter_bass_d2 tension_bass_d2 linear_density_bass_d2 bending_stiffness_bass_d2_lo no-intrinsic-loss speaking-length
+polarizations two 1 0 1 0
+prepared-linear 512 4294967296 1000000000000000
+residual-flexibility exact-static-green
+bow-residual-flexibility exact-static-green
+cavity physical-neck 0.116066551 0.108482702 0.006970275 flanged flanged 1
+friction hyperbolic 0.8 0.4 0.2
+bow_ribbon 0.010 3
+bow_compliance quasistatic-continuation bow-hair-horse-pitteroff-woodhouse-acustica1998.fsmatpk 0.000095 0.65 50 0.5 2 frequency 0 relative_humidity_known 0 young_modulus_static density viscosity kelvin_voigt_young_viscosity_pw98_model
+forces retain 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	bow	bow	0
+initial	bow	0e0	2.720979796631535e0	7.272727272727273e-1
+events	2
+event	0e0	1.5e-1	bow	1.5e-1	2.720979796631535e0	7.272727272727273e-1
+event	2.5e0	2e-2	bow	1.5e-1	0e0	7.272727272727273e-1

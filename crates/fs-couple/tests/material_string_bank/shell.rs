@@ -15,6 +15,10 @@ fn shell_material(rho:f64, eta:f64) -> ResolvedMaterialStatePoint {
     shell_material_with_loss_anchor(rho, eta, None)
 }
 fn shell_material_with_loss_anchor(rho:f64, eta:f64, anchor:Option<f64>) -> ResolvedMaterialStatePoint {
+    shell_material_in_band(rho, eta, anchor, (0.0,100_000.0), 1000.0)
+}
+/// The same synthetic material with an explicit angular-frequency validity band [rad/s] and query point.
+fn shell_material_in_band(rho:f64, eta:f64, anchor:Option<f64>, band:(f64,f64), omega:f64) -> ResolvedMaterialStatePoint {
     let mut entries=vec![("density",Density::DIMS,rho),
         ("young_modulus_1",Pressure::DIMS,1.0e9),("young_modulus_2",Pressure::DIMS,4.0e8),
         ("poisson_ratio_12",Dims::NONE,0.25),("shear_modulus_12",Pressure::DIMS,1.8e8),
@@ -32,7 +36,7 @@ fn shell_material_with_loss_anchor(rho:f64, eta:f64, anchor:Option<f64>) -> Reso
     for (key,dims,value) in entries {
         claims.insert_claim(PropertyClaim { key:PropertyKey::new(key,dims),
             value:PropertyValue::Scalar {value,dims},
-            validity:ValidityDomain::unconstrained().with("T",280.0,310.0).with("omega",0.0,100_000.0),
+            validity:ValidityDomain::unconstrained().with("T",280.0,310.0).with("omega",band.0,band.1),
             uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
             provenance:Provenance {source:"synthetic curved material shell".into(),license:"CC0-1.0".into(),artifact:None},
             observations:vec![] }).unwrap();
@@ -40,7 +44,7 @@ fn shell_material_with_loss_anchor(rho:f64, eta:f64, anchor:Option<f64>) -> Reso
     }
     let card=MaterialCard::assemble(MaterialStateId {chemistry:"synthetic shell".into(),phase:"solid".into(),
         process:"fixture".into(),revision:0},claims,vec![]).unwrap();
-    resolve_material_state_point(&card,&QueryPoint::new().with("T",293.15).unwrap().with("omega",1000.0).unwrap(),
+    resolve_material_state_point(&card,&QueryPoint::new().with("T",293.15).unwrap().with("omega",omega).unwrap(),
         &requirements,MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
 fn geometry(rise:f64) -> (ShellMesh,NodalDirectors,Vec<ShellConstraint>) {

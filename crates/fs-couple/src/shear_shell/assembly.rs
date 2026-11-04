@@ -433,29 +433,21 @@ impl MaterialShellAssembly {
             )));
         }
         let modes = &report.modes[..n];
+        // Every retained mode against every original component band, once, right after the
+        // eigensolve and before any expansion or projection: the refusal names the whole miss.
+        let retained: Vec<f64> = modes
+            .iter()
+            .map(|mode| fs_math::det::sqrt(mode.lambda))
+            .collect();
+        if let Some(text) = band_refusal(&support_bands(&self.components), &retained) {
+            return Err(owner(text));
+        }
         let mut physical_modes = vec![Vec::with_capacity(n); self.components.len()];
         let mut intervals = Vec::with_capacity(n);
         let mut omega = Vec::with_capacity(n);
         for mode in modes {
             poll(gate)?;
             let w = fs_math::det::sqrt(mode.lambda);
-            if !w.is_finite()
-                || w <= 0.0
-                || self.components.iter().any(|part| {
-                    part.specimen
-                        .regions
-                        .iter()
-                        .any(|r| w < r.omega_band.0 || w > r.omega_band.1)
-                        || part.specimen.interfaces.iter().any(|r| {
-                            let band = r.omega_band_rad_s();
-                            w < band.0 || w > band.1
-                        })
-                })
-            {
-                return Err(invalid(
-                    "assembled shell mode lies outside original component material support",
-                ));
-            }
             let component_free = tied.expand_component_free(&mode.phi).map_err(owner)?;
             for (i, free) in component_free.iter().enumerate() {
                 physical_modes[i].push(models[i].expand(free).map_err(owner)?);
@@ -684,4 +676,237 @@ fn add(target: &mut [f64], input: &[f64]) -> Result<(), AcousticRealizeError> {
         }
     }
     Ok(())
+}
+
+/// One original source applicability band [rad/s] and the names a refusal must report.
+struct SupportBand {
+    component: String,
+    source: String,
+    band: (f64, f64),
+}
+
+fn support_bands(components: &[MaterialShellComponent]) -> Vec<SupportBand> {
+    let mut bands = Vec::new();
+    for part in components {
+        for r in &part.specimen.regions {
+            bands.push(SupportBand {
+                component: part.name.clone(),
+                source: format!(
+                    "region '{}' ({})",
+                    r.input.region.region.name,
+                    r.input.region.material.material()
+                ),
+                band: r.omega_band,
+            });
+        }
+        for (k, r) in part.specimen.interfaces.iter().enumerate() {
+            bands.push(SupportBand {
+                component: part.name.clone(),
+                source: format!("interface {k}"),
+                band: r.omega_band_rad_s(),
+            });
+        }
+    }
+    bands
+}
+
+/// The original refusal predicate, unchanged: a retained mode must be finite, positive and
+/// inside EVERY component region and interface band.
+fn mode_misses(w: f64, bands: &[SupportBand]) -> bool {
+    !w.is_finite() || w <= 0.0 || bands.iter().any(|b| w < b.band.0 || w > b.band.1)
+}
+
+/// `None` when every retained mode is inside every band; otherwise the refusal text, which names the
+/// first miss (mode index, Hz, component, material region, band) and then every band that is missed
+/// with its counts, and every retained mode that misses one.
+fn band_refusal(bands: &[SupportBand], omega: &[f64]) -> Option<String> {
+    use core::fmt::Write;
+    let hz = |w: f64| w / core::f64::consts::TAU;
+    let missed: Vec<usize> = (0..omega.len())
+        .filter(|&j| mode_misses(omega[j], bands))
+        .collect();
+    let first = *missed.first()?;
+    let w = omega[first];
+    let mut text = format!(
+        "assembled shell mode lies outside original component material support: {} of {} retained modes miss a band (retained span {:.3} to {:.3} Hz)",
+        missed.len(),
+        omega.len(),
+        hz(omega[0]),
+        hz(omega[omega.len() - 1])
+    );
+    let _ = match bands.iter().find(|b| w < b.band.0 || w > b.band.1) {
+        Some(b) => write!(
+            text,
+            "; first miss: mode {first} at {:.3} Hz, component '{}', {}, band [{:.3}, {:.3}] Hz",
+            hz(w),
+            b.component,
+            b.source,
+            hz(b.band.0),
+            hz(b.band.1)
+        ),
+        None => write!(
+            text,
+            "; first miss: mode {first} has a non-finite or non-positive angular frequency ({w:e} rad/s)"
+        ),
+    };
+    text.push_str("; bands missed [component | source | band | modes below | modes above]:");
+    for b in bands {
+        let below = omega
+            .iter()
+            .filter(|&&w| w.is_finite() && w < b.band.0)
+            .count();
+        let above = omega
+            .iter()
+            .filter(|&&w| w.is_finite() && w > b.band.1)
+            .count();
+        if below + above > 0 {
+            let _ = write!(
+                text,
+                " [{} | {} | [{:.3}, {:.3}] Hz | {below} below | {above} above]",
+                b.component,
+                b.source,
+                hz(b.band.0),
+                hz(b.band.1)
+            );
+        }
+    }
+    text.push_str("; modes missing a band (index:Hz):");
+    for &j in &missed {
+        let _ = write!(text, " {j}:{:.3}", hz(omega[j]));
+    }
+    Some(text)
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    const TAU: f64 = core::f64::consts::TAU;
+    fn band(component: &str, source: &str, lo_hz: f64, hi_hz: f64) -> SupportBand {
+        SupportBand {
+            component: component.into(),
+            source: source.into(),
+            band: (lo_hz * TAU, hi_hz * TAU),
+        }
+    }
+    fn rad(hz: f64) -> f64 {
+        hz * TAU
+    }
+
+    #[test]
+    fn a_planted_mode_below_a_band_is_refused_with_every_named_field() {
+        let bands = [
+            band("top", "region 'spruce' (spruce/p/q rev 1)", 100.0, 5000.0),
+            band("back", "region 'maple' (maple/p/q rev 2)", 150.0, 10_000.0),
+        ];
+        let omega = [rad(41.0), rad(99.0), rad(120.0), rad(160.0), rad(300.0)];
+        let text = band_refusal(&bands, &omega).unwrap();
+        assert!(text.starts_with(
+            "assembled shell mode lies outside original component material support: 3 of 5 retained modes miss a band (retained span 41.000 to 300.000 Hz)"
+        ), "{text}");
+        assert!(text.contains(
+            "first miss: mode 0 at 41.000 Hz, component 'top', region 'spruce' (spruce/p/q rev 1), band [100.000, 5000.000] Hz"
+        ), "{text}");
+        assert!(text.contains(
+            "[top | region 'spruce' (spruce/p/q rev 1) | [100.000, 5000.000] Hz | 2 below | 0 above]"
+        ), "{text}");
+        assert!(text.contains(
+            "[back | region 'maple' (maple/p/q rev 2) | [150.000, 10000.000] Hz | 3 below | 0 above]"
+        ), "{text}");
+        assert!(
+            text.ends_with("modes missing a band (index:Hz): 0:41.000 1:99.000 2:120.000"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_planted_mode_above_a_band_and_an_interface_band_are_named() {
+        let bands = [
+            band("top", "region 'spruce' (spruce/p/q rev 1)", 100.0, 5000.0),
+            band("top", "interface 0", 20.0, 700.0),
+        ];
+        let omega = [rad(150.0), rad(650.0), rad(900.0), rad(6000.0)];
+        let text = band_refusal(&bands, &omega).unwrap();
+        assert!(text.contains("2 of 4 retained modes miss a band"), "{text}");
+        assert!(text.contains("first miss: mode 2 at 900.000 Hz, component 'top', interface 0, band [20.000, 700.000] Hz"), "{text}");
+        assert!(
+            text.contains("[top | interface 0 | [20.000, 700.000] Hz | 0 below | 2 above]"),
+            "{text}"
+        );
+        assert!(text.contains("[top | region 'spruce' (spruce/p/q rev 1) | [100.000, 5000.000] Hz | 0 below | 1 above]"), "{text}");
+        assert!(
+            text.ends_with("modes missing a band (index:Hz): 2:900.000 3:6000.000"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_or_non_positive_mode_is_named_as_such() {
+        let bands = [band(
+            "top",
+            "region 'spruce' (spruce/p/q rev 1)",
+            100.0,
+            5000.0,
+        )];
+        assert!(band_refusal(&bands, &[rad(200.0)]).is_none());
+        for w in [0.0, -3.0, f64::NAN, f64::INFINITY] {
+            let text = band_refusal(&bands, &[rad(200.0), w]).unwrap();
+            assert!(text.contains("1 of 2 retained modes miss a band"), "{text}");
+        }
+        let text = band_refusal(&bands, &[rad(200.0), f64::NAN]).unwrap();
+        assert!(
+            text.contains("first miss: mode 1 has a non-finite or non-positive angular frequency"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_shared_predicate_is_the_original_inline_predicate_on_every_probe() {
+        let bands = [
+            band("top", "region 'spruce' (spruce/p/q rev 1)", 100.0, 5000.0),
+            band("back", "region 'maple' (maple/p/q rev 2)", 150.0, 10_000.0),
+            band("back", "interface 0", 20.0, 700.0),
+        ];
+        // The predicate as it stood inline in `reduce`, transcribed on plain (lo, hi) tuples.
+        let edges: Vec<(f64, f64)> = bands.iter().map(|b| b.band).collect();
+        let original =
+            |w: f64| !w.is_finite() || w <= 0.0 || edges.iter().any(|&(lo, hi)| w < lo || w > hi);
+        let mut grid = vec![
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+        ];
+        for &(lo, hi) in &edges {
+            for edge in [lo, hi] {
+                grid.extend([
+                    edge,
+                    f64::from_bits(edge.to_bits() + 1),
+                    f64::from_bits(edge.to_bits() - 1),
+                ]);
+            }
+        }
+        grid.extend((1..4000).map(|k| f64::from(k) * 17.0));
+        let mut inside = 0;
+        for &w in &grid {
+            assert_eq!(mode_misses(w, &bands), original(w), "w = {w:e}");
+            assert_eq!(
+                band_refusal(&bands, &[w]).is_some(),
+                original(w),
+                "w = {w:e}"
+            );
+            inside += usize::from(!original(w));
+        }
+        assert!(
+            inside > 100 && inside < grid.len(),
+            "the probe set must cover both verdicts"
+        );
+        // A whole in-band spectrum is never refused, an edge-exact one neither.
+        // (rad(150) = 942.5 rad/s is the largest lower edge, rad(700) = 4398 rad/s the smallest upper edge.)
+        let inband: Vec<f64> = (0..64).map(|k| rad(150.0) + f64::from(k) * 40.0).collect();
+        assert!(band_refusal(&bands, &inband).is_none());
+        assert!(band_refusal(&bands, &[bands[1].band.0, bands[2].band.1]).is_none());
+    }
 }

@@ -1,0 +1,19 @@
+frankensim.specimen.v1
+key	value
+specimen_id	double-bass-johannsson-shell
+maker	Hans Johannsson, as named on the published bass specification table (hansjohannsson.com/resources/mesbass.html); not a surviving instrument, a table of maker's values
+model	four-string double bass, body length 1130 mm (the single column 'BASS mm.' of the table)
+serial	none; a published specification, not one instrument
+year	unstated (the page is undated and says 'This table is being modified and revised')
+system	unstrung shell model of a four-string double bass body: top plate with two f-holes, back plate, rib ring, bass bar, soundpost, bridge, and the enclosed air as one equivalent neck; the strings and the bow enter through the performance cards
+holder	none; no instrument exists for this model
+reference_state	unstrung body shell; strings are in the cards (4/4 Spirocore rows at a 1.100 m speaking length, no intrinsic string loss)
+environment	unstated
+source_ids	johannsson-bass-specification-shell-model;brown-2004-double-bass-dissertation;esrf-il-cannone-ct-2026
+target_relation	a double-bass body for the shell route built from a maker's published table: a violin-form outline (il Cannone, ledger row esrf-il-cannone-ct-2026) scaled to the table's length and three bout widths; NOT a scanned bass and not the bass of the UIowa recordings; population-grade stand-in only; no fidelity claim beyond the grades posted with the rendered notes
+licence	facts only: the numbers of the published table and of Brown's dissertation, with attribution; the il Cannone tables keep their own CC-BY-4.0 terms (ledger row esrf-il-cannone-ct-2026)
+units_and_frame	every length in the specimen tables is in millimetres in the plan frame of the il Cannone tables mapped through PROVENANCE.tsv (plan_length_scale, plan_width_scale); the shell-assembly table is in millimetres, its cavity row and the cards are in SI
+extraction	crates/fs-couple/examples/shell_body_modes/bass_specimen.py on data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026 writes the 14 specimen tables listed in specimen-files.md5 (numpy only; identical bytes on macOS arm64 and Linux x86-64); the shell-assembly table is written from them by gen_violin_shell_assembly.py with the options in PROVENANCE-generator.tsv
+unknowns	every ASSUMPTION is in PROVENANCE.tsv and PROVENANCE-generator.tsv; the largest: no published bass outline, arching or bridge mass; the bar moved 18.1 mm off the bass foot to clear the f-hole (the one unpublished position); interior plate thickness = the mean of three printed stations; rib taper 220-160 replaced by its midpoint 190; the cards use 4/4 strings at 1.100 m against the table's string length of about 1070 mm (the 30 mm is not modelled)
+not_represented	neck and upper block, tail block, tailpiece, endpin, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch, the sloping shoulders and flat or sloping back of many basses, the rib taper, bridge cut-outs of a real bass bridge
+wood_bands	the posted notes use the declared-lowband wood packs (ledger row bass-declared-lowband-shell-packs): body wood properties below 150 Hz (maple) and 100 Hz (spruce) are a declared extrapolation of the measured packs, not measurements
