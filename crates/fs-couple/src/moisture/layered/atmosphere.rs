@@ -32,7 +32,10 @@ pub type LayeredAtmosphereMoistureCandidate =
 pub type SharedLayeredAtmosphereMoistureCandidate =
     SharedAtmosphereMoistureCandidate<MoistureLayeredSlab, MoistureLayeredReport>;
 
-fn water_change(old: &MoistureLayeredSlab, next: &MoistureLayeredSlab) -> f64 {
+pub(in crate::moisture) fn water_change(
+    old: &MoistureLayeredSlab,
+    next: &MoistureLayeredSlab,
+) -> f64 {
     water_sum(
         old.layers
             .iter()
@@ -113,13 +116,7 @@ impl FiniteMoistureAtmosphere {
         )?;
         let (atmosphere, mut solids, shared) = candidate.into_parts();
         let solid = solids.pop().expect("one admitted layered stack");
-        let mut sorption = [None, None];
-        for (side, layer) in [0, moisture.layers.len() - 1].into_iter().enumerate() {
-            poll(cx)?;
-            if let Some(activity) = solid.transport.surface_activities[side] {
-                sorption[side] = Some(endpoint_sorption(&moisture.layers[layer], activity)?);
-            }
-        }
+        let sorption = surface_sorption(moisture, &solid.transport, cx)?;
         let step = AtmosphereMoistureStep {
             sorption,
             transport: solid.transport,
@@ -170,33 +167,12 @@ impl FiniteMoistureAtmosphere {
                 .ok_or(AtmosphereMoistureError::Invalid(
                     "shared-atmosphere total layered cell budget exhausted",
                 ))?;
-            if body.moisture.time_s().to_bits() != time_s.to_bits()
-                || body.moisture.layers[0]
-                    .sorption
-                    .temperature_kelvin()
-                    .to_bits()
-                    != temperature.to_bits()
-            {
+            if body.moisture.time_s().to_bits() != time_s.to_bits() {
                 return Err(AtmosphereMoistureError::Invalid(
                     "layered stacks need the same accepted clock and gas temperature",
                 ));
             }
-            if effective_exposure(body).into_iter().any(|face| face) {
-                let supported = body.moisture.activity_bounds;
-                if controls.relative_humidity_bracket[0] < supported[0]
-                    || controls.relative_humidity_bracket[1] > supported[1]
-                {
-                    return Err(AtmosphereMoistureError::Invalid(
-                        "finite humidity bracket exceeds a layered source domain",
-                    ));
-                }
-                for layer in &body.moisture.layers {
-                    poll(cx)?;
-                    // Pressure/composition cannot remain hidden fixed inputs
-                    // while this very gas owner changes them during exchange.
-                    admit_environment(layer.sorption.source_point())?;
-                }
-            }
+            admit_exchange(body.moisture, temperature, body.exposed, controls, cx)?;
         }
         let all_sealed = ordered
             .iter()
@@ -243,4 +219,56 @@ fn effective_exposure(body: &LayeredMoistureParticipant<'_>) -> [bool; 2] {
         body.exposed[side]
             && body.moisture.exterior_transfer[side] != MoistureActivityTransfer::Sealed
     })
+}
+
+/// Shared source/environment admission for reference and swelling-metric
+/// transport. Geometry may alter conductance, never the supported RH context.
+pub(in crate::moisture) fn admit_exchange(
+    moisture: &MoistureLayeredSlab,
+    temperature: f64,
+    exposed: [bool; 2],
+    controls: AtmosphereMoistureSolve,
+    cx: &Cx<'_>,
+) -> Result<[bool; 2], AtmosphereMoistureError> {
+    poll(cx)?;
+    if moisture.layers[0].sorption.temperature_kelvin().to_bits() != temperature.to_bits() {
+        return Err(AtmosphereMoistureError::Invalid(
+            "layered stacks need the same accepted clock and gas temperature",
+        ));
+    }
+    let exposed = std::array::from_fn(|side| {
+        exposed[side] && moisture.exterior_transfer[side] != MoistureActivityTransfer::Sealed
+    });
+    if exposed.into_iter().any(|face| face) {
+        let supported = moisture.activity_bounds;
+        if controls.relative_humidity_bracket[0] < supported[0]
+            || controls.relative_humidity_bracket[1] > supported[1]
+        {
+            return Err(AtmosphereMoistureError::Invalid(
+                "finite humidity bracket exceeds a layered source domain",
+            ));
+        }
+        for layer in &moisture.layers {
+            poll(cx)?;
+            // This gas owner changes pressure/composition during exchange.
+            // Those cannot remain hidden fixed inputs to a source isotherm.
+            admit_environment(layer.sorption.source_point())?;
+        }
+    }
+    Ok(exposed)
+}
+
+pub(in crate::moisture) fn surface_sorption(
+    moisture: &MoistureLayeredSlab,
+    transport: &MoistureLayeredReport,
+    cx: &Cx<'_>,
+) -> Result<[Option<ResolvedMaterialStatePoint>; 2], MoistureError> {
+    let mut sorption = [None, None];
+    for (side, layer) in [0, moisture.layers.len() - 1].into_iter().enumerate() {
+        poll(cx)?;
+        if let Some(activity) = transport.surface_activities[side] {
+            sorption[side] = Some(endpoint_sorption(&moisture.layers[layer], activity)?);
+        }
+    }
+    Ok(sorption)
 }

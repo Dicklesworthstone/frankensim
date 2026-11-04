@@ -17,6 +17,32 @@
 use super::*;
 use crate::moisture::layered::MoistureLayeredMetric;
 
+#[path = "deforming/atmosphere.rs"]
+mod atmosphere;
+pub use atmosphere::{
+    MoistureSpatialAtmosphereCandidate, MoistureSpatialAtmosphereControls,
+    MoistureSpatialAtmosphereReport,
+};
+
+// One counter follows every RH trial and nonlinear geometry evaluation.
+// A native mechanical solve is reserved BEFORE entering the original owner.
+struct SpatialSolveBudget {
+    used: usize,
+    maximum: usize,
+}
+impl SpatialSolveBudget {
+    fn reserve(&mut self, cx: &Cx<'_>) -> Result<(), MoistureError> {
+        poll(cx)?;
+        if self.used >= self.maximum {
+            return Err(MoistureError::Invalid(
+                "cumulative spatial solid-solve budget exhausted",
+            ));
+        }
+        self.used += 1;
+        Ok(())
+    }
+}
+
 /// Original conservative transport, together with the measured spatial metric.
 #[derive(Clone, Debug)]
 pub struct MoistureSpatialDiffusionReport {
@@ -145,6 +171,34 @@ impl MoistureLayeredSolid {
         maximum_geometry_residual_m: f64,
         cx: &Cx<'_>,
     ) -> Result<MoistureLayeredSolidStep<MoistureSpatialDiffusionReport>, MoistureError> {
+        let mut work = SpatialSolveBudget {
+            used: 0,
+            maximum: usize::MAX,
+        };
+        self.advance_spatial_diffusion_budgeted(
+            moisture,
+            dt_s,
+            faces,
+            transport,
+            nonlinear,
+            maximum_geometry_residual_m,
+            &mut work,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_spatial_diffusion_budgeted(
+        &self,
+        moisture: &MoistureLayeredSlab,
+        dt_s: f64,
+        faces: &[MoistureLayeredFace; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        maximum_geometry_residual_m: f64,
+        work: &mut SpatialSolveBudget,
+        cx: &Cx<'_>,
+    ) -> Result<MoistureLayeredSolidStep<MoistureSpatialDiffusionReport>, MoistureError> {
         poll(cx)?;
         if !positive(maximum_geometry_residual_m) {
             return Err(MoistureError::Invalid(
@@ -152,10 +206,10 @@ impl MoistureLayeredSolid {
             ));
         }
         let mut final_state = None;
-        let mut native_solid_solves = 0usize;
+        let initial_solid_solves = work.used;
         let mut resolve_metric = |candidate: &MoistureLayeredSlab| {
+            work.reserve(cx)?;
             let solid = self.resolve(candidate, cx)?;
-            native_solid_solves += 1;
             let geometry = AxialMetric::from_geometry(
                 &self.nodes_m,
                 solid.geometry().nodes_m(),
@@ -187,7 +241,7 @@ impl MoistureLayeredSolid {
             current_cross_section_m2,
             maximum_geometry_residual_m,
             geometry_identity: solid.geometry().identity(),
-            native_solid_solves,
+            native_solid_solves: work.used - initial_solid_solves,
         };
         poll(cx)?;
         Ok(MoistureLayeredSolidStep {

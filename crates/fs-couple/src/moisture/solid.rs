@@ -36,7 +36,8 @@ use fs_solid::{
 };
 pub use layered::{
     MoistureLayerSolidSource, MoistureLayeredSolid, MoistureLayeredSolidStep,
-    MoistureSpatialDiffusionReport,
+    MoistureSpatialAtmosphereCandidate, MoistureSpatialAtmosphereControls,
+    MoistureSpatialAtmosphereReport, MoistureSpatialDiffusionReport,
 };
 
 /// Fixed source-principal and mesh frames, independent of elastic symmetry.

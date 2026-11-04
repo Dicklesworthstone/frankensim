@@ -27131,6 +27131,15 @@ Focused G1 tests independently solve the one-cell swelling polynomial, finite cu
 Scope: explicitly opted-in spatial diffusivity, isothermal quasistatic small-strain mechanics, and axis-aligned rectangular common sections within the caller's nodal tolerance. Bending, shear and taper outside that tolerance refuse. Stress chemical potentials, strain-dependent diffusivity, sorption heat, general moving meshes, finite-strain constitutive mechanics and liquid transport are separate capabilities.
 
 
+### Finite atmospheric water coupled to swelling geometry
+
+`MoistureLayeredSolid::advance_spatial_diffusion_finite_atmosphere` joins the original spatial transport and native solid solve to the original finite-vapor atmosphere balance. Each endpoint-humidity trial starts from the same accepted moisture field. Its actual axial stretch supplies the bulk `1/lambda_x^2` metric, and its actual current area supplies surface and contact transfer. The atmosphere owner alone accepts water uptake, reconstructs the gas, and checks water, carrier, and total-mass conservation.
+
+`MoistureSpatialAtmosphereControls` bounds complete transport evaluations and actual native solid solves cumulatively across every humidity and nonlinear geometry trial, including discarded trials. The solid allowance is reserved before each native solve. Reports retain original transport/source/geometry identities and cumulative work counts; failed admission, budgets, balances, or cancellation publish no changed input.
+
+This is an isothermal, quasistatic small-strain extension for the existing admitted separable prism. The atmosphere retains its fixed gas free volume: specimen expansion is not deducted from that volume. Displacement-volume coupling, gas-pressure traction, sorption heat, and pressure work are outside this API. Five public-API regression groups cover independent coupled inventory/geometry equations, finite current-area surface resistance, zero-swelling reduction, sealed and wet/dry finite reservoirs, cumulative trial budgets, source/geometry refusal, replay, and cancellation. Rustfmt parsing and source/API review passed; native execution of these new integration tests remains unverified in this environment.
+
+
 ### Source-bound coating admission for complete forced shell response
 
 `PreparedShellResonance::harmonic_factor_with_coating_strain` pairs the complete forced factor with its own original shell or assembled-shell strain owner. Each accepted response retains all selected material memory and independent load states, the source-band checks, signed physical work and original equation residuals. The actual coherent complex displacement must pass every original film's sufficient strain bound over the whole coated triangle, both film faces and the complete oscillation cycle. No phase sampling, modal normalization, foreign observer or copied geometry enters the check.

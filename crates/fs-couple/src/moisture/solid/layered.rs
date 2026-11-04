@@ -22,7 +22,10 @@ use crate::moisture::{
         atmosphere::LayeredAtmosphereMoistureCandidate,
     },
 };
-pub use deforming::MoistureSpatialDiffusionReport;
+pub use deforming::{
+    MoistureSpatialAtmosphereCandidate, MoistureSpatialAtmosphereControls,
+    MoistureSpatialAtmosphereReport, MoistureSpatialDiffusionReport,
+};
 
 /// Mechanical source choices for exactly one layer in original stack order.
 #[derive(Clone, Debug)]
