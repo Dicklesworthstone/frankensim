@@ -116,6 +116,37 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
         Ok(())
     }
 
+    /// Hold a spatial reservoir pressure perturbation [Pa] on a pressure face.
+    ///
+    /// The callback receives fixed world/grid cell centers [m], in deterministic
+    /// z/y/x order. The original source density and dx/dt convert gauge pressure
+    /// to the native isothermal density target. This is neither absolute gas
+    /// pressure nor a pressure-work or finite-reservoir model.
+    ///
+    /// Sampling and conversion finish before native profile publication, reusing
+    /// two scalar plane buffers. Refusal/cancellation preserves the previous
+    /// trace. Accepted populations, body history, forces and time do not change;
+    /// the following step's shared `open` receipt measures actual mass and
+    /// linear/angular momentum exchange. Returned density diagnostics are IN
+    /// LATTICE UNITS, with no fallible post-publication conversion.
+    pub fn set_pressure_profile_si(
+        &mut self,
+        face: Face3,
+        gate: &CancelGate,
+        sample: impl FnMut([f64; 3]) -> Result<f64, BoundaryProfileError3>,
+    ) -> Result<PressureProfileReport3, Error> {
+        boundary::set_pressure_profile_si(&mut self.grid, &self.scaling, face, gate, sample)
+    }
+
+    /// Restore the held uniform pressure target without advancing accepted state.
+    pub fn clear_pressure_profile(&mut self, face: Face3, gate: &CancelGate) -> Result<(), Error> {
+        if gate.is_requested() {
+            return Err(Error::Profile(BoundaryProfileError3::Cancelled));
+        }
+        self.grid.clear_pressure_profile(face);
+        Ok(())
+    }
+
     /// Replace an externally authored uniform fluid volume force [N/m^3].
     ///
     /// This is a force on represented fluid only. The load is held for

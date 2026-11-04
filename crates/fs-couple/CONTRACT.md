@@ -27771,6 +27771,28 @@ nonuniform shear driving body translation/spin with independent six-component
 momentum balance; the full source-backed continuation/clear regression is in
 `tests/material_immersed/flow.rs`.
 
+The same material immersed interfaces also expose `set_pressure_profile_si`
+and `clear_pressure_profile`, including shared finite-carrier surfaces.
+Sampling receives fixed world/grid cell centers in metres and returns gauge
+pressure perturbations in Pa. The original source-owned
+`density_lattice_from_pressure_perturbation` converts each sample to the native
+reference-one isothermal density target. Its positive-density, finite-scale and
+representability checks remain binding; no new pressure or Mach law is added.
+
+The common native pressure-profile owner reuses two scalar plane buffers and
+publishes only a complete admitted trace. Source/conversion/cancellation refusal
+retains the preceding profile. Updating or clearing profiles preserves accepted
+fluid/body/surface history, force frames and time. Subsequent original steps
+measure reservoir mass and linear/angular transport once in their shared
+`open` receipt. Diagnostics retain explicit lattice units, so no fallible
+conversion follows publication. These controls do not supply absolute gas
+pressure, finite reservoir storage, pressure work or a calibrated inflow model.
+
+Focused original-source SI cases compare physical cell-center sampling and
+pressure conversion against independently authored native profiles on all
+six faces at two source densities and two cell sizes. Invalid or unrepresentable
+pressure, retained source errors, cancellation and successful retry are covered.
+
 ### Inertial ambient capture and complete molecular momentum
 
 `GasRocketState::advance_effusion_exchange_with_ambient` adds prescribed

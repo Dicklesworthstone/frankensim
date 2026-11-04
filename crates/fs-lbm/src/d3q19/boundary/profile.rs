@@ -5,6 +5,9 @@
 use super::{BoundaryGrid3, Face3, FaceBoundary3, planar_face_cells};
 use fs_exec::CancelGate;
 
+mod pressure;
+pub use pressure::PressureProfileReport3;
+
 /// Control of the prescribed normal velocity, in lattice units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum InletFlux3 {
@@ -24,6 +27,8 @@ pub enum InletFlux3 {
 pub enum BoundaryProfileError3 {
     /// The requested face is not a declared velocity boundary.
     NotVelocityFace,
+    /// The requested face is not a declared pressure boundary.
+    NotPressureFace,
     /// No fluid open nodes are available on this face.
     EmptyFace,
     /// Mean-normal control is undefined at partially reconstructed wall seams.
@@ -35,6 +40,8 @@ pub enum BoundaryProfileError3 {
     /// A sampled or corrected velocity violates low-Mach admission or the
     /// caller's additional bound on the final prescribed trace.
     InvalidVelocity { cell: [usize; 3] },
+    /// A prescribed pressure-boundary density is nonpositive or nonfinite.
+    InvalidDensity { cell: [usize; 3] },
     /// An open node has a solid first-interior neighbor.
     InvalidInterior { cell: [usize; 3] },
     /// Callback refusal, retaining the original field's reason.
@@ -68,9 +75,9 @@ pub struct VelocityProfileReport3 {
     pub maximum_speed_squared_lu: f64,
 }
 
-pub(super) struct ProfileState3 {
-    values: Vec<[f64; 3]>,
-    scratch: Vec<[f64; 3]>,
+pub(super) struct ProfileState3<T = [f64; 3]> {
+    values: Vec<T>,
+    scratch: Vec<T>,
 }
 
 fn check(gate: &CancelGate) -> Result<(), BoundaryProfileError3> {

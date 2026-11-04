@@ -23,7 +23,7 @@ use crate::CS2;
 mod sgs;
 pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
 mod profile;
-pub use profile::{BoundaryProfileError3, InletFlux3, VelocityProfileReport3};
+pub use profile::{BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3};
 mod forcing;
 pub use forcing::{BoundaryForcingError3, RigidFrame3};
 mod curved;
@@ -620,6 +620,8 @@ pub struct BoundaryGrid3 {
     /// Explicit spatial velocity traces, sampled outside the lattice step.
     /// Each face owns two reusable plane buffers for atomic profile updates.
     velocity_profiles: [Option<profile::ProfileState3>; 6],
+    /// Spatial pressure targets as native densities, with reusable atomic buffers.
+    pressure_profiles: [Option<profile::ProfileState3<f64>>; 6],
 }
 
 /// Lattice tiles per pooled kernel tile (512 cells).
@@ -787,6 +789,7 @@ impl BoundaryGrid3 {
             force_field_shape: None,
             open_cells: None,
             velocity_profiles: core::array::from_fn(|_| None),
+            pressure_profiles: core::array::from_fn(|_| None),
         };
         let (wall_masks, open_masks, stationary_masks) = grid.compile_link_masks(&grid.solid);
         grid.link_masks = wall_masks;
@@ -847,9 +850,10 @@ impl BoundaryGrid3 {
     /// regularized boundary operator. Immersed receipts account for its actual
     /// reservoir mass, impulse and angular impulse in their shared `open` field.
     ///
-    /// A changed velocity target with an installed spatial profile refuses:
+    /// A changed uniform target with an installed spatial profile refuses:
     /// clear that profile explicitly first, or update it with
-    /// [`Self::set_velocity_profile`]. Unchanged profiles remain authoritative.
+    /// [`Self::set_velocity_profile`] or [`Self::set_pressure_profile`].
+    /// Unchanged profiles remain authoritative.
     /// Targets are held over each tick; this does not interpolate a waveform,
     /// model a finite reservoir, or provide a pressure-work balance.
     ///
@@ -879,7 +883,9 @@ impl BoundaryGrid3 {
                     "live open targets must preserve face kinds and wall data",
                 ));
             }
-            if self.velocity_profiles[face.index()].is_some() {
+            if self.velocity_profiles[face.index()].is_some()
+                || self.pressure_profiles[face.index()].is_some()
+            {
                 return Err(BoundaryForcingError3::Invalid(
                     "clear or update the spatial profile before changing its uniform target",
                 ));
@@ -2102,7 +2108,10 @@ impl BoundaryGrid3 {
                 neighbor_rho,
                 self.profile_velocity(face, cell).unwrap_or(velocity),
             ),
-            FaceBoundary3::Pressure { density } => (density, neighbor_velocity),
+            FaceBoundary3::Pressure { density } => (
+                self.profile_density(face, cell).unwrap_or(density),
+                neighbor_velocity,
+            ),
             FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
         };
         let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);

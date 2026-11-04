@@ -9745,6 +9745,28 @@ receipt is introduced. The spatial-shear regression in
 `tests/open_partial_saturation3.rs` exercises actual body spin and independent
 mass, linear and angular inventories with all four admitted collision models.
 
+`BoundaryGrid3::set_pressure_profile` holds spatial positive finite density
+targets on declared pressure faces. It reuses the profile owner's deterministic
+sampling and two scalar plane buffers. Source, density, geometry or cancellation
+refusal retains the complete previous trace and accepted populations. Successful
+profiles lock solid topology. `clear_pressure_profile` restores the held uniform
+density; changing that uniform target while a profile is installed refuses.
+
+The original regularized pressure operator changes only its per-node density
+selection. First-interior velocity/stress, Guo framing and mixed wall/open link
+ownership remain authoritative. At mixed seams actual density need not equal
+the complete prescribed trace. Updates advance no populations or physical time;
+the following common step's shared `open` receipt measures actual mass, linear
+and angular transport. The report contains sampled count and minimum/maximum
+lattice density, without a pressure-work or thermodynamic interpretation.
+
+`tests/pressure_profiles.rs` covers all six face orientations, uniform
+trajectory identity including mixed seams, spatial density reconstruction,
+buffer reuse, target precedence and atomic refusal. The pressure-history case
+in `tests/open_partial_saturation3.rs` drives an elongated body's translation
+and spin, compares a uniform-pressure control, and independently closes mass
+and all six momentum components through the original four collision models.
+
 ### Moving finite film carriers on the dry sphere/fluid clock
 
 `MovingLubricationSurface3::{Prescribed, Finite}` and the moving/dry

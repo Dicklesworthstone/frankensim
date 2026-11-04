@@ -515,6 +515,22 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> SubmergedMaterialBodies<
         self.native.clear_velocity_profile(face, gate)
     }
 
+    /// Hold physical cell-center pressure perturbations [Pa] through the original
+    /// material scaling and native reservoir momentum owner. Diagnostics use LU.
+    pub fn set_pressure_profile_si(
+        &mut self,
+        face: Face3,
+        gate: &CancelGate,
+        sample: impl FnMut([f64; 3]) -> Result<f64, BoundaryProfileError3>,
+    ) -> Result<PressureProfileReport3, Error> {
+        self.native.set_pressure_profile_si(face, gate, sample)
+    }
+
+    /// Restore the held uniform pressure target without advancing accepted state.
+    pub fn clear_pressure_profile(&mut self, face: Face3, gate: &CancelGate) -> Result<(), Error> {
+        self.native.clear_pressure_profile(face, gate)
+    }
+
     /// Apply reduced weight plus authored WORLD center forces/couples once.
     ///
     /// The grid has no gravity force: reference hydrostatic pressure is removed.

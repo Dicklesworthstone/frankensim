@@ -12,7 +12,7 @@ use fs_lbm::d3q19::{
     BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
     BoundaryProfileError3, BoundarySpec3, CollisionError3, Face3, FaceBoundary3, InletFlux3,
     MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3, PartialSaturationError3,
-    SphereLubrication3, TILE, VelocityProfileReport3,
+    PressureProfileReport3, SphereLubrication3, TILE, VelocityProfileReport3,
 };
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
 use fs_material::fluid_transport::FluidTransport;

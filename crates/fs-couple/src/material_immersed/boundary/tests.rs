@@ -402,3 +402,109 @@ fn si_profile_corrected_overspeed_source_failure_and_cancel_keep_previous_trace(
     assert_eq!(grid.velocity_profile(Face3::ZMin).unwrap(), profile);
     assert_eq!(populations(&grid), before);
 }
+
+fn pressure_faces(axis: usize, upper: bool) -> [FaceBoundarySi; 6] {
+    let mut faces = profile_faces(axis, upper);
+    faces[2 * axis + usize::from(upper)] = FaceBoundarySi::Pressure { perturbation_pa: 0.0 };
+    faces
+}
+
+#[test]
+fn si_pressure_profiles_use_physical_positions_and_source_scaling_on_all_faces() {
+    let gate = CancelGate::new_clock_free();
+    for rho in [2.0, 8.0] {
+        let fluid = FluidTransportState::try_new(rho, 1024.0, 0.25, rho / 8192.0).unwrap();
+        for dx in [1.0 / 64.0, 1.0 / 32.0] {
+            let domain = ImmersedDomain { cell_size_m: dx, ..domain() };
+            let scaling = plan_scaling_from_material(
+                &fluid, dx, domain.timestep_s, domain.maximum_speed_m_s,
+            ).unwrap();
+            let speed_unit = dx / domain.timestep_s;
+            let pressure_unit = fs_lbm::CS2 * rho * speed_unit * speed_unit;
+            for axis in 0..3 {
+                for upper in [false, true] {
+                    let face = Face3::ALL[2 * axis + usize::from(upper)];
+                    let boundary = domain.with_boundaries(pressure_faces(axis, upper))
+                        .lattice_boundaries(&scaling).unwrap();
+                    let mut actual = BoundaryGrid3::new(8, 8, 8, scaling.flow().tau, [0.0; 3], boundary);
+                    let mut reference = BoundaryGrid3::new(8, 8, 8, scaling.flow().tau, [0.0; 3], boundary);
+                    let before = populations(&actual);
+                    let mut positions = Vec::new();
+                    let pressure = |position: [f64; 3]| 1e-5 * (position[(axis + 1) % 3] - 4.0 * dx);
+                    let report = set_pressure_profile_si(
+                        &mut actual, &scaling, face, &gate, |position| {
+                            positions.push(position);
+                            Ok(pressure(position))
+                        },
+                    ).unwrap();
+                    // Independently authored numerical isothermal density targets.
+                    let expected = reference.set_pressure_profile(face, &gate, |cell| {
+                        let position = cell.map(|i| (i as f64 + 0.5) * dx);
+                        Ok(1.0 + pressure(position) / pressure_unit)
+                    }).unwrap();
+                    assert_eq!(report, expected);
+                    assert_eq!(actual.pressure_profile(face), reference.pressure_profile(face));
+                    assert_eq!(positions.len(), 64);
+                    let mut first = [0.5 * dx; 3];
+                    let mut last = [7.5 * dx; 3];
+                    first[axis] = if upper { 7.5 } else { 0.5 } * dx;
+                    last[axis] = first[axis];
+                    assert_eq!(positions[0], first);
+                    assert_eq!(positions[63], last);
+                    assert_eq!(populations(&actual), before);
+                    actual.step();
+                    reference.step();
+                    assert_eq!(populations(&actual), populations(&reference));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn si_pressure_profile_conversion_source_and_cancel_refuse_without_publication() {
+    let fluid = fluid();
+    let domain = domain();
+    let gate = CancelGate::new_clock_free();
+    let scaling = plan_scaling_from_material(
+        &fluid, domain.cell_size_m, domain.timestep_s, domain.maximum_speed_m_s,
+    ).unwrap();
+    let boundary = domain.with_boundaries(pressure_faces(2, false))
+        .lattice_boundaries(&scaling).unwrap();
+    let mut grid = BoundaryGrid3::new(8, 8, 8, scaling.flow().tau, [0.0; 3], boundary);
+    set_pressure_profile_si(&mut grid, &scaling, Face3::ZMin, &gate, |p| {
+        Ok(1e-5 * (p[0] - 4.0 * domain.cell_size_m))
+    }).unwrap();
+    let profile = grid.pressure_profile(Face3::ZMin).unwrap().to_vec();
+    let before = populations(&grid);
+    let pressure_unit = fs_lbm::CS2 * 2.0 * (domain.cell_size_m / domain.timestep_s).powi(2);
+    for invalid in [f64::NAN, f64::INFINITY, -pressure_unit, -2.0 * pressure_unit, f64::MIN_POSITIVE] {
+        assert!(matches!(
+            set_pressure_profile_si(&mut grid, &scaling, Face3::ZMin, &gate, |p| {
+                Ok(if p[0] > 7.0 * domain.cell_size_m && p[1] > 7.0 * domain.cell_size_m {
+                    invalid
+                } else { 0.0 })
+            }),
+            Err(Error::Profile(BoundaryProfileError3::Source(_))),
+        ));
+        assert_eq!(grid.pressure_profile(Face3::ZMin).unwrap(), profile);
+    }
+    let reason = BoundaryProfileError3::Source("pressure field unavailable".into());
+    assert_eq!(
+        set_pressure_profile_si(&mut grid, &scaling, Face3::ZMin, &gate, |_| Err(reason.clone())),
+        Err(Error::Profile(reason)),
+    );
+    let cancelled = CancelGate::new_clock_free();
+    assert_eq!(
+        set_pressure_profile_si(&mut grid, &scaling, Face3::ZMin, &cancelled, |_| {
+            cancelled.request();
+            Ok(0.0)
+        }),
+        Err(Error::Profile(BoundaryProfileError3::Cancelled)),
+    );
+    assert_eq!(grid.pressure_profile(Face3::ZMin).unwrap(), profile);
+    assert_eq!(populations(&grid), before);
+    set_pressure_profile_si(&mut grid, &scaling, Face3::ZMin, &gate, |_| Ok(0.0)).unwrap();
+    assert_eq!(grid.pressure_profile(Face3::ZMin).unwrap(), &[1.0; 64]);
+    assert_eq!(populations(&grid), before);
+}

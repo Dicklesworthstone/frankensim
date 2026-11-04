@@ -897,3 +897,78 @@ fn spatial_inlet_shear_reaches_body_spin_and_closes_actual_open_momentum() {
         assert!(rigid.angular_velocity[1] < -1e-6, "{collision:?}: {rigid:?}");
     }
 }
+
+#[test]
+fn spatial_pressure_histories_drive_body_force_and_torque_with_measured_transport() {
+    let gate = CancelGate::new_clock_free();
+    let origin = [-2.0, 6.0, -3.0];
+    let boundary = BoundarySpec3::new([
+        FaceBoundary3::Periodic, FaceBoundary3::Periodic,
+        FaceBoundary3::Periodic, FaceBoundary3::Periodic,
+        FaceBoundary3::Pressure { density: 1.003 },
+        FaceBoundary3::Pressure { density: 1.0 },
+    ]);
+    let mut fractions = vec![0.0; N * N * N];
+    // A centered elongated overlay distinguishes a pressure-gradient couple
+    // from the reflection-symmetric uniform-pressure control.
+    for z in 3..5 {
+        for y in 3..5 {
+            for x in 2..6 {
+                fractions[(z * N + y) * N + x] = 0.4;
+            }
+        }
+    }
+    for collision in models() {
+        let mut grid = BoundaryGrid3::with_collision_model(N, N, N, collision, [0.0; 3], boundary);
+        let mut control = BoundaryGrid3::with_collision_model(N, N, N, collision, [0.0; 3], boundary);
+        let mut rigid = body([4.0; 3]);
+        rigid.velocity = [0.0; 3];
+        rigid.angular_velocity = [0.0; 3];
+        rigid.inertia_world = [[1.3, 0.0, 0.0], [0.0, 1.7, 0.0], [0.0, 0.0, 2.0]];
+        let mut control_body = rigid;
+        let mut reservoir_impulse = 0.0;
+        for tick in 0..10 {
+            let before = snapshot(&grid);
+            let old = rigid;
+            let mean = if tick < 4 { 1.003 } else { 1.004 };
+            grid.set_pressure_profile(Face3::ZMin, &gate, |[x, _, _]| {
+                Ok(mean + 0.0004 * (x as f64 - 3.5))
+            }).unwrap();
+            let mut faces = Face3::ALL.map(|face| control.boundaries().face(face));
+            faces[4] = FaceBoundary3::Pressure { density: mean };
+            control.rebind_open_boundaries(BoundarySpec3::new(faces), &gate).unwrap();
+            assert_eq!(snapshot(&grid), before);
+            assert_eq!(rigid, old);
+            let _ = control.step_with_partial_saturation_body(
+                &fractions, &mut control_body, [0.0; 6], origin, &gate,
+            ).unwrap();
+            let receipt = grid.step_with_partial_saturation_body(
+                &fractions, &mut rigid, [0.0; 6], origin, &gate,
+            ).unwrap();
+            let (mass, fluid) = fluid_change(&before, &grid, origin);
+            let solid = body_change(old, rigid, origin);
+            close(mass, receipt.open.mass_change, 2e-12);
+            for axis in 0..3 {
+                close(
+                    fluid[axis] + solid[axis],
+                    receipt.open.impulse[axis] + receipt.walls.fluid_population_impulse[axis]
+                        + receipt.forcing.impulse[axis],
+                    4e-12,
+                );
+                close(
+                    fluid[axis + 3] + solid[axis + 3],
+                    receipt.open.angular_impulse[axis]
+                        + receipt.walls.fluid_population_angular_impulse[axis]
+                        + receipt.periodic.angular_momentum_change[axis]
+                        + receipt.forcing.angular_impulse[axis],
+                    3e-11,
+                );
+            }
+            reservoir_impulse += receipt.open.impulse[2].abs();
+        }
+        assert!(reservoir_impulse > 0.01);
+        assert!(rigid.velocity[2] > 1e-5, "{collision:?}: {rigid:?}");
+        assert!(rigid.angular_velocity[1] < -1e-7, "{collision:?}: {rigid:?}");
+        assert!(control_body.angular_velocity[1].abs() < 1e-13);
+    }
+}

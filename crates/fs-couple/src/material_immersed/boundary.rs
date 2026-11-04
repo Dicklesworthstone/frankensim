@@ -172,3 +172,26 @@ pub(super) fn set_velocity_profile_si<F: FluidTransport + ?Sized>(
     })
     .map_err(Error::Profile)
 }
+
+
+/// Convert a held physical pressure-perturbation trace with the original
+/// reference density and numerical isothermal pressure mapping.
+pub(super) fn set_pressure_profile_si<F: FluidTransport + ?Sized>(
+    grid: &mut BoundaryGrid3,
+    scaling: &MaterialScaling<'_, F>,
+    face: Face3,
+    gate: &CancelGate,
+    mut sample: impl FnMut([f64; 3]) -> Result<f64, BoundaryProfileError3>,
+) -> Result<PressureProfileReport3, Error> {
+    if gate.is_requested() {
+        return Err(Error::Profile(BoundaryProfileError3::Cancelled));
+    }
+    grid.set_pressure_profile(face, gate, |cell| {
+        let position = convert(cell.map(|i| i as f64 + 0.5), scaling.cell_size_m())
+            .map_err(|error| BoundaryProfileError3::Source(error.to_string()))?;
+        scaling
+            .density_lattice_from_pressure_perturbation(sample(position)?)
+            .map_err(|error| BoundaryProfileError3::Source(error.to_string()))
+    })
+    .map_err(Error::Profile)
+}
