@@ -254,15 +254,16 @@ impl ZkDiffusive {
             return Err(invalid("ZK diffusive physical data, pole count or band"));
         }
         let tau_s = density_kg_m3 * radius_m * radius_m / viscosity_pa_s;
-        let thermal_tau = tau_s * prandtl;
-        if ![
-            tau_s,
-            thermal_tau,
-            8.0 / tau_s,
-            band_rad_s[1] / band_rad_s[0],
-        ]
-        .iter()
-        .all(|v| v.is_finite() && *v > 0.0)
+        // Cp == Cv removes the thermal-compression channel exactly. Its
+        // diffusion scale must not constrain the remaining viscous operator:
+        // it can overflow or lie outside the Bessel shear domain without
+        // contributing storage or damping. Positive finite Pr is still part
+        // of the original material admission above.
+        let thermal_tau = if gamma == 1.0 { 0.0 } else { tau_s * prandtl };
+        if ![tau_s, 8.0 / tau_s, band_rad_s[1] / band_rad_s[0]]
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0)
+            || (gamma > 1.0 && (!thermal_tau.is_finite() || thermal_tau <= 0.0))
         {
             return Err(invalid(
                 "ZK diffusive physical scales are not representable",
@@ -324,7 +325,11 @@ impl ZkDiffusive {
             let rv = det::sqrt(omega * tau_s);
             let s = C64::new(0.0, omega);
             let exact_series = s / zk_one_minus_f(rv)? - s;
-            let exact_shunt = s * zwikker_kosten_f(rv * det::sqrt(prandtl))?.scale(gamma - 1.0);
+            let exact_shunt = if gamma == 1.0 {
+                C64::ZERO
+            } else {
+                s * zwikker_kosten_f(rv * det::sqrt(prandtl))?.scale(gamma - 1.0)
+            };
             let actual_series =
                 C64::from_re(model.series_drag_per_s) + response(&model.series, omega);
             let actual_shunt = response(&model.shunt, omega);

@@ -527,6 +527,10 @@ supplies `gain_per_s * s/(s + rate_per_s)`, normalized by the corresponding
 inviscid inertance or compliance. No acoustic baseline storage is duplicated.
 The low-frequency total inertance is 4/3 of the inviscid value and total
 compliance is gamma times the adiabatic value at every pole count.
+At Cp = Cv the thermal channel is absent exactly: the original positive finite
+Prandtl admission remains, but an inactive thermal time or Bessel shear cannot
+reject the independent viscous spectrum. Every strictly positive Cp-Cv retains
+the original thermal-scale and reference-domain checks without a cutoff.
 
 Pole counts 1..=64 are an explicit diffusion resolution axis. Construction
 refuses nonpositive rates/weights or unresolved spectral decomposition, and

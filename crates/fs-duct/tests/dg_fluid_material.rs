@@ -338,6 +338,48 @@ fn liquid_viscosity_and_caloric_response_drive_native_diffusion_and_pressure() {
 }
 
 #[test]
+fn uncoupled_thermal_diffusion_does_not_disable_native_viscous_decay() {
+    let geometry = cylinder(0.001, 0.05);
+    let mut final_states = Vec::new();
+    for conductivity in [0.2, 1e-30, 1e20] {
+        // Manufactured Cp=Cv material: conductivity changes thermal diffusion
+        // but cannot change acoustic motion. Extreme finite Pr checks that an
+        // inactive Bessel argument cannot reject the actual viscous damping.
+        let material = ThermoviscousFluidState::try_new(
+            FluidAcousticState::try_new(2.0, 300.0).unwrap(),
+            FluidTransportState::try_new(2.0, 1000.0, conductivity, 2e-4).unwrap(),
+            1000.0,
+        )
+        .unwrap();
+        let dg = DgDuct::from_material(
+            &geometry,
+            &material,
+            DgMesh { elements: 1, order: 1 },
+            DgBoundary::IdealOpen,
+            DgBoundary::IdealOpen,
+        )
+        .unwrap()
+        .with_viscothermal(8, [50.0, 2000.0], 0.02)
+        .unwrap();
+        assert_eq!(dg.material().thermoviscous_state().unwrap(), material);
+        assert!(dg.viscothermal_model().unwrap().shunt_terms().is_empty());
+        let mut state = dg.project_initial_state(|_| 0.0, |_| 1e-6);
+        let initial_energy = state.stored_energy_j();
+        assert!(dg.wall_dissipated_power_w(&state).unwrap() > 0.0);
+        let propagator = dg.propagator(1e-6, 1e-12).unwrap();
+        for _ in 0..8 {
+            let before = state.stored_energy_j();
+            propagator.step(&mut state, &[]).unwrap();
+            assert!(state.stored_energy_j() < before);
+        }
+        assert!(state.stored_energy_j() < 0.999 * initial_energy);
+        final_states.push(state);
+    }
+    assert_eq!(final_states[0], final_states[1]);
+    assert_eq!(final_states[0], final_states[2]);
+}
+
+#[test]
 fn liquid_pressure_and_compliant_wall_share_the_native_physical_energy() {
     let (radius, length, p0) = (0.01, 0.3, 100.0);
     let material = liquid(0.001, 4100.0);

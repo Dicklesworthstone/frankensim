@@ -81,6 +81,37 @@ fn material_diffusion_scale_changes_both_memory_and_pressure_response() {
 }
 
 #[test]
+fn zero_thermal_coupling_retains_viscous_damping_for_all_admitted_prandtl_scales() {
+    let basis = ZkDiffusiveBasis::new(16).unwrap();
+    for (density, band) in [(1.0, [0.1, 10.0]), (10.0, [0.01, 1.0])] {
+        let reference = ZkDiffusive::new(1.0, density, 1.0, 1.0, 1.0, 16, band, 1e-3).unwrap();
+        for prandtl in [1e-300, 1e-40, 1e40, f64::MAX] {
+            // The second density and MAX Pr also overflow the INACTIVE
+            // thermal time. Neither the viscous spectrum nor its admission
+            // depends on this channel once Cp-Cv is exactly zero.
+            let direct = ZkDiffusive::new(1.0, density, 1.0, 1.0, prandtl, 16, band, 1e-3).unwrap();
+            let cached = basis
+                .bind(1.0, density, 1.0, 1.0, prandtl, band, 1e-3)
+                .unwrap();
+            assert_eq!(direct, reference);
+            assert_eq!(cached, reference);
+            assert!(direct.shunt_terms().is_empty());
+            let (series, shunt) = direct.response_at(band[0]).unwrap();
+            assert!(series.re > 0.0);
+            assert_eq!(shunt, C64::new(0.0, band[0]));
+            // Any positive thermal coupling remains a real physical channel:
+            // even the next floating-point ratio above one must keep its
+            // original scale and exact-Bessel domain checks.
+            assert!(
+                basis
+                    .bind(1.0, density, 1.0, 1.0 + f64::EPSILON, prandtl, band, 1e-3)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
 fn invalid_or_unresolved_diffusion_never_becomes_lossless() {
     for count in [0, MAX_ZK_DIFFUSIVE_POLES + 1] {
         assert!(model(count, 0.1).is_err());
