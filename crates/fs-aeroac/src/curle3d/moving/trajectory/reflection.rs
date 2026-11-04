@@ -123,6 +123,54 @@ impl IdealReflectionObserver {
         1 << self.plane_count
     }
 
+    /// Geometry and vector frame for one stationary source's reflected field.
+    ///
+    /// The original source must lie strictly inside every physical half-space.
+    /// Returns the existing virtual receiver, its pressure parity, and a
+    /// row-major matrix mapping virtual particle velocity to the physical frame.
+    /// The velocity matrix already includes parity. It is the transpose of the
+    /// receiver-image Jacobian: apply selected vector reflections in FORWARD
+    /// plane order, since receiver positions were reflected in REVERSE order.
+    /// This retains the actual rounded plane transforms without assuming they
+    /// commute. No source history, propagation phase or field is evaluated.
+    pub fn stationary_field_path(
+        &self,
+        path: usize,
+        source_m: [f64; 3],
+    ) -> Result<(MovingCompactObserver, f64, [[f64; 3]; 3]), AeroacError> {
+        let image = self.path(path)?;
+        for plane in self.planes() {
+            if plane.distance(source_m)?.to_f64() <= 0.0 {
+                return Err(invalid(
+                    "stationary source must lie strictly inside the fluid half-spaces",
+                ));
+            }
+        }
+        let columns: [[Dd; 3]; 3] = core::array::from_fn(|column| {
+            let mut vector = [Dd::ZERO; 3];
+            vector[column] = Dd::ONE;
+            for (index, plane) in self.planes().iter().enumerate() {
+                if path & (1 << index) == 0 {
+                    continue;
+                }
+                let normal = plane.inward_normal();
+                let projection = (0..3).fold(Dd::ZERO, |sum, axis| {
+                    sum + vector[axis] * Dd::from_f64(normal[axis])
+                });
+                vector = core::array::from_fn(|axis| {
+                    vector[axis] - projection * Dd::from_f64(2.0 * normal[axis])
+                });
+            }
+            vector
+        });
+        let velocity = core::array::from_fn(|row| {
+            core::array::from_fn(|column| {
+                (columns[column][row] * Dd::from_f64(image.sign)).to_f64()
+            })
+        });
+        Ok((image.observer, image.sign, velocity))
+    }
+
     fn path(&self, index: usize) -> Result<ImagePath, AeroacError> {
         if index >= self.path_count() {
             return Err(invalid(

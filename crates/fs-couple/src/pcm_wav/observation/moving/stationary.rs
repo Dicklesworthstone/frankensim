@@ -14,6 +14,7 @@
 
 use super::*;
 use fs_aeroac::curle3d::CompactForceObserver;
+use fs_aeroac::curle3d::moving::trajectory::IdealReflectionObserver;
 use fs_bem::{helmholtz::Medium, near_field::FirstOrder};
 use fs_math::c64::C64;
 
@@ -33,11 +34,63 @@ pub struct StationaryCompactSample {
 }
 
 struct Transfer {
+    source_index: usize,
+    observer: MovingCompactObserver,
+    pressure_sign: f64,
+    // None retains the original direct-path reduction without an extra map.
+    velocity_transform: Option<[[f64; 3]; 3]>,
     force: CompactForceObserver,
     direction: [f64; 3],
     monopole_pressure: f64,
     monopole_velocity: [f64; 2],
     first_impulse: usize,
+}
+
+impl Transfer {
+    fn new(
+        observer: MovingCompactObserver,
+        source_m: [f64; 3],
+        source_index: usize,
+        first_impulse: usize,
+        pressure_sign: f64,
+        velocity_transform: Option<[[f64; 3]; 3]>,
+    ) -> Result<Self, RenderError> {
+        let medium = observer.medium();
+        let delta = core::array::from_fn(|i| observer.observer_position_m()[i] - source_m[i]);
+        let radius = norm(delta);
+        let inverse = (0.25 / core::f64::consts::PI) / radius;
+        let monopole_pressure = inverse * medium.density_kg_m3();
+        let monopole_velocity = [inverse / radius, inverse / medium.sound_speed_m_s()];
+        if [
+            monopole_pressure,
+            monopole_velocity[0],
+            monopole_velocity[1],
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x <= 0.0)
+        {
+            return Err(sizing(
+                "stationary monopole coefficients are unrepresentable",
+            ));
+        }
+        let force = CompactForceObserver::new(medium, observer.observer_position_m(), source_m)
+            .map_err(acoustic)?;
+        // Refuse unrepresentable velocity coefficients even for silent sources.
+        force
+            .field_at_retarded([0.0; 3], [0.0; 3], [0.0; 3])
+            .map_err(acoustic)?;
+        Ok(Self {
+            source_index,
+            observer,
+            pressure_sign,
+            velocity_transform,
+            force,
+            direction: delta.map(|x| x / radius),
+            monopole_pressure,
+            monopole_velocity,
+            first_impulse,
+        })
+    }
 }
 
 /// Finite accepted stationary sources on the existing physical receiver clock.
@@ -136,40 +189,21 @@ impl<'a> StationaryCompactRenderer<'a> {
             .try_reserve_exact(config.max_block)
             .map_err(|_| sizing("cannot reserve stationary field scratch"))?;
         scratch.resize(config.max_block, StationaryCompactSample::default());
-        let medium = observer.medium();
-        for (track, initial) in original.tracks.iter().zip(initial_force_impulses_n_s) {
-            check_cancel(cancelled)?;
-            let source = track.source.motion.reference_position_m();
-            let delta = core::array::from_fn(|i| observer.observer_position_m()[i] - source[i]);
-            let radius = norm(delta);
-            let inverse = (0.25 / core::f64::consts::PI) / radius;
-            let monopole_pressure = inverse * medium.density_kg_m3();
-            let monopole_velocity = [inverse / radius, inverse / medium.sound_speed_m_s()];
-            if [
-                monopole_pressure,
-                monopole_velocity[0],
-                monopole_velocity[1],
-            ]
+        for (source_index, (track, initial)) in original
+            .tracks
             .iter()
-            .any(|x| !x.is_finite() || *x <= 0.0)
-            {
-                return Err(sizing(
-                    "stationary monopole coefficients are unrepresentable",
-                ));
-            }
-            let force = CompactForceObserver::new(medium, observer.observer_position_m(), source)
-                .map_err(acoustic)?;
-            // Fail during preparation even when the first block's source is zero.
-            force
-                .field_at_retarded([0.0; 3], [0.0; 3], [0.0; 3])
-                .map_err(acoustic)?;
-            transfers.push(Transfer {
-                force,
-                direction: delta.map(|x| x / radius),
-                monopole_pressure,
-                monopole_velocity,
-                first_impulse: impulses.len(),
-            });
+            .zip(initial_force_impulses_n_s)
+            .enumerate()
+        {
+            check_cancel(cancelled)?;
+            transfers.push(Transfer::new(
+                observer,
+                track.source.motion.reference_position_m(),
+                source_index,
+                impulses.len(),
+                1.0,
+                None,
+            )?);
             let mut impulse = initial.map(Dd::from_f64);
             impulses.push(impulse);
             for left in 0..track.source.samples.len() - 1 {
@@ -194,6 +228,111 @@ impl<'a> StationaryCompactRenderer<'a> {
             scratch,
             microphone,
         })
+    }
+
+    /// Full transient fields through the original ideal-wall image group.
+    ///
+    /// Each physical source retains one cubic history and one force-impulse
+    /// prefix. Every image queries that SAME history at its own retarded time.
+    /// Pressure and physical Cartesian velocity interfere before intensity or
+    /// microphone projection. Reflections do not create independent sources.
+    ///
+    /// The original observer admits one to three perpendicular rigid/release
+    /// walls. Sources must be strictly inside all fluid half-spaces. All paths
+    /// must cover the complete receiver window, including their prehistory.
+    /// Source limits count physical sources; work and transfer storage charge
+    /// every source-image path. Construction borrows no reflection geometry.
+    pub fn with_ideal_reflections(
+        observer: &IdealReflectionObserver,
+        sources: &[CompactSourceHistory<'a>],
+        initial_force_impulses_n_s: &[[f64; 3]],
+        microphone: FirstOrder,
+        config: MovingPressureConfig,
+        mut budget: MovingPressureBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, RenderError> {
+        check_cancel(cancelled)?;
+        if sources.is_empty() || sources.len() > budget.maximum_sources {
+            return Err(sizing("reflected fields exceed the physical source budget"));
+        }
+        let paths = sources
+            .len()
+            .checked_mul(observer.path_count())
+            .ok_or_else(|| sizing("stationary reflected path count overflows"))?;
+        if u64::try_from(paths)
+            .ok()
+            .and_then(|count| count.checked_mul(config.samples))
+            .is_none_or(|work| work > budget.maximum_source_receiver_pairs)
+        {
+            return Err(sizing("stationary reflected lifetime work exceeds budget"));
+        }
+        let additional = paths - sources.len();
+        let extra = additional
+            .checked_mul(size_of::<Transfer>())
+            .ok_or_else(|| sizing("stationary reflected transfer payload overflows"))?;
+        budget.maximum_payload_bytes = budget
+            .maximum_payload_bytes
+            .checked_sub(extra)
+            .ok_or_else(|| sizing("stationary reflected fields exceed payload budget"))?;
+        for source in sources {
+            check_cancel(cancelled)?;
+            observer
+                .stationary_field_path(0, source.motion.reference_position_m())
+                .map_err(acoustic)?;
+        }
+        let mut renderer = Self::new(
+            *observer.observer(),
+            sources,
+            initial_force_impulses_n_s,
+            microphone,
+            config,
+            budget,
+            cancelled,
+        )?;
+        renderer
+            .transfers
+            .try_reserve_exact(additional)
+            .map_err(|_| sizing("cannot reserve stationary reflected transfers"))?;
+        let first_time = renderer.receiver_time_at(0)?;
+        let last_time = renderer.receiver_time_at(config.samples - 1)?;
+        // All direct paths stay first, followed by each complete image mask
+        // in physical-source order. No history or impulse prefix is duplicated.
+        for path in 1..observer.path_count() {
+            for (source_index, track) in renderer.original.tracks.iter().enumerate() {
+                check_cancel(cancelled)?;
+                let source_m = track.source.motion.reference_position_m();
+                let (virtual_observer, pressure_sign, velocity_transform) = observer
+                    .stationary_field_path(path, source_m)
+                    .map_err(acoustic)?;
+                // Stationary delay is constant: endpoints admit the entire
+                // source-time window using the original reconciliation policy.
+                for time in [first_time, last_time] {
+                    prepare_history(
+                        &virtual_observer,
+                        &track.source,
+                        time,
+                        config.maximum_time_residual_s,
+                        cancelled,
+                    )?;
+                }
+                let first_impulse = renderer.transfers[source_index].first_impulse;
+                renderer.transfers.push(Transfer::new(
+                    virtual_observer,
+                    source_m,
+                    source_index,
+                    first_impulse,
+                    pressure_sign,
+                    Some(velocity_transform),
+                )?);
+            }
+        }
+        check_cancel(cancelled)?;
+        Ok(renderer)
+    }
+
+    /// All cached direct and reflected paths over the physical source bank.
+    pub fn source_path_count(&self) -> usize {
+        self.transfers.len()
     }
 
     /// Original receiver clock and finite observation window.
@@ -286,14 +425,13 @@ impl<'a> StationaryCompactRenderer<'a> {
     ) -> Result<StationaryCompactSample, RenderError> {
         let mut pressure = Dd::ZERO;
         let mut velocity = [Dd::ZERO; 3];
-        for (index, (track, transfer)) in
-            self.original.tracks.iter().zip(&self.transfers).enumerate()
-        {
+        for (index, transfer) in self.transfers.iter().enumerate() {
             if index % 64 == 0 {
                 check_cancel(cancelled)?;
             }
+            let track = &self.original.tracks[transfer.source_index];
             let prepared = prepare_history(
-                &self.original.observer,
+                &transfer.observer,
                 &track.source,
                 time,
                 self.config().maximum_time_residual_s,
@@ -325,13 +463,28 @@ impl<'a> StationaryCompactRenderer<'a> {
                 + Dd::from_f64(transfer.monopole_velocity[1])
                     * Dd::from_f64(strength.volume_flow_rate_m3_s2);
             pressure = pressure
-                + Dd::from_f64(field.pressure_pa)
-                + Dd::from_f64(transfer.monopole_pressure)
+                + Dd::from_f64(transfer.pressure_sign * field.pressure_pa)
+                + Dd::from_f64(transfer.pressure_sign * transfer.monopole_pressure)
                     * Dd::from_f64(strength.volume_flow_rate_m3_s2);
-            for axis in 0..3 {
-                velocity[axis] = velocity[axis]
-                    + Dd::from_f64(field.particle_velocity_m_s[axis])
-                    + Dd::from_f64(transfer.direction[axis]) * radial_velocity;
+            if let Some(transform) = transfer.velocity_transform {
+                let virtual_velocity: [Dd; 3] = core::array::from_fn(|axis| {
+                    Dd::from_f64(field.particle_velocity_m_s[axis])
+                        + Dd::from_f64(transfer.direction[axis]) * radial_velocity
+                });
+                for axis in 0..3 {
+                    for component in 0..3 {
+                        velocity[axis] = velocity[axis]
+                            + Dd::from_f64(transform[axis][component])
+                                * virtual_velocity[component];
+                    }
+                }
+            } else {
+                // Preserve the original free-space accumulation order exactly.
+                for axis in 0..3 {
+                    velocity[axis] = velocity[axis]
+                        + Dd::from_f64(field.particle_velocity_m_s[axis])
+                        + Dd::from_f64(transfer.direction[axis]) * radial_velocity;
+                }
             }
         }
         let pressure_pa = pressure.to_f64();

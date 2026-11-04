@@ -1751,12 +1751,33 @@ source. G1/G3/G4 regression cases cover an independent polynomial primitive,
 scalar-pressure parity, explicit initial history, coherent reinforcement and
 cancellation, quadratic flux, callback partitioning, PCM output and refusal.
 
+`StationaryCompactRenderer::with_ideal_reflections` extends those accepted
+histories to the complete image group of an original `IdealReflectionObserver`:
+one to three perpendicular rigid or pressure-release planes. Every image keeps
+its own retarded time and reads the same physical cubic and force-impulse
+prefix. Cached virtual receivers retain the original geometry. Their complete
+particle velocities are mapped back through the transpose image Jacobian and
+wall parity before coherent Cartesian field summation. Intensity and ideal
+directional microphone output are formed only after all source/image fields
+combine; a pressure-release node can retain normal motion and a dipole signal.
+
+All-path finite-history coverage and physical half-spaces are admitted before
+publication. Work charges sources times paths times output samples; retained
+payload charges every path transfer while source histories and impulse
+prefixes remain shared. Existing transactional field/microphone callbacks and
+global sample clocks are retained. Regressions in
+`tests/moving_pressure_history/stationary.rs` compare rotated mixed corners
+against independent source images and analytic polynomial primitives, test
+wall boundary conditions and directional pressure nodes, and exercise path
+history/work refusals and callback partition/cancellation.
+
 This remains a one-way stationary compact-source model in a homogeneous
 lossless linear fluid. It refuses moving sources and inherits each source
 field owner's representable range, including individual flux. It supplies no
-source qualification, nonlinear propagation, scattering, microphone-body
-response, radiation reaction or experimental amplitude validation. Native
-Cargo execution is a separate obligation from the authored regressions.
+source qualification, nonlinear propagation, finite-impedance or general
+boundary scattering, microphone-body response, radiation reaction or
+experimental amplitude validation. Native Cargo execution is a separate
+obligation from the authored regressions.
 
 ## Full spatial circuits coupled to complete heat assemblies
 
