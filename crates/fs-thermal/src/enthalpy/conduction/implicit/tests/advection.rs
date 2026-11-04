@@ -337,3 +337,427 @@ fn observed_advection_retries_prepare_flow_once_and_refusals_keep_history() {
     assert_eq!(refusing.inner().transfer_evaluations, 0);
     assert_eq!(refusing.inner().begins, 0);
 }
+
+#[test]
+fn implicit_upwind_stiff_pair_uses_endpoint_enthalpy_and_retains_the_datum() {
+    for datum in [0.0, 1e9] {
+        let law = ShiftedLaw {
+            base: Law {
+                nonlinear_k: false,
+                plateau: false,
+            },
+            datum,
+        };
+        let (thermal, conduction) = setup(&law, &[400.0 + datum, 200.0 + datum], None, vec![]);
+        let flow = circulating((), 30.5);
+        let chain = ImplicitConductionChain::new(
+            &thermal,
+            &conduction,
+            &[(MaterialId(0), &law)],
+            || Ok(()),
+        )
+        .unwrap()
+        .with_implicit_advection(&thermal, &flow, || Ok(()))
+        .unwrap();
+        let graph = ImplicitConductionGraph::new(
+            &thermal,
+            &conduction,
+            &[(MaterialId(0), &law)],
+            ImplicitConductionLinearControls::default(),
+            || Ok(()),
+        )
+        .unwrap()
+        .with_implicit_advection(&thermal, &flow, || Ok(()))
+        .unwrap();
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        for graph_path in [false, true] {
+            let (next, report) = if graph_path {
+                graph.advance_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(()))
+            } else {
+                chain.advance_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(()))
+            }
+            .unwrap();
+            // m=Cp=G=1, reciprocal mdot=30.5: the exact BE contrast is
+            // 200/[1+2*(G/Cp+mdot)*dt/m] = 3.125. Courant=30.5 is well
+            // above the explicit bound, without freezing the advected state.
+            near(next.temperature_k(CellId(0)).unwrap(), 301.5625, 1e-9);
+            near(next.temperature_k(CellId(1)).unwrap(), 298.4375, 1e-9);
+            near(report.energy.external_heat_j, 0.0, 0.0);
+            near(report.energy.stored_energy_change_j, 0.0, 1e-9);
+            assert_eq!(report.energy.substeps, 1);
+            assert!(report.entropy.has_unclassified_sources);
+        }
+        assert_eq!(flow.audit().substeps, 0);
+        assert_eq!(thermal.time_s(), 0.0);
+    }
+}
+
+fn open_flow(cells: usize, rate: f64, incoming_h: f64) -> Advected<()> {
+    Advected::new(
+        (),
+        (0..cells - 1)
+            .map(|i| MassFlow {
+                id: i as u64,
+                a: CellId(i as u64),
+                b: CellId(i as u64 + 1),
+                kg_s: rate,
+            })
+            .collect(),
+        cells,
+    )
+    .unwrap()
+    .with_boundaries(
+        vec![
+            MassBoundary::Inlet {
+                id: cells as u64,
+                cell: CellId(0),
+                kg_s: rate,
+                material_id: MaterialId(0),
+                specific_h_j_kg: incoming_h,
+            },
+            MassBoundary::Outlet {
+                id: cells as u64 + 1,
+                cell: CellId(cells as u64 - 1),
+                kg_s: rate,
+            },
+        ],
+        cells + 1,
+    )
+    .unwrap()
+}
+
+#[test]
+fn implicit_open_stream_moves_latent_heat_at_identical_temperatures() {
+    let law = Law {
+        nonlinear_k: true,
+        plateau: true,
+    };
+    let (mut thermal, conduction) = setup(&law, &[350.0, 400.0], None, vec![]);
+    thermal.cells.get_mut(&CellId(1)).unwrap().mass_kg = 2.0;
+    let flow = open_flow(2, 4.0, 450.0);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+            .with_implicit_advection(&thermal, &flow, || Ok(()))
+            .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (next, report) = chain
+        .advance_to(&thermal, 2.0, controls(2.0), &mut workspace, || Ok(()))
+        .unwrap();
+    let first = (350.0 + 8.0 * 450.0) / 9.0;
+    let second = (2.0 * 400.0 + 8.0 * first) / 10.0;
+    near(next.cells()[&CellId(0)].specific_h_j_kg, first, 1e-10);
+    near(next.cells()[&CellId(1)].specific_h_j_kg, second, 1e-10);
+    for id in [CellId(0), CellId(1)] {
+        near(next.temperature_k(id).unwrap(), 300.0, 0.0);
+    }
+    let external = 8.0 * (450.0 - second);
+    near(report.energy.external_heat_j, external, 1e-9);
+    near(
+        report.energy.stored_energy_change_j,
+        first - 350.0 + 2.0 * (second - 400.0),
+        1e-9,
+    );
+    near(report.energy.residual_j, 0.0, 1e-9);
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(next.cells()[&CellId(1)].mass_kg, 2.0);
+}
+
+#[test]
+fn implicit_directed_cycle_has_the_original_nonlinear_jacobian_and_balance() {
+    let law = Law {
+        nonlinear_k: true,
+        plateau: true,
+    };
+    let (mut thermal, conduction) = setup(&law, &[400.0, 350.0, 250.0], None, vec![]);
+    for (i, mass) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+        thermal.cells.get_mut(&CellId(i as u64)).unwrap().mass_kg = mass;
+    }
+    let flow = Advected::new(
+        (),
+        vec![
+            MassFlow {
+                id: 1,
+                a: CellId(0),
+                b: CellId(2),
+                kg_s: 2.5,
+            },
+            MassFlow {
+                id: 2,
+                a: CellId(1),
+                b: CellId(2),
+                kg_s: -2.5,
+            },
+            MassFlow {
+                id: 3,
+                a: CellId(1),
+                b: CellId(0),
+                kg_s: 2.5,
+            },
+        ],
+        3,
+    )
+    .unwrap();
+    assert!(matches!(
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()),)
+            .unwrap()
+            .with_implicit_advection(&thermal, &flow, || Ok(())),
+        Err(ImplicitConductionError::Invalid(
+            "nontridiagonal enthalpy transport requires the graph solver"
+        ))
+    ));
+    let graph = ImplicitConductionChain::prepare(
+        &thermal,
+        &conduction,
+        &[(MaterialId(0), &law)],
+        LinearTopology::Graph(ImplicitConductionLinearControls::default()),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_implicit_advection(&thermal, &flow, || Ok(()))
+    .unwrap();
+    let step = BackwardEulerStep::new(&thermal, 0.7, || Ok(())).unwrap();
+    let energy = [3.0, -4.0, 2.0];
+    let mut report = empty_report();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    let trial = graph
+        .evaluate(
+            &step,
+            &energy,
+            &BTreeMap::new(),
+            &[],
+            false,
+            controls(1.0),
+            &mut report,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    graph
+        .jacobian(&thermal, trial.payload(), 0.7, &mut workspace, &mut || {
+            Ok(())
+        })
+        .unwrap();
+    let coefficient = |row, col| {
+        if row == col {
+            workspace.diagonal[row]
+        } else {
+            workspace
+                .graph_entries
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|&&(r, c, _)| r == row && c == col)
+                .map(|entry| entry.2)
+                .sum()
+        }
+    };
+    assert!((coefficient(0, 1) - coefficient(1, 0)).abs() > 0.1);
+    for col in 0..3 {
+        let mut plus = energy;
+        let mut minus = energy;
+        plus[col] += 1e-3;
+        minus[col] -= 1e-3;
+        let a = graph
+            .evaluate(
+                &step,
+                &plus,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(1.0),
+                &mut report,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        let b = graph
+            .evaluate(
+                &step,
+                &minus,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(1.0),
+                &mut report,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        for row in 0..3 {
+            near(
+                coefficient(row, col),
+                (a.residual_j()[row] - b.residual_j()[row]) / 0.002,
+                1e-8,
+            );
+        }
+    }
+    let (next, report) = graph
+        .advance_to(&thermal, 0.7, controls(0.7), &mut workspace, || Ok(()))
+        .unwrap();
+    let h: Vec<_> = (0..3)
+        .map(|i| next.cells()[&CellId(i)].specific_h_j_kg)
+        .collect();
+    let t: Vec<_> = h.iter().map(|&h| law.temperature_k(h).unwrap()).collect();
+    let k: Vec<_> = h
+        .iter()
+        .map(|&h| law.conductivity_w_m_k(h).unwrap())
+        .collect();
+    let q01 = (t[0] - t[1]) / (0.5 / k[0] + 0.5 / k[1]);
+    let q12 = (t[1] - t[2]) / (0.5 / k[1] + 0.5 / k[2]);
+    let powers = [
+        -q01 + 2.5 * (h[1] - h[0]),
+        q01 - q12 + 2.5 * (h[2] - h[1]),
+        q12 + 2.5 * (h[0] - h[2]),
+    ];
+    for (i, old) in [400.0, 350.0, 250.0].into_iter().enumerate() {
+        near((i + 1) as f64 * (h[i] - old), 0.7 * powers[i], 1e-9);
+    }
+    near(report.energy.external_heat_j, 0.0, 0.0);
+    near(report.energy.stored_energy_change_j, 0.0, 1e-9);
+}
+
+#[test]
+fn implicit_upwind_time_refinement_and_adaptation_follow_the_real_stream_balance() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let (thermal, conduction) = setup(&law, &[400.0], None, vec![]);
+    let flow = open_flow(1, 2.0, 300.0);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+            .with_implicit_advection(&thermal, &flow, || Ok(()))
+            .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let exact = 300.0 + 100.0 * (-2.0_f64).exp();
+    let mut errors = Vec::new();
+    for dt in [0.1, 0.05, 0.025] {
+        let (next, report) = chain
+            .advance_to(&thermal, 1.0, controls(dt), &mut workspace, || Ok(()))
+            .unwrap();
+        let h = next.cells()[&CellId(0)].specific_h_j_kg;
+        errors.push((h - exact).abs());
+        near(report.energy.external_heat_j, h - 400.0, 1e-9);
+    }
+    assert!(
+        errors[1] < 0.6 * errors[0] && errors[2] < 0.6 * errors[1],
+        "{errors:?}"
+    );
+    let policy = |tolerance| adaptive::AdaptiveImplicitConductionControls {
+        step: controls(1.0),
+        initial_dt_s: 1.0,
+        maximum_trials: 4096,
+        enthalpy_absolute_tolerance_j_kg: tolerance,
+        temperature_absolute_tolerance_k: tolerance,
+        phase_fraction_absolute_tolerance: None,
+        relative_tolerance: 0.0,
+    };
+    let (loose, a) = chain
+        .advance_adaptive_to(&thermal, 1.0, policy(1.0), &mut workspace, || Ok(()))
+        .unwrap();
+    let (tight, b) = chain
+        .advance_adaptive_to(&thermal, 1.0, policy(0.001), &mut workspace, || Ok(()))
+        .unwrap();
+    assert!(
+        (tight.temperature_k(CellId(0)).unwrap() - exact).abs()
+            < 0.1 * (loose.temperature_k(CellId(0)).unwrap() - exact).abs()
+    );
+    assert!(b.accepted_comparisons > a.accepted_comparisons);
+    assert!(b.accuracy_rejections > 0 && b.maximum_accepted_normalized_error <= 1.0);
+    near(
+        b.solve.energy.external_heat_j,
+        tight.cells()[&CellId(0)].specific_h_j_kg - 400.0,
+        1e-9,
+    );
+}
+
+#[test]
+fn implicit_upwind_preserves_failure_rollback_and_explicit_source_ownership() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let (thermal, conduction) = setup(&law, &[400.0], None, vec![]);
+    let flow = open_flow(1, 2.0, 300.0);
+    let bind = |flow: &Advected<()>| {
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+            .with_implicit_advection(&thermal, flow, || Ok(()))
+    };
+    assert!(bind(&flow.clone().with_entropy_audit()).is_err());
+    assert!(bind(&open_flow(1, 2.0, 2000.0)).is_err());
+    let chain = bind(&flow).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let source = Forcing {
+        constant_w: 1.0,
+        ..Forcing::default()
+    };
+    let mut calls = 0;
+    let (next, accepted, report) = chain
+        .advance_observed_to(
+            &thermal,
+            &source,
+            2.0,
+            controls(2.0),
+            &mut workspace,
+            || {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    near(
+        next.temperature_k(CellId(0)).unwrap(),
+        (400.0 + 2.0 * (600.0 + 1.0)) / 5.0,
+        1e-10,
+    );
+    near(accepted.energy_j, 2.0, 1e-12);
+    near(
+        report.energy.external_heat_j,
+        next.temperature_k(CellId(0)).unwrap() - 400.0,
+        1e-9,
+    );
+    let mut cancelled_calls = 0;
+    assert!(matches!(
+        chain.advance_observed_to(
+            &thermal,
+            &source,
+            2.0,
+            controls(2.0),
+            &mut workspace,
+            || {
+                cancelled_calls += 1;
+                if cancelled_calls + 1 == calls {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        ),
+        Err(ImplicitConductionObservedError::Implicit(
+            ImplicitConductionError::Thermal(DepositionError::Cancelled)
+        ))
+    ));
+    let mut exhausted = controls(2.0);
+    exhausted.maximum_residual_evaluations = 1;
+    assert!(matches!(
+        chain.advance_to(&thermal, 2.0, exhausted, &mut workspace, || Ok(())),
+        Err(ImplicitConductionError::Thermal(DepositionError::Budget(_)))
+    ));
+    let (retried, retried_source, retried_report) = chain
+        .advance_observed_to(
+            &thermal,
+            &source,
+            2.0,
+            controls(2.0),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(retried.cells(), next.cells());
+    assert_eq!(retried_source.energy_j, accepted.energy_j);
+    assert_eq!(retried_report, report);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, 400.0);
+    assert_eq!(flow.audit().substeps, 0);
+    assert_eq!(source.energy_j, 0.0);
+}

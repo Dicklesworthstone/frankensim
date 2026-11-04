@@ -336,6 +336,72 @@ impl<O> Advected<O> {
     }
 }
 
+impl Advected<()> {
+    /// Analytic derivative of the original endpoint heat rates with respect
+    /// to each cell's specific enthalpy, in kg/s. Only bulk upwind enthalpy has
+    /// this constant tangent. Other carriers and entropy/species histories
+    /// must retain their own endpoint closure rather than borrow this one.
+    pub(super) fn implicit_enthalpy_tangent(
+        &self,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<(CellId, CellId, f64)>, DepositionError> {
+        checkpoint()?;
+        if self.liquid_carrier.is_some()
+            || self.stationary_species.is_some()
+            || !self.selective_outlets.is_empty()
+            || self.entropy.is_some()
+        {
+            return Err(invalid(
+                "implicit bulk enthalpy excludes liquid carriers, species, selective streams and flow entropy histories",
+            ));
+        }
+        let mut entries = BTreeMap::<(CellId, CellId), (f64, f64)>::new();
+        let mut add = |row, col, amount| -> Result<(), DepositionError> {
+            let value = entries.entry((row, col)).or_default();
+            let (sum, error) = fs_math::eft::two_sum(value.0, amount);
+            *value = (finite(sum)?, finite(value.1 + error)?);
+            Ok(())
+        };
+        for flow in &self.flows {
+            checkpoint()?;
+            let Some((up, down, rate)) = flow.directed() else {
+                continue;
+            };
+            let reference = *self.reference_cells.get(&up).unwrap_or(&up);
+            // A reference-cell donor carries h_ref - h_ref exactly, so cancel
+            // its derivative before combining differently scaled connections.
+            if up != reference {
+                add(up, up, -rate)?;
+                add(down, up, rate)?;
+                add(up, reference, rate)?;
+                add(down, reference, -rate)?;
+            }
+        }
+        for boundary in &self.boundaries {
+            checkpoint()?;
+            let (_, cell, rate) = boundary.identity();
+            let reference = *self.reference_cells.get(&cell).unwrap_or(&cell);
+            match boundary {
+                MassBoundary::Inlet { .. } => add(cell, reference, -rate)?,
+                MassBoundary::Outlet { .. } if cell != reference => {
+                    add(cell, cell, -rate)?;
+                    add(cell, reference, rate)?;
+                }
+                MassBoundary::Outlet { .. } => {}
+            }
+        }
+        let mut tangent = Vec::with_capacity(entries.len());
+        for ((row, col), (sum, error)) in entries {
+            checkpoint()?;
+            let value = finite(sum + error)?;
+            if value != 0.0 {
+                tangent.push((row, col, value));
+            }
+        }
+        Ok(tangent)
+    }
+}
+
 impl<O: DepositionObserver> DepositionObserver for Advected<O> {
     type Error = O::Error;
 

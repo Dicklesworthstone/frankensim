@@ -1554,4 +1554,36 @@ closure. This remains a fixed-geometry, first-order thermal reduction; no
 spatial convergence or empirical material-accuracy claim follows from its
 algebraic energy residual.
 
+## Implicit upwind enthalpy with native conduction
+
+`ImplicitConductionChain::with_implicit_advection` and its graph counterpart
+bind the original `Advected<()>` mass-flow graph into the existing endpoint
+residual. Every Newton trial evaluates actual endpoint enthalpy, including
+latent energy at unchanged temperature. Native inlet/outlet enthalpy, common
+caloric references, fixed-mass continuity and internal-transfer cancellation
+remain authoritative. Source heat and stream enthalpy are each credited once.
+
+The analytic directed tangent is compiled once in joule coordinates, including
+the original component-reference derivative under admitted continuity roundoff.
+Tridiagonal transport retains the direct chain solver; other topologies use the
+existing nonsymmetric sparse FGMRES owner. No dense matrix or numerical caloric
+derivative is introduced. The selected backward-Euler term has no explicit flow
+CFL restriction; the same endpoints also reach the existing adaptive h/T/phase
+controller. Other observed sources retain their own timestep restrictions.
+
+This binding is an immutable snapshot of ordinary bulk enthalpy transport.
+Liquid carriers, stationary species, selective streams and flow-entropy
+histories refuse until their own endpoint closures exist. Thermal entropy marks
+these transfers unclassified. No phase mobility, moving inventory, pressure
+work, momentum feedback or entropy-generation model is inferred. First-order
+time error and upwind spatial diffusion still require independent refinement.
+
+Focused G1/G3/G4 regressions cover exact high-Courant chain/graph balances,
+large enthalpy-reference shifts, unequal-mass latent throughflow, nonlinear
+directed-cycle Jacobians, temporal/adaptive accuracy and transactional refusals.
+The `fs-lbm` flow-enthalpy integration regression binds actual material-driven
+SIMPLEC face fluxes to the same implicit owner, checking serial latent inventory
+and inlet-minus-outlet joules at Courant 10 in one accepted interval. These are
+synthetic numerical checks, not experimental validation or throughput claims.
+
 

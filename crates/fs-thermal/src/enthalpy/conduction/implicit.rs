@@ -55,6 +55,11 @@ use link::{ImplicitLinkLaw, ImplicitLinkState};
 pub mod boundary;
 use boundary::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState};
 
+/// Endpoint upwind enthalpy in the same conservative nonlinear solve.
+#[path = "implicit/advection.rs"]
+mod advection;
+use advection::ImplicitAdvection;
+
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
 /// generalized derivative. The original residual still decides acceptance.
@@ -237,6 +242,7 @@ pub struct ImplicitConductionChain<'a> {
     link_laws: BTreeMap<u64, &'a dyn ImplicitLinkLaw>,
     reservoir_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
     ambient_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
+    advection: Option<ImplicitAdvection>,
 }
 
 struct Endpoint {
@@ -314,6 +320,7 @@ impl<'a> ImplicitConductionChain<'a> {
             link_laws: BTreeMap::new(),
             reservoir_laws: BTreeMap::new(),
             ambient_laws: BTreeMap::new(),
+            advection: None,
         };
         result.admit(thermal, &mut checkpoint)?;
         result.endpoint(thermal, &mut checkpoint)?;
@@ -635,19 +642,31 @@ impl<'a> ImplicitConductionChain<'a> {
         let resolve = |thermal: &DepositionSimulation<'m>| {
             let endpoint = self.endpoint(thermal, &mut || (checkpoint.borrow_mut())())?;
             let boundaries = endpoint.boundary_values.clone();
+            let mut sources_w = sources_w.clone();
+            let mut transfers = transfers.to_vec();
+            if let Some(advection) = &self.advection {
+                let transport = advection
+                    .flow
+                    .endpoint_transport(thermal, &mut || (checkpoint.borrow_mut())())?;
+                for (id, watts) in transport.heat.bulk.sources_w {
+                    let value = sources_w.entry(id).or_default();
+                    *value = finite(*value + watts)?;
+                }
+                transfers.extend(transport.transfers);
+            }
             Ok::<_, ImplicitConductionError>(TransportStepCoefficients {
                 heat: BoundaryStepCoefficients {
                     bulk: StepCoefficients {
-                        sources_w: sources_w.clone(),
+                        sources_w,
                         conductances_w_k: endpoint.link_values.clone(),
                         payload: endpoint,
                     },
                     boundaries,
                 },
-                // Held at the accepted start state: these directed powers
-                // have no endpoint derivative. Their original paired debit
-                // and credit never enter the external-source energy account.
-                transfers: transfers.to_vec(),
+                // Observed transfers stay at the accepted start; an explicitly
+                // bound upwind graph is evaluated at this actual endpoint.
+                // Both use the original paired debit/credit owner exactly once.
+                transfers,
             })
         };
         if entropy {
@@ -683,6 +702,8 @@ impl<'a> ImplicitConductionChain<'a> {
                             .links
                             .len()
                             .checked_mul(2)
+                            .and_then(|n| n.checked_add(self.advection.as_ref()
+                                .map_or(0, |flow| flow.tangent.len())))
                             .ok_or(TridiagonalError::Capacity)?,
                     )
                     .map_err(|_| TridiagonalError::Capacity)?;
@@ -782,6 +803,12 @@ impl<'a> ImplicitConductionChain<'a> {
                 }
             }
             add_entry(workspace, i, i, -dt * derivative / cell.mass_kg)?;
+        }
+        if let Some(advection) = &self.advection {
+            for &(row, col, derivative) in &advection.tangent {
+                checkpoint()?;
+                add_entry(workspace, row, col, -dt * derivative)?;
+            }
         }
         checkpoint()?;
         Ok(())

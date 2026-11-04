@@ -209,3 +209,122 @@ fn foreign_caloric_law_density_map_and_rejected_history_preserve_accepted_state(
     assert!(matches!(result, Err(DepositionError::Cancelled)));
     assert_eq!(observer.advection().inner(), &history);
 }
+
+#[test]
+fn solved_material_flow_reaches_implicit_latent_transport_above_explicit_cfl() {
+    use fs_conduction::enthalpy::conduction::implicit::{
+        ImplicitConductionControls, ImplicitConductionGraph, ImplicitConductionLaw,
+        ImplicitConductionLinearControls, ImplicitConductionState, ImplicitConductionWorkspace,
+    };
+    use fs_conduction::enthalpy::conduction::{ConductionObserver, ConductivityLaw};
+
+    // A tangent adapter retains the actual material curve; it supplies neither
+    // a second caloric inverse nor an apparent heat capacity on the plateau.
+    struct PhaseTangent<'a>(&'a EquilibriumEnthalpyPhaseCurve, f64);
+    impl ConductivityLaw for PhaseTangent<'_> {
+        fn conductivity_w_m_k(&self, _: f64) -> Result<f64, DepositionError> {
+            Ok(self.1)
+        }
+    }
+    impl ImplicitConductionLaw for PhaseTangent<'_> {
+        fn caloric_law(&self) -> &dyn ThermalLaw {
+            self.0
+        }
+        fn conductivity_law(&self) -> &dyn ConductivityLaw {
+            self
+        }
+        fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
+            [
+                self.0.knots()[0].specific_enthalpy_j_kg,
+                self.0.knots().last().unwrap().specific_enthalpy_j_kg,
+            ]
+        }
+        fn state_at_specific_enthalpy(
+            &self,
+            h: f64,
+        ) -> Result<ImplicitConductionState, DepositionError> {
+            let state = self
+                .0
+                .state_at_specific_enthalpy(h)
+                .map_err(|_| DepositionError::MaterialDomain)?;
+            Ok(ImplicitConductionState {
+                temperature_k: state.temperature_k(),
+                temperature_slope_kg_k_j: self
+                    .0
+                    .temperature_derivative_at_specific_enthalpy(h)
+                    .map_err(|_| DepositionError::MaterialDomain)?,
+                conductivity_w_m_k: self.1,
+                conductivity_slope_kg_w_m_k_j: 0.0,
+            })
+        }
+    }
+
+    let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+    let source = FluidTransportState::try_new(2.0, 2.0, 0.01, 0.1).unwrap();
+    let fluid = MaterialChtFluid::try_new(&source).unwrap();
+    let gate = CancelGate::new();
+    let solved = fluid.solve_flow(&domain, &throughflow(), &gate).unwrap();
+    let law = curve(2.0, 100.0);
+    let old = initial(&domain, 2.0, &law);
+    let ids: Vec<_> = (0..3).map(|c| Some(CellId(c))).collect();
+    let mut inlet = input(&ids, &law);
+    inlet.inlet_specific_h_j_kg = [Some(100.0); 6];
+    let observer = solved.advect_enthalpy(&old, inlet, (), &gate).unwrap();
+    let tangent = PhaseTangent(&law, source.thermal_conductivity_w_m_k());
+    let conduction =
+        ConductionObserver::new(&old, &[(MAT, &tangent)], &[], &[], || Ok(())).unwrap();
+    let implicit = ImplicitConductionGraph::new(
+        &old,
+        &conduction,
+        &[(MAT, &tangent)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_implicit_advection(&old, observer.advection(), || Ok(()))
+    .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    let duration = 40.0;
+    let (next, report) = implicit
+        .advance_to(
+            &old,
+            duration,
+            ImplicitConductionControls {
+                maximum_dt_s: duration,
+                maximum_steps: 1,
+                cell_tolerance_j: 1e-8,
+                total_tolerance_j: 1e-7,
+                ..ImplicitConductionControls::default()
+            },
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+
+    // The actual momentum solution supplies rho*u*A = 0.5 kg/s. In each
+    // serial volume m=2 kg, hence Courant=10. Independent BE elimination gives
+    // h_i = [m*h_i_old + dt*mdot*h_upstream]/[m+dt*mdot]. All three endpoints
+    // lie inside the latent plateau despite their different transported h.
+    for edge in observer.advection().flows() {
+        near(edge.kg_s, 0.5);
+    }
+    let mut upstream = 100.0;
+    for c in 0..3 {
+        let expected = 20.0 * upstream / 22.0;
+        near(next.cells()[&CellId(c)].specific_h_j_kg, expected);
+        near(next.temperature_k(CellId(c)).unwrap(), 310.0);
+        let phase = law
+            .state_at_specific_enthalpy(expected)
+            .unwrap()
+            .liquid_mass_fraction();
+        assert!(phase > 0.0 && phase < 1.0);
+        upstream = expected;
+    }
+    let inlet_minus_outlet_j = duration * 0.5 * (100.0 - upstream);
+    near(report.energy.external_heat_j, inlet_minus_outlet_j);
+    near(next.energy_j() - old.energy_j(), inlet_minus_outlet_j);
+    near(next.mass_kg(), old.mass_kg());
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(observer.advection().audit().substeps, 0);
+    assert_eq!(old.time_s(), 0.0);
+}

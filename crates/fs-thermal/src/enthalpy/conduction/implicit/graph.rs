@@ -46,6 +46,23 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Bind original endpoint upwind enthalpy to this same nonlinear graph.
+    /// Directed flows may join any active cells. The analytic nonsymmetric
+    /// tangent uses the existing sparse FGMRES path. See the chain method for
+    /// storage, source ownership and unsupported-carrier restrictions.
+    pub fn with_implicit_advection(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        flow: &crate::enthalpy::advection::Advected<()>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self
+                .inner
+                .with_implicit_advection(thermal, flow, checkpoint)?,
+        })
+    }
+
     /// Replace selected reservoir and ambient fluxes in the same original
     /// residual and Jacobian. See the chain method for original caloric,
     /// geometric and boundary-channel ownership requirements.
