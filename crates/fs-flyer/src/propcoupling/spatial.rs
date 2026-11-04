@@ -91,6 +91,7 @@ impl DiskAxes {
     }
 
     #[cfg(test)]
+    #[test]
     fn large_radius_regression() {
         let axes = Self::new([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).unwrap();
         let unit = axes.wash_factors([0.5, 0.25, 0.125], [[0.0; 3]; 2], 1.0).unwrap();
