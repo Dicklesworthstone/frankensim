@@ -3,6 +3,9 @@
 #[allow(dead_code)]
 mod source;
 
+#[path = "steady_material_gas/network.rs"]
+mod network;
+
 use fs_airflow::graph::thermal::medium::convection::ForcedConvectionSettings;
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
 use fs_airflow::graph::thermal::medium::steady_gas::*;

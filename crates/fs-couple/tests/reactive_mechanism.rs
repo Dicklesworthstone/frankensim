@@ -16,6 +16,9 @@ use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use std::collections::BTreeMap;
 
 const DT: f64 = 0.00005;
+
+#[path = "reactive_mechanism/implicit.rs"]
+mod implicit;
 fn quantity(k: QuantityKind) -> QuantitySpec { QuantitySpec::semantic(SemanticType::new(k, ValueForm::Static)) }
 fn laws(edges: &[(&str, usize, usize, f64)], formation: [f64; 3]) -> Vec<GasReaction> {
     let components = ["A", "B", "C"].into_iter().zip(formation)
@@ -261,3 +264,4 @@ fn coupled_nonisomeric_stoichiometry_changes_molecule_count_without_changing_mas
     near(trial.gas().state().state().temperature, t, 1e-7);
     assert_eq!(trial.gas().mass_kg(), old.mass_kg());
 }
+

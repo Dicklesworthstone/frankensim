@@ -91,7 +91,8 @@ pub struct SlotJet3dConfig {
 /// Per-run diagnostics (the mandated honesty block).
 #[derive(Debug, Clone)]
 pub struct SlotJet3dDiagnostics {
-    /// Maximum sampled plane speed over recording steps [lu/step].
+    /// Maximum speed on the two final diagnostic planes [lu/step].
+    /// This is neither a full-field nor an all-recording-times maximum.
     pub mach_max_lattice: f64,
     /// Mean x mass flux through a plane just upstream of the plate.
     pub flux_plate_plane: f64,
@@ -262,7 +263,7 @@ fn slit_open(y: usize, ny: usize, slot_half: f64) -> bool {
 }
 
 /// Shared parameter validation.
-fn validate_config(cfg: &SlotJet3dConfig) -> Result<(), AeroacError> {
+pub(crate) fn validate_config(cfg: &SlotJet3dConfig) -> Result<(), AeroacError> {
     for (v, what) in [
         (cfg.slot_half, "slot_half"),
         (cfg.u_jet, "u_jet"),
@@ -553,17 +554,43 @@ impl Rig3 {
                 }
                 let f = self.grid.populations(self.x_plate_plane, y, z);
                 let rho: f64 = f.iter().sum();
-                let ux: f64 = f.iter().zip(E3).map(|(q, e)| q * f64::from(e.0)).sum();
-                flux_plate += rho * ux;
-                mach_max = mach_max.max(det::sqrt(ux * ux));
+                let momentum = [
+                    f.iter()
+                        .zip(E3)
+                        .map(|(q, e)| q * f64::from(e.0))
+                        .sum::<f64>(),
+                    f.iter()
+                        .zip(E3)
+                        .map(|(q, e)| q * f64::from(e.1))
+                        .sum::<f64>(),
+                    f.iter()
+                        .zip(E3)
+                        .map(|(q, e)| q * f64::from(e.2))
+                        .sum::<f64>(),
+                ];
+                flux_plate += momentum[0];
+                mach_max = mach_max.max(det::sqrt(momentum.iter().map(|p| p * p).sum()) / rho);
                 if self.grid.is_solid(self.x_fringe_plane, y, z) {
                     continue;
                 }
                 let g = self.grid.populations(self.x_fringe_plane, y, z);
                 let rho2: f64 = g.iter().sum();
-                let ux2: f64 = g.iter().zip(E3).map(|(q, e)| q * f64::from(e.0)).sum();
-                flux_fringe += rho2 * ux2;
-                mach_max = mach_max.max(det::sqrt(ux2 * ux2));
+                let momentum2 = [
+                    g.iter()
+                        .zip(E3)
+                        .map(|(q, e)| q * f64::from(e.0))
+                        .sum::<f64>(),
+                    g.iter()
+                        .zip(E3)
+                        .map(|(q, e)| q * f64::from(e.1))
+                        .sum::<f64>(),
+                    g.iter()
+                        .zip(E3)
+                        .map(|(q, e)| q * f64::from(e.2))
+                        .sum::<f64>(),
+                ];
+                flux_fringe += momentum2[0];
+                mach_max = mach_max.max(det::sqrt(momentum2.iter().map(|p| p * p).sum()) / rho2);
             }
         }
         #[allow(clippy::cast_precision_loss)]
@@ -607,6 +634,48 @@ pub fn run_slot_jet_3d(cfg: &SlotJet3dConfig) -> Result<SlotJet3dRun, AeroacErro
         },
         scope: SCOPE_STATEMENT,
     })
+}
+
+#[cfg(test)]
+mod material_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn g0_planes_measure_three_component_velocity_and_mass_flux() {
+        let mut grid = BoundaryGrid3::with_collision_model(
+            4,
+            4,
+            4,
+            CollisionModel3::CentralMoment {
+                second_order_rate: 1.2,
+                higher_order_rate: 1.2,
+            },
+            [0.0; 3],
+            BoundarySpec3::periodic(),
+        );
+        let left = (2.0, [0.03_f64, 0.04, 0.02]);
+        let right = (0.7, [-0.02_f64, 0.01, 0.06]);
+        for (x, (rho, velocity)) in [(1, left), (2, right)] {
+            let f = equilibrium3(rho, velocity);
+            for y in 0..4 {
+                for z in 0..4 {
+                    grid.set_populations(x, y, z, &f);
+                }
+            }
+        }
+        let rig = Rig3 {
+            grid,
+            fringe: Fringe3::with_profile(1, 0.1, &[(1.0, [0.0; 3]); 4]),
+            plate_cells: Vec::new(),
+            x_plate_plane: 1,
+            x_fringe_plane: 2,
+        };
+        let (speed, flux_left, flux_right) = rig.plane_diagnostics();
+        let expected_speed = right.1.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!((speed - expected_speed).abs() < 1e-14);
+        assert!((flux_left - left.0 * left.1[0]).abs() < 1e-14);
+        assert!((flux_right - right.0 * right.1[0]).abs() < 1e-14);
+    }
 }
 
 /// Classify one run through the shared measurement pipeline

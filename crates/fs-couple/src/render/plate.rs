@@ -48,6 +48,8 @@ pub struct PlateVoiceConfig {
 
 impl PlateVoiceConfig {
     fn validate(self) -> Result<(), RenderError> {
+        self.gas.validate_coherence().map_err(|e|
+            RenderError::Voice(AcousticRealizeError::Ambient(e.to_string())))?;
         if self.sample_rate_hz == 0 || self.max_modes == 0
             || self.max_modes > MAX_TIME_DOMAIN_ACOUSTIC_MODES
             || !self.nyquist_guard_fraction.is_finite()
@@ -112,7 +114,8 @@ impl CompactPlateVoice {
     /// Host already reduced bodies, including those returned by
     /// `thin_plate::certified_chart_radiators` for a regional-material mesh and
     /// force footprint. Signed areas/participations and any existing vibration
-    /// survive unchanged. The clock counts samples since this wrapper was made.
+    /// survive unchanged. A retained reaction filter must have been built from
+    /// this same gas and sample clock. The clock counts samples since this wrapper was made.
     /// A body list is not proof of source validity or modal completeness.
     ///
     /// # Errors
@@ -129,6 +132,8 @@ impl CompactPlateVoice {
         let maximum_omega = core::f64::consts::PI * f64::from(config.sample_rate_hz)
             * config.nyquist_guard_fraction;
         for body in &bodies {
+            body.validate_radiation_load(&config.gas, config.sample_rate_hz)
+                .map_err(RenderError::Voice)?;
             if !body.mass_kg.is_finite() || body.mass_kg <= 0.0
                 || !body.omega.is_finite() || body.omega <= 0.0 || body.omega > maximum_omega
                 || !body.zeta.is_finite() || body.zeta < 0.0
@@ -151,6 +156,26 @@ impl CompactPlateVoice {
         let voice = Self { bodies, config, force_n: initial_force_n, sample_index: 0, poisoned: false,
             delay_whole, retarded_elapsed_s, history };
         voice.validate_force(initial_force_n)?;
+        Ok(voice)
+    }
+
+    /// Attach the existing compact baffled-piston reaction using the SAME gas
+    /// and clock as pressure propagation, then host the geometry-derived bodies.
+    /// The physical face area is retained by the reducer; it is not inferred
+    /// from the signed modal area. This is the explicit per-mode piston image,
+    /// not a full mutual-radiation matrix or a continuum convergence claim.
+    ///
+    /// An identical existing load preserves its memory; a different gas/clock
+    /// refuses rather than silently retaining stale physics or resetting it.
+    /// Fit and sampled-coupling errors retain the underlying owner's scope.
+    pub fn from_radiators_with_piston_loads(
+        bodies: Vec<CompactBody>, initial_force_n: f64, config: PlateVoiceConfig,
+    ) -> Result<Self, RenderError> {
+        let mut voice = Self::from_radiators(bodies, initial_force_n, config)?;
+        for body in &mut voice.bodies {
+            body.attach_piston_load(&config.gas, config.sample_rate_hz)
+                .map_err(RenderError::Voice)?;
+        }
         Ok(voice)
     }
 

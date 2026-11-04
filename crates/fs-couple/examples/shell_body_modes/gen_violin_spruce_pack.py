@@ -4,7 +4,8 @@ Stiffness and density: the averages over 10 Norway spruce (Picea abies) violin q
 (spruce-norway-viala2020-quarters): E_L, E_R, G_LR, G_LT (the source's G_TL) and G_RT. nu_LR is not identified by the source; the Sitka value of the
 committed Wood Handbook pack (spruce-sitka-fpl-gtr282, nu-lr) is a declared SURROGATE. Loss: eta_L, eta_R and eta_LR of the same quarters; eta_LT and
 eta_RT are UNKNOWN and set equal to eta_LR, as in the maple pack. The nine Kelvin-Voigt viscosities are V = eta x stiffness / omega_ref with
-omega_ref = 2 pi 200 rad/s, exactly as in gen_violin_maple_pack.py; they do not enter the frequencies.
+omega_ref = 2 pi 200 rad/s, exactly as in gen_violin_maple_pack.py; they do not enter the frequencies. The pack states omega_ref as
+constant_loss_reference_omega, so the shell reduction reads each loss factor at every mode's own frequency (fs_couple::shear_shell::constant_loss).
 
 usage: python3 -I gen_violin_spruce_pack.py REPO_ROOT OUT_ROOT
 Reads REPO_ROOT/data/matdb/seed-v1/{spruce-norway-viala2020-quarters,spruce-sitka-fpl-gtr282}/properties.tsv and writes OUT_ROOT/violin-spruce-norway-viala2020-shell/{manifest.tsv,properties.tsv}.
@@ -15,7 +16,7 @@ import sys
 
 REPO, OUT = sys.argv[1].rstrip("/"), sys.argv[2].rstrip("/")
 SEED = REPO + "/data/matdb/seed-v1/"
-OMEGA_MAX = 12566.37
+OMEGA_MIN, OMEGA_MAX = 2.0 * math.pi * 100.0, 2.0 * math.pi * 5000.0  # the source's band: Viala's audio-band model updating, 100-5000 Hz
 OMEGA_REF = 2.0 * math.pi * 200.0
 PACK = "violin-spruce-norway-viala2020-shell"
 
@@ -62,8 +63,9 @@ VISC_ORDER = ["plane_stress_viscosity_11", "plane_stress_viscosity_22", "plane_s
 BASE = [("density", "kg/m^3"), ("young_modulus_1", "Pa"), ("young_modulus_2", "Pa"), ("poisson_ratio_12", "1"), ("shear_modulus_12", "Pa"), ("shear_modulus_13", "Pa"), ("shear_modulus_23", "Pa")]
 
 AXES = ("Axis convention: material axis 1 = L (grain), axis 2 = R (across the growth rings, in the plane of a quartersawn plate), thickness = T, so shear_modulus_12 = G_LR, "
-        "shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). The validity band omega 0 to 2 pi 2000 rad/s "
-        "and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.")
+        "shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). The validity band omega 2 pi 100 to 2 pi 5000 rad/s "
+        "is the source's band (Viala's audio-band model updating, 100-5000 Hz); T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a "
+        "measured band.")
 OBS = [
     ("viala-shell", "Norway spruce (Picea abies) violin-top tonewood, 10 split quarters from one seller, 9-11 percent moisture",
      "Viala et al. (2020) J. Cult. Herit. 42:108-116 as committed in the pack spruce-norway-viala2020-quarters (audio-band finite element model updating, 100-5000 Hz): density %.0f kg/m3, "
@@ -73,8 +75,8 @@ OBS = [
     ("viala-shell-loss", "the same quarters",
      "Viala et al. (2020) Table 4 average row as committed in spruce-norway-viala2020-quarters: eta_L %.4f, eta_R %.4f, eta_LR %.4f; eta_LT and eta_RT are UNKNOWN and set equal to eta_LR" % (
          eta["L"], eta["R"], eta["LR"]),
-     "SURROGATE for two of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the example "
-     "recovers a constant loss factor per mode by omega_ref / omega. They do not enter any frequency."),
+     "SURROGATE for two of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the pack "
+     "states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own frequency. They do not enter any frequency."),
 ]
 
 
@@ -87,11 +89,16 @@ lines = ["frankensim.matdb-source.v1"]
 for o in OBS:
     lines.append("\t".join(("observation",) + o))
 for k, u in BASE:
-    for row in (("scalar", k, "viala-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+    for row in (("scalar", k, "viala-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
 for k in VISC_ORDER:
-    for row in (("scalar", k, "viala-shell-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+    for row in (("scalar", k, "viala-shell-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
+# The angular frequency at which the nine viscosities above were written: a reader applies each loss factor at every
+# mode's own frequency with it (fs_couple::shear_shell::CONSTANT_LOSS_REFERENCE_OMEGA); without it they are Kelvin-Voigt.
+k = "constant_loss_reference_omega"
+for row in (("scalar", k, "viala-shell-loss", k, fmt(OMEGA_REF), "rad/s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
+    lines.append("\t".join(row))
 open(OUT + "/" + PACK + "/properties.tsv", "w", encoding="utf-8").write("\n".join(lines) + "\n")
 man = ["frankensim.matdb-manifest.v1", "pack_id\t" + PACK,
        "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs spruce-norway-viala2020-quarters and spruce-sitka-fpl-gtr282 (whose own terms apply)",

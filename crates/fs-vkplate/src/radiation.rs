@@ -598,6 +598,8 @@ struct Retained {
     /// Held film loss as a modal damping coefficient,
     /// `tan delta * phi' K_bend phi / omega` at the loaded frequency.
     film_resistance: f64,
+    /// Stokes face-layer resistance at the loaded frequency.
+    viscous_resistance: f64,
 }
 
 fn cholesky(a: &mut [f64], n: usize) -> Result<(), String> {
@@ -781,6 +783,7 @@ fn ritz_macs(
 }
 
 impl ModalAirLoad {
+
     /// Build the load of a clamped full circular head of `radius` whose nodes
     /// are `xy` (centred) with spacing `h`, nodal `mass` and linear
     /// `stiffness(v) -> K v`, in `gas`. Every `m >= 1` table mode the grid
@@ -833,6 +836,27 @@ impl ModalAirLoad {
         compact_volume_resistance: Option<f64>,
         film: Option<(f64, &dyn Fn(&[f64]) -> Vec<f64>)>,
     ) -> Result<ModalAirLoad, String> {
+        Self::new_with_losses(table, radius, h, xy, mass, stiffness, gas, compact_volume_resistance, film, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_losses(
+        table: &RadiationTable,
+        radius: f64,
+        h: f64,
+        xy: &[[f64; 2]],
+        mass: &[f64],
+        stiffness: &dyn Fn(&[f64]) -> Vec<f64>,
+        gas: &GasState,
+        compact_volume_resistance: Option<f64>,
+        film: Option<(f64, &dyn Fn(&[f64]) -> Vec<f64>)>,
+        viscous: Option<(f64, f64)>,
+    ) -> Result<ModalAirLoad, String> {
+        if let Some((areal_density, coincidence_hz)) = viscous
+            && !(areal_density.is_finite() && areal_density > 0.0 && coincidence_hz.is_finite() && coincidence_hz > 0.0)
+        {
+            return Err("head viscous layer needs positive areal density and coincidence frequency".into());
+        }
         if let Some((tan_delta, _)) = film
             && !(tan_delta.is_finite() && tan_delta > 0.0 && tan_delta < 1.0)
         {
@@ -993,6 +1017,19 @@ impl ModalAirLoad {
                     }
                     None => (0.0, 0.0),
                 };
+                let viscous_resistance = match viscous {
+                    Some((areal_density, coincidence_hz)) => {
+                        let layer = crate::air_loss::plate_viscous_layer(
+                            areal_density,
+                            omega,
+                            omega / (2.0 * std::f64::consts::PI * coincidence_hz),
+                            2,
+                            gas,
+                        )?;
+                        layer.loss_factor * modal_mass * omega
+                    }
+                    None => 0.0,
+                };
                 retained.push(Retained {
                     shape: index,
                     sine,
@@ -1007,6 +1044,7 @@ impl ModalAirLoad {
                     mac: 1.0,
                     bending_share,
                     film_resistance,
+                    viscous_resistance,
                 });
                 phis.push(phi);
                 kphis.push(k_phi);
@@ -1071,7 +1109,7 @@ impl ModalAirLoad {
             out
         };
         let film_damping = film.map(|_| sandwich(&|r| retained[r].film_resistance));
-        let damping = sandwich(&|r| retained[r].resistance + retained[r].film_resistance);
+        let damping = sandwich(&|r| retained[r].resistance + retained[r].film_resistance + retained[r].viscous_resistance);
         let mass_matrix = sandwich(&|r| retained[r].air_mass);
         let mut inverse_mass_gram = vec![0.0; n * n];
         for i in 0..n {
@@ -1210,6 +1248,13 @@ impl ModalAirLoad {
                 });
             receipt.push(format!(
                 "head film loss: tan delta {tan_delta} held per mode on the {n} retained m >= 1 shapes, loaded {low:.1} to {high:.1} Hz (eta = tan delta x bending share at each mode's own frequency); the volume (m = 0) shapes and every dropped or refused shape carry NO film loss, so their decays stay upper bounds"
+            ));
+        }
+        if viscous.is_some() {
+            let (low, high) = retained.iter().map(|r| r.viscous_resistance / (r.mass * r.omega))
+                .fold((f64::INFINITY, 0.0_f64), |(lo, hi), eta| (lo.min(eta), hi.max(eta)));
+            receipt.push(format!(
+                "head viscous layer: exact linear Stokes face loss on both faces, eta {low:.3e} to {high:.3e} at each retained mode's loaded frequency; m = 0 and dropped shapes carry none, so their decays stay upper bounds; every retained mode is below coincidence"
             ));
         }
         receipt.push(format!(

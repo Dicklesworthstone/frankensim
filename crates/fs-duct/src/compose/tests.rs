@@ -998,3 +998,155 @@ fn neck_end_corrections_match_the_duct_terminations() {
     let flanged = (delta(Termination::FlangedOpen) - phs(fs_phs::MouthFlange::Flanged)) / a;
     assert!(flanged.abs() < 1e-3, "flanged end correction gap {flanged} a");
 }
+
+#[test]
+fn open_tone_hole_flows_conserve_dc_and_match_prefix_suffix_split() {
+    let g = gas();
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder {
+                radius: 0.0075,
+                length: 0.14,
+            },
+            Segment::ToneHole {
+                hole_radius: 0.0032,
+                chimney_height: 0.006,
+                bore_radius: 0.0075,
+                state: HoleState::Closed,
+            },
+            Segment::Cylinder {
+                radius: 0.0075,
+                length: 0.06,
+            },
+            Segment::ToneHole {
+                hole_radius: 0.0036,
+                chimney_height: 0.0065,
+                bore_radius: 0.0075,
+                state: HoleState::Open,
+            },
+            Segment::Cylinder {
+                radius: 0.0075,
+                length: 0.05,
+            },
+            Segment::ToneHole {
+                hole_radius: 0.0040,
+                chimney_height: 0.007,
+                bore_radius: 0.0075,
+                state: HoleState::Vent(0.64),
+            },
+            Segment::Cone {
+                inlet_radius: 0.0075,
+                outlet_radius: 0.025,
+                length: 0.09,
+            },
+        ],
+    };
+    let wall = WallModel::from_pin(None);
+    // Low-frequency volume-flow conservation: sum(u_hole/u_in) + u_bell/u_in -> 1.
+    let (dc_resp, dc_holes) = crate::input_impedance_with_wall_and_holes(
+        &duct,
+        &g,
+        TAU * 0.25,
+        LossModel::Bessel,
+        Termination::FlangedOpen,
+        wall,
+    )
+    .unwrap();
+    assert_eq!(dc_holes.len(), 2);
+    assert!((dc_holes[0].axial_position_m - 0.20).abs() < 1e-15);
+    assert!((dc_holes[1].axial_position_m - 0.25).abs() < 1e-15);
+    assert!((dc_holes[1].effective_radius_m - 0.0040 * 0.8).abs() < 1e-15);
+    let total_dc =
+        dc_resp.u_mouth_over_u_in + dc_holes[0].u_hole_over_u_in + dc_holes[1].u_hole_over_u_in;
+    assert!(
+        (total_dc - C64::ONE).abs() < 1e-5,
+        "low-frequency volume flow sum {total_dc:?}"
+    );
+    // Midpoint-pressure formula agrees with explicit chain-splitting flow difference.
+    let options = ComposeOptions::default();
+    for hz in [110.0, 440.0, 1175.0, 2637.0] {
+        let omega = TAU * hz;
+        let expected_resp = crate::input_impedance_with_wall(
+            &duct,
+            &g,
+            omega,
+            LossModel::Bessel,
+            Termination::FlangedOpen,
+            wall,
+        )
+        .unwrap();
+        let (resp, holes) = crate::input_impedance_with_wall_and_holes(
+            &duct,
+            &g,
+            omega,
+            LossModel::Bessel,
+            Termination::FlangedOpen,
+            wall,
+        )
+        .unwrap();
+        assert_eq!(
+            (resp.impedance.re.to_bits(), resp.impedance.im.to_bits()),
+            (
+                expected_resp.impedance.re.to_bits(),
+                expected_resp.impedance.im.to_bits()
+            )
+        );
+        assert_eq!(
+            (
+                resp.u_mouth_over_u_in.re.to_bits(),
+                resp.u_mouth_over_u_in.im.to_bits()
+            ),
+            (
+                expected_resp.u_mouth_over_u_in.re.to_bits(),
+                expected_resp.u_mouth_over_u_in.im.to_bits()
+            )
+        );
+        let (chain, prepared_holes) = super::duct_chain_with_wall_and_holes(
+            &duct,
+            &g,
+            omega,
+            LossModel::Bessel,
+            wall,
+            options,
+            true,
+            || false,
+        )
+        .unwrap();
+        let (z_load, _) =
+            crate::termination_impedance(Termination::FlangedOpen, &g, 0.025, omega).unwrap();
+        for (flow, prep) in holes.iter().zip(&prepared_holes) {
+            let b = prep.block_index;
+            let suffix = compose_chain(&chain.blocks[b..], z_load, options).unwrap();
+            let prefix = compose_chain(&chain.blocks[..b], Some(suffix.z_in), options).unwrap();
+            let after = compose_chain(&chain.blocks[b + 1..], z_load, options).unwrap();
+            let through_hole = compose_chain(&chain.blocks[..=b], Some(after.z_in), options).unwrap();
+            let u_shunt = prefix.u_out_over_u_in - through_hole.u_out_over_u_in;
+            let seg = &duct.segments[if b == 3 { 3 } else { 5 }];
+            let Segment::ToneHole {
+                hole_radius,
+                chimney_height,
+                bore_radius,
+                state,
+            } = *seg
+            else {
+                unreachable!()
+            };
+            let z_h = crate::tone_hole_shunt_with_wall(
+                &g,
+                hole_radius,
+                chimney_height,
+                state,
+                omega,
+                LossModel::Bessel,
+                bore_radius,
+                wall,
+            )
+            .unwrap();
+            let want = u_shunt
+                * (z_h.scale(prep.sigma) / prep.open_chimney_impedance)
+                * prep.chimney_u_mouth_over_u_in;
+            let err = relative(flow.u_hole_over_u_in, want);
+            assert!(err < 1e-12, "hz={hz} block={b}: err={err}");
+        }
+    }
+}

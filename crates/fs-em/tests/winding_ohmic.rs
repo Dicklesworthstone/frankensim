@@ -1,5 +1,7 @@
 #[path = "winding_ohmic/common.rs"]
 mod common;
+#[path = "winding_ohmic/rebind.rs"]
+mod rebind;
 use common::*;
 use fs_em::winding::{PlanarWindingBasis, ohmic::{OhmicWindingCircuit, OhmicWindingError}};
 use fs_material::conductor::{ElectricalPropertyBasis, ResolvedConductorState};
@@ -73,7 +75,7 @@ fn material_resistance_changes_actual_mutual_circuit_currents_and_complete_heat(
 
 #[test]
 fn electrical_basis_and_actual_extrusion_are_data_not_solver_switches() {
-    let mut reference = None;
+    let mut reference: Option<(Vec<f64>, f64)> = None;
     for basis in [ElectricalPropertyBasis::Resistivity, ElectricalPropertyBasis::Conductivity] {
         let cards = [card(2e-5, 0.0, 2e-4, basis), card(3e-5, 0.0, 2e-4, basis)];
         for depth in [0.5, 1.0] {

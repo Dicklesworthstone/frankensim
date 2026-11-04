@@ -131,7 +131,21 @@ pub struct PlateDynamics<'a, L: ?Sized> {
     load_parameters: usize,
 }
 
+impl<L: ?Sized> Copy for PlateDynamics<'_, L> {}
+impl<L: ?Sized> Clone for PlateDynamics<'_, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
+    pub(crate) fn same_model_and_load(&self, other: &Self) -> bool {
+        core::ptr::eq(self.model, other.model)
+            && core::ptr::eq(self.load, other.load)
+            && self.load_parameters == other.load_parameters
+            && self.parameters == other.parameters
+    }
+
     /// Bind admitted sparse operators and pure load callbacks.
     #[allow(clippy::too_many_lines)]
     pub fn new<C: FnMut() -> bool>(
@@ -278,11 +292,12 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
         let alpha_f = rho_inf / (rho_inf + 1.0);
         let gamma = 0.5 - alpha_m + alpha_f;
         let beta = 0.25 * (1.0 - alpha_m + alpha_f) * (1.0 - alpha_m + alpha_f);
-        let (m_coefficient, k_coefficient) = self.effective_coefficients(SecondOrderOperatorWeights {
-            mass: (1.0 - alpha_m) / (beta * step * step),
-            damping: (1.0 - alpha_f) * gamma / (beta * step),
-            tangent: 1.0 - alpha_f,
-        });
+        let (m_coefficient, k_coefficient) =
+            self.effective_coefficients(SecondOrderOperatorWeights {
+                mass: (1.0 - alpha_m) / (beta * step * step),
+                damping: (1.0 - alpha_f) * gamma / (beta * step),
+                tangent: 1.0 - alpha_f,
+            });
         if !finite(&[m_coefficient, k_coefficient]) {
             return Err(PlateDynamicsError::InvalidInput(
                 "unrepresentable effective operator coefficients",
@@ -393,7 +408,8 @@ impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateDynamics<'_, L> {
         residual: &[f64],
         output: &mut [f64],
     ) {
-        if residual.len() != self.model.free || output.len() != self.model.free || !finite(residual) {
+        if residual.len() != self.model.free || output.len() != self.model.free || !finite(residual)
+        {
             output.fill(f64::NAN);
             return;
         }
@@ -403,7 +419,8 @@ impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateDynamics<'_, L> {
             return;
         }
         for (row, (out, &value)) in output.iter_mut().zip(residual).enumerate() {
-            let diagonal = mass * self.model.m.get(row, row) + stiffness * self.model.k.get(row, row);
+            let diagonal =
+                mass * self.model.m.get(row, row) + stiffness * self.model.k.get(row, row);
             let inverse = 1.0 / diagonal;
             if !diagonal.is_finite() || diagonal <= 0.0 || !inverse.is_finite() {
                 output.fill(f64::NAN);

@@ -80,6 +80,9 @@ impl ExactNetwork {
         {
             return Err(invalid("complete modal island layout"));
         }
+        if links.iter().any(|link| link.constant_loss_reference_omega_rad_s.is_some()) {
+            return Err(invalid("a constant-loss connection needs the prepared exact owner"));
+        }
         let mut labels: Vec<_> = (0..count).collect();
         let root = |parents: &[usize], mut i: usize| {
             while parents[i] != i {
@@ -283,6 +286,11 @@ impl ExactNetwork {
 
     /// The accepted step's per-port ledger as a deferred observation, for the owner whose ledger costs a sweep over every
     /// dense link Gramian (the prepared one); `None` for every other owner, which computes it eagerly in `connection_work`.
+    /// The damping column of a constant-loss link on the prepared owner; None where the dashpot acts along its own column.
+    pub(super) fn damping_column(&self, link: usize) -> Option<&[f64]> {
+        self.prepared.as_ref().and_then(|prepared| prepared.damping_column(link))
+    }
+
     pub(super) fn deferred_connection_work(&self, x: &[f64], u: &[f64], endpoint: &[f64], connection_loss: f64)
         -> Option<std::sync::Arc<dyn crate::port_adoption::DeferredTransfers>>
     {
@@ -819,19 +827,33 @@ pub(super) fn stage(
         poll(gate)?;
         let extension = extension(&network.candidates, column, link.rest_extension_m)?;
         spring_after = finite(spring_after + 0.5 * link.stiffness_n_m * extension * extension)?;
-        let velocity: f64 = column
+        // A constant-loss dashpot acts along its damping column; its reaction is the spring's force plus that generalized
+        // dashpot force.
+        let damping_column = network.exact.as_ref().and_then(|exact| exact.damping_column(index));
+        let dashpot = damping_column.unwrap_or(column);
+        let velocity: f64 = dashpot
             .iter()
             .enumerate()
             .map(|(i, b)| b * rec_x[2 * i + 1])
             .sum();
         network.reactions[index] =
             finite(-link.stiffness_n_m * extension - link.damping_n_s_m * velocity)?;
-        for (force, b) in network.forces.iter_mut().zip(column) {
-            *force = finite(*force + b * network.reactions[index])?;
+        match damping_column {
+            None => {
+                for (force, b) in network.forces.iter_mut().zip(column) {
+                    *force = finite(*force + b * network.reactions[index])?;
+                }
+            }
+            Some(damping_column) => {
+                let (spring, viscous) = (-link.stiffness_n_m * extension, -link.damping_n_s_m * velocity);
+                for ((force, b), d) in network.forces.iter_mut().zip(column).zip(damping_column) {
+                    *force = finite(*force + b * spring + d * viscous)?;
+                }
+            }
         }
         let force_bound = finite(
             (det::sqrt(link.stiffness_n_m)
-                + link.damping_n_s_m * det::sqrt(column.iter().map(|b| b * b).sum()))
+                + link.damping_n_s_m * det::sqrt(dashpot.iter().map(|b| b * b).sum()))
                 * root_twice_energy
                 + link.stiffness_n_m * link.rest_extension_m.abs(),
         )?;
@@ -1221,6 +1243,7 @@ mod tests {
             stiffness_n_m: 1.0,
             damping_n_s_m: 0.0,
             rest_extension_m: 0.0,
+            constant_loss_reference_omega_rad_s: None,
         }];
         assert!(ExactNetwork::new(&models[..cap], &[vec![1.0; cap]], &links, cap, &gate).is_ok());
         assert!(matches!(
@@ -1256,11 +1279,13 @@ mod tests {
                 stiffness_n_m: 2e5,
                 damping_n_s_m: 70.0,
                 rest_extension_m: 1e-9,
+                constant_loss_reference_omega_rad_s: None,
             },
             ConnectionLaw {
                 stiffness_n_m: 3e5,
                 damping_n_s_m: 90.0,
                 rest_extension_m: -2e-9,
+                constant_loss_reference_omega_rad_s: None,
             },
         ];
         let gate = CancelGate::new();
@@ -1359,16 +1384,19 @@ mod tests {
                     stiffness_n_m: links[0].stiffness_n_m,
                     damping_n_s_m: links[0].damping_n_s_m,
                     rest_extension_m: links[0].rest_extension_m,
+                    constant_loss_reference_omega_rad_s: None,
                 },
                 ConnectionLaw {
                     stiffness_n_m: links[1].stiffness_n_m,
                     damping_n_s_m: links[1].damping_n_s_m,
                     rest_extension_m: links[1].rest_extension_m,
+                    constant_loss_reference_omega_rad_s: None,
                 },
                 ConnectionLaw {
                     stiffness_n_m,
                     damping_n_s_m,
                     rest_extension_m: 0.0,
+                    constant_loss_reference_omega_rad_s: None,
                 },
             ];
             let merged =

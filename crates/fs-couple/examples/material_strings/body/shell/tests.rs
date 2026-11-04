@@ -193,8 +193,9 @@ fn shell_profile_admits_exactly_the_node_ceiling_and_refuses_one_more() {
     assert!(Profile::parse(grid_body(nx, 32, MAX_NODES, 0).as_bytes()).is_ok());
     // One more node is refused when it is only declared and when it is really present.
     assert!(Profile::parse(grid_body(nx, 32, MAX_NODES + 1, 0).as_bytes()).is_err());
-    assert_eq!((MAX_NODES + 1) % 3, 0, "MAX_NODES + 1 must factor as 3 * m for the real over-cap grid");
-    assert!(Profile::parse(grid_body(3, (MAX_NODES + 1) / 3, MAX_NODES + 1, 0).as_bytes()).is_err());
+    // The real over-cap grid is `columns` wide, the smallest factor of MAX_NODES + 1.
+    let columns = (2..MAX_NODES + 1).find(|f| (MAX_NODES + 1) % f == 0).expect("MAX_NODES + 1 must not be prime");
+    assert!(Profile::parse(grid_body(columns, (MAX_NODES + 1) / columns, MAX_NODES + 1, 0).as_bytes()).is_err());
 }
 
 #[test]
@@ -222,6 +223,34 @@ fn shell_profile_admits_exactly_the_mode_ceiling_and_refuses_one_more() {
     assert!(plate.preflight(&spec).is_ok());
     spec.body.modes = input::MAX_PLATE_BODY_MODES + 1;
     assert!(plate.preflight(&spec).is_err());
+}
+
+/// A complete instrument admits exactly `MAX_TOTAL_MODES` modal coordinates (1024, the prepared owner's ceiling) and
+/// refuses one more; at that ceiling it admits exactly `MAX_WORK` setup terms, one link per body mode at the body
+/// ceiling, and refuses one more link. A `prepared-linear` record admits the library ceiling and refuses one more mode.
+#[test]
+fn the_complete_instrument_admits_exactly_the_mode_and_work_ceilings_and_refuses_one_more() {
+    let spec = shell_spec();
+    let dimensions = |links, modes| spec.network_dimensions_with_body_modes(false, links, modes);
+    let (base, base_links, _) = dimensions(0, 0).unwrap();
+    let (at, _, _) = dimensions(0, input::MAX_TOTAL_MODES - base).unwrap();
+    assert_eq!(at, input::MAX_TOTAL_MODES);
+    let over = dimensions(0, input::MAX_TOTAL_MODES - base + 1).unwrap_err();
+    assert!(over.to_string().contains("exceeds 1024 modes"), "{over}");
+    let extra = input::MAX_BODY_MODES - base_links;
+    let (_, links, terms) = dimensions(extra, input::MAX_TOTAL_MODES - base).unwrap();
+    assert_eq!(links, input::MAX_BODY_MODES);
+    assert_eq!(terms as u64, input::MAX_WORK);
+    let over = dimensions(extra + 1, input::MAX_TOTAL_MODES - base).unwrap_err();
+    assert!(over.to_string().contains("setup work budget"), "{over}");
+    let body = "body body.fsmatpk 0.4 0.3 0.001 2 1";
+    let cavity = "cavity neck 0.003 0.01 0.02 100 1";
+    let text = violin_performance(96, body, cavity, CANNONE_DIRECTIONS);
+    let ceiling = fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES;
+    let record = |modes: usize| format!("prepared-linear {modes} ");
+    let with = |modes: usize| text.replacen(&record(512), &record(modes), 1);
+    assert!(input::Spec::parse(with(ceiling).as_bytes()).is_ok());
+    assert!(input::Spec::parse(with(ceiling + 1).as_bytes()).is_err());
 }
 
 #[test]
@@ -389,7 +418,6 @@ const VIOLIN_STRING_BAND_HZ: f64 = 10_000.0;
 /// tenth of the speaking length from the bridge. There is no cylinder gas loading: its memory (bending modes x planes x
 /// intervals) would exceed the 512-coordinate prepared ceiling.
 fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
-    use std::f64::consts::PI;
     let (nx, ny) = (15, 11);
     let centre = (ny / 2) * nx + nx / 2;
     let feet: String = [centre - 2, centre - 1, centre + 1, centre + 2].iter()
@@ -397,6 +425,15 @@ fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
     let text = clamped_plate_body(nx, ny, "window 1 4000000000", 2_000_000_000)
         .replace(&format!("bridges 1\nbridge {centre} 0 0 1\n"), &format!("bridges 4\n{feet}"));
     let profile = Profile::parse(text.as_bytes()).unwrap();
+    let performance = violin_performance(samples, "body body.fsmatpk 0.4 0.3 0.001 128 1",
+        "cavity neck 0.002 0.0187 0.003 100 1", "0.6 0.8 1 0");
+    (profile, input::Spec::parse(performance.as_bytes()).unwrap())
+}
+
+/// The violin-sized rung's performance (see `violin_inputs`: its strings, bow and schedule) around a body and a cavity
+/// record, with every string's `polarizations two` directions (BOW_X BOW_Y BRIDGE_X BRIDGE_Y).
+fn violin_performance(samples: u64, body: &str, cavity: &str, directions: &str) -> String {
+    use std::f64::consts::PI;
     let (speaking, span) = (0.328_f64, 0.383_f64);
     let bridge = speaking / span;
     let (density, young, shear) = (7800.0, 200e9, 80e9);
@@ -414,15 +451,384 @@ fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
             .count();
         let twist = (VIOLIN_STRING_BAND_HZ * 2.0 * span / (shear / density).sqrt()) as usize;
         strings.push_str(&format!("string wire.fsmatpk {span} {radius} tension {tension} {bending} {twist} {bridge} 3000 0.1\n\
-            section bonded {} 1\nlayer sleeve.fsmatpk {radius}\npolarizations two 0.6 0.8 1 0\n", radius * 2.0 / 3.0));
+            section bonded {} 1\nlayer sleeve.fsmatpk {radius}\npolarizations two {directions}\n", radius * 2.0 / 3.0));
     }
     let bow = bridge * 0.9;
-    let performance = format!("frankensim-material-strings-v3\naudio 48000 {samples} 0.01 128\nstate 293.15 1000\n\
-        gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2\nbody body.fsmatpk 0.4 0.3 0.001 128 1\nstrings 4\n{strings}\
-        prepared-linear 512 4294967296 1000000000000000\ncavity neck 0.002 0.0187 0.003 100 1\n\
+    format!("frankensim-material-strings-v3\naudio 48000 {samples} 0.01 128\nstate 293.15 1000\n\
+        gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2\n{body}\nstrings 4\n{strings}\
+        prepared-linear 512 4294967296 1000000000000000\n{cavity}\n\
         friction stribeck 0.8 0.4 0.1 0\nforces retain 0 0\nschedule\nfrankensim-gesture-schedule-v1\n\
-        control_rate_hz\t700\ntracks\t1\ntrack\tbow\tbow\t0\ninitial\tbow\t2e-1\t5e-1\t{bow:e}\nevents\t0\n");
+        control_rate_hz\t700\ntracks\t1\ntrack\tbow\tbow\t0\ninitial\tbow\t2e-1\t5e-1\t{bow:e}\nevents\t0\n")
+}
+
+/// Every il Cannone string's BOW_X BOW_Y BRIDGE_X BRIDGE_Y. The bridge nodes push along x, across the body, which is also
+/// the bow's tangent, so the bow drives the plane the bridge holds. The bow-normal plane has no bridge (the string record
+/// carries one bridge direction) and nothing drives it. With the violin-sized rung's `0.6 0.8 1 0`, 0.8 of the bow drove
+/// that free plane, and the G string sounded its full 0.383 m span (167 Hz) instead of its 0.328 m speaking length.
+const CANNONE_DIRECTIONS: &str = "1 0 1 0";
+
+/// The il Cannone body's assembly choices (`cannone-h8.assembly`, the file `material_strings assemble-shell` reads): the
+/// window from 15 Hz to 2 kHz (the packs declare 100 Hz to 5 kHz and 150 Hz to 10 kHz), spruce as the performance body
+/// pack and maple the other, the 3 mm reference thickness, and the four string contacts on the bridge, each driving its
+/// node along x.
+fn cannone_options() -> super::super::shell::assembly::table::OptionsFile {
+    super::super::shell::assembly::table::OptionsFile::parse(include_str!("../../cannone-h8.assembly")).unwrap()
+}
+
+/// The il Cannone violin body (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv: 48
+/// parts, 7042 nodes, 10192 triangles, 119 ties) written as a v4 assembled profile with `cannone_options`. The table's
+/// frame has x across the body, y vertical and z along the strings.
+fn cannone_profile() -> (Profile, super::super::shell::assembly::table::ConvertedTable) {
+    cannone_profile_with(&cannone_options(), CANNONE_H8)
+}
+
+const CANNONE_H8: &str =
+    include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv");
+
+/// The same body meshed at 6 mm by the same generator (shell-assembly-h6.tsv: 64 parts, 11769 nodes, 17483 triangles,
+/// 157 ties), the largest table on file.
+const CANNONE_H6: &str =
+    include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv");
+
+/// The 6 mm table's assembly choices (`cannone-h6.assembly`): h8's, with the window to 5 kHz (the spruce pack's source
+/// band) and the projection work its 11769 nodes need.
+fn cannone_h6_options() -> super::super::shell::assembly::table::OptionsFile {
+    super::super::shell::assembly::table::OptionsFile::parse(include_str!("../../cannone-h6.assembly")).unwrap()
+}
+
+fn cannone_profile_with(options: &super::super::shell::assembly::table::OptionsFile, table: &str)
+    -> (Profile, super::super::shell::assembly::table::ConvertedTable)
+{
+    let converted = options.convert(table).unwrap();
+    (Profile::parse(converted.profile.as_bytes()).unwrap(), converted)
+}
+
+/// A shell-assembly options file states each choice once: a missing, repeated, unknown or malformed record refuses, as do
+/// an inverted window and another version.
+#[test]
+fn shell_assembly_options_refuse_missing_repeated_unknown_and_malformed_records() {
+    use super::super::shell::assembly::table::OptionsFile;
+    let text = include_str!("../../cannone-h8.assembly");
+    assert!(OptionsFile::parse(text).is_ok());
+    let refused = |t: &str| OptionsFile::parse(t).err().expect("must refuse").to_string();
+    assert!(refused(&text.replace("window-hz 15 2000\n", "")).contains("need window-hz"));
+    assert!(refused(&text.replace("bridge-direction 1 0 0\n", "")).contains("need bridge-direction"));
+    assert!(refused(&format!("{text}reference-thickness-m 0.004\n")).contains("repeated"));
+    assert!(refused(&format!("{text}pack maple violin-spruce-norway-viala2020-shell.fsmatpk\n")).contains("repeated"));
+    assert!(refused(&format!("{text}bridge 0.01\n")).contains("needs 2 numbers"));
+    assert!(refused(&format!("{text}bridge-component bridge top\n")).contains("malformed"));
+    assert!(refused(&format!("{text}tie-budget 4\n")).contains("unknown"));
+    assert!(refused(&text.replace("window-hz 15 2000", "window-hz 2000 15")).contains("0 < LO < HI"));
+    assert!(refused(&text.replacen("options-v1", "options-v2", 1)).contains("not a frankensim-shell-assembly-options-v1"));
+}
+
+/// `cannone-dominant-g3.material-strings` is the il Cannone G3 note for the command line: the four Dominant string packs
+/// on the rung's 0.383 m span and 0.328 m speaking length, the G bowed at 1 N and 0.2 m/s one tenth of its speaking length
+/// from the bridge, 2 s at 144 kHz. Its body and cavity records are the ones this body's conversion gives, and it passes
+/// preflight on that profile.
+#[test]
+fn the_cannone_dominant_g3_performance_matches_its_body_and_passes_preflight() {
+    let text = include_str!("../../cannone-dominant-g3.material-strings");
+    let (profile, converted) = cannone_profile();
+    let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
+    let body = format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} {} {CANNONE_BODY_MODES} 1\n",
+        converted.length_m, converted.width_m, cannone_options().reference_thickness_m());
+    assert!(text.contains(&body), "{body}");
+    let cavity = format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1\n");
+    assert!(text.contains(&cavity), "{cavity}");
+    for (k, string) in ["g", "d", "a", "e"].iter().enumerate() {
+        let record = text.lines().filter(|l| l.starts_with("string ")).nth(k).unwrap();
+        assert!(record.starts_with(&format!("string violin-string-dominant-{string}-pickering1985-section.fsmatpk ")));
+    }
+    profile.preflight(&input::Spec::parse(text.as_bytes()).unwrap()).unwrap();
+}
+
+/// The crown joints of `cannone-dominant-g3-crown-{compliant,stiff}.material-strings`, written by
+/// `gen_crown_interface_packs.py`. Each Dominant string's lateral stick on the il Cannone bridge crown comes from Hertz
+/// crossed cylinders and Mindlin's no-slip tangential stiffness k_t = 8 G* a (Johnson 1985, eqs. 4.53 and 7.42).
+///
+/// Both ends of the envelope of its STATED UNKNOWNs are covered:
+/// - the maple orthotropy: G_RT with E_L, or G_LR with E_R;
+/// - the crown edge radius: 0.1 mm, or half the CT bridge-top thickness;
+/// - the unnamed wrap metal.
+///
+/// The test checks five things:
+/// - each note is the committed note with only every string's scalar joint replaced, and the stiff end's audio clock
+///   raised to 384 kHz over the same duration;
+/// - re-derived here from the committed seeds, the CT tables and the note's own tensions, every resolved joint agrees to
+///   2e-8 in stiffness and damping;
+/// - every joint states the maple pack's constant-loss anchor, so its loss factor is share x eta at every frequency;
+/// - every string's compliant end is the softer and the less lossy;
+/// - the joints claim 0 to 2 pi 200 kHz (MagentaBadger 7268 (a)), and a declared state above that refuses.
+#[test]
+fn the_cannone_crown_joints_resolve_to_their_contact_mechanics_at_both_envelope_ends() {
+    let scalar = |text: &str, name: &str| -> f64 {
+        let f = text.lines().map(|l| l.split('\t').collect::<Vec<_>>())
+            .find(|f| f[0] == "scalar" && f[3] == name).unwrap_or_else(|| panic!("no scalar {name}"));
+        f[4].parse::<f64>().unwrap() * match f[5] { "MPa" => 1e6, "GPa" => 1e9, _ => 1.0 }
+    };
+    let maple = include_str!(
+        "../../../../../../data/matdb/seed-v1/violin-maple-sycamore-sonderegger2013-shell/properties.tsv");
+    let aluminium = include_str!("../../../../../../data/matdb/seed-v1/aluminum-2024-t3-sheet-mil-hdbk-5j/properties.tsv");
+    let silver = include_str!("../../../../../../data/matdb/seed-v1/silver-pure-smith-fickett-nist1995/properties.tsv");
+    let silver_shear = include_str!("../../../../../../data/matdb/seed-v1/silver-pure-wrap-nist1995/properties.tsv");
+    let wire = include_str!("../../../../../../data/matdb/seed-v1/music-wire-spring-moduli-fuchs-1968/properties.tsv");
+    let contacts = include_str!(
+        "../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/string-contacts.tsv");
+    let dimensions = include_str!(
+        "../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/dimensions.tsv");
+    let base = include_str!("../../cannone-dominant-g3.material-strings");
+    let notes = [("compliant", include_str!("../../cannone-dominant-g3-crown-compliant.material-strings")),
+        ("stiff", include_str!("../../cannone-dominant-g3-crown-stiff.material-strings"))];
+    let packs: [(&str, &[u8]); 4] = [
+        ("violin-cannone-crown-dominant-e-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-e-interface.fsintpk")),
+        ("violin-cannone-crown-dominant-a-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-a-interface.fsintpk")),
+        ("violin-cannone-crown-dominant-d-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-d-interface.fsintpk")),
+        ("violin-cannone-crown-dominant-g-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-g-interface.fsintpk")),
+    ];
+    let loader = |name: &str| -> Result<NormalizedInterfacePack> {
+        let (_, bytes) = packs.iter().find(|(n, _)| *n == name).ok_or("unknown crown pack")?;
+        Ok(NormalizedInterfacePack::from_bytes(bytes)?)
+    };
+
+    // The contact, re-derived from the same committed sources (gen_crown_interface_packs.py's derivation).
+    let nu_maple = scalar(maple, "poisson_ratio_12");
+    let crown = [(scalar(maple, "young_modulus_1"), scalar(maple, "shear_modulus_23")),
+        (scalar(maple, "young_modulus_2"), scalar(maple, "shear_modulus_12"))];
+    let tau = [("plane_stress_viscosity_66", "shear_modulus_12"), ("transverse_shear_viscosity_13", "shear_modulus_13"),
+        ("transverse_shear_viscosity_23", "shear_modulus_23")]
+        .map(|(v, g)| scalar(maple, v) / scalar(maple, g)).into_iter().fold(0.0_f64, f64::max);
+    let crown_thickness = dimensions.lines().map(|l| l.split('\t').collect::<Vec<_>>())
+        .find(|f| f.len() > 4 && f[0] == "bridge" && f[2] == "thickness-z-min-above-y-minus-52" && f[4] == "m")
+        .map(|f| f[3].parse::<f64>().unwrap()).unwrap();
+    let edge_radius = [1.0e-4, 0.5 * crown_thickness];
+    let al = (scalar(aluminium, "young_modulus"), scalar(aluminium, "poisson_ratio"), scalar(aluminium, "shear_modulus"));
+    let ag = (scalar(silver, "young_modulus"), scalar(silver, "poisson_ratio"), scalar(silver_shear, "shear_modulus"));
+    let (e_w, g_w) = (scalar(wire, "young_modulus"), scalar(wire, "shear_modulus"));
+    let steel = (e_w, e_w / (2.0 * g_w) - 1.0, g_w);
+    let joint = |string: &str, end: usize, radius: f64, tension: f64| -> (f64, f64) {
+        let f: Vec<&str> = contacts.lines().map(|l| l.split('\t').collect::<Vec<_>>())
+            .find(|f| f.len() == 7 && f[0] == string && f[1] == "bridge").unwrap();
+        let theta = (-f[5].parse::<f64>().unwrap()).atan() + f[6].parse::<f64>().unwrap().atan();
+        let load = 2.0 * tension * (theta / 2.0).sin();
+        let (e_s, nu_s, g_s) = [al, if string == "e" { steel } else { ag }][end];
+        let (e_b, g_b) = crown[end];
+        let e_star = 1.0 / ((1.0 - nu_s * nu_s) / e_s + (1.0 - nu_maple * nu_maple) / e_b);
+        let (maple_shear, metal_shear) = ((2.0 - nu_maple) / g_b, (2.0 - nu_s) / g_s);
+        let a = (3.0 * load * (radius * edge_radius[end]).sqrt() / (4.0 * e_star)).cbrt();
+        let k = 8.0 * a / (maple_shear + metal_shear);
+        (k, maple_shear / (maple_shear + metal_shear) * tau * k)
+    };
+
+    let mut resolved = Vec::new();
+    for (end, (label, text)) in notes.iter().enumerate() {
+        let (changed, original) = (text.lines().collect::<Vec<_>>(), base.lines().collect::<Vec<_>>());
+        assert_eq!(changed.len(), original.len());
+        for (c, o) in changed.iter().zip(&original) {
+            if end == 1 && o.starts_with("audio ") {
+                // The stiff end renders at 384 kHz over the same duration (MagentaBadger 7268 (b)).
+                let (c, o): (Vec<&str>, Vec<&str>) = (c.split(' ').collect(), o.split(' ').collect());
+                let seconds = |f: &[&str]| f[2].parse::<f64>().unwrap() / f[1].parse::<f64>().unwrap();
+                assert_eq!((c[1], &c[3..], seconds(&c)), ("384000", &o[3..], seconds(&o)));
+                continue;
+            }
+            if !o.starts_with("string ") {
+                assert_eq!(c, o);
+                continue;
+            }
+            let (c, o): (Vec<&str>, Vec<&str>) = (c.split(' ').collect(), o.split(' ').collect());
+            assert_eq!((&c[..9], &o[9..]), (&o[..9], &["200000", "0.1"][..]), "{label}");
+            assert_eq!((c.len(), c[9]), (14, "interface"));
+            assert_eq!(c[12], format!("crown_lateral_stiffness_per_area_{label}"));
+            assert_eq!(c[13], format!("crown_lateral_viscosity_per_area_{label}"));
+        }
+        let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
+        let gate = CancelGate::new_clock_free();
+        let claimed = core::f64::consts::TAU * 200e3;
+        assert!(spec.bridge_interfaces.load(spec.temperature, 1.000_001 * claimed, &gate, loader).is_err(),
+            "a solid state above the joints' 2 pi 200 kHz must refuse");
+        spec.bridge_interfaces.load(spec.temperature, spec.omega, &gate, loader).unwrap();
+        let bindings = spec.bridge_interfaces.bindings();
+        assert_eq!(bindings.len(), 4);
+        for binding in bindings {
+            let row: Vec<&str> = changed.iter().filter(|l| l.starts_with("string ")).nth(binding.string).unwrap()
+                .split(' ').collect();
+            let string = &row[1]["violin-string-dominant-".len()..][..1];
+            assert_eq!(row[10], format!("violin-cannone-crown-dominant-{string}-interface.fsintpk"));
+            let (k, d) = joint(string, end, row[3].parse().unwrap(), row[5].parse().unwrap());
+            // The source per area and the row's area are each printed to 9 significant digits.
+            let law = &binding.interface;
+            assert_eq!(law.constant_loss_reference_omega_rad_s(), Some(scalar(maple, "constant_loss_reference_omega")));
+            let (lo, hi) = law.omega_band_rad_s();
+            assert!(lo == 0.0 && (hi / claimed - 1.0).abs() < 1e-8, "{label} {string}: band {lo}..{hi}");
+            assert!((law.stiffness_n_m() / k - 1.0).abs() < 2e-8, "{label} {string}: {} vs {k}", law.stiffness_n_m());
+            assert!((law.damping_n_s_m() / d - 1.0).abs() < 2e-8, "{label} {string}: {} vs {d}", law.damping_n_s_m());
+            resolved.push((end, binding.string, law.stiffness_n_m(), law.damping_n_s_m()));
+        }
+    }
+    for &(_, string, k, d) in resolved.iter().filter(|r| r.0 == 0) {
+        let &(_, _, k_stiff, d_stiff) = resolved.iter().find(|r| r.0 == 1 && r.1 == string).unwrap();
+        assert!(k < k_stiff && d < d_stiff, "string {string}: compliant {k} {d}, stiff {k_stiff} {d_stiff}");
+    }
+}
+
+/// Both il Cannone tables are admitted, and their four bridges land on bridge nodes within 0.6 mm of the string
+/// contacts and push along x. The 6 mm body's 64 components and 157 ties are exactly the assembly caps: one more
+/// component or one more tie refuses. Its rib set (2904 nodes, 5082 triangles) and its 11769 nodes and 17483 triangles
+/// in all fit the node and triangle caps. With the violin-sized strings (synthetic steel, `violin_performance`), each
+/// table's own cavity row as a physical neck and 128 body modes, each passes preflight: every check that runs before
+/// pack I/O and the reduction.
+#[test]
+fn the_cannone_violin_body_at_6_mm_fills_the_assembly_caps_and_both_tables_pass_preflight() {
+    let records = |text: &str, name: &str| text.lines().filter(|l| l.split(' ').next() == Some(name)).count();
+    let tables = [(cannone_options(), CANNONE_H8, (48, 119, 4)), (cannone_h6_options(), CANNONE_H6, (64, 157, 4))];
+    for (options, table, counts) in tables {
+        let (profile, converted) = cannone_profile_with(&options, table);
+        let text = &converted.profile;
+        assert_eq!((records(text, "component"), records(text, "edge-tie"), records(text, "bridge")), counts);
+        assert!(text.lines().filter(|l| l.starts_with("bridge bridge ")).all(|l| l.ends_with(" 1 0 0")));
+        assert!(converted.bridge_snaps_m.iter().all(|&d| d < 0.000_6), "bridge snaps {:?} m", converted.bridge_snaps_m);
+        profile.preflight(&cannone_inputs_with(&options, table, 96, 128).1).unwrap();
+    }
+    let text = &cannone_profile_with(&cannone_h6_options(), CANNONE_H6).1.profile;
+    let refusal = |text: &str| Profile::parse(text.as_bytes()).err().expect("one past the cap must refuse").to_string();
+    // One more component: the bridge again, under a new name.
+    let (start, end) = (text.find("component bridge\n").unwrap(), text.find("face-ties").unwrap());
+    let part_end = start + text[start..end].find("end-component\n").unwrap() + "end-component\n".len();
+    let copy = text[start..part_end].replacen("component bridge\n", "component bridge-copy\n", 1);
+    let one_more_component = format!("{}{copy}{}", &text[..part_end], &text[part_end..])
+        .replacen("components 64\n", "components 65\n", 1);
+    assert!(refusal(&one_more_component).contains("count exceeds its explicit range"));
+    // One more tie: the first edge tie again.
+    let lines: Vec<&str> = text.lines().collect();
+    let first = lines.iter().position(|l| l.starts_with("edge-tie ")).unwrap();
+    let f: Vec<&str> = lines[first].split(' ').collect();
+    let block = 1 + f[5].parse::<usize>().unwrap() + f[6].parse::<usize>().unwrap();
+    let one_more_tie = [&lines[..first + block], &lines[first..]].concat().join("\n")
+        .replacen("edge-ties 157\n", "edge-ties 158\n", 1);
+    assert!(refusal(&one_more_tie).contains("count exceeds its explicit range"));
+}
+
+/// The violin-sized G3 rung's strings, bow and schedule (`violin_performance`: synthetic steel, NOT violin strings) on the
+/// il Cannone body (`cannone_profile`) with `modes` retained body modes and the table's own cavity row (2.061 L through
+/// one equivalent neck of the two f-holes, both ends flanged). The body, the cavity and the strings' directions
+/// (`CANNONE_DIRECTIONS`) differ from that rung.
+fn cannone_inputs(samples: u64, modes: usize) -> (Profile, input::Spec) {
+    cannone_inputs_with(&cannone_options(), CANNONE_H8, samples, modes)
+}
+
+/// `cannone_inputs` on one il Cannone table converted with its options.
+fn cannone_inputs_with(options: &super::super::shell::assembly::table::OptionsFile, table: &str, samples: u64,
+    modes: usize) -> (Profile, input::Spec)
+{
+    let (profile, converted) = cannone_profile_with(options, table);
+    let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
+    let performance = violin_performance(samples, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} {} \
+        {modes} 1", converted.length_m, converted.width_m, options.reference_thickness_m()),
+        &format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1"), CANNONE_DIRECTIONS);
     (profile, input::Spec::parse(performance.as_bytes()).unwrap())
+}
+
+/// Every assembled il Cannone mode between 15 Hz and 2 kHz: the window holds 30 (a request for 128 refuses, naming 30).
+const CANNONE_BODY_MODES: usize = 30;
+
+/// The two violin shell packs, built by `xtask matdb-pack` from data/matdb/seed-v1, and the synthetic steel elsewhere.
+fn cannone_pack(name: &str) -> NormalizedPack {
+    let bytes: &[u8] = match name {
+        "violin-spruce-norway-viala2020-shell.fsmatpk" =>
+            include_bytes!("../../packs/violin-spruce-norway-viala2020-shell.fsmatpk"),
+        "violin-maple-sycamore-sonderegger2013-shell.fsmatpk" =>
+            include_bytes!("../../packs/violin-maple-sycamore-sonderegger2013-shell.fsmatpk"),
+        _ => return pack(name, 1.0, None),
+    };
+    NormalizedPack::from_bytes(bytes).unwrap()
+}
+
+/// Each retained body mode as rendered: frequency [Hz], and its Q from the diagonal of the modal viscosity matrix. Both
+/// packs state their Kelvin-Voigt reference (`constant_loss_reference_omega`, 2 pi 200 rad/s), so every mode's damping
+/// carries their loss factors at its own frequency: Q is about one over the loss factor of the mode's material mix.
+fn cannone_body_modes(r: &Ready) -> String {
+    let image = r.performance.bank().source().bank().material_shell_assembly_image().unwrap();
+    let damping = image.damping().matrix_per_s();
+    let n = image.eigenvalue_intervals().len();
+    image.eigenvalue_intervals().iter().enumerate().map(|(i, &(lo, hi))| {
+        let omega = (0.5 * (lo + hi)).sqrt();
+        let (f, q) = (omega / (2.0 * std::f64::consts::PI), omega / damping[i * n + i]);
+        format!("{f:.1} Hz Q {q:.1}")
+    }).collect::<Vec<_>>().join(", ")
+}
+
+/// The il Cannone G3 rung (`cannone_inputs`) for a quarter second: the wall time per audio second with what it was
+/// measured on, the time of construction (assembled shell modes, projection, prepared network) and render, every
+/// retained body mode, and the pressure bits.
+#[test]
+#[ignore = "il Cannone violin G3 cost rung: run with --ignored --nocapture"]
+fn the_cannone_violin_g3_rung_reports_its_body_modes_and_wall_time_per_audio_second() {
+    let (profile, spec) = cannone_inputs(12_000, CANNONE_BODY_MODES);
+    scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(cannone_pack(name))).unwrap();
+        let built = constructing.elapsed();
+        eprintln!("il Cannone G3 rung: {}", cost_context(&r.spec));
+        eprintln!("il Cannone G3 rung: body modes {}", cannone_body_modes(&r));
+        let source = r.performance.bank().source().bank();
+        assert_eq!(source.material_shell_assembly_image().unwrap().eigenvalue_intervals().len(), CANNONE_BODY_MODES);
+        assert_eq!(source.strings().len(), 4);
+        assert!(source.material_cavity().is_some());
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 128);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 12_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        assert!(samples.iter().any(|p| p.abs() > 1e-14), "the bowed body radiated nothing");
+        let per_second = rendered.as_secs_f64() / (samples.len() as f64 / 48_000.0);
+        eprintln!("il Cannone G3 rung: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({per_second:.1} s render per audio second; a 2 s note with its construction takes {:.1} s per audio second)",
+            samples.len(), (built.as_secs_f64() + 2.0 * per_second) / 2.0);
+        eprintln!("il Cannone G3 rung: pressure bits fnv1a {:#018x}, peak {:.3e} Pa", pressure_bits(&samples),
+            samples.iter().fold(0.0_f64, |m, p| m.max(p.abs())));
+    });
+}
+
+/// The il Cannone G3 rung bowed for 2 s, for listening and for comparison with the violin-sized rung's 2 s render on the
+/// clamped plate (the same strings, bow and schedule). FRANKENSIM_CANNONE_RUNG_OUT names an existing directory, which
+/// receives `cannone-g3-rung-2s.f64le` (every pressure sample [Pa], exact) and `cannone-g3-rung-2s.wav` (PCM16 whose full
+/// scale is the smallest power of two in pascals above the peak; no normalization or mastering, no clip).
+#[test]
+#[ignore = "two-second il Cannone render for listening: set FRANKENSIM_CANNONE_RUNG_OUT, run with --ignored --nocapture"]
+fn the_cannone_violin_g3_rung_renders_two_seconds_for_listening() {
+    let out = std::path::PathBuf::from(std::env::var_os("FRANKENSIM_CANNONE_RUNG_OUT")
+        .expect("FRANKENSIM_CANNONE_RUNG_OUT names the output directory"));
+    let (profile, spec) = cannone_inputs(96_000, CANNONE_BODY_MODES);
+    scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(cannone_pack(name))).unwrap();
+        let built = constructing.elapsed();
+        eprintln!("il Cannone G3 2 s: body modes {}", cannone_body_modes(&r));
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 128);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 96_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        let peak = samples.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        assert!(peak > 0.0, "the bowed body radiated nothing");
+        let full_scale = 2f64.powi(peak.log2().floor() as i32 + 1);
+        let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&samples, 48_000, full_scale).unwrap();
+        assert_eq!(clips, 0);
+        std::fs::write(out.join("cannone-g3-rung-2s.wav"), wav).unwrap();
+        std::fs::write(out.join("cannone-g3-rung-2s.f64le"),
+            samples.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        eprintln!("il Cannone G3 2 s: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({:.1} s per audio second with construction)", samples.len(),
+            (built + rendered).as_secs_f64() / (samples.len() as f64 / 48_000.0));
+        eprintln!("il Cannone G3 2 s: {}", cost_context(&r.spec));
+        eprintln!("il Cannone G3 2 s: peak {peak:.4e} Pa, WAV full scale {full_scale:e} Pa, pressure bits fnv1a {:#018x} \
+            (first 12000 samples {:#018x})", pressure_bits(&samples), pressure_bits(&samples[..12_000]));
+    });
 }
 
 /// The violin-sized G3 rung (above) for a quarter second: the wall time per audio second with what it was measured on, the
@@ -505,7 +911,8 @@ const GUITAR_STRINGS: [(f64, f64); 6] =
     [(82.41, 0.000_5), (110.0, 0.000_375), (146.83, 0.000_28), (196.0, 0.000_21), (246.94, 0.000_166), (329.63, 0.000_125)];
 
 /// Every guitar string keeps every bending and twist mode of its full span below this frequency [Hz]. It is half the
-/// violin rung's: six strings at 10 kHz would exceed the 512-coordinate prepared ceiling with the 128 body modes.
+/// violin rung's, set when the prepared ceiling was 512 coordinates: six strings at 10 kHz with the 128 body modes
+/// exceeded it.
 const GUITAR_STRING_BAND_HZ: f64 = 5_000.0;
 
 /// The Esteso 1964 guitar body (data/instruments/geometry/guitar-esteso-1964-zimmer2024/shell-assembly-h12.tsv, 19 parts,
@@ -524,6 +931,7 @@ fn esteso_profile(strings: &[(f64, f64)]) -> (Profile, super::super::shell::asse
             reference_thickness_m: ESTESO_REFERENCE_THICKNESS_M,
             bridge_component: "top",
             bridges: strings,
+            bridge_direction: [0.0, 0.0, 1.0],
         }).unwrap();
     (Profile::parse(converted.profile.as_bytes()).unwrap(), converted)
 }

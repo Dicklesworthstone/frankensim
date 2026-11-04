@@ -413,8 +413,11 @@ impl GasFieldDuct {
         let root3 = det::sqrt(3.0);
         let mut blocks = Vec::with_capacity(self.steps_used());
         let mut min_shear = f64::INFINITY;
+        let (open_sites, total_acoustic_len_m, outlet_radius_m) =
+            crate::collect_open_hole_sites(&self.duct);
         let mut axial_index = 0;
         let mut hole_index = 0;
+        let mut open_hole_index = 0;
         for index in 0..self.steps_used() {
             if cancelled() {
                 return Err(DuctError::Cancelled {
@@ -441,7 +444,22 @@ impl GasFieldDuct {
                             * (hole.gas.density * omega / hole.gas.dynamic_viscosity).sqrt(),
                     );
                 }
-                let matrix = crate::tone_hole_t_junction_with_wall(
+                let mut r_vortex = 0.0;
+                if crate::hole_sigma(state) > 0.0 {
+                    r_vortex = crate::open_hole_vortex_resistance(
+                        &hole.gas,
+                        loss,
+                        hole_radius,
+                        bore_radius,
+                        chimney_height,
+                        &open_sites,
+                        open_hole_index,
+                        total_acoustic_len_m,
+                        outlet_radius_m,
+                    );
+                    open_hole_index += 1;
+                }
+                let matrix = crate::tone_hole_t_junction_with_wall_vortex(
                     &hole.gas,
                     hole_radius,
                     chimney_height,
@@ -450,6 +468,7 @@ impl GasFieldDuct {
                     loss,
                     bore_radius,
                     hole.extra_series_m,
+                    r_vortex,
                     wall,
                 )?;
                 blocks.push(TwoPort::from_abcd(matrix, reference)?);

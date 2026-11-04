@@ -36,11 +36,11 @@ pub struct GasEnergySolve {
     pub maximum_iterations: usize,
 }
 impl GasEnergySolve {
-    /// Check the shared source-independent temperature and iteration controls.
-    /// Actual material coverage is checked by each original energy solve.
+    /// Check positive absolute temperatures and bounded iteration controls.
+    /// NASA-9 and transport source coverage is checked by the original solve;
+    /// the legacy air-fit envelope does not bound a source-backed gas model.
     pub fn validate(self) -> Result<(), GasEnergyError> {
-        if !self.minimum_temperature_k.is_finite() || !self.maximum_temperature_k.is_finite()
-            || self.minimum_temperature_k < 50.0 || self.maximum_temperature_k > 2000.0
+        if !positive(self.minimum_temperature_k) || !positive(self.maximum_temperature_k)
             || self.minimum_temperature_k >= self.maximum_temperature_k
             || !positive(self.energy_tolerance_j_kg) || !(1..=128).contains(&self.maximum_iterations) {
             return Err(GasEnergyError::Invalid("finite gas temperature bracket, positive absolute energy tolerance and 1..=128 iterations required"));
@@ -288,4 +288,3 @@ impl IsochoricGasParcel {
 #[cfg(test)]
 #[path = "energy_tests.rs"]
 mod tests;
-

@@ -120,7 +120,8 @@ impl EnsembleRenderer {
                     ControlDelta::SetFrictionDrive { voice, .. }
                     | ControlDelta::SetModalForce { voice, .. }
                     | ControlDelta::SetPlateForce { voice, .. }
-                    | ControlDelta::SetBlowingPressure { voice, .. } => voice,
+                    | ControlDelta::SetBlowingPressure { voice, .. }
+                    | ControlDelta::SetReedClosingForce { voice, .. } => voice,
                 };
                 *slot = (*slot).checked_add(first_voice)
                     .ok_or_else(|| sizing("ensemble voice index overflow"))?;

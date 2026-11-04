@@ -75,9 +75,11 @@ fn prepared_file_preserves_every_fluid_coordinate_and_explicit_budget_through_pr
 #[test]
 fn prepared_row_is_optional_strict_and_cannot_override_complete_file_mode_caps() {
     let bytes = text();
+    let ceiling = fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES;
+    let over_ceiling = format!("prepared-linear {} 67108864 200000000000", ceiling + 1);
     for invalid in [
         "prepared-linear 0 67108864 200000000000",
-        "prepared-linear 513 67108864 200000000000",
+        over_ceiling.as_str(),
         "prepared-linear 53 67108864 200000000000",
         "prepared-linear 64 0 200000000000",
         "prepared-linear 64 67108864 0",
@@ -92,8 +94,12 @@ fn prepared_row_is_optional_strict_and_cannot_override_complete_file_mode_caps()
     let reordered = bytes.replace(&format!("{PREPARED}\n"), "")
         .replace("cylinder-gas-loading", &format!("{PREPARED}\ncylinder-gas-loading"));
     assert!(input::Spec::parse(reordered.as_bytes()).is_err());
-    let above_file_limit = bytes.replace("prepared-linear 64", "prepared-linear 512")
-        .replace("cylinder-gas-loading 0.001 30 24", "cylinder-gas-loading 0.001 30 64");
+    // 54 coordinates at 24 intervals and two more per interval: one interval past the file's mode cap.
+    let intervals = 24 + (input::MAX_TOTAL_MODES - 54) / 2 + 1;
+    let gas = format!("cylinder-gas-loading 0.001 30 {intervals}");
+    let above_file_limit = bytes
+        .replace("prepared-linear 64", &format!("prepared-linear {ceiling}"))
+        .replace("cylinder-gas-loading 0.001 30 24", &gas);
     assert!(input::Spec::parse(above_file_limit.as_bytes()).is_err());
     let no_fluid = bytes.replace("cylinder-gas-loading 0.001 30 24\n", "");
     assert_eq!(input::Spec::parse(no_fluid.as_bytes()).unwrap().prepared_linear,

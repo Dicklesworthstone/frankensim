@@ -194,6 +194,7 @@ impl MaterialStringBankSource {
     ) -> Result<FrictionModalSystem, ReciprocalStringError> {
         poll(gate)?;
         if self.material_chart_relaxation.is_none() && self.string_bending_relaxation.is_none()
+            && self.spatial_cavity.as_ref().and_then(|cavity|cavity.thermal_loss()).is_none()
             && self.strings.iter().all(|m| m.source.bending_relaxation().is_none()
                 && m.source.torsional_relaxation().is_none()) {
             if memory.as_ref().is_some_and(|z| !z.is_empty()) {
@@ -206,6 +207,9 @@ impl MaterialStringBankSource {
         if let Some(image) = &self.string_bending_relaxation {
             branches.extend(image.branches(&system, gate)?);
         }
+        if let Some(cavity) = &self.spatial_cavity {
+            branches.extend(cavity.thermal_memory_branches(self, &system, gate)?);
+        }
         system = system.with_material_relaxation(branches, memory, gate)
             .map_err(ReciprocalStringError::Friction)?;
         self.validate_body_memory_frequencies(&system, gate)?;
@@ -214,3 +218,4 @@ impl MaterialStringBankSource {
         self.restore_body_radiation(system, gate)
     }
 }
+

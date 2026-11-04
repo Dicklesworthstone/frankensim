@@ -2,16 +2,24 @@
 //!
 //! This grammar uses the same gas records, DG source loader, flue control
 //! compiler, source equations and PressureRenderer as the existing instrument
-//! paths. Observation is declared internal mean-inlet pressure. The jet card
-//! remains an exploration source; it is never a resolved-flow qualification.
+//! paths. Observation is explicitly internal mean-inlet pressure or the
+//! computed outlet's baffled microphone in its original exterior gas. The jet
+//! card remains an exploration source, never a resolved-flow qualification.
+//! After a baffled observation, optional `mouth_radiation X Y WIDTH_CELLS
+//! CUT_UP_CELLS` adds the actual rectangular mouth to that same microphone.
+//! Optional `mouth_reaction none|compact-baffled|mutual-baffled` selects no
+//! replacement, the original compact self reaction, or one complete shared
+//! rectangular-mouth/circular-terminal reaction. The latter includes all
+//! reciprocal cross terms and requires source quadrature over mechanical Nyquist.
 
-use super::{FlueDgConfig, FlueDgPerformance};
+use super::{FlueDgConfig, FlueDgPerformance, FlueMouthRadiation};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
 use crate::flue_loop::dg::FlueDgSpec;
 use crate::flue_loop::network::performance::file::{
     FlueInputError, FluePerformanceInfo, MAX_FLUE_PERFORMANCE_BYTES, Rows,
 };
 use crate::flue_loop::{FlueGeometry, FlueVoice};
+use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
 use fs_blake3::hash_domain;
 use fs_exec::CancelGate;
@@ -46,6 +54,59 @@ fn bad(line: usize, what: &'static str) -> FlueDgInputError {
 }
 fn poll(gate: &CancelGate) -> Result<(), FlueDgInputError> {
     if gate.is_requested() { Err(bad(0, "DG flue source construction cancelled")) } else { Ok(()) }
+}
+
+fn read_observation(rows: &mut Rows<'_>) -> Result<Option<CircularOutletReceiver>, FlueDgInputError> {
+    let mut row = rows.row("observation")?;
+    let receiver = match row.fields.next() {
+        Some("inlet-pressure") => None,
+        Some("baffled") => Some(CircularOutletReceiver {
+            position_m: [row.scalar()?, row.scalar()?, row.scalar()?],
+            radial_rings: row.number()?,
+            angular_points: row.number()?,
+            maximum_frequency_hz: row.scalar()?,
+        }),
+        _ => return Err(bad(row.line,
+            "observation requires inlet-pressure or baffled X Y Z RINGS ANGLES FMAX_HZ")),
+    };
+    row.end()?;
+    Ok(receiver)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouthReaction { None, CompactBaffled, MutualBaffled }
+
+fn read_mouth(rows: &mut Rows<'_>, exterior: bool)
+    -> Result<(Option<FlueMouthRadiation>, MouthReaction), FlueDgInputError>
+{
+    let mouth = if rows.next_is("mouth_radiation") {
+        let mut row = rows.row("mouth_radiation")?;
+        let input = FlueMouthRadiation {
+            center_m: [row.scalar()?, row.scalar()?],
+            aperture_size_m: None,
+            cells: [row.number()?, row.number()?],
+        };
+        row.end()?;
+        if !exterior {
+            return Err(bad(rows.line, "DG mouth radiation requires observation baffled"));
+        }
+        Some(input)
+    } else { None };
+    let reaction = if rows.next_is("mouth_reaction") {
+        let mut row = rows.row("mouth_reaction")?;
+        let selected = match row.fields.next() {
+            Some("none") => MouthReaction::None,
+            Some("compact-baffled") => MouthReaction::CompactBaffled,
+            Some("mutual-baffled") => MouthReaction::MutualBaffled,
+            _ => return Err(bad(row.line, "mouth_reaction requires none, compact-baffled or mutual-baffled")),
+        };
+        row.end()?;
+        if selected != MouthReaction::None && mouth.is_none() {
+            return Err(bad(rows.line, "DG mouth reaction requires an explicit mouth_radiation rectangle"));
+        }
+        selected
+    } else { MouthReaction::None };
+    Ok((mouth, reaction))
 }
 
 pub struct FlueDgFilePerformance {
@@ -164,9 +225,8 @@ impl FlueDgFilePerformance {
         if max_controls > 262_144 {
             return Err(bad(rows.line, "DG flue control budget exceeds 262144 ticks"));
         }
-        if rows.record("observation")? != "inlet-pressure" {
-            return Err(bad(rows.line, "DG flue currently observes internal mean inlet pressure only"));
-        }
+        let observation = read_observation(&mut rows)?;
+        let (mouth_radiation, mouth_reaction) = read_mouth(&mut rows, observation.is_some())?;
         if rows.lines.next().is_some() {
             return Err(bad(rows.line + 1, "unexpected records before gesture section"));
         }
@@ -198,10 +258,27 @@ impl FlueDgFilePerformance {
                 .with_unsteady_windway(length, transverse, convection)
                 .map_err(FlueInputError::Physics)?,
         };
-        let renderer = FlueDgPerformance::new(voice, schedule, FlueDgConfig {
+        let config = FlueDgConfig {
             sample_rate_hz, samples, max_block, max_controls, max_compile_work,
             maximum_abs_pressure_pa,
-        }).map_err(FlueInputError::Performance)?;
+        };
+        let mut renderer = match observation {
+            Some(receiver) => FlueDgPerformance::with_baffled_outlet(
+                voice, schedule, config, receiver,
+            ),
+            None => FlueDgPerformance::new(voice, schedule, config),
+        }.map_err(FlueInputError::Performance)?;
+        if let Some(mouth) = mouth_radiation {
+            renderer = renderer.with_mouth_radiation(mouth)
+                .map_err(FlueInputError::Performance)?;
+        }
+        renderer = match mouth_reaction {
+            MouthReaction::None => renderer,
+            MouthReaction::CompactBaffled => renderer.with_mouth_reaction(gate)
+                .map_err(FlueInputError::Performance)?,
+            MouthReaction::MutualBaffled => renderer.with_mutual_mouth_reaction(gate)
+                .map_err(FlueInputError::Performance)?,
+        };
         poll(gate)?;
         let info = FluePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.flue-dg-performance.v1", bytes),
@@ -219,3 +296,7 @@ impl FlueDgFilePerformance {
     pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
     pub fn into_renderer(self) -> FlueDgPerformance { self.renderer }
 }
+
+#[cfg(test)]
+mod tests;
+

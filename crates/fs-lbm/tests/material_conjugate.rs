@@ -4,6 +4,8 @@ use fs_exec::CancelGate;
 use fs_lbm::conjugate::{EnergyConfig, FvBoundary, SimpleConfig, SolidMaterial,
     ThermalFace, ThermalSetup, Voxel, VoxelDomain, simple_flow, solve_energy};
 use fs_lbm::material::conjugate::MaterialChtFluid;
+use fs_lbm::material::conjugate::buoyant::{MaterialBuoyancyConfig, MaterialBuoyancyError};
+use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 use fs_lbm::material::plan_scaling_from_material;
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -122,4 +124,315 @@ fn unrepresentable_capacity_and_conflicting_eddy_input_refuse() {
     assert!(bound.solve_forced_convection(&domain, &[], &SimpleConfig::new([FvBoundary::wall(); 6]),
         &setup, &EnergyConfig::default(), &CancelGate::new()).is_err());
     assert_eq!(setup, before);
+}
+
+fn natural_material_controls() -> MaterialBuoyancyConfig {
+    MaterialBuoyancyConfig {
+        boussinesq: BoussinesqConfig {
+            gravity_m_s2: [-9.81, 0.0, 0.0],
+            max_relative_density_departure: 0.05,
+            max_relative_specific_heat_departure: 0.0,
+        },
+        maximum_passes: 100,
+        temperature_tolerance_k: 1e-10,
+        transport_relative_tolerance: 1e-10,
+        force_tolerance_n_m3: 1e-10,
+        temperature_relaxation: 1.0,
+    }
+}
+
+#[test]
+fn natural_material_closes_nonlinear_conductivity_at_actual_thermal_endpoint() {
+    // G1: one unit cube, six faces at 300 K. Q=12*k(T)*(T-300),
+    // k=1+0.1*(T-300), hence Q=67.2 W has the independent root T=304 K.
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let source = FluidTransportState::try_new(1.0, 2.0, 1.0, 1.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&source).unwrap();
+    let flow = SimpleConfig::new([FvBoundary::wall(); 6]);
+    let mut thermal = ThermalSetup::new([ThermalFace::Temperature(300.0); 6]);
+    thermal.power_w = vec![67.2];
+    let result = bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+        &EnergyConfig::default(), &[300.0], natural_material_controls(), &CancelGate::new(),
+        |_, t, _| FluidTransportState::try_new(1.0, 2.0, 1.0 + 0.1*(t-300.0), 1.0/(1.0+0.05*(t-300.0))))
+        .unwrap();
+    near(result.energy.temperature[0], 304.0, 1e-11);
+    assert!(result.report.passes > 2);
+    assert!(result.report.temperature_defect_k <= 1e-10);
+    assert!(result.report.transport_relative_defect <= 1e-10);
+    assert!(result.energy.report.balance.residual_w.abs() < 1e-8);
+    let final_material = result.endpoint[0].material.resolved_transport();
+    near(final_material.thermal_conductivity_w_m_k(), 1.4, 1e-11);
+    near(final_material.dynamic_viscosity_pa_s(), 1.0/1.2, 1e-11);
+    assert_eq!(result.endpoint[0].temperature_k, result.energy.temperature[0]);
+    assert_eq!(result.flow.velocity_m_s, vec![[0.0; 3]]);
+}
+
+#[test]
+fn natural_material_density_and_viscosity_drive_same_existing_porous_momentum() {
+    // G1/G3: both ends are pressure openings, all cells thermostat-held at
+    // 310 K. In this uniform Darcy column, q=(rho-rho0)*g*K/mu exactly.
+    // Changing only source data includes ordinary, zero and negative expansion.
+    let domain = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    let reference = FluidTransportState::try_new(1.0, 2.0, 1.0, 1.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&reference).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    let mut flow = SimpleConfig::new(faces);
+    flow.tolerance = 1e-12;
+    flow.pressure_tolerance = 1e-12;
+    flow.resistances.push(fs_lbm::conjugate::FlowResistance::Volume {
+        lo: [0, 0, 0], hi: [4, 1, 1], permeability_m2: [1.0; 3], inertial_per_m: [0.0; 3],
+    });
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    let mut thermal = ThermalSetup::new(faces);
+    thermal.fixed_temperature = (0..4).map(|c| (c, 310.0)).collect();
+    for (expansion, viscosity_scale) in [(0.0, 1.0), (0.001, 1.0), (-0.001, 1.0), (0.001, 2.0)] {
+        let result = bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+            &EnergyConfig::default(), &[300.0; 4], natural_material_controls(), &CancelGate::new(),
+            |_, t, _| FluidTransportState::try_new(1.0 - expansion*(t-300.0), 2.0,
+                1.0 + 0.01*(t-300.0), viscosity_scale*(1.0+0.1*(t-300.0))))
+            .unwrap();
+        let expected = 9.81 * expansion * 10.0 / (2.0 * viscosity_scale);
+        near(result.flow.field.flux_x(2, 0, 0), expected, 1e-9);
+        assert!(result.energy.report.balance.residual_w.abs() < 1e-8);
+        assert_eq!(result.reference, reference);
+        assert_eq!(result.energy.temperature, vec![310.0; 4]);
+        for sample in result.applied {
+            near(sample.force_n_m3[0], 9.81*expansion*10.0, 1e-12);
+            near(sample.material.resolved_transport().dynamic_viscosity_pa_s(), 2.0*viscosity_scale, 1e-12);
+            near(sample.material.resolved_transport().thermal_conductivity_w_m_k(), 1.1, 1e-12);
+            assert_eq!(sample.material.reference_storage_transport().density_kg_m3(), 1.0);
+        }
+    }
+}
+
+#[test]
+fn natural_material_endpoint_refusal_cancellation_and_budget_publish_no_partial_result() {
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let source = FluidTransportState::try_new(1.0, 2.0, 1.0, 1.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&source).unwrap();
+    let flow = SimpleConfig::new([FvBoundary::wall(); 6]);
+    let mut thermal = ThermalSetup::new([ThermalFace::Temperature(300.0); 6]);
+    thermal.power_w = vec![48.0];
+    let before = thermal.clone();
+    let initial = [300.0];
+    let error = bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+        &EnergyConfig::default(), &initial, natural_material_controls(), &CancelGate::new(),
+        |_, t, _| if t > 301.0 { Err(MaterialError::State { what: "synthetic source ends at 301 K".into() }) }
+            else { Ok(source) });
+    assert!(matches!(error, Err(MaterialBuoyancyError::Material { cell: 0, temperature_k: 304.0, .. })));
+    let mut controls = natural_material_controls();
+    controls.maximum_passes = 2;
+    controls.temperature_relaxation = 1e-8;
+    controls.temperature_tolerance_k = 1e-3;
+    assert!(matches!(bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+        &EnergyConfig::default(), &initial, controls, &CancelGate::new(), |_, _, _| Ok(source)),
+        Err(MaterialBuoyancyError::NotConverged(_))));
+    let gate = CancelGate::new();
+    assert!(matches!(bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+        &EnergyConfig::default(), &initial, controls, &gate, |_, _, _| { gate.request(); Ok(source) }),
+        Err(MaterialBuoyancyError::Solver(fs_lbm::conjugate::ChtError::Cancelled))));
+    assert_eq!(thermal, before);
+    assert_eq!(initial, [300.0]);
+}
+
+#[test]
+fn natural_material_force_jump_cannot_hide_behind_small_temperature_change() {
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let source = FluidTransportState::try_new(1.0, 2.0, 1.0, 1.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&source).unwrap();
+    let flow = SimpleConfig::new([FvBoundary::wall(); 6]);
+    let thermal = ThermalSetup::new([ThermalFace::Temperature(310.0); 6]);
+    let mut controls = natural_material_controls();
+    controls.maximum_passes = 1;
+    controls.temperature_tolerance_k = 1e-3;
+    let result = bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+        &EnergyConfig::default(), &[310.0-1e-6], controls, &CancelGate::new(),
+        |_, t, _| FluidTransportState::try_new(if t < 310.0-1e-7 { 1.0 } else { 0.99 }, 2.0, 1.0, 1.0));
+    match result {
+        Err(MaterialBuoyancyError::NotConverged(report)) => {
+            assert!(report.temperature_defect_k < controls.temperature_tolerance_k);
+            near(report.force_defect_n_m3, 0.0981, 1e-12);
+        }
+        _ => panic!("discontinuous source force must fail its independent nonlinear gate"),
+    }
+}
+
+#[test]
+fn natural_material_heated_open_column_starts_from_uniform_ambient() {
+    let domain = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    let source = FluidTransportState::try_new(1.0, 2.0, 0.1, 1.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&source).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    let mut flow = SimpleConfig::new(faces);
+    flow.tolerance = 1e-12;
+    flow.pressure_tolerance = 1e-12;
+    flow.resistances.push(fs_lbm::conjugate::FlowResistance::Volume {
+        lo: [0, 0, 0], hi: [4, 1, 1], permeability_m2: [1.0; 3], inertial_per_m: [0.0; 3],
+    });
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    let mut thermal = ThermalSetup::new(faces);
+    thermal.power_w = vec![0.0, 1.0, 0.0, 0.0];
+    let mut controls = natural_material_controls();
+    controls.temperature_relaxation = 0.5;
+    let result = bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+        &EnergyConfig::default(), &[300.0; 4], controls, &CancelGate::new(),
+        |_, t, _| FluidTransportState::try_new(1.0-0.001*(t-300.0), 2.0, 0.1, 1.0))
+        .unwrap();
+    let flux = result.flow.field.flux_x(2, 0, 0);
+    assert!(flux > 0.0);
+    let outlet = result.energy.temperature[3];
+    assert!(outlet > 300.0);
+    // All heat leaves as the SAME conservative flow's sensible energy flux.
+    near(2.0 * flux * (outlet-300.0), 1.0, 1e-7);
+    assert!(result.energy.report.balance.residual_w.abs() < 1e-7);
+}
+
+#[test]
+fn natural_material_low_conductivity_open_column_preserves_warm_and_pressure_driven_starts() {
+    use fs_lbm::conjugate::{FacePatch, FanCurve, FlowResistance, InternalFan};
+
+    let domain = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    let source = FluidTransportState::try_new(1.0, 2.0, 0.001, 1.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&source).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    let mut flow = SimpleConfig::new(faces);
+    flow.tolerance = 1e-12;
+    flow.pressure_tolerance = 1e-12;
+    flow.resistances.push(FlowResistance::Volume {
+        lo: [0, 0, 0], hi: [4, 1, 1], permeability_m2: [1.0; 3], inertial_per_m: [0.0; 3],
+    });
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+    let mut thermal = ThermalSetup::new(faces);
+    thermal.power_w = vec![0.0, 1.0, 0.0, 0.0];
+    let mut controls = natural_material_controls();
+    controls.temperature_relaxation = 0.5;
+    // A zero-flow conductive seed reaches 1237.5 K, outside the original
+    // source domain. Both admitted starts already carry enough actual flow
+    // to close the heat balance without that fictitious hot material state.
+    for fan_driven in [false, true] {
+        let mut flow = flow.clone();
+        let initial = if fan_driven {
+            flow.internal_fans.push(InternalFan {
+                patch: FacePatch { axis: 0, index: 2, lo: [0, 0, 0], hi: [4, 1, 1] },
+                blows_positive: true,
+                curve: FanCurve::new(&[(0.0, 0.4), (1.0, 0.4)]).unwrap(),
+            });
+            [300.0; 4]
+        } else {
+            [300.0, 308.25, 308.25, 308.25]
+        };
+        let result = bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+            &EnergyConfig::default(), &initial, controls, &CancelGate::new(), |_, t, _| {
+                if !(295.0..=320.0).contains(&t) {
+                    return Err(MaterialError::State { what: "synthetic source supports only 295..320 K".into() });
+                }
+                let density = if fan_driven { 1.0 } else { 1.0 - 0.001 * (t - 300.0) };
+                FluidTransportState::try_new(density, 2.0, 0.001, 1.0)
+            }).unwrap();
+        let flux = result.flow.field.flux_x(2, 0, 0);
+        assert!(flux > 0.0);
+        let outlet = result.energy.temperature[3];
+        assert!((300.0..320.0).contains(&outlet));
+        near(2.0 * flux * (outlet - 300.0), 1.0, 1e-7);
+        assert!(result.energy.report.balance.residual_w.abs() < 1e-7);
+        if fan_driven {
+            near(flux, 0.1, 1e-9);
+            assert!(result.applied.iter().all(|sample| sample.force_n_m3 == [0.0; 3]));
+        }
+    }
+}
+
+#[test]
+fn natural_material_card_swap_refreshes_same_source_claims_at_thermal_endpoint() {
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
+        PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+    use fs_material::liquid::{DYNAMIC_VISCOSITY_DIMS, DYNAMIC_VISCOSITY_PROPERTY};
+    use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
+    use fs_material::state_point::{DENSITY_PROPERTY, MaterialPropertySelection,
+        SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
+        THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY};
+    use fs_qty::{Density, QuantitySpec, Temperature};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature, ValueForm::Static));
+    let point = QueryPoint::new().with_quantity("T", absolute, 300.0).unwrap()
+        .with("pressure", 100000.0).unwrap();
+    let card = |k: f64| {
+        let mut claims = ClaimSet::new();
+        for (name, dims, values) in [
+            (DENSITY_PROPERTY, Density::DIMS, [1.0, 0.96]),
+            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, [2.0, 2.0]),
+            (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, [k, 5.0*k]),
+            (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, [1.0, 0.5]),
+        ] {
+            let quantity = if name == THERMAL_CONDUCTIVITY_PROPERTY {
+                QuantitySpec::semantic(SemanticType::new(QuantityKind::ThermalConductivity, ValueForm::Static))
+            } else { QuantitySpec::dimensional(dims) };
+            claims.insert_claim(PropertyClaim {
+                key: PropertyKey::with_quantity(name, quantity),
+                value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                    knots: vec![(300.0, values[0]), (340.0, values[1])], dims },
+                validity: ValidityDomain::unconstrained().with_quantity("T", absolute, 300.0, 340.0)
+                    .with("pressure", 100000.0, 100000.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::LinearInside,
+                observations: vec![],
+                provenance: Provenance { source: "synthetic source-card swap, not measurements".into(),
+                    license: "test-only".into(), artifact: None },
+            }).unwrap();
+        }
+        MaterialCard::assemble(MaterialStateId { chemistry: "synthetic liquid".into(),
+            phase: "liquid".into(), process: "numerical fixture".into(), revision: 0 }, claims, vec![]).unwrap()
+    };
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let flow = SimpleConfig::new([FvBoundary::wall(); 6]);
+    let mut thermal = ThermalSetup::new([ThermalFace::Temperature(300.0); 6]);
+    thermal.power_w = vec![67.2];
+    let mut outcomes = Vec::new();
+    for k in [1.0, 2.0] {
+        let card = card(k);
+        let law = LiquidTemperatureLaw::try_new(&card, &point, "T", LiquidViscosityBasis::Dynamic,
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let bound = MaterialChtFluid::try_new(law.reference_state()).unwrap();
+        let resolve = |_, t, _: &FluidTransportState| law.at_temperature(Temperature::new(t))
+            .map_err(|e| MaterialError::State { what: e.to_string() });
+        let result = bound.solve_natural_convection(&domain, &[], &flow, &thermal,
+            &EnergyConfig::default(), &[300.0], natural_material_controls(), &CancelGate::new(), resolve).unwrap();
+        // Independent scalar balance: 0.1*theta^2 + theta = Q/(12*k).
+        let expected = 300.0 + ((1.0_f64+0.4*67.2/(12.0*k)).sqrt()-1.0)/0.2;
+        near(result.energy.temperature[0], expected, 1e-11);
+        let endpoint = &result.endpoint[0];
+        let state = endpoint.material.material().material();
+        assert_eq!(state.card_identity(), card.content_hash());
+        for name in [DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY,
+            THERMAL_CONDUCTIVITY_PROPERTY, DYNAMIC_VISCOSITY_PROPERTY] {
+            let receipt = &state.property(name).unwrap().answer().receipt;
+            assert_eq!(receipt.selected,
+                law.reference_state().material().property(name).unwrap().answer().receipt.selected);
+            assert!(receipt.query_point.contains(&("T".into(), endpoint.temperature_k)));
+            assert!(receipt.query_point.contains(&("pressure".into(), 100000.0)));
+        }
+        outcomes.push((card.content_hash(), result.energy.temperature[0]));
+        let mut outside = thermal.clone();
+        outside.power_w = vec![1200.0];
+        assert!(matches!(bound.solve_natural_convection(&domain, &[], &flow, &outside,
+            &EnergyConfig::default(), &[300.0], natural_material_controls(), &CancelGate::new(), resolve),
+            Err(MaterialBuoyancyError::Material { cell: 0, .. })));
+    }
+    assert_ne!(outcomes[0].0, outcomes[1].0);
+    assert!(outcomes[1].1 < outcomes[0].1);
 }

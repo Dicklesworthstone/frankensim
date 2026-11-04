@@ -205,6 +205,20 @@ changes on a latent plateau, equivalent electrical source bases and rollback.
   energy account is introduced. G1/G3 ideal-gas pressure/temperature checks,
   three-dimensional source/force ownership and G0/G4 refusal/retry coverage
   live in `tests/material_transport_feedback.rs`.
+- `MaterialSlab::step_with_boussinesq_material_rheology_and_viscous_heating`
+  composes those existing source owners in both dimensions. A single converged
+  material response at actual temperature/shear rate supplies density-derived
+  buoyancy, molecular viscosity/conductivity and `mu * rate^2` heat. The shared
+  sampler, heat partition, tentative transport step and endpoint admission
+  publish together. Original source receipts and unprojected density survive;
+  reference density/Cp still own mass and sensible storage, and the independent
+  background beta load is replaced for the step. The same explicit Boussinesq,
+  generalized-Newtonian and sensible-energy limits above apply; this does not
+  claim total mechanical/gravitational energy conservation. G1/G3 tests in
+  `tests/material_rheology.rs` compare both dimensions against independently
+  prescribed force and stress power, change density/shear source data in the
+  actual repeated flow, and verify initial/endpoint refusal and cancellation
+  rollback.
 - `freesurface::FreeSurface`, `ContactModel`, `dam_break`, and `surge_front`
   — dense-grid VOF-style mass tracking with interface/gas/fluid conversion
   bookkeeping, conservative carry redistribution, contact-model bracketing,
@@ -869,6 +883,48 @@ the internal-energy budget, excludes that work: in a steady Couette flow the net
 so the ledger carries no heating information there and the physical check is the temperature profile
 (`couette_viscous_heating_profile`).
 
+**Prescribed open faces (pexfp.138).**
+`set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],
+Cartesian velocity [m/s] and temperature [K] of a uniform exterior ghost plane.
+The face lies halfway between its ghost centre and the adjacent fluid centre.
+Only one non-periodic axis with periodic transverse domain edges is admitted;
+internal solid masks may describe a nozzle/channel but must not touch the open
+plane. Solid/open junctions, intersecting open/wall domain edges, moving open
+faces and manufactured volume sources are refused. Prescribed reservoir and
+characteristic boundary modes are mutually exclusive in either attachment order.
+`None` restores a stationary wall. Incoming populations use non-equilibrium
+extrapolation (Guo, Zheng & Shi 2002, Chinese Physics 11, 366–374,
+doi:10.1088/1009-1963/11/4/310), including the post-collision half-force shift.
+The same exterior state enters the centred thermal-pressure face force and the
+total-energy face flux (enthalpy, extrapolated stress work, and conduction).
+Caloric energy and face transport use the grid's gas owner, including NASA9
+when supplied. Changing a boundary restarts flux history and adjusts the
+pre-collision half-force moment without changing the fluid's physical velocity
+or energy. Refused updates leave the state and prior boundary intact.
+
+`EnergyLedger::open_energy_j` reports the signed net energy entering prescribed
+faces, separately from `wall_heat_j` and characteristic `open_boundary_energy_j`;
+the conservation residual subtracts all three. With prescribed faces the legacy
+`viscous_heating_j` remainder also contains kinetic energy transport and is
+**not** a physical viscous-heating measurement.
+The `nsf3::open::tests` checks cover uniform throughflow in both directions on
+all three axes (G0, error < 1e-11, sealed-wall negative control), heat input
+and the total-energy balance (G0, relative residual < 1e-12), boundary-update
+refusals and velocity preservation, and worker-count equality (G5).
+The existing thermochemical suite also exercises open throughflow away from the
+caloric reference temperature, arbitrary formation-energy offsets and refusal
+outside source pressure support. A fixed-domain pulse at 64/128/256 cells reports
+the prescribed boundary's reflection; it does not assert a transparency band.
+The native 20 mm-domain, sigma=1 mm Gaussian diagnostic measured amplitude
+ratios 0.68695 / 0.81251 / 0.90254 at dx=0.3125 / 0.15625 / 0.078125 mm
+(-3.26 / -1.80 / -0.89 dB): reflection increases with refinement. This broadband
+packet result is not frequency-resolved R(f) over an instrument's declared band.
+These are boundary-implementation checks, not a spatial convergence ladder,
+characteristic zone-to-DG coupling, < -40 dB reflection qualification, jet
+validation, or instrument/audio evidence. A prescribed exterior state generally
+reflects acoustic waves. The separate characteristic mode has its own contract
+and qualification limits below; it is not replaced by this primitive.
+
 **Manufactured-solution hooks.** `NsfGrid3::new_with_sources(spec, solid, initial, Some(source))` takes a `SourceFn`: for a cell
 index and a lattice time (steps) it returns `(S_rho, S_m, S_E)` in lattice units for `d rho/dt + div(rho u) = S_rho`,
 `d(rho u)/dt + div(rho u u + p I - sigma) = S_m` and `dE/dt + div((E + p) u - sigma . u - kappa grad theta) = S_E`. The momentum
@@ -880,12 +936,28 @@ error of that size after the first step and a density error that did not shrink 
 residual per step is `theta0 laplacian(S) / 4`, which is second order globally under acoustic scaling. A grid without sources
 is bitwise unchanged. The hooks exist for the qualification (`mms_full_nsf_order`) and are not an instrument source API.
 
-**Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating and wall-heat terms of a step in joules
-and `residual_rel = |change of total energy - wall heat| / total energy`. `pressure_work_j = -integral(p div u) dV dt` is the
-reversible exchange (trapezoid in time, fourth-order divergence); `viscous_heating_j` is DEFINED as
-`internal change - wall heat - pressure work`, so it equals the kinetic energy loss net of pressure work term by term to
-round-off. THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is the continuum dissipation) is the
-Taylor-Green kinetic-energy decay rate in the battery.
+**Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating, wall-heat, boundary-energy and
+volume-source terms in joules. `source_energy_j` is the exact trapezoid of the same `S_E` samples applied to fluid cells;
+solid cells and callback reevaluation cannot add an audit-only supply. Negative supplies remove energy. The total-energy
+residual subtracts wall, boundary and volume supplies independently; no internal-exchange remainder is a balancing credit.
+Cumulative source energy is published only with an accepted step and uses the medium's fixed sensible-energy chart.
+
+`pressure_work_j = -integral(p div u) dV dt` is the reversible exchange (trapezoid in time, fourth-order divergence).
+For source-free and heat-only steps, `viscous_heating_j` is DEFINED as
+`internal change - wall heat - pressure work - source energy`, with the existing boundary terms where applicable.
+With no source, it equals the kinetic-energy loss net of pressure work term by term to round-off.
+THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is continuum dissipation) is the Taylor-Green decay rate.
+
+Manufactured mass/momentum sources also alter kinetic storage, and this owner has no separately qualified local
+source-work split for its streamed mass source. Such steps report the signed residual in
+`unresolved_internal_exchange_j` and zero in `viscous_heating_j`; the unresolved term includes both dissipation and
+unseparated source mechanics and must not be deposited as heat. Uniform acceleration can give a negative unresolved
+term while the exact supplied energy becomes kinetic energy. This does not weaken the independent total-energy audit.
+Source-free arithmetic, dynamics and bit-semantics version are unchanged.
+
+Focused regressions in `tests/nsf3_thermochemical.rs` cover affine signed heating/cooling in both gas branches,
+solid-cell exclusion, one/three-worker replay, uniform source-driven acceleration, mass/energy supply, and existing
+source-domain rollback. They are authored behavioral checks, not a native execution or empirical qualification claim.
 
 **Conformance (`tests/nsf3_battery.rs`).** `equilibrium_recovers_conserved_moments` (G0: mass, momentum, the second moment
 and every third moment the lattice can represent, 1e-13), `refusals_cap_and_cap_plus_one` (G0, including the viscosity envelope, the anonymous ratio and the Mach-bound refusal; the
@@ -2029,6 +2101,31 @@ contact resistance, phase mobility, pressure/viscous heat or moving surface.
 
 ### Material-density natural convection on the enthalpy timeline
 
+`material::conjugate::MaterialChtFluid::solve_natural_convection` also exposes
+the shared source-driven Boussinesq projection directly to steady CHT consumers,
+without requiring a transient enthalpy timeline. One local source query supplies
+`(rho(T)-rho0)*g`, dynamic viscosity and molecular conductivity. The existing
+full-symmetric-stress SIMPLEC owner and conductivity-field energy owner solve
+on the same original domain and conservative volume fluxes. Reference rho/Cp
+stay in inertia, continuity and sensible heat-capacity advection; the supplied
+density/Cp departure bounds apply at every trial and proposed endpoint.
+
+Acceptance requires converged native flow/heat solves plus independent
+unrelaxed temperature, relative mu/k and absolute force-defect tolerances.
+Underrelaxation cannot shrink the defect used for acceptance. Returned fields
+retain both the actual applied samples and fresh endpoint samples. Negative or
+nonmonotone thermal expansion follows the source density law without an
+independent beta. Fixed solid conductivities, ordinary contacts and authored
+thermal boundaries are retained; stateful solid tables, LVEL and independent
+eddy-conductivity fields refuse. This is a numerical steady Boussinesq model,
+not variable-density mass transport, transient dynamics or experimental
+validation. Source queries must be repeatable; budget, domain or cancellation
+failure publishes no partial solution. Focused G1/G3/G4 cases in
+`tests/material_conjugate.rs` cover nonlinear heat balance, Darcy material swaps,
+negative expansion, endpoint source refusal and independent force convergence.
+Low-conductivity warm and fan-driven starts keep the caller's initial field;
+conductive initialization is reserved for unanchored, exactly zero-flow startup.
+
 `LiquidFlowEnthalpyInput::feedback_boussinesq` admits the same pinned liquid
 and caloric sources for bounded density variation. It delegates to
 `MaterialFlowFeedback::try_new_boussinesq` and the existing `BoussinesqMaterial`
@@ -2274,10 +2371,16 @@ kinetic energy is not a closed mechanical-plus-thermal work account; pressure,
 molecular and Darcy power are not deposited as heat. Steady viscous/body-force
 heating refuses in either attachment order.
 Existing phase-support, equal-density mushy and no-free-surface limits remain.
-Retained momentum currently requires fixed native momentum occupancy;
-`try_new_phase` with exact solid locking refuses this mode. A changing solid
-constraint needs an explicit momentum/kinetic-energy handoff. The existing
-quasisteady exact-phase owner continues to handle freezing and remelting.
+`try_new_phase` also supports retained momentum on its original fixed grid.
+An exact solid start needs no liquid viscosity or Cp; all-solid intervals
+advance the accepted clock with zero native solves. Melting opens the original
+faces at their retained zero speed without restarting other moving faces.
+Freezing can close a native face only if its actual staggered velocity is
+already exactly zero. Otherwise the entire candidate refuses a missing
+momentum/kinetic-energy handoff; no speed clipping, pressure projection or
+unreported capture energy is introduced. This preserves native kinetic energy
+under the admitted zero-speed occupancy changes. It supplies no elastic stress
+release, shrinkage, moving skeleton or resolidification reference-state law.
 Regressions exercise heated and isothermal latent-plateau transients, retained
 history, the native steady limit, actual CFL durations and atomic refusals.
 Their addition does not establish an executed native test pass.
@@ -2291,6 +2394,97 @@ The shared thermal owner chooses the actual combined conductive/advective CFL an
 
 The discrete account is `W_wall + W_body + W_pressure = Q_molecular + Q_Darcy + (K_end-K_start) + N_BE`, where `K=sum(M_face*u_face^2)/2` uses exactly the inertia row's staggered half-cell volumes, and `N_BE=sum(M_face*(u_end-u_start)^2)/2`. The nonnegative backward-Euler numerical loss is reported, never turned into heat. Pressure-constraint work must independently remain negligible; it is not heat or a residual correction. Only physical molecular/Darcy watts enter the original caloric kernel, once. `UnsteadyHeatingAudit` accumulates that physical heat, signed supplies, native kinetic change, numerical loss and residual over the accepted advance; generated heat is already inside the original thermal audit. The older cell-centred kinetic diagnostic is not substituted for native mechanical storage.
 
-Admission is closed fixed geometry, laminar Newtonian source transport, constant reference mass/density and the original fixed-pressure caloric chart. A stationary Darcy frame must share the bulk enthalpy at local thermal equilibrium. Exact-solid topology changes, Boussinesq/gravitational storage, openings, fans, configured extra resistance, moving skeletons and compressible pressure work refuse or remain outside this mode. Prescribed actuator work does not debit an unspecified finite electrical/mechanical reservoir. Duration-dependent histories refuse instantaneous `power_balance_observed` queries.
+Source-derived Boussinesq forcing also composes with this retained-momentum heat mode. The same applied material epoch supplies density departures, viscosity and conductivity; its buoyancy field adds to any prescribed actuator field in the native momentum equation. The original staggered body-work quadrature evaluates both total force and the buoyancy component on the same endpoint faces. `UnsteadyMechanicalStep::supplied_buoyancy_power_w` and `cell_buoyancy_power_w` retain that signed component; `UnsteadyHeatingAudit::supplied_buoyancy_work_j` accumulates it over accepted intervals. Buoyancy is a SUBSET of total body work, never an additional supply or heat source. Actuator work is total body work minus that subset. Physical molecular/Darcy losses alone enter enthalpy, while numerical loss remains separate.
 
-All state, source snapshots, prepared momentum, heat and accounts remain inside the original thermal deep-clone transaction. A pending interval can be prepared and accepted only once; solver, caloric, endpoint, history, cancellation or budget refusal publishes none of it. Focused G1/G3/G4 regressions cover the independently reduced 2x2 MAC startup/work identity, negative actuator work, drive-off kinetic decay without numerical heating, material feedback, CFL clipping, latent Darcy heating and late rollback.
+Admission is closed fixed geometry, laminar Newtonian source transport, constant reference mass/density and the original fixed-pressure caloric chart. Material buoyancy retains its explicit small density/Cp-departure bounds and source/endpoint checks. Its signed work represents exchange with the declared Boussinesq forcing model; no resolved gravitational-potential reservoir is introduced. A stationary Darcy frame must share the bulk enthalpy at local thermal equilibrium. Exact phase occupancy uses the same zero-speed face admission above; an all-solid interval has zero mechanical work, physical heat, kinetic change and numerical loss. Locking a moving face, openings, fans, configured extra resistance, moving skeletons and compressible pressure work refuse or remain outside this mode. Prescribed actuator work does not debit an unspecified finite electrical/mechanical reservoir. Duration-dependent histories refuse instantaneous `power_balance_observed` queries.
+
+All state, source snapshots, prepared momentum, heat and accounts remain inside the original thermal deep-clone transaction. A pending interval can be prepared and accepted only once; solver, caloric, endpoint, history, cancellation or budget refusal publishes none of it. Focused G1/G3/G4 regressions cover the independently reduced 2x2 MAC startup/work identity, negative actuator work, drive-off kinetic decay without numerical heating, material feedback, CFL clipping, latent Darcy heating and late rollback. Exact-phase cases additionally cover cold-solid startup, quiescent freeze/remelt, the independent eight-face moving-ring kinetic/work account while its central solid melts, data-only viscosity changes, and atomic refusal to lock a moving face.
+
+Additional G1/G3/G4 cases in `tests/liquid_flow_enthalpy/viscous/unsteady.rs` independently reduce source-density-driven circulation and its work/heat/storage account, compare combined buoyancy and absorbing actuators/walls with the identical prescribed total force, and retain accepted thermal and momentum histories through late refusal/cancellation. These regressions exercise the original native solver and source cards; adding or compiling them is not a claim of executed numerical or experimental validation.
+
+`examples/material_buoyant_flow.rs` exposes this same composition as a runnable
+material-swap entry. A bounded synthetic input table becomes one immutable
+`MaterialCard`; the existing liquid and caloric owners supply all interpolation
+and source evaluation. Local source density drives buoyancy, local viscosity
+drives stress, and local conductivity drives the four declared thermal faces.
+The accepted native momentum and enthalpy history continue across reports.
+CSV output separates physical heat, native kinetic storage, numerical loss,
+signed buoyancy work and the combined energy defect. The two supplied material
+files change only the density curve. They are numerical examples, not measured
+substance data or a spatially converged benchmark. The example retains the
+closed single-phase Boussinesq/Stokes restrictions and introduces no additional
+solver, state clock or gravitational-potential reservoir. Its actual entry tests
+cover material source identity, bounded support and data-only coupled response.
+
+
+
+
+### Open NSF axis with source-bound local linear characteristics
+
+`NsfGrid3::with_characteristic_axis` opens two opposed faces of the original
+NSF owner. One non-periodic axis (at least four cells), periodic transverse
+axes and a two-cell all-fluid collar are required. Interior stationary
+obstacles remain supported. Topology binds before stepping; manufactured body
+sources and moving edge walls are excluded. This supersedes the original
+closed-grid "no open boundary" limitation only within this narrow domain.
+
+Each face prescribes one incoming outward-normal acoustic characteristic
+`J- = delta u_n - delta p/(rho_ref*c_ref)`; the outgoing `J+` comes from the
+adjacent live cell. Entropy and tangential velocity use the inflow reference or
+the actual outflow donor. The reference density, impedance and caloric tangent
+come from the SAME retained `NsfGasMedium`. Reconstructed pressure and temperature
+query its actual NASA9 caloric energy and local transport, or the original
+GasSpec path; no independent reservoir gamma, density, sound speed, viscosity
+or conductivity is accepted. The declared bound on pressure, temperature and
+velocity perturbations must lie in (0, 0.1], with the original material support,
+Mach, temperature-window and viscosity refusals still active. Composition stays
+frozen. The entropy/acoustic boundary reconstruction is explicitly linearized
+about the authored reference; NASA9 energy inversion inside the grid remains
+nonlinear and source-owned.
+
+The same reconstructed face supplies incoming populations (adjacent
+post-collision non-equilibrium extrapolation), the conservative thermal-pressure
+force and the original FV enthalpy/conduction/viscous-work flux. Face energy is
+not injected as a manufactured source and boundary cells are not overwritten.
+The two-ended exchange reports actual streamed mass, streamed momentum plus the
+trapezoidal thermal-pressure impulse, FV total energy, the integral of normal
+volume flow and the actual pressure-work integral. Positive exchange leaves the
+grid. Area-averaged pressure times total flow is not substituted for integrated
+pressure work on a nonuniform face. Per-cell pressure/velocity/area traces remain
+available for a later explicit spatial projection. Lattice mass flux and
+continuum volume flow remain distinct, exposing their discretization difference.
+
+`set_incoming_characteristics` changes the two incoming acoustic data only at an
+accepted time boundary. It preserves physical density, velocity and total energy
+and rebases the full Guo half-source, including its second moment, together with
+the current face-flux history. A refusal publishes nothing. Every accepted step
+publishes face exchange with the existing fluid/material state; failed predictor
+passes publish neither. The optional boundary has no effect on the closed-grid
+population/energy arithmetic. Fixed cell-order reductions retain worker-count
+determinism. Face storage is proportional to face cells, not volume cells.
+
+`EnergyLedger::open_boundary_energy_j` is signed total energy entering these
+faces; its residual now subtracts this term separately from wall heat. The
+viscous-heating bookkeeping subtracts open internal-energy advection and heat,
+not the enthalpy/kinetic flux. Its remainder still is not independent evidence
+of physical dissipation. Momentum exchange closes the no-obstacle domain;
+stationary internal obstacle reactions are additional wall impulses.
+
+Focused tests in `nsf3_open_boundaries.rs` exercise analytic uniform throughflow
+on all axes, separately summed mass/momentum/energy budgets, incoming-wave work,
+outgoing-pulse refinement, NASA9 formation-offset invariance and source support,
+atomic refusals and workers. `nsf_open_channel` is an executable throughflow and
+incoming-pulse example with pressure/temperature/speed inputs; dry-air GasSpec
+owns its thermodynamics and transport. NASA9 source replacement is exercised
+through the same API in the focused tests. These tests/example have not been
+executed natively in the authoring environment.
+
+**No-claim boundary.** This is a first-order normal-face, local linear acoustic
+characteristic rung, not full nonlinear NSCBC, a qualified obliquely transparent
+boundary, moving interfaces, a DG/flow multirate mortar, a resolved flute jet or
+instrument-accuracy evidence. An independent NumPy plane-wave calculation of
+these formulas (not Rust execution) gave returned/residual pressure L2 ratios
+0.08120, 0.04191 and 0.01920 for 64/128/256 cells. That is a refinement check;
+it does not meet or establish the plan's -40 dB interface target. Native and
+multidimensional qualification remain necessary before stronger claims.
+

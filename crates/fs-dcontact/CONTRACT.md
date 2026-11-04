@@ -95,6 +95,21 @@ nonfinite state or derived forces refuse before a force vector is returned.
 without making this crate depend on its owner. The loss formula and local
 non-attractive unloading saturation are unchanged.
 
+## Contact parameter derivatives
+
+`Obstacle::resistance_parameter_vjp_into` differentiates the original total
+positive resisting contact force with respect to `[K, chi, gap_0, ...]`, with
+exponent, collocation and physical measures fixed. It contracts a generalized
+force seed without allocating or dividing by coefficients, so `K=0` and `chi=0`
+retain their admitted-side sensitivities. Open contact and strictly capped
+unloading select zero derivatives; cap equality selects the existing
+unsaturated one-sided derivative. Shape, malformed-owner and nonfinite-input
+refusals leave output unchanged; arithmetic refusal invalidates scratch.
+`tests/contact_parameters.rs` checks these local derivatives against the
+original storage/loss forces, including nonuniform multipoint measures and the
+inactive/capped branches. This is a local constitutive parameter derivative,
+not a source-card derivative or an identification/uniqueness claim.
+
 ## Determinism class
 
 Deterministic: fixed collocation, fs-phs stepping, no RNG or time.

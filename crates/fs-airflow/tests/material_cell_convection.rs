@@ -76,7 +76,7 @@ fn implicit_heating_and_cooling_use_actual_endpoint_temperatures_and_original_st
     let step=BackwardEulerStep::new(&heat,dt,||Ok(())).unwrap();
     let increments=step.cell_ids().iter().map(|&id| {
         let sample=source.samples().iter().find(|s|s.cell==id).unwrap();
-        let g=sample.coefficient.value.value()*sample.exposed_area_m2;
+        let g=sample.evaluation.as_ref().unwrap().coefficient.value.value()*sample.exposed_area_m2;
         let old=heat.temperature_k(id).unwrap();
         MASS*CP*((300.0+(old-300.0)/(1.0+dt*g/(MASS*CP)))-old)
     }).collect::<Vec<_>>();
@@ -111,8 +111,8 @@ fn liquid_and_counted_fluid_reuse_one_original_transport_snapshot_per_cell() {
     let fluid=Counted(std::cell::Cell::new(0));
     let result=evaluate_cell_convection(&heat,&[binding(&fluid,IDS[0],300.0)],1,||false).unwrap();
     assert_eq!(fluid.0.get(),1);assert_eq!(result.sources_w()[&IDS[0]],0.0);
-    near(result.samples()[0].nusselt.groups()["Re"],100000.0,1e-8);
-    near(result.samples()[0].nusselt.groups()["Pr"],8.0,1e-12);
+    near(result.samples()[0].evaluation.as_ref().unwrap().nusselt.groups()["Re"],100000.0,1e-8);
+    near(result.samples()[0].evaluation.as_ref().unwrap().nusselt.groups()["Pr"],8.0,1e-12);
     let mut sources=BTreeMap::from([(IDS[0],2.0)]);
     result.add_to(&mut sources,||false).unwrap();
     assert_eq!(fluid.0.get(),1);assert_eq!(sources[&IDS[0]],2.0);
@@ -178,6 +178,179 @@ fn dittus_boelter_direction_follows_the_solved_wall_not_a_stale_flag() {
     let source=evaluate_cell_convection(&heat,&cells,2,||false).unwrap();
     let hot=source.samples().iter().find(|s|s.cell==IDS[0]).unwrap();
     let cold=source.samples().iter().find(|s|s.cell==IDS[1]).unwrap();
-    near(hot.coefficient.value.value()/cold.coefficient.value.value(),8.0_f64.powf(0.1),1e-10);
+    near(hot.evaluation.as_ref().unwrap().coefficient.value.value()
+        /cold.evaluation.as_ref().unwrap().coefficient.value.value(),8.0_f64.powf(0.1),1e-10);
     assert!(hot.heat_into_cell_w<0.0 && cold.heat_into_cell_w>0.0);
+}
+
+fn natural(fluid:&dyn FluidTransport,cell:CellId)->MaterialConvectiveCell<'_> {
+    MaterialConvectiveCell {cell,fluid,reference_temperature:Temperature::new(300.0),
+        characteristic_length:Length::new(0.1),
+        law:CellConvectionLaw::VerticalPlate {gravity_m_s2:9.81,expansion_per_k:0.002}}
+}
+
+// Independent Churchill-Chu algebra on explicitly declared source properties.
+fn natural_h(fluid:FluidTransportState,delta:f64,beta:f64)->f64 {
+    let rho=fluid.density_kg_m3();let cp=fluid.specific_heat_j_kg_k();
+    let k=fluid.thermal_conductivity_w_m_k();let mu=fluid.dynamic_viscosity_pa_s();
+    let ra=(9.81*beta*delta*0.1_f64.powi(3)/((mu/rho)*(k/(rho*cp)))).abs();
+    let pr=mu*cp/k;
+    (0.825+0.387*ra.powf(1.0/6.0)/(1.0+(0.492/pr).powf(9.0/16.0)).powf(8.0/27.0)).powi(2)*k/0.1
+}
+
+fn natural_endpoint(fluid:FluidTransportState,old:f64,heater:f64,area:f64,dt:f64)->f64 {
+    let mut lower=old.min(300.0);
+    let mut upper=old.max(300.0)+dt*heater/(MASS*CP);
+    for _ in 0..80 {
+        let t=0.5*lower+0.5*upper;
+        let power=heater+area*natural_h(fluid,t-300.0,0.002)*(300.0-t);
+        let residual=MASS*CP*(t-old)-dt*power;
+        if residual>0.0 {upper=t;} else {lower=t;}
+    }
+    0.5*lower+0.5*upper
+}
+
+#[test]
+fn natural_hot_cold_and_material_changes_follow_independent_rayleigh_heat() {
+    let chart=curve();let heat=initial(&chart,[310.0,290.0],0.0,0.002);
+    let first=FluidTransportState::try_new(1.0,1000.0,0.02,2e-5).unwrap();
+    let second=FluidTransportState::try_new(2.0,1200.0,0.03,3e-5).unwrap();
+    let run=|fluid:&FluidTransportState| {
+        let cells=IDS.map(|id|natural(fluid,id));
+        evaluate_material_cell_convection(&heat,&cells,2,||false).unwrap()
+    };
+    let a=run(&first);let b=run(&second);
+    for (result,fluid) in [(&a,first),(&b,second)] {
+        for sample in result.samples() {
+            let delta=sample.wall_temperature_k-300.0;
+            let h=natural_h(fluid,delta,0.002);
+            near(sample.evaluation.as_ref().unwrap().coefficient.value.value(),h,1e-10);
+            near(sample.heat_into_cell_w,-0.008*h*delta,1e-10);
+            assert_eq!(sample.transport,fluid);
+        }
+        near(result.sources_w()[&IDS[0]],-result.sources_w()[&IDS[1]],1e-12);
+        assert!(result.sources_w()[&IDS[0]]<0.0 && result.sources_w()[&IDS[1]]>0.0);
+    }
+    assert!((a.sources_w()[&IDS[0]]-b.sources_w()[&IDS[0]]).abs()>1e-3);
+    let reversed=MaterialConvectiveCell {law:CellConvectionLaw::VerticalPlate {
+        gravity_m_s2:9.81,expansion_per_k:-0.002},..natural(&first,IDS[0])};
+    let reverse=evaluate_material_cell_convection(&heat,&[reversed],1,||false).unwrap();
+    near(reverse.sources_w()[&IDS[0]],a.sources_w()[&IDS[0]],1e-12);
+}
+
+#[test]
+fn natural_boundaries_close_original_backward_euler_storage_at_the_actual_endpoint() {
+    let chart=curve();let heat=initial(&chart,[310.0,290.0],0.0,0.002);
+    let fluid=FluidTransportState::try_new(1.0,1000.0,0.02,2e-5).unwrap();
+    let cells=IDS.map(|id|natural(&fluid,id));
+    let before=evaluate_material_cell_convection(&heat,&cells,2,||false).unwrap();
+    let dt=0.2;let step=BackwardEulerStep::new(&heat,dt,||Ok(())).unwrap();
+    let increments=step.cell_ids().iter().map(|&id| {
+        let old=heat.temperature_k(id).unwrap();
+        MASS*CP*(natural_endpoint(fluid,old,0.0,0.008,dt)-old)
+    }).collect::<Vec<_>>();
+    let trial=step.evaluate(&increments,|endpoint| {
+        let sources=evaluate_material_cell_convection(endpoint,&cells,2,||false)?;
+        Ok::<_,ConvectionSourceError>(StepCoefficients {sources_w:sources.sources_w().clone(),
+            conductances_w_k:BTreeMap::new(),payload:sources})
+    },||Ok(())).unwrap();
+    let (next,actual,audit)=trial.accept(1e-9,1e-9,||Ok(())).unwrap();
+    for sample in actual.samples() {
+        let old=heat.temperature_k(sample.cell).unwrap();
+        near(next.temperature_k(sample.cell).unwrap(),natural_endpoint(fluid,old,0.0,0.008,dt),1e-10);
+        near(sample.wall_temperature_k,next.temperature_k(sample.cell).unwrap(),1e-12);
+        let original=before.samples().iter().find(|s|s.cell==sample.cell).unwrap();
+        assert!(sample.evaluation.as_ref().unwrap().coefficient.value.value()
+            <original.evaluation.as_ref().unwrap().coefficient.value.value());
+        near(MASS*CP*(sample.wall_temperature_k-old),dt*sample.heat_into_cell_w,1e-9);
+    }
+    near(next.energy_j()-heat.energy_j(),audit.external_heat_j,1e-9);
+    near(audit.external_heat_j,dt*actual.total_heat_into_cells_w(),1e-12);
+    assert_eq!(heat.time_s(),0.0);
+}
+
+#[test]
+fn natural_equilibrium_retains_source_admission_and_can_start_a_heated_step() {
+    struct Counted {calls:std::cell::Cell<usize>,state:FluidTransportState}
+    impl FluidTransport for Counted {
+        fn transport_state(&self)->Result<FluidTransportState,fs_material::MaterialError> {
+            self.calls.set(self.calls.get()+1);Ok(self.state)
+        }
+    }
+    let chart=curve();let heat=initial(&chart,[300.0;2],0.0,0.0);
+    let fluid=Counted {calls:std::cell::Cell::new(0),
+        state:FluidTransportState::try_new(1.0,1000.0,0.02,2e-5).unwrap()};
+    let cells=IDS.map(|id|natural(&fluid,id));
+    let zero=evaluate_material_cell_convection(&heat,&cells,2,||false).unwrap();
+    assert_eq!(fluid.calls.get(),2);
+    assert_eq!(zero.total_heat_into_cells_w(),0.0);
+    assert!(zero.samples().iter().all(|s|s.evaluation.is_none() && s.heat_into_cell_w==0.0));
+    for cell in [MaterialConvectiveCell {characteristic_length:Length::new(0.0),..cells[0]},
+        MaterialConvectiveCell {law:CellConvectionLaw::VerticalPlate {gravity_m_s2:-1.0,
+            expansion_per_k:0.002},..cells[0]},
+        MaterialConvectiveCell {law:CellConvectionLaw::VerticalPlate {gravity_m_s2:9.81,
+            expansion_per_k:f64::NAN},..cells[0]}]
+    {assert!(evaluate_material_cell_convection(&heat,&[cell],1,||false).is_err());}
+    struct Missing;
+    impl FluidTransport for Missing {
+        fn transport_state(&self)->Result<FluidTransportState,fs_material::MaterialError> {
+            Err(fs_material::MaterialError::State {what:"missing source".into()})
+        }
+    }
+    assert!(evaluate_material_cell_convection(&heat,&[natural(&Missing,IDS[0])],1,||false).is_err());
+    let dt=0.2;let heater=1.0;
+    let step=BackwardEulerStep::new(&heat,dt,||Ok(())).unwrap();
+    let expected=natural_endpoint(fluid.state,300.0,heater,AREA,dt);
+    let increments=vec![MASS*CP*(expected-300.0);2];
+    let coefficients=|endpoint:&DepositionSimulation<'_>| {
+        let sources=evaluate_material_cell_convection(endpoint,&cells,2,||false)?;
+        let mut powers=BTreeMap::from(IDS.map(|id|(id,heater)));
+        sources.add_to(&mut powers,||false)?;
+        Ok::<_,ConvectionSourceError>(StepCoefficients {sources_w:powers,
+            conductances_w_k:BTreeMap::new(),payload:sources})
+    };
+    // The exact initial guess is a valid residual query, not a fabricated
+    // positive temperature offset chosen just to make the correlation evaluate.
+    step.evaluate(&[0.0;2],coefficients,||Ok(())).unwrap();
+    let trial=step.evaluate(&increments,coefficients,||Ok(())).unwrap();
+    let (next,sources,audit)=trial.accept(1e-9,1e-9,||Ok(())).unwrap();
+    assert!(next.temperature_k(IDS[0]).unwrap()>300.0);
+    assert!(sources.samples().iter().all(|s|s.evaluation.is_some() && s.heat_into_cell_w<0.0));
+    near(next.temperature_k(IDS[0]).unwrap(),expected,1e-10);
+    near(next.energy_j()-heat.energy_j(),dt*(2.0*heater+sources.total_heat_into_cells_w()),1e-9);
+    near(audit.external_heat_j,next.energy_j()-heat.energy_j(),1e-9);
+}
+
+#[test]
+fn mixed_cell_laws_preserve_forced_values_boundary_ownership_and_rollback() {
+    let chart=curve();let heat=initial(&chart,[310.0,290.0],0.0,0.002);
+    let fluid=FluidTransportState::try_new(1.0,1000.0,0.02,2e-5).unwrap();
+    let forced=binding(&fluid,IDS[0],300.0);
+    let cells=[MaterialConvectiveCell::from(forced),natural(&fluid,IDS[1])];
+    let mixed=evaluate_material_cell_convection(&heat,&cells,2,||false).unwrap();
+    let old=evaluate_cell_convection(&heat,&[forced],1,||false).unwrap();
+    assert_eq!(mixed.sources_w()[&IDS[0]],old.sources_w()[&IDS[0]]);
+    let reordered=evaluate_material_cell_convection(&heat,&[cells[1],cells[0]],2,||false).unwrap();
+    assert_eq!(mixed.sources_w(),reordered.sources_w());
+    assert_eq!(mixed.samples()[0].cell,IDS[1]);
+    let before=heat.cells().clone();
+    assert!(evaluate_material_cell_convection(&heat,&[cells[0],natural(&fluid,IDS[0])],2,||false).is_err());
+    let owned=initial(&chart,[310.0,290.0],5.0,0.0);
+    assert!(evaluate_material_cell_convection(&owned,&cells,2,||false).is_err());
+    for law in [CellConvectionLaw::VerticalPlate {gravity_m_s2:0.0,expansion_per_k:0.002},
+        CellConvectionLaw::VerticalPlate {gravity_m_s2:9.81,expansion_per_k:0.0},
+        CellConvectionLaw::VerticalPlate {gravity_m_s2:9.81,expansion_per_k:1e30}]
+    {
+        let invalid=MaterialConvectiveCell {law,..cells[1]};
+        assert!(evaluate_material_cell_convection(&heat,&[cells[0],invalid],2,||false).is_err());
+    }
+    let mut count=0;
+    evaluate_material_cell_convection(&heat,&cells,2,||{count+=1;false}).unwrap();
+    let mut at=0;
+    assert!(matches!(evaluate_material_cell_convection(&heat,&cells,2,||{at+=1;at==count}),
+        Err(ConvectionSourceError::Cancelled)));
+    let mut destination=BTreeMap::from([(IDS[0],1.0),(IDS[1],2.0)]);
+    let saved=destination.clone();
+    assert!(mixed.add_to(&mut destination,||true).is_err());
+    assert_eq!(destination,saved);assert_eq!(heat.cells(),&before);
 }

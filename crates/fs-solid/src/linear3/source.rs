@@ -9,7 +9,7 @@ mod expansion;
 mod stiffness;
 
 pub use expansion::{ThermalExpansionModel, ThermalExpansionSource};
-pub use stiffness::ThermalStiffnessModel;
+pub use stiffness::{SolidStiffnessModel, ThermalStiffnessModel};
 
 use super::TetElasticError;
 use fs_material::state_point::MaterialStatePointError;
@@ -48,3 +48,4 @@ impl From<TetElasticError> for SolidMaterialError {
         Self::Solid(error)
     }
 }
+

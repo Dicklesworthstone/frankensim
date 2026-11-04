@@ -188,9 +188,12 @@ fn add_source_closure(payload: &mut Vec<u8>, workspace_root: &Path) {
         );
         files.push(crate_root.join("Cargo.toml"));
         let build_script = crate_root.join("build.rs");
-        println!("cargo:rerun-if-changed={}", build_script.display());
         if build_script.is_file() {
             files.push(build_script);
+        } else {
+            // A missing watched file makes Cargo rerun on every invocation.
+            // Watch its existing parent so adding the optional script is detected.
+            println!("cargo:rerun-if-changed={}", crate_root.display());
         }
         collect_rust_sources(&crate_root.join("src"), &mut files);
     }
@@ -240,9 +243,12 @@ fn add_asupersync_identity(
         collect_regular_files(&source_root, &mut files);
         files.push(package_root.join("Cargo.toml"));
         let build_script = package_root.join("build.rs");
-        println!("cargo:rerun-if-changed={}", build_script.display());
         if build_script.is_file() {
             files.push(build_script);
+        } else {
+            // Keep optional-script creation observable without watching a
+            // nonexistent path (which Cargo otherwise treats as always dirty).
+            println!("cargo:rerun-if-changed={}", package_root.display());
         }
     }
     for relative in ASUPERSYNC_NON_SRC_INPUTS {

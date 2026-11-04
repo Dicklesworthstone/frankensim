@@ -213,5 +213,72 @@ fn gas_changes_reach_physical_pressure_and_invalid_observation_retains_its_error
     assert!(std::error::Error::source(&error).is_some());
 }
 
+#[test]
+fn open_tone_hole_radiates_to_listener_before_bell_without_changing_in_loop_state() {
+    let with_hole = SOURCE
+        .replace(
+            "segments 2\ncylinder 0.0015 0.2\ngas mixture 293.15 100000 mole 3 N2 0.4 O2 0.2 CO2 0.4\ncylinder 0.0015 0.3",
+            "segments 3\ncylinder 0.0015 0.2\nhole 0.0010 0.004 0.0015 1\ncylinder 0.0015 0.3",
+        )
+        .replace(RECEIVER, &format!("{RECEIVER}\nobserver_law none"));
+    let mut baffled = ReedPerformance::from_bytes(with_hole.as_bytes(), 1).unwrap();
+    let mut legacy = ReedPerformance::from_bytes(
+        with_hole.replace(RECEIVER, "listener_m 0.5").as_bytes(),
+        1,
+    )
+    .unwrap();
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder {
+                radius: 0.0015,
+                length: 0.2,
+            },
+            Segment::ToneHole {
+                hole_radius: 0.0010,
+                chimney_height: 0.004,
+                bore_radius: 0.0015,
+                state: HoleState::Open,
+            },
+            Segment::Cylinder {
+                radius: 0.0015,
+                length: 0.3,
+            },
+        ],
+    };
+    let info = baffled.outlet_receiver().unwrap();
+    let regional = RegionalDuct::new(&duct, baffled.segment_gases()).unwrap();
+    let mut bell_only = regional
+        .baffled_outlet(48000, info.fft_samples, info.receiver, None)
+        .unwrap();
+    let (mut bell, mut holes) = regional
+        .baffled_outlet_and_open_holes_delayed_at(
+            48000,
+            info.fft_samples,
+            info.receiver,
+            fs_duct::WallModel::from_pin(None),
+            info.gas.sound_speed,
+        )
+        .unwrap();
+    assert_eq!(holes.len(), 1);
+    assert!(holes[0].info().axial_delay_samples < bell.info().axial_delay_samples);
+    bell_only.step(voice(&legacy).p_plus_prev).unwrap();
+    bell.step(voice(&legacy).p_plus_prev).unwrap();
+    holes[0].step(voice(&legacy).p_plus_prev).unwrap();
+    let mut hole_differs_from_bell_only = false;
+    for _ in 0..701 {
+        legacy.pressure_block(&mut [0.0]).unwrap();
+        let mut actual = [0.0];
+        baffled.pressure_block(&mut actual).unwrap();
+        let p_plus = voice(&legacy).p_plus_prev;
+        let bell_pa = bell_only.step(p_plus).unwrap();
+        let expected_sum = bell.step(p_plus).unwrap() + holes[0].step(p_plus).unwrap();
+        assert_eq!(actual[0].to_bits(), expected_sum.to_bits());
+        assert_eq!(voice(&legacy).reed_y.to_bits(), voice(&baffled).reed_y.to_bits());
+        assert_eq!(voice(&legacy).reed_v.to_bits(), voice(&baffled).reed_v.to_bits());
+        hole_differs_from_bell_only |= (actual[0] - bell_pa).abs() > 1e-9;
+    }
+    assert!(hole_differs_from_bell_only, "open hole must radiate to the listener");
+}
+
 #[path = "exterior_tests.rs"]
 mod exterior;

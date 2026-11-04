@@ -282,7 +282,8 @@ impl<'m> ThermoplasticSolid<'m> {
         cx: &Cx<'_>,
     ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
         self.advance_contacts_candidate(thermal, contacts, target_s, prescribed_m,
-            nodal_forces_n, settings, controls, guess_j, resolve, false, cx)
+            nodal_forces_n, settings, controls, guess_j, resolve, false, None, cx)
+            .map(|(candidate, _)| candidate)
     }
 
     /// Combine solved support pressure with finite bulk conduction in series.
@@ -304,17 +305,18 @@ impl<'m> ThermoplasticSolid<'m> {
         cx: &Cx<'_>,
     ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
         self.advance_contacts_candidate(thermal, contacts, target_s, prescribed_m,
-            nodal_forces_n, settings, controls, guess_j, resolve, true, cx)
+            nodal_forces_n, settings, controls, guess_j, resolve, true, None, cx)
+            .map(|(candidate, _)| candidate)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_contacts_candidate<'t, S, E>(
+    pub(super) fn advance_contacts_candidate<'t, S, E>(
         &self, thermal: &DepositionSimulation<'t>, contacts: &[ThermalSupportContact<'_>],
         target_s: f64, prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
         settings: IncrementSettings, controls: ContactSolve, guess_j: &[f64],
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
-        series_bulk: bool, cx: &Cx<'_>,
-    ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
+        series_bulk: bool, velocity_mps: Option<&[[f64; 3]]>, cx: &Cx<'_>,
+    ) -> Result<(ContactCandidate<'m, 't, S>, Option<dynamics::Motion>), ContactError<E>> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint()?;
         controls.newton.validate().map_err(ContactError::Newton)?;
@@ -339,7 +341,8 @@ impl<'m> ThermoplasticSolid<'m> {
         self.enthalpies::<Infallible>(thermal, true, cx)?;
         let routes = self.support_contact_routes::<E>(thermal, contacts, prescribed_m, cx)?;
         self.solve_contacts_candidate(thermal, contacts, target_s, prescribed_m,
-            nodal_forces_n, settings, controls, guess_j, resolve, series_bulk, &routes, cx)
+            nodal_forces_n, settings, controls, guess_j, resolve, series_bulk, &routes,
+            velocity_mps, cx)
     }
 
     // Both powered and unpowered solids use these exact face/source checks.
@@ -465,8 +468,9 @@ impl<'m> ThermoplasticSolid<'m> {
         target_s: f64, prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
         settings: IncrementSettings, controls: ContactSolve, guess_j: &[f64],
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
-        series_bulk: bool, routes: &[(usize, [f64; 3])], cx: &Cx<'_>,
-    ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
+        series_bulk: bool, routes: &[(usize, [f64; 3])],
+        velocity_mps: Option<&[[f64; 3]]>, cx: &Cx<'_>,
+    ) -> Result<(ContactCandidate<'m, 't, S>, Option<dynamics::Motion>), ContactError<E>> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         let mechanical_config = ThermoplasticConfig {
             maximum_iterations: 1,
@@ -488,12 +492,13 @@ impl<'m> ThermoplasticSolid<'m> {
                     }
                     trials.set(trials.get() + 1);
                     let h = self.enthalpies::<Infallible>(endpoint, false, cx)?;
-                    let mechanical = self.mechanics::<Infallible>(
+                    let mechanical = self.mechanics_with_motion::<Infallible>(
                         &h,
                         prescribed_m,
                         nodal_forces_n,
                         settings,
                         mechanical_config,
+                        velocity_mps.map(|velocity| (velocity, dt)),
                         cx,
                     )?;
                     let mut coefficients = resolve(endpoint).map_err(ContactError::Source)?;
@@ -607,6 +612,8 @@ impl<'m> ThermoplasticSolid<'m> {
                 + mechanical.thermoelastic_storage_change_j
                 + thermal_audit.stored_energy_change_j
                 + mechanical.numerical_loss_j
+                + mechanical.motion.as_ref().map_or(0.0, |motion|
+                    motion.energy.kinetic_change_j + motion.energy.numerical_loss_j)
                 - mechanical.external_work_j
                 - external_heat_j,
         )?;
@@ -655,7 +662,7 @@ impl<'m> ThermoplasticSolid<'m> {
             cell.accepted = thermal.cells()[&cell.accepted.id].clone();
         }
         checkpoint()?;
-        Ok(ContactCandidate {
+        Ok((ContactCandidate {
             thermal,
             solid,
             report: ContactReport {
@@ -667,6 +674,6 @@ impl<'m> ThermoplasticSolid<'m> {
                 maximum_cell_residual_j,
                 support_work_j,
             },
-        })
+        }, mechanical.motion))
     }
 }

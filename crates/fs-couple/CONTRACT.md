@@ -30,23 +30,50 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Material gas loading in the file-driven plate renderer
+
+The optional `radiation-load none|baffled-piston` record after `observer` in a
+plate performance selects the existing compact piston reaction. The one
+resolved ambient gas and output clock supply both mechanical loading and the
+retarded pressure observer. Physical face area, modal mass and signed volume
+and force projections remain those of the original chart reduction. The input
+hash and CLI sidecar retain the load selection. Omission preserves the original
+unloaded image; no material loss or radiation model is inferred.
+
+`CompactPlateVoice::from_radiators_with_piston_loads` exposes the same path to
+code consumers. A retained filter owns its original gas snapshot and sample
+clock: mismatched consumers or step durations refuse before filter mutation;
+reattachment of the identical load preserves its history. Gas snapshots pass
+the material owner's coherence admission. This remains the existing sampled,
+per-mode compact piston approximation, without mutual radiation, atmospheric
+absorption, a whole-fluid energy claim or continuum/experimental validation.
+G3 regressions distinguish a pressure-induced change in mechanical response
+from density-only output scaling, check the actual retained body's kinetic
+energy, and compare loaded file/WAV renders across callback partitions. The original piston
+decay/frequency oracle retains its tolerance and uses a coherent low-pressure
+gas for its vanishing-load limit.
+
 ### Material-driven finite-body sliding
 
 `tribothermal::dynamics::SlidingPair` adds force-driven tangent inertia to the
 original material sliding contact and finite enthalpy network. Each complete
 uniform body's original thermal-cell mass also supplies its inertial mass.
-Centre-of-mass momentum and one Newton--Krylov relative-speed residual determine
-both velocities; every trial restarts the original contact/thermal candidate,
+Both velocities and applied forces have two components in the original fixed
+tangent frame, ordered by body A then body B. Centre-of-mass momentum and two
+Newton--Krylov relative-velocity residuals determine the complete planar motion;
+every trial restarts the original contact/thermal candidate,
 including its actual endpoint temperature, pressure, speed and slip-history
 source queries. Separate impulse and whole-system energy gates precede joint
 publication of velocities, original slip/work history and finite temperatures.
 Original friction work is an internal transfer; external force work is measured
-on each body's endpoint displacement. Physical friction alone is partitioned
+as the dot product with each body's endpoint displacement. Physical friction alone is partitioned
 as heat, while backward-Euler kinetic loss remains an explicit numerical account.
 The fixed patch/normal-load reduction passes released motion and inertial
 compliance `dt²(1/mA + 1/mB)` to the original tangential return map. That owner
-selects exact sticking or signed sliding; the source speed and accumulated
-distance converge to its solved slip. A stuck branch queries exact zero speed
+selects exact sticking or vector sliding; the material source queries the
+Euclidean speed, and accumulated distance follows actual slip arc length.
+The source motion converges to that same two-component native slip. A stuck
+branch queries exact zero speed
 and leaves slip/work history unchanged. Bodies can accelerate together, stop
 and restart in the opposite direction, under the native endpoint static-first
 convention. It does not locate the physical stopping instant within a coarse
@@ -54,7 +81,8 @@ interval: a backward-Euler stop may have numerical kinetic loss and zero endpoin
 friction heat. Refine time to resolve stopping heat; numerical loss is never
 thermalized. Zero-speed material support is required. No normal, rotational or
 contact-geometry evolution is added. Focused synthetic regressions cover static
-capacity, signed source feedback, stopping/restart, continuation and rollback;
+capacity, signed source feedback, oblique motion, rotation of the tangent frame,
+stopping/restart, continuation and rollback;
 native execution remains required for qualification. The internal same-trial
 friction callback allows other energy owners to share this original solve;
 compliant consumers must gate queried motion against the native solved slip.
@@ -953,6 +981,26 @@ are not supplied here. Coefficients are externally scheduled and piecewise const
 The acoustic observer retains the preceding accepted acceleration across updates;
 abrupt coefficient changes can produce a transient, without a crossfade.
 
+`substitute_material` additionally accepts a different source card and line mass
+at exactly the same length, circular radius and pinned sine-mode count. It uses
+the same coefficient/loss/observer rebuild, with an explicit canonical transfer:
+`q_new = sqrt(mu_new / mu_old) q_old` and
+`p_new = sqrt(mu_old / mu_new) p_old`. Physical displacement and transverse
+momentum remain continuous; velocity generally changes. The reported external
+parameter work includes both kinetic and elastic energy changes and must fit the
+caller's budget. Previous acceleration is rescaled into the new mass normalization
+so the pressure observer retains its physical history. Physical forces must be
+projected again after the epoch changes. The compact observer includes endpoint
+acceleration changes but does not reconstruct distributional radiation from the
+instantaneous velocity jump; that needs a time-resolved transition.
+G1 checks an independent forced oscillator,
+canonical momentum and pressure including the even-mode jerk term; G3 checks a
+substitution round trip and identical-source continuation; G4 checks complete
+rollback after geometry/basis, work-budget and cancellation refusals. This is a
+prescribed material intervention, not chemical conversion, melting, mass transport
+or heat deposited in either material. The thermal wrapper retains its stricter
+same-card binding and does not expose this substitution.
+
 Explicit `refine_modes` increases the retained sine basis at fixed geometry without
 advancing time. Existing coordinates and observer acceleration history are retained;
 added modes start at rest with zero previous acceleration. Shared admission enforces
@@ -982,8 +1030,9 @@ Existing G4 refusal/retry tests compare the complete frame, including loss field
 
 `acoustic_realize::ThermalMaterialStringRuntime` owns that incremental string,
 its immutable material card and a uniform equilibrium enthalpy state. It closes
-the dissipative temperature/viscosity feedback for the prescribed-radius or
-prescribed-mass, fixed-tension, constant-density, constant-Young's-modulus solid rung. Those
+the dissipative temperature/viscosity feedback. Its ordinary constructor admits
+the prescribed-radius or prescribed-mass, fixed-tension, constant-density,
+constant-Young's-modulus solid rung. Those
 restrictions keep elastic and axial prestress storage independent of temperature;
 there is no omitted stiffness-change or expansion work. Density must agree with
 the solid branch of the thermal chart. The initial absolute temperature and card
@@ -997,7 +1046,51 @@ For `FixedMass`, the prescribed mass and `m/L` remain exact through thermal
 updates; constant density and loaded length keep the resolved radius and basis
 unchanged. Thermal area and volume use `ResolvedStringSpecimen::radius_m()` and
 its cross-section, rather than reconstructing mass through a rounded radius.
-This does not admit changing density, expansion or geometric state transfer.
+This ordinary constructor does not admit changing density, expansion or geometric
+state transfer. The source-bound thermoelastic constructor below also keeps mass,
+section and loaded length fixed while evolving its thermal eigenstrain.
+
+`try_new_thermoelastic` admits the original sourced `FixedThermalExtension`, a
+scalar expansion coefficient and scalar or globally affine temperature-dependent
+Young's modulus. Every original modulus knot must belong to that same affine law;
+derivative jumps require a different caloric model. The original material and
+expansion owners resolve the complete temperature path, retaining source claims,
+reference temperature and reference stress-free length. At each accepted sample,
+thermal expansion changes the actual tensile force and modal operator without
+resetting displacement, velocity, observer history or the accepted sample count.
+Slack, changing density/geometry, melting and unsupported source paths refuse.
+
+The axial Helmholtz storage is `Psi_a = A L_ref E(T) e(T)^2 / 2`, with
+`e = (L-L_ref)/L_ref - integral(alpha dT)`. The retained native transverse
+storage is `Psi_v = sum(omega_n(T)^2 q_n^2 / 2)`. Mechanical entropy is
+`s = -partial_T(Psi_a + Psi_v)` at fixed supports and modal coordinates, and
+mechanical internal energy is `K + Psi_a + Psi_v + T*s`. The public
+`mechanical_internal_energy_j` reports this same storage for coupled consumers.
+Positive total fixed-coordinate heat capacity is checked on every original
+caloric segment, including the amplitude-dependent modal term; the exact
+quadratic extrema of `T*Psi_TT` are checked for the admitted affine law.
+
+Mechanics advances once at the accepted temperature. At its resulting modal
+coordinates the existing bounded scalar feedback solver closes reversible heat
+`Q_rev = -delta(Psi_a) - modal_parameter_work - delta(T*s)` through the original
+caloric/transport owner. The heat includes entropy change due to modal motion,
+not just the endpoint temperature change. Thermal callbacks are repeatable
+`FnMut` proposals from the same accepted state; only the final report/reservoir
+candidate survives. The ordinary constant-stiffness path still calls transport
+once. The final frame exposes axial, modal-parameter and entropy-energy changes
+separately, updates the actual modal energies and pressure, and checks the full
+first law. Material dissipation remains distinct from signed reversible heat;
+neither numerical loss nor diagnostic acoustic pressure is deposited as heat.
+The electrical and finite-gas paths share this owner, including reciprocal
+conduction at the actual solved solid and gas endpoint temperatures.
+
+This remains a first-order partitioned small-strain model with a fixed section,
+uniform temperature and diagnostic compact radiation. Energy closure does not
+prove exact entropy conservation, timestep convergence or instrument fidelity.
+`tests/string_specimen/thermoelastic.rs` defines synthetic live-pitch, independent
+internal-energy, electrical-source and refusal/retry checks. Native compilation
+and execution were unavailable in the implementation environment; syntax and
+energy-algebra checks are not reported as native test passes.
 
 Each sample advances mechanics at its initial viscosity, credits material loss
 and explicit external heat to total enthalpy, then resolves the new material
@@ -1676,6 +1769,19 @@ clarinet is one filling of those objects.
   viscosity is requested in that same atomic bundle, including exact claim pins.
   The resulting state rebuilds the fixed-mass/thickness specimen and both loss
   mechanisms. Stale numerical coefficients and citations are replaced together.
+  Regional bindings explicitly select `RegionalPlateLoss::Authored` or
+  `KelvinVoigt`. The latter resolves every region's loss with its elastic state:
+  isotropic regions require uniaxial bending viscosity, while orthotropic regions
+  require all six reduced plane-stress viscosity coefficients, including signed
+  or explicitly zero couplings. The original tensor owner handles rotation and
+  admissibility. `realize_assembly_with_material_plate_chart_and_options` keeps
+  the resolved chart through the common acoustic dispatcher, so its existing
+  modal curvature-energy loss projection and frequency-domain refusals cannot
+  disappear at a bare-chart conversion. Authored damping must be zero alongside
+  sourced loss. This retains the existing diagonal weak-loss image, not full
+  nonproportional damping. G1/G3 compare uniform eta/E against its analytic modal
+  decay, substitute one region's loss source, and observe changed coupled
+  pressure and free decay without changing elastic frequencies or the gas state.
   An orthotropic material selection with this isotropic thermal law refuses.
   Specimen temperature must be an explicit positive absolute T coordinate; the
   surrounding gas does not supply it implicitly. Compilation is
@@ -1956,6 +2062,35 @@ clarinet is one filling of those objects.
   `xtask/tests/observer_relaxation_amount.rs` gates the amount on a rendered
   plucked string at 100 m. The humidity change is gated against ISO 9613-1,
   and the oxygen change against the law with declared rates.
+  The shared `pcm_wav::baffled::BaffledPressure::new_multirate_gas_differentiating`
+  composes these same `ObserverFilter` laws on every original surface-to-receiver
+  path before signed modal summation. Only bit-equal computed distances share a
+  prepared filter; there is no common-distance filter on the summed pressure.
+  Each path retains its `rho*dA/(2*pi*r)` gain, source filter receipt and residual
+  delay `r/c - filter.low_frequency_delay_s`. A negative residual receives the
+  smallest common whole-sample causal padding across ALL paths; that added
+  numerical latency is reported separately and preserves relative path timing.
+  The existing 65-tap sinc contributes its original 32-sample interpolation
+  latency. The source response's own delay is counted once, including dispersion
+  and its numerical padding; FIR support is not physical travel time.
+  Explicit distinct-path, retained-response and convolution/projection budgets
+  bound cold preparation, with cancellation between bounded designs and surface
+  tiles. The actual pressure loop and clone retain the original receiver owner.
+  The reference cold budgets are 16,384 distinct paths, 4,000,000 source-filter
+  taps and 500,000,000 convolution/projection terms. These are admission limits,
+  not a measured real-time guarantee. The receiver exposes its actual multiply
+  count per sample; the live-piano clock reports that count and the physical and
+  numerical delays separately. Larger responses, including some reduced-pressure
+  or higher-rate configurations, can exceed the declared limits and refuse;
+  the caller may select larger explicit cold budgets in the native API.
+  The law is explicit: classical transport does not infer molecular relaxation,
+  ISO requires its state-bound terrestrial-air admission, and a supplied
+  molecular state must belong to the same gas. Prepared live-piano atmospheres
+  now use this path with the generic classical law; native configurations can
+  supply another admitted law or retain the lossless comparison receiver.
+  This remains fixed-gas, infinite-baffle, one-way observation, with original
+  source-law, filter-tail, temporal and spatial approximation limits.
+
   Streaming renderers apply the same laws through `air_path::ObserverFilter`,
   a causal FIR built once per law, range and clock. The reed performance
   (`render::schedule::reed`) applies it to both observers, the legacy
@@ -2399,7 +2534,14 @@ None.
 
   `FlueOutletPerformance::with_mouth_reaction` selects compact self reaction of
   the actual rectangular mouth in the same exterior gas and area basis as its
-  pressure receiver. The exact rectangular static Rayleigh integral and compact
+  pressure receiver. Optional `mouth_aperture rectangle WIDTH_M LENGTH_M`
+  before `mouth_radiation` supplies acoustic dimensions independently of the
+  jet's width and cut-up; omission retains the original rectangular window.
+  Network observation and compact reaction share this declared aperture.
+  Independent aperture dimensions are not yet supported by the DG route.
+  This choice does not alter the aerodynamic jet geometry,
+  source coefficient or independently selected separation law. The exact
+  rectangular static Rayleigh integral and compact
   monopole resistance determine one positive-real `R*s/(s+p)` branch in the
   existing `fs-vfit` midpoint owner. Current-flow pressure and retained history
   enter the original same-sample jet/mouth/duct solve. Original windway, jet
@@ -4058,6 +4200,29 @@ the binary limit, diffusivity-only physical response, post-mixing reaction,
 zero-net-mass stream accounting, closed faces and transactional refusal.
 Native execution and experimental qualification remain separate requirements.
 
+### Combined species transport with selected material heat laws
+
+`MaterialExchangeState::{transport_step_with_gas_law_candidate,
+advance_with_transport_and_gas_law}` lets the original combined nozzle and
+Maxwell–Stefan transport use the same typed gas-heat callback as the closed and
+sequential-flow assemblies. Transport samples one accepted snapshot and checks
+one gross species budget, then chemistry runs once and the existing joint
+electrical/enthalpy/heat/momentum solve receives those actual material gases.
+The heat law sees each trial gas midpoint and exact cell material endpoint;
+its source payload and refusal type survive unchanged. Empty path lists select
+either transport mechanism alone, including a closed assembly.
+
+All transport variants and heat laws now share the original whole-interval
+mass/energy audit and changed-inventory port accounting. There is one accepted
+clock and one publication; carried partial enthalpy or reaction formation
+energy is not deposited again as heat. Failed transport, heat-law resolution,
+nonlinear solve or cancellation leaves every owner intact. Existing
+first-order splitting, distinct physical transport paths, molar-average
+diffusion domains and material/geometry restrictions remain; this is not a
+resolved advection-diffusion or boundary-layer solve. The existing material
+exchange regressions exercise conductive-law parity, actual post-transport
+chemistry once, typed late heat errors, atomic publication and cancellation.
+
 ### Curved material shell bodies in the reciprocal string network
 
 `shear_shell::compile_material_shear_shell` binds original
@@ -4078,6 +4243,20 @@ is factored by the existing passive dashpot owner and retained in the common
 mechanical solve. Original six-DOF force/moment rows and actual facet-normal
 volume integrals are projected on those same mass-normalized modes. Independent
 assembly, projection, modal and complete-network budgets remain explicit.
+
+A source that also states `constant_loss_reference_omega` [rad/s] declares that
+its viscosities are its loss factors at that angular frequency (viscosity =
+loss factor x modulus / omega_ref). Its elements are projected on their own and
+read at every retained mode's own frequency: the projected matrix C becomes
+S C S with s_a = sqrt(omega_ref G(omega_a) / omega_a), where G is a fixed
+five-branch Debye (generalized Maxwell) spectrum fitted to unit loss over
+50 Hz-10 kHz (`shear_shell::constant_loss`; flat to 0.990-1.013 over
+100 Hz-2 kHz). Each mode's damping then carries the source's loss factors at its
+own frequency instead of growing with it. The anchor's claim domain and that
+band clip the region's frequency support. Sources without the anchor keep the
+single unchanged Kelvin-Voigt projection, bit for bit. This is a per-mode loss
+law: the stiffness dispersion that a causal constant-loss solid implies is not
+applied.
 
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every
@@ -4178,6 +4357,41 @@ instrument fidelity. The direction remains an instantaneous geometric
 approximation, not resolved transient jet turning, moving lips, coverage,
 time-varying mouth area/cut-up, or a material-state evolution law. The
 separation closure does not resolve vortex memory or turbulence.
+
+### Retained material inertia in contact and electrical feedback
+
+`solid_enthalpy::plastic::dynamics::ThermoplasticDynamics` now composes with the
+original pressure-dependent thermal supports, finite circuits and electrical
+support contacts. Its `advance_with_thermal_contacts` and series-conduction
+variant use the same contact Newton residual as the quasistatic solid. Its
+`advance_electrical_candidate`, support variant and pressure-contact variant use
+the same original circuit/enthalpy residual. Existing quasistatic entry points
+retain their signatures and omit inertia.
+
+Every thermal trial calls the original native small-strain mechanical owner
+with the same accepted displacement, velocity, J2 history and source-bound
+reference mass. Endpoint stress supplies support compression; that pressure and
+the actual two-sided temperatures resolve the original pinned interface laws.
+Source resistivity determines current, native current supplies Joule heat, and
+plastic plus reversible material heat reaches the original caloric cells once.
+Bulk conductivity and contact resistance retain their original series owner.
+
+The complete coupled balance includes kinetic change and separately reported
+backward-Euler inertial loss, alongside original constitutive numerical loss.
+Neither numerical loss becomes physical heat. Dynamic candidates retain velocity
+and its native kinetic account; their `into_parts` returns thermal and dynamic
+owners together, plus the original circuit where present. Continuation must use
+all returned histories. Refusal, cancellation and source exit publish none.
+
+Reference geometry, mass, electrical topology and transport areas remain fixed.
+Support contacts retain their original complete, prescribed, compressive face
+model; this adds no opening, impact, friction, evolving contact area, motional EMF,
+Lorentz force or finite-strain mechanics. Loads are endpoint values and time
+accuracy is first order. Focused regressions add independent consistent-mass
+displacement/contact-pressure and two-cell heat oracles, source-only resistivity
+changes, circuit and motion continuation, physical versus numerical loss,
+pressure-dependent current and atomic source refusal. Native execution remains
+pending in the resource-constrained build environment.
 
 ### Sourced thermal expansion in the native thermoplastic solid
 
@@ -4518,8 +4732,10 @@ Gas motion/pressure work, radiation loading and propagation of a changing
 atmosphere remain outside both finite-gas paths. The
 compact pressure observer is diagnostic, not an additional heat debit.
 Temperature-increment limits require temporal-refinement assessment and do not
-certify acoustic or thermodynamic accuracy. Existing thermal-string restrictions
-(constant density/E, fixed tension, solid phase and fixed modal basis) remain in force.
+certify acoustic or thermodynamic accuracy. The same thermal-string admission
+applies: either constant stiffness/fixed tension or sourced fixed-support
+thermoelasticity, with constant density, solid phase and a fixed modal basis.
+The combined account includes axial storage and mechanical entropy for the latter.
 
 G1/G3/G4 regression definitions in `tests/string_specimen/finite_gas.rs` check
 source-dependent drag without a vibration reset, measured combined energy,
@@ -4659,6 +4875,52 @@ small-strain, fully-solid, one-way quasistatic approximation remains explicit;
 caloric and elastic energy are reported separately, with no reciprocal
 thermoelastic heat, changing transport geometry or experimental claim.
 
+`SolidEnthalpyState::advance_transient_candidate` also feeds those same local
+material/thermal arrays into the existing sparse 3-D Newmark trajectory. The
+previous state must match the run's exact material and thermal fields and
+clock. Both endpoints retain the same source-pinned reference records, cell
+inventory, axes, frames and strain bounds. The next problem is checked against
+the resolved endpoint before its source identities are borrowed by the native
+candidate. Changed source stiffness rebuilds the native operator at fixed
+reference mass; temperature-dependent softening and stiffening continue the
+same displacement, velocity and acceleration history. Density changes and
+changing stiffness with stiffness-proportional damping refuse. Constant mass
+damping remains admissible.
+
+Expansion work and constitutive-stiffness work are independently integrated
+from the native stress/strain endpoints, including fully clamped storage, and
+kept separate from caloric heat. The latter is the signed tensor term
+`sum V/2 * elastic_strain_old : (C_next-C_old) : elastic_strain_next`.
+This is sequential one-way thermal-to-inertial loading; no reciprocal heat
+correction or whole caloric/mechanical energy closure is claimed. Tests in
+`tests/solid_enthalpy.rs` change material expansion, modulus and heat capacity
+as source data, compare actual heated inertial endpoints with a one-DOF
+reference, continue the same motion through softening and stiffening, and
+refuse missing source/clock bindings or unsupported damping. A nonzero initial
+elastic strain makes omitted stiffness work exceed the energy allowance.
+The endpoint adapter does not observe intervening thermal events: callers
+must admit that path, resolve heating events and check temporal refinement.
+
+`SolidEnthalpyState::rebind_transient_candidate` connects explicit source-card
+replacement to the same retained 3-D motion. Both snapshots must originate from
+their material/caloric owners and match the accepted clock, reference mesh/frame,
+zero supports and persistent cell correspondence. The old snapshot must exactly
+match the run; the new problem must exactly match the replacement snapshot. The
+native owner transfers displacement and reduced canonical momentum, rebuilds
+mass/stiffness/thermal forces, re-equilibrates acceleration and reports bounded
+signed mechanical work. Subsequent ordinary heating retains the new sources and
+delivered mass.
+
+`SolidMaterialRebind` separately retains each cell's old/new mass, exact
+phase/card/chart identity and extensive `m*h` inventory. Different caloric charts
+may use unrelated energy zeros, so these values are not subtracted into heat or a
+purported closed total-energy balance. The caller accepts the new thermal owner,
+source binding, resolved state and run together and owns the external matter/energy
+replacement. This is neither continuous mass flow nor a melting closure. Synthetic
+G1/G4 tests in `tests/solid_enthalpy/rebind.rs` exercise changed density, modulus,
+expansion and heat capacity through nonzero-time motion, reverse replacement,
+subsequent heating, and exact binding/work/cancellation rollback.
+
 ### Finite source gas on uniform thermal feedback
 
 `finite_gas_thermal::FiniteGasThermalEnvironment` adapts the original
@@ -4688,6 +4950,17 @@ Focused G1/G3/G4 regression definitions in
 finite gas inventory changing actual hereditary vibration, exact insulation
 parity, independent radiation ownership, measured combined energy and
 failed/cancelled proposals preserving both accepted owners.
+
+`advance_with_convection` uses the same bounded residual and enthalpy owner
+while resolving a new whole-surface film coefficient from the complete gas
+endpoint at each trial. `advance_with_convection_feedback` additionally supplies
+the signed proposed heat to select a correlation's heating/cooling branch;
+the accepted temperature ordering and energy gates still apply. The exact
+source sample accompanies the final gas and body
+reports. The declared-coefficient `advance` delegates to this path with a
+constant callback. This is a bulk-gas coefficient law, not a wall-temperature
+film iteration or resolved flow. The original Biot admission remains active;
+callers must not dilute a local coefficient by averaging partial coverage.
 
 ### Shared DG causal terminal boundary
 
@@ -4819,10 +5092,11 @@ not add it again. Material viscous loss heats the solid, aerodynamic drag heats
 the finite gas, and signed interfacial heat cancels between their inventories.
 Numerical loss and diagnostic radiation are not converted to extra heat.
 
-The existing first-order frozen-coefficient split, fixed tension and geometry,
-constant elastic modulus/density, fully solid caloric state, source validity,
-layer geometry and Biot restrictions remain in force. This supplies no circuit
-dynamics, contact/skin effects, Lorentz force, thermoelastic work, gas pressure
+The existing first-order frozen-coefficient split, fixed geometry/density,
+fully solid caloric state, source validity, layer geometry and Biot restrictions
+remain in force. The sourced thermoelastic constructor also propagates heating
+into tension/stiffness and its reversible work through this same path. This
+supplies no circuit dynamics, contact/skin effects, Lorentz force, gas pressure
 work or radiation loading. Gas volume specifies a thermal inventory, not an
 acoustic chamber geometry.
 
@@ -4886,3 +5160,1130 @@ well-mixed gas and diagnostic-radiation limitations remain. The supplied solid
 fixture is manufactured. Native regressions cover replay, independent storage
 integrals, data-only material/gas/volume changes, strict input and source or
 cancellation refusal; they do not establish measured instrument accuracy.
+
+## Thermal material field storage
+
+`circuit_enthalpy::field_storage::step_candidate` closes sourced C(T) and L(T), native Kirchhoff charge/flux, resistor heating and the original finite enthalpy/Newton residual on one candidate interval. Every field branch maps to one whole material cell with the same immutable card, source context, caloric law and geometry. The prepared material network keeps resistor/conduction source choices pinned. Field coefficients are refreshed at each proposed temperature through `fs-material::field_storage::thermal`; the original circuit owns rebinding and midpoint evolution. No replacement circuit or heat integrator is introduced.
+
+For each field, the source law supplies psi=z²/(2K), s=-partial_T psi and U=psi+Ts. The frozen-initial-coordinate coefficient change supplies explicit parameter work to the native electrical step. Its negative, together with minus delta(Ts), becomes signed reversible transfer into the same material's caloric store; Joule dissipation is routed separately, exactly once. The final independent enclosing balance uses actual U at both endpoints plus caloric storage, against only authored electrical work and external heat. Original native reports retain their isothermal free-energy convention and expose the separate physical account explicitly.
+
+The bounded reduction requires fixed geometry, complete storage mapping, one field branch per thermal material cell, fully solid constant-density caloric charts for mapped fields, positive affine coefficients and positive total caloric plus field heat capacity across each declared temperature/coordinate envelope. Both endpoint charges/fluxes must satisfy that envelope. Other thermal cells keep their original phase and boundary behavior. Source constraints, material-domain errors, unresolved thermal events, failed residuals, budget exhaustion and cancellation return no live-state mutation. Ideal-source constraint incompatibilities during frozen-coordinate rebinding refuse; no impulsive source exchange is inferred. Hysteresis, dielectric relaxation, moving geometry, field-dependent constitutive response, spatial field reassembly and phase transitions of mapped fields are separate owners. This first-order endpoint-temperature split does not claim unconditional passivity or temporal accuracy.
+
+Focused authored RC/RL fixtures cover both thermal coefficient signs, exact constant-coefficient recovery, independent total-U scalar roots, repeated accepted history, Joule versus reversible versus external heat, positive closed-system entropy, source/volume mismatch, capacity envelope, budget and late cancellation. These are numerical regressions, not measured material validation. Native Cargo/DSR execution was unavailable for this increment.
+
+### Implicit conservative homogeneous reaction extent
+
+`cavity_phs::piston::reactive::implicit::ImplicitReactionSolve` selects
+backward Euler for one reversible source-bound reaction, including inerts and
+initially absent products. It solves `xi - dt V r_end = 0` in moles with the
+same bounded scalar feedback algorithm used by thermal exchange. Each trial
+starts from the same accepted gas mass, volume and TOTAL internal energy,
+reconstructs the original NASA-9 mixture, and re-evaluates canonical partial
+activities, the actual temperature-dependent material rate and thermodynamic
+reverse closure. No formation-energy heat is added. Source/model identities
+and explicit/implicit paths share the original inventory reconstruction and
+final species, mass, energy and entropy admission.
+
+The caller's signed molar bracket is intersected with current donor allowances;
+accepted species are never clipped. Search endpoints retain strictly positive
+donors. Zero-rate states accept before querying the nonzero edge. Every queried
+state must remain inside the declared caloric/transport/kinetic source domain.
+Rejected bracket samples need not pass the accepted-trajectory entropy gate;
+the converged physical endpoint must. Reports retain endpoint rates, actual
+nonlinear residual, admitted extent bracket and bounded trial count. Thermal
+feedback's joule API and numerical operation order remain unchanged; the shared
+internal scalar core attaches units only in its physical wrappers.
+
+Existing parcel, piston, flow/diffusion and finite electrical/thermal consumers
+select this method through the same `GasReaction` value. Existing dyadic
+subcycling also refines implicit trajectories and may retry donor, entropy or
+nonlinear-root failures, while source, arithmetic and cancellation errors
+remain hard refusals. The root cap is at most 128 interior trials plus two
+endpoints per attempted substep; every gas inversion retains its separate cap.
+An aggregate subcycling report does not mislabel its summed extent as one root:
+individual endpoint equations remain in the actual accepted substeps.
+
+This is a first-order homogeneous reaction-then-motion/heat split, not a
+multi-reaction implicit mechanism, chemical-equilibrium acoustic derivative or
+validated ignition/engine model. Multi-channel implicit construction refuses.
+Temporal refinement and nonlinear-source branch admission remain necessary.
+Focused regressions use synthetic balanced isomers with an independent analytic
+backward-Euler limit and exponential relaxation, actual temperature-dependent
+source kinetics, formation-energy pressure/sound response, material piston
+motion, absent reagents, source/work limits and cancellation rollback. Native
+workspace execution and experimental mechanism qualification remain separate.
+
+## Finite moisture transport into native plate mechanics
+
+The material-reality MR46 slice in `moisture` keeps local water inventory
+separate from ambient relative humidity. `MoistureSlab` is a homogeneous,
+isothermal, one-dimensional fixed-reference specimen with kg water/kg dry solid
+as its sole evolving field. Its source query explicitly distinguishes absolute
+temperature and dry-basis moisture. Reference density at the declared reference
+moisture gives conserved dry skeleton mass; later density queries never create
+or destroy that inventory. Every interval measures the water received at each
+end and checks total water change against those signed transfers.
+
+The effective diffusivity is required material data; no wood/material name
+selects a number. Its original claim is pinned and re-evaluated locally.
+Backward Euler uses harmonic interior-face diffusivities evaluated at the
+accepted start and half-cell resistance at prescribed surfaces. This lagged
+nonlinear coefficient is a first-order approximation, with explicit interval,
+content-increment, true-residual, conservation and work limits. The tridiagonal
+SPD operator uses the original `fs-solver::checked_cg` and original
+`fs-sparse::Precond` interface, not a second linear solver. Its identity
+term and nonnegative graph conductances establish SPD. Source, numerical
+maximum-principle, increment and water balance admissions precede publication.
+No water is clipped or silently renormalized. Sealed ends carry zero transfer;
+prescribed dry-basis values are infinite reservoirs. The explicit FPL wood
+sorption boundary calls the existing coefficient-card owner at matching
+temperature and actual RH; it changes the surface condition, never every
+interior cell at once.
+
+`moisture::plate::MoisturePlate` maps that same inventory to the existing
+rectangular DKT mesh: diffusion is along in-plane x, while width and thickness
+are well mixed and their exterior faces are sealed in the transport reduction.
+Each x strip re-resolves its original isotropic or orthotropic elastic claims at
+its actual local moisture. The existing plane-stress/axis lowering and native
+DKT assembler rebuild stiffness and translational/rotary inertia. Reference
+dry density times (1+M) supplies wet mass on this fixed geometry. The assembled
+mass is independently compared with conserved dry mass plus transported water.
+Ordinary modal/force/pressure consumers receive the native pencil; no modal
+frequency multiplier or instrument preset is introduced. Coupled advance
+returns transport and mechanical endpoints together only after both admit.
+
+This rung does not model hygroscopic swelling, humidity prestress, sorption
+heat, finite vapor-reservoir depletion, hysteresis, free liquid, stress-assisted
+diffusion, changing porosity/geometry, dynamic modal-state remapping, or
+moisture-dependent damping. It makes no complete thermodynamic energy or
+chemical-entropy claim. Its no-swelling/fixed-geometry approximation must be
+admitted by the caller; it is not the full MR46 completion. Drying/wetting
+response is memory through the diffusion field, not a sorption scanning law.
+No physical wood diffusivity or validation is inferred from authored fixtures.
+
+Focused tests cover a closed-form one-cell update, sealed water conservation,
+Fourier-series slab refinement, squared-length/time scaling, data-only
+diffusivity changes, local nonlinear source refresh, the shipped FPL sorption
+pack, native modal stiffness/inertia scaling, spatial anisotropic material
+consumption, complete mechanical-source refusal, budgets, quantity-basis
+refusal and cancellation. Native Cargo execution is a separate gate; parsing
+and independent numerical oracles do not establish executed native test results.
+
+### Simultaneous implicit conservative reaction mechanisms
+
+`GasReaction::with_implicit_mechanism(implicit::coupled::ImplicitMechanismSolve)`
+solves every canonical reaction extent together with the existing
+`fs-solver::NewtonKrylovState`. The residual is
+`F_r = xi_r - dt V rate_r(n0 + S xi, U0, V)`. A trial reconstructs one original
+`ClosedGasParcel` at conserved mass, volume and total internal energy, then
+evaluates every original material rate and detailed-balance reverse closure at
+that same actual temperature, pressure and composition. NASA-9 formation energy
+is included once by the existing gas chart. No reaction heat source or new
+caloric/rate engine is introduced. Existing piston, flow/diffusion and finite
+thermal/electrical consumers select the method through their original
+`parcel_candidate` calls.
+
+Each channel has an explicit signed extent range keyed by its original reaction
+ID. Newton uses dimensionless extents/residuals normalized by the channel's
+largest absolute range endpoint. Physical acceptance separately checks every
+unscaled molar residual, source support, stoichiometric species balance, mass,
+total-U balance and entropy. A converged native solver report alone is
+insufficient. Canonical accumulation uses the explicit mechanism's compensated
+sum owner. The numerical Jacobian admits feasible centered/one-sided columns
+inside the stoichiometric positivity domain and caller ranges; it supplies the
+existing native Krylov/preconditioner interfaces and has no analytic tangent or
+adjoint authority. Negative-inventory/range trials request native globalization;
+missing source data, arithmetic failure, exhausted work or cancellation latch a
+hard refusal. Accepted species are never clipped.
+
+Initially absent intermediates can be produced and consumed in the same
+implicit interval. A conservative interior *initial guess* is built only on the
+reaction support reachable from the original species. Inaccessible reaction
+channels remain at zero extent, with their original rates and residuals still
+checked at acceptance. The seed is never published or counted as a physical
+burn. For this simultaneous method, the existing consumed-fraction control
+bounds gross withdrawals divided by original stock plus simultaneous channel
+production. Explicit and scalar integration retain their original-stock
+denominator. Source domains and finite representability can refuse an interior
+seed or derivative stencil; there is no guaranteed solve at every valid state.
+
+The original 32-channel bound remains. Outer attempts are capped at 128, total
+residual evaluations (including stencils/rejected trials) at 65536, and native
+restart/cycle counts at 32 each. Every gas inversion retains its own work bound.
+Cancellation is polled through physical work and native solver callbacks.
+Accepted gas and enclosing motion/heat history remain unchanged on any refusal.
+The report retains every channel's endpoint residual and the native nonlinear
+report. Existing dyadic refinement replays complete coupled trajectories; an
+aggregate report retains solved equations in its actual substeps instead of
+mislabeling summed extents as one nonlinear root.
+
+This is a first-order homogeneous backward-Euler reaction stage with the existing
+reaction-then-motion/heat split, not a validated combustion mechanism, flame or
+shock solver, equilibrium acoustic derivative, or nonlinear uniqueness/stability
+certificate. The scalar `with_implicit` API still accepts one reaction; it and
+the coupled method cannot be bound together. Direct manufactured regressions
+cover a stiff A/B/C chain against an independent matrix inverse, absent
+intermediate production/consumption, source-driven temperature/pressure/sound,
+inactive species, source/budget/cancellation refusals, native piston energy,
+replay and actual subcycling. Native Cargo/DSR execution was unavailable in this
+environment; source parsing and independent numerical references do not replace
+those gates.
+
+
+## Transported moisture to compatible solid deformation and prestress
+
+`moisture::solid::MoistureSolid` maps each original dry-basis finite-volume cell
+to a reference rectangular-prism strip with six native P1 tetrahedra. Tetrahedra
+never straddle moisture cells; the well-mixed transverse faces remain sealed.
+The source-bound solid independently selects isotropic or oriented orthotropic
+elasticity and fixed principal hygroscopic directions. Every accepted moisture
+cell re-evaluates the pinned elastic bundle and integrates its three hygroscopic
+strain coefficients from the original explicit source length/moisture datum.
+
+The existing solid owner solves compatible quasistatic displacement, recovers
+actual stress/support reactions/elastic energy, admits the deformed geometry,
+and assembles the original signed reference-configuration initial-stress pencil.
+Dry skeleton and transported water own inertia. Reference element density is
+wet cell mass/reference strip volume, with current density obtained from wet
+element mass/admitted deformed volume; no fresh density curve creates matter.
+Native mass and transported inventory must agree under an explicit tolerance.
+Fully prescribed bodies retain stress and reactions and have no modal pencil.
+
+`advance` returns proposed transport, geometry and all mechanical projections
+together after source/domain, equilibrium, strain, geometry, mass and cancellation
+gates. Failure retains the original accepted slab and does not debit reservoir
+water. The source-driven outputs expose the native modal/stability pencil;
+negative eigenvalues remain instability, never converted to audible frequencies.
+Diffusion stays on its original reference chart. This is slow isothermal open-
+reservoir hygroscopic mechanics: chemical reservoir work and sorption heat are
+not closed by the mechanical energy report. Stress-assisted diffusion, hysteresis,
+finite deformation, a deformed-configuration tangent and dynamic mode-state
+transfer remain separate models. Analytic fixtures verify transport-to-free
+swelling, constrained stress/energy, rotated directions, orthotropic data swaps,
+spatial variation, native wet inertia, changed modal pencil and atomic refusal.
+All fixture coefficients are authored verification data, not wood validation.
+
+## Spatial magnetic thermal feedback
+
+`circuit_enthalpy::eddy::thermal` extends the same `MagneticThermalNetwork` with `step_eddy_thermal_candidate`. Every thermally mapped triangle, conducting or insulating, has a complete source-pinned `ThermalMagneticMaterial` law and explicit |B| envelope. Original material/caloric context, immutable card and selected claims, whole-volume receiving cells, density, geometry, electrical regions and accepted clocks stay bound. The summed field heat-capacity lower bounds plus each receiving cell caloric capacity must remain positive over a common supported temperature interval. Both accepted endpoint fields must respect their envelopes. Fixed external regions require temperature-independent permeability; changing field entropy cannot disappear into an unmodeled reservoir.
+
+Every original enthalpy/Newton trial starts from the same accepted A/H, resolves local sigma(T), mu(T) and thermal conduction, rebuilds the original planar operator, and calls the original endpoint-effort induction solve. Its native per-triangle sigma E² integral is deposited once through the same heat router as the fixed-mu path. Separately, Q_rev=−P−delta(T S_field) enters that triangle receiving cell. Native magnetic parameter work P and signed reversible heat remain distinct from Ohmic heat. The returned report independently reconstructs delta U_field+delta U_caloric−impressed work−external heat, with U_field=psi+T S; reversible heat is internal, not external supply. Both retained histories publish together, and cancellation/source/budget/nonlinear failures publish neither.
+
+Focused synthetic tests cover both permeability-temperature slope signs, the zero-slope existing limit, independent scalar elimination/root references, repeated accepted-history evolution and replay, spatially unequal permeability/conductivity with local temperatures, summed capacity bounds, missing/duplicate/foreign sources, field bounds, and interrupted/budget-exhausted proposals. This is a fixed-geometry linear reversible affine-permeability rung with first-order thermal endpoint coupling, not saturation, hysteresis, phase evolution, a time-error certificate, unconditional entropy/passivity, or measured magnetic-material qualification.
+
+## Spatial solid cells exchanging heat with one finite source gas
+
+`solid_enthalpy::gas::step_with_isochoric_gas` closes the existing thermal
+backward-Euler cell balances and the existing fixed-volume NASA-9 gas energy
+balance in one bounded Newton--Krylov solve. Every exposed patch resolves the
+original gas and solid conductivity at the common trial endpoint. Its signed
+heat is removed from its own cell and added to the single gas inventory;
+opposite patch transfers remain distinct even when their net gas heat is zero.
+Existing internal links and authored external heat remain on the original
+thermal owner. No mean solid temperature or substitute heat capacity is used.
+
+The source-bound structural field is resolved at every trial and at admission.
+Conductivity selection is pinned at the original stress-free reference, and
+the accepted start must still support it. Local cell, gas and combined caloric
+energy allowances are independent of the nonlinear stopping rule. Contact
+IDs, aggregate exposed area, cell/patch/trial budgets, source domains and
+cancellation are admitted before any endpoint can be returned. The immutable
+candidate owns thermal, gas, material-field and transfer reports together;
+callers perform any required equilibrium/valve admission before publishing it.
+
+This slice assumes a well-mixed gas at fixed volume and composition, fixed
+thermal geometry and authored internal conductances. It is sequential
+quasistatic thermoelastic loading: reciprocal elastic heat, pressure work,
+gas flow, moving surfaces and phase change are not supplied by this coupling.
+Numerical Jacobian probes must remain inside the declared material domains.
+Independent three-reservoir regressions cover local heat, source conductivity
+and gas-volume changes reaching displacement, zero-net spatial exchange,
+source continuity, cancellation and transactional refusal.
+
+### Computed DG radiation and source-bound exterior pressure
+
+DgPortLoad::new_with_computed_baffled derives the single circular outlet from
+original DG area and an explicit shared GasRecord. ComputedBaffledInput now
+exposes its existing aperture/gas bake independently of waveguide topology;
+its original BEM samples, rational fit, full mechanical Nyquist admission and
+source/held-out/continuous/sampled reports remain unchanged. The retained
+ComputedBaffledRecord owns source geometry, gas receipts and numerical results,
+not another copy of the accepted physical terminal history.
+
+The shared dg_tube/dg_bore reader admits OUTLET baffled followed, after all
+geometry and gas-station rows, by dg_radiation computed-baffled with the original
+fourteen controls and dg_exterior with a complete gas record. Static pressure
+must match the quiescent bore; mixture and temperature may differ. Cold source
+preparation rebuilds the physical load once. The same source serves moving
+apertures and original jet-driven flues through the shared DG endpoint solve.
+
+FlueDgPerformance::with_baffled_outlet and AperturePerformance's existing
+TubeBaffled selector consume each accepted outward DG terminal flow once in
+the original same-clock differentiating BaffledPressure owner. Their opening
+and exterior come from that computed source; observing adds no second load.
+The default original inlet observation remains available with the same reaction
+active. Geometry, source/wall frequency admissions, receiver limits and clock
+remain checked; a conflicting explicit exterior refuses. A failed pressure
+callback poisons its finite wrapper rather than claiming complete acceptance.
+
+Both authored formats reach the existing pressure renderer and explicit CLI
+decimation. Metadata retains the computed source even for inlet observation.
+An active ensemble microphone uses its actual bound exterior gas, checked
+against the numerical receiver medium and existing common-listener policy.
+Focused tests cover gas/geometry source records, original thermochemical
+receipts, accepted-flow observer equality, physical-state preservation,
+callback partitioning, receiver refusals and pressure-ceiling poisoning.
+
+This is one uniform circular opening in an infinite rigid baffle, without
+mouth mutual loading, unflanged bell diffraction, body scattering or room
+physics. The original flue jet remains an exploration source. Wall-law,
+spatial, rational and nonlinear-time convergence stay separate; sampled
+passivity remains GridOnly. No measured flute, clarinet or oboe qualification
+is asserted. Source tests and illustrative fit declarations require native
+execution before numerical or acoustic accuracy claims.
+
+## Native finite-gas heating of a spatial material valve
+
+The `heated_valve_sound` example accepts an explicit finite gas volume, layer
+distance and step count alongside the existing species/NASA9/transport packs.
+The original 48-cell solid receives gas heat on actual exterior triangles,
+with an insulated root and conservative shared-face internal links. The native
+slice pins the original conductivity source and resolves it at each cell's
+actual nonlinear endpoint within the declared fully solid 280–400 K interval.
+Internal half-cell links and gas-facing layers consume the same material
+snapshot; constant claims, temperature curves and supported fixed-context
+response surfaces use the original material-network owner. Its centroid-normal
+two-point network remains a coarse transport model, not a continuum-consistent
+tetrahedral heat discretization.
+
+The optional manufactured `--demo-conductivity K_AT_280 K_AT_300 K_AT_400`
+source permits conductivity comparisons with identical initial coefficients.
+A regression follows the changed temperature dependence through spatial heat,
+quasistatic deformation, reduced valve frequency and actual pressure, with
+combined storage closure and deterministic replay checks.
+
+Each accepted temperature field uses the same source stiffness and expansion
+owner as the final equilibrium, prestress, aperture and valve reduction.
+Initial and final gas snapshots feed the existing common-medium acoustic
+realizer. Pressure CSV and stereo WAV preserve physical pressure scaling; an
+additional thermal CSV reports spatial temperature extrema, gas T/p and
+independently measured solid/gas storage and cumulative heat. Both complete
+frozen-state acoustic experiments precede output creation. The gas volume is
+thermal storage, not a modeled acoustic enclosure; pressure work, live modal
+state transfer and reciprocal thermoelastic heat remain outside this slice.
+
+## Material valves on the original DG bore
+
+`bernoulli_aperture::dg::LoadedApertureDg` binds the existing
+`LoadedAperture` single, independent-paired or material-modal owner to the same
+DG mean-port relation used by the scalar valve and flue source. It requires cold
+ExactZoh mechanics, matching physical clock, inlet density and mean impedance;
+retained paired/modal gas states must match the complete inlet material state.
+No blade, mode, contact coordinate or constitutive memory is collapsed to the
+diagnostic opening. Both wrappers share one acoustic/work acceptance path.
+Additional source-mesh pressure work appears in the frame and is already
+credited once in mechanical work. Rational terminal exchange remains signed
+port work, not an invented heat or storage certificate. Failed trials leave
+mechanical, wall and terminal histories unchanged.
+
+`dg::loaded::performance::LoadedDgPerformance` adds a finite canonical
+blowing-pressure phrase and the existing source-mesh force/pressure compilers.
+All auxiliary controls share one remaining storage/work allowance. Each accepted
+mechanical sample advances its source once and publishes its controls; a failed
+callback poisons further output while retaining the accepted prefix. Inlet
+pressure and an explicitly selected computed baffled outlet are distinct
+observations. `DgPortLoad::baffled_receiver` is the shared scalar/flue/loaded
+admission owner for original outlet geometry, exterior gas, physical clock and
+radiation/wall bands. It feeds the existing retarded pressure observer without
+rebaking or adding a reaction.
+
+Regressions exercise original scalar arithmetic, independent material blades,
+all retained modal/Maxwell coordinates, prescribed traction work, rollback and
+scheduled playback. These are coupling invariants, not measured
+clarinet/oboe fidelity or convergence certificates. Native test execution and
+instrument-specific time/space/material validation remain separate requirements.
+
+## Authored material-modal DG sources
+
+`frankensim-material-modal-dg-valve-v1` makes the loaded DG composition
+reachable through the existing material-card/mesh readers and `music_render
+wind`. One or two original regional plates retain all requested signed modes,
+selected tensor viscosity or Maxwell histories, wetted geometry, spatial
+pressure, contact closure and source-mesh force controls. The material source
+binds the actual DG inlet gas and mean impedance. Shared DG input owns local
+gas fields, wall memory and any computed exterior reaction; material inputs
+do not replace those owners with density-only tuning.
+
+The source declares equal mechanical/output clocks and ExactZoh; downstream
+PCM decimation is explicit. A named inlet trace remains internal pressure.
+Baffled output requires the original computed terminal and uses its exterior
+gas, outlet geometry and accepted outward flow. The supplied paired-DG
+fixture and regression sources are manufactured integration data, not an
+instrument qualification. Clock/structure, missing material claims, absent
+pressure ports and unbound exterior observations refuse without substitution.
+
+## Authored distributed interior for material strings
+
+An optional `interior-fe-v1` trailer on v3/v4 body profiles supplies the
+original tetrahedral volume, pressure FE order, complete frequency window and
+explicit numerical allowances to the existing Helmholtz and
+`with_material_shell_cavity` owners. Gas properties come only from the
+performance's coherent material gas. The declared volume must conform to the
+original shell's complete cavity surface; missing walls and open apertures
+refuse rather than acquire invented closing faces. A separate lumped cavity
+cannot be supplied simultaneously.
+
+Preparation installs this reciprocal air load before subsequent cylinder-fluid,
+torsional, nonlinear, material-memory, radiation and bow/performance attachment.
+Whole-network admission reserves every possible pressure inertia and compression
+connection before material reads. The exact uniform pressure mode contributes
+compression but no fictitious air inertia. Body radiation keeps its original
+structural basis while the same accepted solve carries strings, shell and air.
+
+The supplied closed-shell-cavity source contains its exact shared surface and
+P2 tetrahedral geometry. Its compact body observation is an integration
+diagnostic; the fixture does not claim open violin/cello/bass geometry,
+aperture radiation, interior viscothermal loss or measured-instrument fidelity.
+Regression source covers physical motion/PCM propagation, pressure/composition
+and solid-material substitutions, retained fluid augmentation, zero-inertia
+uniform compression and strict resource/geometry admission. Fixture topology
+was checked independently; native Rust execution remains required.
+
+## Material-wind ensembles and complete numerical observation latency
+
+The existing ensemble `--valve` input selects plate-valve, material-modal and
+material-modal-DG schemas without replacing their physical renderers. Material
+modes, constitutive histories, controls, reaction loads and microphone histories
+stay source-owned. Pressure-producer clocks govern outer conversion; actual
+mechanical clocks/counts are recorded separately. Listener compatibility uses
+the microphone's bound complete exterior gas. Internal DG inlet traces are
+explicitly identified and do not infer a listener gas.
+
+`PressureEnsemble::new_with_source_delays` accepts the numerical receiver
+latency already present in each producer, in final-output samples, and aligns
+that plus the existing outer decimator delay using the original pure-delay
+owner. Every total must be finite, nonnegative, integral and at most 4096
+samples. Fractional totals refuse. Physical propagation remains within each
+receiver; no source state, source event or sound-travel time is resampled to
+perform alignment. The original `new` constructor retains zero-source-delay
+behavior. Focused regression source compares independently filtered modal
+trajectories across callback partitions and covers exact zero-delay parity and
+invalid latency admission; native execution is still required.
+
+## Material-driven sliding heat allocation (MR20)
+
+`tribothermal::SlidingHeatPartition` makes the heat model explicit:
+`Prescribed` retains supplied fractions; `SemiInfiniteEffusivity` uses each
+surface's original material and accepted caloric state. Conductivity is queried
+at each body's own endpoint temperature, preserving its external coordinates
+and pinning the initially selected claim. Density and differential heat
+capacity are read from the same original enthalpy chart used by the thermal
+solver. There is no second Cp law, replacement material, constant heat split
+after a swap, or separate heat integrator.
+
+The selected split participates in every nonlinear endpoint trial, including
+the finite-body dynamics and field-driven motion paths. Friction work is still
+partitioned and deposited exactly once by the existing thermal owner. The
+report retains the conductivity bundles, original phase states, differential
+Cp, density, diffusivity, heat fractions and current contact age. Failure to
+resolve either material or to fit the model envelope returns no new thermal,
+slip, mechanical or work state.
+
+This is an explicit local half-space estimate for incremental friction heat:
+homogeneous isotropic media, equal exposure times, negligible thermal
+resistance at the generation plane. It does not predict flash temperatures or
+moving-source Peclet effects. Background heat exchange remains the separately
+declared thermal network. A caller-specified diffusion-depth envelope compares
+`2 sqrt(alpha_max age)` with the distance to competing boundaries (including
+footprint edges); age and the maximum sampled diffusivity survive accepted
+steps and cloned restarts. The envelope is an approximation guard, not a
+finite-domain error certificate or proof of property behavior between sampled
+states. Contact resistance, third-body layers, melting and inadequate spatial
+resolution require other models.
+
+Focused G1/G3 regressions in `tests/tribothermal/partition.rs` exercise changes
+to conductivity and Cp through actual finite heat stores, independently solve
+a temperature-dependent conductivity feedback case, and verify cumulative
+exposure refusal, ordered-source identity and unchanged accepted state.
+
+## Source-dependent internal transport in the spatial solid/finite-gas solve
+
+`solid_enthalpy::gas::step_with_isochoric_gas_transport` composes the original
+prepared material network with the same backward-Euler solid/gas residual as
+`step_with_isochoric_gas`. A resistor-free network pins each original cell's
+conductivity source once, refreshes it at the actual endpoint enthalpy/phase,
+and lowers existing two-layer links through their original conductance owner.
+No dummy circuit, alternate thermal state or additional heat integrator is
+introduced. Networks with resistor work refuse this thermal-only entry point.
+
+The structural and transport bindings must share their original material,
+borrowed caloric chart and complete physical condition point. Gas patches
+consume the network's existing material snapshot through the original layer
+adapter, including the exact conductivity key and reference source pin. The
+accepted report retains those cell/link source snapshots alongside local,
+gas and combined energy accounts. Failed source refresh, nonlinear admission,
+geometry or cancellation leaves both inventories intact. The original entry
+point retains authored internal coefficients; geometry and all original
+quasistatic, single-phase and fixed-volume limitations remain unchanged.
+
+Three nonlinear-transport regressions exercise different material cards,
+independent three-reservoir equations and compatible nonuniform displacement,
+subsequent source refresh, conductivity changes reaching gas/motion, and
+wrong-context/chart or failed-trial refusal.
+
+
+## DG flue mouth observation and compact reaction
+
+`FlueDgPerformance::with_mouth_radiation` observes the source's actual flue
+width and cut-up through the existing rectangular Rayleigh owner. Placement
+and surface resolution are explicit; the already computed terminal supplies
+the complete exterior gas and common microphone. Each accepted negative DG
+inlet flow enters that receiver once, then its physical pressure is added to
+the terminal pressure. Each aperture retains its own propagation and numerical
+filter support. Geometry, equal static pressure, quadrature, source band and
+cold attachment remain original-owner admission checks.
+
+Optional `with_mouth_reaction` attaches the existing `RectangularMouthLoad`
+through `FlueVoice::attach_mouth_radiation` before playback, replacing the legacy
+mouth load and feeding its retained passive state into the current jet/DG
+solve. The original source equations, controls, pressure ceiling and callback
+failure behavior remain in effect. The file grammar adds optional
+`mouth_radiation X Y WIDTH_CELLS CUT_UP_CELLS` and
+`mouth_reaction none|compact-baffled` after `observation baffled ...`; a physical
+reaction requires zero legacy `mouth_loss_rel`.
+
+This is a disjoint rectangular mouth and circular terminal in an infinite
+rigid baffle, with independent self reactions. Mutual mouth/terminal loading,
+free-field body scattering and a resolved compressible jet are not provided.
+Focused tests compare the pressure against the original Rayleigh owners fed
+with accepted signed flows, source-state change under mouth reaction, block
+partition equality and physical admission. Native execution and measured flute
+qualification remain pending.
+
+
+## Complete DG terminal groups
+
+`DgPortLoad::new_with_terminal_ports` binds every non-inlet port exactly once
+in explicit MIMO channel order. The complete mean relation is
+`(Zdd + L) u = Hd - Hl + Zd0 Qin`, with outward flow into the original
+`PreparedMimoLoad`. Its full cross entries and signed exchanges are retained.
+The one-channel branch preserves the original divide; larger constant systems
+use the existing normalized prepared LU with infinity-norm condition <=1e10.
+No terminal pressure, work or accepted memory is published until every original
+DG/load candidate and the nonlinear source accept. An abandoned trial advances
+nothing. The coupling is exact for each owner's held-flow image, not the joint
+continuous exponential; coupling-clock refinement remains separate.
+
+`terminal_ports` and `last_terminal_frames` retain declared matrix order.
+`last_terminal_frame` remains only the actual axial-outlet convenience, including
+None for side-only groups. Aperture and flue frames carry every terminal;
+aperture balance credits their signed work once, with absolute per-port scales
+for numerical cancellation checks. Tests cover independent 2x2 elimination,
+raw original DG/MimoZoh state and work, both kernels, wall memory, rollback,
+side-only ownership and bitwise legacy scalar arithmetic. These regressions
+are authored; native execution remains pending.
+
+
+## Authored DG openings with shared exterior reaction and observation
+
+`DgPortLoad::new_with_computed_baffled_ports` binds explicit ordered port/circle
+pairs to one original computed BEM/VF source and one complete terminal group.
+Every non-inlet port is required. Axial geometry retains the original outlet
+area; side geometry is independent and uses the actual face's gas for common
+static-pressure admission. All mutual source entries, local bore/wall physics,
+full mechanical Nyquist fit and original passivity/error refusals are retained.
+No duplicate propagation or load owner is introduced. A microphone consumes the
+same original geometry, exterior gas and accepted ordered terminal-flow vector.
+Scalar, paired/material-modal and DG flue performances now pass every accepted
+flow exactly once, with buffers allocated at construction.
+
+The shared `dg_tube`/`dg_bore` input admits optional `dg_side_openings COUNT`
+before `dg_radiation`, followed by `dg_side_opening PORT_ID DOWNSTREAM_ELEMENT
+X_M Y_M RADIUS_M`. IDs exceed 1; faces and IDs are unique. The computed source's
+existing eight-opening cap permits seven side openings plus the axial outlet.
+The original element face is explicit: no station snapping occurs. These are
+zero-volume flush plane-wave junctions in one infinite rigid baffle, without
+finite chimneys, moving pads or free-field instrument-body scattering. Flue
+mouth reaction remains its separate compact self load; terminal mutual terms
+do not imply mouth-to-terminal mutual reaction.
+
+`examples/flue-dg-side-openings.performance` exercises the complete authored
+selection. Focused source tests retain original face/material/area identities,
+reverse matrix order independently of DG order, and compare the common
+microphone with original individual receivers driven by actual accepted flows.
+The fit, native tests and example audio remain unexecuted in this environment;
+no instrument-accuracy or measured-audio qualification is claimed.
+
+
+## Whole-interval reactive material heat and piston refinement
+
+`cavity_phs::piston::reactive::thermal::subcycling` composes the existing conservative reaction/thermal/motion candidate on real subintervals. `GasPiston::reactive_thermal_subcycled_candidate` and `reactive_thermal_layers_subcycled_candidate`, with the corresponding `MaterialGasPiston` forwarding methods, feed each complete accepted gas, finite-body enthalpy and wall-motion endpoint into the next chemical stage. Wall conductivity, mixture transport, phase/enthalpy and material rate sources therefore affect chemical progress within the requested macro interval. The original rigid material binding remains the sole piston inertia authority.
+
+`ReactiveThermalSubcycling` compares complete N and 2N trajectories from immutable initial owners, using independent absolute scales plus a relative tolerance for each species amount, each canonical reaction-channel extent, gas temperature/pressure/volume, wall velocity and body specific enthalpy. The finer actual trajectory is accepted without extrapolation. Dyadic meshes are bounded at 256 substeps and all attempted coupled steps at 511; every nested chemistry, heat and motion owner retains its original separate work limits. Donor/entropy/iteration and resolved-clock refusals may request refinement; missing material support, invalid data and cancellation remain hard failures. The callback is repeatable and cannot debit live external state. This is controlled refinement of the existing first-order split, not a monolithic implicit chemical/thermal closure or detailed combustion/engine validation.
+
+Integrated gas and body source heats are apportioned at constant power with cumulative fractions and a final remainder; exterior pressure and applied force remain constant. The returned `UniformEnthalpyStep` covers the complete interval, including the sum of boundary heat and the original source-bearing reports of every accepted substep. Independent macro checks enforce the original species, isolated chemical energy, finite-body energy, total energy and momentum tolerances. Momentum uses actual endpoint MΔv against separately accumulated midpoint gas-pressure, exterior-pressure, applied-force and support impulses. Chemical formation energy is never credited again as heat. One macro port clock/account replaces tentative substep accounts and retains actual accepted work, gas endpoint entropy, summed heat and the full heat entropy integral Σ(Q/T); heat reversals do not create a fictitious single boundary temperature.
+
+Focused regressions in `cavity_phs::piston::reactive::tests::thermal` cover material-only conductivity swaps changing intrainterval reaction progress, piston compression feeding source-backed rates, independent reversible-isomer convergence under tighter tolerances, whole-interval source/heat/impulse accounting, and bounded-work/late-source/late-cancellation rollback. Synthetic source cards establish numerical and integration behavior; they are not empirical combustion calibration.
+
+
+## Explicit compact mouths on the material shell cavity
+
+`ShellCavityOpening` binds a connected planar disk of original interior FE
+boundary faces, internal neck length and nonnegative internal resistance.
+`with_material_shell_cavity_openings` integrates its actual area and every
+retained pressure-shape average through `HelmholtzFe::boundary_load`, then
+uses the original `CavityCoupling` neck inertia and collective volume springs.
+Each face has exactly one solid or declared fluid owner. Existing solid caps,
+undeclared holes, duplicate/disconnected patches and moving retained rims
+refuse. The maximum patch extent and internal length must remain within the
+original compact acoustic chart across the declared band. No exterior end mass
+is included in internal neck data. The sealed constructor keeps its old path.
+
+A joint exterior source map contains all structural modes followed by actual
+neck coordinates, excluding interior standing-wave inertias. Existing shell
+BEM receives solid panels and explicit fluid panels with normal trace W/area;
+its complete passive Model acts through the original exact mechanical network.
+The existing finite-distance observer instead labels physical aperture volume
+flow Q=W*v_neck and uses the inverse-scaled 1/area trace. Body-mouth and
+mouth-mouth terms, material memory, cold rebuild mappings, signed work and
+accepted physical state remain with their original owners. New readouts expose
+accepted neck pressure, flow and the exterior reaction without another solve.
+
+The unloaded constructor explicitly means zero exterior pressure. The atomic
+`with_material_shell_cavity_and_bem` and the existing later BEM attachment both
+require the unchanged exterior admissions. In particular, dense collocation
+does not guarantee the modal fitter's 1e-12 reciprocity bound for independent
+localized body/mouth columns. Such data refuse; the matrix is never repaired or
+its tolerance relaxed. Source-derived general open-body radiation is therefore
+not qualified by this integration. Native regressions and the manufactured
+joint-BEM example remain pending and may expose this existing numerical limit.
+The direct FE/neck/passive-network tests cover original normalization, pressure
+reaction and work, atmosphere substitution, geometry refusal and retained source
+maps. This is a fixed compact-mouth model, not distributed f-hole flow, interior
+thermoviscous loss, moving aperture rims or measured violin/cello/bass accuracy.
+
+
+The material-string v3/v4 body profile exposes these same cavity mouths after
+its `interior-fe-v1` tetrahedra with `air-openings COUNT`, then
+`air-opening INTERNAL_LENGTH_M INTERNAL_RESISTANCE_PA_S_M3 FACE_COUNT` and
+that many `air-opening-face A B C` records. Original FE indices and geometry
+are retained. Each opening reserves one fluid mode and one possible internal
+damper connection before material-pack reads. Opening-bearing profiles require
+BEM and a covering band at preflight. The cavity binds at the original early
+assembly point; mandatory joint BEM binds later, preserving existing nonlinear
+attachments. No incomplete performance is returned if exterior preparation
+refuses. Sealed source grammar is unchanged.
+
+The open-shell-cavity profile/performance and focused actual-flow microphone
+regression are unexecuted integration inputs. Their 80-panel source may refuse
+at the unchanged dense-BEM reciprocity gate described above. No native test,
+render, material calibration or instrument-realism parity is claimed.
+
+## Thermally live layered supports in reciprocal field motion
+
+`circuit_enthalpy::motion::support` connects the original
+`MaterialFieldMotion` actuator to the shared
+`ConcentricThermoelasticLaw`. `AxialSupport::from_thermoelastic_law`
+retains the original source-bound section, reference gap/length and consistent
+inertia. `MaterialNetwork::field_motion_support_candidate` binds each layer to
+one whole finite caloric cell with the same card, state context, reference
+volume and mass. Independent layer temperatures update expansion, stiffness,
+restoring force and continuing charge/flux, gap and momentum.
+
+Every trial starts from the same accepted histories. At unchanged initial gap,
+the member is rebound to its proposed layer temperatures and the original
+field-motion descriptor advances once. Each layer receives
+`Q_rev = -delta(Psi_at_initial_gap) - delta(T*s)`; its source-backed Joule heat
+is deposited independently, once. The native mechanical potential remains
+Helmholtz energy. A second physical account closes the change in caloric,
+support `Psi+T*s`, field and kinetic energy against electrical/mechanical work
+and authored heat. Reversible transfer is removed from the reported external
+heat. The existing thermal network owns conduction, reservoirs, events and
+bounded nonlinear work; no new field, motion or thermal solver is introduced.
+
+Scalar reference density/expansion and globally affine modulus use the shared
+material admission. A conservative bound requires positive combined caloric
+and thermoelastic heat capacity over the caloric interval and declared elastic
+strain envelope. Original cards, selected claims, thermal references, geometry
+and inertia survive rebinding. Ordinary frozen-support stepping refuses a
+thermally live support. Enclosed electrical storage coefficients must remain
+source-constant because this lane does not supply their field entropy.
+Unsupported sources, inventory mismatches, cancellation and failed balances
+publish no partial physical history.
+
+This is the existing small-strain axial reduction with fixed reference geometry
+and electrical paths. It does not add radial work, interlayer slip, changing
+mass, strain-dependent resistance, distributed Lorentz forces, phase change,
+magnetic hysteresis or heating of the moving-gap medium. The endpoint thermal
+coupling is generally first order; nonlinear tolerances are not time-error
+bounds. Bulk electrical heat routes are supported here; source-bound electrical
+contact heating remains on the existing separate contact-aware motion path.
+
+Focused tests in `tests/circuit_enthalpy_motion/support.rs` cover unequal layer
+heating, a source-only expansion swap affecting actual gap/velocity, independently
+reconstructed internal energy, original inertia/flux, positive-capacity refusal,
+cancellation and exact retry. The changed Rust files passed syntax parsing;
+native compilation and these tests were not executed in the connector-only
+session because DSR, RCH, Cargo and rustc were unavailable.
+
+## Continuing layered-string heat, electrical drive and sound
+
+`acoustic_realize::concentric::ThermalConcentricStringRuntime` connects the
+shared source-bound thermoelastic section to continuing native string modes,
+gas resistance, pressure history and finite thermal cells. Each perfectly
+bonded annulus retains its own material, temperature, expansion, modulus,
+caloric law and Kelvin–Voigt bending viscosity. Reference cards, complete
+property requirements, source selections and original annular inventories
+survive every step; there is no equivalent homogeneous material card.
+
+The existing exact modal propagator advances once at the accepted temperature.
+The existing backward-Euler network and Newton–Krylov owner then solve layer
+temperatures at frozen new modal displacement and momentum. The original
+source section rebuilds tension, bending stiffness, damping and pressure
+coefficients without resetting physical motion or observer acceleration history.
+Each layer receives its actual share of bending dissipation, proportional to
+its own `eta_i*I_i`, and reversible heat
+`-delta(Psi_axial_i)-delta(Psi_modal_i at fixed new q)-delta(T_i*s_i)`.
+The entropy term includes the change in physical modal displacement, not just
+temperature. Independent combined-energy acceptance includes full mechanical
+internal energy, caloric storage, supplied force work and the native air-loss
+account. Local and global heat residuals must also pass before publication.
+
+`step_with_ohmic_heating` reuses the original parallel-conductor model on the
+SAME already-resolved trial section. Current or voltage determines each layer's
+current and Joule heat from its actual resistivity/conductivity. Total current
+is shared by conductance; it is not applied independently to every layer.
+The payload separates electrical supply and per-layer Joule energy from other
+external heat. Joule heat, physical bending heat and reversible exchange each
+enter the original thermal cells once. Independent sources and thermal links
+continue through the existing callback and network; no second electrical,
+mechanical or thermal integrator is introduced.
+
+This is a fixed-section, fixed-density, small-strain bonded-member model with
+scalar expansion, globally affine modulus, solid caloric charts and sourced
+Kelvin–Voigt bending. A per-layer capacity check includes axial AND modal
+thermoelastic curvature over every original caloric segment. Slack, source
+exits, excessive strain/temperature increments, changed inventory, cancellation
+and solver/balance failures publish neither thermal nor acoustic history.
+The thermal/mechanical split is first order and needs timestep/modal refinement.
+The thermal-only and Ohmic methods above retain their supplied fixed gas state;
+the finite-gas transaction below evolves it explicitly. Microphone pressure is
+the existing diagnostic radiation approximation. This does not thermally evolve a complete
+bow/string/body network, resolve helical winding slip, radial gradients inside
+an annulus, skin effects, changing geometry or phase transitions.
+
+Four focused tests cover unequal temperatures with continuing motion, independent
+internal-energy accounting and layer-loss ownership; source-only expansion and
+resistivity changes affecting tension and pressure; implicit `R(T)`/current/
+Joule energy; and refusal with exact retry. The changed Rust files passed syntax
+parsing and the thermal identities were checked by independent numerical
+reductions. Native compilation/tests and audio rendering/listening were not
+performed in this connector-only session. No measured instrument-fidelity claim
+is made by these synthetic constitutive tests.
+
+
+## Finite DG side branches
+
+`DgPortLoad::new_with_terminal_branches` joins original two-port `DgDuct` branches to distinct existing bore side ports. Each branch retains its actual geometry, material gas, viscothermal memory, original propagator and state. Junction mean pressure is common and held volume flows are opposite. The constant junction matrix is eliminated through the existing prepared LU; the resulting complete external mean-port response enters the unchanged terminal MIMO coupling with every cross term retained.
+
+External IDs remain the authored bore-side IDs, but terminal pressure, work and microphone flow belong to the actual branch outlets. `DgBranchFrame` separately exposes junction flow, both independently integrated pressure/work observations and the original branch step. Compressible branch storage permits different junction and outlet flows; neither is substituted for the other.
+
+Bore, branch and rational histories publish together only after every original candidate and signed junction/terminal work check accepts. Main `state()` retains its original meaning; `branches()` exposes the independent states. `stored_energy_j`, cumulative loss and coupled-source ledgers sum every original DG owner once. Rational terminal exchange is reported separately without fabricating a storage function.
+
+Cold admission requires complete terminal ownership, two-port branches without nested side ports, common equilibrium junction pressure, a common clock, resolved native wall bands and a combined acoustic-plus-memory DOF allowance before exponentials. Different coherent gas compositions at the junction are permitted. An empty branch list preserves existing scalar and multiport arithmetic. This is a finite one-dimensional duct attached at a zero-volume point junction: it does not add three-dimensional entrance/jet flow, moving pads, or a continuous-time joint exponential. Coupling-clock, spatial and wall-fit refinement remain separate qualifications.
+
+
+## Finite material-gas chimneys in authored DG instruments
+
+The shared DG source grammar now allows `dg_side_chimney PORT_ID
+DOWNSTREAM_ELEMENT X_M Y_M RADIUS_M LENGTH_M ELEMENTS ORDER` among the
+existing `dg_side_openings` rows, followed by `dg_chimney_gas` and one
+complete shared material gas record. The original uniform-cylinder DG and
+Bessel wall owners retain each chimney's physical propagation, storage,
+viscothermal memory and gas dependence. Parent wall poles, band and tolerance
+apply to each branch; the common state allowance covers the main bore and all
+chimneys before any propagator or radiation fit is constructed. Full
+thermochemical receipts remain in the existing source record collection.
+
+`new_with_computed_baffled_branches` binds the actual branch outlet area and
+gas to the original complete radiation matrix. The source retains every
+terminal in its authored order, with accepted OUTER flows feeding the existing
+microphone once. An internal junction is not a radiating aperture. Bore,
+chimney and exterior compositions may differ at common static pressure; a
+mean pressure jump refuses. The microphone band is limited by every retained
+wall owner. Empty branch lists preserve the existing flush-opening route.
+The same source input serves scalar and material-modal apertures and DG flues.
+
+The new flue and paired material-modal chimney performance inputs demonstrate
+data-only selection. Focused regressions check material receipts, original
+wall-operator identity, complete memory limits, actual outlet area, equilibrium
+admission and the original microphone driven by accepted branch outlet flows.
+Native Rust tests and audio rendering remain unexecuted here. This is a
+fixed plane-wave junction/finite cylindrical branch reduction, without moving
+pads, resolved three-dimensional junction corrections, mean flow, or empirical
+instrument qualification.
+
+
+## One physical Rayleigh source for rectangular mouths and circular terminals
+
+The computed baffled source can now prepare a complete mixed opening image
+through `ComputedBaffledRecord::with_driven_mouth`. Channel zero is the actual
+rectangular mouth; following channels retain the original circular-terminal
+order. Shared receiver surface quadratures provide normal velocity per SI
+volume flow to the existing power-consistent Rayleigh owner. Full signed
+mutual entries pass unchanged through the original causal fitting ladder,
+withheld errors, continuous passivity and interval-mean sampled passivity.
+The bound full gas record, mechanical clock, complete band, opening geometry
+and source quadrature accompany the actual replacement fit and identities.
+
+Original rectangular and circular static-inertia references independently
+refuse insufficient source quadrature without replacing computed entries.
+The rectangular reference formula is now shared from the BEM owner.
+Complete source-sweep work and coexisting source/fit memory are admitted
+before surface allocation. Circular-only inputs retain their original path.
+Focused tests cover physical flow normalization, compact mutual phase,
+signed interference, gas changes and source refusal; native execution remains
+pending. This is a declared infinite-baffle surface reduction, without resolved
+jet flow, free-field instrument scattering or empirical acoustic qualification.
+
+
+## Shared reciprocal material-shell exterior and observer
+
+Material-string `with_material_shell_bem` and
+`prepare_material_shell_bem` now select the existing symmetric P1/P0 reciprocal
+boundary owner through the shared complete modal-loading adapter. Existing
+`ShellBemOptions` fields are unchanged. The corresponding
+`*_with_angular_refinement` methods expose the original 0..=2 angular refinement;
+the existing methods select level zero. Every original signed structural mode
+and explicitly admitted compact mouth volume-flow column enters the same
+work-conjugate matrix. The strict existing reciprocity/passivity assessment and
+full causal fit precede attachment to the original complete mechanical model.
+No computed collocation matrix is repaired or silently substituted.
+
+`ShellBemReport::reciprocal` records actual original unknown/cache/work and
+backward-residual/flux diagnostics. `maximum_sweep_terms` admits the complete
+original per-frequency source work times the declared grid, including singular
+moment preparation, angular Gram assembly, dense factorization and all source
+columns. The retained legacy condition-number lower-bound field is the
+universal lower bound one; it is not a condition probe or enclosure.
+
+The material-shell observer reconstructs the same original boundary, gas,
+complete source order and load angular refinement, then observes its actual
+P1/P0 solution at the declared receiver. It consumes each accepted body
+generalized velocity and compact mouth's actual SI volume flow exactly once on
+the existing mechanical clock. The default receiver uses the original adaptive
+near-field quadrature defaults. `with_material_shell_observer_with_quadrature`
+exposes that owner's independent tolerance, depth and per-frequency kernel
+allowance. The full boundary sweep allowance and the receiver kernel allowance
+are separate units; neither replaces the unchanged FIR tail, wrap and DTFT
+admission or replay-work cap.
+
+The authored material-string format exposes optional
+`shell_angular_refinement LEVEL` immediately after `body-radiation bem`, and
+`shell_quadrature REL_TOL MAX_DEPTH MAX_KERNEL_EVALUATIONS` immediately after
+`shell_observer`. Missing records retain level zero and the original receiver
+defaults; malformed or incompatible records refuse before material-pack I/O.
+The manufactured 80-panel/42-vertex, two-source, 65-frequency level-zero example
+requires 10,535,395,000 conservative source-work units and declares 12 billion.
+Its observer separately declares at most 80 billion boundary-work units under
+the unchanged 100-billion hard ceiling, plus the original two-million
+adaptive-kernel allowance per frequency. These declarations change numerical
+work capacity, not physical materials or fit/FIR tolerances.
+
+Original geometry, resonance-exclusion, angular-resolution, compact-mouth,
+gas-coherence, complete-source, cold-history and exact-state gates remain
+authoritative. This joins the previously admitted compact uniform opening
+velocity to its exterior reaction and receiver; it does not resolve an f-hole
+flow field or interior viscothermal losses. Native compilation and the new
+integration regressions were unavailable in the implementation environment;
+the source-defined gates remain required before qualification of these
+manufactured examples.
+
+
+### Joint DG mouth and terminal exterior
+
+The explicit DG flue mutual-mouth route replaces independent mouth and terminal loads with one original rational MIMO owner. Its rectangular mouth is channel zero with outward flow exactly minus accepted inlet flow; all circular terminal channels retain their physical order, including finite branch outlets. The same-step source effort is inlet pressure minus exterior mouth pressure. The existing Schur solve retains every mutual term, and bore, branch and original rational candidates publish together only after their independent pressure/work checks.
+
+Source preparation reuses the original receiver surface quadratures and power-consistent Rayleigh matrix in one infinite rigid baffle, with the complete retained exterior GasRecord. It keeps the common full-mechanical-band fit, withheld errors, source causality assumptions and continuous/sampled passivity admissions. Sampled admission remains GridOnly; finite surface/frequency checks are not continuum or rational-storage certificates. Signed joint mouth work is distinct from heat. This does not resolve the jet or free-field scattering by an instrument body. Cold source reuse preserves the joint load and does not restore legacy mouth inertia.
+
+The shared DG flute file grammar selects this path with
+`mouth_reaction mutual-baffled` after its explicit `mouth_radiation`
+rectangle. Existing `none` and `compact-baffled` selections remain distinct.
+The same joint load composes with the original finite DG chimney states;
+`flue-dg-mutual-chimney.performance` supplies the combined data-only selection.
+The receiver retains the source's actual surface quadratures on cold reuse.
+Generic aperture adapters refuse this pressure-jump load at construction,
+because their existing source law requires absolute bore inlet pressure.
+
+Source syntax parsing and an independent 90-case numerical elimination/work
+oracle passed during integration; neither executes the Rust implementation.
+Native tests and example audio remain pending. The declared geometry, source
+fit and material validity gates remain mandatory.
+
+## Finite source gas on continuing bonded layered strings
+
+`acoustic_realize::concentric::finite_gas` couples the existing layered-string
+thermal step to the original `IsochoricGasParcel`. All annuli keep their own
+material cards, caloric cells, temperatures and source-derived electrical
+paths. The gas retains its original species, thermochemistry, transport
+sources, mass and volume. Its initial complete snapshot must agree with the
+string's accepted ambient.
+
+The existing bounded scalar feedback owner solves signed heat exchange with
+the outermost annulus around the existing backward-Euler layer network. Each
+proposal begins from the same accepted histories. The conductance callback
+receives the candidate gas and exposed material states, so source-driven
+conduction or convection can share this transaction. The original parallel
+Ohmic owner optionally supplies current/voltage heating at each trial
+temperature. Solid bending loss and per-layer reversible thermoelastic heat
+remain in their original cells; the actual native aerodynamic loss enters
+the gas once. Interface heat is debited from the exposed solid and credited
+to the gas.
+
+Acceptance independently measures caloric solid storage, mechanical internal
+energy (kinetic plus Helmholtz plus `T*s`) and gas internal energy. The
+external account includes force work, electrical supply and other declared
+solid/gas heat; signed interface heat and drag cancel internally. Damping
+roundoff stays an explicit numerical account. Endpoint gas thermochemistry,
+EOS and transport rebuild drag and pressure observation while preserving
+modal displacement, momentum and observer acceleration history. Final
+publication advances the string, thermal network and gas together;
+source-domain exits, failed balances, work limits and cancellation leave all
+three accepted owners unchanged.
+
+The parcel is a well-mixed fixed-volume thermal inventory with frozen species.
+This first-order partitioned path does not supply chamber acoustics, gas flow,
+pressure-volume work, reactions, evolving geometry or complete bowed-instrument
+body/radiation feedback. The inherited fixed-section, solid-caloric,
+small-strain and source-law limits still apply. The compact pressure observer
+is diagnostic; it is not a second heat source.
+
+The source-bound conduction adapter also checks the actual exposed outer area,
+original conductivity claim and conditions, and the native lumped Biot limit.
+A pre-window point-load initializer uses the original modal equilibrium owner;
+existing motion or pressure history cannot be overwritten by initialization.
+
+Three focused regression definitions independently reconstruct mixture heat
+capacity, layer Ohmic current and complete stored energy; compare composition/
+pressure changes at identical geometry; and check late refusal, cancellation
+and exact retry. Production and regression source passed Rust syntax parsing.
+Native compilation, numerical execution and audio rendering/listening were not
+available in this session; these tests do not establish instrument fidelity.
+
+
+## Original finite gap channels on complete DG exterior groups
+
+`DgPortLoad::with_terminal_channels` binds explicit fixed planar slit channels
+or rigid closures to actual external ports, including finite chimney outlets.
+Each slit is the existing `SlitChannel` transverse no-slip momentum owner with
+the original local `GasState` and common clock. Density, viscosity, inertial
+history and resolved wall layers enter the simultaneous mean-pressure solve;
+geometry or material substitution changes the physical source feedback.
+The admitted source remains affine. All exterior mutual entries and rational
+histories remain intact. A closed channel has exactly zero held flow and an
+unconstrained pressure reaction, including when every terminal is closed;
+there is no infinite resistance, deleted exterior channel or reset history.
+
+Each original gap owner advances privately at the shared held flow. Its actual
+FV flow, constitutive pressure, storage, viscous heat and backward-Euler
+numerical dissipation participate in the unchanged relative work gates before
+bore, branch, gap and rational states publish together. Channel kinetic
+storage and both explicitly distinguished losses join the aggregate source
+ledger once. `DgTerminalFrame::channel_work_j` is signed exchange into that
+owner; exterior work subtracts it from the independently integrated DG work.
+Negative channel work is permitted when stored fluid energy returns.
+`last_terminal_channel_frames` retains the complete original channel step;
+numerical dissipation is never relabeled as physical heat. Existing actual
+outer flow drives the exterior observer once. Cold joint-mouth attachment
+retains and recomputes the same gap condensation.
+
+Admission checks fixed thin geometry, unique declared terminal ownership,
+local duct area, the complete explicitly budgeted transverse field count
+(hard limit 4096), and a supplied resolved-cell Mach ceiling in `(0,0.3]`.
+Runtime Mach refusal or any late work/flow failure leaves all accepted
+histories and observations intact. Empty channel declarations retain the
+original direct-terminal path. This is a fixed, laminar, incompressible planar
+port reduction with original backward-Euler channel stepping; it does not
+resolve axial entrance/exit jets, lateral walls, annular pad radiation,
+turbulence, moving-pad swept volume/contact or full instrument qualification.
+The exterior surface geometry is unchanged and remains independently explicit.
+
+Focused regression definitions compare one/two finite gaps, both original DG
+kernels, a finite material-gas chimney and the full exterior history against
+independently assembled uncondensed pressure equations. They also cover exact
+closure, all-closed source response, signed kinetic-energy return, material
+and gap substitutions, joint-mouth construction order, aggregate source work,
+late refusal and exact retry. Rust syntax parsing passed; native compilation,
+numerical test execution and acoustic qualification remain pending.
+
+
+## Original cavity gas diffusion in the reciprocal string bank
+
+`with_material_shell_cavity_thermal` projects scalar heat diffusion on the same
+original tetrahedral Helmholtz FE into the existing complete mechanical and
+material-memory propagator. `HelmholtzFe::isothermal_diffusion_modes` restricts
+the original consistent K/M pencil to homogeneous Dirichlet traces on selected
+solid walls; actual compact mouths remain natural zero-diffusive-flux faces.
+The original sparse inertia/slicing owner retains the entire declared positive
+eigenwindow. A source ceiling refuses, never truncates. Its bounded eigensolver
+call retains the original cancellation limitations; assembly/projection polls.
+
+The coherent source gas supplies kappa/(rho*cv), cv=cp/gamma, adiabatic modulus
+rho*c² and isothermal modulus rho*c²/gamma. Complete L2 pressure/temperature
+cross projections form reciprocal compression-memory rows. Positive equilibrium
+compression is factored by the existing Cholesky owner, and one first-order
+Maxwell state per active heat eigenmode enters the existing exact network.
+All modal cross terms and actual neck volume coordinates remain coupled. The
+instantaneous stiffness equals the original adiabatic cavity. Missing thermal
+projection remains explicitly adiabatic, with a declared infinity-norm bound;
+no modal-Q fit, eigenvalue clipping or duplicated compliance is introduced.
+
+Existing source/body/layered history stays a prefix, followed by gas history.
+New gas states start unrelaxed so initial mechanical compression is preserved.
+Cold gas/torque/axial rebuilds retain thermal projections and states. Accepted
+single/multiple-bow pressure and neck observations include that exact memory.
+Coordinate-only physical pressure observations refuse on a memory-bound cavity;
+the separately named adiabatic reference is not a physical pressure readout.
+The original work/energy owner counts thermal availability and dissipative loss
+exactly once, together with material memories and exterior acoustic loading.
+
+This is linear gas conduction to fixed-temperature walls, not complete
+viscothermal boundary-layer physics: no no-slip shear, wall effusivity/finite
+thermal inventory, aperture enthalpy advection, molecular relaxation or measured
+instrument agreement is claimed. The gas/solid state remains frozen. The FE,
+heat-mode window, compression-projector remainder and pressure basis require
+convergence; a coarse FE does not resolve audio-frequency thermal skin depths.
+Focused tests cover analytic star-tet heat rates/projections, coherent gas and
+length substitutions, reciprocal pressure/force/storage/loss, strict budgets,
+original bank history and reconstruction. Native Rust execution remains
+required; syntax and independent matrix identities are not runtime proof.
+
+## Refined sealed multi-chamber material assemblies
+
+`cavity_phs::piston::thermal::boundary::ports::network::material::state::subcycling` extends the existing co-owned `MaterialExchangeState` with `step_subcycled_candidate`/`advance_subcycled` and their source-bearing `with_gas_law` counterparts. Each real subinterval advances the original circuit charge/flux, every finite cell enthalpy, declared chamber reactions and independent piston walls together. Subsequent chemical stages therefore see actual material wall heat and compression within the same requested interval. Existing thermal contact resistance, electrical contact losses, radiation and caller-selected gas convection/conduction continue through their original source owners and nonlinear equations.
+
+`MaterialExchangeSubcycling` reuses `ReactiveThermalSubcycling`'s gas/species/enthalpy scales, scalar comparison and 256-substep/511-evaluation bounds, adding independently dimensioned charge and flux tolerances. It compares complete N and 2N trajectories and accepts the finer actual trajectory without extrapolating physical state. Each species and reaction channel is compared separately; every finite cell uses its own enthalpy coordinate, including latent plateaus. Node potentials and branch currents remain the original circuit's resolved algebraic efforts, not new differential stores. Nested chemistry/network/thermal/momentum solvers retain their original explicit work limits. All accepted source reports are retained within the bounded fine trajectory; discarded trajectories publish nothing.
+
+Electrical port inputs, exterior pressures and applied forces are held at their caller values. Each chamber's `heat_j` is integrated external heat, apportioned at constant power over actual representable subinterval boundaries, with a final remainder. Thermal `source_w` and existing boundary/source integrals are not divided again. Numerical cell-energy guesses are scaled to the actual subinterval without changing a physical source. Chemical formation energy, Joule heat, wall exchange, contact conduction and closed-enclosure radiation are never credited twice.
+
+The macro audit independently reconstructs all finite-cell enthalpy change, circuit-owner initial/final Hamiltonians, each sealed gas internal-energy change, piston kinetic changes and accepted source/mechanical work. Original electrical, thermal, circuit/thermal and complete-network energy tolerances remain enforced. The sum of accepted maximum cell residuals conservatively bounds each fixed cell's accumulated residual at the original cell tolerance. Original chemical energy/entropy/species and independently reconstructed pressure/applied/support impulse bounds also remain in force. Each gas receives one macro port tick with its actual endpoint entropy and integrated heat entropy Σ(Q/T), including sign-reversing heat histories. Final publication moves the entire assembly only after all checks and cancellation gates succeed.
+
+This is bounded temporal refinement of the existing first-order sealed-chamber split, not a monolithic implicit chemistry solve or a reacting compressible-flow model. Cell masses, thermal/circuit topology and chamber identities remain fixed; the `state::flow` transport stages are not composed by this API. Source-domain refusal, failed numerical work and cancellation preserve the complete original assembly and its port/history state.
+
+Focused regressions in `tests/material_exchange/subcycling.rs` exercise a data-only emissivity change reaching reaction progress within the interval, real circuit/contact/radiation source histories, independent total physical energy and impulse balances, integrated heat versus held electrical-current/force semantics, nonzero-clock resume, charge-controlled refinement, and late source/work-limit/cancellation rollback. Fixtures are synthetic and establish integration behavior rather than empirical combustion calibration.
+
+## Consistent-inertia solids with original tensor material memory
+
+`tensor_material::TensorMaterialBody::from_mass_matrix` admits the complete
+symmetric positive-definite inertia in the caller's displacement coordinates.
+Momentum is `M v`, velocity is `M^-1 p`, and the kinetic Hamiltonian retains
+the full quadratic block. The existing `fs-la` Cholesky owner supplies the
+inverse; a dimension-scaled floating-point identity-residual check rejects
+unrepresentable inertia, including dependent bases that leave a tiny positive
+pivot. It never regularizes mass or removes coordinates. Existing diagonal
+inertia and plane-stress paths keep their own original arithmetic.
+
+`tensor_material::solid::TensorSolidBody` connects
+`fs-solid::linear3::visco::ProjectedViscoSolid` to this same full-memory
+`TensorMaterialBody` and the existing `fs-phs` exact-ZOH propagator. The
+source tetrahedral basis owns consistent mass, strain maps, supports and
+force/velocity transformations together. Every material point retains its
+equilibrium stiffness, Kelvin matrix and all Maxwell branches. Initial
+constitutive prehistory remains explicit. Held nodal forces are projected by
+the same basis transpose; the reported mean nodal velocity expands the same
+work-conjugate port output used for integrated supplied work.
+
+`TensorMaterialHistory::advance_with_material_heat` independently integrates
+each original point's Kelvin and Maxwell resistance channels along the same
+complete coupled trajectory using `fs-phs::integrated_resistance_loss`.
+`TensorSolidHistory::advance` aggregates those channels to their original
+elements. No work-minus-storage residual is assigned as material heat.
+Both point and element totals must agree with the original total dissipated
+energy within the caller's explicit positive absolute attribution tolerance.
+Failed propagation, heat attribution, nodal expansion or cancellation preserves
+the entire original history, clock and accumulated heat.
+
+Existing material-point/state-coordinate and dense-propagation capacities remain
+in force; oversized requests refuse without dropping modes or memories.
+Geometry, basis and material temperature/composition are fixed. The returned
+element heat is available for a thermal owner but this API does not itself
+advance caloric state. Separate point heat for plane-stress histories is
+explicitly refused; their existing total-loss dynamics remain available.
+There is no claim of nonlinear mechanics, acoustic radiation, spatial/modal
+convergence or empirical material calibration. Five focused G0/G3 regressions
+in `tests/tensor_solid.rs` exercise off-diagonal inertia and analytic force work,
+Tet4/Tet10 shear/mass, Maxwell prehistory, regional loss attribution, constrained
+nonorthogonal work maps, dependent-basis refusal and transactional failure.
+
+## Retained inertial motion during native finite-gas heating
+
+`heated_valve_sound --inertial-history MAX_STEP_S MASS_DAMPING_PER_S` retains
+each accepted finite-gas/source state and advances one original sparse Newmark
+trajectory from stress-free rest on those exact times. Nodal displacement,
+velocity and acceleration persist while source stiffness and expansion refresh
+at fixed reference mass, mesh and supports. `PREFIX.motion.csv` records actual
+nodal motion and global kinetic/shifted elastic energy, signed external,
+expansion and stiffness work, damping and cumulative mechanical residual.
+
+The explicit step ceiling is an admission limit, not a temporal-error
+certificate. This is prescribed one-way thermal loading: parameter work and
+damping are not silently exchanged with caloric storage. Pressure CSV/WAV retain
+the existing frozen-state acoustic experiments. All mechanical admission and
+sound calculations precede output creation. Focused native tests check the
+retained Newmark kinematic identities, shared heat/motion clock, actual inertia,
+source-stiffness work, energy balance, replay and refused/cancelled inputs.
+
+`LocalMaterialWall::bind_dg` carries the same source-resolved thin-cylinder
+mass, elasticity, Kelvin-Voigt viscosity or complete generalized-Maxwell
+relaxation into the native DG duct time operator. `MaterialWallDg` retains the
+original material receipts, geometry
+reduction and declared frequency applicability beside that operator. Material
+data changes affect pressure, reciprocal wall motion and stored energy through
+the existing gas/port/time owners. Every positive Maxwell source arm retains
+its radial reaction pressure, elastic storage and nonnegative loss in that
+same operator. The exact exponential advances all memories together, so the
+network midpoint clock restrictions do not apply to this route. The source
+band remains an applicability statement, not a
+filter or broadband certificate; uniform gas/cylinder, small displacement and
+frozen source state are the bounded model. The source-data regression changes
+only Young modulus and compares actual time-domain pressure and wall motion
+with the independent sealed-tube oscillator while checking total energy.
+A further source-state regression changes only a relaxation-time claim and
+checks actual DG pressure, retained branch energy and material loss; the
+unused Kelvin property is not counted again. Native execution is pending.
+
+## Nonlinear induction coupled to finite material enthalpy
+
+`MagneticThermalNetwork::step_nonlinear_eddy_candidate` advances the original
+`PlanarNonlinearEddy` field and `DepositionSimulation` on one accepted time
+interval. Each thermal Newton trial starts from the same accepted magnetic
+potential, resolves the same material card's conductivity at the trial endpoint
+temperature, and solves the source-defined reversible H(B) induction problem.
+The original conductor-region projection supplies exact triangle-integrated
+sigma*E^2 losses to the existing thermal cells; the shared material network
+supplies conduction, authored sources, boundaries and finite caloric storage.
+The coupled candidate publishes both histories together. Cancellation, missing
+routes, source mismatch or nonlinear failure leaves both inputs unchanged.
+
+Only physical Joule heat enters material enthalpy. The field step's nonnegative
+backward-Euler magnetic convexity loss remains separately visible as
+`report.electrical.numerical_dissipation_j`. The shared driver audit checks
+magnetic storage change + thermal storage change + numerical dissipation
+against impressed-current work and other external heat. Numerical loss is not
+an empirical core-loss model and is never deposited as heating.
+
+Source identity, property basis, requirements, nonthermal coordinates, fixed
+geometry, original triangle volumes and complete conductor/thermal routing are
+re-admitted at every trial. The complete H(B) source path must remain unchanged;
+a temperature-dependent H(B,T) source refuses thermal feedback even if selected
+endpoint values happen to agree. This path does not supply magnetic entropy,
+thermal parameter work, hysteresis, remanence, moving conductors or terminal
+circuit feedback. Caloric charts are fixed and fully solid in this bounded
+coupling; unsupported phase changes refuse through the existing material owner.
+
+`tests/nonlinear_eddy_enthalpy.rs` specifies an independent scalar-bisection
+oracle for source-only changes to saturation and temperature-dependent
+resistivity, continuation from the accepted field, physical heat versus
+numerical loss, complete energy balance, and transactional failure. Full native
+integration execution is required in a build environment that can compile the
+pinned constellation; the production-leaf checks alone do not establish it.

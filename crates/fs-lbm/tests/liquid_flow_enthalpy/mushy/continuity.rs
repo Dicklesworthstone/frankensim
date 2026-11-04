@@ -14,6 +14,9 @@ use fs_material::phase::transport::{
 };
 use fs_material::thermal::source::ThermalMaterialPoint;
 
+#[path = "continuity/electrothermal_momentum.rs"]
+mod electrothermal_momentum;
+
 pub(super) fn source(mu: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
@@ -206,6 +209,16 @@ impl DepositionObserver for CycleHeat {
         Ok(thermal.cells().keys().map(|&id| (id, watts)).collect())
     }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn step(
+        &mut self,
+        _: f64,
+        _: f64,
+        _: &BTreeMap<CellId, f64>,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 }

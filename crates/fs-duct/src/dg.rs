@@ -56,12 +56,21 @@
 //! `Matched` boundary the absorbed energy is inferred from the deficit, so that balance is not a
 //! check (`balance_checked` is false).
 //!
+//! [`DgDuct::with_side_ports`] exposes existing interior faces as point flow
+//! junctions, using the same alternating pressure trace and exact work integral.
+//! Complete side loads interact through [`DgPropagator::multiport_response`];
+//! finite chimney geometry and aperture corrections belong to those loads.
+//!
 //! [`DgDuct::with_viscothermal`] optionally appends the exact-Bessel-derived
 //! positive viscous and thermal memory supplied by `fs_phs::ZkDiffusive`.
 //! Identical circular cylinders in a uniform material gas are supported. These
 //! states share the same dense exponential and energy coordinates; no midpoint
 //! relaxation or duplicated inviscid storage is introduced. Total energy then
 //! includes wall memory, and the dense ledger still reports inferred loss.
+//!
+//! [`DgDuct::with_compliant_wall`] adds the displacement and velocity of a
+//! locally reacting cylindrical wall to that SAME operator. Its pressure work
+//! is reciprocal and its elastic/kinetic storage is part of the native state.
 
 use crate::profile::gas_field::GasFieldDuctError;
 use crate::{Duct, DuctError, Segment};
@@ -73,8 +82,12 @@ use fs_math::det;
 
 mod viscothermal;
 pub use viscothermal::{DgWallAdmission, DgWallResolution};
+mod compliant_wall;
+pub use compliant_wall::DgCompliantWallState;
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
+mod side_ports;
+pub use side_ports::{DgSidePort, DgSidePortSource, MAX_DG_SIDE_PORTS};
 
 /// Maximum admitted nodal polynomial order $p$ per element.
 pub const MAX_DG_ORDER: usize = 8;
@@ -504,6 +517,7 @@ pub struct DgDuct {
     geometry: Duct,
     uniform_radius_m: Option<f64>,
     viscothermal: Option<viscothermal::ViscothermalMemory>,
+    compliant_wall: Option<compliant_wall::CompliantWall>,
     memory_dofs: usize,
     inlet: DgBoundary,
     outlet: DgBoundary,
@@ -519,6 +533,8 @@ pub struct DgDuct {
     g_block: Option<Vec<f64>>,
     /// Active port descriptors `(PortId, vector_of_len_total_dofs)`.
     ports: Vec<(PortId, Vec<f64>)>,
+    /// Point junctions on original element faces, in attachment order.
+    side_ports: Vec<DgSidePort>,
 }
 
 /// Bind the physical coordinate maps as well as the energy-normalized operator.
@@ -989,6 +1005,7 @@ impl DgDuct {
             geometry: duct.clone(),
             uniform_radius_m: viscothermal::uniform_radius(duct),
             viscothermal: None,
+            compliant_wall: None,
             memory_dofs: 0,
             inlet,
             outlet,
@@ -999,6 +1016,7 @@ impl DgDuct {
             l_tilde,
             g_block,
             ports,
+            side_ports: Vec::new(),
         })
     }
 

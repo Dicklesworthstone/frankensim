@@ -10,9 +10,9 @@
 //! The contact must remain compressive. Opening, changes of tangent frame,
 //! geometry, wear and layer advection need
 //! their own state transfer; none may silently erase this stored shear energy.
-//! Thermal owners may use `continue_state` only with an unchanged elastic
-//! potential; endpoint temperature and dissipative coefficients then change
-//! together while all accepted strain remains intact.
+//! Thermal owners may use `continue_state` with an unchanged elastic potential,
+//! or `continue_state_with_work` when they account explicitly for coefficient
+//! work and the mechanical entropy. Neither operation resets accepted strain.
 
 use crate::{FrictionRegime, TangentialLaw, TangentialStep, TangentialStepInput, TriboError,
     checked_add, checked_mul, finite, nonnegative_finite, positive_finite};
@@ -43,6 +43,23 @@ impl ThirdBodyLayerState {
     pub const fn elastic_slip_m(&self) -> [f64; 2] { self.elastic_slip_m }
     #[must_use]
     pub const fn plastic_slip_m(&self) -> [f64; 2] { self.plastic_slip_m }
+}
+
+/// Thermodynamic mechanical contribution for an admitted affine k(T).
+/// The thermal owner adds its independent stress-free caloric internal energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThirdBodyLayerThermodynamics {
+    pub free_energy_j: f64,
+    pub entropy_j_k: f64,
+    pub internal_energy_j: f64,
+}
+
+/// Retained strain at new coefficients, with the work of changing its potential.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThirdBodyLayerContinuation {
+    pub state: ThirdBodyLayerState,
+    /// psi(T_new,e_old) - psi(T_old,e_old), not dissipated heat [J].
+    pub coefficient_free_energy_change_j: f64,
 }
 
 impl ThirdBodyLayerContact {
@@ -86,15 +103,62 @@ impl ThirdBodyLayerContact {
                 field: "layer_continuation_requires_unchanged_elastic_potential",
             });
         }
+        Ok(self.continue_state_with_work(previous)?.state)
+    }
+
+    /// Continue the same retained strain with explicit coefficient work.
+    /// A thermal owner must supply an admitted free-energy temperature law and
+    /// close `delta(psi + T s)` with its caloric update. This numerical transfer
+    /// alone supplies neither heat nor source authority. Geometry/tangent-frame
+    /// changes remain outside this operation; the strain limit is unchanged.
+    pub fn continue_state_with_work(&self, previous: &ThirdBodyLayerState)
+        -> Result<ThirdBodyLayerContinuation, TriboError> {
+        if self.maximum_elastic_slip_m.to_bits()
+            != previous.owner.maximum_elastic_slip_m.to_bits() {
+            return Err(TriboError::InvalidInput {
+                field: "layer_continuation_requires_unchanged_elastic_domain",
+            });
+        }
         self.admit_elastic_slip(previous.elastic_slip_m)?;
         for value in previous.plastic_slip_m {
             finite(value, "layer_continued_plastic_slip_m")?;
         }
-        Ok(ThirdBodyLayerState {
+        let e = det::hypot(previous.elastic_slip_m[0], previous.elastic_slip_m[1]);
+        let coefficient_free_energy_change_j = if self.stiffness_n_m
+            == previous.owner.stiffness_n_m { 0.0 } else {
+            checked_mul(checked_mul(0.5 * (self.stiffness_n_m
+                - previous.owner.stiffness_n_m), e, "layer_coefficient_work_j")?,
+                e, "layer_coefficient_work_j")?
+        };
+        let state = ThirdBodyLayerState {
             elastic_slip_m: previous.elastic_slip_m,
             plastic_slip_m: previous.plastic_slip_m,
             owner: self.clone(),
-        })
+        };
+        Ok(ThirdBodyLayerContinuation { state, coefficient_free_energy_change_j })
+    }
+
+    /// `s = -d(psi)/dT` and `U = psi + T s` for the retained affine spring.
+    /// The caller owns admission of the complete affine temperature interval;
+    /// an arbitrary supplied slope never becomes a measured material claim.
+    pub fn thermodynamics(&self, state: &ThirdBodyLayerState,
+        stiffness_slope_n_m_k: f64) -> Result<ThirdBodyLayerThermodynamics, TriboError> {
+        if state.owner != *self {
+            return Err(TriboError::InvalidInput { field: "layer_checkpoint_owner" });
+        }
+        finite(stiffness_slope_n_m_k, "layer_stiffness_temperature_derivative")?;
+        self.admit_elastic_slip(state.elastic_slip_m)?;
+        let e = det::hypot(state.elastic_slip_m[0], state.elastic_slip_m[1]);
+        let free_energy_j = self.stored_energy_j(state);
+        nonnegative_finite(free_energy_j, "layer_free_energy_j")?;
+        let entropy_j_k = if stiffness_slope_n_m_k == 0.0 { 0.0 } else {
+            checked_mul(checked_mul(-0.5 * stiffness_slope_n_m_k, e,
+                "layer_mechanical_entropy_j_k")?, e, "layer_mechanical_entropy_j_k")?
+        };
+        let internal_energy_j = checked_add(free_energy_j,
+            checked_mul(self.temperature_kelvin, entropy_j_k,
+                "layer_entropy_energy_j")?, "layer_internal_energy_j")?;
+        Ok(ThirdBodyLayerThermodynamics { free_energy_j, entropy_j_k, internal_energy_j })
     }
 
     fn admit_elastic_slip(&self, slip: [f64; 2]) -> Result<(), TriboError> {

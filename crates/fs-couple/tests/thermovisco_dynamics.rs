@@ -50,6 +50,20 @@ fn sources_at_pressure(
     thermal_shift: bool,
     pressure_pa: Option<f64>,
 ) -> Sources {
+    sources_with_thermal_slopes(cp, density, branch, thermal_shift, pressure_pa, 0.0, 0.0)
+}
+
+// Manufactured source laws S=1+b*(T-300) and free strain=alpha*(T-300).
+// No relaxation, density, transport or caloric value is retuned with either slope.
+fn sources_with_thermal_slopes(
+    cp: f64,
+    density: f64,
+    branch: bool,
+    thermal_shift: bool,
+    pressure_pa: Option<f64>,
+    modulus_slope_per_k: f64,
+    expansion_per_k: f64,
+) -> Sources {
     let mut claims = ClaimSet::new();
     let quantity = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
@@ -61,7 +75,8 @@ fn sources_at_pressure(
         ("E_inf", Pressure::DIMS, [1e6; 4]),
         ("E0", Pressure::DIMS, [3e6; 4]),
         ("tau0", Time::DIMS, [0.005; 4]),
-        ("scale", Dims::NONE, [1.0; 4]),
+        ("scale", Dims::NONE, [280.0, 300.0, 320.0, 340.0]
+            .map(|t| 1.0 + modulus_slope_per_k * (t - 300.0))),
         (
             "shift",
             Dims::NONE,
@@ -71,7 +86,8 @@ fn sources_at_pressure(
                 [1.0; 4]
             },
         ),
-        ("free", Dims::NONE, [0.0; 4]),
+        ("free", Dims::NONE, [280.0, 300.0, 320.0, 340.0]
+            .map(|t| expansion_per_k * (t - 300.0))),
         ("density", Density::DIMS, [density; 4]),
         ("cp", SPECIFIC_HEAT_CAPACITY_DIMS, [cp; 4]),
         ("conductivity", THERMAL_CONDUCTIVITY_DIMS, [10.0; 4]),
@@ -570,8 +586,126 @@ fn g3_pressure_surface_changes_motion_and_physical_heat_through_the_existing_own
 }
 
 #[test]
+fn g1_affine_elastic_cooling_matches_an_independent_thermal_inertial_root() {
+    let slope = -0.005;
+    let cp = 0.02;
+    let source = sources_with_thermal_slopes(cp, 1000.0, false, false, None, slope, 0.0);
+    let g = geometry(0.0);
+    let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+        g, 300.0, 0.0, 0.5).unwrap();
+    let (dt, force) = (0.001, 0.03);
+    let volume = g.length_m * g.cross_section_m2;
+    let mass = 1000.0 * volume / 3.0;
+    let capacity = 1000.0 * volume * cp;
+    let derivative = 1e6 * slope;
+    // Independent scalar equation: solve BE inertia at T, then close caloric
+    // C*(T-300) = T*E'*V*epsilon(T)^2/2. There is no dashpot in this fixture.
+    let velocity = |t: f64| {
+        let modulus = 1e6 * (1.0 + slope * (t - 300.0));
+        (mass * 0.5 + dt * force)
+            / (mass + dt * dt * g.cross_section_m2 * modulus / g.length_m)
+    };
+    let residual = |t: f64| {
+        let strain = dt * velocity(t) / g.length_m;
+        capacity * (t - 300.0) - 0.5 * t * derivative * volume * strain * strain
+    };
+    let (mut lo, mut hi) = (280.0, 300.0);
+    assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+    for _ in 0..64 {
+        let mid = f64::midpoint(lo, hi);
+        if residual(mid) > 0.0 { hi = mid; } else { lo = mid; }
+    }
+    let expected_t = f64::midpoint(lo, hi);
+    let expected_v = velocity(expected_t);
+    let strain = dt * expected_v / g.length_m;
+    let modulus = 1e6 * (1.0 + slope * (expected_t - 300.0));
+    let internal = 0.5 * volume * (modulus - expected_t * derivative) * strain * strain;
+    let numerical = 0.5 * mass * (expected_v - 0.5).powi(2)
+        + 0.5 * volume * modulus * strain * strain;
+    let step = old.step(force, dt, config(), adiabatic, &CancelGate::new()).unwrap();
+    close(step.next.point().caloric_state().temperature_k(), expected_t, 2e-8);
+    close(step.next.velocity_m_s(), expected_v, 1e-10);
+    close(step.next.extension_m(), dt * expected_v, 1e-13);
+    close(step.material_internal_energy_change_j, internal, 1e-12);
+    close(step.next.point().mechanical_internal_energy_j(), internal, 1e-12);
+    close(step.numerical_loss_j, numerical, 1e-12);
+    close(step.reversible_material_heat_j, capacity * (expected_t - 300.0), 1e-12);
+    close(step.reversible_material_heat_j + step.mechanical_entropy_energy_change_j,
+        0.0, 1e-14);
+    assert_eq!(step.material_heat_j, 0.0);
+    assert!(step.reversible_material_heat_j < 0.0 && step.applied_material_heat_j < 0.0);
+    assert!(step.next.point().caloric_state().temperature_k() < 299.9);
+    close(step.next.kinetic_energy_j() + internal + capacity * (expected_t - 300.0)
+        + numerical, old.kinetic_energy_j() + force * dt * expected_v, 1e-12);
+    assert!(step.combined_residual_j.abs() <= config().energy_tolerance_j);
+    assert_eq!(old.point().time_s(), 0.0);
+    assert_eq!(old.velocity_m_s(), 0.5);
+}
+
+#[test]
+fn g1_source_expansion_drives_inertia_with_the_independent_thermal_capacity() {
+    let (cp, rho, modulus, dt, heating) = (0.02, 1000.0, 1e6, 0.0005, 2e-4);
+    for alpha in [-1e-4, 0.0, 1e-4] {
+        let source = sources_with_thermal_slopes(cp, rho, false, false, None, 0.0, alpha);
+        let g = geometry(0.0);
+        let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+            g, 300.0, 0.0, 0.0).unwrap();
+        let volume = g.length_m * g.cross_section_m2;
+        let inertia = rho * volume / 3.0;
+        let spring = g.cross_section_m2 * modulus / g.length_m;
+        let constrained_fraction = inertia / (inertia + dt * dt * spring);
+        // Eliminate the actual BE inertia: sigma=-E*c*alpha*delta_T.
+        // For constant E and alpha, Qrev=-V*T0*alpha*delta_sigma. Thus this
+        // first heated endpoint has a closed scalar caloric solution.
+        let capacity = rho * volume * cp;
+        let delta_t = heating
+            / (capacity - volume * 300.0 * alpha * alpha * modulus * constrained_fraction);
+        let velocity = dt * g.cross_section_m2 * modulus * alpha * delta_t
+            / (inertia + dt * dt * spring);
+        let strain = dt * velocity / g.length_m;
+        let elastic_strain = strain - alpha * delta_t;
+        let stress = modulus * elastic_strain;
+        let entropy = volume * alpha * stress;
+        let free_energy = 0.5 * volume * modulus * elastic_strain * elastic_strain;
+        let internal_energy = free_energy + (300.0 + delta_t) * entropy;
+        let numerical = 0.5 * inertia * velocity * velocity + free_energy;
+        let step = old.step(0.0, dt, config(), |input| {
+            let h = input.initial.specific_enthalpy_j_kg()
+                + (input.internal_heat_j + heating) / input.mass_kg;
+            Ok::<_, Infallible>(UniformEnthalpyStep {
+                state: input.curve.state_at_specific_enthalpy(h).unwrap(),
+                external_heat_j: heating, energy_residual_tolerance_j: 1e-11, report: (),
+            })
+        }, &CancelGate::new()).unwrap();
+        close(step.next.point().caloric_state().temperature_k(), 300.0 + delta_t, 2e-7);
+        close(step.next.velocity_m_s(), velocity, 1e-10);
+        close(step.next.extension_m(), dt * velocity, 1e-13);
+        close(step.next.point().mechanical().stress_pa(), stress, 1e-5);
+        close(step.next.point().mechanical_entropy_j_k(), entropy, 1e-13);
+        close(step.material_internal_energy_change_j, internal_energy, 1e-11);
+        close(step.reversible_material_heat_j, -300.0 * entropy, 1e-11);
+        close(step.material_energy.thermal_strain_work, -stress * alpha * delta_t, 1e-8);
+        close(step.numerical_loss_j, numerical, 1e-12);
+        assert_eq!(step.material_heat_j, 0.0);
+        assert_eq!(step.external_work_j, 0.0);
+        close(step.next.kinetic_energy_j() + internal_energy
+            + capacity * delta_t + numerical, heating, 1e-11);
+        assert!(step.combined_residual_j.abs() <= config().energy_tolerance_j);
+        if alpha == 0.0 {
+            assert_eq!(step.next.velocity_m_s(), 0.0);
+            assert_eq!(step.reversible_material_heat_j, 0.0);
+        } else {
+            assert!(step.next.velocity_m_s() * alpha > 0.0);
+            assert!(step.reversible_material_heat_j > 0.0);
+        }
+        assert_eq!(old.point().time_s(), 0.0);
+        assert_eq!(old.point().mechanical().stress_pa(), 0.0);
+    }
+}
+
+#[test]
 fn g4_failed_thermal_trials_and_cancellation_preserve_the_whole_vibrating_history() {
-    let source = sources(0.02, 1000.0, true, true);
+    let source = sources_with_thermal_slopes(0.02, 1000.0, true, true, None, -0.005, 0.0);
     let initial = Oscillator::try_new(
         &source.mechanical,
         &source.caloric,

@@ -1,10 +1,12 @@
 //! Sourced joint data reaches the original shared string/body pressure solve.
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::MaterialBridgeInterface;
+use fs_couple::render::schedule::force::coupled::{ConstantLossConnection, PreparedModalBudget};
 use fs_matdb::{InterfaceSystemCard, SurfaceSpec, SystemContext};
 use fs_material::state_point::{
-    ResolvedLinearInterface, interface_stiffness_per_area_dims, interface_viscosity_per_area_dims,
-    resolve_interface_state_point,
+    LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA, ResolvedLinearInterface,
+    constant_loss_reference_omega_dims, interface_stiffness_per_area_dims,
+    interface_viscosity_per_area_dims, resolve_interface_state_point,
 };
 
 fn interface(
@@ -24,12 +26,31 @@ fn interface_with_band(
     t: f64,
     band: (f64, f64),
 ) -> ResolvedLinearInterface {
+    anchored_interface(pair, k, c, t, band, None)
+}
+
+fn anchored_interface(
+    pair: [MaterialStateId; 2],
+    k: f64,
+    c: f64,
+    t: f64,
+    band: (f64, f64),
+    anchor: Option<f64>,
+) -> ResolvedLinearInterface {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
-    for (name, dims, value) in [
+    let mut rows = vec![
         ("joint-k", interface_stiffness_per_area_dims(), k),
         ("joint-c", interface_viscosity_per_area_dims(), c),
-    ] {
+    ];
+    if let Some(omega) = anchor {
+        rows.push((
+            LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA,
+            constant_loss_reference_omega_dims(),
+            omega,
+        ));
+    }
+    for (name, dims, value) in rows {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -349,6 +370,70 @@ fn mismatched_joint_source_surfaces_temperature_band_and_rebinding_refuse() {
                 gate
             )
             .is_err()
+        );
+    });
+}
+
+// A source that states its constant-loss anchor binds its bridge's dashpot at a
+// constant loss factor on the prepared owner: string 0's bridge is connection 0,
+// the energy account stays closed and the pressure differs from the
+// Kelvin-Voigt binding of the same k and c. The ordinary owner refuses it.
+#[test]
+fn a_constant_loss_anchor_binds_the_bridge_dashpot_on_the_prepared_owner() {
+    with_cx(|cx, gate| {
+        let anchor = core::f64::consts::TAU * 200.0;
+        let pair = [
+            specimen(7800.0, 200e9).material().material().clone(),
+            source_plate(7800.0, 2).specimen.material().material().clone(),
+        ];
+        let anchored_source =
+            anchored_interface(pair, 3e7, 1e3, 293.15, (0.0, 100_000.0), Some(anchor));
+        assert_eq!(
+            anchored_source.constant_loss_reference_omega_rad_s(),
+            Some(anchor)
+        );
+        let (plain, viscous_source) = sourced(cx, gate, 3e7, 1e3);
+        assert_eq!(viscous_source.constant_loss_reference_omega_rad_s(), None);
+        assert!(
+            plain
+                .with_material_bridge_interfaces(
+                    vec![MaterialBridgeInterface {
+                        string: 0,
+                        interface: anchored_source.clone(),
+                    }],
+                    gate,
+                )
+                .is_err()
+        );
+        let budget = PreparedModalBudget {
+            max_modes: 1024,
+            max_dense_bytes: 1 << 30,
+            max_multiply_terms: 1 << 50,
+        };
+        let prepared = |bank: ReciprocalStringBank| {
+            bank.with_prepared_linear_propagation(budget, gate).unwrap()
+        };
+        let mut viscous = bind(prepared(sourced(cx, gate, 3e7, 1e3).0), viscous_source, gate);
+        let mut anchored = bind(prepared(sourced(cx, gate, 3e7, 1e3).0), anchored_source, gate);
+        assert!(viscous.system().constant_loss_connections().is_empty());
+        assert_eq!(
+            anchored.system().constant_loss_connections(),
+            vec![ConstantLossConnection {
+                connection: 0,
+                reference_omega_rad_s: anchor,
+            }]
+        );
+        let zero = vec![0.0; anchored.system().mode_count()];
+        let mut pressure_delta = 0.0_f64;
+        for _ in 0..128 {
+            let a = *viscous.step(&zero, drive()).unwrap();
+            let b = *anchored.step(&zero, drive()).unwrap();
+            assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+            pressure_delta += (a.observer_pressure_pa - b.observer_pressure_pa).abs();
+        }
+        assert!(
+            pressure_delta > 1e-12,
+            "the constant-loss bridge must change the actual microphone pressure"
         );
     });
 }

@@ -25,6 +25,7 @@ frankensim-plate-performance-v2
 audio RATE_HZ SAMPLE_COUNT FULL_SCALE_PA
 ambient GAS_RECORD
 observer DISTANCE_M
+radiation-load none|baffled-piston
 limits MAX_MODES NYQUIST_FRACTION MAX_ABS_FORCE_N MAX_ABS_PRESSURE_PA MAX_EVENTS
 mechanics SUPPORT PRETENSION_N_M DAMPING_RATIO LOW_HZ HIGH_HZ RETAINED_MODES
 sections COUNT
@@ -50,6 +51,21 @@ FRACTION...` with `--gas-component` source packs on the command line. Its
 density scales the pressure and its sound speed sets the time of flight. A
 record that does not parse or resolve refuses the file; there is no air
 default. Version 1 files, which authored a bare fluid density, refuse.
+
+The `radiation-load` row is optional and must follow `observer`. Omission or
+`none` keeps the original unloaded plate. `baffled-piston` attaches the existing
+passive fitted piston impedance to each retained mode, using the same ambient
+record and sample clock as the observer. Changing gas pressure or composition
+then changes the mechanical radiation reaction, ringdown and frequency shift,
+as well as pressure scale and arrival time. No density or sound speed is entered
+a second time. The sidecar records the selection in `radiation_load`.
+
+This is an explicit compact per-mode piston approximation. Its radius comes
+from actual plate face area; its signed modal volume and force projections are
+preserved. It does not include the mutual radiation between modes or the full
+finite-wavelength pressure field. The fitted filter and sampled reaction retain
+their original approximation and time-resolution requirements. A retained load
+from a different gas or sample clock refuses instead of being silently reused.
 
 `SUPPORT` is `simply-supported` (zero transverse displacement) or `clamped`
 (zero displacement and slopes), applied to exactly the listed support nodes.
@@ -103,8 +119,9 @@ Pressure uses the existing signed-area compact baffled monopole observation,
 `rho A a(t - r/c) / (2 pi r)`, with `rho` and `c` from the ambient record. The
 retarded acceleration is evaluated exactly inside the recorded exact-ZOH step,
 not interpolated; before the first wavefront arrives the output is zero. There
-is no radiation reaction load, atmospheric absorption, resolved directivity, or
-whole-fluid energy balance in this input path. Large/noncompact radiators need a more complete acoustic model.
+is no atmospheric absorption, resolved directivity, or whole-fluid energy
+balance in this input path. Reaction loading is the explicit selection above;
+large/noncompact radiators need a more complete acoustic model.
 The source hash binds exact bytes; relocation does not change it, but whitespace
 changes do. The sidecar is numerical/software provenance, not a certificate of
 experimental validity, continuum accuracy, or source material truth.

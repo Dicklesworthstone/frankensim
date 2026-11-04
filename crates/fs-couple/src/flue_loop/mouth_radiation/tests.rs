@@ -199,7 +199,7 @@ fn voice() -> FlueVoice {
 #[test]
 fn same_sample_jet_feedback_sees_the_retained_radiation_pressure() {
     let mut v = voice();
-    v.attach_mouth_radiation(model([0.01, 0.004], [8, 4], *v.gas()))
+    v.attach_mouth_radiation(model([0.01, 0.004], [8, 4], *v.gas()), [0.01, 0.004])
         .unwrap();
     assert_eq!((v.inertance, v.resistance), (0.0, 0.0));
     v.mouth_radiation = Some(v.mouth_radiation.unwrap().candidate(1e-5).unwrap().0);
@@ -279,13 +279,13 @@ fn invalid_bands_sources_and_double_loading_refuse() {
         model([0.01, 0.004], [8, 4], gas(293.15, 202_650.0)),
         model([0.008, 0.005], [8, 4], g),
     ] {
-        assert!(voice().attach_mouth_radiation(load).is_err());
+        assert!(voice().attach_mouth_radiation(load, [0.01, 0.004]).is_err());
     }
     let load = model([0.01, 0.004], [8, 4], g);
     let mut v = voice();
     v.geometry.mouth_loss_rel = 0.01;
-    assert!(v.attach_mouth_radiation(load).is_err());
+    assert!(v.attach_mouth_radiation(load, [0.01, 0.004]).is_err());
     let mut v = voice();
-    v.attach_mouth_radiation(load).unwrap();
-    assert!(v.attach_mouth_radiation(load).is_err());
+    v.attach_mouth_radiation(load, [0.01, 0.004]).unwrap();
+    assert!(v.attach_mouth_radiation(load, [0.01, 0.004]).is_err());
 }

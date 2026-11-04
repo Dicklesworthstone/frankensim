@@ -22,6 +22,24 @@ pub(crate) fn species_with_energy_reference(
     slope: f64,
     energy_reference_j_kg: f64,
 ) -> Nasa9StandardStateModelV1 {
+    species_in_domain(
+        name,
+        mass,
+        cp_r,
+        slope,
+        energy_reference_j_kg,
+        [200.0, 2000.0],
+    )
+}
+
+pub(crate) fn species_in_domain(
+    name: &str,
+    mass: f64,
+    cp_r: f64,
+    slope: f64,
+    energy_reference_j_kg: f64,
+    temperatures: [f64; 2],
+) -> Nasa9StandardStateModelV1 {
     let mut coefficients = [0.0; 9];
     coefficients[2] = cp_r;
     coefficients[3] = slope;
@@ -36,7 +54,7 @@ pub(crate) fn species_with_energy_reference(
         law: LawId(NASA9_LAW_ID_V1.into()), law_version: NASA9_LAW_VERSION_V1,
         parameters, state_schema_version: NASA9_STATE_SCHEMA_VERSION_V1,
         initial_state: InitialStatePolicy::ZeroInternalState,
-        validity: ValidityDomain::unconstrained().with("T", 200.0, 2000.0),
+        validity: ValidityDomain::unconstrained().with("T", temperatures[0], temperatures[1]),
         sources: vec![], provenance: Provenance { source: "synthetic NASA-9 gas".into(),
             license: "CC0-1.0".into(), artifact: None },
     };
@@ -47,6 +65,16 @@ pub(crate) fn species_with_energy_reference(
 }
 
 pub(crate) fn transport(name: &str, mu: f64, k: f64) -> SpeciesTransportMaterial {
+    transport_in_domain(name, mu, k, [200.0, 2000.0], [1000.0, 1.0e7])
+}
+
+pub(crate) fn transport_in_domain(
+    name: &str,
+    mu: f64,
+    k: f64,
+    temperatures: [f64; 2],
+    pressures: [f64; 2],
+) -> SpeciesTransportMaterial {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [("dynamic_viscosity", DynViscosity::DIMS, mu),
         (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, k)] {
@@ -54,10 +82,10 @@ pub(crate) fn transport(name: &str, mu: f64, k: f64) -> SpeciesTransportMaterial
             key: PropertyKey::new(name, dims),
             value: PropertyValue::Curve { abscissa: "temperature".into(),
                 abscissa_dims: Temperature::DIMS,
-                knots: vec![(200.0, value), (2000.0, 2.0 * value)], dims },
+                knots: vec![(temperatures[0], value), (temperatures[1], 2.0 * value)], dims },
             validity: ValidityDomain::unconstrained()
-                .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), 200.0, 2000.0)
-                .with_quantity("pressure", typed(QuantityKind::Pressure), 1000.0, 1.0e7),
+                .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), temperatures[0], temperatures[1])
+                .with_quantity("pressure", typed(QuantityKind::Pressure), pressures[0], pressures[1]),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::LinearInside, observations: vec![],
             provenance: Provenance { source: "synthetic pure transport curve".into(),
@@ -71,10 +99,28 @@ pub(crate) fn transport(name: &str, mu: f64, k: f64) -> SpeciesTransportMaterial
 }
 
 pub(crate) fn model(fractions: Vec<f64>, slope: f64) -> ThermochemicalGasModel {
+    model_in_domains(
+        fractions,
+        slope,
+        [200.0, 2000.0],
+        [200.0, 2000.0],
+        [1000.0, 1.0e7],
+    )
+}
+
+pub(crate) fn model_in_domains(
+    fractions: Vec<f64>,
+    slope: f64,
+    thermodynamic_temperatures: [f64; 2],
+    transport_temperatures: [f64; 2],
+    pressures: [f64; 2],
+) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(
-        vec![species("A", 0.028, 3.5, slope), species("B", 0.004, 2.5, 0.0)],
+        vec![species_in_domain("A", 0.028, 3.5, slope, 0.0, thermodynamic_temperatures),
+            species_in_domain("B", 0.004, 2.5, 0.0, 0.0, thermodynamic_temperatures)],
         Composition::new(CompositionBasis::MoleFraction, fractions).unwrap()).unwrap(),
-        vec![transport("B", 2.0e-5, 0.15), transport("A", 1.7e-5, 0.025)], None).unwrap()
+        vec![transport_in_domain("B", 2.0e-5, 0.15, transport_temperatures, pressures),
+            transport_in_domain("A", 1.7e-5, 0.025, transport_temperatures, pressures)], None).unwrap()
 }
 pub(crate) fn point(t: f64, p: f64) -> QueryPoint {
     QueryPoint::new()
@@ -98,6 +144,69 @@ fn g0_gamma_cp_coherence() {
         assert!((gas.gamma / (cp / cv) - 1.0).abs() <= 1e-14);
         gas.validate_coherence().unwrap();
     }
+}
+
+#[test]
+fn source_domains_govern_hot_gas_acoustics_and_transport_together() {
+    // Manufactured NASA-9/transport data, not a hot-air or real-gas accuracy claim.
+    let model = model_in_domains(
+        vec![0.75, 0.25],
+        0.001,
+        [200.0, 6000.0],
+        [200.0, 5000.0],
+        [1000.0, 3.0e7],
+    );
+    let resolved = model.evaluate(&point(3200.0, 2.0e7)).unwrap();
+    let gas = resolved.state();
+    gas.validate_coherence().unwrap();
+    assert_eq!(
+        gas.transport_state().unwrap(),
+        resolved.transport_state().unwrap()
+    );
+    let molar_mass = 0.75 * 0.028 + 0.25 * 0.004;
+    let cp_over_r = 0.75 * (3.5 + 0.001 * 3200.0) + 0.25 * 2.5;
+    close(gas.specific_heat_cp, cp_over_r * R / molar_mass);
+    close(gas.gamma, cp_over_r / (cp_over_r - 1.0));
+    close(gas.density, 2.0e7 * molar_mass / (R * 3200.0));
+    close(
+        gas.sound_speed,
+        (gas.gamma * R * 3200.0 / molar_mass).sqrt(),
+    );
+    close(gas.characteristic_impedance, gas.density * gas.sound_speed);
+
+    // The same data-driven composition substitution updates all three views.
+    let changed = model
+        .with_composition(
+            Composition::new(CompositionBasis::MoleFraction, vec![0.25, 0.75]).unwrap(),
+        )
+        .unwrap()
+        .evaluate(&point(3200.0, 2.0e7))
+        .unwrap();
+    changed.state().validate_coherence().unwrap();
+    assert!(changed.state().density < gas.density);
+    assert!(changed.state().sound_speed > gas.sound_speed);
+    assert!(
+        changed
+            .transport_state()
+            .unwrap()
+            .kinematic_viscosity_m2_s()
+            > resolved
+                .transport_state()
+                .unwrap()
+                .kinematic_viscosity_m2_s()
+    );
+
+    // Each original source still refuses beyond its own support; no extrapolation.
+    let thermodynamic_error = model.evaluate(&point(6000.01, 100000.0)).unwrap_err();
+    assert!(thermodynamic_error.to_string().contains("thermodynamics"));
+    for unsupported in [point(5000.01, 100000.0), point(3200.0, 3.0e7 + 1.0)] {
+        let error = model.evaluate(&unsupported).unwrap_err();
+        assert!(error.to_string().contains("transport material"));
+    }
+    // The unrelated legacy Sutherland/USSA model keeps its declared limits.
+    let legacy = crate::gas::GasSpec::dry_air_ussa1976();
+    assert!(GasState::try_new(&legacy, 3200.0, 100000.0).is_err());
+    assert!(GasState::try_new(&legacy, 300.0, 2.0e7).is_err());
 }
 
 #[test]

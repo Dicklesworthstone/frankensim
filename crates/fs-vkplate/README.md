@@ -9,8 +9,9 @@ equations, couplings and output stage (`src/kit.rs`).
 Why it exists: FrankenSim's modal percussion (`crates/fs-couple/examples/percussion`) keeps at
 most 63 head modes, admits audio only for head bands inside 40-1640 Hz, and caps a cymbal shell
 at 32 modes (an 18-inch crash stops near 400 Hz). A handful of lightly damped modes is a bell,
-and that is what those renders sounded like. A grid solver needs no mode list: an 18-inch crash
-on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
+and that is what those renders sounded like. A grid solver avoids a prescribed modal cutoff,
+but its usable bandwidth and dispersion still require spatial and temporal convergence checks.
+Node count alone does not establish audio-band fidelity.
 
 ## Physics
 
@@ -19,13 +20,36 @@ on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
   `D k^2 > T` (above roughly 0.7 kHz on the slack 2-ply kick and floor-tom batters, 5 kHz on the
   snare and rack tom). Berger tension modulation (the mean stretch raises the tension) gives the pitch drop of a
   hard-struck tom.
-- **Plates and shells**: bending energy summed over 3x3 curvature stencils with the full
-  `(1 - nu)` twist term; free edges are the natural boundary of that energy. Von Karman coupling
+- **Plates and shells**: bending energy averages four quarter-cell tensor energies with the full
+  `(1 - nu)` twist term. Squaring a node-centred average of mixed curvature instead loses
+  diagonal-wave stiffness. The quarter-cell form gives exactly `D Lap_h^2` in a uniform
+  interior, second-order continuum consistency and zero bending force for rigid tilts;
+  free edges are the natural boundary of that energy. Sourced bending-viscosity roots use
+  the same quadrature. Von Karman coupling
   through the Airy stress function with a rest shape `z0(r)`:
-  `Lap^2 F = -E t [l(w + z0) - l(z0)]`, `l(u) = u_xx u_yy - u_xy^2`, `F = dF/dn = 0` at the rim.
+  `Lap^2 F = -E t [l(w + z0) - l(z0)]` for uniform thickness,
+  `l(u) = u_xx u_yy - u_xy^2`. The outer rim fixes the affine Airy
+  gauge with `F = dF/dn = 0`. A hole has its own three affine trace
+  coordinates; imposing the same zero trace on both boundaries incorrectly
+  removes physical stress fields. Annuli use the complementary weak load
+  `cof(Hess F) : [grad(w)⊗grad(w)/2 + sym(grad(z0)⊗grad(w))]`,
+  retaining the boundary contribution and its exact discrete energy gradient.
+  The three extra coordinates use a Schur complement of the narrow-band factor.
+  Native and CUDA steppers consume the same quadratic strain rows.
+  With varying thickness, the stress operator comes from the local complementary
+  membrane energy `(F_xx^2 + F_yy^2 - 2 nu F_xx F_yy + 2(1+nu) F_xy^2)/(2 E t)`.
+  Normal derivatives live at nodes and mixed derivatives at cell centres. This
+  preserves the uniform-thickness operator and retains thickness gradients in
+  the variable-coefficient compatibility equation; an average thickness cannot.
   The nonlinear force is the exact gradient of the discrete potential.
 - **Loss**: either `s0 + s1 beta^2` per mode, fixed by two (frequency, T60) points,
   or an explicitly selected source-bound plane-stress Kelvin–Voigt bending tensor.
+  The former is a phenomenological law, not measured material viscosity. Its gradient
+  term is `2 s1 div(rho t grad(w_t))`: on a tapered surface, each grid edge uses
+  the mean adjacent mass, giving equal and opposite internal forces and nonnegative
+  dissipation. Multiplying the ordinary Laplacian by each node's mass instead would
+  violate those properties. Uniform-mass surfaces retain their original operator;
+  clock admission includes the mass-normalized damping bound on tapered surfaces.
 - **Contacts** (stick, felt beater, snare wires, hi-hat rims): one-sided power laws with
   Hunt-Crossley loss, `f = K d^alpha (1 + mu d_dot)`, each solved implicitly as a monotone scalar
   equation, so a hickory tip on bronze is stable at audio rates. A zero-radius tip uses bilinear
@@ -287,6 +311,16 @@ Scope, also printed in the receipt:
 
 The GPU and CUDA planners refuse a head with this load. Render it natively.
 
+### Head viscous layer
+
+Native card-built drums also apply the two-face Stokes boundary-layer loss
+from `air_loss::plate_viscous_layer` to every retained non-volume head shape,
+evaluated at its loaded frequency and its own areal density. Volume and
+dropped shapes carry none, so their decays remain upper bounds. Every admitted
+shape must be below coincidence. This is a gas-owned loss, not a decay-time
+fit; live keeps its existing installed decays.
+
+
 ## Numerics
 
 Leapfrog in time. The nonlinear potential (Berger or von Karman) enters through a scalar
@@ -300,7 +334,9 @@ between 0.5 and 1.5 within 2 s and the 8-16 kHz bands grew back after a second).
 back to `sqrt(2V)` at the half step: lowering it only removes energy, and raising it spends at most
 the energy the loss terms removed in the step before, so the discrete energy still never grows.
 Power iteration estimates the larger of the linear and full rest-shell tangent stiffnesses. The
-internal rate is the smallest supported multiple of 48 kHz using at most 60 % of that estimate;
+internal rate is the smallest supported multiple of 48 kHz using at most 60 % of that estimate
+(1, 2, 3, 4, 6, 8, 12, 16, 24 or 32 times); an insufficient maximum rate refuses the build.
+Finer meshes can therefore use smaller steps without relaxing the stability margin;
 this is not a contact or large-deflection convergence bound. Output uses a windowed-sinc filter.
 
 The Airy operator is factored once (banded Cholesky, row-major ordering); both triangular sweeps

@@ -4,7 +4,8 @@
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::MaterialBridgeInterface;
 use fs_material::state_point::{ResolvedLinearInterface, resolve_interface_state_point,
-    interface_stiffness_per_area_dims, interface_viscosity_per_area_dims};
+    interface_stiffness_per_area_dims, interface_viscosity_per_area_dims,
+    LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA, constant_loss_reference_omega_dims};
 
 #[derive(Clone, Debug)]
 pub struct Declaration {
@@ -67,10 +68,15 @@ impl Inputs {
                 remaining -= size;
                 packs.insert(d.pack.clone(), pack);
             }
-            let requirements = [
+            let mut requirements = vec![
                 Requirement::try_new(&d.stiffness_property, interface_stiffness_per_area_dims(), Admit::NonNegative)?,
                 Requirement::try_new(&d.viscosity_property, interface_viscosity_per_area_dims(), Admit::NonNegative)?,
             ];
+            // A source that states its constant-loss anchor has it read; without one the joint is Kelvin-Voigt.
+            if !packs[&d.pack].card().claims_for(LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA).is_empty() {
+                requirements.push(Requirement::try_new(LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA,
+                    constant_loss_reference_omega_dims(), Admit::StrictlyPositive)?);
+            }
             let state = resolve_interface_state_point(packs[&d.pack].card(), &query,
                 &requirements, Pick::SingleClaimOnly)?;
             let interface = ResolvedLinearInterface::new(state, &d.stiffness_property,

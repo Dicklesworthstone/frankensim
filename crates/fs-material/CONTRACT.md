@@ -20,6 +20,28 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+
+- `section_temperature::thermoelastic::ConcentricThermoelasticLaw` derives
+  layer force, Helmholtz storage, entropy and thermal curvature from the same
+  source-bound axial potential. Each layer retains its own temperature, card,
+  original annular geometry and integrated thermal-expansion path. Scalar
+  reference density and expansion, plus scalar or globally affine `E(T)`, are
+  admitted; every original modulus knot is checked. Continuous material support
+  and all original property selections survive reevaluation, including auxiliary
+  electrical/thermal properties. For elastic strain `e`, the per-reference-length
+  potential is `psi=E*A*e^2/2`, entropy is
+  `s=A*(E*alpha*e-E'*e^2/2)` and curvature is
+  `psi_TT=A*(E*alpha^2-2*E'*alpha*e)`. Consumers add `psi+T*s` to the original
+  stress-free caloric energy and must admit positive combined heat capacity,
+  `C_caloric-T*psi_TT`, on their actual displacement and temperature domain.
+  This shared law supplies constitutive derivatives; continuing motion, heat
+  transfer and atomic publication belong to the native coupling owners.
+  It does not infer zero expansion, average materials, evolve mass, model slip,
+  or certify a radial/finite-strain/phase-changing constitutive law. The focused
+  G0/G1 tests cover unequal layer temperatures, opposing stresses, source pins,
+  negative expansion and independent free-energy derivative identities. Those
+  tests were added but not executed natively in the connector-only session;
+  syntax parsing and independent derivative arithmetic were checked.
 - `section::winding::CloseWoundSection` retains a sourced circular core and a
   distinct round-wire winding. Exact helical length gives winding line mass;
   the close-coiled spring law gives its axial rigidity with core and winding
@@ -618,6 +640,24 @@ accuracy is supplied by this adapter. Literal NASA/JANAF disagreements remain
 test failures after accounting separately for each printed half-unit. Relative
 bands are unchanged; cp also satisfies its relative-only gate. Rows absent from
 the source are recorded as absent, never interpolated into alleged facts.
+
+Source-backed gas temperature and pressure support comes from the selected
+NASA-9 regions and every pure-transport claim, not from the legacy USSA/Sutherland
+air constructor's 50..2000 K and 100 bar bounds. `GasState::validate_coherence`
+checks positive finite coordinates and the common EOS/caloric/transport/acoustic
+identities; it does not assert source coverage. Energy and entropy inversion
+accept positive finite temperature brackets and retain their original source
+checks, residual tolerances, cancellation and atomic updates. Consequently
+source-supported hot gases can heat, compress and supply the same density,
+viscosity, conductivity and sound speed to existing consumers without changing
+their physics code. Legacy `GasSpec` constructors keep their original limits.
+G1/G3 manufactured tests cover heating through 2000 K, variable-cp reversible
+compression, data-only composition changes and unchanged state after leaving
+transport support. The NASA-9 family covers species-specific high-temperature
+regions (NASA/TP-2002-211556, <https://ntrs.nasa.gov/citations/20020085330>);
+the active source bounds still govern each calculation. This does not admit
+condensed phases, real-gas behavior, equilibrium chemistry or plasma physics,
+and source support alone is not an experimental-accuracy claim.
 
 `gas_species::input::read_isochoric_parcel` retains the same parsed
 thermochemical model, typed conditions and canonical source associations in
@@ -1840,7 +1880,33 @@ gas, wetting or purity default, runtime material-state transfer, or evolving
 surface-energy account. Scalar constants and supported temperature coefficients
 do not authorize frequency- or rate-dependent Newtonian flow.
 
-`gas_field::steady::SteadyAxialGas::solve` generates the existing `AxialGasField` from explicit source packs, common pressure, axial volumes, prescribed positive mass flow, gas injections, and wall temperatures/conductances. The existing fs-thermal `Advected` observer owns both donor-cell enthalpy and its stationary acyclic species extension; the original thermal timeline owns wall heat, combined CFL and energy updates. `GasEnthalpyLaw` derives h(T), T(h,p), and a conservative thermal slope bound from the existing NASA-9 source and safeguarded energy root. Caloric laws may differ by stationary composition only after exact full species/fraction and common enthalpy-reference checks. Inlet enthalpy belongs to its own source mixture. Fixed initial EOS cell masses serve only as pseudo-time relaxation weights; only a converged common-pressure EOS field is published. The final power gate includes absolute caloric closure-flux errors so loose inverse tolerances cannot hide an incorrect supplied inlet energy. Reported balances, work, flow and low-Mach admission are retained. Downstream faces carry first-order mixed-cell states; primitive field interpolation and acoustic sampling require independent spatial refinement. The scope excludes transient variable-density breath flow, inferred heat-transfer coefficients, pressure drop, diffusion, reaction and condensation; phase/source/domain failures refuse without publishing a field. This addition does not close the complete M0.1-W3 qualification.
+`gas_field::steady::SteadyAxialGas::solve` lowers its source packs, axial volumes,
+supplies and walls through `to_network` into the shared
+`network::SteadyGasNetwork`. That owner also admits branched and inlet-fed
+recirculating graphs, with at most 64 cells and 256 interior/boundary connections.
+The existing fs-thermal `Advected` observer owns both donor-cell enthalpy and
+stationary species transport; the original thermal timeline owns wall heat,
+combined CFL and energy updates. Cyclic species balance uses the existing
+fs-la prepared LU with bounded work and a numerical conditioning allowance;
+unanchored closed loops refuse instead of inventing a composition or leakage.
+`GasEnthalpyLaw` derives h(T), T(h,p), and a conservative thermal slope bound from
+the original NASA-9 source. Caloric laws may differ by stationary composition
+only after exact full species/fraction and common enthalpy-reference checks.
+Every inlet carries its own source-mixture enthalpy. Initial EOS cell masses
+are pseudo-time relaxation weights, not a physical variable-density history.
+Only converged, phase-admitted common-pressure states are published, retaining
+their thermochemical and material transport sources for existing flow, thermal
+and acoustic consumers. Each final power gate bounds every donor/outlet caloric
+closure flux separately so inverse errors cannot conceal an inlet energy error.
+The axial adapter additionally checks its reconstructed inlet face, then emits
+the same `AxialGasField` used by existing ducts and reeds. Balances, work, flow
+and bulk-cell low-Mach admission survive this lowering. Downstream faces carry
+first-order mixed-cell states; field interpolation and acoustic sampling still
+need independent spatial refinement. The scope excludes pressure-drop and
+branch-throat velocity prediction, transient variable-density flow, inferred
+wall conductances, diffusion, reaction and condensation. Source, phase, work,
+convergence and publication failures return no partial solution. This does not
+close the complete M0.1-W3 qualification.
 
 ### Equilibrium substrate wetting on the liquid surface owner
 
@@ -2010,8 +2076,18 @@ fixed-external-coordinate policy. Typed pressure, composition, moisture and
 concentration may describe fixed external conditions. Evolving mechanical
 coordinates and a second temperature coordinate cannot be frozen into a thermal
 law. Frequency-dependent values refuse; thermovisco frequency applicability
-alone must retain its static/relaxed endpoint. The original caloric restrictions
-on spring energy, free strain, density and phase remain unchanged.
+alone must retain its static/relaxed endpoint. Caloric feedback admits a globally
+affine common modulus multiplier and free thermal strain across the complete
+retained knot union. It uses mechanical entropy `s=alpha*sigma-S_prime*Xi`
+from the free-energy derivative and accounts for
+internal energy separately from spring free energy. Physical dashpot loss and
+signed reversible exchange, including the native thermal-eigenstrain work,
+enter the original caloric transport owner; numerical loss remains separate.
+Expansion requires positive total heat capacity over the complete chart and
+admitted strain/history range, including instantaneous branch stiffness and
+the mixed expansion/modulus derivative term. The native branch-strain envelope
+is enforced on expansion-bearing endpoints. Changing reference density, phase,
+or either affine derivative still requires additional terms and refuses.
 
 ### Shared phase-dependent conductivity
 
@@ -2039,3 +2115,61 @@ parameter work; fixed-storage winding and moving-gap owners retain their stricte
 source-evolution guards. Focused field-storage tests cover pressure/composition
 surfaces, typed external curves, original claim retention and dynamic-role refusal.
 This adds no independent constitutive formula or magnetic heating law.
+
+## Reversible thermal field storage
+
+field_storage::thermal supplies source-bound reversible thermal field response for fixed-geometry linear C(T)=epsilon(T) A/d and L(T)=mu(T) N^2 A/l. The exact original material card, selected claims, typed absolute temperature and fixed external context remain attached to each refreshed native element. The existing continuous source-path owner checks the full requested interval; the shared affine-temperature derivative admission is reused by thermoplastic and field-storage consumers. Globally affine positive coefficient paths (including constant and fixed-context surface slices) supply field Helmholtz energy psi=z^2/(2K), entropy s=psi Kprime/K, internal energy U=psi+T s, and the nonpositive fixed-coordinate heat-capacity contribution -2T psi(Kprime/K)^2. A conservative full-interval bound supports the coupled owner admission of positive total caloric plus field capacity under an enforced coordinate limit. This material law does not advance a circuit or thermal state. Coupled owners must account reversible field-caloric exchange separately from Joule heat and add U, not psi, to total internal energy. Derivative jumps, field/frequency-dependent coefficients, second thermal source axes, hysteresis, phase transitions, moving geometry and changing nonthermal context refuse or require another owner. Synthetic G1 tests check potential derivatives, electric/magnetic signs, native geometry, source retention, surface paths, coefficient swaps and validity/refusal boundaries; they are not experimental material validation.
+
+## Spatial affine magnetic thermal material
+
+`field_storage::thermal::magnetic::ThermalMagneticMaterial` pins a complete original material snapshot, its immutable card and selected claims, an explicit absolute-temperature axis, fixed remaining context, and a positive globally affine permeability path. It shares source-path admission, Helmholtz derivatives and capacity arithmetic with lumped C(T)/L(T). For actual cell volume V and gauge-invariant |B| it returns psi=V B²/(2mu), entropy=psi mu_prime/mu, U=psi+T entropy and fixed-B heat capacity=−2T psi(mu_prime/mu)². The full-range conservative capacity bound requires the caller to enforce its B envelope and add all field contributions to the caloric capacity. This is a linear reversible fixed-geometry rung; kinked/nonaffine paths, hysteresis, saturation, transition physics and experimental validation are not inferred.
+
+## Source-integrated directional hygroscopic strain
+
+`state_point::integrate_orthotropic_hygroscopic_expansion` integrates three
+explicit dimensionless `linear_hygroscopic_expansion_coefficient_{1,2,3}`
+claims with respect to dry-basis moisture (kg water/kg dry solid). Coefficients
+are engineering-strain derivatives relative to the original stress-free length.
+The typed `hygroscopic_strain_reference_moisture_content` claim must equal the
+reference query throughout the admitted path. Temperature is explicitly absolute
+and fixed; all other query coordinates and schemas remain identical. Selected
+claims are pinned and the original material-line owner admits continuous support
+and exact piecewise-linear integration, including surfaces and drying. Missing
+axes/directions, ambiguous sources, datum changes and domain gaps refuse.
+This is a reversible additive small-strain constitutive path, not a finite-strain,
+hysteretic, sorption-energy or stress-assisted transport law. Source and datum
+identities accompany the complete endpoint evaluations. Tests use authored
+analytic coefficients, not experimental wood validation.
+
+## Source-backed permanent-magnet recoil
+
+`field_storage::permanent::ResolvedRecoilMaterial` binds the reversible isotropic law `B = mu_recoil H + Br n` at one complete fixed material state. Required source properties are `recoil_magnetic_permeability` [H/m], `remanent_flux_density` [T], signed `recoil_minimum_parallel_field_strength` and `recoil_maximum_parallel_field_strength` [A/m], and `recoil_maximum_transverse_field_strength` [A/m]. The parallel interval must contain zero; all values retain their original units, selected claims, card identity, query coordinates and receipts. Generic permeability, coercivity and energy-product-derived model coefficients cannot substitute for recoil data. All coefficients and limits must be static at the selected external conditions; field/frequency dependence cannot be frozen into this linear law.
+
+`at_query_point` refreshes the complete source-pinned bundle, including Br, slope and operating limits. It creates a new fixed-state snapshot; it does not supply live thermal parameter work or irreversible demagnetization. Specimen orientation belongs to the field owner. Computed parallel/transverse H and signed margins are checked against every source limit; those margins are model-admission estimates, not certified bounds on the numerical field. Remanence-only catalog entries remain insufficient input.
+
+## Source-backed reversible nonlinear magnetics
+
+`field_storage::nonlinear::ReversibleMagneticMaterial` consumes the explicit
+`reversible_magnetic_field_strength` source property [A/m] along a named,
+dimensioned flux-density coordinate [T]. The original matdb line query pins
+one source across the whole interval from zero to the declared maximum,
+including fixed-context slices of two-axis source surfaces. Every breakpoint
+retains its canonical answer and receipt. Field-dependent secant permeability,
+coercivity and material names are not alternative ingress paths.
+
+Admission requires H(0)=0 and finite strictly positive segment slopes. Other
+source axes and applicability bounds must be fixed external thermodynamic
+conditions. Discrete-only spans, gaps, source switching, nonmonotone response
+and extrapolation refuse. Runtime H uses the canonical pinned query. The same
+piecewise-affine path supplies H/B, dH/dB, exact segment-integrated energy
+`psi(B)=integral_0^B H(b) db` and coenergy `B H-psi`. The tangent at zero uses
+the first segment; an interior knot uses its right derivative. These are
+floating-point model evaluations, not uncertainty propagation or enclosures.
+
+The law is reversible, isotropic and without remanence. A hysteresis loop or
+initial magnetization branch does not establish that physical model. Static
+temperature/material substitution creates a new law; it does not supply
+magnetic heat, parameter work, hysteresis or irreversible demagnetization.
+G1/G3 regressions in `fs-em/tests/nonlinear_magnetic.rs` exercise analytical
+energy/tangents, material-only solved saturation, mixed-material oblique fields,
+the linear limit, source-domain refusals and cancellation.

@@ -202,8 +202,18 @@ impl ResolvedShearShell {
             budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
         let cavity_volume_shapes=pressure.cavity.project_modes(&physical_modes,
             budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
-        let matrix=project_viscosity(&self.mesh,directors,&self.sections,&self.viscosity,
-            &physical_modes,options.assembly_budget,budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
+        // Each material loss law projects on its own elements; an anchored one is then read at every retained mode's
+        // own frequency (constant loss factors). A Kelvin-Voigt shell is the single original projection.
+        let spectrum=super::constant_loss::ConstantLossSpectrum::fit();
+        let mut matrix:Vec<f64>=Vec::new();
+        for (law,viscosity) in self.loss_groups()? {
+            let mut part=project_viscosity(&self.mesh,directors,&self.sections,&viscosity,&physical_modes,
+                options.assembly_budget,budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
+            if let Some(reference)=law { super::constant_loss::rescale(&mut part,&omega,reference,&spectrum); }
+            if matrix.is_empty() { matrix=part; } else {
+                for (target,value) in matrix.iter_mut().zip(&part) { *target+=value; }
+            }
+        }
         let damping=ModalPlateViscosity::factor(matrix,n,budget.reference_resistance_n_s_m,gate)?;
         let radiators=omega.iter().enumerate().map(|(i,&w)|
             CompactBody::from_mass_normalized_projection(w,volume_shapes[i],projected[0][i],pressure.exterior.area_m2()))

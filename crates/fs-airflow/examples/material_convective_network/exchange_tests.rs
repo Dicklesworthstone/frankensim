@@ -1,5 +1,6 @@
 //! Real shared owners with synthetic material data; no surrogate time integrator.
 use super::*;
+use fs_airflow::graph::thermal::medium::convection::finite_gas::natural::NaturalGasSurface;
 use fs_airflow::graph::thermal::medium::convection::finite_gas::network::exchange::{
     self, ExchangeContact, GasHeatLaw, GasHeatSample,
 };
@@ -33,7 +34,9 @@ fn scoped<R>(run:impl FnOnce(&Cx<'_>,&CancelGate)->R)->R {
 }
 fn mixed(speed:f64)->[ExchangeContact;3] {
     let base=contacts(speed);
-    [ExchangeContact {contact:base[0].contact,law:GasHeatLaw::ForcedConvection(base[0].surface)},
+    [ExchangeContact {contact:base[0].contact,law:GasHeatLaw::NaturalConvection(
+            NaturalGasSurface {area_m2:base[0].surface.area_m2,
+                characteristic_length:base[0].surface.characteristic_length,gravity_m_s2:9.81})},
         ExchangeContact {contact:base[1].contact,law:GasHeatLaw::Conduction(GasConductionGeometry {
             area_m2:base[1].surface.area_m2,gas_distance_m:0.01,cell_distance_m:0.02})},
         ExchangeContact {contact:base[2].contact,law:GasHeatLaw::ForcedConvection(base[2].surface)}]
@@ -104,8 +107,13 @@ fn mixed_laws_use_reacted_midpoints_and_material_changes_reach_charge_heat_and_m
             for entry in result.chambers() {for patch in &entry.surfaces {
                 let cell=result.report().source.material.material.bulk.cells.iter().find(|c|c.cell==patch.source.0.cell).unwrap();
                 match &patch.source.1 {
-                    GasHeatSample::ForcedConvection(sample)=> {
+                    GasHeatSample::ForcedConvection(sample) | GasHeatSample::NaturalConvection(sample)=> {
                         assert_eq!(sample.gas,entry.boundary.piston.midpoint);assert_eq!(sample.body,cell.phase);
+                        let coefficient=sample.evaluation.as_ref().unwrap().coefficient.value.value();
+                        let expected=dt*coefficient*sample.area_m2
+                            *(sample.body.temperature_k()-sample.gas.state().temperature);
+                        assert!((patch.heat_j-expected).abs()<1e-9);
+                        assert!(patch.heat_j<0.0); // Actual hotter gas heats the finite cells.
                         if entry.id==10 {assert_eq!(sample.gas.components().len(),2);}
                     }
                     GasHeatSample::Conduction(material)=>assert_eq!(Some(material),cell.conductivity.as_ref()),
@@ -199,8 +207,8 @@ fn live_transport_changes_the_mixture_seen_by_mixed_heat_before_atomic_publish()
             for surface in &chamber.surfaces {
                 if chamber.id==10 {
                     match &surface.source.1 {
-                        GasHeatSample::ForcedConvection(sample)=>
-                            assert_eq!(sample.gas,&chamber.boundary.piston.midpoint),
+                        GasHeatSample::ForcedConvection(sample) | GasHeatSample::NaturalConvection(sample)=>
+                            assert_eq!(&sample.gas,&chamber.boundary.piston.midpoint),
                         GasHeatSample::Conduction(_) => {}
                     }
                 }

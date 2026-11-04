@@ -42,10 +42,11 @@ use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 mod field_input;
 mod outlet;
 use super::{
-    GestureCompileError, PressureGestureBinding, ScheduledRenderer, compile_pressure_gestures,
+    GestureCompileError, PressureGestureBinding, ScheduledControl, ScheduledRenderer,
+    compile_pressure_gestures,
 };
 use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer};
-use crate::render::{ReedBoreVoice, ReedLay, RenderContext, RenderError, RenderVoice};
+use crate::render::{ControlDelta, ReedBoreVoice, ReedLay, RenderContext, RenderError, RenderVoice};
 use crate::thin_plate::PlateBank;
 pub use field_input::steady::SteadyGasPerformance;
 
@@ -579,6 +580,35 @@ impl ReedPerformance {
             row.finish()?;
             Some(length)
         } else { None };
+        let tongue_contact = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("tongue_contact") {
+            let mut row = r.row("tongue_contact")?;
+            let area_m2 = row.positive()?;
+            let effective_area_m2 = row.positive()?;
+            let force_n = row.positive()?;
+            let release_start_s = row.scalar()?;
+            let release_s = row.positive()?;
+            row.finish()?;
+            if reed.mass_kg <= 0.0 {
+                return Err(bad(r.line, "tongue_contact requires a massive reed"));
+            }
+            if release_start_s < 0.0 {
+                return Err(bad(
+                    r.line,
+                    "tongue_contact requires a nonnegative release_start_s",
+                ));
+            }
+            let modal_factor = cantilever_tip_modal_factor(area_m2, effective_area_m2)
+                .ok_or_else(|| bad(r.line, "tongue_contact area exceeds the vibrating reed blade area"))?;
+            Some(TongueContactInput {
+                modal_factor,
+                force_n,
+                release_start_s,
+                release_s,
+            })
+        } else {
+            None
+        };
         let observation =
             outlet::ObservationInput::read_with_gas_sources(&mut r, sources, &mut gas_records)?;
         observation.validate_policy(policy)?;
@@ -781,7 +811,7 @@ impl ReedPerformance {
                 "an authored pressure command starts after the last observed control tick",
             ));
         }
-        let controls = compile_pressure_gestures(
+        let mut controls = compile_pressure_gestures(
             &schedule,
             &[PressureGestureBinding {
                 track: track.id.clone(),
@@ -792,6 +822,22 @@ impl ReedPerformance {
             max_work,
         )
         .map_err(ReedPerformanceError::Schedule)?;
+        if let Some(tongue) = tongue_contact {
+            if tongue.release_start_s > last_time {
+                return Err(bad(
+                    0,
+                    "tongue_contact release starts after the last observed control tick",
+                ));
+            }
+            tongue.append_controls(
+                &mut controls,
+                &schedule,
+                &track.id,
+                reed,
+                rate,
+                last_tick,
+            )?;
+        }
         if controls.len() > max_controls {
             return Err(bad(
                 0,
@@ -1162,6 +1208,88 @@ impl<'a> Row<'a> {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TongueContactInput {
+    modal_factor: f64,
+    force_n: f64,
+    release_start_s: f64,
+    release_s: f64,
+}
+
+impl TongueContactInput {
+    fn append_controls(
+        &self,
+        controls: &mut Vec<ScheduledControl>,
+        schedule: &GestureSchedule,
+        track_id: &str,
+        reed: BeatingReed,
+        audio_rate_hz: u32,
+        last_tick: u64,
+    ) -> Result<(), ReedPerformanceError> {
+        let control_rate_hz = schedule.control_rate_hz;
+        let face = crate::reed_bore::reed_pressure_face(reed);
+        let release_tick = ((self.release_start_s * f64::from(control_rate_hz)).round() as u64)
+            .min(last_tick);
+        let release_pressure_pa = schedule
+            .sample(track_id, release_tick)
+            .map_err(|e| ReedPerformanceError::Schedule(GestureCompileError::Gesture(e)))?;
+        let pre_release_close_n = self.modal_factor * self.force_n;
+        let held_downward_n = pre_release_close_n + face * release_pressure_pa;
+        let mut previous = None;
+        for tick in 0..=last_tick {
+            let t = tick as f64 / f64::from(control_rate_hz);
+            let force_n = if t <= self.release_start_s {
+                let p_m = schedule
+                    .sample(track_id, tick)
+                    .map_err(|e| ReedPerformanceError::Schedule(GestureCompileError::Gesture(e)))?;
+                (held_downward_n - face * p_m).max(0.0)
+            } else {
+                let elapsed = t - self.release_start_s;
+                if elapsed < self.release_s {
+                    (pre_release_close_n * (1.0 - elapsed / self.release_s)).max(0.0)
+                } else {
+                    0.0
+                }
+            };
+            let bits = force_n.to_bits();
+            if previous != Some(bits) {
+                let sample = (u128::from(tick) * u128::from(audio_rate_hz))
+                    .div_ceil(u128::from(control_rate_hz)) as u64;
+                controls
+                    .try_reserve(1)
+                    .map_err(|_| bad(0, "cannot allocate tongue_contact controls"))?;
+                controls.push(ScheduledControl {
+                    sample,
+                    delta: ControlDelta::SetReedClosingForce { voice: 0, force_n },
+                });
+                previous = Some(bits);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Fundamental clamped-free Euler-Bernoulli cantilever mode projection factor
+/// $\Phi_{\text{tongue}}(\eta) = \frac{1}{\eta} \int_{1-\eta}^1 \psi_1(\xi)\,d\xi$
+/// for a uniform tongue contact strip of area $A_{\text{tongue}}$ at the reed tip,
+/// where $S_r = c_1 A_{\text{reed}}$ is the effective pressure area of the reed
+/// (`Chatziioannou & van Walstijn 2009` Eq. 6; `Ducasse 2003` p. 62).
+fn cantilever_tip_modal_factor(area_m2: f64, effective_area_m2: f64) -> Option<f64> {
+    const BETA1: f64 = 1.875_104_068_711_961_2;
+    const SIGMA1: f64 = 0.734_095_513_758_888_6;
+    const C1: f64 = 2.0 * SIGMA1 / BETA1;
+    let eta = C1 * area_m2 / effective_area_m2;
+    if !eta.is_finite() || eta <= 0.0 || eta > 1.0 {
+        return None;
+    }
+    let psi_integral = |xi: f64| -> f64 {
+        let bxi = BETA1 * xi;
+        ((bxi.sinh() - bxi.sin()) - SIGMA1 * (bxi.cosh() + bxi.cos() - 2.0)) / (2.0 * BETA1)
+    };
+    let factor = (psi_integral(1.0) - psi_integral(1.0 - eta)) / eta;
+    (factor.is_finite() && factor > 0.0).then_some(factor)
 }
 
 #[cfg(test)]

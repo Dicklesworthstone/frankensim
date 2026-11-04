@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	manufactured-bonded-finite-gas-sleeve
+redistribution	permitted	Manufactured coupling fixture; no measured material authority
+citation	Declared second-layer conductor, density, expansion and bending loss for live bonded-string coupling
+license	CC0-1.0
+source	fixture	sleeve-properties.tsv	material-tsv-v1

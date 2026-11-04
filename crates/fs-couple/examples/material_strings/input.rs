@@ -13,18 +13,22 @@ pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
 pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
 pub const MAX_MODES: usize = 128;
-/// Retained body modes a `body` record may request. Flat plate bodies keep [`MAX_PLATE_BODY_MODES`].
-pub const MAX_BODY_MODES: usize = 128;
+/// Retained body modes a `body` record may request: the shell owner's own ceiling, `MAX_SHELL_MODES`. Flat plate
+/// bodies keep [`MAX_PLATE_BODY_MODES`].
+pub const MAX_BODY_MODES: usize = 256;
 pub const MAX_PLATE_BODY_MODES: usize = 16;
 /// Modal coordinates of one complete instrument (strings, twist, body, cavity, gas memory). The shared exact
 /// propagation holds at most 42 of them as one dense block; a larger network needs the explicit
-/// `prepared-linear` record, whose own library ceiling is `MAX_PREPARED_MODAL_MODES` (512). The network
+/// `prepared-linear` record, whose own library ceiling is `MAX_PREPARED_MODAL_MODES` (1024). The network
 /// setup work `modes * (links + 1)^2` still has to fit [`MAX_WORK`].
-pub const MAX_TOTAL_MODES: usize = 512;
+pub const MAX_TOTAL_MODES: usize = 1024;
 const _: () = assert!(MAX_TOTAL_MODES <= fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES);
 pub const MAX_EVENTS: usize = 16_384;
 pub const MAX_CONTROLS: usize = 262_144;
-pub const MAX_WORK: u64 = 16_777_216;
+/// The complete network's setup work `modes * (links + 1)^2` at the ceilings: every mode of the total ceiling with one
+/// link per body mode at the body ceiling. It also bounds plate and relaxation projection terms; each performance's
+/// declared budgets bound the real work, and this ceiling only refuses impossible declarations.
+pub const MAX_WORK: u64 = (MAX_TOTAL_MODES * (MAX_BODY_MODES + 1) * (MAX_BODY_MODES + 1)) as u64;
 
 #[derive(Clone, Debug)]
 pub struct Wire {
@@ -131,7 +135,9 @@ pub struct Spec {
     pub longitudinal_loss: LongitudinalMaterialLoss,
     pub bending_memory: Option<bending_memory::Input>,
     pub body_radiation: Option<BodyRadiation>,
+    pub shell_bem_angular_refinement: u32,
     pub shell_observer: Option<ShellObserverOptions>,
+    pub shell_receiver_quadrature: fs_bem::near_field::Options,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
@@ -161,7 +167,7 @@ impl Spec {
         let mut row = r.row("audio")?;
         let rate: u32 = row.parse()?; let samples: u64 = row.parse()?;
         let full_scale = row.positive()?; let block = row.count(65_536)?; row.end()?;
-        if rate == 0 || rate > 192_000 || samples == 0 || samples > 28_800_000
+        if rate == 0 || rate > 384_000 || samples == 0 || samples > 28_800_000
             || samples > u64::from(rate)*600 || block == 0 {
             return Err("audio requires a bounded positive clock, horizon and callback".into());
         }
@@ -441,6 +447,14 @@ impl Spec {
             }
             Some(options)
         } else { None };
+        let shell_bem_angular_refinement = if r.lines.clone().next()
+            .and_then(|line|line.split_ascii_whitespace().next())==Some("shell_angular_refinement") {
+            if !matches!(body_radiation,Some(BodyRadiation::ShellBem(_))) {
+                return Err("shell_angular_refinement requires body-radiation bem".into());
+            }
+            let mut row=r.row("shell_angular_refinement")?;
+            let level=row.count(2)? as u32;row.end()?;level
+        } else {0};
         let shell_observer = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("shell_observer") {
             let mut row = r.row("shell_observer")?;
@@ -472,6 +486,16 @@ impl Spec {
                 maximum_sweep_terms, maximum_replay_terms,
             })
         } else { None };
+        let shell_receiver_quadrature = if r.lines.clone().next()
+            .and_then(|line|line.split_ascii_whitespace().next())==Some("shell_quadrature") {
+            if shell_observer.is_none() { return Err("shell_quadrature requires shell_observer".into()); }
+            let mut row=r.row("shell_quadrature")?;
+            let options=fs_bem::near_field::Options {
+                relative_tolerance:row.positive()?,maximum_depth:row.count(16)?,
+                maximum_kernel_evaluations:row.count(20_000_000)?,
+            };
+            row.end()?;options.validate()?;options
+        } else {fs_bem::near_field::Options::default()};
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -677,7 +701,8 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
-            longitudinal_loss, bending_memory, body_radiation, shell_observer, cavity, friction, bow_ribbon, bow_fibers, forces, schedule };
+            longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
+            shell_observer, shell_receiver_quadrature, cavity, friction, bow_ribbon, bow_fibers, forces, schedule };
         spec.validate_shell_observer()?;
         if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }
         spec.network_dimensions(false)?;
@@ -688,6 +713,12 @@ impl Spec {
     /// Repeat this cheap source admission before material I/O for programmatic
     /// edits to an already parsed specification.
     pub fn validate_shell_observer(&self) -> Result<()> {
+        if self.shell_bem_angular_refinement>2
+            || (self.shell_bem_angular_refinement!=0
+                && !matches!(self.body_radiation,Some(BodyRadiation::ShellBem(_)))) {
+            return Err("shell angular refinement requires the original BEM owner and level 0..2".into());
+        }
+        self.shell_receiver_quadrature.validate()?;
         if let Some(observer) = &self.shell_observer {
             observer.validate(self.rate)?;
             let Some(BodyRadiation::ShellBem(load)) = self.body_radiation else {
@@ -760,9 +791,20 @@ impl Spec {
     pub fn network_dimensions_with_body_connections(&self, tensor_body: bool,
         additional_body_connections: usize) -> Result<(usize, usize, usize)>
     {
+        self.network_dimensions_with_body_modes(tensor_body, additional_body_connections, 0)
+    }
+
+    /// Include every source-declared interior-air coordinate and compression
+    /// column in the same complete mechanical allocation. Uniform compression
+    /// contributes a connection but no fictitious inertia.
+    pub fn network_dimensions_with_body_modes(&self, tensor_body: bool,
+        additional_body_connections: usize, additional_body_modes: usize)
+        -> Result<(usize, usize, usize)>
+    {
         self.string_memory_states()?;
         if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
+            .and_then(|n| n.checked_add(additional_body_modes))
             .ok_or("complete mode count overflow")?;
         if let Some(fibers) = &self.bow_fibers {
             modes = modes.checked_add(fibers.mode_count(self)?).ok_or("complete fiber mode count overflow")?;

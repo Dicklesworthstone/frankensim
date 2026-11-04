@@ -37,16 +37,36 @@ impl ReedBoreVoice {
                 what: "same-sample reed load is outside the finite positive-impedance domain",
             });
         }
+        let closing_force_n = self.closing_force_n;
+        let closing_force = |_next_y: f64| Ok(closing_force_n);
+        let material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>> =
+            if closing_force_n != 0.0 {
+                Some(&closing_force)
+            } else {
+                None
+            };
         let (outgoing, opening, velocity) = if let Some(slit) = self.viscous_slit {
             let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
             let result = crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
                 self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
                 self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
-                |opening| Ok(opening.max(0.0)), None,
+                |opening| Ok(opening.max(0.0)), material_force,
                 |opening, moving| slit.characteristic_pressure(
                     self.reed.width_m, opening, self.rho, impedance, incoming,
                     mouth_pressure_pa, moving,
                 ),
+            )?;
+            if self.solver_mode == ReedSolverMode::FastNewton {
+                self.fast_stats.fallback_samples += 1;
+            }
+            result
+        } else if closing_force_n != 0.0 {
+            let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
+            let result = crate::reed_bore::step_profiled_aperture(
+                self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
+                self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
+                |opening| Ok(opening.max(0.0)), material_force,
+                crate::reed_bore::OpeningPropagator::Midpoint,
             )?;
             if self.solver_mode == ReedSolverMode::FastNewton {
                 self.fast_stats.fallback_samples += 1;

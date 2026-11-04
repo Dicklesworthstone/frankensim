@@ -11,10 +11,17 @@ pub(super) fn computed_baffled_provenance(
     let limits = record.limits();
     let band = record.band_hz();
     let report = record.report();
-    let apertures = record.apertures().iter().enumerate().map(|(port, aperture)| format!(
-        "{{\"port\":{port},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
-        aperture.center_m[0], aperture.center_m[1], aperture.radius_m
+    let driven_mouth = record.driven_mouth();
+    let offset = usize::from(driven_mouth.is_some());
+    let terminals = record.apertures().iter().enumerate().map(|(port, aperture)| format!(
+        "{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+        port + offset, aperture.center_m[0], aperture.center_m[1], aperture.radius_m
     )).collect::<Vec<_>>().join(",");
+    let apertures = driven_mouth.map_or_else(|| terminals.clone(), |mouth| format!(
+        "{{\"port\":0,\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"outward_flow\":\"negative driven inlet flow\",\"terminal_radial_rings\":{},\"terminal_angular_points\":{}}},{terminals}",
+        mouth.center_m[0], mouth.center_m[1], mouth.size_m[0], mouth.size_m[1],
+        mouth.cells[0], mouth.cells[1], mouth.terminal_radial_rings, mouth.terminal_angular_points
+    ));
     let number = |value: Option<f64>| value.filter(|v| v.is_finite())
         .map_or_else(|| "null".into(), |value| format!("{value:e}"));
     let rungs = report.rungs.iter().map(|rung| format!(
@@ -24,7 +31,13 @@ pub(super) fn computed_baffled_provenance(
         rung.refusal.as_ref().map_or_else(|| "null".into(), |text| super::json_string(text))
     )).collect::<Vec<_>>().join(",");
     let gas_sources = super::thermochemical::provenance(core::slice::from_ref(record.gas_record()));
-    format!("{{\"source\":\"computed-baffled\",\"declaration_identity\":\"{}\",\"realization_identity\":\"{}\",\"exterior_gas\":{},\"band_hz\":[{:e},{:e}],\"ordered_apertures\":[{apertures}],\"frequency_samples\":{},\"orders\":[{},{},{}],\"fit_iterations\":{},\"maximum_relative_error\":{:e},\"max_fit_memory_bytes\":{},\"causality_subtractions\":{},\"causality_tail_bound_ratio\":{:e},\"causality_data_tolerance\":{:e},\"max_states\":{},\"max_memory_bytes\":{},\"sampled_passivity_points\":{},\"selected_order\":{},\"held_out_samples\":{},\"fit_relative_error\":{:e},\"held_out_relative_error\":{:e},\"maximum_causality_ratio\":{:e},\"continuous_passivity_class\":\"{:?}\",\"sampled_passivity_class\":\"{:?}\",\"rungs\":[{rungs}],\"scope\":\"actual coplanar circular openings and resolved exterior; shared closed-form piston and Rayleigh mutual operator; proper undelayed rational approximation over full mechanical Nyquist band; no passivity repair, delayed realization or measured-instrument qualification; sampled GridOnly is not a storage certificate\"{gas_sources}}}",
+    let source = if driven_mouth.is_some() { "computed-mixed-baffled" } else { "computed-baffled" };
+    let scope = if driven_mouth.is_some() {
+        "actual coplanar rectangular mouth and circular terminals in the bound exterior; complete shared power-consistent Rayleigh surface matrix and mutual source feedback; proper rational approximation over full mechanical Nyquist band; no passivity repair or measured-instrument qualification; finite surface/frequency checks and sampled GridOnly are not continuum or storage certificates"
+    } else {
+        "actual coplanar circular openings and resolved exterior; shared closed-form piston and Rayleigh mutual operator; proper undelayed rational approximation over full mechanical Nyquist band; no passivity repair, delayed realization or measured-instrument qualification; sampled GridOnly is not a storage certificate"
+    };
+    format!("{{\"source\":\"{source}\",\"declaration_identity\":\"{}\",\"realization_identity\":\"{}\",\"exterior_gas\":{},\"band_hz\":[{:e},{:e}],\"ordered_apertures\":[{apertures}],\"frequency_samples\":{},\"orders\":[{},{},{}],\"fit_iterations\":{},\"maximum_relative_error\":{:e},\"max_fit_memory_bytes\":{},\"causality_subtractions\":{},\"causality_tail_bound_ratio\":{:e},\"causality_data_tolerance\":{:e},\"max_states\":{},\"max_memory_bytes\":{},\"sampled_passivity_points\":{},\"selected_order\":{},\"held_out_samples\":{},\"fit_relative_error\":{:e},\"held_out_relative_error\":{:e},\"maximum_causality_ratio\":{:e},\"continuous_passivity_class\":\"{:?}\",\"sampled_passivity_class\":\"{:?}\",\"rungs\":[{rungs}],\"scope\":\"{scope}\"{gas_sources}}}",
         fs_blake3::ContentHash(record.declaration_identity()).to_hex(),
         fs_blake3::ContentHash(record.realization_identity()).to_hex(),
         gas_state(record.gas_record().state()), band[0], band[1],
@@ -57,6 +70,89 @@ pub(super) fn mimo_radiation_provenance(
         limits.max_states, limits.max_memory_bytes, limits.sampled_passivity_points)
 }
 
+// Read the same bound exterior used by an actual receiver. A DG reaction's
+// retained record takes precedence over a separate outer-file declaration.
+pub(super) fn aperture_exterior_gas(
+    p: &PlateValvePerformance,
+) -> Option<&fs_material::gas::GasState> {
+    let bound = match p.renderer().system() {
+        CoupledAperture::Dg(runtime) => runtime.load().radiation_record()
+            .map(|record| record.gas_record().state()),
+        _ => None,
+    };
+    bound.or_else(|| p.renderer().exterior_gas()).or_else(|| p.exterior_gas())
+}
+
+// The source record is meaningful even when the selected output is internal.
+pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> String {
+    let mut output = load.radiation_record().map_or_else(String::new, |record|
+        format!(",\"computed_radiation\":{}", computed_baffled_provenance(record)));
+    if !load.terminal_channels().is_empty() {
+        use fs_couple::dg_port::DgTerminalChannelKind;
+        let channels = load.terminal_channels().iter().map(|bound| {
+            let input = bound.input();
+            let law = match input.kind {
+                DgTerminalChannelKind::Closed => "\"kind\":\"closed\"".to_owned(),
+                DgTerminalChannelKind::Slit {
+                    width_m, height_m, length_m, transverse_cells, maximum_mach,
+                } => format!("\"kind\":\"unsteady-fixed-slit\",\"width_m\":{width_m:e},\"height_m\":{height_m:e},\"length_m\":{length_m:e},\"transverse_cells\":{transverse_cells},\"maximum_mach\":{maximum_mach:e}"),
+            };
+            format!("{{\"port\":{},{law},\"gas\":{}}}", input.port.0, gas_state(bound.gas()))
+        }).collect::<Vec<_>>().join(",");
+        output.push_str(&format!(",\"terminal_channels\":[{channels}],\"terminal_channel_scope\":\"same-step original transverse-momentum slit states or exact zero-flow closures in the complete exterior matrix; fixed geometry and laminar port reduction; no moving-pad work, annular-gap resolution, edge shedding or turbulent-loss calibration\""));
+    }
+    if !load.duct().side_ports().is_empty() {
+        let ports = load.terminal_ports().iter().map(|port| port.0.to_string())
+            .collect::<Vec<_>>().join(",");
+        let sides = load.duct().side_ports().iter().map(|port| {
+            let source = load.duct().side_port_source(port.id)
+                .expect("computed source admitted every original side-port gas");
+            format!("{{\"port\":{},\"downstream_element\":{},\"station_m\":{:e},\"bore_area_m2\":{:e},\"gas\":{}}}",
+                port.id.0, port.downstream_element, source.station_m,
+                source.bore_area_m2, gas_state(&source.gas))
+        }).collect::<Vec<_>>().join(",");
+        let chimneys = load.branches().iter().map(|branch| {
+            let duct = branch.duct();
+            let mesh = duct.mesh();
+            let band = duct.viscothermal_band_rad_s().map_or_else(|| "null".into(), |band|
+                format!("[{:e},{:e}]", band[0], band[1]));
+            format!("{{\"port\":{},\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_band_rad_s\":{band}}}",
+                branch.port().0, duct.operator_identity().to_hex(), duct.total_length(),
+                duct.inlet_area_m2(), duct.outlet_area_m2(), gas_state(duct.inlet_gas()),
+                gas_state(duct.outlet_gas()), mesh.elements, mesh.order, duct.total_dofs())
+        }).collect::<Vec<_>>().join(",");
+        output.push_str(&format!(",\"terminal_port_order\":[{ports}],\"side_ports\":[{sides}],\"finite_chimneys\":[{chimneys}],\"side_opening_scope\":\"original DG face junctions and explicitly declared finite DG chimneys; branch outlets own exterior geometry and accepted radiated flow; complete mutual terminal radiation; no moving pad or three-dimensional junction correction\""));
+    }
+    output
+}
+
+// Both existing wind owners observe this same accepted DG terminal and record.
+pub(super) fn dg_baffled_observation_provenance(
+    load: &fs_couple::dg_port::DgPortLoad,
+    receiver: fs_couple::pcm_wav::baffled::CircularOutletReceiver,
+    microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
+) -> String {
+    let source = load.radiation_record().expect("admitted bound DG radiation source");
+    let exterior = gas_state(source.gas_record().state());
+    if !load.duct().side_ports().is_empty() {
+        let apertures = load.terminal_ports().iter().zip(source.apertures()).map(|(port, aperture)|
+            format!("{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+                port.0, aperture.center_m[0], aperture.center_m[1], aperture.radius_m)
+        ).collect::<Vec<_>>().join(",");
+        return format!(",\"observation_scope\":\"exterior Rayleigh pressure from every accepted held DG terminal flow in original matrix order and bound source gas; uniform circular openings in one infinite rigid baffle; full mutual terminal feedback through any declared finite DG chimney; no mouth, free-field body or room radiation\",\"terminal_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"apertures\":[{apertures}],\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
+            receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
+            receiver.radial_rings, receiver.angular_points, receiver.maximum_frequency_hz,
+            microphone.delay_samples.0, microphone.delay_samples.1,
+            microphone.filter_delay_samples());
+    }
+    let aperture = source.apertures().first().expect("admitted bound DG outlet");
+    format!(",\"observation_scope\":\"exterior Rayleigh pressure from each accepted held DG outlet flow in the bound computed-source gas; one uniform circular opening in an infinite rigid baffle; no mouth, free-field body or room radiation\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
+        receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
+        aperture.radius_m, receiver.radial_rings, receiver.angular_points,
+        receiver.maximum_frequency_hz, microphone.delay_samples.0,
+        microphone.delay_samples.1, microphone.filter_delay_samples())
+}
+
 fn impedance(load:SeriesImpedanceSpec)->String {
     let compliance=load.compliance_m3_pa.map_or_else(||"null".into(),|v|format!("{v:e}"));
     format!("\"resistance_pa_s_m3\":{:e},\"inertance_pa_s2_m3\":{:e},\"compliance_m3_pa\":{compliance}",
@@ -66,7 +162,7 @@ fn impedance(load:SeriesImpedanceSpec)->String {
 pub(super) fn provenance(p:&PlateValvePerformance)->String {
     // Report the resolved default even on an unsegmented tube. Source identity
     // already binds the exact authored species, basis and fractions.
-    let exterior = p.exterior_gas().map_or_else(String::new, |gas|
+    let exterior = aperture_exterior_gas(p).map_or_else(String::new, |gas|
         format!(",\"exterior_gas\":{}", gas_state(gas)));
     let slit = p.renderer().system().aperture().viscous_slit().map_or_else(String::new, |law|
         format!(",\"slit_flow\":{{\"model\":\"spatial-laminar-bernoulli-v1\",\"length_m\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"viscosity_source\":\"inlet-gas\",\"scope\":\"quasi-steady Newtonian slit with separated outflow; not resolved channel flow or pressure recovery\"}}",
@@ -95,10 +191,14 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
             fs_duct::dg::DgBoundary::Closed => "closed",
             fs_duct::dg::DgBoundary::IdealOpen => "ideal-open",
             fs_duct::dg::DgBoundary::Matched => "matched",
-            fs_duct::dg::DgBoundary::Port(_) => unreachable!("one inlet load admission"),
+            fs_duct::dg::DgBoundary::Port(_) => {
+                if load.radiation_record().is_some() { "computed-baffled" }
+                else { "causal-impedance-port" }
+            }
         };
         let field = duct.gas_field().map_or_else(String::new, dg_field_provenance);
-        return format!("{force_json},\"dg_duct\":{{\"model\":\"exact-zoh-bessel-dg-v1\",\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_memory_dofs\":{},\"outlet\":\"{terminal}\",\"wall_owner\":\"{wall_owner}\",\"series_poles\":{series_poles},\"thermal_poles\":{thermal_poles},\"wall_quadrature_points\":{quadrature},\"band_hz\":[{:e},{:e}],\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e},\"exponential_tolerance\":{:e},\"exponential_certificate_residual\":{:e},\"mean_port_impedance_pa_s_m3\":{:e}{field},\"scope\":\"original geometry and material-gas DG exponential with ExactZoh plate/Maxwell aperture; implicit same-step mean pressure and total flow; internal inlet observation; finite-band Bessel pole approximation; taper uses a local-cylinder Webster approximation; spatial and nonlinear time convergence separate; loss ledger inferred, not an independent heat integral; authored solid sections and spectra, not measured-material qualification\"}}",
+        let radiation = dg_radiation_provenance(load);
+        return format!("{force_json},\"dg_duct\":{{\"model\":\"exact-zoh-bessel-dg-v1\",\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_memory_dofs\":{},\"outlet\":\"{terminal}\",\"wall_owner\":\"{wall_owner}\",\"series_poles\":{series_poles},\"thermal_poles\":{thermal_poles},\"wall_quadrature_points\":{quadrature},\"band_hz\":[{:e},{:e}],\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e},\"exponential_tolerance\":{:e},\"exponential_certificate_residual\":{:e},\"mean_port_impedance_pa_s_m3\":{:e}{field}{radiation},\"scope\":\"original geometry and material-gas DG exponential with ExactZoh plate/Maxwell aperture; implicit same-step mean pressure and total flow; pressure observation declared separately; finite-band Bessel pole approximation; taper uses a local-cylinder Webster approximation; spatial and nonlinear time convergence separate; loss ledger inferred, not an independent heat integral; authored solid sections and spectra, not measured-material qualification\"}}",
             duct.operator_identity().to_hex(), duct.total_length(), duct.inlet_area_m2(),
             duct.outlet_area_m2(), gas_state(duct.inlet_gas()), gas_state(duct.outlet_gas()),
             mesh.elements, mesh.order, duct.total_dofs(),
@@ -317,3 +417,4 @@ pub(super) fn dg_field_provenance(field: &fs_material::gas_field::AxialGasField)
     format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}],\"scope\":\"frozen primitive temperature/composition; shared EOS and transport at original spatial quadrature; no mean-flow correction\"}}",
         field.static_pressure_pa(), species.join(","), stations.join(","), packs.join(","))
 }
+

@@ -514,6 +514,82 @@ This is source-data covariance conditional on fixed orientation, not solved-fiel
 uncertainty, a confidence/domain bound, material/frame calibration, propagation
 of uncertain temperature/stiffness/orientation, or experimental validation.
 
+## Material replacement on an accepted P1 trajectory
+
+`loads3::transient::events::rebind_material_candidate` permits source-data
+changes to density, stiffness and stress-free strain on the same reference
+mesh and fixed-DOF set. It retains the accepted physical displacement, clock
+and step count, solves `M_after_ff v_after = M_before_ff v_before`, and uses
+the original initializer to rebuild operators and re-equilibrate acceleration
+under the explicitly supplied new load/thermal endpoint. Subsequent ordinary
+Newmark steps and stress recovery consume the actual retained new problem.
+The event does not consume a time-advancement slot.
+
+The conserved quantity is FREE canonical momentum. Stationary constraints
+may exchange full nodal or total physical momentum; this operation reports
+no support impulse. Moving-support trajectories and changed meshes/restraints
+refuse. This is externally supplied material reconfiguration, not mass
+transport or a continuous material transition.
+
+Required signed work is `Delta(1/2 v'Mv) + Delta(sum V/2 e'C e)`, where
+`e = strain - strain_free`. Kinetic and physical shifted-elastic changes
+remain separate. Positive work must be supplied by the reconfiguration owner,
+and negative work returned to it; neither is automatically caloric heat or
+dissipation. An explicit absolute work budget and independent SI momentum
+residual gate admit the candidate. Per-element old/new material and thermal
+identities and reference masses remain in its report. Failure of source,
+solve, momentum, strain, work or cancellation checks preserves the old run.
+
+`tests/transient_events3.rs` exercises immutable source-card substitution
+through the native solver: doubled density, tripled stiffness, changed
+eigenstrain, exact scalar momentum/acceleration/work, subsequent motion,
+zero-work equivalent replacement, retained nonzero clock/step history,
+fully clamped storage, and late work/strain or cancellation refusal.
+This does not differentiate the replacement map or validate a real material
+transition.
+
+## Thermal material evolution in sparse P1 dynamics
+
+`loads3::transient::thermal::advance_thermal_candidate` refreshes the actual
+source-bound thermal strain, material identity and global Mandel stiffness.
+Changed tensors rebuild the native endpoint stiffness using the existing P1
+assembly; unchanged tensors reuse the original sparse operators. Both paths
+preserve the accepted Newmark displacement, velocity, acceleration and clock.
+Reference density, sparse mass, reference inventory, mesh connectivity and
+stationary zero restraints stay fixed. Refreshed source counts, identities,
+geometry, quality and strain limits pass the original assembly and response
+checks. A fully clamped trajectory uses the existing zero-free-DOF dynamic
+assembly and still reports stress and stored energy.
+
+The ordinary Newmark audit retains its unshifted quadratic-energy convention,
+averages old/new thermal nodal forcing, and records signed stiffness parameter
+work `W_K = q_old' * (K_next-K_old) * q_next / 2`.
+`ThermalTransientStep3` separately audits physical kinetic plus shifted elastic
+energy, with `e = epsilon-epsilon_free`. Its independent element work is
+`W_T = -sum V * (sigma_old+sigma_next)/2 : delta(epsilon_free)` and
+`W_C = sum V/2 * e_old : (C_next-C_old) : e_next`. Both terms are needed when a
+fully restrained solid expands and softens with zero displacement work.
+Material parameter work is signed prescribed input; it is not dissipated heat.
+
+Changing stiffness requires zero stiffness-proportional Rayleigh damping;
+fixed reference mass damping remains supported. Changing endpoint Rayleigh
+stiffness damping is not unconditionally dissipative and is refused.
+Unchanged-stiffness trajectories retain their existing damping behavior.
+The native and physical audits use the declared run tolerances and refreshed
+source identities. These are exact discrete endpoint work identities;
+continuum accuracy still requires resolving the prescribed material path and
+checking timestep refinement. Failed assembly, motion, stress, energy or
+cancellation checks leave the original trajectory unchanged.
+
+G1/G3/G4 tests in `tests/transient3.rs` cover an analytical thermally driven
+oscillator with timestep refinement, source-identity refresh, scalar softening
+and stiffening with retained motion and mass damping, fully clamped thermal
+storage with distinct expansion/stiffness work, changed-density and variable
+stiffness-damping refusal, late strain refusal and cancellation. This is
+one-way prescribed thermal/material loading. Reciprocal caloric feedback,
+changing reference mass, moving thermal supports, an adjoint of the new
+material inputs and measured validation remain outside this path.
+
 ## Prescribed support motion in sparse P1 dynamics
 
 `loads3::transient::motion` extends the existing sparse average-acceleration
@@ -1460,3 +1536,121 @@ unchanged mass/support maps, spectral shifts, and a manufactured varying-stress
 quadratic field whose geometric energy differs from an element-average shortcut.
 They also check the fully constrained and cancellation boundaries. These are
 numerical approximation checks, not experimental material validation.
+
+## Generic initial strain on the native tetrahedral owner
+
+`linear3::eigenstrain` admits source-bound mesh-frame Mandel initial strain
+without manufacturing a temperature. Principal strains rotate through the
+existing second-order Mandel transform with explicit nonzero source/mesh frames.
+Generic and thermal inputs share the original equivalent-load, PCG displacement,
+stress recovery, geometry admission and prestress kernels; thermal source types
+and thermal identity formats remain intact. Generic output carriers now name
+the shared eigenstrain response; existing thermal names denote those same results.
+`SolidStiffnessModel` is the existing source schema and lowering shared across
+thermal and other evolving material conditions. No duplicate constitutive or
+linear solver is introduced. Deformed charts expose their admitted tetrahedral
+volumes for mass-conserving current density.
+
+Generic initial strain is checked against exact current elastic identities;
+stress/tangent recovery refuses a stale material/source/load/solution. Fully
+constrained equilibrium returns zero displacement and actual reactions; a modal
+pencil still requires free DOFs. The tangent uses the existing signed
+reference-configuration initial-stress approximation, not a finite-deformation
+or post-buckling theory. Input source work is external to this mechanical energy
+account; no combined chemo/thermo-mechanical passivity claim is added. G1 tests
+cover free directional deformation, constrained stress and energy, thermal/generic
+numerical equivalence, frame rotation, stale input and cancellation.
+
+
+## Source viscoelastic pressure-valve dynamics
+
+The material-valve path in fs-solid::reduce::visco connects the existing
+TetViscoField / TensorProny owner to the ordinary valve reduction, pressure
+ports and BeatingReedSource interface. Uniform or per-element anisotropic
+Kelvin-Voigt/Prony data supplies density, storage and loss. The same TET4 or
+explicit-quadrature TET10 mesh, constraints, modal shapes, face normalization
+and pressure work projection are used throughout. No material-name branch or
+independent damping constant is inserted.
+
+This is an explicitly admitted frozen-frequency reduction:
+K = K'(omega_ref), C = K''(omega_ref)/omega_ref. All modes share ONE storage
+pencil and its mass-orthogonal basis. The existing fs-modal damping certifier
+examines the full projected symmetric C; a required coupled block refuses
+instead of being exported as independent decay rates. Full retained storage
+and loss matrices are also compared with the frozen model at EVERY retained
+modal frequency. Controls explicitly bound the resulting storage-energy and
+absolute loss-factor operator errors, the modal loss factor and allocation.
+These are finite-subspace, discrete-frequency checks. They do not establish
+broadband/hereditary accuracy, coupling to omitted modes, nonlinear mechanics,
+or a thermally coupled constitutive history.
+
+The static opening and pressure comparisons still use the source EQUILIBRIUM
+stiffness, not K'(omega_ref). Thus even a complete retained frozen model must
+disclose any lost equilibrium compliance and pass the existing playing-mode
+admission. Every law must admit DC, the reference frequency and each modal
+sample. The wrapper retains the original field and approximation report;
+identities bind constitutive tensors, branch times, density, source identities,
+field ordering and the selected reference frequency.
+
+Authored loss must be zero on this source-material path. The existing card
+codec preserves each mode's actual damping_n_s_m, and reed lowering reads that
+coefficient as c/(2*sqrt(k*m)). The legacy loss_factor field denotes only the
+authored contribution; it is not total material loss. Exact legacy eta/2
+rounding is retained only when the authored formula reproduces that mode's c.
+The same source loss consequently changes the existing mechanical runtime's
+energy decay after serialization, rather than merely changing metadata.
+
+The focused visco_valve integration target covers analytic single-coordinate
+mass/stiffness/pressure normalization, source-viscosity changes to actual
+port-Hamiltonian decay, Prony changes to frequency and damping, equilibrium
+compliance disclosure, codec-to-reed continuity, uniform/per-element identity,
+and refusal of incompatible bands, double-counted loss, excessive dispersion
+or modal loss requiring a coupled runtime.
+
+## Source tetrahedra projected into full-memory structural dynamics
+
+`linear3::visco::ViscoElements::project_basis` projects an explicit displacement
+basis using the original Tet4/Tet10 strain matrices, physical quadrature volumes,
+material laws and constrained free-DOF map. The resulting
+`ProjectedViscoSolid` retains the complete consistent mass matrix
+`Phi^T M Phi`, each original quadrature-point tensor constitutive contribution,
+and its owning element. It converts Mandel shear to tensor shear at the existing
+`TensorProny::project_strain` boundary. All Kelvin cross terms and all original
+Maxwell factor rows survive; no mass lumping, material averaging, fitted damping
+or silent basis truncation is introduced.
+
+The same retained basis maps nodal loads by its transpose and expands
+displacement/velocity with the original supports. These maps preserve discrete
+virtual work; fixed rows contribute no work. `SolidProjectionBudget` bounds
+coordinate count, stored basis entries, quadrature points and scalar projection
+work before constructing the result. Overflow, nonfinite maps, source refusal
+and cancellation return errors without a partial projection. The immutable
+projection borrows its original source assembly.
+
+A dynamic consumer must independently admit positive-definite, representable
+projected inertia. Geometry, supports, basis and material state remain fixed.
+This API does not claim spatial/modal convergence, arbitrary frequency validity,
+nonlinear strain or thermally evolving geometry. Focused G0/G3 integration
+regressions in `fs-couple/tests/tensor_solid.rs` cover Tet4/Tet10 shear and
+consistent mass, nodal virtual work, nonorthogonal constrained bases, original
+Maxwell prehistory and regional material-loss swaps. They use synthetic material
+fixtures and do not establish empirical calibration.
+
+## Continuing thermal-valve motion across source updates
+
+`reduce::thermal::motion::ThermalValveModalMotion` owns the actual thermal
+reduction and the existing `fs-modal` time-domain state. The reducer retains
+its original mass-normalized mode shapes and exact pressure-load projections.
+Pressure steps use the original exact ZOH owner; applied work is conjugate to
+swept volume, and nodal observations reconstruct equilibrium plus vibration.
+
+Candidate source updates preserve the exact sample clock and use the shared
+mass-inner-product transfer on the same reference mesh, frame, supports and
+consistent mass. New equilibrium, stiffness, mode count/order and supplied
+pressure observations are admitted with explicit state-loss and signed
+incremental-storage budgets. Updates and pressure steps publish only complete
+candidates. Discarded state is not damping or heat; bore feedback, radiation
+reaction and reciprocal thermoelastic heat are not inferred. Three focused
+one-tetrahedron tests use independent consistent mass, stiffness, thermal
+equilibrium and oscillator references to check motion/work, source-update
+continuity, changed pressure response and refused/cancelled candidates.

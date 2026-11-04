@@ -30,7 +30,8 @@ use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
-use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
+use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation,
+    SHEAR_VISCOSITY_REFERENCE_OMEGA as TORSION_REFERENCE,SHEAR_VISCOSITY_REFERENCE_OMEGA_DIMS as TORSION_REFERENCE_DIMS};
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighReport;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemReport;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
@@ -68,9 +69,9 @@ const SHEAR_ETA: &str = "kelvin_voigt_shear_viscosity";
 fn modal_budget() -> ModalAcousticTimeBudget { ModalAcousticTimeBudget::audible_reference() }
 fn poll(gate: &CancelGate) -> Result<()> { if gate.is_requested() { Err("material-string construction cancelled".into()) } else { Ok(()) } }
 fn options(spec:&input::Spec,bow:StringBowLocation,tensor_body:bool,
-    additional_body_connections:usize) -> Result<StringBankOptions> {
+    additional_body_connections:usize,additional_body_modes:usize) -> Result<StringBankOptions> {
     let (max_modes,max_connections,max_setup_terms)=spec
-        .network_dimensions_with_body_connections(tensor_body,additional_body_connections)?;
+        .network_dimensions_with_body_modes(tensor_body,additional_body_connections,additional_body_modes)?;
     // The N*(L+1)^2 screen leaves no room for a zero-stiffness coordinate (a cavity neck
     // plug) in a static preload: its free-block solve costs free*L^2 + free^2*L + free^3
     // with free <= L, so a full-rank viscous body plus a cavity was refused by construction.
@@ -124,6 +125,12 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     if twist {
         requirements.push(Requirement::try_new(SHEAR,Pressure::DIMS,Admit::StrictlyPositive)?);
         requirements.push(Requirement::try_new(SHEAR_ETA,DynViscosity::DIMS,Admit::Finite)?);
+        // A pack that wrote its shear viscosity at a stated reference frequency has constant torsional loss
+        // (fs_couple::bowed_string::runtime::reciprocal::bank::torsion::SHEAR_VISCOSITY_REFERENCE_OMEGA).
+        load_pack(name,catalog,loader)?;
+        if !catalog[name].pack.claims().claims_for(TORSION_REFERENCE).is_empty() {
+            requirements.push(Requirement::try_new(TORSION_REFERENCE,TORSION_REFERENCE_DIMS,Admit::StrictlyPositive)?);
+        }
     }
     if !body && let LongitudinalMaterialLoss::KelvinVoigt { viscosity_property } = &spec.longitudinal_loss {
         requirements.push(Requirement::try_new(viscosity_property.as_str(),DynViscosity::DIMS,Admit::Finite)?);
@@ -138,10 +145,7 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     }
     resolve_properties(name,catalog,loader,spec,&requirements)
 }
-fn resolve_properties(name:&str, catalog:&mut Catalog,
-    loader:&mut impl FnMut(&str)->Result<NormalizedPack>, spec:&input::Spec,
-    requirements:&[Requirement]) -> Result<ResolvedMaterialStatePoint>
-{
+fn load_pack(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>) -> Result<()> {
     if !catalog.contains_key(name) {
         let pack=loader(name)?;
         let card=MaterialCard::assemble(MaterialStateId { chemistry:format!("source-pack:{}",pack.pack_id()),
@@ -149,6 +153,13 @@ fn resolve_properties(name:&str, catalog:&mut Catalog,
             pack.claims().clone(),vec![])?;
         catalog.insert(name.into(),CatalogEntry { pack,card });
     }
+    Ok(())
+}
+fn resolve_properties(name:&str, catalog:&mut Catalog,
+    loader:&mut impl FnMut(&str)->Result<NormalizedPack>, spec:&input::Spec,
+    requirements:&[Requirement]) -> Result<ResolvedMaterialStatePoint>
+{
+    load_pack(name,catalog,loader)?;
     // This compact input profile explicitly declares bare SI T and omega axes.
     // Incompatible typed/context axes refuse in the original resolver; they are
     // never removed, guessed, coerced or supplied from an unrelated source.
@@ -217,7 +228,10 @@ impl input::Spec {
         // The exact owner still applies its stricter connected-island bound.
         let additional_body_connections = profile.as_ref()
             .map_or(0, body::Profile::additional_body_connections);
-        self.network_dimensions_with_body_connections(profile.is_some(), additional_body_connections)?;
+        let additional_body_modes = profile.as_ref()
+            .map_or(0, body::Profile::additional_body_modes);
+        self.network_dimensions_with_body_modes(profile.is_some(), additional_body_connections,
+            additional_body_modes)?;
         let mut baselines = Vec::with_capacity(self.rotational_bridges.len());
         for joint in &self.rotational_bridges {
             let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
@@ -229,7 +243,8 @@ impl input::Spec {
             let GestureValue::Bow { station,.. }=track.initial else { return Err("non-bow value".into()); };
             contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
         }
-        let mut settings=options(&self,contacts[0],profile.is_some(),additional_body_connections)?;
+        let mut settings=options(&self,contacts[0],profile.is_some(),additional_body_connections,
+            additional_body_modes)?;
         let memory = self.string_memory_states()?
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
@@ -323,7 +338,9 @@ impl input::Spec {
             }
             bank.with_rotational_body_connections(joints, gate)?
         };
-        let bank = if let Some(resolution) = self.cylinder_gas_loading {
+        let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
+            bank // Gas inertia precedes the material/thermal memory prefix.
+        } else if let Some(resolution) = self.cylinder_gas_loading {
             bank.with_cylinder_gas_loading(resolution, gate)?
         } else { bank };
         let bank = if let Some((slope, config)) = self.geometric_stretching {
@@ -333,13 +350,17 @@ impl input::Spec {
             bank.with_longitudinal_waves_and_loss(vec![resolution.clone(); self.strings.len()],
                 self.longitudinal_loss.clone(), *config, gate)?
         } else { bank };
-        let bank = match &profile {
-            Some(body) => body.bind_material_memory(bank, gate)?,
-            None => bank,
-        };
-        let bank = match &self.bending_memory {
-            Some(memory) => memory.bind(bank, gate)?,
-            None => bank,
+        let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
+            bank // The source material prefix was bound before thermal air memory.
+        } else {
+            let bank = match &profile {
+                Some(body) => body.bind_material_memory(bank, gate)?,
+                None => bank,
+            };
+            match &self.bending_memory {
+                Some(memory) => memory.bind(bank, gate)?,
+                None => bank,
+            }
         };
         // The original body basis survives fluid, torsion and material-history
         // binding. Compute its air reaction once, before bows or preload run.
@@ -349,7 +370,8 @@ impl input::Spec {
                 (bank, Some(BodyRadiationReport::Rayleigh(report)))
             },
             Some(input::BodyRadiation::ShellBem(options)) => {
-                let (bank, report) = bank.with_material_shell_bem(options, gate)?;
+                let (bank, report) = bank.with_material_shell_bem_with_angular_refinement(
+                    options,self.shell_bem_angular_refinement,gate)?;
                 (bank, Some(BodyRadiationReport::ShellBem(report)))
             },
             None => (bank, None),
@@ -397,7 +419,8 @@ impl input::Spec {
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
         if let Some(observer)=&self.shell_observer {
-            performance=performance.with_material_shell_observer(observer.clone(),gate)?;
+            performance=performance.with_material_shell_observer_with_quadrature(
+                observer.clone(),self.shell_receiver_quadrature,gate)?;
         }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
         Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })
@@ -419,9 +442,30 @@ fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
     let mut bytes=Vec::new();File::open(path)?.take(cap as u64+1).read_to_end(&mut bytes)?;
     if bytes.len()>cap {return Err(format!("{} exceeds {cap} bytes",path.display()).into());} Ok(bytes)
 }
+/// `material_strings assemble-shell TABLE OPTIONS NEW_PROFILE`: a `frankensim.shell-assembly.v1` table written as a v4
+/// body profile with the choices of a `frankensim-shell-assembly-options-v1` file (BODY_PROFILES.md). The profile is
+/// admitted before it is written. Printed: the body length and width [m] and reference thickness the performance's body
+/// record takes, how far each bridge point is from its node, and the table's cavity row for the cavity record.
+fn assemble_shell(args:&[std::ffi::OsString])->Result<()> {
+    let [table,options,out]=args else {
+        return Err("usage: material_strings assemble-shell TABLE OPTIONS NEW_PROFILE".into());
+    };
+    let options=body::ShellTableOptions::parse(std::str::from_utf8(&read_bounded(Path::new(options),body::MAX_BYTES)?)?)?;
+    let converted=options.convert(std::str::from_utf8(&read_bounded(Path::new(table),body::MAX_SHELL_BYTES)?)?)?;
+    body::Profile::parse(converted.profile.as_bytes())?;
+    OpenOptions::new().write(true).create_new(true).open(out)?.write_all(converted.profile.as_bytes())?;
+    println!("body-length-m {}\nbody-width-m {}\nreference-thickness-m {}",converted.length_m,converted.width_m,
+        options.reference_thickness_m());
+    for (k,snap) in converted.bridge_snaps_m.iter().enumerate() { println!("bridge-snap-m {k} {snap}"); }
+    if let Some([volume,radius,length])=converted.cavity {
+        println!("cavity-volume-m3 {volume}\ncavity-neck-radius-m {radius}\ncavity-neck-length-m {length}");
+    }
+    Ok(())
+}
 fn main()->Result<()> {
-    let (args, gas_options)=thermochemical::Options::extract_os(
-        &std::env::args_os().collect::<Vec<_>>())?;
+    let raw=std::env::args_os().collect::<Vec<_>>();
+    if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
+    let (args, gas_options)=thermochemical::Options::extract_os(&raw)?;
     if args.len()<3 {
         return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }
@@ -507,8 +551,10 @@ fn main()->Result<()> {
     if let Some(loading)=ready.performance.bank().source().bank().cylinder_gas_loading() {
         let additional = ready.body_profile.as_ref()
             .map_or(0, body::Profile::additional_body_connections);
+        let air_modes = ready.body_profile.as_ref()
+            .map_or(0, body::Profile::additional_body_modes);
         let (modes,links,terms)=ready.spec
-            .network_dimensions_with_body_connections(ready.body_profile.is_some(),additional)?;
+            .network_dimensions_with_body_modes(ready.body_profile.is_some(),additional,air_modes)?;
         eprintln!("cylinder_gas_loading={:?}; complete_modes={modes}; connection_allowance={links}; setup_terms_allowance={terms}",
             loading.resolution());
     }
@@ -527,3 +573,4 @@ fn main()->Result<()> {
 #[cfg(test)]
 #[path = "material_strings/tests.rs"]
 mod tests;
+

@@ -273,21 +273,32 @@ fn g3_hihat_refinement_preserves_joint_load_and_rim_traction() {
 
 #[test]
 fn g0_shell_admission_includes_curvature_without_changing_live_state() {
-    let mut spec=kit::ride(); spec.grid*=2.6;
-    let mut p=kit::cymbal(&spec,&[]).unwrap();
-    let mut b=p.instrument.bodies[0].clone();
+    // Isolate the shell tangent from bending: a product preset may have a
+    // bending-dominated highest mode even when its rest curvature matters.
+    let mut b=Body::plate("shell admission", &PlateSpec {
+        radius: 0.1, hole: 0.02, grid: 0.01, edge: Edge::Free,
+        thickness: &|_| 0.001, rest_height: &|r| 0.2*r*r,
+        young: 1e11, poisson: 0.3, density: 8000.0, tension: 0.0,
+        bending: false, nonlinear: Nonlinear::VonKarman,
+        t60: NO_LOSS, support: None, muffle: None,
+    }).unwrap();
     let linear=b.max_rate2(); let shell=b.max_rate2_with_shell();
-    assert!(shell>1.1*linear,"fixture must expose unresolved rest curvature");
+    assert_eq!(linear,0.0);
+    assert!(shell.is_finite() && shell>0.0,"curved shell must have a tangent");
+    let mut instrument=Instrument::new((shell/(4.0*0.5)).sqrt());
+    instrument.add(b);
+    assert!(instrument.stability().0<=0.6);
     let old_rate=((linear+shell)/(8.0*0.6)).sqrt();
-    assert!(shell/(4.0*p.instrument.rate.powi(2))<=0.6);
-    p.instrument.rate=old_rate;
-    p.instrument.bodies[0].f[0]+=0.5;
-    let before=p.instrument.bodies[0].clone();
-    assert!(p.instrument.stability().0>0.6);
-    assert_eq!(p.instrument.bodies[0].f,before.f);
-    assert_eq!(p.instrument.bodies[0].w,before.w);
-    assert_eq!(p.instrument.bodies[0].wp,before.wp);
-    assert_eq!(p.instrument.bodies[0].lw,before.lw);
+    // Negative control: the former linear-only admission accepts this rate.
+    assert!(linear/(4.0*old_rate.powi(2))<=0.6);
+    instrument.rate=old_rate;
+    instrument.bodies[0].f[0]+=0.5;
+    let before=instrument.bodies[0].clone();
+    assert!(instrument.stability().0>0.6);
+    assert_eq!(instrument.bodies[0].f,before.f);
+    assert_eq!(instrument.bodies[0].w,before.w);
+    assert_eq!(instrument.bodies[0].wp,before.wp);
+    assert_eq!(instrument.bodies[0].lw,before.lw);
 }
 
 
@@ -478,7 +489,7 @@ fn exporting_an_instrument_changes_nothing_and_exports_a_spd_airy_inverse() {
     let (exported, mut p) = run(true);
     assert_eq!(plain, exported, "exporting changed the output");
     let img = p.ins.image();
-    let (bi, nc) = img.bodies.iter().enumerate().find_map(|(i, b)| b.vk.as_ref().map(|v| (i, v.nb.len()))).unwrap();
+    let (bi, nc) = img.bodies.iter().enumerate().find_map(|(i, b)| b.vk.as_ref().map(|v| (i, v.f.len()))).unwrap();
     assert!(nc > 10, "no von Karman core found");
     let shell = &p.ins.bodies[bi];
     assert!(!shell.airy_solve(&mut vec![0.0; nc + 1]), "a wrong-length solve must refuse");
@@ -891,4 +902,39 @@ fn rim_friction_sticks_inside_its_cone_and_contracts_backward_slip() {
         }
     }
     assert!(stuck > 0 && slid > 0);
+}
+
+#[test]
+fn g0_head_viscous_layer_increases_modal_damping() {
+    let gas = standard_gas();
+    let table = radiation::RadiationTable::shipped().unwrap();
+    let mut plain = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
+    let mut layered = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
+    plain.instrument.bodies[0].attach_head_radiation(&table, 0.1703, &gas, None).unwrap();
+    layered.instrument.bodies[0].attach_head_radiation_with_viscous(&table, 0.1703, &gas, None, 140_000.0).unwrap();
+    let plain_damping: f64 = plain.instrument.bodies[0].head_radiation().unwrap().damping.iter().sum();
+    let layered_damping: f64 = layered.instrument.bodies[0].head_radiation().unwrap().damping.iter().sum();
+    assert!(layered_damping > plain_damping, "viscous layer did not add loss: {layered_damping} <= {plain_damping}");
+    assert!(layered.instrument.bodies[0].head_radiation().unwrap().rate_bound
+        > plain.instrument.bodies[0].head_radiation().unwrap().rate_bound);
+}
+
+#[test]
+fn g0_floor_tom_viscous_layer_refines_its_clock() {
+    let gas = standard_gas();
+    let cards = materials::KitMaterials::from_packs_at_temperature(
+        include_bytes!("../packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk"),
+        &[],
+        include_bytes!("../packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk"),
+        "T",
+        gas.temperature,
+        0.00730108512,
+        0.005,
+        0.05,
+    ).and_then(materials::KitMaterials::with_stated_unknown_film_loss).unwrap();
+    let piece = kit::drum_with_materials(&kit::tom(14.0), &[], gas, &cards).unwrap();
+    assert!(piece.instrument.rate > kit::OUT_RATE, "viscous layer left the floor tom at 48 kHz");
+    let (lam, who) = piece.instrument.admission_rate2();
+    let ratio = lam / (4.0 * piece.instrument.rate.powi(2));
+    assert!(ratio < 0.95, "floor tom was not admitted: {ratio} ({who})");
 }

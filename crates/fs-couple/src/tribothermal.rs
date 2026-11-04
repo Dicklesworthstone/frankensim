@@ -25,7 +25,8 @@ pub mod material;
 pub mod dynamics;
 /// Native electric/magnetic field motion with material guide friction and heat.
 pub mod field_motion;
-pub use material::{MaterialSlidingContact, SlidingInterface, SlidingMaterialSample};
+pub use material::{EffusivityPartitionSample, MaterialSlidingContact, SemiInfiniteHeatPartition,
+    SlidingHeatPartition, SlidingInterface, SlidingMaterialSample};
 
 use fs_contact::interface_binding::InterfaceBindingError;
 use fs_material::phase::PhaseStateError;
@@ -319,7 +320,7 @@ impl<'a> MaterialSlidingContact<'a> {
                             "original friction work does not close actual interface motion",
                         ));
                     }
-                    let partition = friction.dissipation_step(self.data.partition)?;
+                    let partition = friction.dissipation_step(material.partition)?;
                     let StepCoefficients {
                         mut sources_w,
                         conductances_w_k,
@@ -442,6 +443,9 @@ impl<'a> MaterialSlidingContact<'a> {
             return Err(SlidingError::Invalid("actual sliding history increment is unrepresentable"));
         }
         contact.time_s = target_s;
+        if let Some(sample) = &material.effusivity {
+            contact.partition_maximum_diffusivity_m2_s = sample.maximum_diffusivity_m2_s;
+        }
         checkpoint()?;
         Ok(SlidingCandidate {
             thermal: next,

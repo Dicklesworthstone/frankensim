@@ -22,8 +22,8 @@ use crate::bowed_string::{BowedStringCard, unit_shape};
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use crate::render::schedule::{GestureCompileError, ScheduledRenderer};
 use crate::render::schedule::force::coupled::{
-    CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig, ModalCouplingError,
-    PreparedModalBudget,
+    ConstantLossConnection, CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig,
+    ModalCouplingError, PreparedModalBudget,
 };
 use crate::render::schedule::force::coupled::contact::friction::{
     FrictionDrive, FrictionModalFrame, FrictionModalSystem, ModalFrictionConfig,
@@ -279,7 +279,7 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, prepared, law, &options, gate)?;
+        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, prepared, &[], law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
@@ -446,11 +446,13 @@ pub(super) fn assemble(
     connections: &[&[InteriorStringConnection]], body_connections: &[ModalConnection],
     law: FrictionLaw, options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
-    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, None, law, options, gate)
+    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, None, &[], law, options, gate)
 }
 
 // Keep the original one-string API in the same assembler. Its absent source
-// extensions retain the original basis and arithmetic exactly.
+// extensions retain the original basis and arithmetic exactly. Constant-loss
+// bridges name their connections in the assembled order: every string's own
+// connections come first, in string order.
 #[allow(clippy::too_many_arguments)]
 fn assemble_sources(
     cards: &[BowedStringCard], sources: Option<&[MaterialStringMember]>,
@@ -458,7 +460,7 @@ fn assemble_sources(
     body_connections: &[ModalConnection],
     rotational_body_connections: &[torsion::StringBodyRotationConnection],
     fluid_loading: Option<&fluid::StringBankFluidLoading>, prepared: Option<PreparedModalBudget>,
-    law: FrictionLaw,
+    constant_loss: &[ConstantLossConnection], law: FrictionLaw,
     options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
     poll(gate)?;
@@ -530,8 +532,10 @@ fn assemble_sources(
         loading.append_components(cards, sources, &mut components, &mut links, options, gate)?;
     }
     let network = match prepared {
-        Some(budget) => CoupledModalSystem::new_prepared(components, links, options.network, budget, gate),
-        None => CoupledModalSystem::new(components, links, options.network, gate),
+        Some(budget) => CoupledModalSystem::new_prepared_with_constant_loss(components, links, constant_loss,
+            options.network, budget, gate),
+        None if constant_loss.is_empty() => CoupledModalSystem::new(components, links, options.network, gate),
+        None => return Err(invalid("a constant-loss bridge needs the prepared exact owner")),
     }.map_err(ReciprocalStringError::Network)?;
     let bow_card = &cards[options.bow.string];
     let bow_shape = match sources {

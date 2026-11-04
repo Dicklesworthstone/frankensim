@@ -651,3 +651,110 @@ and mutual-radiation memories, and exercise material, local-gas, force and
 reservoir substitutions in the same pressure and PCM path. The CLI regression
 retains the upstream typed-key example and separately renders the sampled
 example; malformed key programs refuse before either output is created.
+
+## Use the same material plates with the DG bore
+
+`paired-dg.performance` selects `frankensim-material-modal-dg-valve-v1`.
+It retains both original regional plates and all six requested modes, with
+the same material viscosity, slit flow and contact owners. The actual DG
+inlet gas and mean pressure/flow impedance enter that retained mechanical
+system. Change the material pack or gas record in the source data to rebuild
+the coupled physical properties.
+
+After the normalization steps above, render the supplied finite source with:
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- wind \
+  "$modal_demo_dir/paired-dg.performance" "$modal_demo_dir/paired-dg.wav" \
+  --decimate --block 37
+```
+
+This fixture declares a 96 kHz mechanical/output source clock and observes
+**internal mean inlet pressure**. `--decimate` performs the existing explicit
+conversion to 48 kHz. The synthetic bore, plate and material data demonstrate
+integration; spatial, nonlinear-time and measured-instrument validation remain
+separate work.
+
+The DG schema starts with `audio RATE RATE SAMPLES FULL_SCALE_PA`, requires
+`propagator exact-zoh`, and uses `ambient` followed by the shared `dg_tube` or
+`dg_bore` records. After `slit_length`, select `observation inlet-pressure` or
+`observation baffled-outlet X Y Z RINGS ANGLES FMAX_HZ`. The latter requires
+the shared computed DG radiation declaration and uses that reaction source's
+original outlet geometry and exterior gas. It does not infer an exterior
+from the reed's inlet gas.
+
+`valve`, `limits`, `contact`, `loss`, `blades`, the complete plate blocks,
+optional wetted surfaces, pressure shapes, spatial closure, source forces,
+source pressures, and the canonical schedule keep the same record meanings
+shown above. This DG route has one explicit upstream pressure supply; it
+does not declare the separate upstream tract or moving graph boundaries of
+the two-sided schema. Every force/pressure event uses the mechanical clock.
+
+### Finite DG terminal gaps and closures
+
+Every source using the shared DG bore grammar can now place an explicit fixed
+slit channel or rigid closure between a terminal and the complete exterior
+radiation load. This includes the flute, scalar aperture and material-modal
+reed paths. After any `dg_side_openings` block and before `dg_radiation`, use:
+
+```text
+dg_terminal_channels 2 16
+dg_terminal_closed 1
+dg_terminal_slit 7 0.004 0.00008 0.001 16 0.1
+```
+
+The header is `COUNT MAX_TOTAL_TRANSVERSE_CELLS`. A slit row contains `PORT`,
+width, height and length in metres, transverse finite-volume cell count, and
+the maximum admitted local Mach number. A closure row needs only its existing
+port ID. Port 1 is the axial outlet; additional IDs come from the declared side
+openings or finite chimneys. Omitted ports retain their direct connection.
+The separate cell allowance sums every slit field; closures require no fluid
+states and may use an allowance of zero.
+
+Each slit uses the actual terminal's original gas, including a finite chimney's
+own gas record. Density and viscosity therefore change the channel inertia,
+velocity profile and dissipation when the source data change. Its original
+unsteady transverse momentum solver participates in the same interval solve
+as every DG duct and the full radiation matrix. A closure imposes exactly zero
+flow while preserving the exterior matrix and its histories. Source feedback,
+stored energy, viscous loss and the microphone all use the accepted flow.
+The original channel's numerical loss is reported separately from viscous loss.
+
+The admitted slit has fixed parallel no-slip walls, at least two transverse
+cells, height no more than one tenth of either width or length, and a declared
+Mach ceiling in `(0, 0.3]`. Its area cannot exceed a known attached duct area.
+The declared exterior circular surface remains unchanged; the slit is a finite
+series channel, not a replacement annular radiation surface. Moving-pad volume
+work, lateral-wall corrections, entrance/exit shedding and turbulent losses
+are outside this reduction. Changing a pad gap during playback needs the
+corresponding moving-boundary operator and is not exposed by these records.
+
+`../flue-dg-slit-chimney.performance` combines this shared channel with a finite
+DG chimney, three distinct source gas records and mutual mouth/terminal
+radiation. To close that chimney, replace its slit row with
+`dg_terminal_closed 7` and set the header's cell allowance to zero. The source
+remains a manufactured integration fixture; no measured flute or reed accuracy
+is asserted.
+
+## Ensemble playback
+
+The existing `music_render ensemble --valve` input accepts both material-modal
+schemas as well as the original plate-valve schema. Each input keeps its own
+physical renderer, material histories, controls and microphone. Supply the
+ensemble's explicit `--full-scale-pa`; individual source PCM scales do not
+become mix gains. Sources must declare the same physical duration.
+
+Rate conversion follows the source's pressure output clock. The original
+two-sided source already produces 48 kHz frames from its faster mechanics;
+`--decimate` is required when a selected producer, such as the 96 kHz DG
+fixture, still needs conversion to the ensemble's 48 kHz output. Numerical
+receiver-filter and outer-decimator delays are aligned together. Physical
+distance/sound-speed travel remains in each original receiver, and fractional
+final-output alignment delays refuse rather than being rounded.
+
+Actual exterior microphones must agree on the complete bound listener gas.
+A selected internal DG pressure trace is identified as internal in the output
+metadata; combining it with other traces does not make it an exterior
+microphone. The ensemble superposes independent physical pressure sources and
+does not introduce mechanical coupling between instruments.
+

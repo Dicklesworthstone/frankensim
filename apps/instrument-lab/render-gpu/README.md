@@ -40,6 +40,9 @@ cymbals and the hi-hat are unchanged.
 
 - `--device all` splits a batch, or a chunked render, over every GPU (one host thread each).
 - `--exact-friction-order` solves frictions in the CPU's list order instead of a coloured sweep. It is slower; `--check` always uses it.
+- `--grid-scale S` multiplies the hi-hat/crash/ride mesh spacing (default `1`, resource-bounded to `0.5..=8`). Values below one refine the same physical model for convergence studies; the library still chooses and checks the integration clock and can refuse a mesh within that range. Material, contact, support and microphone parameters stay fixed. This applies to CPU, CUDA, batches, chunks and `--check`. Drum-head pieces refuse a non-default scale. A coarser grid is not evidence of equivalent sound quality.
+
+For an isolated time-refinement diagnostic, run `cargo run --release --example shell_energy_probe` from this workspace. It compares a lossless curved annulus at four time resolutions, with both initial velocity and a force pulse from rest. It reports energy drift and mass-weighted displacement error against the finest clock for linear and von Karman mechanics. This separates initialization and integration effects; it is not an instrument sound-quality test.
 
 **Run-time requirements.** cudarc loads the CUDA driver and NVRTC at run time:
 

@@ -25,6 +25,9 @@ use fs_material::visco::ViscoError;
 use fs_material::visco::tensor::{Mandel6, TensorProny, TensorPronyState};
 use fs_sparse::{Coo, Csr};
 
+mod project;
+pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
+
 /// Geometry and explicit quadrature; material frames must already be resolved.
 #[derive(Clone, Copy)]
 pub enum SolidMeshRef<'a> {
@@ -89,6 +92,8 @@ pub enum ViscoElementError {
     Elastic(TetElasticError),
     /// Constitutive owner refused (including out-of-band queries).
     Material(ViscoError),
+    /// The original work-conjugate tensor-material projection refused.
+    Projection(fs_material::visco_tensor::TensorPronyError),
     /// Required internal strain scalars exceeded the explicit cap.
     InternalStateBudget {
         /// Internal scalar strains required by the mesh and law field.

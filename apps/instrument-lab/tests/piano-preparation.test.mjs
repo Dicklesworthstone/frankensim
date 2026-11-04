@@ -14,6 +14,8 @@ function recording() {
     static withPreparation(...args) { calls.push(['prepared', ...args]); return { kind: 'prepared' }; }
     static withAtmosphere(...args) { calls.push(['atmosphere', ...args]); return { kind: 'atmosphere' }; }
     static withStringMaterials(...args) { calls.push(['materials', ...args]); return { kind: 'materials' }; }
+    static withGasSources(...args) { calls.push(['source-gas', ...args]); return { kind: 'source-gas' }; }
+    static withStringMaterialsAndGasSources(...args) { calls.push(['source-materials', ...args]); return { kind: 'source-materials' }; }
   }
   return { Engine, calls };
 }
@@ -23,6 +25,68 @@ const geometry = 'frankensim-piano-materials-v2\ntension,target-pitch\nstrength,
 const materialInput = () => ({ packs: [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5]).buffer],
   geometry, temperatureAxis: 'T', temperatureK: 293.15, viscosityProperty: 'solid_viscosity',
   frequencyAxis: 'frequency', frequencyHz: 1000 });
+
+const sourceGas = 'thermochemical 300 100000 mole 1 custom-gas 1';
+const gasSources = () => ({ phase: 'frozen', waterSpecies: null, components: [
+  { speciesPack: new Uint8Array([99, 1, 2, 99]).subarray(1, 3),
+    nasa9Pack: new Uint8Array([3]), transportPack: new Uint8Array([4, 5]) },
+] });
+
+test('source gas and solid data reach the same physical constructor at every board and clock', () => {
+  const { Engine, calls } = recording();
+  const source = gasSources();
+  const board = new Uint8Array([6, 7]);
+  for (const substeps of [1, 2, 4]) {
+    for (const bytes of [null, board]) {
+      for (const stringMaterials of [undefined, materialInput()]) {
+        const options = { gas: sourceGas, gasSources: source, stringMaterials,
+          boardCoordinates: 16, substeps, scaleCsv: scale, stretchTuning: { concertAHz: 442 } };
+        const expected = stringMaterials ? 'source-materials' : 'source-gas';
+        assert.equal(createPianoEngine(Engine, 48000, options, bytes).kind, expected);
+        const call = calls.at(-1);
+        if (bytes) assert.equal(call[2], bytes);
+        else assert.deepEqual(call[2], new Uint8Array());
+        assert.equal(call[3], bytes ? 0 : 16);
+        assert.equal(call[7], substeps);
+        assert.equal(call[8], scale);
+        assert.equal(call[9][0], 442);
+        assert.equal(call[10], sourceGas);
+        assert.deepEqual(call.slice(-4), [new Uint8Array([1, 2, 3, 4, 5]), new Uint32Array([2, 1, 2]), '', 'frozen']);
+        if (stringMaterials) assert.deepEqual(call.slice(11, 19), [
+          new Uint8Array([1, 2, 3, 4, 5]), new Uint32Array([3, 2]), geometry,
+          'T', 293.15, 'solid_viscosity', 'frequency', 1000]);
+      }
+    }
+  }
+  calls.at(-1).at(-4)[0] = 255;
+  assert.deepEqual(source.components[0].speciesPack, new Uint8Array([1, 2]));
+});
+
+test('source requests never discard their gas, solid bindings or owner refusal for older WASM', () => {
+  for (const stringMaterials of [undefined, materialInput()]) {
+    const { Engine, calls } = recording();
+    const method = stringMaterials ? 'withStringMaterialsAndGasSources' : 'withGasSources';
+    const options = { gas: sourceGas, gasSources: gasSources(), stringMaterials };
+    Engine[method] = undefined;
+    assert.throws(() => createPianoEngine(Engine, 48000, options), /rebuilding.*WASM/);
+    const refusal = new Error('gas source is outside its temperature domain');
+    Engine[method] = () => { throw refusal; };
+    assert.throws(() => createPianoEngine(Engine, 48000, options), error => error === refusal);
+    assert.equal(calls.length, 0);
+  }
+  const { Engine, calls } = recording();
+  for (const gas of [undefined, '293.15 101325 0', 'mixture 300 100000 mole 1 N2 1']) {
+    assert.throws(() => createPianoEngine(Engine, 48000, { gas, gasSources: gasSources() }), /thermochemical/);
+  }
+  for (const source of [null, {}, { ...gasSources(), waterSpecies: undefined },
+    { ...gasSources(), phase: 'liquid-water' }, { ...gasSources(), components: [] }]) {
+    assert.throws(() => createPianoEngine(Engine, 48000, { gas: sourceGas, gasSources: source }));
+  }
+  assert.equal(calls.length, 0);
+  createPianoEngine(Engine, 48000, { gas: sourceGas,
+    gasSources: { ...gasSources(), phase: 'liquid-water', waterSpecies: 'explicit-water' } });
+  assert.deepEqual(calls.at(-1).slice(-2), ['explicit-water', 'liquid-water']);
+});
 
 test('canonical material framing preserves byte views and identities through every board and clock', () => {
   const { Engine, calls } = recording();

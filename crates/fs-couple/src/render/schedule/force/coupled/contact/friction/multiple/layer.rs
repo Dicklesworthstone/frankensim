@@ -6,8 +6,8 @@
 //! Area, thickness, temperature and tangent frame are fixed. Normal opening,
 //! layer transport, wear and pressure-dependent yield are
 //! outside this retained-compressive-contact rung; none is replaced by a reset.
-//! The explicit thermal adapter continues this same state only while the
-//! elastic potential stays unchanged; ordinary stepping remains isothermal.
+//! The explicit thermal adapter continues this same state with affine elastic
+//! softening and its reversible heat; ordinary stepping remains isothermal.
 
 /// Closed finite-cell heating and source-backed dissipative thermal feedback.
 pub mod thermal;

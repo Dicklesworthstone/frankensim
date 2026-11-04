@@ -31,6 +31,8 @@ pub use shear_layer::*;
 
 mod thermal_expansion;
 pub use thermal_expansion::*;
+mod hygroscopic_expansion;
+pub use hygroscopic_expansion::*;
 
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
@@ -1769,6 +1771,54 @@ pub(crate) fn pinned_temperature_line(
         .into_iter()
         .map(|(coordinate, answer)| (coordinate, answer.evidence.value.value))
         .collect())
+}
+
+/// One differentiable affine coefficient over every admitted source-line cell.
+/// A derivative jump carries entropy/energy absent from an affine caloric model.
+/// Shared by thermoplastic solids, retained thermal shear layers and acoustic
+/// thermoelasticity. The caller supplies the complete, source-admitted path;
+/// this arithmetic check does not resolve sources or extend their validity.
+///
+/// # Errors
+/// Refuses an incomplete/non-affine path, inconsistent reference value or
+/// unrepresentable derivative. Constant paths return an exact zero slope.
+pub fn affine_temperature_slope(
+    knots: &[(f64, f64)],
+    reference_k: f64,
+    reference_value: f64,
+) -> Result<f64, &'static str> {
+    let finite = |value: f64| if value.is_finite() { Ok(value) }
+        else { Err("unrepresentable affine modulus arithmetic") };
+    if knots.len() < 2 {
+        return Err("affine modulus needs a complete temperature path");
+    }
+    if knots.iter().all(|(_, value)| *value == reference_value) {
+        return Ok(0.0);
+    }
+    let first = knots[0];
+    let last = knots[knots.len() - 1];
+    let width = last.0 - first.0;
+    if !width.is_finite() || width <= 0.0 {
+        return Err("modulus temperature span is invalid");
+    }
+    let slope = finite((last.1 - first.1) / width)?;
+    for pair in knots.windows(2) {
+        let width = pair[1].0 - pair[0].0;
+        if !width.is_finite() || width <= 0.0 {
+            return Err("modulus source temperatures must increase");
+        }
+        let local = finite((pair[1].1 - pair[0].1) / width)?;
+        let scale = local.abs().max(slope.abs());
+        if (local - slope).abs() > 128.0 * f64::EPSILON * scale {
+            return Err("elastic and hardening moduli must be globally affine; derivative jumps need a different caloric model");
+        }
+    }
+    let expected = finite(slope.mul_add(reference_k - first.0, first.1))?;
+    if (expected - reference_value).abs()
+        > 128.0 * f64::EPSILON * expected.abs().max(reference_value.abs()) {
+        return Err("reference modulus differs from its admitted affine path");
+    }
+    Ok(slope)
 }
 
 pub(crate) fn integrate_piecewise_linear(
@@ -4761,3 +4811,4 @@ mod tests {
         ));
     }
 }
+

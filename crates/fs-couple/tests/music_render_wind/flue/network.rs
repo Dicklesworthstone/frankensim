@@ -14,6 +14,36 @@ fn source() -> String {
 }
 
 #[test]
+fn independent_aperture_card_reaches_pcm_and_reports_actual_geometry() {
+    let baseline = articulated_source();
+    let text = baseline.replace("mouth_radiation -0.3 0 4 4",
+        "mouth_aperture rectangle 0.010 0.012\nmouth_radiation -0.3 0 4 4");
+    let gate = CancelGate::new_clock_free();
+    let file = FlueFilePerformance::from_bytes(text.as_bytes(), 37, &gate).unwrap();
+    let original = FlueFilePerformance::from_bytes(baseline.as_bytes(), 37, &gate).unwrap();
+    assert_eq!(file.geometry(), original.geometry());
+    assert_eq!(file.renderer().mouth_radiation().unwrap().aperture_size_m, Some([0.010, 0.012]));
+    let pressure = physical(&text).0;
+    assert_ne!(pressure, physical(&baseline).0);
+    let dir = directory();
+    let input = dir.join("independent-aperture.performance");
+    let output = dir.join("independent-aperture.wav");
+    std::fs::write(&input, &text).unwrap();
+    success(run(&input, &output, 37, false));
+    assert_eq!(std::fs::read(&output).unwrap(), encode_pcm16_wav(&pressure, 48_000, 1.0).unwrap().0);
+    let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    assert!(sidecar.contains("\"size_m\":[1e-2,1.2e-2]"));
+    for invalid in [
+        text.replace("rectangle 0.010 0.012", "rectangle 0 0.012"),
+        text.replace("rectangle 0.010 0.012", "rectangle NaN 0.012"),
+        text.replace("rectangle 0.010 0.012", "ellipse 0.010 0.012"),
+        text.replace("mouth_radiation -0.3 0 4 4\n", ""),
+    ] {
+        assert!(FlueFilePerformance::from_bytes(invalid.as_bytes(), 37, &gate).is_err());
+    }
+}
+
+#[test]
 fn physical_network_and_actual_inlet_gas_survive_file_lowering_and_cli() {
     let text = source();
     let gate = CancelGate::new_clock_free();

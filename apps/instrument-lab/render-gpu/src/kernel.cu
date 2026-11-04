@@ -26,6 +26,20 @@
 
 typedef unsigned int u32;
 
+// Same variable-mass edge flux as Csr::mass_flux_correction. The shared
+// Laplacian includes fixed-boundary diagonal terms; those remain unchanged.
+__device__ __forceinline__ double mass_flux_correction(const P& p, int i, ll o,
+                                                       const double* w, const double* wp) {
+  const double xi = w[o + i] - wp[o + i], mi = __ldg(&p.mass[i]);
+  double correction = 0.0;
+  for (int q = 0; q < p.KL; q++) {
+    const int j = __ldg(&p.lapE_col[(ll)q * p.NT + i]);
+    correction += 0.5 * __ldg(&p.lapE_val[(ll)q * p.NT + i]) * (__ldg(&p.mass[j]) - mi)
+                  * ((w[o + j] - wp[o + j]) - xi);
+  }
+  return correction;
+}
+
 #define TPB 256
 #ifndef SPIN_NS
 #define SPIN_NS 32
@@ -175,6 +189,8 @@ __device__ double contact_force(double d_pred, double comp, double force, double
     double v, dv;
     contact_phi(d_pred - comp * x, previous, kk, alpha, mu, k, v, dv);
     double g = x - v;
+    // Keep an exact root before the bracket safeguard can step away from it.
+    if (g == 0.0) return x;
     if (g > 0.0) hi = x; else lo = x;
     double next = x - g / (1.0 + comp * dv);
     if (!((next > lo && next < hi) || (fixed_exit && next == x))) next = 0.5 * (lo + hi);
@@ -376,6 +392,9 @@ __device__ __forceinline__ void solve_contact(const P& p, ll s, int j, const dou
   p.ct_peak[oj] = fmax(p.ct_peak[oj], f);
   p.ct_force[oj] = f;
   p.ct_dnow[oj] = d_pred - comp * f;
+  // Coulomb friction has zero support without a compressive normal force.
+  // This is only an activity witness: never reorder or approximate an active solve.
+  if (f > 0.0 && __ldg(&p.ct_has_friction[j])) atomicExch(p.any_friction, 1);
 }
 
 // Friction r of simulation s: constrained quadratic solve, as in fs-vkplate.
@@ -438,6 +457,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
   const ll nwarps = ((ll)nbk * TPB) >> 5;
   // phase timing on block 0 (cycles from one barrier exit to the next, summed in registers, written at exit)
   long long tprev = clock64(), pt[7] = {0, 0, 0, 0, 0, 0, 0};
+  long long active_friction_steps = 0;
 #define MARK(ph) if (blockIdx.x == 0 && tid == 0) { long long tn = clock64(); pt[ph] += tn - tprev; tprev = tn; }
 
   for (ll it = 0; it < p.steps; it++) {
@@ -452,6 +472,8 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
     double* LWP = (n % 2 == 0) ? p.LW1 : p.LW0;
 
     // ------------------------------------------------------------------ P1
+    // The P1 grid barrier publishes this reset before any contact is solved.
+    if (blockIdx.x == 0 && tid == 0) *(volatile int*)p.any_friction = 0;
     for (ll wi = blockIdx.x; wi < B * NI; wi += nbk) {
       const int s = (int)(wi / NI), item = (int)(wi % NI);
       const int b = __ldg(&p.item_body[item]);
@@ -473,7 +495,8 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         }
         p.F[o + i] = f;
         if (__ldg(&p.bs1[b]) > 0.0) {
-          p.TMP[o + i] = -(lw - LWP[o + i]) * __ldg(&p.bih2[b]);
+          const double correction = mass_flux_correction(p, i, o, W, Wp);
+          p.TMP[o + i] = -((lw - LWP[o + i]) + correction / __ldg(&p.mass[i])) * __ldg(&p.bih2[b]);
         }
         const double w = W[o + i], wp = Wp[o + i];
         v[0] = w * lw; v[1] = w; v[2] = w - wp; v[3] = 2.0 * w - wp;
@@ -488,6 +511,18 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const int b = __ldg(&p.citem_body[item]);
         const ll o = (ll)s * NT;
         const double ih2 = __ldg(&p.bih2[b]);
+        if (__ldg(&p.bweak[b])) {
+          double sum = 0.0;
+          for (int j = __ldg(&p.q_ptr[c]); j < __ldg(&p.q_ptr[c+1]); j++) {
+            const int a = __ldg(&p.q_a[j]), d = __ldg(&p.q_b[j]);
+            const double wa = W[o+a], wd = W[o+d];
+            sum += __ldg(&p.q_weight[j]) * (wa*wd + __ldg(&p.z0[a])*wd + wa*__ldg(&p.z0[d]));
+          }
+          const double qc = __ldg(&p.beh[b]) * sum;
+          const ll oc = (ll)s * NC + c;
+          p.Q[oc] = qc; p.QF[oc] = (float)qc;
+          p.CXX[oc] = p.CYY[oc] = p.CXY[oc] = 0.0;
+        } else {
         int nb[9]; double u[9];
 #pragma unroll
         for (int j = 0; j < 9; j++) nb[j] = __ldg(&p.cnb[9ll * c + j]);
@@ -503,6 +538,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const ll oc = (ll)s * NC + c;
         p.Q[oc] = qc; p.QF[oc] = (float)qc;
         p.CXX[oc] = xx + zx; p.CYY[oc] = yy + zy; p.CXY[oc] = xy + zxy;
+        }
       }
     }
     // link forces, one thread per (simulation, link); the nodes add them in link order in P3
@@ -568,6 +604,13 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
           double g = 0.0;
           if (__ldg(&p.bber[b]) > 0.0) g = g + sv[0] * LW[o + i];
           if (__ldg(&p.bvk[b])) {
+            if (__ldg(&p.bweak[b])) {
+              for (int q = __ldg(&p.wg_ptr[i]); q < __ldg(&p.wg_ptr[i+1]); q++) {
+                const int other = __ldg(&p.wg_other[q]);
+                const ll oc = (ll)s * NC + __ldg(&p.wg_core[q]);
+                g += (h*h*p.AF[oc]*__ldg(&p.wg_weight[q])) * (W[o+other]+__ldg(&p.z0[other]));
+              }
+            } else {
 #pragma unroll 9
             for (int q = 0; q < p.KG; q++) {
               const int gc = __ldg(&p.gtE_core[(ll)q * NT + i]);
@@ -575,6 +618,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
                 const ll oc = (ll)s * NC + gc;
                 g = g - p.AF[oc] * slot_val(__ldg(&p.gtE_slot[(ll)q * NT + i]), p.CXX[oc], p.CYY[oc], p.CXY[oc]);
               }
+            }
             }
           }
           p.G[o + i] = g;
@@ -716,6 +760,16 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
     {
       bool wide_before = false;
       for (int bt = 0; bt < p.NCB + p.NFB; bt++) {
+        if (bt == p.NCB) {
+          // Include contacts solved on other blocks before reading the witness.
+          // If every friction call would return immediately, its hundreds of
+          // ordered batch barriers have no work to protect. Otherwise retain
+          // the original batches and every floating-point operation unchanged.
+          gsync(p.bar, nbk);
+          // Volatile bypasses per-SM L1 caching of this cross-block witness.
+          if (!*(volatile int*)p.any_friction) break;
+          if (blockIdx.x == 0 && tid == 0) active_friction_steps++;
+        }
         const bool fr = bt >= p.NCB;
         const int g = fr ? bt - (int)p.NCB : bt;
         const int q0 = fr ? __ldg(&p.fb_ptr[g]) : __ldg(&p.cb_ptr[g]);
@@ -755,14 +809,18 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const ll o = (ll)s * NT + i;
         const double dv = Wn[o] - Wp[o];
         if (sav) {
-          if (__ldg(&p.bvk[b])) { v[0] = __ldg(&p.ms0[i]) * dv * dv; v[1] = __ldg(&p.mass[i]) * (LW[o] - LWP[o]) * dv; }
+          if (__ldg(&p.bvk[b])) {
+            v[0] = __ldg(&p.ms0[i]) * dv * dv;
+            const double correction = mass_flux_correction(p, i, (ll)s * NT, W, Wp);
+            v[1] = (__ldg(&p.mass[i]) * (LW[o] - LWP[o]) + correction) * dv;
+          }
           v[2] = p.G[o] * dv;
         }
         if (viscous) {
           const ll base = (ll)s * NT;
-          // Same three curvature-root rows as the native solver: squares of
+          // Same quarter-cell tensor-root rows as the native solver: squares of
           // G(wn-wp), not a clipped signed matrix quadratic or preset T60.
-          for (int r = 3 * i; r < 3 * i + 3; r++) {
+          for (int r = BENDING_ROOT_ROWS_PER_NODE * i; r < BENDING_ROOT_ROWS_PER_NODE * (i + 1); r++) {
             double strain = 0.0;
             for (int q = __ldg(&p.vroot_ptr[r]); q < __ldg(&p.vroot_ptr[r + 1]); q++) {
               const int j = __ldg(&p.vroot_col[q]);
@@ -851,5 +909,8 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
     }
     MARK(6)
   }
-  if (blockIdx.x == 0 && tid == 0) for (int ph = 0; ph < 7; ph++) p.prof[ph] += pt[ph];
+  if (blockIdx.x == 0 && tid == 0) {
+    for (int ph = 0; ph < 7; ph++) p.prof[ph] += pt[ph];
+    p.prof[7] += active_friction_steps;
+  }
 }

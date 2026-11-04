@@ -56,10 +56,12 @@ pub enum ApertureObservation {
     TubeTerminal,
     /// Actual accepted node pressure in a connected tube network.
     NetworkNode(usize),
-    /// One-way exterior receiver of a uniform tube's outward terminal flow.
-    /// The circular mouth lies in an infinite rigid baffle. The authored
-    /// terminal reflection still drives the mechanics; no additional radiation
-    /// reaction is silently applied or claimed to match that terminal load.
+    /// Exterior receiver of a tube outlet or every bound DG terminal flow.
+    /// The circular openings lie in an infinite rigid baffle. A legacy tube keeps
+    /// its authored reflection; a DG outlet requires its computed baffled load
+    /// and uses that load's original geometry and exterior gas. Observation
+    /// adds no second reaction. DG uses the existing same-clock differentiating
+    /// image; the legacy tube's finite-difference image remains unchanged.
     TubeBaffled(CircularOutletReceiver),
     /// Exterior observation of flow into a degree-one passive network terminal.
     /// The adjacent section supplies the actual outlet radius. Its existing load
@@ -104,6 +106,7 @@ pub struct AperturePerformance {
     system: CoupledAperture,
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
+    dg_terminal_flows: Vec<f64>,
     exterior_gas: Option<GasState>,
     config: AperturePerformanceConfig,
     schedule: GestureSchedule,
@@ -209,16 +212,18 @@ impl AperturePerformance {
         Self::new_in_medium(system, observation, schedule, config, None)
     }
 
-    /// Observe an unadvanced network in an independently resolved exterior gas.
+    /// Observe an unadvanced outlet in an explicitly resolved exterior gas.
     /// The geometry and outward volume flow remain the selected terminal's.
-    /// This selects only the receiver medium: an existing authored load is NOT
-    /// replaced. Use the same exterior when deriving a matched radiation load.
-    /// No internal gas, aperture, cavity, wall or material-memory state changes.
+    /// A network selects its receiver medium; a DG source must already bind the
+    /// same exterior for its computed radiation reaction. This does not replace
+    /// an installed load or change any internal material or physical history.
     ///
-    /// The network must retain its complete section gases so common static
-    /// pressure can be checked. Legacy scalar-only tubes cannot supply that
-    /// condition and refuse; use an explicitly gas-bound one-section network.
-    /// The original constructor retains its local-gas path without conversion.
+    /// A network must retain its complete section gases so common static
+    /// pressure can be checked. A DG receiver is already bound to its computed
+    /// load's exterior; an explicit exterior must equal that original state.
+    /// Legacy scalar-only tubes cannot supply this condition and refuse; use an
+    /// explicitly gas-bound one-section network. The original local-gas paths
+    /// retain their existing receiver arithmetic.
     ///
     /// # Errors
     /// Original clock/schedule/receiver refusal, incoherent exterior, unequal
@@ -242,26 +247,53 @@ impl AperturePerformance {
             || a.accepted_steps() != 0 || config.samples > a.spec().max_steps
             || a.spec().time_step_s.to_bits() != (1.0 / f64::from(config.sample_rate_hz)).to_bits()
         { return Err(invalid("aperture performance requires a matching clock, positive capacity/window and an unadvanced complete physical system")); }
+        let exterior_gas = match (&system, observation) {
+            (CoupledAperture::Dg(model), ApertureObservation::TubeBaffled(_)) => {
+                let record = model.load().radiation_record()
+                    .ok_or_else(|| invalid("DG exterior observation requires its computed baffled reaction source"))?;
+                if record.apertures().is_empty()
+                    || record.apertures().len() != model.load().terminal_ports().len()
+                {
+                    return Err(invalid("DG exterior observation requires every original bound terminal opening"));
+                }
+                let bound = *record.gas_record().state();
+                if exterior_gas.is_some_and(|gas| gas != bound) {
+                    return Err(invalid("DG receiver exterior differs from its computed reaction source"));
+                }
+                Some(bound)
+            }
+            _ => exterior_gas,
+        };
         if let Some(exterior) = exterior_gas {
             exterior.validate_coherence().map_err(|e|
                 GestureCompileError::Render(receiver_error(e.to_string())))?;
-            let (CoupledAperture::Network(network), ApertureObservation::NetworkBaffled {node, ..})
-                = (&system, observation) else {
-                    return Err(invalid("independent exterior requires a gas-bound network outlet observation"));
-                };
-            let gases = network.section_gases()
-                .ok_or_else(|| invalid("independent exterior requires complete internal gas states"))?;
-            let mut adjacent = network.spec().sections.iter().enumerate()
-                .filter(|(_, s)| s.nodes.contains(&node));
-            let (index, _) = adjacent.next()
-                .ok_or_else(|| invalid("exterior observation has no adjacent section"))?;
-            if adjacent.next().is_some() || gases[index].pressure != exterior.pressure {
-                return Err(invalid("exterior observation requires a degree-one port and common static pressure; mean flow is not modeled"));
+            match (&system, observation) {
+                (CoupledAperture::Network(network), ApertureObservation::NetworkBaffled {node, ..}) => {
+                    let gases = network.section_gases()
+                        .ok_or_else(|| invalid("independent exterior requires complete internal gas states"))?;
+                    let mut adjacent = network.spec().sections.iter().enumerate()
+                        .filter(|(_, s)| s.nodes.contains(&node));
+                    let (index, _) = adjacent.next()
+                        .ok_or_else(|| invalid("exterior observation has no adjacent section"))?;
+                    if adjacent.next().is_some() || gases[index].pressure != exterior.pressure {
+                        return Err(invalid("exterior observation requires a degree-one port and common static pressure; mean flow is not modeled"));
+                    }
+                }
+                (CoupledAperture::Dg(model), ApertureObservation::TubeBaffled(_)) => {
+                    if model.load().duct().outlet_gas().pressure != exterior.pressure {
+                        return Err(invalid("DG receiver and outlet must share static pressure"));
+                    }
+                }
+                _ => return Err(invalid("independent exterior requires a bound outlet observation")),
             }
         }
         let receiver = match (&system, observation) {
             (_, ApertureObservation::Inlet) | (CoupledAperture::Tube(_), ApertureObservation::TubeTerminal) => None,
             (CoupledAperture::Network(m), ApertureObservation::NetworkNode(n)) if n < m.spec().nodes.len() => None,
+            (CoupledAperture::Dg(model), ApertureObservation::TubeBaffled(location)) => {
+                Some(model.load().baffled_receiver(config.sample_rate_hz, location)
+                    .map_err(|e| GestureCompileError::Render(RenderError::Voice(e)))?)
+            }
             (CoupledAperture::Tube(m), ApertureObservation::TubeBaffled(location)) => {
                 // Radius and gas are the actual physical tube's, never an
                 // independently tuned observer area or invented gain. Waveguide
@@ -292,7 +324,11 @@ impl AperturePerformance {
             _ => return Err(invalid("pressure observation is not a node or terminal of the supplied system")),
         };
         let controls = compile_schedule(&schedule, &config)?;
-        Ok(Self { system, observation, receiver, exterior_gas, config, schedule, controls, next: 0,
+        let dg_terminal_flows = match (&system, &receiver) {
+            (CoupledAperture::Dg(model), Some(_)) => vec![0.0; model.load().terminal_ports().len()],
+            _ => Vec::new(),
+        };
+        Ok(Self { system, observation, receiver, dg_terminal_flows, exterior_gas, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, poisoned: false, forces: None, boundaries: None,
             boundary_frame: None, mechanical_work_j: 0.0,
             observation_policy: ObservationPolicy::Diagnostic })
@@ -355,9 +391,23 @@ impl AperturePerformance {
         match &mut self.system {
             CoupledAperture::Dg(m) => {
                 let frame = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
-                // Admission permits the actual mean inlet pressure only. DG
-                // terminal radiation has not been substituted by a one-way gain.
-                Ok((frame.aperture.bore_pressure_pa, frame.aperture.mechanical_work_j, None))
+                let pressure = match self.observation {
+                    ApertureObservation::Inlet => frame.aperture.bore_pressure_pa,
+                    ApertureObservation::TubeBaffled(_) => {
+                        if frame.terminals.len() != self.dg_terminal_flows.len()
+                            || frame.terminals.is_empty()
+                        {
+                            return Err(sizing("DG microphone requires every accepted terminal flow"));
+                        }
+                        for (flow, terminal) in self.dg_terminal_flows.iter_mut().zip(&frame.terminals) {
+                            *flow = terminal.outward_flow_m3_s;
+                        }
+                        self.receiver.as_mut().expect("admitted DG outlet receiver")
+                            .step(&self.dg_terminal_flows).map_err(receiver_error)?
+                    }
+                    _ => unreachable!("observer admitted against the exclusively owned system"),
+                };
+                Ok((pressure, frame.aperture.mechanical_work_j, None))
             }
             CoupledAperture::Tube(m) => {
                 let f = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
@@ -479,3 +529,6 @@ mod exterior_tests;
 
 #[cfg(test)]
 mod qualification;
+
+#[cfg(test)]
+mod dg_tests;

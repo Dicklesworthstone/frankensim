@@ -17,9 +17,14 @@
 //! sweep reaches the regime a render with that onset reaches. Neither mode maps
 //! hysteresis: every run starts from rest.
 //!
+//! With `--trace PATH` and `--points 1`, the run's bow-point string velocity and
+//! string-minus-bow relative velocity are also written to PATH, one pair of
+//! little-endian f64 per audio sample (bow-point first), so the onset can be read
+//! period by period instead of only through the tail metrics.
+//!
 //! ```text
 //! bowed_card_sweep CARD.performance --beta 0.0909 --speed 0.15 \
-//!     [--force-min 0.02] [--force-max 3] [--points 21] [--seconds 1.0] [--accel 1.0]
+//!     [--force-min 0.02] [--force-max 3] [--points 21] [--seconds 1.0] [--accel 1.0] [--trace PATH]
 //! ```
 
 use std::process::ExitCode;
@@ -48,6 +53,8 @@ struct Args {
     seconds: f64,
     /// Constant bow acceleration from rest [m/s^2]; zero is a step onset.
     accel_m_s2: f64,
+    /// Where to write the single run's velocity trace, if anywhere.
+    trace: Option<String>,
 }
 
 struct Card {
@@ -148,9 +155,11 @@ fn parse_args() -> Result<Args, String> {
     let mut points = 21_usize;
     let mut seconds = 1.0;
     let mut accel = 0.0;
+    let mut trace = None;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--trace" => trace = Some(iter.next().ok_or("--trace needs a path")?),
             "--beta" | "--speed" | "--force-min" | "--force-max" | "--points" | "--seconds"
             | "--accel" => {
                 let raw = iter.next().ok_or_else(|| format!("{arg} needs a value"))?;
@@ -192,6 +201,9 @@ fn parse_args() -> Result<Args, String> {
     if !(accel >= 0.0) {
         return Err("--accel must be zero (a step onset) or positive".to_string());
     }
+    if trace.is_some() && points != 1 {
+        return Err("--trace records one run: it needs --points 1".to_string());
+    }
     Ok(Args {
         card: card.ok_or("a CARD.performance path is required")?,
         beta,
@@ -201,7 +213,17 @@ fn parse_args() -> Result<Args, String> {
         points,
         seconds,
         accel_m_s2: accel,
+        trace,
     })
+}
+
+/// The log's bow-point and relative velocities, interleaved per sample as little-endian f64.
+fn trace_bytes(log: &BowedRunLog) -> Vec<u8> {
+    log.bow_point_velocity_m_s
+        .iter()
+        .zip(&log.relative_velocity_m_s)
+        .flat_map(|(bow, rel)| bow.to_le_bytes().into_iter().chain(rel.to_le_bytes()))
+        .collect()
 }
 
 /// Bow speed at control tick `tick`: constant acceleration from rest, then held.
@@ -311,6 +333,10 @@ fn run() -> Result<(), String> {
         } else {
             run_bowed(&config).map_err(|error| format!("run refused at {force_n} N: {error}"))?
         };
+        if let Some(path) = &args.trace {
+            std::fs::write(path, trace_bytes(&log))
+                .map_err(|error| format!("cannot write the trace {path}: {error}"))?;
+        }
         let metrics = gate_metrics(&log, &config.card);
         let class = classify(&metrics);
         if class == "playable" {
@@ -386,6 +412,26 @@ mod tests {
         assert!((ramp_speed_m_s(75, 1.0, 0.15) - 0.075).abs() < 1.0e-15);
         assert!((ramp_speed_m_s(150, 1.0, 0.15) - 0.15).abs() < 1.0e-15);
         assert_eq!(ramp_speed_m_s(10_000, 1.0, 0.15), 0.15);
+    }
+
+    #[test]
+    fn the_trace_interleaves_bow_point_and_relative_velocity_per_sample() {
+        let log = BowedRunLog {
+            bow_point_velocity_m_s: vec![0.25, -1.5],
+            relative_velocity_m_s: vec![0.0, -1.65],
+            bridge_force_n: vec![0.0, 0.0],
+            body_volume_velocity_m3_s: Vec::new(),
+            radiated_pressure_pa: Vec::new(),
+            final_total_energy_j: 0.0,
+            peak_total_energy_j: 0.0,
+        };
+        let bytes = trace_bytes(&log);
+        assert_eq!(bytes.len(), 4 * 8);
+        let words: Vec<f64> = bytes
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(words, [0.25, 0.0, -1.5, -1.65]);
     }
 
     #[test]

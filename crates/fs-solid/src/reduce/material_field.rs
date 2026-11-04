@@ -36,7 +36,7 @@ pub fn reduce_valve(
     cx: &Cx<'_>,
 ) -> Result<ValveCard, ReduceError> {
     let identity = field_identity(request.material, request.tetrahedra.len())?;
-    super::reduce_valve_impl(request, request.material, identity, cx, None, None)
+    super::reduce_valve_impl(request, Some(request.material), identity, cx, None, None)
         .map(|reduced| reduced.card)
 }
 

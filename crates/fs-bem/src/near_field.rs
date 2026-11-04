@@ -74,7 +74,8 @@ impl Default for Options {
     fn default() -> Self { Self { relative_tolerance:1e-7, maximum_depth:14, maximum_kernel_evaluations:2_000_000 } }
 }
 impl Options {
-    fn validate(self) -> Result<(),HelmholtzError> {
+    /// Admit the existing accuracy, depth and total quadrature-work envelope.
+    pub fn validate(self) -> Result<(),HelmholtzError> {
         if !self.relative_tolerance.is_finite() || !(1e-12..=1e-3).contains(&self.relative_tolerance)
             || self.maximum_depth>16 || self.maximum_kernel_evaluations<80
             || self.maximum_kernel_evaluations>20_000_000 {

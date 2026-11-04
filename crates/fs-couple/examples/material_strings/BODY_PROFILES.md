@@ -8,6 +8,11 @@ The performance's `body` record still supplies its pack, dimensions, thickness,
 mode count and observer distance. String layers, support prescriptions, torsion,
 loads, plucks, bow tracks, shared gas and optional cavity are unchanged.
 
+V3/v4 profiles can also supply an explicit tetrahedral interior with the
+`interior-fe-v1` trailer below. Its gas is the performance's original resolved
+atmosphere; its standing waves and uniform compression load the same material
+body before the existing force, bow, fluid and radiation attachments.
+
 The rectangular profiles normally use `from_viscous_material_plate_chart`; an
 explicit regional-Maxwell selection uses the original elastic chart plus the
 shared coupled material-memory owner described below. The curved
@@ -362,6 +367,15 @@ physical eigenvectors as stiffness, force and volume response. It retains the
 full modal damping matrix. Missing shear or viscosity data never means borrowing
 another material's coefficients.
 
+A pack may also state `constant_loss_reference_omega` in rad/s: the angular
+frequency at which its viscosities are its loss factors (viscosity = loss
+factor x modulus / omega_ref). That region's viscosity is then projected on its
+own elements and read at every retained mode's own frequency, so each mode's
+damping carries the pack's loss factors instead of growing with frequency
+(`fs_couple::shear_shell::constant_loss`). The anchor's claim domain and the
+law's 50 Hz-10 kHz band clip the region's frequency support. A pack without it
+is Kelvin-Voigt exactly as before.
+
 Node x/y fractions lie in `[0,1]` and scale with the performance's body length
 and width; z is in metres. Directors and force directions must already be unit
 vectors; the parser does not normalize or smooth them. The shared midsurface and
@@ -372,15 +386,15 @@ an unconstrained translational component. The bridge count equals the actual
 string count, including unplayed strings. Source bytes, geometry, packs,
 physical eigenvectors and force maps remain attached to the performer.
 
-The file admits at most 2048 nodes and 4096 triangles per component, 16 regions, eight string
-attachments and 128 retained shell modes, within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
+The file admits at most 3072 nodes and 6144 triangles per component, 16 regions, eight string
+attachments and 256 retained shell modes, within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
 `consistent` or `lumped` inertia. `drilling` supplies positive numerical
 drilling stabilization; `director-min-dot` declares the incident-facet alignment
 floor in `(0,1]`. The spectral window contains squared angular frequencies.
 `projection-work` declares a separate cold shell-projection budget, at most
-549,755,813,888 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
-force and pressure projections, about 2.6e10 for a cap-sized component; a v4 assembly adds the owner's
-conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`, about 4.3e11 in all at the v4 caps).
+2,199,023,255,552 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
+force and pressure projections, about 1.4e11 for a cap-sized component; a v4 assembly adds the owner's
+conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`, about 2.0e12 in all at the v4 caps).
 It does not enlarge the existing complete-network limits.
 These discretization choices require mesh, mode, stabilization and time-step
 refinement for the intended specimen.
@@ -647,8 +661,8 @@ components; they retain the same physical chord and perpendicular-lever rule
 as v3. The other string controls, material bow interfaces, afterlength, torsion,
 preloads and shared gas continue through the original performer.
 
-Profiles take the 4 MiB shell limit and admit at most 32 components, 8192 total
-nodes, 16384 total triangles, 64 ties and 128 shared body modes. Per-component v3
+Profiles take the 4 MiB shell limit and admit at most 64 components, 12288 total
+nodes, 24576 total triangles, 157 ties and 256 shared body modes. Per-component v3
 mesh limits still apply. Material/interface source bytes and every damping
 channel remain under the existing complete-performance budgets. At least one
 region across the assembly must retain `@body`; other regions can select
@@ -670,5 +684,397 @@ their own axes at the part's thickness, a free body, the part flags' exterior
 and cavity facets, full-rotation rigid edge ties on the master's skin or
 midsurface. What the table does not carry is explicit: the window, projection
 work, which wood is `@body`, the reference thickness, and one bridge per string
-at the nearest node of a declared point (the snap distance is reported). The
-table's cavity row supplies the performance's cavity record.
+at the nearest node of a declared point (the snap distance is reported), each
+pushing along one declared direction. The table's cavity row supplies the
+performance's cavity record. The il Cannone violin body
+(`data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv`,
+48 components and 119 ties; its 6 mm mesh `shell-assembly-h6.tsv`, 64 components
+and 157 ties, sets the two caps above) converts the same way;
+its frame has x across the body, y vertical and z along the strings, so its
+strings push their bridge nodes along x. That x is also the bow's tangent, so
+the il Cannone rungs give every string `polarizations two 1 0 1 0`: the bow
+drives the plane the bridge holds. The string record carries one bridge
+direction, so the bow-normal plane has no bridge, and nothing drives it. With
+the violin-sized rung's `0.6 0.8 1 0`, 0.8 of the bow drove that free plane, and
+the G string sounded its full 0.383 m span (167 Hz) instead of its 0.328 m
+speaking length.
+
+With the two violin shell packs, both built by `xtask matdb-pack` from
+`data/matdb/seed-v1` (`packs/violin-spruce-norway-viala2020-shell.fsmatpk` as
+`@body` for the top, bass bar and soundpost,
+`packs/violin-maple-sycamore-sonderegger2013-shell.fsmatpk` for the back, ribs
+and bridge), the window from 15 Hz to 2 kHz holds 30
+assembled modes, 473.5 Hz to 1967.7 Hz. A request for more refuses once the
+window is solved and names the count it holds. Both packs state
+`constant_loss_reference_omega` (2 pi 200 rad/s), so the body modes' Q is
+68.3-80.3 across the window; without it the same packs gave a Kelvin-Voigt Q
+falling from 31.0 at 473.5 Hz to 7.2 at 1915.7 Hz. The ignored rungs in
+`body/shell/tests.rs` bow the violin-sized G3 rung's synthetic steel strings
+(not violin strings) on this body: a quarter-second cost rung printing every
+body mode with its Q, the construction and render times and the pressure bits,
+and a 2 s render for listening. On trj the body constructs in 315-350 s and the
+coupled network (245 coordinates, 36 connections) renders at 100-125 s per
+audio second.
+
+### A table from the command line
+
+`material_strings assemble-shell TABLE OPTIONS NEW_PROFILE` writes a table as
+this v4 profile and admits it before it writes it. OPTIONS states the choices
+the table does not carry:
+
+```text
+frankensim-shell-assembly-options-v1
+window-hz LO HI
+projection-work N
+reference-thickness-m T
+pack TABLE_PACK PROFILE_PACK          (one per table pack; @body is the performance body pack)
+bridge-component NAME
+bridge-direction X Y Z
+bridge X Y                            (one per string, in string order, table coordinates [m])
+```
+
+Each record except `pack` and `bridge` appears exactly once, and a line that
+starts with `#` is a comment. The command prints:
+- the body length and width [m] and the reference thickness, for the
+  performance's body record;
+- each bridge's snap distance;
+- the table's cavity row (volume, neck radius, neck length), for the cavity
+  record.
+
+`cannone-h8.assembly` holds il Cannone's choices. The rungs in
+`body/shell/tests.rs` read the same file. `cannone-h6.assembly` makes the same
+choices for the 6 mm table `shell-assembly-h6.tsv` beside it, with the
+projection work its 11769 nodes need, except the window: it reaches 5 kHz, the
+narrower pack's validity. The spruce pack declares its source's band (Viala's
+model updating, 100-5000 Hz) and the maple pack Laemmlein's 150 Hz to 10 kHz
+sweep; no source reaches 5-6 kHz. The cavity row and the bridge snaps differ
+slightly from h8's, so `assemble-shell` prints them for the performance.
+
+`cannone-dominant-g3.material-strings` bows il Cannone's G for 2 s at 144 kHz,
+on the four Dominant string packs (README.md). It uses the rung's 0.383 m span
+and 0.328 m speaking length; the contacts table puts il Cannone's own G at
+323.1 mm bridge to nut. The G keeps its bending and twist modes to 30 kHz; D, A
+and E keep theirs to 10 kHz, which is 474 coordinates with the body and cavity.
+The bow presses 1 N and moves at 0.2 m/s, a tenth of the speaking length from
+the bridge. The WAV's full scale is 1 Pa. The peak at the microphone is
+0.34 Pa on this body and 0.37 Pa on h6 at 5 kHz, both in the first 50 ms.
+
+Two inputs of this note are authored, not measured:
+- the bridge joint (200000 N/m, 0.1 N s/m);
+- the Stribeck friction law (0.8, 0.4, 0.1 m/s).
+
+`cannone-dominant-g3-crown-compliant.material-strings` and
+`cannone-dominant-g3-crown-stiff.material-strings` replace the authored joint.
+They are the same note, but every string's joint comes from its interface pack
+`packs/violin-cannone-crown-dominant-{e,a,d,g}-interface.fsintpk`.
+
+`gen_crown_interface_packs.py` writes both notes and the four sources from
+committed data only:
+- the maple shell pack;
+- the wrap-metal packs;
+- the CT break angles and bridge-top thickness;
+- this note's string radii and tensions.
+
+Each joint is the string's lateral stick on the maple crown: Hertz crossed
+cylinders and Mindlin's no-slip tangential stiffness, k_t = 8 G* a. The joint
+loss is the maple's shear retardation time times its share of the compliance.
+That dashpot is written at the maple pack's constant-loss anchor (2 pi 200
+rad/s), and each source states the anchor as `constant_loss_reference_omega`.
+The prepared network then gives every coupled mode the joint's loss factor
+(share x eta_LR, about 0.016) times the joint's share of that mode's strain
+energy, at the mode's own frequency, instead of the Kelvin-Voigt reading that
+grows with frequency. The note needs the prepared owner, which it declares.
+
+The stiff end's coupled stiffness bound exceeds the network's 0.9 pi f_s guard
+at 144 kHz, so its note renders at 384 kHz over the same 2 s, with 2.67 times
+as many steps.
+
+Every claim covers 0 to 2 pi 200 kHz: the contact is quasi-static there, and the
+network asks the law at the cavity neck's free coordinate and at its coupled
+stiffness bound. The loss outside the maple's measured 150 Hz-10 kHz is a STATED
+UNKNOWN; there it is the five-branch constant-loss shape, extrapolated.
+
+Three inputs are STATED UNKNOWN. Each is taken at both ends of its range:
+- the maple's orthotropy;
+- the crown edge radius, from 0.1 mm to half the CT's 1.8 mm bridge top;
+- the wrap metal Pickering does not name: aluminium to silver, and aluminium to
+  steel for the E.
+
+| string | compliant k_t, D | stiff k_t, D |
+|---|---|---|
+| G | 1.08e5 N/m, 1.37 N s/m | 1.30e6 N/m, 15.9 N s/m |
+| E | 1.05e5 N/m, 1.33 N s/m | 1.30e6 N/m, 16.4 N s/m |
+
+The D and A strings lie in between.
+
+The elastic contact's mean pressure (170 MPa to 2.2 GPa) is beyond what end-grain
+maple bears, so a played crown beds into a conforming groove. That only enlarges
+the contact: the compliant end is a lower bound, and the stiff end can be
+exceeded. The winding's turn-by-turn contact is not resolved.
+
+Gather the packs and the performance in one directory, then run from the root:
+
+```bash
+demo=$(mktemp -d)
+m=crates/fs-couple/examples/material_strings
+cp $m/packs/violin-*.fsmatpk $m/packs/violin-cannone-crown-*.fsintpk $m/cannone-dominant-g3*.material-strings "$demo/"
+cargo run --release -p fs-couple --example material_strings -- assemble-shell \
+  data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv \
+  $m/cannone-h8.assembly "$demo/cannone-h8.body"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/cannone-dominant-g3.material-strings" "$demo/g3.wav" --body-profile "$demo/cannone-h8.body"
+```
+
+For a crown end, run the last command on
+`cannone-dominant-g3-crown-compliant.material-strings` or
+`cannone-dominant-g3-crown-stiff.material-strings`, with a new output.
+
+## Authored distributed interior air on the material shell
+
+An optional `interior-fe-v1` trailer follows every ordinary record of a v3
+shell or v4 assembled body profile. It gives the original Helmholtz finite
+element owner the actual volume mesh. No material-specific cavity preset,
+assigned resonance, frequency tuning or independent pressure filter is used.
+
+```text
+interior-fe-v1 ORDER MAX_HZ MAX_PRESSURE_MODES MAX_DOFS MAX_BOUNDARY_FACES MAX_PROJECTION_TERMS RITZ_TOL
+air-nodes N
+air-node X_FRACTION Y_FRACTION Z_METRES
+... exactly N rows ...
+air-tets T
+air-tet A B C D
+... exactly T rows ...
+```
+
+Every node index is zero based. X and Y use exactly the shell's existing
+fractional convention: multiply by the performance body's length and width.
+Z is already in metres. Reuse the exact original boundary coordinate values;
+the adapter neither welds nearby points nor closes gaps. Every tetrahedron
+needs four distinct valid vertices and nonzero physical volume, every volume
+vertex must be used, and repeated tetrahedra are refused. The volume must be
+connected and conforming, and every boundary triangle must match one explicitly
+selected original `cavity-facet` or a declared compact opening below. Solid
+pressure facets are oriented outward from the gas. A profile
+without an explicit `pressure-surfaces` block cannot bind a distributed
+interior. Exterior pressure roles remain independent.
+
+The order is 1–4. The positive frequency ceiling must stay below 0.45 times
+the mechanical sample rate. The original inertia-counted eigensolver retains
+the **entire** Neumann eigenwindow, including uniform pressure; exceeding
+`MAX_PRESSURE_MODES` refuses instead of dropping modes. `RITZ_TOL` is the
+relative eigen residual tolerance and must lie strictly between zero and one.
+The source admits at most 256 pressure modes, 8192 pressure degrees of freedom,
+8192 boundary faces, 32768 tetrahedra and one billion projection terms. It also
+retains the complete profile's 4 MiB byte ceiling. Higher order contributes edge,
+face and interior degrees of freedom; `MAX_DOFS` bounds the complete FE
+space, not only its vertices.
+
+The network reserves up to `min(MAX_PRESSURE_MODES, actual FE DOFs)-1`
+additional standing-wave coordinates and one compression connection per
+pressure mode before material-pack reads. Each declared opening also reserves
+one fluid-inertia coordinate and one possible internal-damping connection,
+including when its declared resistance is zero. The exact uniform pressure mode contributes
+compression storage without an invented moving air mass. These reservations
+share the existing complete mode, connection, setup-work and optional
+`prepared-linear` budgets with string polarizations, torsion, interfaces and
+cylinder-fluid memory. The original exact owner still applies its connected
+block limit. Structural modes, the pressure frequency window, element order
+and mesh resolution remain explicit convergence axes.
+
+The performance must select `cavity none`: a simultaneous lumped neck cavity
+would duplicate the same gas storage. Its existing `gas` record supplies the
+same density and sound speed to strings and the original pressure FE, including
+source-backed thermochemical records when supplied. A change to pressure,
+composition or temperature rebuilds air storage and standing-wave frequencies.
+A replacement solid material rebuilds the original shell basis and integrates
+the same pressure geometry against its new displacement fields. The existing
+work-conjugate coupling supplies both air reaction on the shell and shell work
+on the air inside the complete friction solve.
+
+### Run the closed-shell interior fixture
+
+`closed-shell-cavity.body` extends the existing synthetic 42-node,
+80-triangle shell with all 80 explicit pressure facets and a center-star
+tetrahedral volume. It retains the identical boundary coordinates and material
+pack. Its order-two FE has 205 pressure degrees of freedom; the authored
+1100 Hz window has a 24-mode allowance. One constrained-shell structural
+coordinate and the original four-mode string keep the integration fixture
+small. The fixture is a manufactured source-to-performance example, not a
+measured violin, cello or bass.
+
+From the repository root:
+
+```bash
+demo="$(mktemp -d)"
+cp crates/fs-couple/examples/material_strings/*.tsv "$demo/"
+cp crates/fs-couple/examples/material_strings/closed-shell-cavity.material-strings "$demo/"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/wire-manifest.tsv" --out "$demo/wire.fsmatpk"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/closed-shell-manifest.tsv" --out "$demo/closed-shell.fsmatpk"
+cargo run --release -p fs-couple --bin material_strings -- \
+  "$demo/closed-shell-cavity.material-strings" "$demo/closed-shell-cavity.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/closed-shell-cavity.body
+```
+
+The sample retains the existing compact body-pressure observer, so its WAV is
+an integration diagnostic rather than a converged full-band external sound
+field. It does not reuse the older example's 120 Hz BEM band for a distributed
+air window extending to 1100 Hz. An independently admitted closed-shell BEM
+load and finite-distance shell observer can still be selected through their
+existing performance records; their frequency bands, spatial resolution and
+error budgets need to cover the desired observation.
+
+Without an explicit thermal declaration, this interior path represents frozen,
+homogeneous gas with lossless linear acoustics on straight-sided tetrahedra and
+the original linear shell kinematics. The thermal extension below adds gas
+heat diffusion. Viscous wall shear and nonconforming volume/shell interfaces
+remain separate physical operators. Missing boundary assignments are refused;
+no fictitious solid closure surface is added.
+
+### Thermal diffusion in the same cavity and mechanical solve
+
+After the last `air-tet`, or after the complete optional `air-openings` block,
+select the original gas heat equation with:
+
+```text
+air-thermal isothermal-walls MAX_DECAY_PER_S MAX_THERMAL_MODES MAX_THERMAL_DOFS MAX_PROJECTION_TERMS MAX_UNRESOLVED_FRACTION
+```
+
+The solid wall temperature perturbation is fixed to zero. Actual opening faces
+have zero diffusive heat flux, so the declaration does not invent a heat
+reservoir across an aperture. The retained gas supplies conductivity, density,
+heat capacity and gamma; these determine the diffusivity `kappa/(rho*cv)`.
+Heat modes come from the original volume FE stiffness and consistent mass
+matrices, with the actual wall trace constrained. Every positive heat mode in
+the declared decay-rate window is retained, subject to the explicit mode and
+work allowances.
+
+Those modes become passive compression-relaxation states in the existing
+string/body/cavity propagator. They change both pressure reaction and decay,
+including the uniform compression mode. The instantaneous compression remains
+the original adiabatic law; the captured thermal field relaxes toward its
+isothermal equilibrium. There is no independent heat timestepper or assigned
+modal damping. Original pressure and neck observers include accepted thermal
+history. A bare coordinate-only pressure readout refuses when it would omit
+that history.
+
+The part of the compression field outside the retained thermal space stays
+adiabatic. `MAX_UNRESOLVED_FRACTION`, strictly between zero and one, bounds the
+infinity norm of the missing normalized compression projector. It measures
+the FE/window representation, not overall instrument accuracy. Refining the
+volume and retaining more heat modes are the way to reduce it; the source
+refuses an unresolved declaration. Each retained heat mode reserves a possible
+first-order state in the complete material-memory budget before pack I/O.
+The `prepared-linear` backend is refused because it has no such states.
+
+`closed-shell-thermal.body` reuses the original manufactured closed-shell
+geometry with one pressure mode and this declaration:
+
+```text
+air-thermal isothermal-walls 1.0 43 256 50000000 0.201
+```
+
+Use it with `closed-shell-cavity.material-strings` and the same run command
+above, selecting the thermal body profile and a new output path. An independent
+exact polynomial FE calculation for the authored 0.4 by 0.4 m body gives 205
+volume DOFs, 43 free heat DOFs and a uniform-compression projector remainder of
+0.20. That explicit coarse remainder is why the fixture declares 0.201. For
+293.15 K dry air the retained decay rates are about 0.0084–0.1804 per second.
+This source demonstrates physical coupling and retained history; its coarse
+mesh does not resolve audio-frequency thermal boundary layers.
+
+The model covers linear gas thermal conduction to fixed-temperature walls.
+Viscous boundary shear, finite wall heat capacity and effusivity, mean flow and
+aperture enthalpy transport are not supplied by this selector. Material-card
+and gas substitutions rebuild their original physical owners; this fixture
+does not establish measured violin, cello or bass fidelity.
+
+### Explicit compact openings through the original volume and exterior
+
+After the last `air-tet`, an optional opening section names original volume
+faces and internal neck data:
+
+```text
+air-openings COUNT
+air-opening INTERNAL_LENGTH_M INTERNAL_RESISTANCE_PA_S_M3 FACE_COUNT
+air-opening-face A B C
+... exactly FACE_COUNT rows, then the next opening ...
+```
+
+There may be one to eight openings. Indices are the original `air-node` IDs;
+they are never inferred from the shell's triangle row numbers. Faces must be
+distinct across all openings. The shared physical owner checks that each face
+is on the volume boundary, has no remaining solid shell triangle over it, and
+belongs to one connected planar patch with a single boundary loop. Every rim
+translation must be fixed in every retained shell mode. Remove the actual
+solid triangle and its exterior/cavity pressure-role references when declaring
+a hole; retaining a solid triangle with zero pressure weight does not make it
+an opening.
+
+`INTERNAL_LENGTH_M` is positive and contains only the internal duct length and
+any explicitly included interior correction. The nonnegative resistance is
+only internal loss. The original shell BEM supplies exterior reaction once,
+including its cross-coupling between the structural surface and opening flow.
+No exterior end correction, radiation resistance, assigned resonance or
+instrument-specific sound calibration is added by the file adapter.
+
+Opening-bearing profiles require `body-radiation bem ...` before material-pack
+reads. That band's upper endpoint must cover the selected interior pressure
+window, and the original joint owner additionally checks the reference neck
+frequencies and its compactness bound. The cavity binds before cylinder-fluid,
+torsional, nonlinear axial and material-memory attachments. The complete
+performance is returned only after the original exterior owner has bound the
+joint structural and opening load. Existing sealed files keep their previous
+grammar and construction path.
+
+The existing `shell_observer` record selects the actual external pressure
+output. Its shared BEM transfer takes original body modal velocities and each
+accepted physical opening volume flow. It preserves their interference and
+the observer's explicit numerical latency; no separately driven opening tone
+or output normalization is introduced.
+
+`open-shell-cavity.body` is a manufactured variant of the closed-shell fixture.
+It removes solid triangle `[0,12,14]`, whose three vertices are fully constrained,
+and retains that exact face in the original 80-tetrahedron volume. The explicit
+opening has a 0.04 m internal length and zero internal resistance. Its order-two
+interior selects the complete 0–180 Hz window with one pressure-mode allowance;
+the same eigensolver refuses if that allowance cannot retain the full window.
+The paired performance declares BEM loading over 0.4–180 Hz and an 8 kHz
+microphone with a 60 Hz pass-band endpoint and a 180 Hz taper stop. The nominal
+uniform-neck resonance lies within that declared taper, so this example is a
+finite-band source/observer integration, not full-passband instrument audio or
+a measured violin, cello or bass. Frequency, panel and FIR error gates remain
+those of the original owners.
+
+The joint load now uses the existing symmetric P1/P0 Galerkin source; the
+receiver evaluates that same source's P1 pressure and P0 auxiliary density.
+Independent body and mouth columns retain the unchanged `1e-12` reciprocity,
+passivity and causal-fit gates. No collocation matrix is repaired. The owner's
+slab resonance exclusion and angular-resolution chart limit the declared band;
+spatial, angular, receiver and FIR refinement remain independent obligations.
+
+The 80-panel, 42-vertex, two-source load requires 162,083,000 original work units
+per frequency and 10,535,395,000 over its 65 frequencies. Its file therefore
+declares a bounded 12-billion-unit source allowance. The microphone has an
+80-billion-unit boundary-sweep allowance and separately declares at most two
+million adaptive receiver-kernel evaluations per frequency. These are numerical
+work ceilings, not time estimates or relaxed error tolerances.
+`shell_angular_refinement 0` and `shell_quadrature 1e-7 14 2000000` expose the
+existing owners' refinement controls as input data.
+
+The integration inputs and command remain pending native execution. Their test
+retains all construction, matrix, fit, field and sample-level assertions as hard
+gates; this implementation is not measured-instrument qualification.
+
+After generating the two material packs using the commands above, the pending
+integration command is:
+
+```bash
+cp crates/fs-couple/examples/material_strings/open-shell-cavity.material-strings "$demo/"
+cargo run --release -p fs-couple --bin material_strings -- \
+  "$demo/open-shell-cavity.material-strings" "$demo/open-shell-cavity.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/open-shell-cavity.body
+```
+
+

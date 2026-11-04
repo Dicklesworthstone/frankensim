@@ -19,7 +19,11 @@ const MAX_GRID: usize = 12;
 mod shell;
 #[path = "body/relaxation.rs"]
 mod relaxation;
+#[path = "body/cavity.rs"]
+mod cavity;
 use relaxation::PlateLoss;
+/// The choices `material_strings assemble-shell` reads for a shell-assembly table.
+pub(crate) use shell::assembly::table::OptionsFile as ShellTableOptions;
 
 /// An optional complete body-model selection; the performance still owns its
 /// material pack, physical dimensions, thickness, mode count and listener.
@@ -27,6 +31,7 @@ use relaxation::PlateLoss;
 pub struct Profile {
     pub bytes: Vec<u8>,
     model: BodyModel,
+    interior: Option<cavity::Spec>,
 }
 #[derive(Clone, Debug)]
 enum BodyModel {
@@ -43,16 +48,21 @@ impl Profile {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 4 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;
+        let (body_text, interior) = cavity::split(text)?;
+        let body_bytes = body_text.as_bytes();
         let version = text.lines().next().and_then(|s| s.split_ascii_whitespace().next())
             .ok_or("missing body profile version")?;
         let model = match version {
             "frankensim-string-body-v1" | "frankensim-string-body-v2" =>
-                BodyModel::Plate(PlateProfile::parse(bytes)?),
-            "frankensim-string-body-v3" => BodyModel::Shell(shell::Spec::parse(bytes)?),
-            "frankensim-string-body-v4" => BodyModel::Assembly(shell::assembly::Spec::parse(bytes)?),
+                BodyModel::Plate(PlateProfile::parse(body_bytes)?),
+            "frankensim-string-body-v3" => BodyModel::Shell(shell::Spec::parse(body_bytes)?),
+            "frankensim-string-body-v4" => BodyModel::Assembly(shell::assembly::Spec::parse(body_bytes)?),
             _ => return Err("unsupported body profile version".into()),
         };
-        Ok(Self { bytes: bytes.to_vec(), model })
+        if interior.is_some() && matches!(model, BodyModel::Plate(_)) {
+            return Err("interior FE requires a curved shell or assembled shell body profile".into());
+        }
+        Ok(Self { bytes: bytes.to_vec(), model, interior })
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
         match &self.model {
@@ -61,15 +71,32 @@ impl Profile {
             BodyModel::Plate(plate) => plate.loss.preflight(spec),
             BodyModel::Shell(shell) => shell.preflight(spec),
             BodyModel::Assembly(assembly) => assembly.preflight(spec),
-        }
+        }?;
+        if let Some(interior) = &self.interior { interior.preflight(spec)?; }
+        spec.network_dimensions_with_body_modes(true, self.additional_body_connections(),
+            self.additional_body_modes())?;
+        Ok(())
     }
-    /// Conservative source-declared viscous channel allowance before pack I/O.
+    /// Conservative interface, pressure and internal-loss connection allowance
+    /// before material-pack I/O.
     pub fn additional_body_connections(&self) -> usize {
-        match &self.model {
+        let structural = match &self.model {
             BodyModel::Plate(_) => 0,
             BodyModel::Shell(shell) => shell.additional_body_connections(),
             BodyModel::Assembly(assembly) => assembly.additional_body_connections(),
-        }
+        };
+        structural + self.interior.as_ref().map_or(0, |air|
+            air.pressure_allowance() + air.opening_count())
+    }
+    /// Every possible positive-frequency pressure mode has an air inertia;
+    /// the exact uniform mode has only its compression spring. Each declared
+    /// opening contributes one original compact-neck fluid inertia.
+    pub fn additional_body_modes(&self) -> usize {
+        self.interior.as_ref().map_or(0, |air|
+            air.pressure_allowance() - 1 + air.opening_count())
+    }
+    pub fn has_thermal_cavity(&self) -> bool {
+        self.interior.as_ref().is_some_and(cavity::Spec::has_thermal_loss)
     }
     /// Load original ordered interface packs before the ordinary bulk loader.
     /// Geometry and complete-network admission precede the first source read.
@@ -103,18 +130,39 @@ impl Profile {
         catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
         settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
     {
-        match &self.model {
+        let bank = match &self.model {
             BodyModel::Plate(plate) => plate.compile(spec, sources, catalog, loader, settings, cx, gate),
             BodyModel::Shell(shell) => shell.compile(spec, sources, catalog, loader, settings, cx, gate),
             BodyModel::Assembly(assembly) => assembly.compile(spec, sources, catalog, loader, settings, cx, gate),
+        }?;
+        // Original string/body material histories are the fixed prefix of the
+        // shared memory owner. Cavity thermal diffusion appends to that prefix
+        // before rotational and nonlinear coordinates are attached.
+        let bank = if self.has_thermal_cavity() {
+            // Explicit layered memory retains the final mass-normalized string
+            // basis, so source-gas inertia must precede that selection.
+            let bank = match spec.cylinder_gas_loading {
+                Some(resolution) => bank.with_cylinder_gas_loading(resolution, gate)?,
+                None => bank,
+            };
+            let bank = self.bind_material_memory(bank, gate)?;
+            match &spec.bending_memory {
+                Some(memory) => memory.bind(bank, gate)?,
+                None => bank,
+            }
+        } else { bank };
+        match &self.interior {
+            Some(interior) => interior.bind(bank, spec, gate),
+            None => Ok(bank),
         }
     }
     /// Reserve body and string histories together before material-pack I/O.
     pub fn material_memory_states(&self) -> usize {
-        match &self.model {
+        let solid = match &self.model {
             BodyModel::Plate(plate) => plate.loss.max_memory_states(),
             _ => 0,
-        }
+        };
+        solid + self.interior.as_ref().map_or(0, cavity::Spec::thermal_memory_states)
     }
     /// All solid/gas/axial coordinates are now fixed; memory enters the SAME
     /// coupled mechanical owner before conversion to multiple bows and PCM.
@@ -377,3 +425,5 @@ impl<'a> Records<'a> {
 #[cfg(test)]
 #[path="body/tests.rs"]
 mod tests;
+
+

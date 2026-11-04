@@ -19,6 +19,18 @@ pub fn interface_viscosity_per_area_dims() -> Dims {
         .expect("fixed SI interface exponents")
 }
 
+/// Optional source property: the angular frequency [rad/s] at which the
+/// viscosity was written as `eta k / omega_ref` from a measured constant loss
+/// factor `eta`. A consumer that honours it applies `eta` at every frequency
+/// instead of the Kelvin-Voigt reading `eta omega / omega_ref`. It is resolved
+/// only when the consumer requests it, with these dimensions (1/s).
+pub const LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA: &str = "constant_loss_reference_omega";
+
+/// Dimensions of [`LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA`]: an angular frequency.
+pub fn constant_loss_reference_omega_dims() -> Dims {
+    Dims([0, 0, -1, 0, 0, 0])
+}
+
 fn invalid(quantity: &'static str) -> MaterialStatePointError {
     MaterialStatePointError::InvalidDerived { quantity }
 }
@@ -39,6 +51,7 @@ pub struct ResolvedLinearInterface {
     stiffness_n_m: f64,
     damping_n_s_m: f64,
     omega_band_rad_s: (f64, f64),
+    constant_loss_reference_omega_rad_s: Option<f64>,
 }
 
 impl ResolvedLinearInterface {
@@ -78,7 +91,27 @@ impl ResolvedLinearInterface {
             viscosity_property,
             interface_viscosity_per_area_dims(),
         )?;
-        let band = (kb.0.max(cb.0), kb.1.min(cb.1));
+        let mut band = (kb.0.max(cb.0), kb.1.min(cb.1));
+        // The anchor is read only when the resolved bundle carries it, and
+        // narrows the band to its own applicability like any coefficient.
+        let constant_loss_reference_omega_rad_s =
+            match source.property(LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA) {
+                None => None,
+                Some(_) => {
+                    let (w, wb) = coefficient(
+                        &source,
+                        LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA,
+                        constant_loss_reference_omega_dims(),
+                    )?;
+                    if w <= 0.0 || c == 0.0 {
+                        return Err(invalid(
+                            "a constant-loss anchor is a positive angular frequency on a nonzero viscosity",
+                        ));
+                    }
+                    band = (band.0.max(wb.0), band.1.min(wb.1));
+                    Some(w)
+                }
+            };
         let stiffness_n_m = k * area_m2;
         let damping_n_s_m = c * area_m2;
         if !stiffness_n_m.is_finite()
@@ -103,6 +136,7 @@ impl ResolvedLinearInterface {
             stiffness_n_m,
             damping_n_s_m,
             omega_band_rad_s: band,
+            constant_loss_reference_omega_rad_s,
         })
     }
 
@@ -157,6 +191,12 @@ impl ResolvedLinearInterface {
     #[must_use]
     pub const fn omega_band_rad_s(&self) -> (f64, f64) {
         self.omega_band_rad_s
+    }
+    /// The source's [`LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA`] [rad/s]
+    /// when resolved, else `None` (Kelvin-Voigt).
+    #[must_use]
+    pub const fn constant_loss_reference_omega_rad_s(&self) -> Option<f64> {
+        self.constant_loss_reference_omega_rad_s
     }
 
     /// Match exact material states at the actual receiving surfaces, in order.

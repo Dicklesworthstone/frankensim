@@ -7,7 +7,7 @@
 use fs_material::phase::transport::PhaseTransport;
 
 use super::*;
-use crate::conjugate::{FlowField, FvBoundary, SimpleReport, Voxel};
+use crate::conjugate::{FvBoundary, Voxel};
 
 /// Transport information consumed by the common material-flow owner.
 ///
@@ -142,8 +142,12 @@ where
     ///
     /// This retains the existing homogeneous single-velocity enthalpy/porosity
     /// approximation. It does not supply moving solid mechanics, residual stress,
-    /// shrinkage, separate phase velocities, free surfaces or transient kinetic
-    /// energy. Source support and all enclosing histories keep the original
+    /// shrinkage, separate phase velocities or free surfaces. Retained native
+    /// momentum and its physical/numerical energy account may be selected with
+    /// `with_unsteady_momentum` and the unsteady heating attachments. Newly
+    /// frozen native faces must already have exactly zero speed; otherwise an
+    /// explicit momentum/kinetic-energy handoff is still required. Source
+    /// support and all enclosing histories keep the original
     /// transactional `advance_observed` refusal/publication boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new_phase(
@@ -333,42 +337,9 @@ fn admit_phase_config(config: &SimpleConfig) -> Result<(), DepositionError> {
 
 /// Exact empty constrained system, only after phase/drive admission.
 pub(super) fn immobile_flow(domain: &VoxelDomain) -> FvFlow {
-    FvFlow {
-        field: FlowField::quiescent(domain),
-        velocity_m_s: vec![[0.0; 3]; domain.cell_count()],
-        pressure_pa: vec![0.0; domain.cell_count()],
-        eddy_viscosity_m2_s: vec![0.0; domain.cell_count()],
-        heat_eddy_viscosity_m2_s: vec![0.0; domain.cell_count()],
-        report: SimpleReport {
-            iterations: 0,
-            mass_residual: 0.0,
-            momentum_residual: 0.0,
-            max_divergence_m3_s: 0.0,
-            inflow_m3_s: 0.0,
-            outflow_m3_s: 0.0,
-            max_cell_reynolds: 0.0,
-            momentum_krylov_iterations: 0,
-            pressure_krylov_iterations: 0,
-            fan: None,
-            internal_fans: Vec::new(),
-        },
-    }
+    FvFlow::stationary(domain)
 }
 
 pub(super) fn immobile_power(domain: &VoxelDomain, darcy: bool, body: bool) -> ViscousPower {
-    ViscousPower {
-        cell_heat_w: vec![0.0; domain.cell_count()],
-        heat_w: 0.0,
-        molecular_heat_w: 0.0,
-        darcy_heat_w: 0.0,
-        cell_darcy_heat_w: darcy.then(|| vec![0.0; domain.cell_count()]),
-        wall_power_w: [0.0; 6],
-        wall_tangential_force_n: [[0.0; 3]; 6],
-        supplied_wall_power_w: 0.0,
-        cell_body_power_w: body.then(|| vec![0.0; domain.cell_count()]),
-        supplied_body_power_w: 0.0,
-        pressure_constraint_power_w: 0.0,
-        residual_w: 0.0,
-        reynolds: 0.0,
-    }
+    ViscousPower::stationary(domain, darcy, body)
 }

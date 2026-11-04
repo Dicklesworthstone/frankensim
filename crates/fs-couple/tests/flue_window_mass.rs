@@ -1,0 +1,282 @@
+//! `window wall-cut` on the Clare D whistle's D5 card: the window derived from
+//! the card's own channel, pocket and bore, its computed mass replacing the
+//! legacy `0.61 a_eq` inertance, parallel cheeks and a labium ramp from the
+//! row, the pocket radius tolerance, and the refusals.
+
+use fs_bem::wall_window::{WallWindowOptions, WindowCheeks, WindowRamp, wall_window_ladder};
+use fs_couple::flue_loop::network::performance::file::{FlueFilePerformance, FlueInputError};
+use fs_couple::pcm_wav::observation::PressureRenderer;
+use fs_exec::CancelGate;
+
+const CARD: &str =
+    include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-d5.performance");
+
+/// The card without its window row, cut to a 1024-sample window whose only
+/// gesture event is the opening pressure ramp.
+fn legacy() -> String {
+    let rows: Vec<&str> = CARD
+        .lines()
+        .filter(|line| line.starts_with("window "))
+        .collect();
+    assert_eq!(rows.len(), 1, "the D5 card carries one window row");
+    let text = CARD
+        .replace(&format!("{}\n", rows[0]), "")
+        .replace("output 120000 5", "output 1024 1");
+    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t6.715e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
+    assert!(
+        text.contains(events),
+        "the D5 gesture changed; update this test"
+    );
+    text.replace(events, "events\t1\nevent\t0e0\t5e-2\tpressure-pa\t6.715e1")
+}
+
+fn with_window(text: &str, row: &str) -> String {
+    assert!(text.contains("\ncontrols 4096"));
+    text.replace("\ncontrols 4096", &format!("\n{row}\ncontrols 4096"))
+}
+
+fn parse(text: &str) -> Result<FlueFilePerformance, FlueInputError> {
+    FlueFilePerformance::from_bytes(text.as_bytes(), 256, &CancelGate::new_clock_free())
+}
+
+fn render(file: FlueFilePerformance) -> Vec<f64> {
+    let mut pressure = vec![0.0; file.info().samples as usize];
+    let mut renderer = file.into_renderer();
+    for part in pressure.chunks_mut(256) {
+        renderer.block(part).unwrap();
+    }
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    pressure
+}
+
+#[test]
+fn wall_cut_window_replaces_only_the_legacy_mouth_inertance() {
+    let base = legacy();
+    let old = parse(&base).unwrap();
+    let new = parse(&with_window(&base, "window wall-cut 16")).unwrap();
+    let record = new.window().expect("window record");
+    let w = record.window;
+    assert_eq!(
+        (w.bore_radius, w.wall_thickness, w.arc_width, w.axial_length),
+        (0.0061, 0.0024, 0.008, 0.0053),
+        "geometry comes from the card's bore, channel and flue rows"
+    );
+    assert_eq!(
+        w.upstream,
+        fs_bem::wall_window::WindowUpstream::ClosedEnd { distance: 0.01065 }
+    );
+    assert_eq!(record.cells, [16, 24, 16]);
+    assert_eq!((w.cheeks, w.ramp), (WindowCheeks::Radial, None));
+    let bore_area = core::f64::consts::PI * 0.0061 * 0.0061;
+    let length = record.ladder.mass_per_density * bore_area;
+    // fs-bem's ignored three-rung ladder extrapolates to 15.71259 mm.
+    assert!((length / 0.01571259 - 1.0).abs() < 1e-4, "{length}");
+    // The bits the landed prism solver wrote into the whistle renders'
+    // provenance (r02, rungs and bore length): the prism path is unchanged.
+    let bits: Vec<u64> = record
+        .ladder
+        .rungs
+        .iter()
+        .map(|r| r.bore_length.to_bits())
+        .collect();
+    assert_eq!(
+        bits,
+        [
+            1.5970602151823502e-2f64.to_bits(),
+            1.581485190768185e-2f64.to_bits()
+        ]
+    );
+    assert_eq!(length.to_bits(), 1.571237399621776e-2f64.to_bits());
+    // The graph keeps the channel only as a one-sample inlet line; the card's
+    // 2.4 mm channel stays the window's wall (asserted above).
+    let c = new.renderer().voice().gas().sound_speed;
+    assert_eq!(
+        record.channel_line_m.to_bits(),
+        (c * (1.0 / 288_000.0)).to_bits()
+    );
+    let riser_area = core::f64::consts::PI * 0.0036737 * 0.0036737;
+    assert_eq!(
+        record.riser_mass_per_density.to_bits(),
+        (record.channel_line_m / riser_area).to_bits()
+    );
+    let inlet = |file: &FlueFilePerformance| {
+        file.renderer()
+            .voice()
+            .network()
+            .expect("physical graph")
+            .source()
+            .graph
+            .sections[0]
+            .length_m
+    };
+    assert_eq!(inlet(&new).to_bits(), record.channel_line_m.to_bits());
+    assert_eq!(
+        inlet(&old),
+        0.0024,
+        "without the row the channel stays a line"
+    );
+
+    let rho = new.renderer().voice().gas().density;
+    let s_m = 0.008 * 0.0053;
+    let legacy_inertance = rho * 0.61 * (s_m / core::f64::consts::PI).sqrt() / s_m;
+    let old_inertance = old.renderer().voice().mouth_inertance_pa_s2_m3();
+    assert!((old_inertance / legacy_inertance - 1.0).abs() < 1e-12);
+    let inertance = new.renderer().voice().mouth_inertance_pa_s2_m3();
+    assert_eq!(
+        inertance.to_bits(),
+        (rho * (record.ladder.mass_per_density - record.riser_mass_per_density)).to_bits()
+    );
+    eprintln!(
+        "window branch {:.4} mm of bore; mouth inertance {inertance:.1} vs legacy {old_inertance:.1} Pa s^2/m^3",
+        length * 1e3
+    );
+    assert!(inertance > old_inertance);
+    assert_eq!(old.geometry(), new.geometry(), "the flue row is unchanged");
+    assert!(old.window().is_none());
+    assert_ne!(
+        render(old),
+        render(new),
+        "the mouth mass enters the dynamics"
+    );
+    let none = parse(&with_window(&base, "window none")).unwrap();
+    assert!(none.window().is_none());
+    assert_eq!(
+        none.renderer().voice().mouth_inertance_pa_s2_m3().to_bits(),
+        old_inertance.to_bits()
+    );
+}
+
+#[test]
+fn inconsistent_windows_refuse_before_output() {
+    let base = legacy();
+    let refused = |text: &str| parse(text).is_err();
+    assert!(refused(&with_window(&base, "window wall-cut 1")));
+    assert!(refused(&with_window(&base, "window wall-cut 64")));
+    assert!(refused(&with_window(&base, "window slot 16")));
+    // The inlet section must be the channel through the wall, of the
+    // window's area.
+    assert!(refused(&with_window(
+        &base.replace("flue 0.00800", "flue 0.00700"),
+        "window wall-cut 16"
+    )));
+    // A channel shorter than one transit sample (1.19 mm at 288 kHz) has no
+    // line to keep.
+    assert!(refused(&with_window(
+        &base.replace("duct_section 0 1 0.0024000", "duct_section 0 1 0.0011000"),
+        "window wall-cut 16"
+    )));
+    // A stepped pocket is not represented.
+    assert!(refused(&with_window(
+        &base.replace(
+            "duct_section 1 2 0.0106500 0.0061000",
+            "duct_section 1 2 0.0106500 0.0062000"
+        ),
+        "window wall-cut 16"
+    )));
+    // A compact mouth reaction brings its own outer mass.
+    assert!(refused(&with_window(
+        &base
+            .replace(
+                "flue 0.00800 0.00148 0.00530 0 0 0.02",
+                "flue 0.00800 0.00148 0.00530 0 0 0"
+            )
+            .replace(
+                "\ncontrols 4096",
+                "\nmouth_reaction compact-baffled\ncontrols 4096"
+            ),
+        "window wall-cut 16"
+    )));
+}
+
+#[test]
+fn parallel_cheeks_and_a_ramp_come_from_the_row() {
+    let base = legacy();
+    let file = parse(&with_window(
+        &base,
+        "window wall-cut 8 cheeks parallel ramp 0.0005 25",
+    ))
+    .unwrap();
+    let record = file.window().expect("window record");
+    let w = record.window;
+    assert_eq!(w.cheeks, WindowCheeks::Parallel);
+    // The cheeks stand the flue width apart and meet the bore on its arc.
+    let a = 0.0061;
+    assert_eq!(
+        w.arc_width.to_bits(),
+        (2.0 * a * fs_math::det::asin(0.5 * 0.008 / a)).to_bits()
+    );
+    assert_eq!(
+        w.ramp,
+        Some(WindowRamp {
+            edge_height: 0.0005,
+            angle: 25f64.to_radians(),
+        })
+    );
+    let direct = wall_window_ladder(&w, &WallWindowOptions::rung(&w, 8)).expect("direct ladder");
+    assert_eq!(record.ladder.rungs.len(), 3);
+    assert_eq!(
+        record.ladder.mass_per_density.to_bits(),
+        direct.mass_per_density.to_bits()
+    );
+    let bore_area = core::f64::consts::PI * a * a;
+    eprintln!(
+        "parallel cheeks, 0.5 mm edge, 25 degree ramp: rungs {:?} mm, order {:.3}, {:.4} mm of bore",
+        record
+            .ladder
+            .rungs
+            .iter()
+            .map(|r| r.bore_length * 1e3)
+            .collect::<Vec<_>>(),
+        record.ladder.order,
+        record.ladder.mass_per_density * bore_area * 1e3
+    );
+    let rho = file.renderer().voice().gas().density;
+    assert_eq!(
+        file.renderer().voice().mouth_inertance_pa_s2_m3().to_bits(),
+        (rho * (record.ladder.mass_per_density - record.riser_mass_per_density)).to_bits()
+    );
+}
+
+#[test]
+fn a_pocket_within_one_percent_of_the_bore_is_one_bore() {
+    let base = legacy();
+    let file = parse(&with_window(
+        &base.replace(
+            "duct_section 1 2 0.0106500 0.0061000",
+            "duct_section 1 2 0.0106500 0.0061300",
+        ),
+        "window wall-cut 16",
+    ))
+    .unwrap();
+    let record = file.window().expect("window record");
+    assert_eq!(record.window.bore_radius.to_bits(), 0.0061f64.to_bits());
+    let bits: Vec<u64> = record
+        .ladder
+        .rungs
+        .iter()
+        .map(|r| r.bore_length.to_bits())
+        .collect();
+    assert_eq!(
+        bits,
+        [
+            1.5970602151823502e-2f64.to_bits(),
+            1.581485190768185e-2f64.to_bits()
+        ],
+        "the window solve sees the bore section's radius"
+    );
+}
+
+#[test]
+fn malformed_cut_rows_refuse() {
+    let base = legacy();
+    let refused = |row: &str| parse(&with_window(&base, row)).is_err();
+    assert!(refused("window wall-cut 8 cheeks slanted"));
+    assert!(refused("window wall-cut 8 cheeks"));
+    assert!(refused("window wall-cut 8 ramp 0.0005"));
+    assert!(refused("window wall-cut 8 ramp 0.0005 90"));
+    assert!(refused("window wall-cut 8 ramp -0.0001 25"));
+    // The edge must lie inside the 2.4 mm wall.
+    assert!(refused("window wall-cut 8 ramp 0.003 25"));
+    // Cheeks come before the ramp.
+    assert!(refused("window wall-cut 8 ramp 0.0005 25 cheeks parallel"));
+}

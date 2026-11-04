@@ -6,7 +6,9 @@
 //! viscosity, a friction coefficient or an instrument spectrum cannot supply it.
 //! Time integration remains in fs-tribo's shared tangential-law interface.
 
-use super::{MaterialStatePointError, ResolvedMaterialStatePoint};
+use super::{MaterialStatePointError, ResolvedMaterialStatePoint, affine_temperature_slope,
+    pinned_temperature_line};
+use fs_matdb::MaterialCard;
 use fs_qty::{Dims, DynViscosity, Pressure, QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
@@ -147,6 +149,58 @@ impl ResolvedShearLayer {
     pub const fn plastic_resistance_n_s_m(&self) -> f64 { self.plastic_resistance_n_s_m }
     #[must_use]
     pub const fn temperature_kelvin(&self) -> f64 { self.temperature_kelvin }
+
+    /// Admit `G(T)` as one differentiable affine law over the complete thermal
+    /// owner's temperature interval, retaining this exact modulus claim.
+    ///
+    /// The returned `dk/dT = (A/h) dG/dT` belongs to the free energy
+    /// `psi = k(T)|e|^2/2`. Its entropy is `-k'|e|^2/2`; its internal energy is
+    /// `psi + T s`, not `psi`. A coupled owner must carry both coefficient work
+    /// and reversible heat when continuing stored strain at another T.
+    /// Affine G has zero second T derivative, so it introduces no additional
+    /// fixed-strain heat capacity. This does not admit expansion, phase change,
+    /// nonlinear G(T), or derivative jumps hidden between two endpoints.
+    pub fn thermal_stiffness_slope_n_m_k(
+        &self,
+        card: &MaterialCard,
+        temperature_axis: &str,
+        temperature_span_k: (f64, f64),
+    ) -> Result<f64, MaterialStatePointError> {
+        let (lo, hi) = temperature_span_k;
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature, ValueForm::Static));
+        let quantity = self.resolved.axis_quantities().get(temperature_axis).copied();
+        let temperature = quantity == Some(absolute) || temperature_axis == "T"
+            && quantity.is_none_or(|q| q == QuantitySpec::dimensional(Temperature::DIMS));
+        if card.content_hash() != self.resolved.card_identity() || !temperature
+            || !lo.is_finite() || !hi.is_finite() || lo <= 0.0 || hi <= lo
+            || self.temperature_kelvin < lo || self.temperature_kelvin > hi
+            || self.resolved.query_point().iter().find(|(name, _)| name == temperature_axis)
+                .map(|(_, value)| *value)
+                != Some(self.temperature_kelvin) {
+            return Err(invalid("shear thermal path needs the original card, temperature axis and complete positive interval"));
+        }
+        let property = self.resolved.property(SHEAR_LAYER_MODULUS_PROPERTY)
+            .expect("the immutable layer retains its modulus");
+        let claim = card.claims().claim(property.answer().receipt.selected)
+            .ok_or_else(|| invalid("shear thermal modulus claim is absent"))?;
+        let lower = self.resolved.query().with(temperature_axis, lo)
+            .map_err(|_| invalid("shear thermal path start violates its original schema"))?;
+        let upper = self.resolved.query().with(temperature_axis, hi)
+            .map_err(|_| invalid("shear thermal path end violates its original schema"))?;
+        let knots = pinned_temperature_line(card, &claim.key, temperature_axis, &lower,
+            &upper, property.answer().receipt.selected)?;
+        if knots.iter().any(|(_, g)| !g.is_finite() || *g <= 0.0) {
+            return Err(invalid("shear thermal modulus must be positive over the complete source path"));
+        }
+        let slope = affine_temperature_slope(&knots, self.temperature_kelvin,
+            property.value_si()).map_err(invalid)?;
+        let stiffness_slope = (self.area_m2 / self.thickness_m) * slope;
+        if !stiffness_slope.is_finite() || slope != 0.0 && stiffness_slope == 0.0 {
+            return Err(invalid("shear thermal stiffness derivative is unrepresentable"));
+        }
+        Ok(stiffness_slope)
+    }
     #[must_use]
     pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band_rad_s }
     pub fn require_angular_frequency_rad_s(&self, omega: f64) -> Result<(), MaterialStatePointError> {
@@ -262,5 +316,77 @@ mod tests {
         let property = layer.resolved().property(SHEAR_LAYER_MODULUS_PROPERTY).unwrap();
         assert_eq!(property.value_si(), 1e6);
         assert_eq!(property.source_axes(), &[("T".into(), Temperature::DIMS)]);
+    }
+
+    fn thermal_layer(knots: Vec<(f64, f64)>, axis: &str)
+        -> (MaterialCard, ResolvedShearLayer) {
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature, ValueForm::Static));
+        let mut claims = ClaimSet::new();
+        let mut requirements = Vec::new();
+        for (name, dims, value) in [
+            (SHEAR_LAYER_MODULUS_PROPERTY, Pressure::DIMS, 1e6),
+            (SHEAR_LAYER_YIELD_PROPERTY, Pressure::DIMS, 1000.0),
+            (PLASTIC_SHEAR_VISCOSITY_PROPERTY, DynViscosity::DIMS, 2000.0),
+        ] {
+            let modulus = name == SHEAR_LAYER_MODULUS_PROPERTY;
+            claims.insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: if modulus { PropertyValue::Curve {
+                    abscissa: axis.into(), abscissa_dims: Temperature::DIMS,
+                    knots: knots.clone(), dims,
+                } } else { PropertyValue::Scalar { value, dims } },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(axis, temperature, 280.0, 320.0)
+                    .with("omega", 0.0, 200_000.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: if modulus { InterpolationPolicy::LinearInside }
+                    else { InterpolationPolicy::ConstantWithinValidity },
+                observations: vec![], provenance: Provenance {
+                    source: "manufactured affine shear thermal fixture".into(),
+                    license: "test-only".into(), artifact: None },
+            }).unwrap();
+            requirements.push(ScalarPropertyRequirement::try_new(name, dims,
+                ScalarAdmissibility::StrictlyPositive).unwrap());
+        }
+        let card = MaterialCard::assemble(MaterialStateId {
+            chemistry: "manufactured".into(), phase: "solid".into(),
+            process: "thermal-shear-test".into(), revision: 0,
+        }, claims, vec![]).unwrap();
+        let point = QueryPoint::new().with_quantity(axis, temperature, 300.0).unwrap()
+            .with("omega", 1000.0).unwrap();
+        let resolved = resolve_material_state_point(&card, &point, &requirements,
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let layer = ResolvedShearLayer::new(resolved, 2e-6, 1e-5, 0.05).unwrap();
+        (card, layer)
+    }
+
+    #[test]
+    fn g1_affine_shear_temperature_path_retains_typed_axis_and_exact_source_slope() {
+        for axis in ["T", "film_temperature"] {
+            let (card, layer) = thermal_layer(
+                vec![(280.0, 1.2e6), (300.0, 1e6), (320.0, 0.8e6)], axis);
+            let slope = layer.thermal_stiffness_slope_n_m_k(&card, axis,
+                (280.0, 320.0)).unwrap();
+            assert!((slope + 2000.0).abs() < 1e-12);
+            assert!(layer.thermal_stiffness_slope_n_m_k(&card, axis,
+                (279.0, 320.0)).is_err());
+            assert!(layer.thermal_stiffness_slope_n_m_k(&card, "other_temperature",
+                (280.0, 320.0)).is_err());
+            let (constant_card, constant) = thermal_layer(
+                vec![(280.0, 1e6), (320.0, 1e6)], axis);
+            assert_eq!(constant.thermal_stiffness_slope_n_m_k(&constant_card, axis,
+                (280.0, 320.0)).unwrap(), 0.0);
+            assert!(layer.thermal_stiffness_slope_n_m_k(&constant_card, axis,
+                (280.0, 320.0)).is_err());
+        }
+    }
+
+    #[test]
+    fn g0_thermal_shear_rejects_modulus_kinks_hidden_between_endpoint_values() {
+        let (card, layer) = thermal_layer(
+            vec![(280.0, 1.2e6), (300.0, 1.1e6), (320.0, 0.8e6)], "T");
+        assert!(layer.thermal_stiffness_slope_n_m_k(&card, "T",
+            (280.0, 320.0)).is_err());
     }
 }

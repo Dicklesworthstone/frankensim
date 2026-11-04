@@ -15,11 +15,17 @@
 //! admissions. The dense DG loss ledger still infers loss from energy deficit.
 
 use super::dynamic::{ApertureDrive, ApertureFrame, DynamicAperture};
+use super::modal::pressure::MaterialPressureFrame;
 use super::paired::BladePropagator;
 use super::tube::TubeDrive;
 use crate::acoustic_realize::AcousticRealizeError;
-use fs_duct::dg::{DgState, DgStepOutput};
-use crate::dg_port::DgTerminalFrame;
+use fs_duct::dg::{DgPortResponse, DgState, DgStepOutput};
+use crate::dg_port::{DgTerminalFrame, sum_terminal_work};
+
+/// Original single, paired and material-modal sources on the shared DG load.
+pub mod loaded;
+/// Independent blades or material modes on the same DG pressure/work coupling.
+pub use loaded::LoadedApertureDg;
 
 /// The shared source-bound DG load used by nonlinear acoustic couplers.
 pub use crate::dg_port::DgPortLoad as ApertureDgLoad;
@@ -33,13 +39,19 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 pub struct DgApertureFrame {
     /// Original nonlinear aperture observation and accepted mechanical state.
     pub aperture: ApertureFrame,
-    /// Original exact propagation observation; its port pressure is a step mean.
+    /// Additional prescribed modal pressure ports. Their work is already in
+    /// aperture.mechanical_work_j; it is not another acoustic source or loss.
+    pub spatial_pressure: [MaterialPressureFrame; 2],
+    /// External mean ports and summed original bore/branch propagation ledgers.
     pub duct: DgStepOutput,
     /// Mechanical, contact, material, acoustic, and wall-memory storage [J].
     pub stored_energy_j: f64,
-    /// Signed outlet exchange with an optional admitted rational load. This is
-    /// neither terminal heat nor a certificate of its internal stored energy.
+    /// Actual axial outlet exchange, when loaded. This convenience is also in
+    /// terminals and must not be credited a second time.
     pub terminal: Option<DgTerminalFrame>,
+    /// Every signed terminal exchange in the original load's channel order.
+    /// This is neither heat nor a certificate of rational internal storage.
+    pub terminals: Vec<DgTerminalFrame>,
     /// Change in the aperture and DG storage [J].
     pub storage_change_j: f64,
     /// Aperture loss plus inferred duct loss [J]. This is NOT an independent
@@ -60,7 +72,7 @@ impl DgApertureFrame {
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
         self.storage_change_j + self.inferred_total_dissipation_j
-            + self.terminal.as_ref().map_or(0.0, |frame| frame.port_work_j)
+            + sum_terminal_work(&self.terminals)
             - self.upstream_work_j
             - self.body_work_j
             - self.aperture.mechanical_work_j
@@ -70,9 +82,23 @@ impl DgApertureFrame {
 /// One clock and one accepted state for the existing nonlinear aperture and DG
 /// duct. Failed input, nonlinear solve, propagation or port compatibility leaves
 /// both participants unchanged; source material/contact histories stay retained.
-pub struct ApertureDg {
-    aperture: DynamicAperture,
+pub struct ApertureDg<A = DynamicAperture> {
+    aperture: A,
     load: ApertureDgLoad,
+}
+
+impl<A> ApertureDg<A> {
+    /// Original retained mechanics, including its independent material states.
+    #[must_use]
+    pub const fn aperture(&self) -> &A { &self.aperture }
+
+    /// Immutable cold source and original exponential metadata.
+    #[must_use]
+    pub const fn load(&self) -> &ApertureDgLoad { &self.load }
+
+    /// Accepted acoustic and memory state; its physical nodal arrays are current.
+    #[must_use]
+    pub const fn duct_state(&self) -> &DgState { self.load.state() }
 }
 
 impl ApertureDg {
@@ -86,7 +112,8 @@ impl ApertureDg {
         load: ApertureDgLoad,
     ) -> Result<Self, AcousticRealizeError> {
         let spec = aperture.spec();
-        if aperture.accepted_steps() != 0
+        if load.has_driven_mouth()
+            || aperture.accepted_steps() != 0
             || load.state().step_count() != 0
             || aperture.blade_propagator() != BladePropagator::ExactZoh
             || spec.time_step_s.to_bits() != load.propagator().dt().to_bits()
@@ -94,35 +121,17 @@ impl ApertureDg {
             || spec.impedance_pa_s_m3.to_bits() != load.impedance_pa_s_m3().to_bits()
         {
             return Err(invalid(
-                "DG coupling requires a new ExactZoh aperture bound to its mean impedance, gas density and clock",
+                "DG coupling requires a new ExactZoh aperture bound to its mean inlet-pressure impedance, gas density and clock; driven exterior mouth effort is unsupported",
             ));
         }
         Ok(Self { aperture, load })
-    }
-
-    /// Original retained aperture, including plate, closure, and material arms.
-    #[must_use]
-    pub const fn aperture(&self) -> &DynamicAperture {
-        &self.aperture
-    }
-
-    /// Immutable cold source and original exponential metadata.
-    #[must_use]
-    pub const fn load(&self) -> &ApertureDgLoad {
-        &self.load
-    }
-
-    /// Accepted acoustic and memory state; its physical nodal arrays are current.
-    #[must_use]
-    pub const fn duct_state(&self) -> &DgState {
-        self.load.state()
     }
 
     /// Accepted aperture and DG stored energy [J]. Rational terminal exchange
     /// is reported separately; no rational storage function is fabricated.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        self.aperture.stored_energy_j() + self.load.state().stored_energy_j()
+        self.aperture.stored_energy_j() + self.load.stored_energy_j()
     }
 
     /// Increase the original aperture horizon without resetting either owner.
@@ -157,51 +166,70 @@ impl ApertureDg {
             force_n,
         )?;
         let aperture = trial.frame;
-        let dt = self.load.propagator().dt();
-        let acoustic = self.load.preview_step(aperture.bore_flow_m3_s)?;
-        let duct = acoustic.output();
-        let port = duct.port_outputs[0];
-        let scale = relation.history_pressure_pa.abs()
-            + (relation.impedance_pa_s_m3 * aperture.bore_flow_m3_s).abs()
-            + aperture.bore_pressure_pa.abs();
-        if !port.conjugate_rate.is_finite()
-            || (port.conjugate_rate - aperture.bore_pressure_pa).abs() > 1e-10 * scale.max(1e-300)
-        {
-            return Err(invalid(
-                "DG and aperture disagree on same-step mean port pressure",
-            ));
-        }
-        let stored_energy_j = aperture.stored_energy_j + acoustic.state().stored_energy_j();
-        let duct_change =
-            acoustic.state().stored_energy_j() - acoustic.previous_state().stored_energy_j();
-        let storage_change_j = aperture.storage_change_j + duct_change;
-        let inferred_total_dissipation_j = aperture.dissipated_energy_j
-            + duct.ledger.cumulative_dissipated_j - acoustic.previous_state().cumulative_dissipated_j();
-        let upstream_work_j = drive.upstream_pressure_pa
-            * ((aperture.bore_flow_m3_s - drive.body_flow_m3_s) * dt);
-        let body_work_j = aperture.bore_pressure_pa * (drive.body_flow_m3_s * dt);
-        let port_work_residual_j = acoustic.inlet_work_j()
-            - aperture.bore_pressure_pa * (aperture.bore_flow_m3_s * dt);
-        let terminal = acoustic.terminal_frame().copied();
-        let terminal_work_j = terminal.as_ref().map_or(0.0, |frame| frame.port_work_j);
-        let balance_residual_j = storage_change_j + inferred_total_dissipation_j + terminal_work_j
-            - upstream_work_j - body_work_j - aperture.mechanical_work_j;
-        if ![
-            stored_energy_j, storage_change_j, inferred_total_dissipation_j,
-            upstream_work_j, body_work_j, terminal_work_j, port_work_residual_j, balance_residual_j,
-        ].iter().all(|value| value.is_finite()) {
-            return Err(invalid(
-                "DG aperture candidate left the finite energy/work domain",
-            ));
-        }
-        let duct = acoustic.accept();
+        let frame = accept_acoustic_candidate(&mut self.load, relation, aperture,
+            [MaterialPressureFrame::default(); 2], drive)?;
         self.aperture.accept_frame(trial);
-        Ok(DgApertureFrame {
-            aperture, duct, terminal, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
-            upstream_work_j, body_work_j, port_work_residual_j,
-        })
+        Ok(frame)
     }
+}
+
+// All fallible acoustic/pressure/work checks precede publication. Callers hold
+// the original complete mechanical trial and accept it infallibly immediately
+// after this returns; no second acoustic or nonlinear state is introduced.
+fn accept_acoustic_candidate(
+    load: &mut ApertureDgLoad,
+    relation: DgPortResponse,
+    aperture: ApertureFrame,
+    spatial_pressure: [MaterialPressureFrame; 2],
+    drive: TubeDrive,
+) -> Result<DgApertureFrame, AcousticRealizeError> {
+    let dt = load.propagator().dt();
+    let acoustic = load.preview_step(aperture.bore_flow_m3_s)?;
+    let duct = acoustic.output();
+    let port = duct.port_outputs[0];
+    let scale = relation.history_pressure_pa.abs()
+        + (relation.impedance_pa_s_m3 * aperture.bore_flow_m3_s).abs()
+        + aperture.bore_pressure_pa.abs();
+    if !port.conjugate_rate.is_finite()
+        || (port.conjugate_rate - aperture.bore_pressure_pa).abs() > 1e-10 * scale.max(1e-300)
+    {
+        return Err(invalid(
+            "DG and aperture disagree on same-step mean port pressure",
+        ));
+    }
+    let stored_energy_j = aperture.stored_energy_j + duct.ledger.stored_energy_j;
+    let duct_change =
+        duct.ledger.stored_energy_j - acoustic.previous_stored_energy_j();
+    let storage_change_j = aperture.storage_change_j + duct_change;
+    let inferred_total_dissipation_j = aperture.dissipated_energy_j
+        + duct.ledger.cumulative_dissipated_j - acoustic.previous_cumulative_dissipated_j();
+    let upstream_work_j = drive.upstream_pressure_pa
+        * ((aperture.bore_flow_m3_s - drive.body_flow_m3_s) * dt);
+    let body_work_j = aperture.bore_pressure_pa * (drive.body_flow_m3_s * dt);
+    let port_work_residual_j = acoustic.inlet_work_j()
+        - aperture.bore_pressure_pa * (aperture.bore_flow_m3_s * dt);
+    let terminal = acoustic.terminal_frame().copied();
+    let terminals = acoustic.terminal_frames().to_vec();
+    let terminal_work_j = sum_terminal_work(&terminals);
+    let balance_residual_j = storage_change_j + inferred_total_dissipation_j + terminal_work_j
+        - upstream_work_j - body_work_j - aperture.mechanical_work_j;
+    if ![
+        stored_energy_j, storage_change_j, inferred_total_dissipation_j,
+        upstream_work_j, body_work_j, terminal_work_j, port_work_residual_j, balance_residual_j,
+    ].iter().all(|value| value.is_finite()) {
+        return Err(invalid(
+            "DG aperture candidate left the finite energy/work domain",
+        ));
+    }
+    let duct = acoustic.accept();
+    Ok(DgApertureFrame {
+        aperture, spatial_pressure, duct, terminal, terminals, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
+        upstream_work_j, body_work_j, port_work_residual_j,
+    })
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod loaded_tests;

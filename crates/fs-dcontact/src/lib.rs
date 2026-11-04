@@ -28,6 +28,7 @@
 //! deferred until packs carrying contact-law parameters exist.
 
 mod loss;
+mod parameters;
 mod remainder;
 mod tangent;
 use fs_math::det;

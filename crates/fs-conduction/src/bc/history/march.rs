@@ -180,7 +180,7 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
 
     /// Start with uniform, element-wise, or material-ID-bound heat storage.
     ///
-    /// Every capacity is a declared constant rho*c_p in J/(m^3 K). The original
+    /// Every capacity is a declared or source-resolved constant rho*c_p in J/(m^3 K). The original
     /// lumped P1 assembly is reused; values are never averaged across materials
     /// before assembly. Material-ID binding uses the SAME element assignment
     /// as conductivity and refuses missing, duplicate or unused capacity rows.
@@ -232,6 +232,7 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
         }
         problem.source.at(time_s, mesh.vertex_count())?;
         let stepper = capacity.prepare(cx, mesh, problem.element_materials)?;
+        stepper.validate_capacity_temperature(cx, initial)?;
         poll(cx, 0)?;
         Ok(Self { problem, stepper, method, temperature: initial.to_vec(), time_s, accepted_steps: 0, max_steps })
     }
@@ -239,6 +240,13 @@ impl<'h, 'm> ThermalHistoryRun<'h, 'm> {
     /// Accepted full nodal field, including prescribed vertices, in kelvin.
     #[must_use]
     pub fn temperature(&self) -> &[f64] { &self.temperature }
+
+    /// Original card identities, density/Cp claims and admitted temperature spans.
+    /// Empty for caller-declared capacities.
+    #[must_use]
+    pub fn material_capacities(&self) -> &[crate::transient::MaterialHeatCapacity] {
+        self.stepper.material_capacities()
+    }
 
     /// Time of the accepted field, in seconds.
     #[must_use]

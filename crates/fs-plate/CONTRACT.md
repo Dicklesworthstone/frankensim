@@ -587,3 +587,19 @@ Regressions cover independent static compliance, oblique support coordinates,
 physical moment arms, common rigid motion and viscous work. These additions do
 not implement continuum mortar, exact ties, connection mass, finite strain or a
 prestressed equilibrium.
+
+### Finite-area load and observation ports
+
+`loading::PlatePatchStencil` composes the existing point maps over explicit
+positive physical area quadrature, bounded by `PlatePatchBudget`. It transfers
+a total uniformly distributed force/free couple or nonuniform pressure/couple
+density, retains the full origin force/moment resultant, and aggregates the
+applied load portions on eliminated DOFs. Loading is atomic across the whole
+patch. Area-averaged motion and its transpose preserve virtual work and
+instantaneous power for a uniform total load; nonuniform traction uses each
+quadrature area exactly once. Material velocity is distinct from a moving
+observer's convective derivative. The caller owns footprint geometry and
+quadrature accuracy; an outside point refuses the patch rather than clipping
+its area. There is no inferred contact law, dynamic support reaction, or path
+derivative. The loading tests cover footprints spanning triangles/supports,
+independent world resultants, work/power, subdivision and late-point rollback.

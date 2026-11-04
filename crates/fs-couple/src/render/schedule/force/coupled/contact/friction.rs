@@ -234,6 +234,24 @@ impl FrictionModalSystem {
         Ok(self)
     }
 
+    /// Bind constant-loss dashpots to the prepared coupled owner before playback
+    /// ([`CoupledModalSystem::with_constant_loss_connections`]) and refresh its
+    /// exact held-force compliance. The friction law, material interface,
+    /// pressure weights and initial states are unchanged.
+    pub fn with_constant_loss_connections(
+        mut self, constant_loss: &[super::super::ConstantLossConnection], gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_constant_loss_connections(constant_loss, gate)?;
+        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
+    /// The coupled owner's constant-loss connections, in connection order.
+    pub fn constant_loss_connections(&self) -> Vec<super::super::ConstantLossConnection> {
+        self.network.constant_loss_connections()
+    }
+
     /// Bind genuine constitutive memory to the unchanged coupled owner before
     /// playback. Refresh the SAME friction force response, including material
     /// feedback; existing interfaces, nonlinear storage and pressure weights

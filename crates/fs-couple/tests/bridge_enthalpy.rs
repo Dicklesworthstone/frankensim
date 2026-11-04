@@ -132,6 +132,145 @@ fn numerical_loss_does_not_heat_a_lossless_beam() {
 }
 
 #[test]
+fn affine_spring_material_cools_original_spatial_cells_and_changes_sag_without_dashpots() {
+    let slope=-0.005;
+    let m=[0.05,0.5].map(|cp|material_with_affine_scale(cp,0.0,0.05,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,vec![(280.0,0.1),(320.0,0.1)],slope));
+    let (heat,bridge)=initial_bridge(&m,1.0);
+    let next=step_candidate(&heat,&bridge,&map(&m),0.2,1.0,&[0.1;2],solve_config(),&[0.0;4],coefficients,||false).unwrap();
+    let r=next.report();
+    assert_eq!(r.mechanical.energy_j.dissipated,0.0);
+    assert_eq!(r.mechanical.energy_j.modulus_work,0.0,"initial springs are stress-free");
+    assert!(r.mechanical.energy_j.numerical_dissipation>0.0);
+    assert!(r.reversible_heat_j<0.0 && r.deposited_heat_j<0.0);
+    near(r.deposited_heat_j,r.reversible_heat_j,1e-12);
+    near(next.thermal().energy_j()-heat.energy_j(),r.deposited_heat_j,1e-9);
+    let mut expected_u=0.0;let mut expected_ts=0.0;
+    for (i,cell) in next.bridge().cells().iter().enumerate() {
+        for (j,&layer) in LAYERS.iter().enumerate() {
+            let t=next.thermal().temperature_k(HEAT[i][j]).unwrap();
+            assert!(t<300.0);
+            // Independent oracle for the authored S(T), evaluated at the actual
+            // original Gauss histories. This fixture starts with U=s=0.
+            for point in cell.section().layers()[&layer].material_points() {
+                let xi=point.stored_energy_j_m3()/(1.0+slope*(t-300.0));
+                let weight=0.5*AREA*cell.length_m();
+                expected_u+=weight*(1.0-300.0*slope)*xi;
+                expected_ts+=weight*(-slope)*t*xi;
+            }
+        }
+    }
+    near(r.mechanical_internal_energy_change_j,expected_u,1e-12);
+    near(r.mechanical_entropy_energy_change_j,expected_ts,1e-12);
+    near(r.reversible_heat_j+expected_ts,0.0,1e-12);
+    near(expected_u+next.thermal().energy_j()+r.mechanical.energy_j.numerical_dissipation
+        -r.mechanical.load_work_j,0.0,solve_config().feedback.total_energy_tolerance_j);
+    let constant=materials(0.002,0.0);let (old_heat,old_beam)=initial_bridge(&constant,1.0);
+    let baseline=step_candidate(&old_heat,&old_beam,&map(&constant),0.2,1.0,&[0.1;2],solve_config(),&[0.0;4],coefficients,||false).unwrap();
+    assert!((next.bridge().deformed_position_m(LENGTH,0.0).unwrap()[1]
+        -baseline.bridge().deformed_position_m(LENGTH,0.0).unwrap()[1]).abs()>1e-9);
+    assert_eq!(next.bridge().mass_kg(),bridge.mass_kg());
+    assert_eq!(next.bridge().mass_kg(),baseline.bridge().mass_kg());
+    assert_eq!(heat.time_s(),0.0);assert_eq!(bridge.time_s(),0.0);
+}
+
+#[test]
+fn source_expansion_bends_the_actual_beam_and_retains_thermal_maxwell_history() {
+    let alpha: f64=1e-4;
+    let cp=5.0;
+    let dt=0.2;
+    let a=1.0/(1.0+dt);
+    let mut final_tip=[0.0;2];
+    for (variant,upper_sign) in [1.0,-1.0].into_iter().enumerate() {
+        let alphas=[alpha,upper_sign*alpha];
+        let m=alphas.map(|value|material(cp,3e8,1.0,40.0*value));
+        let (mut heat,mut bridge)=initial_bridge(&m,1.0);
+        let mut old_rise=0.0;
+        let mut old_q=0.0;
+        let mut old_internal=0.0;
+        let mut old_ts=0.0;
+        let mut accumulated_heat=0.0;
+        let mut numerical=0.0;
+        for (step,heat_per_layer) in [0.01,-0.004].into_iter().enumerate() {
+            let next=step_candidate(&heat,&bridge,&map(&m),(step+1) as f64*dt,0.0,&[0.0;2],
+                solve_config(),&[0.0;4],|s|coefficients(s).map(|mut c| {
+                    for row in HEAT { for cell in row {
+                        c.sources_w.insert(cell,heat_per_layer/(2.0*dt));
+                    }}
+                    c
+                }),||false).unwrap();
+            // Equal heating and mirror-related layers leave all four thermal
+            // cells isothermal, but opposite source expansion bends the bonded
+            // beam. Its finite layer thickness leaves real residual stress.
+            // With E_inf=1e8, E_branch=3e8 and tau=1, the native Gauss strains
+            // factor as e=c*(T-300), q=c*q_scalar. The caloric equation is a
+            // scalar quadratic; use its small root without cancellation.
+            let old_temperature=300.0+old_rise;
+            let factor=if upper_sign<0.0 {0.25*VOLUME*alpha*alpha}else{0.0};
+            let quadratic=factor*3e8*dt*a*a;
+            let linear=MASS*cp-factor*old_temperature*(1e8+3e8*a)-2.0*quadratic*old_q;
+            let constant=heat_per_layer+quadratic*old_q*old_q
+                -factor*old_temperature*3e8*(1.0-a)*old_q;
+            let increment=2.0*constant/(linear+(linear*linear-4.0*quadratic*constant).sqrt());
+            let rise=old_rise+increment;
+            let temperature=300.0+rise;
+            let q_scalar=a*(old_q+increment);
+            let strain=0.5*(alphas[0]+alphas[1])*rise;
+            // Integral of z² over both native rectangular layers, including
+            // their thickness moments, gives kappa=750*(alpha0-alpha1)*ΔT.
+            let curvature=750.0*(alphas[0]-alphas[1])*rise;
+            let mut internal=0.0;
+            let mut ts=0.0;
+            for (i,cell) in next.bridge().cells().iter().enumerate() {
+                near(cell.section().axial_strain(),strain,1e-11);
+                near(cell.section().curvature_per_m(),curvature,1e-8);
+                for (j,&layer) in LAYERS.iter().enumerate() {
+                    near(next.thermal().temperature_k(HEAT[i][j]).unwrap(),temperature,1e-6);
+                    let shape=geometry(j);
+                    let weight=0.5*AREA*cell.length_m();
+                    for (point,sign) in cell.section().layers()[&layer].material_points().iter().zip([-1.0,1.0]) {
+                        let z=shape.centroid_z_m+sign*shape.thickness_m/(2.0*3.0_f64.sqrt());
+                        let coefficient=0.5*(alphas[0]+alphas[1])
+                            -z*750.0*(alphas[0]-alphas[1])-alphas[j];
+                        let e=coefficient*rise;
+                        let q=coefficient*q_scalar;
+                        let stress=1e8*e+3e8*q;
+                        near(point.total_strain(),strain-z*curvature,1e-11);
+                        near(point.branch_strains()[0],q,1e-11);
+                        near(point.stress_pa(),stress,1e-3);
+                        let entropy_energy=weight*temperature*alphas[j]*stress;
+                        ts+=entropy_energy;
+                        internal+=weight*0.5*(1e8*e*e+3e8*q*q)+entropy_energy;
+                    }
+                }
+            }
+            let r=next.report();
+            near(next.bridge().deformed_position_m(LENGTH,0.0).unwrap()[0],LENGTH*(1.0+strain),1e-11);
+            near(next.bridge().deformed_position_m(LENGTH,0.0).unwrap()[1],0.5*curvature*LENGTH*LENGTH,1e-10);
+            near(r.mechanical_internal_energy_change_j,internal-old_internal,1e-9);
+            near(r.mechanical_entropy_energy_change_j,ts-old_ts,1e-9);
+            near(r.reversible_heat_j,-r.mechanical.energy_j.thermal_strain_work-(ts-old_ts),1e-9);
+            near(r.deposited_heat_j,r.mechanical.energy_j.dissipated+r.reversible_heat_j,1e-10);
+            accumulated_heat+=2.0*heat_per_layer;
+            numerical+=r.mechanical.energy_j.numerical_dissipation;
+            near(internal+next.thermal().energy_j()+numerical-accumulated_heat,0.0,4e-9);
+            assert_eq!(r.mechanical.load_work_j,0.0);
+            assert_eq!(next.bridge().mass_kg(),bridge.mass_kg());
+            if upper_sign<0.0 {
+                assert!(r.mechanical.energy_j.dissipated>0.0);
+                assert!(r.mechanical.energy_j.thermal_strain_work.abs()>1e-8);
+                assert!(if step==0 {r.reversible_heat_j>0.0}else{r.reversible_heat_j<0.0});
+            }
+            old_rise=rise;old_q=q_scalar;old_internal=internal;old_ts=ts;
+            let (h,b,_)=next.into_parts();heat=h;bridge=b;
+        }
+        final_tip[variant]=bridge.deformed_position_m(LENGTH,0.0).unwrap()[1];
+    }
+    near(final_tip[0],0.0,1e-10);
+    assert!(final_tip[1]>5e-4,"changing only upper-layer expansion changes the actual heated shape");
+}
+
+#[test]
 fn unloading_retains_spatial_memory_and_closes_the_whole_history() {
     let m=materials(0.002,3e8); let (heat,bridge)=initial_bridge(&m,1.0);
     let context=point(300.0); let key=key(); let cells=transport_cells(&m,&context,&key);

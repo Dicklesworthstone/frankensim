@@ -11,6 +11,8 @@
 //! (monotone plastic zone, softening secant stiffness).
 
 use fs_alloc::{ArenaConfig, ArenaPool};
+#[path = "plastic3/dynamics.rs"]
+mod dynamics;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::{J2Plasticity, J2State};
 use fs_material::{IsotropicElastic, SmallStrainLaw};

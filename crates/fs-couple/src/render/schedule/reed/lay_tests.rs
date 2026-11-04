@@ -101,3 +101,41 @@ fn a_lay_that_meets_the_reed_before_the_slit_shuts_changes_the_sound() {
     // The default render is deterministic, so the difference above is the lay.
     assert_eq!(pressure(SIX), plain);
 }
+
+#[test]
+fn tongue_contact_holds_massive_reed_closed_until_release_and_preserves_callback_invariance() {
+    let untongued = source(SIX);
+    let tongued = source(&format!(
+        "{SIX}\ntongue_contact 0.000026 0.0000933333 0.35 0.02 0.005"
+    ));
+    let render_blocked = |text: &str, block: usize| -> Vec<u64> {
+        let mut perf = ReedPerformance::from_bytes(text.as_bytes(), block).unwrap();
+        let mut out = vec![0.0; 4800];
+        for chunk in out.chunks_mut(block) {
+            perf.block(chunk).unwrap();
+        }
+        out.into_iter().map(f64::to_bits).collect()
+    };
+    let out_1 = render_blocked(&tongued, 1);
+    let out_37 = render_blocked(&tongued, 37);
+    let out_512 = render_blocked(&tongued, 512);
+    assert_eq!(out_1, out_37);
+    assert_eq!(out_1, out_512);
+    assert_ne!(out_1, render_blocked(&untongued, 64));
+    assert_eq!(
+        refusal("reed 0.0004 0.013 6000 0 0 0.35\ntongue_contact 0.000026 0.0000933333 0.35 0.02 0.005"),
+        "tongue_contact requires a massive reed"
+    );
+    assert_eq!(
+        refusal(&format!("{SIX}\ntongue_contact 0.0002 0.0000933333 0.35 0.02 0.005")),
+        "tongue_contact area exceeds the vibrating reed blade area"
+    );
+    assert_eq!(
+        refusal(&format!("{SIX}\ntongue_contact 0.000026 0.0000933333 0.35 -0.01 0.005")),
+        "tongue_contact requires a nonnegative release_start_s"
+    );
+    assert_eq!(
+        refusal(&format!("{SIX}\ntongue_contact 0.000026 0.0000933333 0.35 0.02 0")),
+        "physical dimension/scale must be positive"
+    );
+}

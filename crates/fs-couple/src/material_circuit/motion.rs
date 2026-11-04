@@ -167,8 +167,9 @@ impl MaterialFieldMotion {
     /// electrical back-reaction without a separate force or spring integrator.
     ///
     /// All original field restrictions apply. The member has a fixed far end and
-    /// a prescribed linear axial displacement shape. Its temperature/prestrain
-    /// stay frozen; no support damping, heat, buckling or elastic waves are added.
+    /// a prescribed linear axial displacement shape. Ordinary supports retain
+    /// frozen material state. Thermally live supports require the coupled
+    /// enthalpy owner; no support damping, buckling or elastic waves are added.
     /// Construct the complete assembly before advancing history: attaching a
     /// member to a live state would require an explicit energy/momentum transfer.
     pub fn new_with_support(circuit: MaterialCircuit, branch: usize, body: ResolvedBody,
@@ -328,6 +329,40 @@ impl MaterialFieldMotion {
     /// Contact source/area changes follow the existing zero-storage interface
     /// model; electrode gap contact, arc energy and interface memory are not added.
     pub fn step_with_contacts_candidate(&self, sources: Vec<MaterialResistor>,
+        contacts: Vec<SeriesElectricalContact>, input: FieldMotionInput<'_>,
+        controls: MaterialCircuitSolve, mut cancelled: impl FnMut() -> bool)
+        -> Result<FieldMotionCandidate, MaterialCircuitError>
+    {
+        poll(&mut cancelled)?;
+        if self.support.as_ref().is_some_and(AxialSupport::is_thermally_live) {
+            return Err(invalid("live thermoelastic support requires the joint enthalpy and reversible-heat owner"));
+        }
+        self.step_bound_support_candidate(sources, contacts, input, controls, cancelled)
+    }
+
+    // Only the coupled enthalpy owner may change this member's thermal state.
+    // The actual native descriptor, physical history and all branch accounting
+    // are identical to the conservative path; no mechanics are solved twice.
+    pub(crate) fn step_thermal_support_candidate(&self,
+        section: fs_material::section::thermal::ConcentricThermoelasticSection,
+        sources: Vec<MaterialResistor>, input: FieldMotionInput<'_>,
+        controls: MaterialCircuitSolve, mut cancelled: impl FnMut() -> bool)
+        -> Result<FieldMotionCandidate, MaterialCircuitError>
+    {
+        poll(&mut cancelled)?;
+        if !self.circuit.contacts.is_empty() {
+            return Err(invalid("thermal support currently requires explicit bulk-only electrical heat routes"));
+        }
+        let support = self.support.as_ref()
+            .ok_or_else(|| invalid("thermal support requires an existing material member"))?
+            .with_thermal_section(section)?;
+        let mut trial = self.clone();
+        trial.support = Some(support);
+        trial.elastic_energy_j()?;
+        trial.step_bound_support_candidate(sources, Vec::new(), input, controls, cancelled)
+    }
+
+    fn step_bound_support_candidate(&self, sources: Vec<MaterialResistor>,
         mut contacts: Vec<SeriesElectricalContact>, input: FieldMotionInput<'_>,
         controls: MaterialCircuitSolve, mut cancelled: impl FnMut() -> bool)
         -> Result<FieldMotionCandidate, MaterialCircuitError>

@@ -1,12 +1,16 @@
 //! Reciprocal convection between a finite material body and the actual gas cavity.
 //!
 //! The existing correlation owner supplies Nu and h from the CURRENT bulk gas
-//! energy midpoint. The original thermal/piston owner solves one signed heat
-//! transfer, body enthalpy (including latent heat), gas energy and wall momentum.
+//! state supplied by the coupling owner: an energy midpoint for the piston or
+//! an endpoint for the isochoric body. That owner solves one signed heat
+//! transfer, body enthalpy (including latent heat), gas energy and any wall momentum.
 //! No fixed-temperature reservoir, second gas law, or convection integrator.
 
 /// Multiple finite gases and convective patches on the existing circuit/thermal assembly.
 pub mod network;
+/// Buoyancy-driven vertical-plate heat exchange at actual gas/body states.
+pub mod natural;
+pub use natural::NaturalGasSurface;
 
 use super::{ForcedConvectionSettings, MaterialConvectionError, evaluate_forced_from_material};
 use fs_convection::{CorrelationId, HeatTransferCoefficient, NusseltEvaluation, ThermalDirection};
@@ -14,15 +18,20 @@ use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
 use fs_couple::cavity_phs::piston::thermal::{
     ConductanceSample, HeatExchangeSolve, ThermalPistonCandidate, ThermalPistonError,
 };
+use fs_couple::finite_gas_thermal::{
+    ConvectionCoefficient, ConvectionError, FiniteGasThermalEnvironment, FiniteGasThermalReport,
+};
 use fs_evidence::Evidence;
+use fs_exec::Cx;
 use fs_material::MaterialError;
 use fs_material::fluid_transport::FluidTransportState;
-use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStepInput};
+use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_qty::Length;
 
 /// Explicit flow/geometry for a single exposed patch, not a stored coefficient.
-/// Properties are evaluated at the gas BULK energy midpoint. Select a correlation
+/// Properties are evaluated at the gas BULK state supplied by the coupling
+/// owner (piston energy midpoint or isochoric endpoint). Select a correlation
 /// and temperature-contrast regime admitting that reference; no film-temperature
 /// or stagnant-gas model is silently substituted. The prescribed speed is the
 /// relative flow magnitude over this interval, not the translating wall velocity.
@@ -51,7 +60,8 @@ pub struct FiniteGasConvectionSample {
     pub gas: ResolvedThermochemicalGasState,
     pub body: EquilibriumPhaseState,
     pub area_m2: f64,
-    /// None only for an explicitly isolated zero-area patch, not a fallback.
+    /// None for an explicitly isolated zero-area patch or the natural law's
+    /// exact thermal equilibrium. Neither case extrapolates a correlation.
     pub evaluation: Option<GasConvectionEvaluation>,
 }
 
@@ -135,5 +145,75 @@ impl ForcedGasSurface {
         }
         piston.thermal_candidate(input, body, controls, exchange,
             |gas, wall| self.resolve(gas, wall), cancelled)
+    }
+
+    /// Reciprocal convection for an isochoric gas and the existing lumped body
+    /// callback, including hereditary/deforming-solid consumers of that callback.
+    /// The SAME candidate gas endpoint supplies storage, transport, h and the
+    /// returned acoustic state. A data-only gas swap therefore changes the heat
+    /// transfer law as well as thermodynamic storage; no piston is required.
+    ///
+    /// A positive patch must cover the whole exposed body boundary. Smearing a
+    /// partial-patch h over that boundary would understate the local Biot number.
+    /// Zero area explicitly disables convection. Radiation keeps its independent
+    /// enclosure and the original body owner still admits conductivity and Biot.
+    /// Bulk-endpoint property evaluation and prescribed relative speed retain the
+    /// same correlation/domain assumptions as `resolve`; no film-temperature,
+    /// flow-field or fan-power solution is inferred. The proposed heat selects
+    /// Dittus-Boelter's heating/cooling exponent. Its zero-heat seed uses the
+    /// smaller branch coefficient so an authored direction cannot cause a false
+    /// Biot refusal before the physical transfer is known. Every nonzero trial
+    /// uses its actual branch. Constant-heat-flux duct correlations remain
+    /// incompatible with this isothermal-body model.
+    pub fn isochoric_body_candidate(
+        self,
+        cx: &Cx<'_>,
+        environment: &FiniteGasThermalEnvironment<'_>,
+        body: UniformEnthalpyStepInput<'_>,
+    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<Option<GasConvectionEvaluation>>>,
+        ConvectionError<MaterialConvectionError>>
+    {
+        cx.checkpoint().map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;
+        self.validate().map_err(ConvectionError::Convection)?;
+        if !body.surface_area_m2.is_finite() || body.surface_area_m2 <= 0.0
+            || (self.area_m2 != 0.0 && self.area_m2 != body.surface_area_m2)
+        {
+            return Err(ConvectionError::Thermal(ThermalPistonError::Invalid(
+                "isochoric convection must cover the complete body surface or be explicitly insulated",
+            )));
+        }
+        if self.area_m2 > 0.0 && matches!(self.correlation,
+            CorrelationId::CircularDuctLaminarChf | CorrelationId::RectangularDuctLaminarChf)
+        {
+            return Err(ConvectionError::Convection(invalid(
+                "endpoint gas-only convection requires a wall-temperature-independent isothermal correlation",
+            )));
+        }
+        environment.advance_with_convection_feedback(cx, body, |gas, heat_into_gas_j| {
+            if self.area_m2 == 0.0 {
+                return Ok(ConvectionCoefficient { coefficient_w_per_m2_k: 0.0, source: None });
+            }
+            let mut settings = self.settings;
+            settings.direction = if heat_into_gas_j > 0.0 {
+                ThermalDirection::HeatingFluid
+            } else {
+                ThermalDirection::CoolingFluid
+            };
+            let mut evaluated = evaluate_forced_from_material(self.correlation, gas,
+                self.speed_m_s, self.characteristic_length, settings)?;
+            if heat_into_gas_j == 0.0 && self.correlation == CorrelationId::DittusBoelter {
+                settings.direction = ThermalDirection::HeatingFluid;
+                let heating = evaluate_forced_from_material(self.correlation, gas,
+                    self.speed_m_s, self.characteristic_length, settings)?;
+                if heating.coefficient().value.value() < evaluated.coefficient().value.value() {
+                    evaluated = heating;
+                }
+            }
+            let (transport, nusselt, coefficient) = evaluated.into_parts();
+            Ok(ConvectionCoefficient {
+                coefficient_w_per_m2_k: coefficient.value.value(),
+                source: Some(GasConvectionEvaluation { transport, nusselt, coefficient }),
+            })
+        })
     }
 }

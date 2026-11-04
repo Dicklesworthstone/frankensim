@@ -3,7 +3,7 @@
 //! One explicit finite-difference solver for every vibrating surface of a drum kit.
 //! A body is a thin plate on a square grid (spacing `h`) with
 //!
-//! `rho t w_tt = T Lap(w) - div div (D curv) + vK(w, F) - 2 rho t (s0 w_t - s1 Lap(w_t)) + p + f_contact`
+//! `rho t w_tt = T Lap(w) - div div (D curv) + vK(w, F) - 2 rho t s0 w_t + 2 s1 div(rho t grad(w_t)) + p + f_contact`
 //!
 //! - **membranes** (drum heads): clamped rim, in-plane pretension `T`, optional bending,
 //!   Berger tension modulation (the mean stretch raises the tension: pitch glide);
@@ -33,6 +33,9 @@
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
+
+mod annular_membrane;
+pub use annular_membrane::MembraneTerm;
 
 pub use fs_material::gas::GasState;
 pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
@@ -65,6 +68,13 @@ mod radiation_tests;
 
 #[cfg(test)]
 mod air_loss_tests;
+
+#[cfg(test)]
+mod bending_quadrature_tests;
+
+/// Four quarter-cell quadrature points, each with three tensor-root rows.
+/// Shared with consumers of `BodyImage::viscous_root`.
+pub const BENDING_ROOT_ROWS_PER_NODE: usize = 12;
 
 // ----------------------------------------------------------------------------- sparse
 #[derive(Clone, Debug, Default)]
@@ -111,7 +121,7 @@ impl Csr {
         c
     }
 
-    /// Maximal runs of rows sharing one stencil shape with 3, 5 or 17 entries (a string, the
+    /// Maximal runs of rows sharing one stencil shape with 3, 5, 13 or 17 entries (a string, the
     /// Laplacian, the bending operator).
     fn find_runs(&self) -> Vec<Run> {
         let (ptr, col) = (&self.ptr, &self.col);
@@ -121,13 +131,13 @@ impl Csr {
         while i < self.n {
             let k = ptr[i + 1] - ptr[i];
             let mut e = i + 1;
-            if matches!(k, 3 | 5 | 17) {
+            if matches!(k, 3 | 5 | 13 | 17) {
                 while e < self.n && ptr[e + 1] - ptr[e] == k && off(e).eq(off(i)) {
                     e += 1;
                 }
             }
             let len = e - i;
-            if len >= MIN_RUN && matches!(k, 3 | 5 | 17) {
+            if len >= MIN_RUN && matches!(k, 3 | 5 | 13 | 17) {
                 let row = |t: usize| &self.val[ptr[i + t]..ptr[i + t + 1]];
                 let uniform = (1..len).all(|t| row(t).iter().zip(row(0)).all(|(a, b)| a.to_bits() == b.to_bits()));
                 let val = if uniform { row(0).to_vec() } else { (0..k).flat_map(|q| (0..len).map(move |t| row(t)[q])).collect() };
@@ -151,7 +161,9 @@ impl Csr {
             match r.off.len() {
                 3 => r.mul_add::<3>(x, s, y),
                 5 => r.mul_add::<5>(x, s, y),
-                _ => r.mul_add::<17>(x, s, y),
+                13 => r.mul_add::<13>(x, s, y),
+                17 => r.mul_add::<17>(x, s, y),
+                _ => self.rows_add(r.r0, r.r0 + r.len, x, s, y),
             }
             i = r.r0 + r.len;
         }
@@ -208,6 +220,22 @@ impl Csr {
             q += x[i] * acc;
         }
         q
+    }
+
+    /// Correction from M L to the symmetric edge-flux Laplacian L_M,
+    /// evaluated on w-wp. Each edge carries the arithmetic-mean nodal mass:
+    /// (L_M x)_i = m_i (L x)_i + sum_j L_ij (m_j-m_i)(x_j-x_i)/2.
+    /// Thus -L_M is an internal dissipative force even on a tapered plate.
+    /// Dirichlet boundary edges keep their existing m_i weight. Constant mass
+    /// gives exactly zero correction, preserving the uniform-body operator.
+    fn mass_flux_correction(&self, i: usize, w: &[f64], wp: &[f64], mass: &[f64]) -> f64 {
+        let xi = w[i] - wp[i];
+        let mut correction = 0.0;
+        for p in self.ptr[i]..self.ptr[i + 1] {
+            let j = self.col[p];
+            correction += 0.5 * self.val[p] * (mass[j] - mass[i]) * ((w[j] - wp[j]) - xi);
+        }
+        correction
     }
 }
 
@@ -406,8 +434,9 @@ struct VonKarman {
     l0: Vec<f64>,              // l(z0) at core
     rest_curv: Vec<(f64, f64, f64)>, // xx, yy, xy of z0 at core
     z0: Vec<f64>,              // rest height per node
-    airy: Band,
+    airy: Option<Band>,
     matrix: Csr,
+    annulus: Option<annular_membrane::AnnularMembrane>,
     f: Vec<f64>,
     q: Vec<f64>,
     curv: Vec<(f64, f64, f64)>,
@@ -590,16 +619,24 @@ impl Body {
             Edge::Clamped => grid_index.keys().copied().collect(),
             Edge::Free => core.clone(),
         };
-        let stencil = |i: i64, j: i64| -> [Vec<(Option<usize>, f64)>; 3] {
+        // Average four positive tensor energies, not the twisting curvature
+        // before squaring it. Centered Dxy loses alternating cell twists:
+        // its squared Fourier symbol has extra cos²(kx h/2) cos²(ky h/2).
+        // Cell D+x D+y instead satisfies the discrete integration-by-parts
+        // identity; constant-D interior bending is exactly D*Laplacian_h².
+        // Symmetric quarter-cell weights retain second-order consistency and
+        // the energy's natural free-edge conditions without boundary clamps.
+        let stencil = |i: i64, j: i64, di: i64, dj: i64| -> [Vec<(Option<usize>, f64)>; 3] {
             let h2 = h * h;
+            let (ci, cj) = (i + di, j + dj);
             [
                 vec![(at(i - 1, j), 1.0 / h2), (at(i, j), -2.0 / h2), (at(i + 1, j), 1.0 / h2)],
                 vec![(at(i, j - 1), 1.0 / h2), (at(i, j), -2.0 / h2), (at(i, j + 1), 1.0 / h2)],
                 vec![
-                    (at(i + 1, j + 1), 0.25 / h2),
-                    (at(i - 1, j + 1), -0.25 / h2),
-                    (at(i + 1, j - 1), -0.25 / h2),
-                    (at(i - 1, j - 1), 0.25 / h2),
+                    (at(ci + 1, cj + 1), 1.0 / h2),
+                    (at(ci, cj + 1), -1.0 / h2),
+                    (at(ci + 1, cj), -1.0 / h2),
+                    (at(ci, cj), 1.0 / h2),
                 ],
             ]
         };
@@ -609,16 +646,18 @@ impl Body {
                 let r = ((i * i + j * j) as f64).sqrt() * h;
                 let t = (s.thickness)(r);
                 let d = s.young * t * t * t / (12.0 * (1.0 - nu * nu));
-                let b = stencil(i, j);
-                for a in 0..3 {
-                    for c in 0..3 {
-                        if q[a][c] == 0.0 {
-                            continue;
-                        }
-                        for &(pa, va) in &b[a] {
-                            for &(pc, vc) in &b[c] {
-                                if let (Some(pa), Some(pc)) = (pa, pc) {
-                                    add(&mut krows, pa, pc, d * h * h * q[a][c] * va * vc);
+                for (di, dj) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+                    let b = stencil(i, j, di, dj);
+                    for a in 0..3 {
+                        for c in 0..3 {
+                            if q[a][c] == 0.0 {
+                                continue;
+                            }
+                            for &(pa, va) in &b[a] {
+                                for &(pc, vc) in &b[c] {
+                                    if let (Some(pa), Some(pc)) = (pa, pc) {
+                                        add(&mut krows, pa, pc, 0.25 * d * h * h * q[a][c] * va * vc);
+                                    }
                                 }
                             }
                         }
@@ -627,7 +666,7 @@ impl Body {
             }
         }
         let viscosity = if let Some((source, angle)) = viscosity {
-            let mut roots = vec![BTreeMap::new(); 3 * n];
+            let mut roots = vec![BTreeMap::new(); BENDING_ROOT_ROWS_PER_NODE * n];
             for &(i, j) in &curv_pts {
                 let r = ((i * i + j * j) as f64).sqrt() * h;
                 let d = source.bending_matrix_n_m_s((s.thickness)(r), angle)
@@ -636,17 +675,21 @@ impl Body {
                 let rows: Vec<BTreeMap<usize, f64>> = (0..3).map(|a|
                     (0..3).map(|b| (b, d[3*a+b])).collect()).collect();
                 let factor = Band::factor(&rows)?;
-                let b = stencil(i, j);
                 let node = at(i, j).expect("curvature point belongs to the plate");
-                // Engineering curvature is [w_xx,w_yy,2w_xy]. The square
-                // root includes sqrt(area)=h, so G'G has units N s/m.
-                for column in 0..3 {
-                    for a in column..3 {
-                        if a - column > factor.b { continue; }
-                        let l = factor.l[a * (factor.b + 1) + column + factor.b - a];
-                        let scale = h * l * if a == 2 { 2.0 } else { 1.0 };
-                        for &(p, value) in &b[a] {
-                            if let Some(p) = p { add(&mut roots, 3 * node + column, p, scale * value); }
+                // Engineering curvature is [w_xx,w_yy,2w_xy]. Each root
+                // includes sqrt(quarter area)=h/2, so G'G has units N s/m.
+                for (quadrant, (di, dj)) in [(-1, -1), (0, -1), (-1, 0), (0, 0)].into_iter().enumerate() {
+                    let b = stencil(i, j, di, dj);
+                    for column in 0..3 {
+                        for a in column..3 {
+                            if a - column > factor.b { continue; }
+                            let l = factor.l[a * (factor.b + 1) + column + factor.b - a];
+                            let scale = 0.5 * h * l * if a == 2 { 2.0 } else { 1.0 };
+                            for &(p, value) in &b[a] {
+                                if let Some(p) = p {
+                                    add(&mut roots, BENDING_ROOT_ROWS_PER_NODE * node + 3 * quadrant + column, p, scale * value);
+                                }
+                            }
                         }
                     }
                 }
@@ -665,7 +708,7 @@ impl Body {
                 .fold(0.0_f64, f64::max);
             if !rate_bound.is_finite() { return Err("bending-viscosity CFL bound is not representable".into()); }
             Some(ViscousBending { source: source.clone(), angle, c: Csr::from_rows(&rows),
-                root: Csr::from_rows(&roots), scratch: vec![0.0; 3*n], rate_bound,
+                root: Csr::from_rows(&roots), scratch: vec![0.0; BENDING_ROOT_ROWS_PER_NODE*n], rate_bound,
                 dissipated_j: 0.0, last_j: 0.0 })
         } else { None };
         // supports and muffling: springs/dashpots to ground per node
@@ -730,29 +773,72 @@ impl Body {
             };
             let rest_curv: Vec<_> = nb.iter().map(|s9| curv(&z0, s9)).collect();
             let l0: Vec<f64> = rest_curv.iter().map(|&(a, b, c)| a * b - c * c).collect();
-            // Airy energy 1/2 sum (Lap_h F)^2 over every node where it is nonzero; F = 0 off the core
+            // Complementary membrane energy, with F=0 outside the core:
+            // 1/(2 E t) [Fxx^2 + Fyy^2 - 2 nu Fxx Fyy + 2(1+nu) Fxy^2].
+            // Keep the existing mean E*t normalization of q and V, but put
+            // the LOCAL reciprocal thickness inside the stress operator.
+            // Mixed derivatives live at cell centres. For constant thickness,
+            // sum Fxx Fyy = sum Fxy^2 (zero extension), so this reduces exactly
+            // to the former Laplacian-squared matrix, including its boundary.
             let nc = sorted.len();
             let mut arows = vec![BTreeMap::new(); nc];
             let h2 = h * h;
-            for (&(i, j), _) in &grid_index {
-                let mut row: Vec<(usize, f64)> = vec![];
-                if let Some(&c) = cidx.get(&(i, j)) {
-                    row.push((c, -4.0 / h2));
+            let compliance = |x: f64, y: f64| -> Result<f64, String> {
+                let t = (s.thickness)(x.hypot(y));
+                if !t.is_finite() || t <= 0.0 {
+                    return Err(format!("{name}: membrane thickness must be finite and positive"));
                 }
-                for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if let Some(&c) = cidx.get(&(i + di, j + dj)) {
-                        row.push((c, 1.0 / h2));
+                Ok(t_mean / t)
+            };
+            for &(i, j) in grid_index.keys() {
+                let mut rows = [Vec::new(), Vec::new()];
+                for (axis, offsets) in [[(-1, 0), (0, 0), (1, 0)], [(0, -1), (0, 0), (0, 1)]]
+                    .iter()
+                    .enumerate()
+                {
+                    for (&(di, dj), weight) in offsets.iter().zip([1.0, -2.0, 1.0]) {
+                        if let Some(&c) = cidx.get(&(i + di, j + dj)) {
+                            rows[axis].push((c, weight / h2));
+                        }
                     }
                 }
-                for &(a, va) in &row {
-                    for &(b, vb) in &row {
-                        add(&mut arows, a, b, va * vb);
+                let weight = compliance(i as f64 * h, j as f64 * h)?;
+                for (a, ra) in rows.iter().enumerate() {
+                    for (b, rb) in rows.iter().enumerate() {
+                        let q = if a == b { 1.0 } else { -nu };
+                        for &(ia, va) in ra {
+                            for &(ib, vb) in rb {
+                                add(&mut arows, ia, ib, weight * q * va * vb);
+                            }
+                        }
                     }
                 }
             }
-            let airy = Band::factor(&arows)?;
-            let matrix = Csr::from_rows(&arows);
-            Some(VonKarman { eh: s.young * t_mean, nb, l0, rest_curv, z0, airy, matrix, f: vec![0.0; nc], q: vec![0.0; nc], curv: vec![(0.0, 0.0, 0.0); nc] })
+            let cells: std::collections::BTreeSet<_> = sorted
+                .iter()
+                .flat_map(|&(i, j)| [(i - 1, j - 1), (i - 1, j), (i, j - 1), (i, j)])
+                .collect();
+            for (i, j) in cells {
+                let row: Vec<_> = [(0, 0, 1.0), (1, 0, -1.0), (0, 1, -1.0), (1, 1, 1.0)]
+                    .iter()
+                    .filter_map(|&(di, dj, v)| cidx.get(&(i + di, j + dj)).map(|&c| (c, v / h2)))
+                    .collect();
+                let weight = 2.0 * (1.0 + nu) * compliance((i as f64 + 0.5) * h, (j as f64 + 0.5) * h)?;
+                for &(a, va) in &row {
+                    for &(b, vb) in &row {
+                        add(&mut arows, a, b, weight * va * vb);
+                    }
+                }
+            }
+            let airy = if s.hole > 0.0 { None } else { Some(Band::factor(&arows)?) };
+            let (annulus, matrix) = if s.hole > 0.0 {
+                let (a, matrix) = annular_membrane::AnnularMembrane::new(&grid_index, &sorted, s, compliance)?;
+                (Some(a), matrix)
+            } else {
+                (None, Csr::from_rows(&arows))
+            };
+            let na = matrix.n;
+            Some(VonKarman { eh: s.young * t_mean, nb, l0, rest_curv, z0, airy, matrix, annulus, f: vec![0.0; na], q: vec![0.0; na], curv: vec![(0.0, 0.0, 0.0); nc] })
         } else {
             None
         };
@@ -805,6 +891,16 @@ impl Body {
     /// with the baked volume shapes in the receipt.
     pub fn attach_head_radiation(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
         compact_volume_resistance: Option<f64>) -> Result<Vec<String>, String> {
+        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, None)
+    }
+
+    pub fn attach_head_radiation_with_viscous(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
+        compact_volume_resistance: Option<f64>, coincidence_hz: f64) -> Result<Vec<String>, String> {
+        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, Some(coincidence_hz))
+    }
+
+    fn attach_head_radiation_impl(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
+        compact_volume_resistance: Option<f64>, coincidence_hz: Option<f64>) -> Result<Vec<String>, String> {
         // Air loading is the same physics whatever the film-loss source: a
         // sourced bending viscosity composes with it (its force is explicit,
         // the air mass implicit). Shallow shells are not clamped films.
@@ -818,7 +914,9 @@ impl Body {
             lap.mul_add(v, tension, &mut out);
             out
         };
-        let load = radiation::ModalAirLoad::new(table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance)?;
+        let viscous = coincidence_hz.map(|fc| (self.mass.iter().sum::<f64>() / self.area, fc));
+        let load = radiation::ModalAirLoad::new_with_losses(
+            table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance, None, viscous)?;
         let receipt = load.receipt.clone();
         self.head_radiation = Some(Box::new(load));
         self.kc = 0.0; // the implicit air mass is prepared with the update coefficients
@@ -941,9 +1039,20 @@ impl Body {
         if let Some(vk) = self.vk.as_mut() {
             let h2 = self.h * self.h;
             let w = &self.w;
-            let VonKarman { eh, nb, rest_curv, airy, f, q, curv, .. } = vk;
+            let VonKarman { eh, nb, rest_curv, airy, f, q, curv, annulus, z0, .. } = vk;
             let eh = *eh;
+            if let Some(annulus) = annulus {
+                annulus.solve_with(f, |c| {
+                    let qc = annulus.load_row(c, w, z0, eh);
+                    q[c] = qc;
+                    qc
+                });
+                v += h2 / (2.0 * eh) * f.iter().zip(q.iter()).map(|(a, b)| a * b).sum::<f64>();
+                annulus.gradient(w, z0, f, h2, &mut self.g);
+                return v.max(0.0);
+            }
             let u = |o: Option<usize>| o.map_or(0.0, |k| w[k]);
+            let airy = airy.as_ref().expect("simply-connected plate retains its Airy factor");
             // q = -E t (l(w + z0) - l(z0)) per core node, built row by row inside the Airy solve's
             // forward sweep (it fills that sweep's latency chain); A F = q
             airy.solve_with(f, |c| {
@@ -1031,10 +1140,12 @@ impl Body {
             viscous.c.mul_add(&self.tmp, -1.0 / k, &mut self.f);
         }
         if self.s1 > 0.0 {
-            // Lap_h (w - wp) = -(L w - L wp) / h^2 from the two stored products
+            // div(m grad velocity), not m Lap(velocity): the latter is not
+            // symmetric when thickness varies and can create mechanical energy.
             let ih2 = 1.0 / (self.h * self.h);
-            for ((t, a), b) in self.tmp.iter_mut().zip(&self.lw).zip(&self.lwp) {
-                *t = -(a - b) * ih2;
+            for i in 0..self.n {
+                let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                self.tmp[i] = -((self.lw[i] - self.lwp[i]) + correction / self.mass[i]) * ih2;
             }
         }
         let nl = self.berger > 0.0 || self.vk.is_some();
@@ -1193,14 +1304,16 @@ impl Body {
         }
         if self.sav && self.vk.is_some() {
             // energy the loss terms removed over this step (the budget for raising psi next step):
-            // s0: sum m s0 (wn - wp)^2 / (2k); s1: s1/(k h^2) sum m (L(w - wp)) . (wn - wp), if positive
+            // s0: sum m s0 (wn - wp)^2 / (2k); s1 uses the same symmetric
+            // mass-weighted edge flux as predict, paired with centered velocity.
             let ih2 = 1.0 / (self.h * self.h);
             let mut d0 = 0.0;
             let mut d1 = 0.0;
             for i in 0..self.n {
                 let dv = self.wn[i] - self.wp[i];
                 d0 += self.mass[i] * self.s0[i] * dv * dv;
-                d1 += self.mass[i] * (self.lw[i] - self.lwp[i]) * dv;
+                let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                d1 += (self.mass[i] * (self.lw[i] - self.lwp[i]) + correction) * dv;
             }
             self.budget = d0 / (2.0 * k) + (self.s1 * ih2 / k * d1).max(0.0) + bending_loss;
         }
@@ -1561,7 +1674,9 @@ pub struct Contact {
     pub peak_force: f64,
     /// Force of the last step [N] (diagnostics).
     pub force: f64,
-    /// The force solve stops at an exact Newton fixed point (see `contact_force`). On for the snare
+    /// The force solve may stop when a nonzero-residual Newton correction rounds
+    /// to the current iterate (see `contact_force`). Exact zero residuals always
+    /// stop, independently of this option. On for the snare
     /// wires: held under load and warm-started, about one solve in five lands on its own root. Off
     /// elsewhere: it is as exact there, but it would change every other piece's output (by rounding
     /// for most; the open hi-hat's rim chatter decorrelates), and that has not been graded.
@@ -1702,7 +1817,8 @@ fn contact_phi(d: f64, previous: f64, kk: f64, alpha: f64, mu: f64, k: f64) -> (
 /// can still exert force with negative predicted or final penetration.
 /// Safeguarded Newton (a
 /// bisection step whenever Newton leaves the bracket), from the last force when it lies in the bracket.
-/// With `fixed_exit`, a Newton step that lands exactly on the iterate stops the solve there: the
+/// An exactly zero residual always stops the solve. With `fixed_exit`, a Newton
+/// step that rounds to the iterate also stops the solve there: the
 /// correction is below half an ulp, so the iterate is the root to rounding. Without it the bracket
 /// update has just put that iterate on the bracket's edge, so the safeguard bisects away from the
 /// root and halves back down to it (30-47 iterations instead of about 3).
@@ -1720,6 +1836,9 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, fi
     for _ in 0..60 {
         let (v, dv) = phi(d_pred - comp * x);
         let g = x - v;
+        // An exact root must be accepted before it becomes a bracket endpoint.
+        // Otherwise the strict interior safeguard bisects away from the solution.
+        if g == 0.0 { return x; }
         if g > 0.0 { hi = x; } else { lo = x; }
         let mut next = x - g / (1.0 + comp * dv);
         if !((next > lo && next < hi) || (fixed_exit && next == x)) {
@@ -1734,7 +1853,7 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, fi
     x
 }
 
-/// One iteration of `contact_force`'s loop for a = 1.5, without branches: the same operations in the
+/// One iteration of `contact_force`'s loop for a = 1.5: the same operations in the
 /// same order, so the same iterate, bracket and stop. Returns (next iterate, stop).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -1742,6 +1861,7 @@ fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f6
     let d = dp - cm * x;
     let (v, dv) = contact_phi(d, dn, kk, 1.5, mu, k);
     let g = x - v;
+    if g == 0.0 { return (x, true); }
     let up = g > 0.0;
     *hi = if up { x } else { *hi };
     *lo = if up { *lo } else { x };
@@ -2160,7 +2280,13 @@ impl Instrument {
         let viscous_rate2 = self.viscosity_admission_rate2(self.rate);
         if viscous_rate2 > 0.0 {
             worst.0 += viscous_rate2;
-            worst.1.push_str(" + material bending viscosity");
+            let material_loss = self.bodies.iter()
+                .any(|b| b.viscosity.as_ref().is_some_and(|v| v.rate_bound > 0.0));
+            worst.1.push_str(if material_loss {
+                " + material bending viscosity"
+            } else {
+                " + gradient loss"
+            });
         }
         let radiation_rate2 = 2.0 * self.rate * self.bodies.iter().filter_map(|b| b.head_radiation.as_deref())
             .map(|load| load.rate_bound).fold(0.0_f64, f64::max);
@@ -2182,8 +2308,29 @@ impl Instrument {
     }
 
     fn viscosity_admission_rate2(&self, rate: f64) -> f64 {
-        2.0 * rate * self.bodies.iter().filter_map(|b| b.viscosity.as_ref())
-            .map(|v| v.rate_bound).fold(0.0_f64, f64::max)
+        // Both explicit viscous forces need dt^2 lambda_K + 2 dt lambda_C < 4.
+        // For the variable-mass gradient loss, bound M^-1 L_M by its absolute
+        // row sums. The constant-mass shortcut 8/h^2 is not valid on a taper.
+        let bound = self.bodies.iter().map(|b| {
+            let mut gradient = 0.0_f64;
+            if b.s1 > 0.0 {
+                for i in 0..b.n {
+                    let (mut diagonal, mut off) = (0.0, 0.0);
+                    for p in b.lap.ptr[i]..b.lap.ptr[i + 1] {
+                        let j = b.lap.col[p];
+                        let a = b.lap.val[p];
+                        if i == j { diagonal += b.mass[i] * a; } else {
+                            diagonal += 0.5 * a * (b.mass[i] - b.mass[j]);
+                            off += (0.5 * a * (b.mass[i] + b.mass[j])).abs();
+                        }
+                    }
+                    gradient = gradient.max((diagonal.abs() + off) / b.mass[i]);
+                }
+                gradient *= 2.0 * b.s1 / (b.h * b.h);
+            }
+            gradient + b.viscosity.as_ref().map_or(0.0, |v| v.rate_bound)
+        }).fold(0.0_f64, f64::max);
+        2.0 * rate * bound
     }
 
     /// Source-domain admission at the actual internal integration clock.
@@ -2484,6 +2631,8 @@ pub struct VonKarmanImage {
     pub l0: Vec<f64>,
     /// Cached rest curvatures (xx, yy, xy), one triple per core stencil.
     pub rest_curv: Vec<(f64, f64, f64)>,
+    /// Weak annular geometric-strain rows; includes the hole's three affine modes.
+    pub membrane_terms: Option<Vec<Vec<MembraneTerm>>>,
     pub z0: Vec<f64>,
     pub f: Vec<f64>,
 }
@@ -2502,8 +2651,9 @@ pub struct BodyImage {
     pub cf: Vec<[f64; 4]>,
     pub lap: CsrImage,
     pub stiff: CsrImage,
-    /// Source-retaining curvature-rate law, its C=G'G operator and three G rows
-    /// per node. The separate joule counter is physical centered-velocity loss.
+    /// Source-retaining curvature-rate law and its C=G'G operator. Each node
+    /// has `BENDING_ROOT_ROWS_PER_NODE` tensor-root rows. The separate joule
+    /// counter is physical centered-velocity loss.
     pub viscosity: Option<PlaneStressViscosity>,
     pub viscosity_angle_rad: f64,
     pub viscous: CsrImage,
@@ -2583,7 +2733,7 @@ impl Body {
             tension: self.tension,
             berger: self.berger,
             bias: self.bias.clone(),
-            vk: self.vk.as_ref().map(|v| VonKarmanImage { eh: v.eh, nb: v.nb.clone(), l0: v.l0.clone(), rest_curv: v.rest_curv.clone(), z0: v.z0.clone(), f: v.f.clone() }),
+            vk: self.vk.as_ref().map(|v| VonKarmanImage { eh: v.eh, nb: v.nb.clone(), l0: v.l0.clone(), rest_curv: v.rest_curv.clone(), membrane_terms: v.annulus.as_ref().map(|a| a.terms.clone()), z0: v.z0.clone(), f: v.f.clone() }),
             area: self.area,
             air_mass: self.air_mass,
             w: self.w.clone(),
@@ -2595,13 +2745,15 @@ impl Body {
         }
     }
 
-    /// Solve the plate's Airy system A F = x in place (core numbering), with the factor every step
-    /// uses. False (and `x` untouched) for a body without von Karman coupling. Column j of A^-1 is
+    /// Solve A F = x with the factor every step uses. Rows are core nodes followed
+    /// by three affine hole-trace coordinates for an annulus. This is the same order
+    /// as the exported stress and weak-load rows. False for an incompatible length.
+    /// False (and `x` untouched) for a body without von Karman coupling. Column j of A^-1 is
     /// the solve of the j-th unit vector.
     pub fn airy_solve(&self, x: &mut [f64]) -> bool {
         match &self.vk {
-            Some(v) if x.len() == v.nb.len() => {
-                v.airy.solve(x);
+            Some(v) if x.len() == v.f.len() => {
+                if let Some(a) = &v.annulus { a.solve(x); } else if let Some(a) = &v.airy { a.solve(x); }
                 true
             }
             _ => false,
@@ -2708,6 +2860,98 @@ pub fn wav_f32(channels: &[Vec<f64>], rate: u32) -> Vec<u8> {
 
 pub mod kit;
 pub mod live;
+#[cfg(test)]
+mod membrane_compliance_tests;
+
+#[cfg(test)]
+#[test]
+fn exact_contact_root_is_not_bisected_away() {
+    // Hertz contact at d = 1/4: 8 * d^(3/2) = 1 exactly. The predictor
+    // d_pred = 5/4 and unit compliance leave that penetration under force 1.
+    // This covers both scalar and interleaved solvers without a tolerance
+    // relaxation or reliance on the optional rounded-fixed-point policy.
+    for fixed_exit in [false, true] {
+        let (mut lo, mut hi) = (0.0, 16.0);
+        let (force, done) = newton_step_sqrt(
+            1.0, &mut lo, &mut hi, 1.25, 1.0, 0.25, 8.0, 0.0,
+            fixed_exit, 0.1,
+        );
+        assert_eq!((force, done), (1.0, true));
+        assert_eq!((lo, hi), (0.0, 16.0));
+        assert_eq!(contact_force(
+            1.25, 1.0, 1.0, 0.25,
+            Law::Power { k: 8.0, alpha: 1.5, mu: 0.0 }, fixed_exit, 0.1,
+        ), 1.0);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn internal_damping_preserves_momentum_and_dissipates_on_unequal_masses() {
+    // Two free nodes joined by one viscous edge. The continuum flux gives
+    // equal/opposite forces -c(v0-v1), +c(v0-v1), c=2*s1*mean(m)/h^2.
+    // The old M L ordering instead gives [-1,4] here: +2 W and +3 N.
+    for masses in [[1.0, 4.0], [2.0, 2.0]] {
+        for velocity in [[2.0, 1.0], [1.0, 2.0], [3.0, 3.0]] {
+            let mut b = Body::string("viscous edge", 2, 1.0, 1.0, 0.0, f64::INFINITY, 0.0, 0.0);
+            b.mass.copy_from_slice(&masses);
+            b.s0.fill(0.0);
+            b.s1 = 0.5;
+            b.lap = Csr::from_rows(&[
+                BTreeMap::from([(0, 1.0), (1, -1.0)]),
+                BTreeMap::from([(0, -1.0), (1, 1.0)]),
+            ]);
+            let k = 1.0 / 128.0;
+            for i in 0..2 { b.wp[i] = -k * velocity[i]; }
+            b.sync();
+            b.linear_forces();
+            b.predict(k);
+            let force: Vec<_> = (0..2).map(|i| masses[i] * (b.wn[i] + b.wp[i]) / (k*k)).collect();
+            let c = 0.5 * (masses[0] + masses[1]);
+            let expected = -c * (velocity[0] - velocity[1]);
+            assert!((force[0] - expected).abs() < 1e-12);
+            assert!((force[0] + force[1]).abs() < 1e-12, "internal force changed momentum");
+            let power = force[0] * velocity[0] + force[1] * velocity[1];
+            assert!((power + c * (velocity[0] - velocity[1]).powi(2)).abs() < 1e-12);
+            let mut ins = Instrument::new(1.0 / k);
+            ins.add(b);
+            // The nonzero eigenvalue of this two-node viscous operator is
+            // c*(1/m0+1/m1). Admission must enclose it at every trial clock.
+            let exact_rate = c * (1.0 / masses[0] + 1.0 / masses[1]);
+            let momentum = masses[0] * velocity[0] + masses[1] * velocity[1];
+            let exact_relative = (velocity[0] - velocity[1]) * (-exact_rate * 0.25).exp();
+            let mut previous_error = f64::INFINITY;
+            for rate in [128.0, 256.0, 512.0] {
+                assert!(ins.viscosity_admission_rate2(rate) >= 2.0 * rate * exact_rate);
+                // Check the actual time evolution against the analytic viscous
+                // dimer, not another implementation of the sparse stencil.
+                let mut trial = ins.clone();
+                trial.rate = rate;
+                for i in 0..2 { trial.bodies[0].wp[i] = -velocity[i] / rate; }
+                trial.bodies[0].sync();
+                let mut last_energy = 0.5 * (masses[0] * velocity[0].powi(2) + masses[1] * velocity[1].powi(2));
+                let mut relative = 0.0;
+                for _ in 0..(rate / 4.0) as usize {
+                    trial.step(&mut []);
+                    let b = &trial.bodies[0];
+                    let v = [(b.w[0] - b.wp[0]) * rate, (b.w[1] - b.wp[1]) * rate];
+                    assert!((masses[0] * v[0] + masses[1] * v[1] - momentum).abs() < 1e-9);
+                    let energy = 0.5 * (masses[0] * v[0].powi(2) + masses[1] * v[1].powi(2));
+                    assert!(energy <= last_energy + 1e-10, "viscous trajectory gained kinetic energy");
+                    last_energy = energy;
+                    relative = v[0] - v[1];
+                }
+                if velocity[0] != velocity[1] {
+                    let error = (relative - exact_relative).abs();
+                    assert!(error < 0.55 * previous_error, "backward-velocity loss must converge at first order");
+                    previous_error = error;
+                } else {
+                    assert!(relative.abs() < 1e-10, "rigid translation must remain undamped");
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

@@ -18,8 +18,12 @@ use fs_thermal::enthalpy::*;
 
 #[path = "solid_enthalpy/directional.rs"]
 mod directional;
+#[path = "solid_enthalpy/gas.rs"]
+mod gas;
 #[path = "solid_enthalpy/valve.rs"]
 mod valve;
+#[path = "solid_enthalpy/rebind.rs"]
+mod rebind;
 
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];
@@ -34,6 +38,15 @@ fn point(t:f64)->QueryPoint {
         .with("lot",7.0).unwrap()
 }
 fn material(young:f64,alpha:f64,cp:f64,nu:f64,split:bool)->(MaterialCard,ResolvedHeatCapacityCurve) {
+    material_with_modulus_endpoint(young,0.6*young,alpha,cp,nu,split)
+}
+fn material_with_modulus_endpoint(young:f64,young_end:f64,alpha:f64,cp:f64,nu:f64,split:bool)
+    ->(MaterialCard,ResolvedHeatCapacityCurve) {
+    material_with_density(young,young_end,alpha,cp,nu,split,6.0)
+}
+#[allow(clippy::too_many_arguments)]
+fn material_with_density(young:f64,young_end:f64,alpha:f64,cp:f64,nu:f64,split:bool,rho:f64)
+    ->(MaterialCard,ResolvedHeatCapacityCurve) {
     let heat=PropertyKey::new("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS);
     let density=PropertyKey::new("density",Density::DIMS);
     let mut claims=ClaimSet::new();
@@ -49,8 +62,8 @@ fn material(young:f64,alpha:f64,cp:f64,nu:f64,split:bool)->(MaterialCard,Resolve
                 license:"CC0-1.0".into(),artifact:None}}).unwrap();
     };
     add(heat.clone(),cp,cp,300.,500.);
-    add(density.clone(),6.,2.,300.,500.);
-    add(PropertyKey::new("young_modulus",Pressure::DIMS),young,0.6*young,300.,if split {349.} else {500.});
+    add(density.clone(),rho,rho/3.,300.,500.);
+    add(PropertyKey::new("young_modulus",Pressure::DIMS),young,young_end,300.,if split {349.} else {500.});
     if split { add(PropertyKey::new("young_modulus",Pressure::DIMS),2.*young,1.2*young,350.,500.); }
     add(PropertyKey::new("poisson_ratio",Dims([0;6])),nu,nu,300.,500.);
     add(PropertyKey::new("linear_thermal_expansion_coefficient",INVERSE_TEMPERATURE_DIMS),
@@ -88,6 +101,176 @@ fn source<'a>(id:u64,card:&'a MaterialCard,curve:&'a EquilibriumEnthalpyPhaseCur
         expansion_selection:MaterialPropertySelection::SingleClaimOnly}
 }
 fn near(a:f64,b:f64,tol:f64) { assert!((a-b).abs()<=tol,"{a} != {b}, tolerance {tol}"); }
+
+#[test]
+fn g1_material_enthalpy_drives_native_inertial_motion_with_continuous_state_and_physical_work() {
+    with_cx(|cx| {
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let zero = [[0.0;3];4];
+        for (young,alpha,cp) in [(60.0,1e-5,10.0),(60.0,2e-5,10.0),(120.0,1e-5,20.0)] {
+            let (card,caloric) = material_with_modulus_endpoint(young,young,alpha,cp,0.0,false);
+            let thermal = initial(caloric.curve(),&[(30,100.0)],1.0);
+            let context = point(300.0);
+            let model = SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
+                vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),
+                0.1,config().mesh_frame,cx).unwrap();
+            let loads = model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+            let initial_state = model.resolve(&thermal,cx).unwrap();
+            let initial_problem = initial_state.problem(&fixed);
+            let run = loads.begin_transient(&initial_problem,Some(initial_state.thermal_strains()),
+                thermal.time_s(),&zero,&zero,Default::default(),cx).unwrap();
+            let (heated, _) = thermal.advance_to(0.01,thermal_config(),||Ok(())).unwrap();
+            let next_state = model.resolve(&heated,cx).unwrap();
+            let next_problem = next_state.problem(&fixed);
+            let (next,report) = next_state.advance_transient_candidate(&initial_state,&run,
+                &next_problem,&loads,cx).unwrap();
+            let rise = 1.0/cp;
+            let strain = alpha*(rise+0.005*rise*rise);
+            let k = young/6.0; let m = 0.1; let h = 0.01;
+            let b = 0.25*h*h;
+            let acceleration = k*strain/(m+b*k);
+            near(next.state().displacement[0],b*acceleration,1e-15);
+            near(next.state().velocity[0],0.5*h*acceleration,1e-13);
+            near(next.state().acceleration[0],acceleration,1e-11);
+            assert!(report.physical_balance_error_j.abs() < 1e-13);
+            near(report.kinetic_plus_elastic_after_j,report.thermal_material_work_j,1e-13);
+            assert_ne!(initial_state.materials()[0].material_state_identity,
+                next_state.materials()[0].material_state_identity);
+            assert_eq!(next.material_problem().nodes_m,&NODES);
+            near(next_state.materials()[0].density_kg_m3,6.0,1e-12);
+            let response = next.recover_response(config().mesh_frame,0.1,cx).unwrap();
+            near(response.stress.elements()[0].stress_mandel_pa()[0],
+                young*(next.state().displacement[0]-strain),1e-10);
+
+            // A second source-resolved endpoint continues accepted q/v/a;
+            // neither temperature refresh nor a new material ID restarts motion.
+            let (heated_again, _) = heated.advance_to(0.02,thermal_config(),||Ok(())).unwrap();
+            let final_state = model.resolve(&heated_again,cx).unwrap();
+            let final_problem = final_state.problem(&fixed);
+            let (final_run,second) = final_state.advance_transient_candidate(&next_state,&next,
+                &final_problem,&loads,cx).unwrap();
+            let rise2 = 2.0/cp; let strain2 = alpha*(rise2+0.005*rise2*rise2);
+            let predictor = next.state().displacement[0]+h*next.state().velocity[0]
+                +b*next.state().acceleration[0];
+            let a2 = (k*strain2-k*predictor)/(m+b*k);
+            near(final_run.state().displacement[0],predictor+b*a2,1e-15);
+            near(second.kinetic_plus_elastic_after_j,
+                report.thermal_material_work_j+second.thermal_material_work_j,1e-13);
+            assert_eq!(final_run.state().time_s,heated_again.time_s());
+            assert_eq!(run.state().time_s,0.0);
+            assert_eq!(thermal.cells()[&CellId(30)].specific_h_j_kg,0.0);
+            assert!(final_state.advance_transient_candidate(&initial_state,&next,
+                &final_problem,&loads,cx).is_err());
+        }
+    });
+}
+
+#[test]
+fn g1_source_softening_and_stiffening_refresh_the_same_inertial_trajectory() {
+    with_cx(|cx| {
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let zero = [[0.0;3];4];
+        let mut initial_displacement = zero;
+        initial_displacement[1][0] = 0.001;
+        for young_end in [36.0, 90.0] {
+            let (card,caloric) = material_with_modulus_endpoint(60.0,young_end,1e-5,10.0,0.0,false);
+            let thermal = initial(caloric.curve(),&[(30,20_000.0)],1.0);
+            let context = point(300.0);
+            let model = SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
+                vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),
+                0.1,config().mesh_frame,cx).unwrap();
+            let loads = model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+            let heated = thermal.advance_to(0.01,thermal_config(),||Ok(())).unwrap().0;
+            let heated_again = heated.advance_to(0.02,thermal_config(),||Ok(())).unwrap().0;
+            let states = [model.resolve(&thermal,cx).unwrap(), model.resolve(&heated,cx).unwrap(),
+                model.resolve(&heated_again,cx).unwrap()];
+            let problems: Vec<_> = states.iter().map(|state| state.problem(&fixed)).collect();
+            let transient_config = fs_solid::loads3::transient::TransientConfig3 {
+                mass_damping_per_s: 0.4, ..Default::default() };
+            let mut run = loads.begin_transient(&problems[0],Some(states[0].thermal_strains()),
+                0.0,&initial_displacement,&zero,transient_config,cx).unwrap();
+            let (mut q,mut v,mut a) = (0.001,0.0,-0.1);
+            let (mut old_young,mut old_strain) = (60.0,0.0);
+            for index in 1..states.len() {
+                let rise = 20.0*index as f64;
+                let young = 60.0 + (young_end-60.0)*rise/200.0;
+                let strain = 1e-5*(rise+0.005*rise*rise);
+                let (h,m,damping) = (0.01,0.1,0.04);
+                let k = young/6.0;
+                let b = h*h/4.0;
+                let predictor = q+h*v+b*a;
+                let velocity_predictor = v+0.5*h*a;
+                let next_a = (k*(strain-predictor)-damping*velocity_predictor)
+                    /(m+0.5*h*damping+b*k);
+                let next_q = predictor+b*next_a;
+                let next_v = velocity_predictor+0.5*h*next_a;
+                let (candidate,report) = states[index].advance_transient_candidate(
+                    &states[index-1],&run,&problems[index],&loads,cx).unwrap();
+                near(candidate.state().displacement[0],next_q,1e-14);
+                near(candidate.state().velocity[0],next_v,1e-12);
+                near(candidate.state().acceleration[0],next_a,1e-10);
+                let parameter_work = (young-old_young)*q*next_q/12.0;
+                let material_work = (young-old_young)/12.0
+                    *((q-old_strain)*(next_q-strain)+2.0*old_strain*strain);
+                near(report.native.stiffness_parameter_work_j,parameter_work,1e-14);
+                near(report.stiffness_material_work_j,material_work,1e-14);
+                assert!(material_work.abs() > 1e-9);
+                near(report.kinetic_plus_elastic_after_j,
+                    0.5*m*next_v*next_v+young/12.0*((next_q-strain).powi(2)+2.0*strain*strain),1e-13);
+                near(report.kinetic_plus_elastic_after_j-report.kinetic_plus_elastic_before_j
+                    +report.native.damping_loss_j,
+                    report.thermal_material_work_j+report.stiffness_material_work_j,1e-13);
+                let response = candidate.recover_response(config().mesh_frame,0.1,cx).unwrap();
+                near(response.stress.elements()[0].stress_mandel_pa()[0],young*(next_q-strain),1e-11);
+                near(states[index].materials()[0].density_kg_m3,6.0,1e-12);
+                assert_eq!(states[index].samples()[0].elastic.property("young_modulus").unwrap()
+                    .answer().receipt.selected,states[0].samples()[0].elastic.property("young_modulus")
+                    .unwrap().answer().receipt.selected);
+                near(run.state().displacement[0],q,1e-14);
+                (q,v,a) = (next_q,next_v,next_a);
+                (old_young,old_strain) = (young,strain);
+                run = candidate;
+            }
+            assert_eq!(run.state().step,2);
+            assert_eq!(run.state().time_s,heated_again.time_s());
+            assert_eq!(thermal.cells()[&CellId(30)].specific_h_j_kg,0.0);
+        }
+    });
+}
+
+#[test]
+fn g0_transient_material_loading_requires_bound_thermal_state_and_admitted_damping() {
+    with_cx(|cx| {
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let zero = [[0.0;3];4];
+        let (card,caloric) = material(60.0,1e-5,10.0,0.0,false);
+        let thermal = initial(caloric.curve(),&[(30,100.0)],1.0);
+        let context = point(300.0);
+        let model = SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
+            vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),
+            0.1,config().mesh_frame,cx).unwrap();
+        let loads = model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+        let initial_state = model.resolve(&thermal,cx).unwrap();
+        let initial_problem = initial_state.problem(&fixed);
+        let no_thermal = loads.begin_transient(&initial_problem,None,0.0,&zero,&zero,
+            Default::default(),cx).unwrap();
+        let run = loads.begin_transient(&initial_problem,Some(initial_state.thermal_strains()),
+            0.0,&zero,&zero,fs_solid::loads3::transient::TransientConfig3 {
+                stiffness_damping_s: 0.1, ..Default::default() },cx).unwrap();
+        let (heated, _) = thermal.advance_to(0.01,thermal_config(),||Ok(())).unwrap();
+        let next = model.resolve(&heated,cx).unwrap();
+        let next_problem = next.problem(&fixed);
+        assert!(matches!(next.advance_transient_candidate(&initial_state,&no_thermal,
+            &next_problem,&loads,cx),Err(SolidEnthalpyError::Invalid(_))));
+        // A changing stiffness-proportional damping operator needs a separate
+        // passive discretization; the owner refuses it without changing history.
+        assert!(matches!(next.advance_transient_candidate(&initial_state,&run,
+            &next_problem,&loads,cx),Err(SolidEnthalpyError::Transient(
+                fs_solid::loads3::transient::TransientError3::Invalid(_)))));
+        assert_eq!(run.state().time_s,0.0);
+        assert_eq!(run.state().displacement,vec![0.0]);
+    });
+}
 
 #[test]
 fn caloric_and_expansion_data_drive_free_motion_and_constrained_stress_without_changing_mass() {

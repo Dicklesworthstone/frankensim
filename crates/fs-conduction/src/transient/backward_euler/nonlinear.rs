@@ -254,6 +254,7 @@ impl BackwardEuler<'_> {
         dt: f64, dofs: &DofMap,
     ) -> Result<Evaluation, ConductionError> {
         poll(cx, 0)?;
+        self.validate_capacity_temperature(cx, temperature)?;
         let system = assemble_operator_scaled_with_interfaces(cx, self.mesh, problem.boundary,
             problem.material, problem.source, temperature, None, interfaces, problem.element_materials)?;
         let delta = temperature.iter().zip(old).map(|(t, old)| finite(t - old))

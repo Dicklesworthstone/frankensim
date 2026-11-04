@@ -26,8 +26,9 @@ pub struct GasEntropySolve {
 }
 impl GasEntropySolve {
     pub(super) fn validate(self) -> Result<(), GasEntropyError> {
-        if !self.minimum_temperature_k.is_finite() || !self.maximum_temperature_k.is_finite()
-            || self.minimum_temperature_k < 50.0 || self.maximum_temperature_k > 2000.0
+        // The producing source laws own the temperature domain, as in the
+        // shared energy inversion; neither operation substitutes an air fit.
+        if !positive(self.minimum_temperature_k) || !positive(self.maximum_temperature_k)
             || self.minimum_temperature_k >= self.maximum_temperature_k
             || !positive(self.entropy_tolerance_j_kg_k)
             || !(1..=128).contains(&self.maximum_iterations)

@@ -331,15 +331,38 @@ source path replaces the legacy string loss law; it adds no unexplained material
 and duplex geometry remain the chosen scale's data; tension follows the declared policy, and optional
 stretch tuning is applied to the material-derived partials and then checked against the tensile limit
 again. Wrap stiffness, interlayer slip and temperature evolution need additional physical owners.
-The atmosphere controls the Rayleigh receiver's pressure and propagation delay; it does not introduce
-air loading into the mechanical string model. `piano.info.stringMaterials` reports the actual source
-state identities and section coefficients installed in playback.
+The same atmosphere controls the Rayleigh receiver's pressure and propagation delay and the retained
+source-bound string modes' cylinder drag, using their explicit finished radii. This frozen modal drag
+does not include fluid added mass, viscous memory or loading of the unresolved residual chord.
+Effective scales without material geometry do not acquire an inferred radius or gas drag.
+`piano.info.stringMaterials` reports the actual source state identities and section coefficients
+installed in playback.
 
 The same source packet reaches timing probes, copied engines, larger soundboards and 1×/2×/4× mechanical
 clocks (up to 192 kHz). With no `stringMaterials`, the existing constructor routes remain available.
 A requested material construction requires WASM rebuilt with `withStringMaterials`; an older build
 or a material-owner refusal is reported to the caller. Omitting `gas` on the material path selects the
 explicit standard declaration `293.15 101325 0`.
+
+Arbitrary source-backed gases use the same canonical species/NASA-9/transport triples as the live kit,
+including with `stringMaterials`. Supply both fields in `PianoEngineOptions`:
+
+```ts
+const atmosphere = {
+  gas: 'thermochemical 300 100000 mole 1 custom-alpha 1',
+  gasSources: {
+    components: [{ speciesPack, nasa9Pack, transportPack }], // original Uint8Array bytes
+    waterSpecies: null,
+    phase: 'frozen' as const,
+  },
+};
+```
+
+Species IDs and gas properties come from those sources. The gas is frozen at preparation; source
+models survive copies and `piano.info.gasSourcePacks` reports their identities. Rebuild piano WASM
+for `withGasSources` and `withStringMaterialsAndGasSources`. Source limits and the alternative
+`liquid-water` policy (with an explicit water ID) are the same as the kit below. Invalid sources and
+older WASM refuse instead of substituting air.
 
 ## The live kit
 

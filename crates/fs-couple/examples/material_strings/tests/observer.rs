@@ -54,7 +54,8 @@ fn shell_pack(name: &str) -> NormalizedPack {
 
 fn observed_source() -> input::Spec {
     input::Spec::parse(
-        OBSERVED.replace("audio 8000 4096", "audio 8000 1024").as_bytes(),
+        OBSERVED.replace("audio 8000 4096", "audio 8000 1024")
+            .replace("shell_angular_refinement 0","shell_angular_refinement 1").as_bytes(),
     ).unwrap()
 }
 
@@ -85,6 +86,11 @@ fn shell_listener_replays_the_original_body_velocity_once_per_accepted_sample() 
         assert_eq!(report.gas, ready.spec.gas);
         assert_eq!(report.body_modes, ready.spec.body.modes);
         assert_eq!(report.surface_panels, 80);
+        let load=binding.material_shell_bem().unwrap();
+        assert_eq!(load.reciprocal.angular_refinement,1);
+        assert_eq!(load.reciprocal.unknowns,122);
+        assert_eq!(report.quadrature.relative_tolerance,1e-7);
+        assert!(report.sweep_terms<=report.options.maximum_sweep_terms);
         assert_eq!(report.transfer().filter_latency_samples, 256);
         assert!(report.transfer().geometric_delays_s.iter().all(|delay| *delay > 0.0));
         let mut reference = report.transfer().observer().unwrap();
@@ -118,7 +124,10 @@ fn shell_listener_replays_the_original_body_velocity_once_per_accepted_sample() 
 #[test]
 fn listener_source_refuses_unmatched_bands_cavities_and_unbounded_fft_before_material_io() {
     for (from, to) in [
-        ("body-radiation bem 0.5 400 65 80 80000000 36\n", ""),
+        ("body-radiation bem 0.5 400 65 80 12000000000 36\n", ""),
+        ("shell_angular_refinement 0","shell_angular_refinement 3"),
+        ("shell_quadrature 1e-7 14 2000000","shell_quadrature 1e-7 17 2000000"),
+        ("shell_quadrature 1e-7 14 2000000","shell_quadrature 1e-7 14 79"),
         ("0.01 120 400 256", "0.01 120 401 256"),
         ("body-radiation bem 0.5 400", "body-radiation bem 1 400"),
         ("cavity none", "cavity neck 0.01 0.01 0.01 0 1"),

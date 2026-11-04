@@ -180,3 +180,54 @@ fn thermal_continuation_preserves_strain_and_releases_only_actual_elastic_energy
     assert!(warm.advance(&continued, &held).is_err());
     assert_eq!(continued, saved);
 }
+
+#[test]
+fn g1_affine_layer_thermodynamics_preserves_strain_and_distinguishes_free_from_internal_energy() {
+    // k(T)=1600-2*T. This manufactured free-energy law is not a rosin fit.
+    let cold = ThirdBodyLayerContact::new(1000.0, 100.0, 2.0, 300.0, 0.02).unwrap();
+    let loaded = cold.advance(&cold.initial_state(), &input([0.002, 0.001], 0.01, 0.0)).unwrap();
+    let warm = ThirdBodyLayerContact::new(960.0, 100.0, 2.0, 320.0, 0.02).unwrap();
+    let transfer = warm.continue_state_with_work(&loaded.state).unwrap();
+    assert_eq!(transfer.state.elastic_slip_m(), loaded.state.elastic_slip_m());
+    assert_eq!(transfer.state.plastic_slip_m(), loaded.state.plastic_slip_m());
+    let before = cold.thermodynamics(&loaded.state, -2.0).unwrap();
+    let after = warm.thermodynamics(&transfer.state, -2.0).unwrap();
+    close(before.free_energy_j, 0.0025, 0.001);
+    close(before.entropy_j_k, 5e-6, 1e-6);
+    close(before.internal_energy_j, 0.004, 0.001);
+    close(after.internal_energy_j, before.internal_energy_j, 0.001);
+    close(transfer.coefficient_free_energy_change_j, -0.0001, 0.001);
+    close(after.free_energy_j-before.free_energy_j,
+        transfer.coefficient_free_energy_change_j, 0.001);
+    close(transfer.coefficient_free_energy_change_j
+        +320.0*after.entropy_j_k-300.0*before.entropy_j_k, 0.0, 0.001);
+    assert!(warm.continue_state(&loaded.state).is_err());
+    assert!(warm.thermodynamics(&loaded.state, -2.0).is_err());
+    assert!(warm.thermodynamics(&transfer.state, f64::NAN).is_err());
+}
+
+#[test]
+fn g1_affine_layer_elastic_loading_cools_and_closes_first_law_without_plastic_heat() {
+    let slope = -2.0;
+    let capacity = 0.01; // finite, independent caloric capacity [J/K]
+    let e2 = 0.002_f64.powi(2) + 0.001_f64.powi(2);
+    let t1 = 300.0/(1.0-slope*e2/(2.0*capacity));
+    let cold = ThirdBodyLayerContact::new(1000.0, 100.0, 2.0, 300.0, 0.02).unwrap();
+    let warm = ThirdBodyLayerContact::new(1600.0+slope*t1, 100.0, 2.0, t1, 0.02).unwrap();
+    let transfer = warm.continue_state_with_work(&cold.initial_state()).unwrap();
+    let mut drive = input([0.002, 0.001], 0.01, 0.0);
+    drive.contact_temperature_k = Some(t1);
+    let step = warm.advance(&transfer.state, &drive).unwrap();
+    let end = warm.thermodynamics(&step.state, slope).unwrap();
+    let heat = -transfer.coefficient_free_energy_change_j - t1*end.entropy_j_k;
+    let work = step.traction_n[0]*step.slip_increment_m[0]
+        +step.traction_n[1]*step.slip_increment_m[1];
+    assert!(t1 < 300.0 && heat < 0.0);
+    assert_eq!(step.dissipated_j, 0.0);
+    close(capacity*(t1-300.0), heat, 0.001);
+    close(end.internal_energy_j + capacity*(t1-300.0), work, 0.001);
+    // Backward endpoint temperature gives nonnegative O(dt^2) entropy error;
+    // neither that error nor reversible cooling is material dissipation.
+    let entropy_change = capacity*(t1/300.0).ln() + end.entropy_j_k;
+    assert!(entropy_change >= -1e-15 && entropy_change < 2e-9);
+}

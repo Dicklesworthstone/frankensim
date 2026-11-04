@@ -4,6 +4,9 @@ use super::*;
 use fs_lbm::conjugate::ViscousHeatControls;
 use fs_lbm::conjugate::enthalpy::advection::feedback::MaterialFlowError;
 
+#[path = "occupancy/unsteady.rs"]
+mod unsteady;
+
 fn geometry<'a>(
     domain: &VoxelDomain,
     curve: &'a EquilibriumEnthalpyPhaseCurve,
@@ -108,6 +111,16 @@ impl DepositionObserver for CellPower {
         Ok(BTreeMap::from([(self.cell, self.watts)]))
     }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn step(
+        &mut self,
+        _: f64,
+        _: f64,
+        _: &BTreeMap<CellId, f64>,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 }

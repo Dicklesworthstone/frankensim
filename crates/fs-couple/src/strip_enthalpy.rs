@@ -10,6 +10,7 @@ mod types {
     pub(super) use super::error::*;
     pub(super) use super::result::*;
 }
+mod exchange;
 #[path = "layered_feedback_impl.rs"]
 mod solve;
 

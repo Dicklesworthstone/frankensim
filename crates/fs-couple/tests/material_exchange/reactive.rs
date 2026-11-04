@@ -132,3 +132,6 @@ mod state_tests;
 
 #[path = "gas_law.rs"]
 mod gas_law_tests;
+
+#[path = "subcycling.rs"]
+mod subcycling_tests;

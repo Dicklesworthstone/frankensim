@@ -1,0 +1,6 @@
+# Same synthetic Cp, viscosity and conductivity; only source density changes.
+# Constant Cp [J/(kg K)], then T [K], rho [kg/m3], mu [Pa s], k [W/(m K)].
+100
+300 1.000 2.0 0.10
+500 0.996 1.0 0.20
+800 0.990 0.5 0.30

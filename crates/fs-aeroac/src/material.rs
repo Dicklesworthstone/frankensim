@@ -6,7 +6,15 @@
 //! those quantities together. No lattice sound speed is interpreted as a
 //! physical acoustic speed. This is a frozen, homogeneous, low-Mach medium;
 //! chemistry, compressible feedback and atmospheric absorption are absent.
-//! The existing two-dimensional shape/scaling scope still applies.
+//! The existing two-dimensional shape/scaling scope still applies to Curle
+//! observation. The three-dimensional adapter retains periodic-cell force;
+//! it does not reinterpret that force as an isolated acoustic source.
+
+/// Same-material SI binding for the existing three-dimensional slot-jet rig.
+pub mod slot_jet_3d;
+pub use slot_jet_3d::{
+    MaterialSlotJet3d, MaterialSlotJet3dRun, SlotJet3dForceLine, SlotJet3dSetup,
+};
 
 use fs_lbm::core2::CollisionModel2;
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
@@ -301,30 +309,8 @@ impl MaterialJetLabiumRun<'_> {
         observer_m: [f64; 2],
         source_m: [f64; 2],
     ) -> Result<ObservedJetLine, AeroacError> {
-        let n = self.force_series_n_m.len();
-        if bin == 0 || bin >= n / 2 {
-            return Err(AeroacError::InvalidParameter {
-                what: "observed force bin must be strictly between DC and Nyquist",
-            });
-        }
-        let n_f = n as f64;
-        let window: Vec<f64> = (0..n)
-            .map(|i| 0.5 - 0.5 * fs_math::det::cos(core::f64::consts::TAU * i as f64 / (n_f - 1.0)))
-            .collect();
-        let normalization = 2.0 / window.iter().sum::<f64>();
-        let fft = fs_fft::Fft::new(n);
-        let mut buffer = vec![fs_fft::C64::default(); n];
-        let mut scratch = vec![fs_fft::C64::default(); n];
-        let mut force_n_m = [C64::new(0.0, 0.0); 2];
-        for axis in 0..2 {
-            let mean = self.force_series_n_m.iter().map(|f| f[axis]).sum::<f64>() / n_f;
-            for (i, value) in self.force_series_n_m.iter().enumerate() {
-                buffer[i] = fs_fft::C64::new((value[axis] - mean) * window[i], 0.0);
-            }
-            fft.forward(&mut buffer, &mut scratch);
-            force_n_m[axis] = C64::new(buffer[bin].re, -buffer[bin].im).scale(normalization);
-        }
-        let frequency_hz = bin as f64 / (n_f * self.timestep_s);
+        let (force_n_m, frequency_hz) =
+            force_spectral_line(&self.force_series_n_m, self.timestep_s, bin)?;
         let field = self.radiate_force_line(force_n_m, frequency_hz, observer_m, source_m)?;
         Ok(ObservedJetLine {
             frequency_hz,
@@ -357,4 +343,48 @@ impl MaterialJetLabiumRun<'_> {
         let wavenumber = (2.0 * core::f64::consts::PI * frequency_hz) / self.gas.sound_speed;
         dipole_pressure(force_n_m, wavenumber, observer_m, source_m)
     }
+}
+
+// Both spatial rigs use one amplitude, window and phase convention. Units
+// stay those of the input history: the 2-D run supplies N/m, the 3-D run N.
+fn force_spectral_line(
+    forces: &[[f64; 2]],
+    timestep_s: f64,
+    bin: usize,
+) -> Result<([C64; 2], f64), AeroacError> {
+    let n = forces.len();
+    if bin == 0 || bin >= n / 2 {
+        return Err(AeroacError::InvalidParameter {
+            what: "observed force bin must be strictly between DC and Nyquist",
+        });
+    }
+    let n_f = n as f64;
+    let window: Vec<f64> = (0..n)
+        .map(|i| 0.5 - 0.5 * fs_math::det::cos(core::f64::consts::TAU * i as f64 / (n_f - 1.0)))
+        .collect();
+    let normalization = 2.0 / window.iter().sum::<f64>();
+    let fft = fs_fft::Fft::new(n);
+    let mut buffer = vec![fs_fft::C64::default(); n];
+    let mut scratch = vec![fs_fft::C64::default(); n];
+    let mut line = [C64::new(0.0, 0.0); 2];
+    for axis in 0..2 {
+        let mean = forces.iter().map(|f| f[axis]).sum::<f64>() / n_f;
+        for (i, value) in forces.iter().enumerate() {
+            buffer[i] = fs_fft::C64::new((value[axis] - mean) * window[i], 0.0);
+        }
+        fft.forward(&mut buffer, &mut scratch);
+        line[axis] = C64::new(buffer[bin].re, -buffer[bin].im).scale(normalization);
+    }
+    let frequency_hz = bin as f64 / (n_f * timestep_s);
+    if !frequency_hz.is_finite()
+        || frequency_hz <= 0.0
+        || line
+            .iter()
+            .any(|value| !value.re.is_finite() || !value.im.is_finite())
+    {
+        return Err(AeroacError::NonFinite {
+            what: "physical force spectrum or frequency is unrepresentable",
+        });
+    }
+    Ok((line, frequency_hz))
 }

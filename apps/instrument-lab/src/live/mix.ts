@@ -3,7 +3,8 @@
 // AudioContext clock. See public/live/lane.js for the Worker side.
 
 import { LIVE_BASE_URL, LIVE_SAMPLE_RATE, LiveRefusal, loadWorkletModule } from "./liveAudio";
-import type { PianoEngineOptions } from "./pianoClient";
+import type { GasSourceOptions, PianoEngineOptions } from "./pianoClient";
+export type { GasSourceOptions } from "./pianoClient";
 
 export interface LaneStats {
   queuedFrames: number;
@@ -161,13 +162,6 @@ class LaneWorker<R> {
 }
 
 // ------------------------------------------------------------------ kit piece lanes
-/** Original canonical gas sources, explicitly associated without name lookup. */
-export interface GasSourceOptions {
-  components: { speciesPack: Uint8Array; nasa9Pack: Uint8Array; transportPack: Uint8Array }[];
-  /** null explicitly selects no water identity; never inferred from spelling. */
-  waterSpecies: string | null;
-  phase: 'frozen' | 'liquid-water';
-}
 /** Canonical material-card pack inputs; physics resolution stays in Rust. */
 export interface KitMaterialOptions {
   surfacePack: Uint8Array;

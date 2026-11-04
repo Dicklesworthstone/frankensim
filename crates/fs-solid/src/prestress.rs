@@ -23,6 +23,7 @@ use fs_la::batched::{BatchMat, batch_inv};
 use fs_sparse::{Coo, Csr};
 use crate::linear3::{TetElasticAssembly, TetElasticError, TetLinearElasticProblem,
     TetThermalDisplacementSolution, TetThermalStrainField, TetThermalStressReport};
+use crate::linear3::{TetEigenstrainDisplacementSolution, eigenstrain::TetEigenstrainField};
 
 /// The original consistent-mass pencil with its source-bound stress correction.
 /// Matrices and stress are read-only together; this is not a stability certificate.
@@ -48,6 +49,18 @@ impl PrestressedTetAssembly {
 }
 
 impl TetLinearElasticProblem<'_> {
+    /// Initial-stress pencil from an accepted nonthermal eigenstrain solve.
+    /// Uses the same reference-geometry approximation and signed stress kernel
+    /// as thermal prestress; the physical source remains explicitly nonthermal.
+    pub fn assemble_eigenstrain_tangent(
+        &self, solution: &TetEigenstrainDisplacementSolution,
+        strains: TetEigenstrainField<'_>, mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64, cx: &Cx<'_>,
+    ) -> Result<PrestressedTetAssembly, TetElasticError> {
+        let stress = self.recover_eigenstrain_stress(solution, strains, mesh_frame,
+            maximum_absolute_mandel_strain, cx)?;
+        self.assemble_tangent_from_stress(stress, cx)
+    }
     /// Assemble a thermal-prestressed vibration/stability pencil.
     ///
     /// The original stress recovery checks the EXACT mesh, material, thermal
@@ -184,3 +197,4 @@ fn invalid(what: &'static str) -> TetElasticError { TetElasticError::InvalidStre
 fn checkpoint(cx: &Cx<'_>) -> Result<(), TetElasticError> {
     cx.checkpoint().map_err(|_| TetElasticError::Cancelled)
 }
+

@@ -7,14 +7,18 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::{
 use std::collections::BTreeMap;
 
 fn soft_material(rho: f64) -> ResolvedMaterialStatePoint {
+    soft_material_scaled(rho, 1.0)
+}
+
+fn soft_material_scaled(rho: f64, stiffness_scale: f64) -> ResolvedMaterialStatePoint {
     let mut entries = vec![
         ("density", Density::DIMS, rho),
-        ("young_modulus_1", Pressure::DIMS, 1.0e6),
-        ("young_modulus_2", Pressure::DIMS, 4.0e5),
+        ("young_modulus_1", Pressure::DIMS, 1.0e6 * stiffness_scale),
+        ("young_modulus_2", Pressure::DIMS, 4.0e5 * stiffness_scale),
         ("poisson_ratio_12", Dims::NONE, 0.25),
-        ("shear_modulus_12", Pressure::DIMS, 1.8e5),
-        ("shear_modulus_13", Pressure::DIMS, 8.0e4),
-        ("shear_modulus_23", Pressure::DIMS, 3.0e4),
+        ("shear_modulus_12", Pressure::DIMS, 1.8e5 * stiffness_scale),
+        ("shear_modulus_13", Pressure::DIMS, 8.0e4 * stiffness_scale),
+        ("shear_modulus_23", Pressure::DIMS, 3.0e4 * stiffness_scale),
     ];
     entries.extend(
         PLANE_STRESS_VISCOSITY_PROPERTIES
@@ -196,10 +200,11 @@ fn closed_bank_in_gas(
 fn resolution() -> ShellBemOptions {
     ShellBemOptions {
         minimum_hz: 10.0,
-        maximum_hz: 1000.0,
+        maximum_hz: 750.0,
         frequency_samples: 65,
         maximum_surface_panels: 80,
-        maximum_sweep_terms: 100_000_000,
+        // Actual P1/P0 source work is about 10.54 billion for this 65-row sweep.
+        maximum_sweep_terms: 12_000_000_000,
         maximum_poles: 64,
     }
 }
@@ -213,6 +218,9 @@ fn original_curved_material_modes_receive_reciprocal_air_reaction() {
             .unwrap();
         assert_eq!(report.surface_panels, 80);
         assert_eq!(report.body_modes, 1);
+        assert_eq!(report.reciprocal.unknowns,122);
+        assert_eq!(report.sweep_terms,65*report.reciprocal.frequency_work);
+        assert!(report.sweep_terms<=resolution().maximum_sweep_terms);
         assert!(report.acoustic_poles > 0 && report.acoustic_poles <= 64);
         assert!(report.minimum_panels_per_wavelength >= 6.0);
         assert!(
@@ -361,3 +369,7 @@ fn open_skin_incomplete_bands_work_limits_and_cancellation_refuse() {
         ));
     });
 }
+
+#[path = "bem/openings.rs"]
+mod openings;
+

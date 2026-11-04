@@ -1015,3 +1015,73 @@ the two rules, condition/block/mode cap boundaries, cancellation, multiport
 unit-column solutions, opaque network admittance and G5 repeats. No previous
 tolerance, assert, golden or line-ladder baseline is weakened. Native proof,
 wasm compilation, causality and reed rerender remain pending centrally.
+
+
+## DG interior point-flow junctions
+
+`DgDuct::with_side_ports` attaches at most 32 explicitly identified interior
+mesh faces. The downstream pressure trace is the original alternating-flux
+trace. Its held inflow changes the local through-flow jump by that inflow and
+uses the same pressure integral for exact port work. Only conjugate port
+columns and their operator identity change: the acoustic, constitutive wall,
+energy-coordinate and exponential owners remain unchanged. Existing states
+cannot be reinterpreted after changing this port basis. An empty attachment
+preserves the original owner and identity.
+
+`side_port_source` returns the actual face station, local bore area and complete
+original gas-field evaluation; a bore area is never presented as a hole area.
+Finite chimneys, aperture geometry, junction corrections, moving pads and
+exterior radiation require explicit coupled owners. All unknown loads must
+consume the complete `multiport_response` together to retain their same-step
+interaction; independent scalar boundary solves are not equivalent. This is a
+zero-volume plane-wave junction, not a resolved three-dimensional tone hole.
+
+Focused regressions cover pressure/work conjugacy, integrated discrete
+continuity, source identity and local material fields, wall attachment order,
+and equal-pressure/opposite-work composition with a second original DG duct.
+Native execution and instrument qualification remain pending.
+
+## Reciprocal compliant walls in the DG time domain
+
+`DgDuct::with_compliant_wall` appends the original `WallPin` radial displacement
+and velocity to the same energy-normalized DG operator and dense exponential.
+For circumference P, area A and gas bulk modulus B, continuity receives -P v
+while the wall receives pressure through sigma v_t = p - K w - r v.
+The reciprocal terms cancel in the complete energy rate; wall storage is
+integral P(sigma v^2 + K w^2)/2 and its independent loss is integral P r v^2.
+`compliant_wall_state` reads physical motion and storage; the existing
+`wall_dissipated_power_w` includes both material and gas-wall loss once.
+
+This cold attachment requires uniform gas and identical circular segments.
+Viscothermal memory must be attached first and is retained unchanged. New
+states start with the wall at rest; old states refuse by operator identity.
+All boundary/side ports see wall reaction through their original pressure
+columns. A matched end remains the gas characteristic resistance, not an
+assertion of reflectionless termination for an elastic tube. Source bandwidth,
+small-displacement applicability and refinement remain caller responsibilities.
+Axial shell waves, thermal evolution and external wall radiation are not
+supplied. The dense ledger still labels dissipation inferred from its
+deficit; the independent instantaneous loss is not an integrated heat proof.
+
+G0/G1 regressions compare actual pressure, wall displacement and velocity to
+the independent sealed-tube oscillator, check conservative port work and total
+storage, and reconstruct the combined gas/material dissipation from x^T L x.
+
+`with_compliant_wall_relaxation` consumes the original `GeneralizedMaxwell`
+spectrum using the same equilibrium thin-wall reduction, K_j=(K_inf/E_inf)E_j.
+Each positive arm adds radial reaction pressure z_j with z_j'=K_j v-z_j/tau_j,
+work-conjugate reaction -z_j, storage integral P z_j^2/(2K_j), and loss integral
+P z_j^2/(K_j tau_j). Every arm advances together with gas and radial motion in
+the existing exact-ZOH exponential; no midpoint or separately lagged material
+step is introduced. Exact zero arms add no state and preserve the original
+operator identity. Positive coefficients that cannot be represented and total
+states beyond the original dense cap refuse. New memories start relaxed.
+
+`compliant_wall_state` reports each arm's physical radial pressure and its
+spring energy; complete wall storage and loss include all arms exactly once.
+Original source provenance and frequency applicability belong to the material
+adapter. Frozen geometry/state and uniform-gas restrictions remain in force.
+An independent decaying sealed-gas eigenmotion exercises pressure, wall motion,
+branch pressure, complete energy and physical loss. Further regressions cover
+unchanged original gas/port blocks, combined passivity, zero-arm equivalence,
+foreign states and invalid spectra. These new tests await native execution.

@@ -38,15 +38,22 @@
 //!
 //! LEDGER SPLIT. `pressure_work_j = -integral(p div u) dV dt` is the reversible kinetic-to-internal exchange
 //! (trapezoid of the two time levels, fourth-order central divergence). `viscous_heating_j` is DEFINED as
-//! `internal change - wall heat - pressure work`; total-energy conservation then makes it equal the kinetic
-//! energy loss net of pressure work TERM BY TERM to round-off. That identity is bookkeeping, not evidence; the
-//! physical content (the heating equals the continuum dissipation) is tested on a Taylor-Green vortex.
+//! `internal change - wall heat - pressure work - source energy` for heat-only volume sources.
+//! With no volume source, total-energy conservation makes it equal the kinetic energy loss net of pressure
+//! work TERM BY TERM to round-off. Manufactured mass/momentum sources also do mechanical work; without a
+//! separately qualified source-work split, that signed remainder is reported as
+//! `unresolved_internal_exchange_j`, never as viscous heating. The exact total source supply is still
+//! independently audited. These identities are bookkeeping, not evidence; the physical content of
+//! viscous heating is tested on a Taylor-Green vortex.
 //!
 //! WHAT THIS IS NOT: not Boussinesq (`thermal.rs` and `d3q19/coupled.rs` are); not a thermal-LBM with an energy
 //! population; the thermal pressure enters as a force, so the lattice resolves the sound speed `sqrt(gamma
 //! theta)` only while it stays below the lattice speed (declared Mach and temperature-ratio bounds, refused
-//! beyond); no turbulence model, open boundary or moving wall. Sound-speed dispersion is second order; see the
+//! beyond); no turbulence model. The optional open-axis boundary is a separately
+//! bounded local linear characteristic rung, not a qualified nonreflecting jet interface. Sound-speed dispersion is second order; see the
 //! battery.
+//! Prescribed reservoir ghost states are also available as a separate, mutually
+//! exclusive boundary mode; they do not preserve outgoing acoustic characteristics.
 
 use crate::lattice3::Lattice3;
 use core::fmt;
@@ -55,6 +62,13 @@ use material::NsfCellMaterial;
 
 mod material;
 pub use material::{NsfGasMedium, ThermochemicalNsfGas};
+mod open;
+pub use open::NsfOpenState;
+mod open_boundary;
+pub use open_boundary::{
+    NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis, NsfCharacteristicBoundary,
+};
+use open_boundary::{BoundaryFlux, IncomingPopulations, OpenFaces};
 
 /// Exact linearized Navier-Stokes-Fourier modes (test support of the qualification, shipped for reuse).
 pub mod dispersion;
@@ -162,7 +176,8 @@ pub enum WallThermal {
 pub struct NsfSpec<G = GasSpec> {
     /// Cell counts per axis.
     pub dims: [usize; 3],
-    /// Periodic axes; a non-periodic face is a halfway bounce-back wall.
+    /// Periodic axes; a non-periodic face initially has a halfway bounce-back
+    /// wall. `with_characteristic_axis` can open one complete axis cold.
     pub periodic: [bool; 3],
     /// Gas law: legacy GasSpec or source-owned ThermochemicalNsfGas.
     pub gas: G,
@@ -285,12 +300,32 @@ pub struct EnergyLedger {
     /// Kinetic energy after the step [J].
     pub kinetic_j: f64,
     /// Viscous heating of the step [J] (defined from the budget, see the module note).
+    /// With prescribed reservoir faces this remainder also includes kinetic-energy
+    /// transport and is not an independent viscous-heating measurement. Zero for
+    /// a step with manufactured mass/momentum sources; see the unresolved account.
     pub viscous_heating_j: f64,
+    /// Signed internal-energy remainder for manufactured mass/momentum sources [J].
+    /// Includes physical/numerical dissipation and the unseparated mechanical
+    /// action of those sources after their total energy supply is removed.
+    /// It can be negative. It is neither heat nor a total-energy balancing credit.
+    /// Zero for source-free and heat-only steps.
+    pub unresolved_internal_exchange_j: f64,
     /// Reversible kinetic-to-internal exchange `-integral(p div u)` of the step [J].
     pub pressure_work_j: f64,
     /// Heat entering through the walls during the step [J].
     pub wall_heat_j: f64,
-    /// `|change of total energy - wall heat| / total energy` (round-off for a conservative step).
+    /// Net total energy entering the open faces [J], including enthalpy,
+    /// conduction and viscous work. Zero without characteristic boundaries.
+    pub open_boundary_energy_j: f64,
+    /// Total energy entering prescribed reservoir ghost faces [J].
+    /// Separate from characteristic-face energy; the two modes cannot coexist.
+    pub open_energy_j: f64,
+    /// Total energy supplied by the volume source during this step [J].
+    /// The exact trapezoid used by the energy update, in the medium's fixed
+    /// sensible chart. Heat-only sources supply heat; arbitrary manufactured
+    /// mass/momentum sources need not. Negative values remove energy.
+    pub source_energy_j: f64,
+    /// `|change of total energy - wall heat - open energy - source energy| / total energy`.
     pub residual_rel: f64,
 }
 
@@ -476,6 +511,11 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     force: Vec<[f64; 3]>,
     div: Vec<f64>,
     wall_out: f64,
+    open: Option<NsfCharacteristicAxis>,
+    open_faces: Option<OpenFaces>,
+    reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
+    open_out: BoundaryFlux,
+    last_boundary_exchange: Option<[NsfBoundaryExchange; 2]>,
     steps: usize,
     cumulative: EnergyLedger,
     /// Velocity of the bounce-back wall at the low (index 0) and high (index 1) edge of each non-periodic axis.
@@ -663,6 +703,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             force: vec![[0.0; 3]; n],
             div: vec![0.0; n],
             wall_out: 0.0,
+            open: None,
+            open_faces: None,
+            reservoir_faces: [[None; 2]; 3],
+            open_out: BoundaryFlux::default(),
+            last_boundary_exchange: None,
             steps: 0,
             cumulative: EnergyLedger::default(),
             edge_velocity: [[[0.0; 3]; 2]; 3],
@@ -671,7 +716,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             src_now: Vec::new(),
             marker: core::marker::PhantomData,
         };
-        grid.force = grid.force_field(&rho, &grid.theta);
+        grid.force = grid.force_field(&rho, &grid.theta, None);
         if grid.sources.is_some() {
             grid.src_now = grid.source_field(0.0);
             for i in 0..n {
@@ -700,7 +745,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let u = grid.velocity_field(&rho_g, &mom, &grid.force);
         grid.material = grid.material_field(&rho_g, &grid.theta)?;
         let sig = grid.stress_field(&grid.f, &grid.force, &rho_g, &grid.theta, &grid.material);
-        let (div, wall) = grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig)?;
+        let (div, wall, _) = grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig, None)?;
         grid.div = div;
         grid.wall_out = wall;
         Ok(grid)
@@ -763,7 +808,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         high: bool,
         velocity: [f64; 3],
     ) -> Result<(), NsfError> {
-        if axis >= 3 || self.spec.periodic[axis] {
+        if axis >= 3 || self.spec.periodic[axis]
+            || self.open.as_ref().is_some_and(|open| open.axis == axis)
+            || self.reservoir_faces[axis][usize::from(high)].is_some()
+        {
             return Err(NsfError::Input(
                 "an edge wall exists only on a non-periodic axis",
             ));
@@ -790,7 +838,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
         let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta, &self.material);
-        let (div, wall) = match self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig) {
+        let (div, wall, open) = match self.flux_divergence(
+            &self.e, &rho, &u, &self.theta, &sig, self.open_faces.as_ref(),
+        ) {
             Ok(history) => history,
             Err(error) => {
                 self.edge_velocity = old_edge_velocity;
@@ -800,6 +850,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         self.div = div;
         self.wall_out = wall;
+        self.open_out = open;
         Ok(())
     }
 
@@ -874,7 +925,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     /// `F = -grad p'`, `p' = rho (theta - theta0)`, in conservative face form: fourth-order face values where the four
     /// stencil cells are fluid, the two-point value beside a solid cell, the cell's own value at a wall face.
-    fn force_field(&self, rho: &[f64], theta: &[f64]) -> Vec<[f64; 3]> {
+    fn force_field(&self, rho: &[f64], theta: &[f64], faces: Option<&OpenFaces>) -> Vec<[f64; 3]> {
         let pp: Vec<f64> = (0..self.n)
             .map(|i| {
                 if self.solid[i] {
@@ -889,6 +940,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             // face value on the +a side (s = 1) or -a side (s = -1) of cell i
             let x = self.at(i);
             let Some(j) = self.fluid_at(x, a, s) else {
+                if let Some(face) = self.characteristic_face(faces, i, a, s) {
+                    return face.rho * (face.theta - THETA0);
+                }
+                if let Some(b) = self.open_at(i, a, s) {
+                    return 0.5 * (pp[i] + b.rho * (b.theta - THETA0));
+                }
                 return pp[i];
             };
             let xj = self.at(j);
@@ -945,7 +1002,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         u: &[[f64; 3]],
         theta: &[f64],
         sig: &[[f64; 6]],
-    ) -> Result<(Vec<f64>, f64), NsfError> {
+        faces: Option<&OpenFaces>,
+    ) -> Result<(Vec<f64>, f64, BoundaryFlux), NsfError> {
         let n = self.n;
         let mut g = vec![[0.0; 3]; n];
         let solid = &self.solid;
@@ -1006,6 +1064,26 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // wall face: flux in the +axis direction. Heat through the half cell; the viscous work `-sigma_{a b} u_{w b}` of a moving
         // edge wall (zero normal velocity, so no convective part; solid cells and still walls do no work).
         let wall_flux = |i: usize, a: usize, s: i64| -> Result<f64, NsfError> {
+            if let Some(face) = self.characteristic_face(faces, i, a, s) {
+                return self.open_energy_flux(face, i, a, s, rho, theta, sig).map(|f| f.0);
+            }
+            if let Some(b) = self.open_at(i, a, s) {
+                let sg = sig[i];
+                let row = match a {
+                    0 => [sg[0], sg[3], sg[4]],
+                    1 => [sg[3], sg[1], sg[5]],
+                    _ => [sg[4], sg[5], sg[2]],
+                };
+                let stress_work = row[0] * b.u[0] + row[1] * b.u[1] + row[2] * b.u[2];
+                let gb = (b.energy + b.rho * b.theta) * b.u[a] - stress_work;
+                let k = self.spec.gas.face_conductivity(
+                    &self.law,
+                    0.5 * (theta[i] + b.theta),
+                    0.5 * (self.law.pressure_pa(rho[i], theta[i])
+                        + self.law.pressure_pa(b.rho, b.theta)),
+                )?;
+                return Ok(0.5 * (g[i][a] + gb) - (s as f64) * k * (b.theta - theta[i]));
+            }
             let heat = match wall_theta {
                 None => 0.0,
                 Some(tw) => {
@@ -1056,6 +1134,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         });
         let div = div.into_iter().collect::<Result<Vec<_>, _>>()?;
         let mut out = 0.0;
+        let mut open = BoundaryFlux::default();
         for i in 0..n {
             if solid[i] {
                 continue;
@@ -1063,17 +1142,33 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let x = self.at(i);
             for a in 0..3 {
                 if self.fluid_at(x, a, 1).is_none() {
-                    out += wall_flux(i, a, 1)?;
+                    if let Some(face) = self.characteristic_face(faces, i, a, 1) {
+                        let (total, internal) = self.open_energy_flux(face, i, a, 1, rho, theta, sig)?;
+                        open.total_out[1] += total;
+                        open.internal_out[1] += internal;
+                    } else if self.open_at(i, a, 1).is_some() {
+                        open.prescribed_out += wall_flux(i, a, 1)?;
+                    } else {
+                        out += wall_flux(i, a, 1)?;
+                    }
                 }
                 if self.fluid_at(x, a, -1).is_none() {
-                    out -= wall_flux(i, a, -1)?;
+                    if let Some(face) = self.characteristic_face(faces, i, a, -1) {
+                        let (total, internal) = self.open_energy_flux(face, i, a, -1, rho, theta, sig)?;
+                        open.total_out[0] -= total;
+                        open.internal_out[0] -= internal;
+                    } else if self.open_at(i, a, -1).is_some() {
+                        open.prescribed_out -= wall_flux(i, a, -1)?;
+                    } else {
+                        out -= wall_flux(i, a, -1)?;
+                    }
                 }
             }
         }
-        Ok((div, out))
+        Ok((div, out, open))
     }
 
-    fn stream(&self, post: &[[f64; Q]]) -> Vec<[f64; Q]> {
+    fn stream(&self, post: &[[f64; Q]], incoming: Option<&IncomingPopulations>) -> Vec<[f64; Q]> {
         let mut next = vec![[0.0; Q]; self.n];
         let solid = &self.solid;
         par_fill(&mut next, self.spec.workers, &|i| {
@@ -1096,7 +1191,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     }
                 }
                 out[q] = match edge {
+                    Some((a, side)) if self.open.as_ref().is_some_and(|open| open.axis == a) => {
+                        incoming.expect("open stream has prepared incoming populations")
+                            .at(x, self.spec.dims, side)[q]
+                    }
                     None if !self.solid[self.index(y)] => post[self.index(y)][q],
+                    Some((a, side)) if self.reservoir_faces[a][side].is_some() => {
+                        let b = self.reservoir_faces[a][side].expect("guarded reservoir face");
+                        let (rho, mom) = raw_moments::<L>(&post[i]);
+                        let local_u = mom.map(|m| m / rho);
+                        // Post-collision populations carry rho*u + F/2. Extrapolate
+                        // that half-force shift as well as the non-equilibrium part.
+                        let ghost_u = core::array::from_fn(|k| b.u[k] + 0.5 * self.force[i][k] / b.rho);
+                        equilibrium::<L>(b.rho, ghost_u, THETA0)[q]
+                            + post[i][q] - equilibrium::<L>(rho, local_u, THETA0)[q]
+                    }
                     _ => {
                         let mut v = post[i][L::OPP[q]];
                         if let (true, Some((a, side))) = (self.moving_walls, edge) {
@@ -1165,7 +1274,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
         }
         let src_next = self.source_field(self.steps as f64 + 1.0);
-        let mut next = self.stream(&post);
+        let incoming = self.open_incoming_populations(&post, &rho0, &u0);
+        let boundary_links = self.open_link_exchange(&post, incoming.as_ref());
+        let mut next = self.stream(&post, incoming.as_ref());
         if have_sources {
             for i in 0..n {
                 if !self.solid[i] {
@@ -1177,9 +1288,15 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let (rho1, mom1) = self.macro_fields(&next);
         let mut th1 = self.theta.clone();
+        let mut u_guess = if self.open.is_some() {
+            self.velocity_field(&rho1, &mom1, &self.force)
+        } else {
+            Vec::new()
+        };
         let mut result = None;
         for _ in 0..COUPLING_PASSES {
-            let mut f1 = self.force_field(&rho1, &th1);
+            let faces1 = self.resolve_open_faces(self.open.as_ref(), &rho1, &u_guess, &th1)?;
+            let mut f1 = self.force_field(&rho1, &th1, faces1.as_ref());
             if have_sources {
                 for i in 0..n {
                     if !self.solid[i] {
@@ -1204,7 +1321,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 })
                 .collect();
             let sig = self.stress_field(&next, &f1, &rho1, &th1, &trial_material);
-            let (div1, wall1) = self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig)?;
+            let (div1, wall1, open1) = self.flux_divergence(
+                &et_trial, &rho1, &u1, &th1, &sig, faces1.as_ref(),
+            )?;
             let mut material_new = trial_material;
             let mut e1 = self.e.clone();
             let mut th_new = th1.clone();
@@ -1233,9 +1352,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             }
             th1 = th_new;
-            result = Some((f1, u1, e1, div1, wall1, material_new));
+            if self.open.is_some() {
+                u_guess.clone_from(&u1);
+            }
+            result = Some((f1, u1, e1, div1, wall1, open1, faces1, material_new));
         }
-        let (force1, u1, e1, div1, wall1, material_new) =
+        let (force1, u1, e1, div1, wall1, open1, faces1, material_new) =
             result.expect("at least one coupling pass");
         for i in 0..n {
             if self.solid[i] {
@@ -1264,6 +1386,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 });
             }
         }
+        // The last corrector changes temperature after faces1 was evaluated.
+        // Admit the actual endpoint too, without replacing the common
+        // predictor faces that supplied its force and conservative FV flux.
+        let _ = self.resolve_open_faces(self.open.as_ref(), &rho1, &u1, &th1)?;
         let unit = self.law.energy_unit_j();
         let (mut ke0, mut ke1, mut e_old, mut e_new, mut pw) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for i in 0..n {
@@ -1277,27 +1403,72 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             e_old += self.e[i];
             e_new += e1[i];
         }
-        let p0 = self.pressure_work_density(&rho0, &u0, &self.theta);
-        let p1 = self.pressure_work_density(&rho1, &u1, &th1);
+        let p0 = self.pressure_work_density(&rho0, &u0, &self.theta, self.open_faces.as_ref());
+        let p1 = self.pressure_work_density(&rho1, &u1, &th1, faces1.as_ref());
         for i in 0..n {
             if !self.solid[i] {
                 pw += 0.5 * (p0[i] + p1[i]);
             }
         }
         let wall_in = -0.5 * (wall1 + self.wall_out);
+        let open_in = -0.5 * (open1.total_out.iter().sum::<f64>()
+            + self.open_out.total_out.iter().sum::<f64>());
+        let open_internal_in = -0.5 * (open1.internal_out.iter().sum::<f64>()
+            + self.open_out.internal_out.iter().sum::<f64>());
+        let prescribed_in = -0.5 * (open1.prescribed_out + self.open_out.prescribed_out);
+        // Use the exact source quadrature from the native energy update and
+        // the already-sampled fields; never query a callback again for the audit.
+        let mut source_in = 0.0;
+        let mut source_carries_mechanics = false;
+        if have_sources {
+            for i in 0..n {
+                if !self.solid[i] {
+                    source_in += 0.5 * (src_next[i].2 + self.src_now[i].2);
+                    source_carries_mechanics |= mass_half[i].0 != 0.0
+                        || self.src_now[i].1.iter().any(|&value| value != 0.0)
+                        || src_next[i].1.iter().any(|&value| value != 0.0);
+                }
+            }
+        }
         let d_total = e_new - e_old;
         let d_kin = ke1 - ke0;
         let d_int = d_total - d_kin;
         let pressure_work = -pw;
-        let viscous = d_int - wall_in - pressure_work;
+        let viscous = if self.open.is_some() {
+            d_int - wall_in - open_internal_in - pressure_work
+        } else {
+            let remainder = d_int - wall_in - pressure_work;
+            if prescribed_in == 0.0 { remainder } else { remainder - prescribed_in }
+        };
+        let remainder = if source_in == 0.0 { viscous } else { viscous - source_in };
+        let (viscous, unresolved) = if source_carries_mechanics {
+            (0.0, remainder)
+        } else {
+            (remainder, 0.0)
+        };
+        let balance = if self.open.is_some() {
+            d_total - wall_in - open_in
+        } else {
+            d_total - wall_in
+        };
+        // Retain closed/characteristic arithmetic, including signed zero.
+        let balance = if prescribed_in == 0.0 { balance } else { balance - prescribed_in };
+        let balance = if source_in == 0.0 { balance } else { balance - source_in };
         let ledger = EnergyLedger {
             internal_j: unit * (e_new - ke1),
             kinetic_j: unit * ke1,
             viscous_heating_j: unit * viscous,
+            unresolved_internal_exchange_j: unit * unresolved,
             pressure_work_j: unit * pressure_work,
             wall_heat_j: unit * wall_in,
-            residual_rel: (d_total - wall_in).abs() / e_new.abs().max(f64::MIN_POSITIVE),
+            open_boundary_energy_j: unit * open_in,
+            open_energy_j: unit * prescribed_in,
+            source_energy_j: unit * source_in,
+            residual_rel: balance.abs() / e_new.abs().max(f64::MIN_POSITIVE),
         };
+        let boundary_exchange = self.finish_boundary_exchange(
+            boundary_links, self.open_faces.as_ref(), faces1.as_ref(), open1,
+        );
         self.f = next;
         self.e = e1;
         self.material = material_new;
@@ -1308,17 +1479,26 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.force = force1;
         self.div = div1;
         self.wall_out = wall1;
+        self.open_out = open1;
+        self.open_faces = faces1;
+        self.last_boundary_exchange = boundary_exchange;
         self.steps += 1;
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
+        self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;
+        self.cumulative.source_energy_j += ledger.source_energy_j;
         self.cumulative.pressure_work_j += ledger.pressure_work_j;
         self.cumulative.wall_heat_j += ledger.wall_heat_j;
+        self.cumulative.open_boundary_energy_j += ledger.open_boundary_energy_j;
+        self.cumulative.open_energy_j += ledger.open_energy_j;
         self.cumulative.internal_j = ledger.internal_j;
         self.cumulative.kinetic_j = ledger.kinetic_j;
         Ok(ledger)
     }
 
     /// `p div u` per fluid cell with the fourth-order central divergence (second order beside walls).
-    fn pressure_work_density(&self, rho: &[f64], u: &[[f64; 3]], theta: &[f64]) -> Vec<f64> {
+    fn pressure_work_density(
+        &self, rho: &[f64], u: &[[f64; 3]], theta: &[f64], faces: Option<&OpenFaces>,
+    ) -> Vec<f64> {
         let mut out = vec![0.0; self.n];
         let solid = &self.solid;
         par_fill(&mut out, self.spec.workers, &|i| {
@@ -1339,8 +1519,20 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         }
                         _ => 0.5 * (u[p][a] - u[m][a]),
                     },
-                    (None, Some(p)) => 0.5 * (u[p][a] + u[i][a]),
-                    (Some(m), None) => -0.5 * (u[m][a] + u[i][a]),
+                    (None, Some(p)) => match self.characteristic_face(faces, i, a, -1) {
+                        Some(f) => 0.5 * (u[p][a] + u[i][a]) - f.u[a],
+                        None => self.open_at(i, a, -1).map_or(
+                            0.5 * (u[p][a] + u[i][a]),
+                            |b| 0.5 * (u[p][a] - b.u[a]),
+                        ),
+                    },
+                    (Some(m), None) => match self.characteristic_face(faces, i, a, 1) {
+                        Some(f) => f.u[a] - 0.5 * (u[m][a] + u[i][a]),
+                        None => self.open_at(i, a, 1).map_or(
+                            -0.5 * (u[m][a] + u[i][a]),
+                            |b| 0.5 * (b.u[a] - u[m][a]),
+                        ),
+                    },
                     (None, None) => 0.0,
                 };
             }
@@ -1477,3 +1669,4 @@ fn check_state(
     }
     Ok(())
 }
+

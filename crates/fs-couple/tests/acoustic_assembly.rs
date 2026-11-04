@@ -1717,13 +1717,14 @@ fn certified_plate_radiates_without_named_hertz() {
 mod material_plate_tests {
     use super::*;
     use fs_couple::acoustic_realize::{
-        realize_assembly_with_plate_chart, realize_assembly_with_plate_chart_and_options,
+        realize_assembly_with_material_plate_chart_and_options, realize_assembly_with_plate_chart,
+        realize_assembly_with_plate_chart_and_options,
     };
     use fs_couple::air_path::GasAbsorptionModel;
     use fs_couple::material_assembly::{
         AcousticMaterialBindings, CompiledMaterialPlate, MaterialAssemblyError, MaterialSource,
-        PlateMaterialBinding, PlateRegionSource, StringMaterialBinding, StringPrestressBinding,
-        compile_material_assembly,
+        PlateMaterialBinding, PlateRegionSource, RegionalPlateLoss, StringMaterialBinding,
+        StringPrestressBinding, compile_material_assembly,
     };
     use fs_couple::string_specimen::{
         StringGeometryConstraint, StringPrestress, with_uniform_circular_material_and_constraints,
@@ -1731,7 +1732,7 @@ mod material_plate_tests {
     use fs_couple::thin_plate::{
         PlateChartRadiation, PlateMaterialModel as Model, PlateRegionMaterial,
         PlateThicknessConstraint as Thickness, ResolvedPlateSpecimen, certified_chart_radiators,
-        certified_radiators, compile_plate_material_chart,
+        certified_material_chart_radiators, certified_radiators, compile_plate_material_chart,
         with_uniform_plate_material_state as bind,
     };
     use fs_evidence::ValidityDomain;
@@ -3482,6 +3483,7 @@ mod material_plate_tests {
                 mesh: chart.mesh,
                 boundary_nodes: chart.boundary_nodes,
                 regions,
+                loss: RegionalPlateLoss::Authored,
                 radiation,
             }),
         };
@@ -3519,6 +3521,294 @@ mod material_plate_tests {
             .map(|(a, b)| a - b)
             .collect();
         assert!(peak_abs(&delta) > 1e-7);
+    }
+
+    fn regional_loss_bindings<'a>(
+        chart: &PlateChart,
+        radiation: &PlateChartRadiation,
+        point: &'a QueryPoint,
+        cards: [(&'a MaterialCard, Model); 2],
+        loss: RegionalPlateLoss,
+    ) -> AcousticMaterialBindings<'a> {
+        let middle = 0.3;
+        let regions = cards
+            .into_iter()
+            .enumerate()
+            .map(|(r, (card, model))| PlateRegionSource {
+                region: PlateRegion {
+                    name: ["left", "right"][r].into(),
+                    triangle_indices: chart
+                        .mesh
+                        .tris
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(e, t)| {
+                            let right = t.iter().map(|&i| chart.mesh.nodes[i].0).sum::<f64>() / 3.0
+                                > middle;
+                            (right == (r == 1)).then_some(e)
+                        })
+                        .collect(),
+                },
+                source: source(card, point),
+                model,
+                thickness: Thickness::FixedThickness(0.003),
+                material_angle_rad: 0.0,
+            })
+            .collect();
+        AcousticMaterialBindings {
+            string: None,
+            plate: Some(PlateMaterialBinding::Regional {
+                mesh: chart.mesh.clone(),
+                boundary_nodes: chart.boundary_nodes.clone(),
+                regions,
+                loss,
+                radiation: radiation.clone(),
+            }),
+        }
+    }
+
+    #[test]
+    fn g1_g3_regional_material_loss_reaches_coupled_pressure_and_free_decay() {
+        let elastic = state(&[
+            ("density", QuantitySpec::dimensional(Density::DIMS), 450.0),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                12e9,
+            ),
+            ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.3),
+        ]);
+        let specimen = bind(
+            template(),
+            &elastic,
+            Model::Isotropic,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, mut radiation) = chart_input(&specimen);
+        radiation.damping_ratio = 0.0;
+        let point = QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with("omega", 100.0)
+            .unwrap();
+        let zero = viscous_card(0.0, Some((1.0, 10_000.0)));
+        let viscous = viscous_card(3e6, Some((1.0, 10_000.0)));
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.08;
+        input.string.as_mut().unwrap().moving_end = true;
+        let gas = fs_material::gas::GasState::try_new(
+            &fs_material::gas::GasSpec::dry_air_ussa1976(),
+            293.15,
+            80_000.0,
+        )
+        .unwrap();
+        let options = RealizeOptions {
+            gas: Some(gas),
+            observer_absorption: Some(GasAbsorptionModel::Lossless),
+            ..RealizeOptions::default()
+        };
+        let mut modes = Vec::new();
+        let mut pressures = Vec::new();
+        let mut late_pressure_energy = Vec::new();
+        for cards in [[&zero, &zero], [&viscous, &zero], [&viscous, &viscous]] {
+            let compiled = compile_material_assembly(
+                &input,
+                &regional_loss_bindings(
+                    &chart,
+                    &radiation,
+                    &point,
+                    cards.map(|card| (card, Model::Isotropic)),
+                    RegionalPlateLoss::KelvinVoigt,
+                ),
+            )
+            .unwrap();
+            let Some(CompiledMaterialPlate::Regional { chart, radiation }) = compiled.plate()
+            else {
+                panic!("regional material plate");
+            };
+            for (region, card) in chart.regions().iter().zip(cards) {
+                assert_eq!(region.input.material.card_identity(), card.content_hash());
+                assert_eq!(region.input.material.properties().len(), 4);
+            }
+            let bodies = certified_material_chart_radiators(chart, radiation).unwrap();
+            let body = &bodies[0];
+            modes.push((body.omega, body.zeta));
+            let actual = compiled.realize_with_options(&options).unwrap();
+            let direct = realize_assembly_with_material_plate_chart_and_options(
+                &input, chart, radiation, &options,
+            )
+            .unwrap();
+            assert_eq!(actual, direct);
+            assert_eq!(actual.gas, gas);
+            assert!(peak_abs(&actual.pressure_pa) > 0.0);
+            pressures.push(actual.pressure_pa);
+
+            // Release the same single-mode image after one force pulse. This
+            // isolates material decay from continued string forcing and from
+            // separately selected radiation reaction; no gain is normalized.
+            let mut released = body.clone();
+            let dt = 1.0 / f64::from(input.sample_rate_hz);
+            released.drive(1.0, dt).unwrap();
+            let mut energy = 0.0;
+            for i in 0..19_200 {
+                let acceleration = released.drive(0.0, dt).unwrap();
+                if i >= 9_600 {
+                    let pressure = released.radiate(acceleration, gas.density, 1.0);
+                    energy += pressure * pressure * dt;
+                }
+            }
+            late_pressure_energy.push(energy);
+        }
+        assert_eq!(modes[0].0, modes[1].0);
+        assert_eq!(modes[1].0, modes[2].0);
+        assert_eq!(modes[0].1, 0.0);
+        assert!(modes[1].1 > 0.0 && modes[1].1 < modes[2].1);
+        // With uniform eta/E and no prestress, C = (eta/E) K independently
+        // of the regional partition: zeta_i = eta*omega_i/(2E).
+        assert!((modes[2].1 / (0.5 * 3e6 / 12e9 * modes[2].0) - 1.0).abs() < 1e-11);
+        assert!(late_pressure_energy[0] > late_pressure_energy[1]);
+        assert!(late_pressure_energy[1] > late_pressure_energy[2]);
+        for pair in pressures.windows(2) {
+            let peak = peak_abs(&pair[0]);
+            let difference = pair[0]
+                .iter()
+                .zip(&pair[1])
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                difference > 1e-8 * peak,
+                "changing only a regional loss source must change actual coupled pressure"
+            );
+        }
+        let narrow = viscous_card(3e6, Some((1.0, 100.0)));
+        let out_of_band = compile_material_assembly(
+            &input,
+            &regional_loss_bindings(
+                &chart,
+                &radiation,
+                &point,
+                [(&zero, Model::Isotropic), (&narrow, Model::Isotropic)],
+                RegionalPlateLoss::KelvinVoigt,
+            ),
+        )
+        .unwrap();
+        assert!(
+            out_of_band.realize_with_options(&options).is_err(),
+            "a valid scalar query cannot extend a loss law beyond its modal frequency band"
+        );
+    }
+
+    #[test]
+    fn g0_g3_regional_loss_compiler_admits_full_tensor_and_refuses_missing_laws() {
+        use fs_couple::thin_plate::RegionalBendingViscosity;
+        use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES;
+        let material = orthotropic(450.0, 1.0);
+        let plate = bind(
+            template(),
+            &material,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, mut radiation) = chart_input(&plate);
+        radiation.damping_ratio = 0.0;
+        let point = QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with("omega", 100.0)
+            .unwrap();
+        let domain = ValidityDomain::unconstrained()
+            .with("T", 293.15, 293.15)
+            .with("omega", 1.0, 10_000.0);
+        let mut properties = orthotropic_properties(450.0, 1.0);
+        properties.extend(
+            PLANE_STRESS_VISCOSITY_PROPERTIES
+                .into_iter()
+                .zip([6e6, 3e6, 1e6, 0.4e6, -0.2e6, 0.1e6])
+                .map(|(key, value)| (key, QuantitySpec::dimensional(DynViscosity::DIMS), value)),
+        );
+        let complete = material_card(&properties, domain.clone());
+        let missing_tensor = material_card(&properties[..properties.len() - 1], domain);
+        let scalar = viscous_card(3e6, Some((1.0, 10_000.0)));
+        let missing_scalar = isotropic_card(450.0);
+        let input = plucked(20.0, 0.006, 1e-5);
+        let binding = |right, model, loss| {
+            regional_loss_bindings(
+                &chart,
+                &radiation,
+                &point,
+                [(&scalar, Model::Isotropic), (right, model)],
+                loss,
+            )
+        };
+        let compiled = compile_material_assembly(
+            &input,
+            &binding(
+                &complete,
+                Model::Orthotropic21,
+                RegionalPlateLoss::KelvinVoigt,
+            ),
+        )
+        .unwrap();
+        let Some(CompiledMaterialPlate::Regional {
+            chart,
+            radiation: opts,
+        }) = compiled.plate()
+        else {
+            panic!("regional material plate");
+        };
+        assert_eq!(chart.regions()[0].input.material.properties().len(), 4);
+        assert_eq!(chart.regions()[1].input.material.properties().len(), 11);
+        let laws = chart.bending_viscosity().unwrap();
+        assert!(matches!(laws[0], RegionalBendingViscosity::Isotropic(_)));
+        let RegionalBendingViscosity::Orthotropic(tensor) = &laws[1] else {
+            panic!("explicit full plane-stress tensor");
+        };
+        assert_eq!(
+            tensor.material_state_identity(),
+            chart.regions()[1].input.material.identity()
+        );
+        assert!(certified_material_chart_radiators(chart, opts).unwrap()[0].zeta > 0.0);
+        for (card, model) in [
+            (&missing_tensor, Model::Orthotropic21),
+            (&missing_scalar, Model::Isotropic),
+        ] {
+            assert!(matches!(compile_material_assembly(&input,
+                &binding(card, model, RegionalPlateLoss::KelvinVoigt)),
+                Err(MaterialAssemblyError::Resolution { component, .. }) if component == "plate/right"));
+            let authored = compile_material_assembly(
+                &input,
+                &binding(card, model, RegionalPlateLoss::Authored),
+            )
+            .unwrap();
+            let Some(CompiledMaterialPlate::Regional { chart, .. }) = authored.plate() else {
+                panic!("authored loss");
+            };
+            assert!(
+                chart.bending_viscosity().is_none(),
+                "inactive loss must not demand its source data"
+            );
+        }
+        let mut double_counted = binding(
+            &complete,
+            Model::Orthotropic21,
+            RegionalPlateLoss::KelvinVoigt,
+        );
+        let Some(PlateMaterialBinding::Regional { radiation, .. }) = double_counted.plate.as_mut()
+        else {
+            unreachable!();
+        };
+        radiation.damping_ratio = 0.01;
+        assert!(matches!(
+            compile_material_assembly(&input, &double_counted),
+            Err(MaterialAssemblyError::Binding { .. })
+        ));
+        assert_eq!(
+            chart.regions()[1].input.material.card_identity(),
+            complete.content_hash(),
+            "failed compilation cannot mutate the previous source-bound specimen"
+        );
     }
 
     #[test]
@@ -3585,6 +3875,7 @@ mod material_plate_tests {
                         thickness: Thickness::FixedThickness(0.003),
                         material_angle_rad: 0.0,
                     }],
+                    loss: RegionalPlateLoss::Authored,
                     radiation: radiation.clone(),
                 }
             } else {

@@ -102,6 +102,7 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
             displacement_m,
             velocity_m_s,
             Some(prescribed_acceleration_m_s2),
+            None,
             config,
             cx,
         )

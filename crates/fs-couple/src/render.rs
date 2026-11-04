@@ -283,6 +283,7 @@ pub struct ReedBoreVoice {
     dt: f64,
     reed_y: f64,
     reed_v: f64,
+    closing_force_n: f64,
     p_plus_prev: f64,
     f_jet_prev: f64,
     last_parts: ReedObserverParts,
@@ -607,6 +608,7 @@ impl ReedBoreVoice {
             dt: 1.0 / f64::from(sample_rate_hz),
             reed_y: reed.rest_opening_m,
             reed_v: 0.0,
+            closing_force_n: 0.0,
             p_plus_prev,
             f_jet_prev: 0.0,
             last_parts: ReedObserverParts::default(),
@@ -690,7 +692,49 @@ impl ReedBoreVoice {
                 .and_then(|o| o.with_internal_loss(lay.loss_s_per_m))
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         self.lay = Some(obstacle);
+        if self.closing_force_n > 0.0 {
+            self.reed_y = self.static_equilibrium_opening();
+            self.reed_v = 0.0;
+        }
         Ok(())
+    }
+
+    fn static_equilibrium_opening(&self) -> f64 {
+        let face = crate::reed_bore::reed_pressure_face(self.reed);
+        let (stiffness, _damping) = reed_structural(self.reed);
+        let downward_n = face * self.reed.blowing_pressure_pa + self.closing_force_n;
+        if self.reed.mass_kg <= 0.0
+            || !downward_n.is_finite()
+            || downward_n <= 0.0
+            || !stiffness.is_finite()
+            || stiffness <= 0.0
+        {
+            return self.reed.rest_opening_m;
+        }
+        let y_free = self.reed.rest_opening_m - downward_n / stiffness;
+        let Some(lay) = self.lay.as_ref() else {
+            return y_free;
+        };
+        let contact_at = |y: f64| -> f64 {
+            crate::unilateral_contact::distributed::ApertureContactStep::new(lay, y)
+                .and_then(|step| step.response(y, 0.0))
+                .map_or(0.0, |resp| resp.force)
+        };
+        if contact_at(y_free) <= 0.0 {
+            return y_free;
+        }
+        let mut lo = y_free;
+        let mut hi = self.reed.rest_opening_m;
+        for _ in 0..64 {
+            let mid = f64::midpoint(lo, hi);
+            let residual = stiffness * (mid - self.reed.rest_opening_m) + downward_n - contact_at(mid);
+            if residual < 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        f64::midpoint(lo, hi)
     }
 
     /// Replace the reed's held blowing pressure. Applied between blocks
@@ -698,8 +742,31 @@ impl ReedBoreVoice {
     /// pure input-parameter move — no stored state depends on it, so the
     /// D17 lift map is empty and the transition is click-bounded by the
     /// reed's own dynamics.
-    pub const fn set_blowing_pressure(&mut self, pressure_pa: f64) {
+    pub fn set_blowing_pressure(&mut self, pressure_pa: f64) {
         self.reed.blowing_pressure_pa = pressure_pa;
+        if self.sample_index == 0 && self.closing_force_n > 0.0 {
+            self.reed_y = self.static_equilibrium_opening();
+            self.reed_v = 0.0;
+        }
+    }
+
+    /// Held generalized closing force [N] on the reed's opening coordinate.
+    #[must_use]
+    pub const fn closing_force_n(&self) -> f64 {
+        self.closing_force_n
+    }
+
+    /// Replace the held generalized closing force [N] on a massive reed's
+    /// opening coordinate (such as tongue-reed contact prior to and during a
+    /// tongued release). At sample zero, a positive closing force initializes
+    /// the reed at its static contact equilibrium so pre-existing tongue
+    /// contact does not inject a synthetic slap transient.
+    pub fn set_closing_force(&mut self, force_n: f64) {
+        self.closing_force_n = force_n;
+        if self.sample_index == 0 && self.closing_force_n > 0.0 {
+            self.reed_y = self.static_equilibrium_opening();
+            self.reed_v = 0.0;
+        }
     }
 
     /// Opt in to the declared fast-mode aperture solver
@@ -942,6 +1009,13 @@ pub enum ControlDelta {
         voice: usize,
         /// New held pressure [Pa].
         pressure_pa: f64,
+    },
+    /// Replace a massive reed voice's held generalized closing force [N].
+    SetReedClosingForce {
+        /// Voice index in the context.
+        voice: usize,
+        /// Nonnegative generalized closing force [N].
+        force_n: f64,
     },
 }
 
@@ -1227,6 +1301,29 @@ impl RenderContext {
                         }
                     }
                 }
+                ControlDelta::SetReedClosingForce { voice, force_n } => {
+                    if !force_n.is_finite() || *force_n < 0.0 {
+                        return Err(RenderError::Control {
+                            what: "reed closing force must be finite and non-negative",
+                        });
+                    }
+                    match self.voices.get(*voice) {
+                        Some(RenderVoice::ReedBore(reed)) if reed.reed.mass_kg > 0.0 => {}
+                        Some(RenderVoice::ReedBore(_)) => {
+                            return Err(RenderError::Control {
+                                what: "reed closing force requires a massive reed voice",
+                            });
+                        }
+                        Some(_) => {
+                            return Err(RenderError::Control {
+                                what: "reed closing force requires a reed-bore voice",
+                            });
+                        }
+                        None => {
+                            return Err(RenderError::UnknownVoice { index: *voice });
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -1270,6 +1367,11 @@ impl RenderContext {
                 ControlDelta::SetBlowingPressure { voice, pressure_pa } => {
                     if let Some(RenderVoice::ReedBore(reed)) = self.voices.get_mut(*voice) {
                         reed.set_blowing_pressure(*pressure_pa);
+                    }
+                }
+                ControlDelta::SetReedClosingForce { voice, force_n } => {
+                    if let Some(RenderVoice::ReedBore(reed)) = self.voices.get_mut(*voice) {
+                        reed.set_closing_force(*force_n);
                     }
                 }
             }

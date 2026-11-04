@@ -42,6 +42,7 @@ impl std::error::Error for MaterialFlowError {}
 pub enum MaterialGasLawFlowError<E> {
     Invalid(&'static str),
     Flow(GasNetworkError),
+    Transport(fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportError),
     Exchange(ReactiveExchangeError<E>),
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
@@ -115,6 +116,31 @@ struct FlowStage<F> {
     moved: BTreeSet<u64>,
     report: F,
     mass_tolerance_kg: f64,
+}
+// The same whole-interval audit serves every transport and gas heat law. It
+// cannot manufacture a transport/source refusal or discard a typed source error.
+enum FlowBalanceError {
+    Invalid(&'static str),
+    Gas { chamber: u64, error: fs_material::MaterialError },
+    Cancelled,
+}
+impl From<FlowBalanceError> for MaterialFlowError {
+    fn from(error: FlowBalanceError) -> Self {
+        match error {
+            FlowBalanceError::Invalid(message) => Self::Invalid(message),
+            FlowBalanceError::Gas { chamber, error } => Self::Gas { chamber, error },
+            FlowBalanceError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+impl<E> From<FlowBalanceError> for MaterialGasLawFlowError<E> {
+    fn from(error: FlowBalanceError) -> Self {
+        match error {
+            FlowBalanceError::Invalid(message) => Self::Invalid(message),
+            FlowBalanceError::Gas { chamber, error } => Self::Gas { chamber, error },
+            FlowBalanceError::Cancelled => Self::Cancelled,
+        }
+    }
 }
 fn checkpoint(cx: &Cx<'_>) -> Result<(), MaterialFlowError> {
     cx.checkpoint().map_err(|_| MaterialFlowError::Cancelled)
@@ -204,6 +230,23 @@ impl<'m> MaterialExchangeState<'m> {
                 moved.insert(link.donor); moved.insert(link.receiver);
             }
         }
+        self.finish_flow_with_gas_law_candidate(prepared, cx, target_s, ports,
+            drives, reactions, surfaces, controls, guess_j,
+            FlowStage { parcels, moved, report: flow,
+                mass_tolerance_kg: flow_controls.mass_tolerance_kg }, resolve)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn finish_flow_with_gas_law_candidate<F, I, E>(
+        &self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+        target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>], surfaces: &[GasSurface],
+        controls: NetworkSolve, guess_j: &[f64], stage: FlowStage<F>,
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<(Self, MaterialFlowAdvance<F, I>), MaterialGasLawFlowError<E>> {
+        use MaterialGasLawFlowError as Error;
+        let FlowStage { parcels, moved, report: flow, mass_tolerance_kg } = stage;
         let mut chambers = BTreeMap::new();
         for (id, parcel) in parcels {
             cx.checkpoint().map_err(|_| Error::Cancelled)?;
@@ -211,68 +254,11 @@ impl<'m> MaterialExchangeState<'m> {
             chamber.gas = parcel;
             chambers.insert(id, chamber);
         }
-        let (mut next, exchange) = self.step_with_gas_law_from_chambers(
+        let (next, exchange) = self.step_with_gas_law_from_chambers(
             &chambers, prepared, cx, target_s, ports, drives, reactions,
             surfaces, controls, guess_j, resolve)?;
-
-        let mut mass = 0.0;
-        let mut total = (exchange.report.electrical.stored_after_j
-            - exchange.report.electrical.stored_before_j)
-            + exchange.report.thermal.stored_energy_change_j
-            - exchange.report.electrical.native.supplied
-            - exchange.step.external_network_heat_j;
-        let mut accounts = Vec::with_capacity(self.chambers.len());
-        for boundary in &exchange.report.source.chambers {
-            cx.checkpoint().map_err(|_| Error::Cancelled)?;
-            let id = boundary.id;
-            let before = &self.chambers[&id];
-            let after = next.chambers.get_mut(&id)
-                .ok_or(Error::Invalid("flow advance omitted a live chamber"))?;
-            let dm = after.gas().mass_kg() - before.gas().mass_kg();
-            let u0 = before.gas().state().specific_internal_energy_j_kg();
-            let du = after.gas().mass_kg()
-                * (after.gas().state().specific_internal_energy_j_kg() - u0) + dm*u0;
-            let s0 = before.gas().state().specific_entropy_j_kg_k()
-                .map_err(|error| Error::Gas { chamber:id, error })?;
-            let s1 = after.gas().state().specific_entropy_j_kg_k()
-                .map_err(|error| Error::Gas { chamber:id, error })?;
-            let ds = after.gas().mass_kg()*(s1-s0) + dm*s0;
-            let mechanical = &boundary.boundary.piston;
-            let dk = (0.5*before.mass_kg()*(after.velocity_m_s()-before.velocity_m_s()))
-                * (after.velocity_m_s()+before.velocity_m_s());
-            let drive = drives.iter().find(|d| d.chamber==id)
-                .ok_or(Error::Invalid("missing accepted drive"))?;
-            mass += dm;
-            total += du + dk + mechanical.exterior_pressure_work_j
-                - mechanical.external_force_work_j - drive.heat_j;
-            if ![dm,du,ds,dk,mass,total].iter().all(|v|v.is_finite()) {
-                return Err(Error::Invalid("whole-interval mass, entropy or energy is unrepresentable"));
-            }
-            if moved.contains(&id) {
-                after.ports = before.ports.clone();
-                after.ports.accept(crate::port_adoption::StepAccount {
-                    tick: before.ports.next_tick(), duration_s: dt,
-                    storage_change_j: Some(du+dk), loss_j: Some(0.0),
-                    included_work_j: 0.0, entropy_change_j_k: ds,
-                    tolerance_j: Some(controls.total_energy_tolerance_j),
-                    unavailable: Some("gas network mass exchange needs stream ports; use the whole-assembly flow balance"),
-                }, [
-                    crate::port_adoption::PortTransfer::work(
-                        mechanical.external_force_work_j-mechanical.exterior_pressure_work_j,true),
-                    crate::port_adoption::PortTransfer::heat(
-                        mechanical.gas.supplied_heat_j,mechanical.midpoint.state().temperature),
-                ]);
-            }
-            accounts.push(FlowChamberStep { chamber:id, mass_change_kg:dm,
-                gas_energy_change_j:du, entropy_change_j_k:ds });
-        }
-        if mass.abs() > flow_controls.mass_tolerance_kg
-            || total.abs() > controls.total_energy_tolerance_j {
-            return Err(Error::Invalid("flow, reactions, gas heat, finite bodies, circuit and motion fail conservation"));
-        }
-        cx.checkpoint().map_err(|_| Error::Cancelled)?;
-        Ok((next, MaterialFlowAdvance { flow, exchange, chambers:accounts,
-            total_mass_residual_kg:mass, total_energy_residual_j:total }))
+        self.finish_flow_balance(cx, target_s, drives, controls, next, exchange,
+            flow, moved, mass_tolerance_kg).map_err(Into::into)
     }
 
     /// Publish the complete transport/reactive/gas-heat assembly together.
@@ -301,9 +287,7 @@ impl<'m> MaterialExchangeState<'m> {
         gas_patches: &[MaterialContact], controls: NetworkSolve, guess_j: &[f64],
         stage: FlowStage<F>,
     ) -> Result<(Self, MaterialFlowAdvance<F>), MaterialFlowError> {
-        use MaterialFlowError as Error;
         checkpoint(cx)?;
-        let dt = target_s - self.time_s();
         let FlowStage { parcels, moved, report: flow, mass_tolerance_kg } = stage;
         let mut chambers = BTreeMap::new();
         for (id, parcel) in parcels {
@@ -312,15 +296,29 @@ impl<'m> MaterialExchangeState<'m> {
             chamber.gas = parcel;
             chambers.insert(id, chamber);
         }
-        let (mut next, exchange) = self.step_from_chambers(&chambers, prepared, cx, target_s, ports, drives,
+        let (next, exchange) = self.step_from_chambers(&chambers, prepared, cx, target_s, ports, drives,
             reactions, gas_patches, controls, guess_j)?;
+        self.finish_flow_balance(cx, target_s, drives, controls, next, exchange,
+            flow, moved, mass_tolerance_kg).map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_flow_balance<F, I>(
+        &self, cx: &Cx<'_>, target_s: f64, drives: &[ChamberDrive],
+        controls: NetworkSolve, mut next: Self, exchange: MaterialExchangeAdvance<I>,
+        flow: F, moved: BTreeSet<u64>, mass_tolerance_kg: f64,
+    ) -> Result<(Self, MaterialFlowAdvance<F, I>), FlowBalanceError> {
+        use FlowBalanceError as Error;
+        let check = || cx.checkpoint().map_err(|_| Error::Cancelled);
+        check()?;
+        let dt = target_s - self.time_s();
         let mut mass = 0.0;
         let mut total = (exchange.report.electrical.stored_after_j - exchange.report.electrical.stored_before_j)
             + exchange.report.thermal.stored_energy_change_j - exchange.report.electrical.native.supplied
             - exchange.step.external_network_heat_j;
         let mut accounts = Vec::with_capacity(self.chambers.len());
         for boundary in &exchange.report.source.chambers {
-            checkpoint(cx)?;
+            check()?;
             let id = boundary.id;
             let before = &self.chambers[&id];
             let after = next.chambers.get_mut(&id).ok_or(Error::Invalid("flow advance omitted a live chamber"))?;
@@ -359,7 +357,7 @@ impl<'m> MaterialExchangeState<'m> {
             || total.abs() > controls.total_energy_tolerance_j {
             return Err(Error::Invalid("flow, reactions, finite bodies, circuit and motion fail whole-interval conservation"));
         }
-        checkpoint(cx)?;
+        check()?;
         Ok((next, MaterialFlowAdvance { flow, exchange, chambers: accounts,
             total_mass_residual_kg: mass, total_energy_residual_j: total }))
     }

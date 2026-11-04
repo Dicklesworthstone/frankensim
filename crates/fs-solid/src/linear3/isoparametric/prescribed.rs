@@ -87,7 +87,7 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<TetThermalStressReport, TetElasticError> {
         let (load, _) = self.prescribed_load(thermal, nodal_forces_n, prescribed_m,
             maximum_prescribed_displacement_m, cx)?;
-        self.recover_thermal_stress_from_load(solution, thermal, load, mesh_frame,
+        self.recover_thermal_stress_from_load(solution, EigenstrainFieldView::Thermal(thermal), load, mesh_frame,
             maximum_absolute_mandel_strain, cx)
     }
 

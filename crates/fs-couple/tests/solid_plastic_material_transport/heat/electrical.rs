@@ -1,4 +1,6 @@
 //! G0/G3: finite supply and actual native tetrahedra, never a surrogate spring.
+#[path = "electrical/dynamics.rs"]
+mod dynamics;
 use super::*;
 use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpySolve, ResistorCell};
 use fs_couple::circuit_enthalpy::material::CellResistor;

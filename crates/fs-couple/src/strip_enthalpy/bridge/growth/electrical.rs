@@ -158,8 +158,11 @@ impl<'t,'m> GrowingBridge<'t,'m> {
             .map_err(ElectricalGrowthError::Birth)?;
         // Reconstruct from the original accepted storage and the fully born
         // endpoint, not by summing two reports that might share an internal heat.
+        // Native stress-free births add Xi=0 and preserve old histories. Thus
+        // Delta(T*s) belongs entirely to the original coupled physical interval.
         let total=(interval.electrical.stored_after_j-interval.electrical.stored_before_j)
             +(next.bridge.stored_energy_j()-self.bridge.stored_energy_j())
+            +interval.mechanical_entropy_energy_change_j
             +(next.thermal.energy_j()-self.thermal.energy_j())
             +interval.mechanical.energy_j.numerical_dissipation
             -interval.electrical.native.supplied-interval.mechanical.load_work_j

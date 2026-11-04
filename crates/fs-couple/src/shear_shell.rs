@@ -2,6 +2,8 @@
 //!
 //! Original density, directional elasticity, transverse shear, thickness and
 //! full Kelvin--Voigt loss travel together into one immutable element assembly.
+//! A source that states `constant_loss_reference_omega` has its loss factors
+//! read at every retained mode's own frequency instead ([`constant_loss`]).
 //! The material law is homogeneous through each thickness, at a frozen source
 //! state. Geometry, support and numerical resolution remain independent inputs.
 //! No body frequency, damping ratio, carved-instrument preset or fitting to sound
@@ -36,6 +38,14 @@ pub const TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES: [&str; 3] = [
     "transverse_shear_viscosity_13", "transverse_shear_viscosity_23",
     "transverse_shear_viscosity_13_23",
 ];
+/// Optional angular frequency [rad/s] at which a source wrote its nine viscosities as `eta x stiffness / omega`: its loss
+/// factors are then constant in frequency, and the modal reductions apply them at each mode's own frequency
+/// ([`constant_loss`]). A region without it is Kelvin-Voigt, exactly as before.
+pub const CONSTANT_LOSS_REFERENCE_OMEGA: &str = "constant_loss_reference_omega";
+/// The anchor's physical dimension, 1/s.
+pub const CONSTANT_LOSS_REFERENCE_OMEGA_DIMS: fs_qty::Dims = fs_qty::Dims([0, 0, -1, 0, 0, 0]);
+/// The constant-loss-factor (generalized Maxwell) reading of anchored shell viscosities.
+pub mod constant_loss;
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -72,6 +82,7 @@ pub struct ResolvedShellRegion {
     plane_viscosity: PlaneStressViscosity,
     shear_pa_s: [f64;3],
     omega_band: (f64, f64),
+    loss_reference_omega: Option<f64>,
 }
 impl ResolvedShellRegion {
     /// Original material state, assignment and comparison policy.
@@ -90,6 +101,8 @@ impl ResolvedShellRegion {
     pub const fn plane_viscosity(&self) -> &PlaneStressViscosity { &self.plane_viscosity }
     /// Intersected elastic, inertial and viscous support [rad/s].
     pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band }
+    /// The source's [`CONSTANT_LOSS_REFERENCE_OMEGA`] [rad/s], or `None` for Kelvin-Voigt loss.
+    pub const fn constant_loss_reference_omega_rad_s(&self) -> Option<f64> { self.loss_reference_omega }
 }
 /// Bound arbitrary triangular midsurface and every local material section.
 /// Mutation requires recompilation; material records cannot drift from operators.
@@ -119,6 +132,26 @@ impl ResolvedShearShell {
     }
     /// One exact material section per triangle, in original mesh order.
     pub fn sections(&self) -> &[ShearShellSection] { &self.sections }
+    /// The element viscosities grouped by material loss law, each with its anchor ([`CONSTANT_LOSS_REFERENCE_OMEGA`],
+    /// `None` for Kelvin-Voigt). One law borrows the original viscosities unchanged; otherwise each group zeroes the
+    /// elements of the other laws, so the groups' projections sum to the single one.
+    pub(crate) fn loss_groups(&self) -> Result<Vec<(Option<f64>, std::borrow::Cow<'_, [ShearShellViscosity]>)>,
+        AcousticRealizeError>
+    {
+        let laws: Vec<Option<u64>> = self.regions.iter().map(|r| r.loss_reference_omega.map(f64::to_bits)).collect();
+        let mut distinct = laws.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if let [law] = distinct[..] {
+            return Ok(vec![(law.map(f64::from_bits), std::borrow::Cow::Borrowed(&self.viscosity[..]))]);
+        }
+        let zero = ShearShellViscosity::new([0.0; 9], [0.0; 9], [0.0; 3]).map_err(owner)?;
+        Ok(distinct.into_iter().map(|law| {
+            let only = self.element_regions.iter().zip(&self.viscosity)
+                .map(|(&r, v)| if laws[r] == law { *v } else { zero }).collect();
+            (law.map(f64::from_bits), std::borrow::Cow::Owned(only))
+        }).collect())
+    }
     /// Swap one region's complete material data; original geometry, mass policy,
     /// orientation and correction survive. Failed rebind leaves self unchanged.
     pub fn with_region_material(&self, name: &str, material: &ResolvedMaterialStatePoint,
@@ -233,6 +266,16 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
             shear[i]=plate_property(state,key,DynViscosity::DIMS)?;
             restrict_band(state,key,&mut band,true)?;
         }
+        // The anchor is read only when the source states it; its law is claimed only over the spectrum's fit band.
+        let loss_reference_omega = if state.property(CONSTANT_LOSS_REFERENCE_OMEGA).is_some() {
+            let w = plate_property(state, CONSTANT_LOSS_REFERENCE_OMEGA, CONSTANT_LOSS_REFERENCE_OMEGA_DIMS)?;
+            if w <= 0.0 { return Err(invalid("a constant-loss reference angular frequency must be positive")); }
+            restrict_band(state, CONSTANT_LOSS_REFERENCE_OMEGA, &mut band, false)?;
+            let (lo, hi) = constant_loss::SPECTRUM_BAND_RAD_S;
+            band.0 = band.0.max(lo);
+            band.1 = band.1.min(hi);
+            Some(w)
+        } else { None };
         if !band.0.is_finite() || !band.1.is_finite() || band.0<0.0 || band.1<band.0 {
             return Err(invalid("shell material coefficient applicability bands do not intersect"));
         }
@@ -243,7 +286,7 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
             return Err(invalid("shell region area or mass is unrepresentable"));
         }
         regions.push(ResolvedShellRegion { input,area_m2,thickness_m:h,mass_kg,
-            section,viscosity,plane_viscosity,shear_pa_s:shear,omega_band:band });
+            section,viscosity,plane_viscosity,shear_pa_s:shear,omega_band:band,loss_reference_omega });
     }
     let mut sections=Vec::with_capacity(assigned.len());
     let mut viscosity=Vec::with_capacity(assigned.len());

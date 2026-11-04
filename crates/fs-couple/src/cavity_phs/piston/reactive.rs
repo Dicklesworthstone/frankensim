@@ -1,7 +1,9 @@
 //! Declared reaction channels drive the original finite gas and inertial wall.
 //!
 //! The existing mass-action owner supplies `r(T, p_i/p0)` in mol/(m3 s).
-//! At one accepted state, `dξ_r = dt V r_r` and `n_i' = n_i + sum_r ν_ir dξ_r`.
+//! By default `dξ_r = dt V r_r` uses the accepted initial rate; the optional
+//! [`implicit`] paths solve the single or coupled endpoint rates instead. Both
+//! update `n_i' = n_i + sum_r ν_ir dξ_r` with the same conservative owner.
 //! The original gas owner reconstructs temperature at conserved mass, volume
 //! and TOTAL internal energy, including species formation references. Chemical
 //! energy is therefore not added again as a heat input. The new composition,
@@ -15,7 +17,7 @@
 //! consumption, source-domain, entropy and extensive-balance checks refuse
 //! an unresolved step instead of clipping species or renormalizing energy.
 //! Refine the interval to assess temporal error. No flame/shock propagation,
-//! heterogeneous chemistry, stiff mechanism integration or equilibrium sound
+//! heterogeneous chemistry or equilibrium sound
 //! speed is claimed. The gas owner still enforces its dilute gas/T/p envelope.
 //!
 //! Control-volume species/energy convention:
@@ -33,6 +35,8 @@ pub mod material_rate;
 pub mod mechanism;
 /// Bounded temporal refinement of the existing conservative chemistry update.
 pub mod subcycling;
+/// Backward-Euler extent with the same conservative gas and source-rate owners.
+pub mod implicit;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;
@@ -56,6 +60,8 @@ pub struct GasReaction {
     rate_material: Option<material_rate::MaterialRateScale>,
     additional_channels: Vec<mechanism::Channel>,
     subcycling: Option<subcycling::ReactionSubcycling>,
+    implicit: Option<implicit::ImplicitReactionSolve>,
+    implicit_mechanism: Option<implicit::coupled::ImplicitMechanismSolve>,
 }
 
 /// Physical step admission. Consumption is measured from actual reacting
@@ -64,7 +70,10 @@ pub struct GasReaction {
 pub struct GasReactionSolve {
     /// Original fixed-density internal-energy reconstruction controls.
     pub gas: GasEnergySolve,
-    /// Maximum gross fraction consumed across ALL channels per admitted substep, in `(0,1)`.
+    /// Maximum fraction withdrawn across ALL channels per substep, in `(0,1)`.
+    /// Explicit/scalar steps use the original inventory. Coupled implicit steps
+    /// also count simultaneous production as available stock, so an intermediate
+    /// can be produced and consumed within the same endpoint solve.
     pub maximum_consumed_fraction: f64,
     /// Maximum discrepancy of any final `n_i` from its stoichiometric value [mol].
     pub species_tolerance_mol: f64,
@@ -91,6 +100,12 @@ pub enum GasReactionError {
     EntropyDecrease { change_j_k: f64, tolerance_j_k: f64 },
     /// No complete error-admitted trajectory fits the explicit work limits.
     SubcyclingLimit { evaluations: usize, substeps: usize, last_error_ratio: Option<f64> },
+    /// The admitted molar-extent bracket does not contain an implicit root.
+    ImplicitOutsideBracket { lower_residual_mol: f64, upper_residual_mol: f64 },
+    /// Bounded nonlinear work ended before the amount residual was admitted.
+    ImplicitNotConverged { iterations: usize, residual_mol: f64 },
+    /// Total coupled endpoint/Jacobian work, including rejected trials, is spent.
+    ImplicitEvaluationLimit { evaluations: usize, maximum: usize },
     Cancelled,
 }
 impl core::fmt::Display for GasReactionError {
@@ -156,7 +171,8 @@ pub struct GasReactionSpecies {
 pub struct GasReactionStep {
     /// Identity of the first canonical channel; legacy scalar fields describe it.
     pub primary_reaction: fs_thermochem::ReactionId,
-    /// Initial rate; with subcycling, the first accepted substep's rate.
+    /// Explicit initial or implicit endpoint rate; with subcycling, the first
+    /// accepted substep's rate. The corresponding substep records its method.
     pub rate: DeclaredStoichiometricMassActionEvaluationV1,
     /// Actual rate-scale material evaluation; None on the original fixed-scale path.
     pub rate_material: Option<fs_material::state_point::ResolvedMaterialStatePoint>,
@@ -176,6 +192,12 @@ pub struct GasReactionStep {
     pub entropy_change_j_k: f64,
     /// Actual accepted substeps and estimate; None on the original one-step path.
     pub subcycling: Option<subcycling::ReactionSubcyclingReport>,
+    /// Endpoint equation for one implicit step. A subcycled summary leaves this
+    /// None and retains each original equation in its actual substeps instead.
+    pub implicit: Option<implicit::ImplicitReactionReport>,
+    /// Coupled endpoint equations, distinct from the legacy scalar bracket.
+    /// Subcycling retains these only in each actual accepted substep.
+    pub implicit_mechanism: Option<implicit::coupled::ImplicitMechanismReport>,
 }
 
 /// A proposed gas state usable by the existing flow, thermal and acoustic paths.
@@ -230,7 +252,7 @@ impl GasReaction {
                 "declared species molar masses do not conserve reaction mass within roundoff",
             ));
         }
-        Ok(Self { catalog, kinetics, rate_material: None, additional_channels: Vec::new(), subcycling: None })
+        Ok(Self { catalog, kinetics, rate_material: None, additional_channels: Vec::new(), subcycling: None, implicit: None, implicit_mechanism: None })
     }
     pub const fn catalog(&self) -> &ThermochemicalGasModel {
         &self.catalog
@@ -243,7 +265,7 @@ impl GasReaction {
 
     // Validate the live subset against the full catalog. An absent product's
     // sources remain in the immutable catalog, and are restored when it appears.
-    fn inventory(&self, gas: &ClosedGasParcel) -> Result<Vec<f64>, GasReactionError> {
+    pub(crate) fn inventory(&self, gas: &ClosedGasParcel) -> Result<Vec<f64>, GasReactionError> {
         let components = self.catalog.thermodynamics().components();
         let model = gas.model();
         let active = model.thermodynamics().components();
@@ -333,10 +355,26 @@ impl GasReaction {
                 "positive reaction time/tolerances and a consumed-fraction limit in (0,1) required",
             ));
         }
+        if let Some(policy) = self.implicit {
+            return implicit::candidate(self, gas, duration_s, controls, policy, &mut cancelled);
+        }
+        if let Some(policy) = &self.implicit_mechanism {
+            return implicit::coupled::candidate(self, gas, duration_s, controls, policy, &mut cancelled);
+        }
         let initial = self.inventory(gas)?;
-        let components = self.catalog.thermodynamics().components();
-        let mechanism::Progress { primary, additional, changes, expected, consumed } =
-            self.progress(gas, &initial, duration_s, controls, &mut cancelled)?;
+        let progress = self.progress(gas, &initial, duration_s, controls, &mut cancelled)?;
+        let next = self.reconstruct_inventory(gas, &progress.changes, &progress.expected,
+            controls, &mut cancelled)?;
+        self.admit_progress(gas, &initial, next, progress, controls, &mut cancelled)
+    }
+
+    // Shared caloric/source reconstruction for explicit steps and implicit
+    // trials. Only the final admitted candidate is checked for entropy growth;
+    // nonlinear bracket samples are not physical accepted trajectories.
+    fn reconstruct_inventory(
+        &self, gas: &ClosedGasParcel, changes: &[f64], expected: &[f64],
+        controls: GasReactionSolve, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ClosedGasParcel, GasReactionError> {
         let mut next = gas.clone();
         if changes.iter().any(|change| *change != 0.0) {
             let total: f64 = expected.iter().sum();
@@ -359,7 +397,7 @@ impl GasReaction {
             }
             if fractions
                 .iter()
-                .zip(&expected)
+                .zip(expected)
                 .any(|(x, n)| *n > 0.0 && !positive(*x))
             {
                 return Err(invalid(
@@ -371,8 +409,18 @@ impl GasReaction {
                     invalid("reaction composition does not satisfy the original quantity owner")
                 })?;
             let model = self.catalog.with_composition(composition)?;
-            next.replace_model_conserving_mass_energy(model, controls.gas, &mut cancelled)?;
+            next.replace_model_conserving_mass_energy(model, controls.gas, cancelled)?;
         }
+        Ok(next)
+    }
+
+    fn admit_progress(
+        &self, gas: &ClosedGasParcel, initial: &[f64], next: ClosedGasParcel,
+        progress: mechanism::Progress, controls: GasReactionSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasReactionCandidate, GasReactionError> {
+        let mechanism::Progress { primary, additional, changes, expected, consumed } = progress;
+        let components = self.catalog.thermodynamics().components();
         let actual = self.inventory(&next)?;
         let mut maximum_residual: f64 = 0.0;
         let species = components
@@ -407,7 +455,7 @@ impl GasReaction {
                 change_j_k: entropy, tolerance_j_k: controls.entropy_tolerance_j_k,
             });
         }
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(GasReactionCandidate {
             step: GasReactionStep {
                 primary_reaction: primary.reaction_id,
@@ -422,6 +470,8 @@ impl GasReaction {
                 stored_energy_change_j: energy,
                 entropy_change_j_k: entropy,
                 subcycling: None,
+                implicit: None,
+                implicit_mechanism: None,
             },
             gas: next,
         })
@@ -555,3 +605,5 @@ impl GasPiston {
 
 #[cfg(test)]
 mod tests;
+
+

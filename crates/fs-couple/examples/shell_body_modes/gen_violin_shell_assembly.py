@@ -31,6 +31,7 @@ UNIFORM_T = float(opts.get("uniform_t_mm", "0"))  # diagnostic: every plate zone
 CAVITY_EXACT = opts.get("cavity_volume", "exact") == "exact"  # "exact" (default): the air volume enclosed by the inner skins; "facet" reproduces the tables before 2026-10-23, whose divergence sum over open midsurfaces is origin dependent (P13 mail 5583)
 ONLY = opts.get("only", "")  # diagnostic: "top" or "back" builds that plate alone (with bar=0 post=0 bridge=0), free in space, to read its modes without the box
 FANFIX = opts.get("fanfix", "0") == "1"  # repairs for meshes that leave a vertex with several fans in one component (needed by some of the scaled sensitivity meshes; the base table does not need them)
+FANMOVE = opts.get("fanfix", "0") == "move"  # the interior part of that repair alone, keeping the merged patches (fanfix=1 re-derives them from the zones, which splits merged patches into more components)
 MIN_PATCH = int(opts.get("min_patch", "24"))  # interior zone patches smaller than this many triangles are merged into their neighbour
 ZSTEP = dict(top=float(opts.get("zone_step_top_mm", "0.2")), back=float(opts.get("zone_step_back_mm", "0.4")))
 CENTRE = np.array([0.0, -87.0])  # plan-view centre of the body (x, z) for the declared scale
@@ -564,6 +565,57 @@ def zone_components(prefix, fld, V, T, chains, ring, feature_chains, circles, pa
                 changed = True
         if not changed:
             break
+    if FANMOVE:
+        # a component's triangles round every vertex must form one fan: where an interior-zone patch has several fans round a vertex, its smaller fans join the neighbouring interior patch
+        # with which they share the most edges, taking that patch's label and zone; the patches are not recomputed, so the merged partition keeps its count
+        moved = 0
+        for _ in range(30):
+            moved_any = False
+            for v, ts in vert_tris.items():
+                by_patch = defaultdict(list)
+                for t_i in ts:
+                    by_patch[patch[t_i]].append(t_i)
+                for p_, mine in by_patch.items():
+                    if len(mine) < 2 or zone[mine[0]] < 0:
+                        continue
+                    par = {t_i: t_i for t_i in mine}
+
+                    def fnd3(a_):
+                        while par[a_] != a_:
+                            par[a_] = par[par[a_]]
+                            a_ = par[a_]
+                        return a_
+
+                    for x_ in mine:
+                        for y_ in mine:
+                            if x_ < y_ and len(set(T[x_].tolist()) & set(T[y_].tolist())) >= 2:
+                                par[fnd3(x_)] = fnd3(y_)
+                    groups = defaultdict(list)
+                    for t_i in mine:
+                        groups[fnd3(t_i)].append(t_i)
+                    if len(groups) > 1:
+                        keep = max(groups.values(), key=len)
+                        for g in groups.values():
+                            if g is keep:
+                                continue
+                            votes = defaultdict(int)
+                            for t_i in g:
+                                a, b, c = T[t_i]
+                                for u, w_ in ((a, b), (b, c), (c, a)):
+                                    for o in edge_tris[(min(u, w_), max(u, w_))]:
+                                        if patch[o] != p_ and zone[o] >= 0:
+                                            votes[patch[o]] += 1
+                            if votes:
+                                q = max(votes, key=votes.get)
+                                zq = zone[np.nonzero(patch == q)[0][0]]
+                                patch[g] = q
+                                zone[g] = zq
+                                moved += len(g)
+                                moved_any = True
+            if not moved_any:
+                break
+        if moved:
+            meta("fan_move_" + prefix, "%d triangles moved to a neighbouring interior patch so that every component has one fan at every vertex" % moved)
     if FANFIX:
         # a component's triangles round every vertex must form one fan: where a patch meets itself at a vertex (a loop of the patch round another zone touching itself there), the smaller
         # fans of an interior-zone patch go to the neighbouring patch with which they share the most edges, and the patches are recomputed (a detached piece becomes a patch of its own)

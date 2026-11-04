@@ -78,6 +78,11 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
 pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<BaffledRadiationLoad>) -> String {
     let load_json=radiation_provenance(radiation);
     let (c,radius,_density,_speed)=match (p.observation(),p.system()) {
+        (ApertureObservation::TubeBaffled(receiver), CoupledAperture::Dg(runtime)) => {
+            return super::duct_metadata::dg_baffled_observation_provenance(
+                runtime.load(), receiver, p.baffled_receiver().expect("admitted DG microphone"),
+            );
+        }
         (ApertureObservation::TubeBaffled(c),CoupledAperture::Tube(t))=>(c,t.spec().radius_m,t.aperture().spec().density_kg_m3,t.spec().sound_speed_m_s),
         (ApertureObservation::NetworkBaffled {node,receiver},CoupledAperture::Network(n))=> {
             let (index,section)=n.spec().sections.iter().enumerate().find(|(_,s)|s.nodes.contains(&node)).expect("admitted physical outlet section");
@@ -308,6 +313,172 @@ fn flue_duct_provenance(p: &fs_couple::flue_loop::network::performance::FlueOutl
     text
 }
 
+/// Original material/DG source metadata as one named JSON member (no leading comma).
+pub(super) fn material_modal_dg_provenance(
+    p: &fs_couple::bernoulli_aperture::performance::file::material_modal::dg::MaterialModalDgValvePerformance,
+) -> String {
+    let i = p.info();
+    let source = p.renderer();
+    let load = source.system().load();
+    let (pressure_point, observation) = match source.observation() {
+        ApertureObservation::Inlet => ("mean-inlet", String::new()),
+        ApertureObservation::TubeBaffled(receiver) => (
+            "baffled-outlet",
+            super::duct_metadata::dg_baffled_observation_provenance(
+                load, receiver, source.baffled_receiver().expect("admitted DG receiver"),
+            ),
+        ),
+        _ => unreachable!("authored material DG observes its original inlet or outlet"),
+    };
+    let materials = p.material_records().iter().map(|record| format!(
+        "{{\"blade\":{},\"section\":{},\"path\":{},\"pack_hash\":\"{}\"}}",
+        record.blade(), record.section(), json_string(record.path()),
+        record.pack().content_hash().to_hex(),
+    )).collect::<Vec<_>>().join(",");
+    let inlet = super::duct_metadata::gas_state(load.duct().inlet_gas());
+    let outlet = super::duct_metadata::gas_state(load.duct().outlet_gas());
+    let gas_sources = super::thermochemical::provenance(p.gas_records());
+    let radiation = super::duct_metadata::dg_radiation_provenance(load);
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification\"{observation}{radiation}{gas_sources}}}",
+        i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
+        i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
+        load.duct().total_length());
+    source_json
+}
+
+/// Original two-sided material source metadata shared by wind and ensemble.
+pub(super) fn material_modal_provenance(
+    p: &fs_couple::bernoulli_aperture::performance::file::material_modal::MaterialModalValvePerformance,
+) -> String {
+    let i = p.info();
+    let valve = match p.renderer().source().system().valve() {
+        fs_couple::bernoulli_aperture::two_sided::LoadedAperture::Modal(a) => a,
+        _ => unreachable!("material-modal file owns the requested modal valve"),
+    };
+    let materials = p.material_records().iter().map(|record| {
+        let source = valve.material_plates()[record.blade()].source();
+        let region = &source.regions()[record.section()];
+        let material = &region.input.material;
+        format!("{{\"blade\":{},\"section\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"specimen_hash\":\"{}\",\"mass_kg\":{:e},\"thickness_m\":{:e},\"material_angle_rad\":{:e}}}",
+            record.blade(), record.section(), json_string(record.path()),
+            record.pack().content_hash().to_hex(), material.card_identity().to_hex(),
+            material.identity().to_hex(), source.specimen_identity().to_hex(),
+            region.mass_kg, region.section.thickness, region.input.material_angle_rad)
+    }).collect::<Vec<_>>().join(",");
+    let gas_sources = super::thermochemical::provenance(p.gas_records());
+    let system = p.renderer().source().system();
+    let walls = p.wall_records().iter().map(|record| {
+        let side = match record.side() {
+            fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
+            fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
+        };
+        let wall = system.material_walls(record.side()).iter()
+            .find(|wall| wall.source().node == record.node()).expect("source-bound duct wall");
+        let material = &wall.source().material;
+        format!("{{\"side\":\"{side}\",\"node\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"thickness_m\":{:e},\"radius_m\":{:e},\"length_m\":{:e},\"band_hz\":[{:e},{:e}]}}",
+            record.node(), json_string(record.path()), record.pack().content_hash().to_hex(),
+            material.card_identity().to_hex(), material.identity().to_hex(),
+            wall.source().thickness_m, wall.radius_m(), wall.length_m(), wall.band_hz()[0], wall.band_hz()[1])
+    }).collect::<Vec<_>>().join(",");
+    let wall_json = format!(",\"material_duct_walls\":[{walls}],\"duct_wall_scope\":\"fixed-state local isotropic membrane; original regional duct gas; no full shell or exterior wall radiation\"");
+    let supply = system.supply_channel().map_or_else(|| "null".into(), |channel| {
+        let spec = channel.spec();
+        format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
+            spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
+            channel.gas().density, channel.gas().dynamic_viscosity)
+    });
+    let (propagator, linear_scope) = match i.propagator {
+        fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
+            ("midpoint", "original material structure with loaded one-cent midpoint admission"),
+        fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
+            ("exact-zoh", if valve.material_relaxation().is_some_and(|memory| memory.is_regional()) {
+                "original M/K and full cross-mode regional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
+            } else {
+                "original M/K and selected full C or proportional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
+            }),
+    };
+    let relaxation_json = valve.material_relaxation().map_or_else(String::new, |memory| {
+        let initial = match memory.initial_memory() {
+            fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Relaxed => "relaxed",
+            fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Unrelaxed => "unrelaxed",
+        };
+        let spectra = memory.material_spectra().iter().enumerate().flat_map(|(blade, regions)| {
+            regions.iter().enumerate().map(move |(section, law)| {
+                let terms = law.terms.iter().map(|(modulus, time)| format!(
+                    "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
+                    .collect::<Vec<_>>().join(",");
+                format!("{{\"blade\":{blade},\"section\":{section},\"equilibrium_young_modulus_pa\":{:e},\"terms\":[{terms}]}}", law.e_inf)
+            })
+        }).collect::<Vec<_>>().join(",");
+        let arms: usize = memory.memory_sqrt_j().iter().map(Vec::len).sum();
+        let kind = if memory.is_regional() { "regional_material_relaxation" }
+            else { "proportional_material_relaxation" };
+        format!(",\"{kind}\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"regional_spectra\":[{spectra}]}}")
+    });
+    let (radiation_scope, mimo_json) = if p.mimo_radiation_records().is_empty()
+        && p.computed_radiation_records().is_empty() {
+        ("compact independent baffled reaction and shared exterior pressure", String::new())
+    } else {
+        let groups = p.mimo_radiation_records().iter().map(|(side, record)| {
+            let side = match side {
+                fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
+                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
+            };
+            format!("{{\"side\":\"{side}\",\"source\":{}}}", super::duct_metadata::mimo_radiation_provenance(record))
+        }).chain(p.computed_radiation_records().iter().map(|(side, record)| {
+            let side = match side {
+                fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
+                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
+            };
+            format!("{{\"side\":\"{side}\",\"source\":{}}}", super::duct_metadata::computed_baffled_provenance(record))
+        })).collect::<Vec<_>>().join(",");
+        ("source-bound mutual baffled reaction within each selected side and matched exterior pressure; unselected outlets retain authored loads; no cross-side exterior coupling",
+            format!(",\"mimo_radiation_groups\":[{groups}]"))
+    };
+    let terminals = p.radiation_bindings().len()
+        + p.mimo_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>()
+        + p.computed_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>();
+    let boundary_json = modal_boundary_provenance(p);
+    let wetted_json = modal_wetted_provenance(valve);
+    let opening_loss_json = opening_loss_provenance(
+        [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
+         fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream]
+            .into_iter().flat_map(|side| {
+                let label = match side {
+                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
+                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
+                };
+                system.opening_losses(side).iter().map(move |binding| (label, binding))
+            }));
+    let force_programs = valve.material_plates().iter().enumerate().filter_map(|(blade, plate)| {
+        let events = p.renderer().pending_plate_force_controls(blade);
+        if events.is_empty() { return None; }
+        let weights = plate.options().reduction.unit_force_weights.iter()
+            .map(|weight| format!("{weight:e}")).collect::<Vec<_>>().join(",");
+        let projection = valve.spec().modes[plate.mode_range()].iter()
+            .map(|mode| format!("{:e}", mode.force_projection[blade]))
+            .collect::<Vec<_>>().join(",");
+        let events = events.iter().map(|event| format!(
+            "{{\"mechanical_sample\":{},\"force_n\":{:e}}}", event.sample, event.force_n))
+            .collect::<Vec<_>>().join(",");
+        Some(format!("{{\"blade\":{blade},\"node_force_weights\":[{weights}],\"modal_force_projection\":[{projection}],\"controls\":[{events}]}}"))
+    }).collect::<Vec<_>>().join(",");
+    let force_json = format!(",\"source_force_programs\":[{force_programs}],\"source_force_clock_hz\":{},\"source_force_scope\":\"prescribed physical newtons through original plate footprints and all retained modal coordinates; no tongue or lip contact law\"", i.mechanics_rate_hz);
+    let compiled_controls = p.renderer().pending_controls().len()
+        + [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
+           fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter()
+            .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>()
+        + (0..i.blades).map(|blade| p.renderer().pending_plate_force_controls(blade).len()).sum::<usize>();
+    let closure_scope = if valve.plate_closure().is_some() {
+        "source-mesh distributed contact and positive-P1 slit flow on every retained mode"
+    } else { "effective uniform slit/contact" };
+    let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}{opening_loss_json}{wetted_json}}}",
+        i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
+        compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
+        terminals);
+    source_json
+}
+
 fn load(bytes: &[u8], block: usize, policy: ObservationPolicy) -> Result<Loaded, String> {
     load_with_gas_sources(bytes, block, policy, None)
 }
@@ -342,6 +513,21 @@ fn load_with_all_sources(
     if flow_tap.is_some() && !bytes.starts_with(b"frankensim-flue-performance-v1\n") {
         return Err("--aperture-flows observes flue files only".into());
     }
+    if bytes.starts_with(b"frankensim-material-modal-dg-valve-v1\n") {
+        if policy == ObservationPolicy::Acceptance {
+            return Err("material-modal DG files retain flat DKT plates and a finite modal interface; exact propagation does not qualify a measured instrument".into());
+        }
+        let p = fs_couple::bernoulli_aperture::performance::file::material_modal::dg::MaterialModalDgValvePerformance::from_bytes_with_sources(
+            bytes, block, &CancelGate::new(), sources, load_material,
+        ).map_err(|e| e.to_string())?;
+        let i = p.info();
+        let source_json = material_modal_dg_provenance(&p);
+        return Ok(Loaded {
+            source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
+            samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
+            fixture: "material-modal-dg-input", source_json, observation_json: None,
+        });
+    }
     if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("material-modal files retain flat DKT walls and a finite modal interface; matched baffled observation is not a measured instrument qualification".into());
@@ -352,131 +538,7 @@ fn load_with_all_sources(
         if i.output_rate_hz != RATE {
             return Err("material-modal wind output must declare 48000 Hz; mechanical refinement belongs to its separate source clock".into());
         }
-        let valve = match p.renderer().source().system().valve() {
-            fs_couple::bernoulli_aperture::two_sided::LoadedAperture::Modal(a) => a,
-            _ => unreachable!("material-modal file owns the requested modal valve"),
-        };
-        let materials = p.material_records().iter().map(|record| {
-            let source = valve.material_plates()[record.blade()].source();
-            let region = &source.regions()[record.section()];
-            let material = &region.input.material;
-            format!("{{\"blade\":{},\"section\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"specimen_hash\":\"{}\",\"mass_kg\":{:e},\"thickness_m\":{:e},\"material_angle_rad\":{:e}}}",
-                record.blade(), record.section(), json_string(record.path()),
-                record.pack().content_hash().to_hex(), material.card_identity().to_hex(),
-                material.identity().to_hex(), source.specimen_identity().to_hex(),
-                region.mass_kg, region.section.thickness, region.input.material_angle_rad)
-        }).collect::<Vec<_>>().join(",");
-        let gas_sources = super::thermochemical::provenance(p.gas_records());
-        let system = p.renderer().source().system();
-        let walls = p.wall_records().iter().map(|record| {
-            let side = match record.side() {
-                fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
-                fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
-            };
-            let wall = system.material_walls(record.side()).iter()
-                .find(|wall| wall.source().node == record.node()).expect("source-bound duct wall");
-            let material = &wall.source().material;
-            format!("{{\"side\":\"{side}\",\"node\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"thickness_m\":{:e},\"radius_m\":{:e},\"length_m\":{:e},\"band_hz\":[{:e},{:e}]}}",
-                record.node(), json_string(record.path()), record.pack().content_hash().to_hex(),
-                material.card_identity().to_hex(), material.identity().to_hex(),
-                wall.source().thickness_m, wall.radius_m(), wall.length_m(), wall.band_hz()[0], wall.band_hz()[1])
-        }).collect::<Vec<_>>().join(",");
-        let wall_json = format!(",\"material_duct_walls\":[{walls}],\"duct_wall_scope\":\"fixed-state local isotropic membrane; original regional duct gas; no full shell or exterior wall radiation\"");
-        let supply = system.supply_channel().map_or_else(|| "null".into(), |channel| {
-            let spec = channel.spec();
-            format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
-                spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
-                channel.gas().density, channel.gas().dynamic_viscosity)
-        });
-        let (propagator, linear_scope) = match i.propagator {
-            fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
-                ("midpoint", "original material structure with loaded one-cent midpoint admission"),
-            fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
-                ("exact-zoh", if valve.material_relaxation().is_some_and(|memory| memory.is_regional()) {
-                    "original M/K and full cross-mode regional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
-                } else {
-                    "original M/K and selected full C or proportional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
-                }),
-        };
-        let relaxation_json = valve.material_relaxation().map_or_else(String::new, |memory| {
-            let initial = match memory.initial_memory() {
-                fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Relaxed => "relaxed",
-                fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Unrelaxed => "unrelaxed",
-            };
-            let spectra = memory.material_spectra().iter().enumerate().flat_map(|(blade, regions)| {
-                regions.iter().enumerate().map(move |(section, law)| {
-                    let terms = law.terms.iter().map(|(modulus, time)| format!(
-                        "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
-                        .collect::<Vec<_>>().join(",");
-                    format!("{{\"blade\":{blade},\"section\":{section},\"equilibrium_young_modulus_pa\":{:e},\"terms\":[{terms}]}}", law.e_inf)
-                })
-            }).collect::<Vec<_>>().join(",");
-            let arms: usize = memory.memory_sqrt_j().iter().map(Vec::len).sum();
-            let kind = if memory.is_regional() { "regional_material_relaxation" }
-                else { "proportional_material_relaxation" };
-            format!(",\"{kind}\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"regional_spectra\":[{spectra}]}}")
-        });
-        let (radiation_scope, mimo_json) = if p.mimo_radiation_records().is_empty()
-            && p.computed_radiation_records().is_empty() {
-            ("compact independent baffled reaction and shared exterior pressure", String::new())
-        } else {
-            let groups = p.mimo_radiation_records().iter().map(|(side, record)| {
-                let side = match side {
-                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
-                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
-                };
-                format!("{{\"side\":\"{side}\",\"source\":{}}}", super::duct_metadata::mimo_radiation_provenance(record))
-            }).chain(p.computed_radiation_records().iter().map(|(side, record)| {
-                let side = match side {
-                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
-                    fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
-                };
-                format!("{{\"side\":\"{side}\",\"source\":{}}}", super::duct_metadata::computed_baffled_provenance(record))
-            })).collect::<Vec<_>>().join(",");
-            ("source-bound mutual baffled reaction within each selected side and matched exterior pressure; unselected outlets retain authored loads; no cross-side exterior coupling",
-                format!(",\"mimo_radiation_groups\":[{groups}]"))
-        };
-        let terminals = p.radiation_bindings().len()
-            + p.mimo_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>()
-            + p.computed_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>();
-        let boundary_json = modal_boundary_provenance(&p);
-        let wetted_json = modal_wetted_provenance(valve);
-        let opening_loss_json = opening_loss_provenance(
-            [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
-             fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream]
-                .into_iter().flat_map(|side| {
-                    let label = match side {
-                        fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
-                        fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
-                    };
-                    system.opening_losses(side).iter().map(move |binding| (label, binding))
-                }));
-        let force_programs = valve.material_plates().iter().enumerate().filter_map(|(blade, plate)| {
-            let events = p.renderer().pending_plate_force_controls(blade);
-            if events.is_empty() { return None; }
-            let weights = plate.options().reduction.unit_force_weights.iter()
-                .map(|weight| format!("{weight:e}")).collect::<Vec<_>>().join(",");
-            let projection = valve.spec().modes[plate.mode_range()].iter()
-                .map(|mode| format!("{:e}", mode.force_projection[blade]))
-                .collect::<Vec<_>>().join(",");
-            let events = events.iter().map(|event| format!(
-                "{{\"mechanical_sample\":{},\"force_n\":{:e}}}", event.sample, event.force_n))
-                .collect::<Vec<_>>().join(",");
-            Some(format!("{{\"blade\":{blade},\"node_force_weights\":[{weights}],\"modal_force_projection\":[{projection}],\"controls\":[{events}]}}"))
-        }).collect::<Vec<_>>().join(",");
-        let force_json = format!(",\"source_force_programs\":[{force_programs}],\"source_force_clock_hz\":{},\"source_force_scope\":\"prescribed physical newtons through original plate footprints and all retained modal coordinates; no tongue or lip contact law\"", i.mechanics_rate_hz);
-        let compiled_controls = p.renderer().pending_controls().len()
-            + [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
-               fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter()
-                .map(|side| p.renderer().pending_boundary_controls(side).len()).sum::<usize>()
-            + (0..i.blades).map(|blade| p.renderer().pending_plate_force_controls(blade).len()).sum::<usize>();
-        let closure_scope = if valve.plate_closure().is_some() {
-            "source-mesh distributed contact and positive-P1 slit flow on every retained mode"
-        } else { "effective uniform slit/contact" };
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}{opening_loss_json}{wetted_json}}}",
-            i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
-            compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
-            terminals);
+        let source_json = material_modal_provenance(&p);
         let ratio = i.mechanics_rate_hz / i.output_rate_hz;
         let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
             i.mechanics_rate_hz, i.samples * u64::from(ratio), i.output_rate_hz);
@@ -487,14 +549,14 @@ fn load_with_all_sources(
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
     // The exact DG source reuses the same jet and material input owners. Its
-    // internal pressure follows the existing explicit decimation path below.
+    // selected same-clock pressure follows the explicit decimation path below.
     if bytes.starts_with(b"frankensim-flue-dg-performance-v1\n") {
         use fs_couple::flue_loop::dg::performance::file::FlueDgFilePerformance;
         if policy == ObservationPolicy::Acceptance {
             return Err("DG flue files retain an exploration-only jet card; --acceptance requires resolved qualified source flow".into());
         }
         if flow_tap.is_some() {
-            return Err("DG flue input does not declare exterior aperture flows".into());
+            return Err("DG flue aperture-flow export is not supported by this pressure input".into());
         }
         let p = FlueDgFilePerformance::from_bytes_with_gas_sources(
             bytes, block, &CancelGate::new(), sources).map_err(|e| e.to_string())?;
@@ -510,12 +572,75 @@ fn load_with_all_sources(
         let inlet_gas = super::duct_metadata::gas_state(duct.inlet_gas());
         let outlet_gas = super::duct_metadata::gas_state(duct.outlet_gas());
         let gas_sources = super::thermochemical::provenance(p.gas_records());
+        let radiation = super::duct_metadata::dg_radiation_provenance(load);
+        let (pressure_point, pressure_observation) =
+            if let Some(receiver) = p.renderer().baffled_receiver_config() {
+                let terminal = p.renderer().baffled_receiver().expect("admitted DG microphone");
+                if let Some(mouth) = p.renderer().mouth_radiation() {
+                    let source = load.radiation_record().expect("bound DG exterior");
+                    let exterior = super::duct_metadata::gas_state(source.gas_record().state());
+                    let microphone = p.renderer().mouth_receiver().expect("admitted DG mouth");
+                    let support = p.renderer().propagation_delay_samples().expect("exterior kernels");
+                    let mouth_reaction = voice.mouth_radiation_load();
+                    let mutual_mouth = load.has_driven_mouth();
+                    let terminal_json = if source.apertures().len() == 1 {
+                        let aperture = &source.apertures()[0];
+                        format!(",\"outlet_receiver\":{{\"radius_m\":{:e},\"radial_rings\":{},\"angular_points\":{},\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e}}}",
+                            aperture.radius_m, receiver.radial_rings, receiver.angular_points,
+                            terminal.delay_samples.0, terminal.delay_samples.1, terminal.filter_delay_samples())
+                    } else {
+                        let apertures = load.terminal_ports().iter().zip(source.apertures())
+                            .map(|(port, aperture)| format!("{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+                                port.0, aperture.center_m[0], aperture.center_m[1], aperture.radius_m))
+                            .collect::<Vec<_>>().join(",");
+                        format!(",\"terminal_receiver\":{{\"apertures\":[{apertures}],\"flow_order\":\"original DG terminal channels\",\"radial_rings\":{},\"angular_points\":{},\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e}}}",
+                            receiver.radial_rings, receiver.angular_points, terminal.delay_samples.0,
+                            terminal.delay_samples.1, terminal.filter_delay_samples())
+                    };
+                    let mouth_json = format!(",\"mouth_receiver\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"negative accepted DG inlet volume flow\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"reaction_added\":{}}}",
+                        mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
+                        mouth.cells[0], mouth.cells[1], microphone.delay_samples.0,
+                        microphone.delay_samples.1, microphone.filter_delay_samples(), mouth_reaction.is_some() || mutual_mouth);
+                    let reaction_json = if mutual_mouth {
+                        ",\"mouth_reaction\":{\"model\":\"joint-mixed-baffled-v1\",\"legacy_load_replaced\":true,\"memory\":\"one original MIMO mean-output ZOH\",\"mutual_mouth_terminal_reaction\":true,\"source_effort\":\"actual inlet pressure minus exterior mouth pressure\",\"work\":\"signed original joint-mouth exchange; not heat or certified rational storage\"}".to_owned()
+                    } else {
+                        mouth_reaction.map_or_else(|| ",\"mouth_reaction\":null".to_owned(), |reaction| {
+                            let spec = reaction.load();
+                            let term = spec.terms()[0];
+                            format!(",\"mouth_reaction\":{{\"model\":\"compact-rectangular-baffled-v1\",\"legacy_load_replaced\":true,\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"rate_per_s\":{:e},\"static_quadrature_relative_error\":{:e},\"max_complex_relative_error\":{:e},\"max_resistance_relative_error\":{:e},\"memory\":\"shared passive midpoint relaxation\",\"mutual_mouth_terminal_reaction\":false}}",
+                                reaction.maximum_frequency_hz(), term.resistance_pa_s_m3, term.rate_per_s,
+                                reaction.static_quadrature_relative_error(), reaction.max_complex_relative_error(),
+                                reaction.max_resistance_relative_error())
+                        })
+                    };
+                    let point = if source.apertures().len() == 1 { "baffled-mouth-and-outlet" }
+                        else { "baffled-mouth-and-terminals" };
+                    let scope = if mutual_mouth {
+                        "signed Rayleigh pressure sum of the actual rectangular mouth and circular terminals in one bound material exterior and infinite rigid baffle; complete same-step mutual mouth/terminal reaction; no resolved jet, free-field body or room radiation"
+                    } else if source.apertures().len() == 1 {
+                        "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular outlet in one material exterior and infinite rigid baffle; independent self loads, no mutual mouth/outlet reaction, resolved jet, free-field body or room radiation"
+                    } else {
+                        "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular terminals in one material exterior and infinite rigid baffle; no mutual reaction between mouth and terminals, resolved jet, free-field body or room radiation"
+                    };
+                    (point, format!(",\"observation_scope\":\"{scope}\",\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"exterior_gas\":{exterior},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"delay_compensated\":false{terminal_json}{mouth_json}{reaction_json}",
+                        receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
+                        receiver.maximum_frequency_hz, support.0, support.1))
+                } else {
+                    let point = if load.terminal_ports().len() == 1 { "baffled-outlet" }
+                        else { "baffled-terminals" };
+                    (point, super::duct_metadata::dg_baffled_observation_provenance(
+                        load, receiver, terminal,
+                    ))
+                }
+            } else {
+                ("mean-inlet", ",\"observation_scope\":\"internal interval-mean inlet pressure; not an exterior microphone\"".into())
+            };
         let wall = duct.spatial_viscothermal_admission().map_or_else(
             || "\"uniform-consistent-mass\"".to_owned(),
             |wall| format!("{{\"model\":\"local-cylinder-positive-quadrature\",\"quadrature_points\":{},\"poles_per_field\":{},\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e}}}",
                 wall.resolution.quadrature_points, wall.resolution.poles_per_field,
                 wall.max_complex_error, wall.max_real_loss_error));
-        let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"mean-inlet\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; internal mean pressure, not an exterior microphone; rigid bore wall; taper uses local-cylinder Webster approximation; no resolved turbulence or measured flute qualification\"{field}{gas_sources}}}",
+        let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"{pressure_point}\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; rigid bore wall; taper uses local-cylinder Webster approximation; source, spatial and nonlinear time convergence remain separate; no resolved turbulence or measured flute qualification\"{pressure_observation}{radiation}{field}{gas_sources}}}",
             i.input_hash.to_hex(), i.jet_card_source, i.jet_card_hash, p.card().authority.label(),
             i.compiled_controls, duct.operator_identity().to_hex(), duct.total_dofs(),
             duct.total_length(), duct.inlet_area_m2(), duct.outlet_area_m2(),
@@ -562,7 +687,7 @@ fn load_with_all_sources(
         let mouth_reaction = renderer.voice().mouth_radiation_load();
         let mouth_radiation_json = match renderer.mouth_radiation() {
             Some(mouth) => format!(",\"mouth_radiation\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"signed outward inlet volume flow\",\"reaction_added\":{}}}",
-                mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
+                mouth.center_m[0], mouth.center_m[1], mouth.size_m(&geometry)[0], mouth.size_m(&geometry)[1],
                 mouth.cells[0], mouth.cells[1], mouth_reaction.is_some()),
             None => ",\"mouth_radiation\":null".to_string(),
         };
@@ -576,6 +701,28 @@ fn load_with_all_sources(
                     load.max_complex_relative_error(), load.max_resistance_relative_error())
             }
             None => ",\"mouth_reaction\":null".to_string(),
+        };
+        let window_json = match p.window() {
+            Some(record) => {
+                let (w, l) = (&record.window, &record.ladder);
+                let pocket = match w.upstream {
+                    fs_bem::wall_window::WindowUpstream::ClosedEnd { distance }
+                    | fs_bem::wall_window::WindowUpstream::Port { distance } => distance,
+                };
+                let bore_area = core::f64::consts::PI * w.bore_radius * w.bore_radius;
+                let fine = &l.rungs[l.rungs.len() - 1];
+                let cheeks = match w.cheeks { fs_bem::wall_window::WindowCheeks::Radial => "radial", fs_bem::wall_window::WindowCheeks::Parallel => "parallel" };
+                let ramp = w.ramp.map_or_else(|| "null".to_string(), |r| format!("{{\"edge_height_m\":{:e},\"angle_rad\":{:e}}}", r.edge_height, r.angle));
+                let rungs = l.rungs.iter().map(|r| format!("{:e}", r.bore_length)).collect::<Vec<_>>().join(",");
+                let iterations = l.rungs.iter().map(|r| r.iterations.to_string()).collect::<Vec<_>>().join(",");
+                let order_source = if w.is_prism() { "re-entrant edges" } else { "observed over three rungs" };
+                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"unchanged\"}}",
+                    w.bore_radius, w.wall_thickness, w.arc_width, fine.resolved_arc_width, w.axial_length,
+                    fine.outer_axial_length, pocket, record.cells[0], record.cells[1], record.cells[2], l.order,
+                    l.mass_per_density * bore_area, record.channel_line_m, record.riser_mass_per_density,
+                    renderer.voice().mouth_inertance_pa_s2_m3())
+            }
+            None => ",\"window\":null".to_string(),
         };
         let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
         let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
@@ -614,7 +761,7 @@ fn load_with_all_sources(
         let mouth_scope = if mouth_reaction.is_some() {
             "same-sample compact rectangular mouth reaction and matched exterior observation"
         } else { "optional rectangular mouth is observation only" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
@@ -654,7 +801,10 @@ fn load_with_all_sources(
             ApertureObservation::TubeBaffled(_)|ApertureObservation::NetworkBaffled {..}=>"baffled-outlet",
         };
         let receiver_json=format!("{}{}",outlet_provenance(p.renderer(),i.radiation_load),super::duct_metadata::provenance(&p));
+        let computed_dg = matches!(p.renderer().system(), CoupledAperture::Dg(runtime)
+            if runtime.load().radiation_record().is_some());
         let scope=if observation!="baffled-outlet" { "internal pressure, not an exterior microphone" }
+            else if computed_dg { "exterior baffled-outlet pressure from the accepted causal DG terminal flow; computed full-clock-band reaction with separate continuous and sampled GridOnly checks; no measured-instrument qualification" }
             else if i.radiation_load.is_some() { "exterior baffled-outlet pressure with compact passive radiation feedback; not broadband matched radiation or measured calibration" }
             else { "one-way exterior baffled-outlet pressure; no matched radiation load or measured-instrument claim" };
         let requested=match p.renderer().system() {
@@ -812,3 +962,4 @@ mod tests {
         assert!(load(physical.as_bytes(), 37, ObservationPolicy::Acceptance).is_ok());
     }
 }
+

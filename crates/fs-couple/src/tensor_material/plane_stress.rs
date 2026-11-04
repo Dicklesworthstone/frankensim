@@ -227,7 +227,7 @@ impl TensorMaterialBody {
         let split=split_quadratic(&system,LinearSplitBudget {max_modes:states,max_omega_dt:core::f64::consts::PI})
             .map_err(TensorMaterialError::Propagation)?;
         poll(gate)?;
-        Ok(Self {system,split,masses:masses_kg,points:Vec::new(),plane_points:points,plane_offsets:offsets})
+        Ok(Self {system,split,inertia:Inertia::Diagonal(masses_kg),points:Vec::new(),plane_points:points,plane_offsets:offsets})
     }
     /// Original plane-stress contributions; empty for a full-3D body.
     pub fn plane_stress_points(&self)->&[PlaneStressPoint] {&self.plane_points}

@@ -4,7 +4,9 @@
 mod source;
 
 use fs_lbm::d3q27::D3q27;
-use fs_lbm::nsf3::{NsfError, NsfGasMedium, NsfGrid3, NsfSpec, ThermochemicalNsfGas, WallThermal};
+use fs_lbm::nsf3::{
+    NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfSpec, ThermochemicalNsfGas, WallThermal,
+};
 use fs_material::gas::GasSpec;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 
@@ -53,6 +55,48 @@ fn varying(x: [usize; 3]) -> (f64, [f64; 3], f64) {
 }
 
 #[test]
+fn g0_open_faces_use_source_caloric_energy_and_pressure_support() {
+    // Uniform flow at a temperature away from the reference detects a ghost
+    // energy reconstructed with frozen cv instead of the source's integral.
+    // Arbitrary formation energy must not leak into the open energy flux.
+    for offset in [-4000.0, 1_000_000.0] {
+        let mut s = spec(gas(offset, 110000.0, 1.0));
+        s.periodic[0] = false;
+        let mut grid =
+            NsfGrid3::<D3q27>::new(s, |_| false, |_| (300.0 / 310.0, [0.02, 0.0, 0.0], 310.0))
+                .unwrap();
+        let exterior = NsfOpenState {
+            density_kg_m3: grid.law().rho_ref_kg_m3 * 300.0 / 310.0,
+            velocity_m_s: [0.02 * grid.law().dx_m / grid.law().dt_s, 0.0, 0.0],
+            temperature_k: 310.0,
+        };
+        for high in [false, true] {
+            grid.set_open_face(0, high, Some(exterior)).unwrap();
+        }
+        let hash = grid.state_hash();
+        let unsupported = NsfOpenState {
+            density_kg_m3: 2.0 * exterior.density_kg_m3,
+            ..exterior
+        };
+        assert!(matches!(
+            grid.set_open_face(0, false, Some(unsupported)),
+            Err(NsfError::Gas(_))
+        ));
+        assert_eq!(grid.state_hash(), hash);
+        for _ in 0..32 {
+            let ledger = grid.step().unwrap();
+            assert!(ledger.residual_rel < 1e-12);
+        }
+        for x in 0..8 {
+            let (rho, u, temperature) = grid.cell([x, 0, 0]);
+            assert!((rho - 300.0 / 310.0).abs() < 1e-10);
+            assert!((u[0] - 0.02).abs() < 1e-10);
+            assert!((temperature - 310.0).abs() < 1e-6);
+        }
+    }
+}
+
+#[test]
 fn nasa9_energy_heating_updates_temperature_pressure_gamma_and_transport_together() {
     let gas = gas(-4000.0, 250000.0, 1.0);
     let reference = gas.model().evaluate(gas.context()).unwrap();
@@ -98,6 +142,63 @@ fn nasa9_energy_heating_updates_temperature_pressure_gamma_and_transport_togethe
             .abs()
             > 0.1
     );
+}
+
+#[test]
+fn hot_source_data_reaches_the_same_native_flow_heat_and_acoustic_state() {
+    use fs_material::fluid_transport::FluidTransport;
+
+    let temperature = 2400.0;
+    let controls = GasEnergySolve {
+        minimum_temperature_k: 2200.0,
+        maximum_temperature_k: 2700.0,
+        ..controls()
+    };
+    let gas = ThermochemicalNsfGas::new(
+        source::model_with_temperature_limit(-4000.0, 250000.0, 1.0, 3000.0),
+        source::point(temperature, 100000.0),
+        controls,
+    )
+    .unwrap();
+    let reference = gas.model().evaluate(gas.context()).unwrap();
+    let r = reference.state().specific_gas_constant;
+    let mut spec = spec(gas);
+    spec.temperature_k = temperature;
+    spec.temperature_window_k = [
+        controls.minimum_temperature_k,
+        controls.maximum_temperature_k,
+    ];
+    let heat_per_mass = 10000.0;
+    let source_e = heat_per_mass / (3.0 * r * temperature);
+    let mut grid = NsfGrid3::<D3q27>::new_with_sources(
+        spec,
+        |_| false,
+        |_| (1.0, [0.0; 3], temperature),
+        Some(Box::new(move |_, _| (0.0, [0.0; 3], source_e))),
+    )
+    .unwrap();
+    let before = grid.total_energy_j();
+    let mass = 32.0 * grid.law().rho_ref_kg_m3 * grid.law().dx_m.powi(3);
+    for _ in 0..4 {
+        let balance = grid.step().unwrap();
+        assert!(balance.residual_rel < 1e-12);
+    }
+    let resolved = grid.thermochemical_state([0, 0, 0]).unwrap().unwrap();
+    let hot = resolved.state();
+    hot.validate_coherence().unwrap();
+    assert_eq!(
+        hot.transport_state().unwrap(),
+        resolved.transport_state().unwrap()
+    );
+    assert!(hot.temperature > temperature);
+    assert!(hot.sound_speed > reference.state().sound_speed);
+    assert!(hot.gamma < reference.state().gamma);
+    assert!(hot.dynamic_viscosity > reference.state().dynamic_viscosity);
+    let specific_heat = r
+        * (2.0 * (hot.temperature - temperature)
+            + 0.0005 * (hot.temperature.powi(2) - temperature.powi(2)));
+    assert!((specific_heat - 4.0 * heat_per_mass).abs() < 1e-4);
+    assert!((grid.total_energy_j() - before - mass * specific_heat).abs() < 1e-10 * before.abs());
 }
 
 #[test]
@@ -224,4 +325,115 @@ fn perfect_gas_ingress_retains_legacy_arithmetic_and_observations() {
         assert_eq!(direct.step().unwrap(), explicit.step().unwrap());
         assert_eq!(direct.state_hash(), explicit.state_hash());
     }
+}
+
+#[test]
+fn signed_heat_sources_close_native_energy_without_becoming_viscous_heat() {
+    for thermochemical in [false, true] {
+        let mut expected_replay = None;
+        for workers in [1, 3] {
+            let medium = if thermochemical {
+                NsfGasMedium::Thermochemical(gas(-4000.0, 250000.0, 1.0))
+            } else {
+                NsfGasMedium::CaloricallyPerfect(GasSpec::dry_air_ussa1976())
+            };
+            let mut input = spec(medium);
+            input.workers = workers;
+            let mut grid = NsfGrid3::<D3q27>::new_with_sources(
+                input,
+                |x| x[2] == 1,
+                |_| (1.0, [0.0; 3], 300.0),
+                Some(Box::new(|x, time| {
+                    assert_eq!(x[2], 0, "solid cells must not request a source");
+                    (0.0, [0.0; 3], 0.002 * (2.0 - time))
+                })),
+            )
+            .unwrap();
+            let initial = grid.total_energy_j();
+            let unit = grid.law().energy_unit_j();
+            let mut supplied = 0.0;
+            for step in 0..4 {
+                let before = grid.total_energy_j();
+                let ledger = grid.step().unwrap();
+                // Sixteen fluid cells; trapezoidal integration is exact for
+                // this independently prescribed affine power history.
+                let expected = 16.0 * unit * 0.002 * (1.5 - step as f64);
+                supplied += expected;
+                assert!((ledger.source_energy_j - expected).abs() < 1e-13 * initial);
+                assert!((grid.total_energy_j() - before - expected).abs() < 1e-12 * initial);
+                assert!(ledger.residual_rel < 1e-12);
+                assert!(ledger.viscous_heating_j.abs() < 1e-12 * initial);
+                assert_eq!(ledger.unresolved_internal_exchange_j, 0.0);
+                assert!(
+                    (grid.cumulative_ledger().source_energy_j - supplied).abs() < 1e-12 * initial
+                );
+            }
+            assert!((grid.total_energy_j() - initial).abs() < 1e-12 * initial);
+            let replay = (grid.state_hash(), grid.cumulative_ledger());
+            if let Some(expected) = expected_replay {
+                assert_eq!(replay, expected);
+            } else {
+                expected_replay = Some(replay);
+            }
+        }
+    }
+}
+
+#[test]
+fn mechanical_source_work_is_never_relabelled_as_viscous_heat() {
+    let force: f64 = 0.002;
+    let mut grid = NsfGrid3::<D3q27>::new_with_sources(
+        spec(GasSpec::dry_air_ussa1976()),
+        |_| false,
+        |_| (1.0, [0.0; 3], 300.0),
+        Some(Box::new(move |_, time| {
+            // Uniform acceleration: u = force*time, hence supplied power
+            // is force*u and all supplied energy becomes kinetic energy.
+            (0.0, [force, 0.0, 0.0], force * force * time)
+        })),
+    )
+    .unwrap();
+    let initial = grid.total_energy_j();
+    for step in 0..4 {
+        let before_kinetic = grid.kinetic_energy_j();
+        let ledger = grid.step().unwrap();
+        let expected = 32.0 * grid.law().energy_unit_j() * force * force * (step as f64 + 0.5);
+        assert!((ledger.source_energy_j - expected).abs() < 1e-13 * initial);
+        assert!((grid.kinetic_energy_j() - before_kinetic - expected).abs() < 1e-12 * initial);
+        assert_eq!(ledger.viscous_heating_j, 0.0);
+        assert!((ledger.unresolved_internal_exchange_j + expected).abs() < 1e-12 * initial);
+        assert!(ledger.residual_rel < 1e-12);
+        assert!((grid.cell([0, 0, 0]).2 - 300.0).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn mass_source_energy_is_a_supply_not_dissipation() {
+    let gas = GasSpec::dry_air_ussa1976();
+    let velocity: f64 = 0.02;
+    let mass: f64 = 0.001;
+    let energy_per_mass = (1.0 / 3.0) / (gas.gamma - 1.0) + 0.5 * velocity * velocity;
+    let mut grid = NsfGrid3::<D3q27>::new_with_sources(
+        spec(gas),
+        |_| false,
+        |_| (1.0, [velocity, 0.0, 0.0], 300.0),
+        Some(Box::new(move |_, _| {
+            (mass, [mass * velocity, 0.0, 0.0], mass * energy_per_mass)
+        })),
+    )
+    .unwrap();
+    let initial = grid.total_energy_j();
+    let ledger = grid.step().unwrap();
+    let unit = 32.0 * grid.law().energy_unit_j();
+    assert!((ledger.source_energy_j - unit * mass * energy_per_mass).abs() < 1e-13 * initial);
+    assert!(ledger.residual_rel < 1e-12);
+    assert_eq!(ledger.viscous_heating_j, 0.0);
+    assert!(
+        (ledger.unresolved_internal_exchange_j + unit * mass * 0.5 * velocity * velocity).abs()
+            < 1e-12 * initial
+    );
+    let (density, actual_velocity, temperature) = grid.cell([0, 0, 0]);
+    assert!((density - 1.0 - mass).abs() < 1e-12);
+    assert!((actual_velocity[0] - velocity).abs() < 1e-12);
+    assert!((temperature - 300.0).abs() < 1e-8);
 }

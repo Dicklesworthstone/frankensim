@@ -183,6 +183,9 @@ mod thermochemical_gas;
 #[path = "tests/cavity.rs"]
 mod physical_cavity;
 
+#[path = "tests/spatial_cavity.rs"]
+mod spatial_cavity;
+
 #[path = "stops/station_tests.rs"]
 mod migrating_stops;
 

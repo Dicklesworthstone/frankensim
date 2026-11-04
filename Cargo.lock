@@ -961,11 +961,13 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-phs",
  "fs-qty",
  "fs-regime",
  "fs-rep-mesh",
  "fs-solver",
  "fs-sparse",
+ "fs-thermal",
 ]
 
 [[package]]
@@ -1466,10 +1468,12 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-feec",
+ "fs-ga",
  "fs-la",
  "fs-lbm",
  "fs-matdb",
  "fs-material",
+ "fs-mbd",
  "fs-phs",
  "fs-qty",
  "fs-rep-mesh",
@@ -2282,10 +2286,18 @@ dependencies = [
 name = "fs-plate-transient"
 version = "0.0.1"
 dependencies = [
+ "fs-contact",
+ "fs-dcontact",
+ "fs-evidence",
+ "fs-matdb",
+ "fs-material",
+ "fs-phs",
  "fs-plate",
+ "fs-qty",
  "fs-solver",
  "fs-sparse",
  "fs-time",
+ "fs-tribo",
 ]
 
 [[package]]
@@ -2777,6 +2789,9 @@ version = "0.0.1"
 [[package]]
 name = "fs-thermal"
 version = "0.0.1"
+dependencies = [
+ "fs-la",
+]
 
 [[package]]
 name = "fs-thermochem"

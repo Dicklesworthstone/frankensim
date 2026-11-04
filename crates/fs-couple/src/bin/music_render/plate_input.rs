@@ -88,6 +88,7 @@ pub(super) fn run_with_gas_sources(
     )?;
     let input_hash = info.input_hash.to_hex();
     let wav_hash = rendered.hash.to_hex();
+    let radiation_load = if info.baffled_piston_loading { "baffled-piston" } else { "none" };
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"plate-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -99,8 +100,8 @@ pub(super) fn run_with_gas_sources(
          \"retained_modes\":{},\"force_events\":{},\
          \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
          \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}},\
-         \"listener_m\":{:e},\"propagation_delay_s\":{:e}{section_sources},\
-         \"model_scope\":\"linear flat DKT plate; sections from their named packs or fixture labels; compact baffled observer retarded by r/c in the declared gas; no radiation loading or physical-validation claim\"}}{gas_sources}}}",
+         \"listener_m\":{:e},\"propagation_delay_s\":{:e},\"radiation_load\":\"{radiation_load}\"{section_sources},\
+         \"model_scope\":\"linear flat DKT plate; sections from their named packs or fixture labels; compact baffled observer retarded by r/c; optional per-mode piston reaction uses the same gas and clock; no mutual-radiation, continuum-convergence or physical-validation claim\"}}{gas_sources}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.nodes, info.triangles, info.sections, info.requested_modes, info.retained_modes,
         info.force_events, info.gas.temperature, info.gas.pressure, info.gas.density,

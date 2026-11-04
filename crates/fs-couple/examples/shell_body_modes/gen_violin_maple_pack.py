@@ -5,8 +5,9 @@ nu_LR = the mean Poisson ratio, G_LT and G_RT = the ULTRASONIC shear moduli (1 M
 shear modulus of Laemmlein's 30 violin-back maple plates (maple-sycamore-lammlein2020-plates; plate modes near 0.7 kHz), replacing the ultrasonic value (orchestrator ruling, mail 6065).
 Loss: eta_L and eta_LR are Laemmlein's violin-back maple plates; eta_R, eta_LT and eta_RT are UNKNOWN for maple and are set equal to eta_LR as a declared surrogate (mail 5280 of the
 orchestrator: T and RT/LT shear loss are unknown in every open source). The nine Kelvin-Voigt viscosities the shell owner consumes are V = D^(1/2) Q D^(1/2) / omega_ref with
-omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); they do not enter the frequencies. A constant loss factor per mode is recovered by the example as
-C_hyst(omega) = (omega_ref / omega) C_KV, and the packs of the wood-loss lane replace these numbers.
+omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); they do not enter the frequencies. The pack states omega_ref as
+constant_loss_reference_omega, so the shell reduction reads each loss factor at every mode's own frequency (fs_couple::shear_shell::constant_loss), and the
+packs of the wood-loss lane replace these numbers.
 
 usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|shear=fpl] [inplane=laemmlein]
 Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020,maple-sycamore-lammlein2020-plates}/properties.tsv and writes
@@ -26,7 +27,7 @@ FPL_SHEAR = "shear=fpl" in sys.argv[3:]
 ULTRASONIC_SHEAR = "shear=ultrasonic" in sys.argv[3:]
 INPLANE_LAEMMLEIN = "inplane=laemmlein" in sys.argv[3:]
 SEED = REPO + "/data/matdb/seed-v1/"
-OMEGA_MAX = 12566.37
+OMEGA_MIN, OMEGA_MAX = 2.0 * math.pi * 150.0, 2.0 * math.pi * 10000.0  # the narrower of the sources' bands: Laemmlein's sweep, 150-10000 Hz
 OMEGA_REF = 2.0 * math.pi * 200.0
 PACK = ("violin-maple-sycamore-sonderegger2013-shell" + ("-fplshear" if FPL_SHEAR else "") + ("-ultrasonicshear" if ULTRASONIC_SHEAR else "")
         + ("-laemmlein" if INPLANE_LAEMMLEIN else ""))
@@ -96,7 +97,10 @@ BASE = [("density", "kg/m^3"), ("young_modulus_1", "Pa"), ("young_modulus_2", "P
 
 AXES = ("Axis convention: material axis 1 = L (grain), axis 2 = R (across the growth rings, in the plane of a quartersawn plate), thickness = T, so shear_modulus_12 = G_LR, "
         "shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L; the source's subscripts were converted to this "
-        "order in the committed Sonderegger pack). The validity band omega 0 to 2 pi 2000 rad/s and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.")
+        "order in the committed Sonderegger pack). The validity band omega 2 pi 150 to 2 pi 10000 rad/s is the narrower of the sources' bands: Laemmlein's loss factors and audio-band G_LR "
+        "come from a loudspeaker sweep over 150-10000 Hz (four plate modes of it, whose frequencies the source does not state), and the static and 1 MHz ultrasonic moduli bracket the "
+        "audio band. Using a static or ultrasonic modulus inside the band is a STATED ASSUMPTION that the audio-band value lies between the two, with no dispersion applied; it is not a "
+        "fit. T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.")
 OBS = [
     ("sond-shell", "Sycamore maple (Acer pseudoplatanus L.): ONE tree of Eastern Switzerland (Sonderegger, 626 kg/m3 at about 12 percent moisture, 20 C / 65 percent RH) and 30 violin-back plates "
      "(Laemmlein, 665 kg/m3, 20 C / 65 percent RH)",
@@ -109,8 +113,8 @@ OBS = [
     ("laemmlein-maple-loss", "Sycamore maple violin-back wood, 30 quarter-sawn plates 95 x 60 x 2.6 mm, unvarnished",
      "Laemmlein et al. (2020) Holzforschung 74:765-776 as committed in the pack maple-sycamore-loss-lammlein2020: loss_factor_longitudinal %.4f and loss_factor_shear_lr %.4f; eta_L = %.4f, eta_LR = %.4f; "
      "eta_R, eta_LT and eta_RT are UNKNOWN for maple and set equal to eta_LR" % (la["loss_factor_longitudinal"], la["loss_factor_shear_lr"], eta["L"], eta["LR"]),
-     "SURROGATE for three of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the example "
-     "recovers a constant loss factor per mode by omega_ref / omega. They do not enter any frequency."),
+     "SURROGATE for three of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the pack "
+     "states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own frequency. They do not enter any frequency."),
 ]
 
 
@@ -123,11 +127,16 @@ lines = ["frankensim.matdb-source.v1"]
 for o in OBS:
     lines.append("\t".join(("observation",) + o))
 for k, u in BASE:
-    for row in (("scalar", k, "sond-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+    for row in (("scalar", k, "sond-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
 for k in VISC_ORDER:
-    for row in (("scalar", k, "laemmlein-maple-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+    for row in (("scalar", k, "laemmlein-maple-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
+# The angular frequency at which the nine viscosities above were written: a reader applies each loss factor at every
+# mode's own frequency with it (fs_couple::shear_shell::CONSTANT_LOSS_REFERENCE_OMEGA); without it they are Kelvin-Voigt.
+k = "constant_loss_reference_omega"
+for row in (("scalar", k, "laemmlein-maple-loss", k, fmt(OMEGA_REF), "rad/s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
+    lines.append("\t".join(row))
 open(OUT + "/" + PACK + "/properties.tsv", "w", encoding="utf-8").write("\n".join(lines) + "\n")
 man = ["frankensim.matdb-manifest.v1", "pack_id\t" + PACK,
        "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013, maple-sycamore-lammlein2020-plates and maple-sycamore-loss-lammlein2020 (whose own terms apply to the Laemmlein values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted)",

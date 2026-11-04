@@ -7,6 +7,8 @@
 
 #[path = "finite_gas_string/input.rs"]
 mod input;
+#[path = "finite_gas_string/layered.rs"]
+mod layered;
 #[allow(dead_code)]
 #[path = "../src/bin/music_render/json.rs"]
 mod json;
@@ -23,7 +25,7 @@ use fs_couple::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
 use fs_couple::pcm_wav::encode_pcm16_wav;
 use fs_couple::string_specimen::{
     KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, StringGeometryConstraint, StringPrestress,
-    with_uniform_circular_material_and_constraints,
+    with_uniform_circular_material_and_constraints, with_uniform_circular_thermal_extension,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
@@ -34,7 +36,7 @@ use fs_material::gas_species::input::{GasRecord, read_isochoric_parcel};
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::{
     MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_material_state_point,
+    ScalarPropertyRequirement, resolve_material_state_point, integrate_isotropic_thermal_expansion,
 };
 use fs_material::thermochemical_gas::energy::IsochoricGasParcel;
 use fs_qty::{Density, DynViscosity, Pressure};
@@ -95,6 +97,46 @@ fn context(temperature_k: f64, omega_rad_s: f64) -> Result<QueryPoint> {
         .with("omega", omega_rad_s)?)
 }
 
+fn string_template(spec: &input::Spec) -> PrestressedString {
+    PrestressedString {
+        length_m: spec.length_m,
+        // The material/prestress binding replaces all template properties.
+        tension_n: 0.0,
+        lin_density_kg_m: 1.0,
+        axial_stiffness_n: 0.0,
+        width_m: 1.0,
+        n_modes: spec.modes,
+        damping_ratio: 0.0,
+        rayleigh: None,
+        bending_stiffness_n_m2: 0.0,
+        kelvin_voigt_bending: None,
+        relaxation_bending: None,
+        polarization_detune: 0.0,
+        moving_end: false,
+    }
+}
+
+fn caloric_curve(spec: &input::Spec, card: &MaterialCard) -> Result<ResolvedHeatCapacityCurve> {
+    let lower = context(spec.solid_minimum_k, spec.query_omega_rad_s)?;
+    let upper = context(spec.solid_maximum_k, spec.query_omega_rad_s)?;
+    let heat_capacity = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
+    let density = PropertyKey::new("density", Density::DIMS);
+    Ok(ResolvedHeatCapacityCurve::try_new(
+        card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &heat_capacity,
+            density: &density,
+            temperature_axis: "T",
+            lower: &lower,
+            upper: &upper,
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        spec.enthalpy_interpolation_j_kg,
+    )?)
+}
+
 fn build(
     cx: &Cx<'_>,
     spec: &input::Spec,
@@ -138,27 +180,21 @@ fn build(
         &requirements,
         MaterialPropertySelection::SingleClaimOnly,
     )?;
-    let specimen = with_uniform_circular_material_and_constraints(
-        PrestressedString {
-            length_m: spec.length_m,
-            tension_n: spec.tension_n,
-            lin_density_kg_m: 1.0,
-            axial_stiffness_n: 0.0,
-            width_m: 1.0,
-            n_modes: spec.modes,
-            damping_ratio: 0.0,
-            rayleigh: None,
-            bending_stiffness_n_m2: 0.0,
-            kelvin_voigt_bending: None,
-            relaxation_bending: None,
-            polarization_detune: 0.0,
-            moving_end: false,
-        },
-        StringGeometryConstraint::FixedRadius(spec.radius_m),
-        &resolved,
-        StringPrestress::FixedTension(spec.tension_n),
-    )?
-    .with_kelvin_voigt_bending_loss()?;
+    let template = string_template(spec);
+    let geometry = StringGeometryConstraint::FixedRadius(spec.radius_m);
+    let specimen = match (spec.prestress, spec.thermoelastic) {
+        (input::Prestress::FixedTension(tension), None) =>
+            with_uniform_circular_material_and_constraints(template, geometry, &resolved,
+                StringPrestress::FixedTension(tension))?,
+        (input::Prestress::FixedSupports, Some(thermal)) => {
+            let reference = context(thermal.reference_temperature_k, spec.query_omega_rad_s)?;
+            let expansion = integrate_isotropic_thermal_expansion(card, &reference, &point,
+                MaterialPropertySelection::SingleClaimOnly)?;
+            with_uniform_circular_thermal_extension(template, geometry, &resolved, &expansion,
+                thermal.reference_length_m, thermal.strain_limit)?
+        }
+        _ => return Err("inconsistent string prestress and thermoelastic input".into()),
+    }.with_kelvin_voigt_bending_loss()?;
     let mut mechanical = LinearMaterialStringRuntime::try_new_with_gas(
         cx,
         specimen,
@@ -174,51 +210,24 @@ fn build(
             force_n: spec.force_n,
         }],
     )?;
-    let lower = context(spec.solid_minimum_k, spec.query_omega_rad_s)?;
-    let upper = context(spec.solid_maximum_k, spec.query_omega_rad_s)?;
-    let heat_capacity = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
-    let density = PropertyKey::new("density", Density::DIMS);
-    let caloric = ResolvedHeatCapacityCurve::try_new(
-        card,
-        HeatCapacitySourceQuery {
-            heat_capacity: &heat_capacity,
-            density: &density,
-            temperature_axis: "T",
-            lower: &lower,
-            upper: &upper,
-            selection: SelectionPolicy::SingleClaimOnly,
-        },
-        SolidLiquidPhase::Solid,
-        0.0,
-        spec.enthalpy_interpolation_j_kg,
-    )?;
+    let caloric = caloric_curve(spec, card)?;
     let initial = caloric.state_at_temperature(spec.solid_temperature_k)?;
-    Ok(ThermalMaterialStringRuntime::try_new(
-        cx,
-        mechanical,
-        card.clone(),
-        caloric.curve().clone(),
-        initial.specific_enthalpy_j_kg(),
-        spec.maximum_solid_increment_k,
-    )?)
-}
-
-fn mechanical_energy(live: &ThermalMaterialStringRuntime) -> f64 {
-    live.mechanical()
-        .modes()
-        .iter()
-        .zip(live.mechanical().states())
-        .map(|(mode, state)| {
-            0.5 * (state.velocity_m_sqrt_kg_per_s.powi(2)
-                + (mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg).powi(2))
-        })
-        .sum()
+    Ok(if let Some(thermal) = spec.thermoelastic {
+        ThermalMaterialStringRuntime::try_new_thermoelastic(cx, mechanical, card.clone(),
+            caloric.curve().clone(), initial.specific_enthalpy_j_kg(),
+            spec.maximum_solid_increment_k, thermal.solve)?
+    } else {
+        ThermalMaterialStringRuntime::try_new(cx, mechanical, card.clone(),
+            caloric.curve().clone(), initial.specific_enthalpy_j_kg(),
+            spec.maximum_solid_increment_k)?
+    })
 }
 
 struct History {
     description: String,
     pressure_pa: Vec<f64>,
-    records: Vec<[f64; 22]>,
+    records: Vec<[f64; 27]>,
+    layer_temperatures: Vec<Vec<f64>>,
 }
 
 fn simulate(
@@ -228,13 +237,16 @@ fn simulate(
     mut gas: IsochoricGasParcel,
 ) -> Result<History> {
     let mut live = build(cx, spec, card, &gas)?;
-    let initial_mechanical_j = mechanical_energy(&live);
+    let initial_mechanical_j = live.mechanical_internal_energy_j()?;
     let initial_enthalpy_j_kg = live.thermal().specific_enthalpy_j_kg();
     let initial_gas_energy_j_kg = gas.state().specific_internal_energy_j_kg();
     let solid_mass_kg = live.mechanical().specimen().mass_kg();
     let gas_mass_kg = gas.mass_kg();
+    let prestress = if spec.thermoelastic.is_some() {
+        "fixed supports, sourced thermal expansion and affine stiffness with reversible heat"
+    } else { "fixed tension and constant elastic modulus" };
     let description = format!(
-        "material_card={}, caloric_curve={}, solid_mass_kg={solid_mass_kg:e}, gas_mass_kg={gas_mass_kg:e}, gas_volume_m3={:e}, initial_mechanical_energy_j={initial_mechanical_j:e}; fully solid, fixed geometry/tension/E/density, temperature-dependent loss/resistivity/conduction; first-order frozen-law samples; finite gas is a thermal inventory, not a chamber; diagnostic compact pressure supplies no radiation loading; source identity is not measured validation{}",
+        "material_card={}, caloric_curve={}, solid_mass_kg={solid_mass_kg:e}, gas_mass_kg={gas_mass_kg:e}, gas_volume_m3={:e}, initial_mechanical_internal_energy_j={initial_mechanical_j:e}; fully solid, fixed geometry/density, {prestress}, temperature-dependent loss/resistivity/conduction; first-order frozen-law samples; finite gas is a thermal inventory, not a chamber; diagnostic compact pressure supplies no radiation loading; source identity is not measured validation{}",
         card.content_hash().to_hex(),
         live.thermal().phase_curve_identity().to_hex(),
         gas.volume_m3(),
@@ -272,6 +284,7 @@ fn simulate(
         (0.0, 0.0, 0.0, 0.0);
     let (mut solid_heat, mut gas_heat, mut work, mut other_loss, mut allowance) =
         (0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut reversible_heat, mut axial_change, mut entropy_energy_change) = (0.0, 0.0, 0.0);
     for sample in 0..spec.samples {
         cx.checkpoint().map_err(|_| "finite gas string cancelled")?;
         let forces = live.mechanical().project_point_forces(
@@ -345,9 +358,12 @@ fn simulate(
         other_loss +=
             vibration.dissipation.authored_loss_j + vibration.dissipation.roundoff_residual_j;
         allowance += coupled.energy_tolerance_j;
+        reversible_heat += coupled.string.reversible_heat_j;
+        axial_change += coupled.string.axial_free_energy_change_j;
+        entropy_energy_change += coupled.string.mechanical_entropy_energy_change_j;
         // Measure all three actual storage changes from their accepted states,
         // independently of the step reports' claimed energy residuals.
-        let stored_change = mechanical_energy(&live) - initial_mechanical_j
+        let stored_change = live.mechanical_internal_energy_j()? - initial_mechanical_j
             + solid_mass_kg * (live.thermal().specific_enthalpy_j_kg() - initial_enthalpy_j_kg)
             + gas_mass_kg * (gas.state().specific_internal_energy_j_kg() - initial_gas_energy_j_kg);
         let defect = stored_change + other_loss - work - joule_heat - solid_heat - gas_heat;
@@ -361,7 +377,7 @@ fn simulate(
                     + joule_heat.abs()
                     + solid_heat.abs()
                     + gas_heat.abs()
-                    + initial_mechanical_j);
+                    + initial_mechanical_j.abs());
         if !defect.is_finite()
             || !tolerance.is_finite()
             || defect.abs() > tolerance
@@ -396,6 +412,11 @@ fn simulate(
             resistance,
             final_resistance,
             live.mechanical().modes()[0].damping_ratio,
+            live.mechanical().specimen().string().tension_n,
+            live.mechanical().modes()[0].angular_frequency_rad_s / (2.0 * std::f64::consts::PI),
+            reversible_heat,
+            axial_change,
+            entropy_energy_change,
         ];
         if record.iter().any(|value| !value.is_finite()) {
             return Err("nonfinite trajectory observation".into());
@@ -408,6 +429,7 @@ fn simulate(
         description,
         pressure_pa,
         records,
+        layer_temperatures: Vec::new(),
     })
 }
 
@@ -419,7 +441,14 @@ fn run(args: &[String]) -> Result<()> {
     let bytes = bounded_read(Path::new(&args[0]), input::MAX_INPUT_BYTES)?;
     let spec = input::parse(std::str::from_utf8(&bytes)?)?;
     let pack = NormalizedPack::from_bytes(&bounded_read(Path::new(&args[1]), 16 << 20)?)?;
-    let card = material(&pack)?;
+    let mut cards = vec![material(&pack)?];
+    if let Some(bonded) = &spec.bonded {
+        let directory = Path::new(&args[0]).parent().unwrap_or_else(|| Path::new("."));
+        for sleeve in &bonded.sleeves {
+            let bytes = bounded_read(&directory.join(&sleeve.pack), 16 << 20)?;
+            cards.push(material(&NormalizedPack::from_bytes(&bytes)?)?);
+        }
+    }
     let gas = load_gas(&gas_options, spec.gas_volume_m3)?;
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -436,7 +465,11 @@ fn run(args: &[String]) -> Result<()> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        simulate(&cx, &spec, &card, gas)
+        if spec.bonded.is_some() {
+            layered::simulate(&cx, &spec, &cards, gas)
+        } else {
+            simulate(&cx, &spec, &cards[0], gas)
+        }
     })?;
     let (wav, clips) = encode_pcm16_wav(
         &history.pressure_pa,
@@ -456,16 +489,25 @@ fn run(args: &[String]) -> Result<()> {
         history.description, spec.sample_rate_hz, spec.full_scale_pa
     );
     let mut output = std::io::BufWriter::new(std::io::stdout().lock());
-    writeln!(
+    write!(
         output,
-        "time_s,pressure_pa,displacement_m,velocity_m_s,solid_temperature_k,gas_temperature_k,gas_pressure_pa,material_heat_j,drag_heat_j,solid_to_gas_heat_j,joule_heat_j,prescribed_solid_heat_j,prescribed_gas_heat_j,mechanical_work_j,storage_change_j,energy_defect_j,energy_tolerance_j,current_a,endpoint_current_a,resistance_ohm,endpoint_resistance_ohm,first_mode_damping_ratio"
+        "time_s,pressure_pa,displacement_m,velocity_m_s,solid_temperature_k,gas_temperature_k,gas_pressure_pa,material_heat_j,drag_heat_j,solid_to_gas_heat_j,joule_heat_j,prescribed_solid_heat_j,prescribed_gas_heat_j,mechanical_work_j,storage_change_j,energy_defect_j,energy_tolerance_j,current_a,endpoint_current_a,resistance_ohm,endpoint_resistance_ohm,first_mode_damping_ratio,tension_n,first_mode_frequency_hz,reversible_heat_j,axial_free_energy_change_j,mechanical_entropy_energy_change_j"
     )?;
-    for record in &history.records {
+    if let Some(temperatures) = history.layer_temperatures.first() {
+        for layer in 0..temperatures.len() {
+            write!(output, ",layer_{layer}_temperature_k")?;
+        }
+    }
+    writeln!(output)?;
+    for (sample, record) in history.records.iter().enumerate() {
         for (i, value) in record.iter().enumerate() {
             if i != 0 {
                 write!(output, ",")?;
             }
             write!(output, "{value:.17e}")?;
+        }
+        if let Some(temperatures) = history.layer_temperatures.get(sample) {
+            for temperature in temperatures { write!(output, ",{temperature:.17e}")?; }
         }
         writeln!(output)?;
     }

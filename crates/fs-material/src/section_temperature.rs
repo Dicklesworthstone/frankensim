@@ -11,6 +11,8 @@
 pub mod heating;
 /// Source-pinned expansion and stress on the same layer temperatures.
 pub mod expansion;
+/// Helmholtz energy and its thermal derivatives for live layered mechanics.
+pub mod thermoelastic;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};

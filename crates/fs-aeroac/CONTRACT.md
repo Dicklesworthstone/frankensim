@@ -159,6 +159,26 @@ data-only pressure/temperature/mixture changes through executed flow and
 observer outputs (G0/G3). These short transient tests establish integration,
 not a converged tonal spectrum or absolute sound level.
 
+`material::MaterialSlotJet3d` applies the same material/scaling owner to the
+existing D3Q19 central-moment slot-jet rig. Its second-order relaxation rate is
+derived from the gas's actual kinematic viscosity; only higher-order numerical
+relaxation remains an independent control. Three-dimensional momentum exchange
+converts with `rho * dx^4 / dt^2` into N across one explicitly retained periodic
+span. Both material adapters share one Hann/coherent-gain/phase FFT extraction.
+The physical line frequency and acoustic wavenumber use the same timestep and
+gas as the flow. A three-dimensional periodic-cell force is not passed to the
+two-dimensional Curle Green function or relabeled as microphone pressure.
+
+The 3-D initial-speed admission includes the rig's 1.5 maximum spanwise seed
+factor. Final-plane speed diagnostics use all three velocity components
+(`momentum / density`), and plane mass flux is momentum itself. These are
+final-plane samples, not a global speed bound or maximum over the recording.
+`tests/material_slot_jet_3d.rs` executes pressure, temperature and composition
+substitutions through the original solver, independently checks SI force and
+DFT amplitude/phase, and checks necessary material/Mach/allocation refusals.
+This frozen homogeneous low-Mach adapter supplies no compressible feedback,
+chemical evolution, acoustic radiation, turbulence-convergence or SPL claim.
+
 1. EXACT Wronskian: `J1 Y0 - J0 Y1 = 2/(pi x)` holds within 5e-13
    over a log grid 1e-3..3e3 including the series/asymptotic
    crossover from both sides. Honest limits (review-measured against

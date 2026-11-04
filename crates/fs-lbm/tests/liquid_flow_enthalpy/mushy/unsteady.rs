@@ -156,9 +156,8 @@ fn endpoint_loss_of_mushy_support_rolls_back_heat_and_native_momentum() {
 }
 
 #[test]
-fn exact_solid_phase_occupancy_refuses_retained_momentum_without_breaking_quasisteady_flow() {
+fn exact_phase_selects_retained_momentum_without_replacing_quasisteady_flow() {
     use super::continuity::{chart, resolve, source};
-    use fs_lbm::conjugate::enthalpy::advection::feedback::MaterialFlowError;
 
     let card = source(100.0);
     let curve = chart(&card);
@@ -180,17 +179,24 @@ fn exact_solid_phase_occupancy_refuses_retained_momentum_without_breaking_quasis
         |_, cell: &DepositedCell, _| resolve(&card, &law, cell.specific_h_j_kg),
     )
     .unwrap();
-    // Every cell currently flows, but this owner can change native occupancy
-    // at a later exact-solid endpoint. It cannot silently discard stored motion.
+    // Source-backed exact-phase samples can use either original momentum mode.
     assert!(
         phase
             .endpoint()
             .iter()
             .all(|s| s.transport.mobile_transport().is_some())
     );
-    assert!(matches!(phase.clone().with_unsteady_momentum(),
-        Err(MaterialFlowError::Thermal(DepositionError::InvalidInput(reason)))
-            if reason.contains("phase occupancy") && reason.contains("kinetic-energy handoff")));
+    let retained = phase.clone().with_unsteady_momentum().unwrap();
+    let (transient, history, heat) = old
+        .advance_observed(&retained, 0.1, config(), || Ok(()))
+        .unwrap();
+    assert_eq!(history.unsteady_time_s(), Some(transient.time_s()));
+    assert!(history.unsteady_flow().unwrap().velocity_m_s.iter().flatten()
+        .any(|u| u.abs() > 0.0));
+    assert!(history.applied().unwrap().flow.velocity_m_s.iter().flatten()
+        .all(|u| *u == 0.0));
+    near(transient.energy_j(), old.energy_j());
+    near(heat.external_heat_j, 0.0);
     assert!(phase.unsteady_flow().is_none());
     assert_eq!(old.time_s(), 0.0);
     assert!(phase.applied().is_none());

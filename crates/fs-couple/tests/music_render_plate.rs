@@ -74,6 +74,64 @@ fn modifying_a_constitutive_region_changes_the_produced_sound() {
 }
 
 #[test]
+fn explicit_material_gas_reaction_reaches_the_command_and_sidecar() {
+    let root = scratch();
+    let text = std::str::from_utf8(SOURCE).unwrap().replace("observer 1.0\n",
+        "observer 1.0\nradiation-load baffled-piston\n");
+    let input = root.join("loaded.performance");
+    let output = root.join("loaded.wav");
+    std::fs::write(&input, &text).unwrap();
+    let loaded = PlatePerformance::from_bytes(text.as_bytes(), 4801).unwrap();
+    assert!(loaded.info().baffled_piston_loading);
+    let mut performance = loaded.into_renderer();
+    let mut pressure = vec![0.0; 4801];
+    performance.block(&mut pressure).unwrap();
+    let mut unloaded = vec![0.0; 4801];
+    PlatePerformance::from_bytes(SOURCE, 4801).unwrap().into_renderer().block(&mut unloaded).unwrap();
+    assert!(pressure.iter().zip(&unloaded).any(|(a,b)| (a-b).abs() > 1e-7),
+        "the declared reaction must change the physical signal");
+    let (expected, _) = encode_pcm16_wav(&pressure, 48_000, 1.0).unwrap();
+    assert_eq!(rendered(&input, &output, 37), expected);
+    let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    assert!(sidecar.contains("\"radiation_load\":\"baffled-piston\""));
+    assert!(!sidecar.contains("no radiation loading"));
+}
+
+#[test]
+fn data_only_pressure_change_alters_loaded_motion_beyond_pressure_scaling() {
+    let text = std::str::from_utf8(SOURCE).unwrap();
+    let render = |loaded: bool, doubled_pressure: bool| {
+        let mut source = text.to_string();
+        if loaded { source = source.replace("observer 1.0\n", "observer 1.0\nradiation-load baffled-piston\n"); }
+        if doubled_pressure { source = source.replace("ambient 293.15 101325 0", "ambient 293.15 202650 0"); }
+        pressure(&source)
+    };
+    for loaded in [false, true] {
+        let (one, air) = render(loaded, false);
+        let (two, dense) = render(loaded, true);
+        assert_eq!(air.sound_speed, dense.sound_speed);
+        assert_eq!(dense.density, 2.0*air.density);
+        let scale = one.iter().map(|p| p*p).sum::<f64>();
+        let defect = one.iter().zip(two).map(|(a,b)| (b-2.0*a).powi(2)).sum::<f64>();
+        assert!(scale > 1e-12);
+        if loaded { assert!(defect/scale > 1e-8, "gas did not reach mechanical reaction: {defect}/{scale}"); }
+        else { assert!(defect/scale < 1e-24, "unloaded same-c reference must scale only with density"); }
+    }
+}
+
+#[test]
+fn radiation_selection_is_explicit_and_unknown_or_duplicate_loads_refuse() {
+    let text = std::str::from_utf8(SOURCE).unwrap();
+    let source = |row: &str| text.replace("observer 1.0\n", &format!("observer 1.0\n{row}\n"));
+    assert!(!PlatePerformance::from_bytes(source("radiation-load none").as_bytes(), 64)
+        .unwrap().info().baffled_piston_loading);
+    for row in ["radiation-load", "radiation-load automatic", "radiation-load baffled-piston extra",
+        "radiation-load none\nradiation-load baffled-piston"] {
+        assert!(PlatePerformance::from_bytes(source(row).as_bytes(), 64).is_err(), "{row}");
+    }
+}
+
+#[test]
 fn invalid_geometry_and_conflicting_options_leave_no_output_artifact() {
     let root = scratch();
     let input = root.join("invalid.performance");

@@ -2,8 +2,8 @@
 //!
 //! This is an output owner only: the accepted source-bound air reaction remains
 //! inside the existing mechanics. Boundary traces, gas and geometry policy are
-//! shared with that load. The existing observation producer supplies centroid
-//! receiver p/grad rows and the existing FIR retains their causal history.
+//! shared with that load. Its same reciprocal P1/P0 source supplies adaptive
+//! receiver pressure/gradient rows; the existing FIR retains their history.
 //! Finite-band reconstruction convergence does not certify spatial accuracy or
 //! molecular gas attenuation.
 
@@ -11,9 +11,10 @@ use super::{MultiBowPerformance, render_invalid};
 use crate::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemError;
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionModalSystem;
-use fs_bem::helmholtz::{Medium, PanelRule};
+use fs_bem::helmholtz::Medium;
+use fs_bem::near_field::Options as ReceiverQuadrature;
 use fs_bem::observation_transfers::{
-    BemObservation, ObservationTransferBake, ProducerUncertainty, ReceiverSpec,
+    ReciprocalBemObservation, ObservationTransferBake, ProducerUncertainty, ReceiverSpec,
     SourceId, TransferDeclaration, TransferError, MAX_OBSERVATION_RUNGS,
 };
 use fs_blake3::ContentHash;
@@ -34,8 +35,8 @@ pub struct ShellObserverOptions {
     pub tail_energy_tolerance: f64,
     pub dtft_relative_tolerance: f64,
     pub maximum_frequency_entries: usize,
-    /// Conservative frequency-count * dense shell algebraic work bound, using
-    /// the same panel/mode expression as the original loading owner.
+    /// Complete original reciprocal boundary-source work over every sampled
+    /// frequency. Adaptive receiver quadrature has a separate explicit allowance.
     pub maximum_sweep_terms: u64,
     /// Maximum retained FIR multiply-add terms PER accepted physical sample,
     /// including all four pressure/gradient outputs.
@@ -119,7 +120,11 @@ pub struct ShellObserverReport {
     pub loading_identity: ContentHash,
     pub gas: GasState,
     pub body_modes: usize,
+    /// Explicit compact mouth volume-flow inputs, after structural velocities.
+    pub opening_ports: usize,
     pub surface_panels: usize,
+    /// Adaptive P1/P0 receiver accuracy and per-frequency kernel-work allowance.
+    pub quadrature: ReceiverQuadrature,
     pub sweep_terms: u64,
     /// Complete retained convolution terms per accepted sample.
     pub replay_terms: u64,
@@ -132,7 +137,9 @@ impl ShellObserverReport {
 pub(super) struct BoundShellObserver {
     report: ShellObserverReport,
     observer: ObservationFir,
-    body_component: usize,
+    // (original component, original coordinate, physical source scale).
+    // Body columns use generalized velocity; mouths use actual volume flow.
+    coordinates: Vec<(usize, usize, f64)>,
     velocity: Vec<f64>,
     maximum_abs_pressure_pa: f64,
     samples: u64,
@@ -147,13 +154,10 @@ impl BoundShellObserver {
         if self.samples.checked_add(1) != Some(system.samples_rendered()) {
             return Err(render_invalid("closed-shell observer lost its accepted mechanical clock"));
         }
-        let body = system.components().get(self.body_component)
-            .ok_or_else(|| render_invalid("closed-shell observer lost its original body"))?;
-        if body.states().len() != self.velocity.len() {
-            return Err(render_invalid("closed-shell observer lost its complete original modal basis"));
-        }
-        for (velocity, state) in self.velocity.iter_mut().zip(body.states()) {
-            *velocity = state.velocity_m_sqrt_kg_per_s;
+        for (velocity, &(component, coordinate, scale)) in self.velocity.iter_mut().zip(&self.coordinates) {
+            let state = system.components().get(component).and_then(|body|body.states().get(coordinate))
+                .ok_or_else(||render_invalid("shell observer lost its original body or mouth coordinate"))?;
+            *velocity = scale*state.velocity_m_sqrt_kg_per_s;
         }
         let output = self.observer.step(&self.velocity)
             .map_err(|_| render_invalid("closed-shell observation failed on accepted modal velocities"))?;
@@ -173,12 +177,22 @@ impl MultiBowPerformance {
     /// a bank that has accepted any physical sample is refused.
     ///
     /// A raw supplied radiation model has no geometry-route evidence and cannot
-    /// substitute for the original material-shell BEM binding. Cavity/open-body
-    /// coupling and molecular gas attenuation are outside this observation path.
+    /// substitute for the original material-shell BEM binding. Explicit compact
+    /// cavity mouths share that same boundary and supply their accepted physical
+    /// volume flows. Undeclared holes and molecular attenuation remain outside it.
     pub fn with_material_shell_observer(
-        mut self, options: ShellObserverOptions, gate: &CancelGate,
+        self, options: ShellObserverOptions, gate: &CancelGate,
     ) -> Result<Self, ShellObserverError> {
+        self.with_material_shell_observer_with_quadrature(options,ReceiverQuadrature::default(),gate)
+    }
+
+    /// Refine the original P1/P0 receiver integration independently of the
+    /// boundary/angular source and the FIR ladder. No centroid fallback occurs.
+    pub fn with_material_shell_observer_with_quadrature(
+        mut self, options:ShellObserverOptions, quadrature:ReceiverQuadrature, gate:&CancelGate,
+    ) -> Result<Self,ShellObserverError> {
         poll(gate)?;
+        quadrature.validate().map_err(TransferError::Helmholtz)?;
         if self.poisoned || self.shell_observer.is_some() || self.base_sample != 0
             || self.bank.system.samples_rendered() != 0
         {
@@ -188,7 +202,7 @@ impl MultiBowPerformance {
         let rate = source.options().sample_rate_hz;
         options.validate(rate)?;
         if source.material_cavity().is_some() || source.prepared_linear_budget().is_some() {
-            return Err(invalid("closed-shell observation requires the exact loaded owner without a cavity"));
+            return Err(invalid("shell observation requires the exact loaded owner without an unrelated lumped cavity"));
         }
         let binding = source.body_radiation()
             .ok_or_else(|| invalid("shell observation requires the matching original BEM air load"))?;
@@ -214,7 +228,13 @@ impl MultiBowPerformance {
         if body_modes != loading.body_modes {
             return Err(invalid("shell observation must retain every original body mode in order"));
         }
-        let replay_terms = (body_modes as u64).checked_mul(4)
+        let expected = source.radiation_body_coordinates(body_modes)
+            .map_err(|_|invalid("shell observer lost its complete body/mouth source map"))?;
+        if expected != binding.source_body_coordinates()
+            || expected.len() != body_modes+loading.opening_ports
+        { return Err(invalid("shell observer must retain every original body and mouth source")); }
+        let source_count = expected.len();
+        let replay_terms = (source_count as u64).checked_mul(4)
             .and_then(|n| n.checked_mul((finest / 2) as u64))
             .ok_or_else(|| invalid("complete observation replay extent overflow"))?;
         if replay_terms > options.maximum_replay_terms {
@@ -224,7 +244,7 @@ impl MultiBowPerformance {
         // below the stop band, conservatively including its last boundary bin.
         let frequency_samples =
             (options.taper_stop_hz * finest as f64 / f64::from(rate)).ceil() as usize;
-        let (surface, traces, sweep_terms) = source.shell_surface_traces(
+        let (surface, mut traces, _) = source.shell_surface_traces(
             body_modes, loading.options.maximum_surface_panels, options.maximum_sweep_terms,
             frequency_samples, gate,
         ).map_err(ShellObserverError::Shell)?;
@@ -232,15 +252,48 @@ impl MultiBowPerformance {
         if surface_panels != loading.surface_panels {
             return Err(invalid("shell observation geometry differs from the original radiation load"));
         }
-        let sources = (0..body_modes).map(|index| SourceId::StructuralMode(
+        let mut sources = (0..body_modes).map(|index| SourceId::StructuralMode(
             format!("material-shell-mode:{index}:{}", loading.basis_identity),
         )).collect::<Vec<_>>();
+        let mut coordinates: Vec<_> = (0..body_modes).map(|mode|(body_component,mode,1.0)).collect();
+        if loading.opening_ports != 0 {
+            let cavity = source.spatial_cavity()
+                .ok_or_else(||invalid("shell observer lost its original mouth geometry"))?;
+            if cavity.opening_count() != loading.opening_ports || traces.len() != source_count {
+                return Err(invalid("shell observer mouth extent differs from its joint load"));
+            }
+            for index in 0..loading.opening_ports {
+                let port = cavity.coupling().neck_radiation_port(index)
+                    .map_err(|_|invalid("shell observer lost its original neck flow projection"))?;
+                if expected[body_modes+index] != port.coordinate || port.coordinate < body_modes {
+                    return Err(invalid("shell observer mouth address differs from its joint load"));
+                }
+                // Loading columns use mass-normalized velocity. The common
+                // observation owner explicitly labels aperture volume flow,
+                // so transform BOTH the trace and accepted input inversely.
+                for value in &mut traces[body_modes+index] {
+                    *value /= port.volume_weight_m2_per_sqrt_kg;
+                }
+                sources.push(SourceId::ApertureVolumeFlow(format!(
+                    "material-shell-mouth:{index}:{}",loading.loading_identity)));
+                coordinates.push((body_component+1,port.coordinate-body_modes,
+                    port.volume_weight_m2_per_sqrt_kg));
+            }
+        }
         let gas = *source.gas();
-        let owner = BemObservation::new_routed(
+        let mut boundary_allowance=loading.options;
+        boundary_allowance.maximum_sweep_terms=options.maximum_sweep_terms;
+        let owner = ReciprocalBemObservation::new(
             &surface, Medium { density: gas.density, sound_speed: gas.sound_speed },
             &sources, &traces, core::slice::from_ref(&options.receiver), options.minimum_clearance_m,
-            PanelRule::Triangle { max_pairs: surface_panels.saturating_pow(2) },
+            core::f64::consts::TAU*loading.options.maximum_hz,
+            boundary_allowance.reciprocal_budget(frequency_samples,loading.reciprocal.angular_refinement)
+                .map_err(ShellObserverError::Shell)?,
+            quadrature,||gate.is_requested(),
         )?;
+        let sweep_terms=owner.frequency_work().map_err(TransferError::Helmholtz)?
+            .checked_mul(frequency_samples as u64)
+            .ok_or_else(||invalid("reciprocal receiver source sweep work overflow"))?;
         let declaration = options.declaration(
             rate, sources, owner.geometric_delays_s(), owner.operator_hash(), loading.loading_identity,
         );
@@ -250,10 +303,11 @@ impl MultiBowPerformance {
         poll(gate)?;
         let report = ShellObserverReport {
             options, basis_identity: loading.basis_identity, loading_identity: loading.loading_identity,
-            gas, body_modes, surface_panels, sweep_terms, replay_terms, transfer,
+            gas, body_modes, opening_ports: loading.opening_ports,
+            surface_panels, quadrature, sweep_terms, replay_terms, transfer,
         };
         self.shell_observer = Some(BoundShellObserver {
-            report, observer, body_component, velocity: vec![0.0; body_modes],
+            report, observer, coordinates, velocity: vec![0.0; source_count],
             maximum_abs_pressure_pa: source.options().network.maximum_abs_pressure_pa,
             samples: 0,
         });

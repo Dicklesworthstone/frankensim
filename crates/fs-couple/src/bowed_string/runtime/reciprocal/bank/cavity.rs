@@ -7,11 +7,15 @@
 //! No assigned body frequencies, fitted timbre, independent air stepper, or
 //! duplicated uniform compliance is introduced.
 //!
-//! Scope: one connected, conforming, closed midsurface boundary, frozen coherent
-//! gas, linear shell kinematics and lossless interior acoustics. Mesh, pressure
+//! Scope: one connected conforming volume with an explicit partition between
+//! material shell faces and optional fixed compact fluid mouths, frozen coherent
+//! gas, linear shell kinematics and optional source-gas heat diffusion. Mesh, pressure
 //! order, retained frequency window and structural modes require convergence.
-//! This does not cap an open f-hole, guess its exterior impedance, supply
-//! thermoviscous wall loss, or claim full violin/cello/bass validation.
+//! A declared mouth supplies its internal impedance; the existing exterior BEM
+//! supplies its joint pressure reaction. This does not resolve a distributed
+//! f-hole field, supply viscous wall shear, or claim instrument validation.
+//! Thermal loss requires explicitly isothermal solid walls and a separately
+//! admitted heat FE/eigenwindow; the default remains lossless interior air.
 
 use super::*;
 use crate::render::plate::impact::{ImpactError, cavity::{
@@ -25,6 +29,11 @@ use fs_math::det;
 use fs_modal::SliceOptions;
 use fs_plate::shell::pressure::ShellFace;
 use std::collections::BTreeMap;
+
+mod openings;
+pub use openings::{MAX_SHELL_CAVITY_OPENINGS, ShellCavityOpening};
+mod thermal;
+pub use thermal::{ShellCavityThermalLoss, ShellCavityThermalOptions};
 
 /// Numerical admission, independent of instrument name or material choice.
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +69,8 @@ pub struct MaterialShellCavity {
     overlap_rows: Vec<f64>,
     volume_m3: f64,
     coupling: CavityCoupling,
+    openings: Vec<openings::PreparedOpening>,
+    thermal_loss: Option<ShellCavityThermalLoss>,
 }
 impl MaterialShellCavity {
     pub const fn gas(&self) -> &GasState { &self.gas }
@@ -78,8 +89,42 @@ impl MaterialShellCavity {
     pub fn overlap_rows(&self) -> &[f64] { &self.overlap_rows }
     pub const fn volume_m3(&self) -> f64 { self.volume_m3 }
     pub const fn coupling(&self) -> &CavityCoupling { &self.coupling }
+    /// Original gas-conduction reduction, when explicitly selected. With this
+    /// law, use the bank's pressure observer, which includes accepted thermal
+    /// memory; `coupling()` alone describes only the adiabatic storage basis.
+    pub const fn thermal_loss(&self) -> Option<&ShellCavityThermalLoss> {
+        self.thermal_loss.as_ref()
+    }
     /// Caller-owned interleaved displacement/velocity scratch for observation.
     pub fn observation_state_len(&self) -> usize { 2 * self.coupling.total_modes() }
+    /// Actual compact fluid apertures, in the source's declared order.
+    pub fn opening_count(&self) -> usize { self.openings.len() }
+    pub fn opening(&self, index: usize) -> Option<&ShellCavityOpening> {
+        self.openings.get(index).map(|opening| &opening.source)
+    }
+    /// Bounding mouth radius about its area centroid or internal length,
+    /// whichever is larger; the compact chart bounds the whole physical patch.
+    pub fn opening_extent_m(&self, index: usize) -> Option<f64> {
+        self.openings.get(index).map(|opening| opening.extent_m)
+    }
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn opening_triangles(
+        &self, index: usize,
+    ) -> Option<&[[[f64; 3]; 3]]> {
+        self.openings.get(index).map(|opening| opening.triangles.as_slice())
+    }
+    /// Body modes followed by true neck coordinates, relative to the original
+    /// body component. Interior standing-wave inertias are never exterior ports.
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn exterior_body_coordinates(
+        &self,
+    ) -> Result<Vec<usize>, ShellCavityError> {
+        let mut coordinates: Vec<_> = (0..self.coupling.structural_modes()).collect();
+        for index in 0..self.openings.len() {
+            coordinates.push(self.coupling.neck_radiation_port(index)
+                .map_err(ShellCavityError::Coupling)?.coordinate);
+        }
+        self.coupling.admit_exterior_sources(&coordinates).map_err(ShellCavityError::Coupling)?;
+        Ok(coordinates)
+    }
 }
 
 #[derive(Debug)]
@@ -88,6 +133,7 @@ pub enum ShellCavityError {
     Acoustic(AcousticFeError),
     Coupling(ImpactError),
     Bank(ReciprocalStringError),
+    Radiation(super::radiation::bem::ShellBemError),
     Cancelled,
 }
 impl core::fmt::Display for ShellCavityError {
@@ -127,7 +173,65 @@ impl ReciprocalStringBank {
     /// changes exterior sound through the body's accepted loaded acceleration.
     /// Interior pressure coordinates are not relabeled as microphone channels.
     pub fn with_material_shell_cavity(
-        mut self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions, gate: &CancelGate,
+        self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions, gate: &CancelGate,
+    ) -> Result<Self, ShellCavityError> {
+        self.with_material_shell_cavity_inner(fe, options, Vec::new(), None, gate)
+    }
+
+    /// Connect explicitly declared compact mouths to the same original FE and
+    /// body. Every mouth replaces actual missing solid faces, not a rigid cap.
+    /// Its area and pressure averages come from the original FE face integrals;
+    /// only internal neck length and resistance are supplied. Mouth rims must
+    /// be fixed in the retained structural basis. All initial neck states are
+    /// zero; normal network preload can subsequently excite them.
+    ///
+    /// This returns the explicit zero-exterior-pressure comparison. Attach
+    /// `with_material_shell_bem` for one joint body/mouth load, or use the atomic
+    /// constructor below. No exterior inertia or loss is counted in the neck.
+    pub fn with_material_shell_cavity_openings(
+        self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
+        openings: Vec<ShellCavityOpening>, gate: &CancelGate,
+    ) -> Result<Self, ShellCavityError> {
+        self.with_material_shell_cavity_inner(fe, options, openings, None, gate)
+    }
+
+    /// Couple gas heat diffusion on the SAME original cavity FE to every solid,
+    /// standing-wave and compact-mouth compression coordinate. Solid boundary
+    /// faces are explicitly isothermal; apertures have zero diffusive heat flux.
+    /// All thermal states join the original mechanical/material propagator.
+    /// Select optional body/string constitutive memories before this cold call.
+    /// Their histories remain an unchanged prefix; new gas history starts
+    /// unrelaxed, preserving the original instantaneous adiabatic pressure.
+    /// This is thermal conduction only, not viscous wall shear or finite-wall
+    /// heat storage. The declared missing-projection bound is binding.
+    pub fn with_material_shell_cavity_thermal(
+        self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
+        openings: Vec<ShellCavityOpening>, thermal: ShellCavityThermalOptions,
+        gate: &CancelGate,
+    ) -> Result<Self, ShellCavityError> {
+        thermal.validate()?;
+        self.with_material_shell_cavity_inner(fe, options, openings, Some(thermal), gate)
+    }
+
+    /// One source-derived interior/compact-mouth/exterior construction. The
+    /// existing BEM and passive realization retain all signed body-mouth and
+    /// mouth-mouth reactions in the original exact mechanical propagator.
+    /// Independent columns use the original symmetric P1/P0 source and must
+    /// pass unchanged reciprocity, passivity and causal-fit gates. Its geometric
+    /// resonance-exclusion and angular-resolution chart remains authoritative.
+    pub fn with_material_shell_cavity_and_bem(
+        self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
+        openings: Vec<ShellCavityOpening>,
+        exterior: super::radiation::bem::ShellBemOptions, gate: &CancelGate,
+    ) -> Result<(Self, super::radiation::bem::ShellBemReport), ShellCavityError> {
+        self.with_material_shell_cavity_inner(fe, options, openings, None, gate)?
+            .with_material_shell_bem(exterior, gate).map_err(ShellCavityError::Radiation)
+    }
+
+    fn with_material_shell_cavity_inner(
+        mut self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
+        opening_sources: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>,
+        gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
         check_cancel(gate)?;
         let string_count = self.source.strings.len();
@@ -135,6 +239,7 @@ impl ReciprocalStringBank {
             self.system.components().len() - string_count, |f| f.body_components,
         );
         if self.source.spatial_cavity.is_some() || self.source.material_cavity.is_some()
+            || (!opening_sources.is_empty() && self.source.body_radiation.is_some())
             || self.system.samples_rendered() != 0 || self.system.has_nonlinear_potentials()
             || body_count != 1
             || self.system.components().iter().enumerate()
@@ -155,10 +260,18 @@ impl ReciprocalStringBank {
         let (identity, _) = self.source.body_radiation_basis(&self.system, gate)
             .map_err(ShellCavityError::Bank)?;
         let (binding, area) = prepare(&self.source, fe, options, identity,
-            body.modes().len(), self.source.options.network.max_modes, gate)?;
-        let image = binding.coupling.modal_network(body,
-            self.source.options.sample_rate_hz, area, options.acoustic_budget, gate)
-            .map_err(ShellCavityError::Coupling)?;
+            body.modes().len(), self.source.options.network.max_modes, opening_sources, thermal, gate)?;
+        let mut image = if binding.openings.is_empty() {
+            binding.coupling.modal_network(body, self.source.options.sample_rate_hz,
+                area, options.acoustic_budget, gate)
+        } else {
+            binding.coupling.modal_network_for_exterior_load(body,
+                self.source.options.sample_rate_hz, area, options.acoustic_budget,
+                &binding.exterior_body_coordinates()?, gate)
+        }.map_err(ShellCavityError::Coupling)?;
+        if let Some(thermal) = &binding.thermal_loss {
+            thermal.replace_compression_links(&mut image, &binding.coupling, gate)?;
+        }
         let added_components = image.components.len() - 1;
         let added_modes = binding.coupling.total_modes() - binding.coupling.structural_modes();
         let mut links = self.source.body_connections.clone();
@@ -168,8 +281,8 @@ impl ReciprocalStringBank {
         let bridge_rows: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
         let mut system = assemble_sources(&self.cards, Some(&self.source.strings),
             image.components, &bridge_rows, &links, &self.source.rotational_body_connections,
-            fluid.as_ref(), self.source.prepared_linear, self.system.port().law.clone(),
-            &self.source.options, gate).map_err(ShellCavityError::Bank)?;
+            fluid.as_ref(), self.source.prepared_linear, &self.source.constant_loss_bridges(),
+            self.system.port().law.clone(), &self.source.options, gate).map_err(ShellCavityError::Bank)?;
         if let Some(original) = self.system.acceleration_pressure_weights() {
             let insert = self.system.components()[..string_count+1].iter()
                 .map(|component| component.modes().len()).sum::<usize>();
@@ -188,9 +301,13 @@ impl ReciprocalStringBank {
         // material-interface frequency checks or radiation restoration run.
         self.source.body_connections = links;
         self.source.fluid_loading = fluid;
+        let mut memory = self.system.material_memory().to_vec();
+        if let Some(thermal) = &binding.thermal_loss {
+            memory.resize(memory.len()+thermal.memory_states(), 0.0);
+        }
         self.source.spatial_cavity = Some(binding);
         system = self.source.restore_material_memory(system, &self.cards,
-            Some(self.system.material_memory().to_vec()), gate).map_err(ShellCavityError::Bank)?;
+            Some(memory), gate).map_err(ShellCavityError::Bank)?;
         self.source.validate_body_memory_frequencies(&system, gate).map_err(ShellCavityError::Bank)?;
         self.source.validate_material_bridge_frequencies(&system, gate).map_err(ShellCavityError::Bank)?;
         self.system = system;
@@ -203,7 +320,41 @@ impl ReciprocalStringBank {
     pub fn spatial_cavity_pressures_into(&self, scratch: &mut [f64], pressure: &mut [f64])
         -> Result<(), ShellCavityError>
     {
-        observe(&self.source, self.system.components(), scratch, pressure)
+        observe(&self.source, self.system.components(), self.system.material_memory(), scratch, pressure)
+    }
+
+    /// Accepted internal pressure, volume flow and kinetic storage of the
+    /// original neck. This readout adds no force, energy or time integration.
+    pub fn spatial_cavity_neck_observation(&self, index: usize, scratch: &mut [f64])
+        -> Result<crate::render::plate::impact::cavity::neck::NeckObservation, ShellCavityError>
+    {
+        observe_neck(&self.source, self.system.components(), self.system.material_memory(), index, scratch)
+    }
+
+    /// Mouth-averaged exterior load pressure [Pa], positive against outward
+    /// flow. It is already included in the original mechanical force and work
+    /// balance. Zero denotes the explicitly unloaded comparison, not radiation.
+    pub fn spatial_cavity_neck_exterior_pressure(&self, index: usize)
+        -> Result<f64, ShellCavityError>
+    {
+        let cavity = self.source.spatial_cavity.as_ref()
+            .ok_or_else(||bad("bank has no distributed cavity"))?;
+        let port = cavity.coupling.neck_radiation_port(index).map_err(ShellCavityError::Coupling)?;
+        let Some(load) = self.source.body_radiation.as_ref() else { return Ok(0.0); };
+        let column = load.source_body_coordinates().iter().position(|&c|c == port.coordinate)
+            .ok_or_else(||bad("exterior load lost its actual neck source"))?;
+        let state = self.system.radiation_state();
+        if state.is_empty() && load.model().poles.iter()
+            .all(|pole| pole.coupling.iter().all(|&value| value == 0.0))
+        { return Ok(0.0); }
+        if state.len() != 2*load.model().poles.len() {
+            return Err(bad("exterior neck pressure lost its original acoustic history"));
+        }
+        let pressure = load.model().poles.iter().zip(state.chunks_exact(2))
+            .map(|(pole,state)|pole.coupling[column]*state[1]).sum::<f64>()
+            /port.volume_weight_m2_per_sqrt_kg;
+        if !pressure.is_finite() { return Err(bad("exterior neck pressure overflow")); }
+        Ok(pressure)
     }
 }
 impl multiple::MultiBowStringBank {
@@ -211,16 +362,52 @@ impl multiple::MultiBowStringBank {
     pub fn spatial_cavity_pressures_into(&self, scratch: &mut [f64], pressure: &mut [f64])
         -> Result<(), ShellCavityError>
     {
-        observe(self.source().bank(), self.system().components(), scratch, pressure)
+        observe(self.source().bank(), self.system().components(), self.system().material_memory(), scratch, pressure)
+    }
+
+    /// The same accepted physical neck after simultaneous bow/contact solving.
+    pub fn spatial_cavity_neck_observation(&self, index: usize, scratch: &mut [f64])
+        -> Result<crate::render::plate::impact::cavity::neck::NeckObservation, ShellCavityError>
+    {
+        observe_neck(self.source().bank(), self.system().components(), self.system().material_memory(), index, scratch)
     }
 }
 fn observe(source: &MaterialStringBankSource, components: &[ModalAcousticTimeModel],
-    scratch: &mut [f64], pressure: &mut [f64]) -> Result<(), ShellCavityError>
+    memory: &[f64], scratch: &mut [f64], pressure: &mut [f64]) -> Result<(), ShellCavityError>
 {
-    let cavity = source.spatial_cavity.as_ref().ok_or_else(|| bad("bank has no distributed cavity"))?;
-    if scratch.len() != cavity.observation_state_len()
-        || pressure.len() != cavity.coupling.cavity_modes()
-    { return Err(bad("cavity observation requires the complete declared state and pressure buffers")); }
+    let cavity = observation_state(source, components, scratch)?;
+    if pressure.len() != cavity.coupling.cavity_modes() {
+        return Err(bad("cavity observation requires the complete pressure buffer"));
+    }
+    // Stage the complete physical readout so an invalid memory suffix cannot
+    // publish an adiabatic-only pressure as if it were the accepted endpoint.
+    let mut values = [0.0; MAX_CAVITY_PRESSURE_MODES];
+    let values = &mut values[..pressure.len()];
+    cavity.coupling.adiabatic_pressures_into(scratch, values).map_err(ShellCavityError::Coupling)?;
+    if let Some(thermal) = &cavity.thermal_loss { thermal.correct_pressure(memory, values)?; }
+    pressure.copy_from_slice(values);
+    Ok(())
+}
+
+fn observe_neck(source: &MaterialStringBankSource, components: &[ModalAcousticTimeModel],
+    memory: &[f64], index: usize, scratch: &mut [f64])
+    -> Result<crate::render::plate::impact::cavity::neck::NeckObservation, ShellCavityError>
+{
+    let cavity = observation_state(source, components, scratch)?;
+    let mut pressure = [0.0; MAX_CAVITY_PRESSURE_MODES];
+    let pressure = &mut pressure[..cavity.coupling.cavity_modes()];
+    cavity.coupling.adiabatic_pressures_into(scratch,pressure).map_err(ShellCavityError::Coupling)?;
+    if let Some(thermal) = &cavity.thermal_loss { thermal.correct_pressure(memory,pressure)?; }
+    cavity.coupling.neck_observation_with_pressures(scratch,index,pressure).map_err(ShellCavityError::Coupling)
+}
+fn observation_state<'a>(source: &'a MaterialStringBankSource,
+    components: &[ModalAcousticTimeModel], scratch: &mut [f64])
+    -> Result<&'a MaterialShellCavity, ShellCavityError>
+{
+    let cavity = source.spatial_cavity.as_ref().ok_or_else(||bad("bank has no distributed cavity"))?;
+    if scratch.len() != cavity.observation_state_len() {
+        return Err(bad("cavity observation requires the complete declared state buffer"));
+    }
     let start = source.strings.len();
     let count = 1 + usize::from(cavity.coupling.total_modes() > cavity.coupling.structural_modes());
     let bodies = components.get(start..start+count)
@@ -232,7 +419,7 @@ fn observe(source: &MaterialStringBankSource, components: &[ModalAcousticTimeMod
         pair[0] = state.displacement_m_sqrt_kg;
         pair[1] = state.velocity_m_sqrt_kg_per_s;
     }
-    cavity.coupling.pressures_into(scratch, pressure).map_err(ShellCavityError::Coupling)
+    Ok(cavity)
 }
 
 type ShellPart<'a> = (&'a ResolvedShearShell, &'a [Vec<f64>]);
@@ -253,7 +440,8 @@ fn parts(source: &MaterialStringBankSource) -> Result<Vec<ShellPart<'_>>, ShellC
 }
 
 fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
-    identity: ContentHash, body_modes: usize, maximum_mechanical_modes: usize, gate: &CancelGate)
+    identity: ContentHash, body_modes: usize, maximum_mechanical_modes: usize,
+    opening_sources: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>, gate: &CancelGate)
     -> Result<(MaterialShellCavity, f64), ShellCavityError>
 {
     let parts = parts(source)?;
@@ -271,7 +459,7 @@ fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, options: She
     let local = (order+1)*(order+2)*(order+3)/6;
     let work = boundary_count.checked_mul(local).and_then(|n| n.checked_mul((order+1)*(order+1)))
         .and_then(|n| fe.ndof().checked_mul(options.maximum_pressure_modes).and_then(|p| n.checked_add(p)))
-        .and_then(|n| n.checked_mul(body_modes));
+        .and_then(|n| n.checked_mul(body_modes.checked_add(opening_sources.len())?));
     let mass_work = fe.tetrahedra().len().checked_mul(local).and_then(|n| n.checked_mul(local))
         .and_then(|n| n.checked_mul(3 * options.maximum_pressure_modes + 4));
     let work = work.zip(mass_work).and_then(|(a,b)| a.checked_add(b));
@@ -280,7 +468,8 @@ fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, options: She
     }
     connected_volume(fe, gate)?;
     let boundary = fe.boundary_faces();
-    let (traces, area) = surface_traces(&parts, fe, &boundary, body_modes, gate)?;
+    let openings = openings::prepare(&parts, fe, opening_sources, gate)?;
+    let (traces, area) = surface_traces(&parts, fe, &boundary, body_modes, &openings, gate)?;
     let modal_report = fe.modes((-1.0, options.maximum_hz), &options.eigensolver)
         .map_err(ShellCavityError::Acoustic)?;
     check_cancel(gate)?;
@@ -326,13 +515,32 @@ fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, options: She
     let basis = CavityModes { omegas: frequencies, lambdas: norms,
         interface: vec![Vec::new(); count], loss_factor: 0.0,
         rho0: source.gas.density, c0: source.gas.sound_speed };
-    let coupling = CavityCoupling::new_with_mode_budget(&basis, body_modes,
+    let mut coupling = CavityCoupling::new_with_mode_budget(&basis, body_modes,
         &overlap_rows, &vec![0.0; count], maximum_mechanical_modes)
         .map_err(ShellCavityError::Coupling)?;
+    if !openings.is_empty() {
+        let necks = openings.iter().map(|opening| opening.neck(fe, &pressure_shapes, gate))
+            .collect::<Result<Vec<_>, _>>()?;
+        coupling = coupling.with_necks_for_exterior_load(necks, gate)
+            .map_err(ShellCavityError::Coupling)?;
+        for (index,opening) in openings.iter().enumerate() {
+            let omega = coupling.neck_fixed_wall_angular_frequency_rad_s(index)
+                .map_err(ShellCavityError::Coupling)?
+                .max(core::f64::consts::TAU*options.maximum_hz);
+            if omega*opening.extent_m/source.gas.sound_speed > 0.3 {
+                return Err(bad("complete mouth patch exceeds the compact acoustic chart"));
+            }
+        }
+    }
     check_cancel(gate)?;
+    let thermal_loss = thermal.map(|thermal| ShellCavityThermalLoss::prepare(fe,
+        &source.gas, &pressure_shapes, &coupling, &openings, thermal, &options.eigensolver, gate))
+        .transpose()?;
+    if thermal_loss.is_some() { coupling.require_compression_memory(); }
     Ok((MaterialShellCavity { gas: source.gas, basis_identity: identity,
         positions: fe.positions().to_vec(), tetrahedra: fe.tetrahedra().to_vec(),
-        order, options, modal_report, pressure_shapes, overlap_rows, volume_m3: volume, coupling }, area))
+        order, options, modal_report, pressure_shapes, overlap_rows, volume_m3: volume,
+        coupling, openings, thermal_loss }, area))
 }
 
 fn connected_volume(fe: &HelmholtzFe<'_>, gate: &CancelGate) -> Result<(), ShellCavityError> {
@@ -408,7 +616,8 @@ fn constant_mode(fe: &HelmholtzFe<'_>, eigenvector: &[f64], gate: &CancelGate)
 }
 
 fn surface_traces(parts: &[ShellPart<'_>], fe: &HelmholtzFe<'_>, boundary: &[[u32; 3]],
-    modes: usize, gate: &CancelGate) -> Result<(Vec<Vec<Trace>>, f64), ShellCavityError>
+    modes: usize, openings: &[openings::PreparedOpening], gate: &CancelGate)
+    -> Result<(Vec<Vec<Trace>>, f64), ShellCavityError>
 {
     let mut faces = BTreeMap::new();
     let mut area = 0.0;
@@ -452,8 +661,16 @@ fn surface_traces(parts: &[ShellPart<'_>], fe: &HelmholtzFe<'_>, boundary: &[[u3
             }
         }
     }
+    for opening in openings {
+        for triangle in &opening.triangles {
+            if faces.remove(&key(*triangle)).is_none() {
+                return Err(bad("cavity mouth overlaps a solid pressure face or another aperture"));
+            }
+        }
+    }
     if !faces.is_empty() || !area.is_finite() || area <= 0.0 {
-        return Err(bad("every cavity boundary must have one structural owner; open holes need an explicit aperture coupling"));
+        return Err(bad("every cavity boundary must have one original solid or explicit fluid-aperture owner"));
     }
     Ok((traces, area))
 }
+

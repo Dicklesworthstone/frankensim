@@ -203,3 +203,50 @@ mod hereditary;
 
 #[path = "material_duct_wall/reeds.rs"]
 mod reeds;
+
+/// G1/G3: changing only source E changes both the real pressure trajectory and
+/// the wall motion in the original time-domain DG solver. Its closed uniform
+/// mode has an independent radial oscillator solution, not a fitted sound.
+#[test]
+fn source_material_wall_drives_native_dg_pressure_and_storage() {
+    use fs_couple::bernoulli_aperture::wall::material::LocalMaterialWall;
+    use fs_duct::dg::{DgBoundary, DgDuct, DgMesh};
+    let radius = 0.006;
+    let length = 0.3;
+    let geometry = fs_duct::Duct { segments: vec![fs_duct::Segment::Cylinder { radius, length }] };
+    let gas = gas();
+    let mut histories = Vec::new();
+    for young in [1e6, 4e6] {
+        let source = state(&properties(1000.0, young, 0.0), None, None);
+        let wall = LocalMaterialWall::new(source.clone(), 0.0002,
+            AxialConstraint::StressFree, WallMaterialLoss::KelvinVoigt, BAND).unwrap();
+        let dg = DgDuct::new(&geometry, &gas, DgMesh { elements: 2, order: 2 },
+            DgBoundary::Closed, DgBoundary::Closed).unwrap();
+        let bound = wall.bind_dg(dg).unwrap();
+        assert_eq!(bound.wall().material().identity(), source.identity());
+        let dg = bound.duct();
+        let pin = dg.compliant_wall().unwrap();
+        close(pin.stiffness_per_area, young * 0.0002 / radius.powi(2));
+        close(pin.surface_density, 0.2);
+        let beta = 2.0 * gas.density * gas.sound_speed.powi(2) / radius;
+        let omega = ((pin.stiffness_per_area + beta) / pin.surface_density).sqrt();
+        let dt = 1e-6;
+        let propagator = dg.propagator(dt, 1e-13).unwrap();
+        let mut current = dg.project_initial_state(|_| 1.0, |_| 0.0);
+        let initial = current.stored_energy_j();
+        let mut pressure = Vec::new();
+        for step in 1..=100 {
+            propagator.step(&mut current, &[]).unwrap();
+            propagator.sync_nodal(&mut current).unwrap();
+            let w = (1.0 - (omega * step as f64 * dt).cos()) / (pin.stiffness_per_area + beta);
+            assert!((current.pressure()[0] - (1.0 - beta * w)).abs() < 1e-10);
+            close(current.stored_energy_j(), initial);
+            let wall = dg.compliant_wall_state(&current).unwrap();
+            assert!((wall.displacement_m[0] - w).abs() < 1e-17);
+            pressure.push(current.pressure()[0]);
+        }
+        assert!(dg.compliant_wall_state(&current).unwrap().stored_energy_j > 0.0);
+        histories.push(pressure);
+    }
+    assert_ne!(histories[0], histories[1]);
+}

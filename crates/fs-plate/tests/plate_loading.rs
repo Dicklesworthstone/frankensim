@@ -302,7 +302,6 @@ fn additive_loading_and_failures_never_corrupt_existing_loads() {
     assert!(stencil.load_vjp(&short).is_err());
 }
 
-
 #[test]
 fn g0_original_trace_preserves_affine_motion_and_transpose_point_work() {
     let mesh = mesh();
@@ -310,11 +309,7 @@ fn g0_original_trace_preserves_affine_motion_and_transpose_point_work() {
     let velocity = [0.13, -0.27, 0.41, 0.09];
     let mut nodal_force = [0.0; 4];
     let mut physical_power = 0.0;
-    for (point, force) in [
-        ([2.4, 0.2], 1.7),
-        ([2.0, 0.5], -0.8),
-        ([1.0, 2.0], 0.3),
-    ] {
+    for (point, force) in [([2.4, 0.2], 1.7), ([2.0, 0.5], -0.8), ([1.0, 2.0], 0.3)] {
         let trace = PlateTraceStencil::locate(&mesh, point, budget()).unwrap();
         let original = PlatePointStencil::locate(&mesh, &model, point, budget()).unwrap();
         assert_eq!(trace.triangle(), original.triangle());
@@ -331,4 +326,203 @@ fn g0_original_trace_preserves_affine_motion_and_transpose_point_work() {
         physical_power += force * point_velocity;
     }
     close(dot(&nodal_force, &velocity), physical_power);
+}
+
+use fs_plate::loading::{PlatePatchBudget, PlatePatchPoint, PlatePatchStencil};
+
+fn patch_points() -> [PlatePatchPoint; 3] {
+    [
+        PlatePatchPoint {
+            point: [2.5, -0.5],
+            area_m2: 1.0,
+        },
+        PlatePatchPoint {
+            point: [1.5, 1.5],
+            area_m2: 2.0,
+        },
+        PlatePatchPoint {
+            point: [1.0, -1.0],
+            area_m2: 1.0,
+        },
+    ]
+}
+
+fn patch_budget() -> PlatePatchBudget {
+    PlatePatchBudget {
+        max_points: 3,
+        location: budget(),
+    }
+}
+
+#[test]
+fn finite_patch_crosses_triangles_and_supports_with_conservative_resultants_and_power() {
+    let mesh = mesh();
+    let model = model(&mesh, &[0]);
+    let points = patch_points();
+    let patch = PlatePatchStencil::locate(&mesh, &model, &points, patch_budget()).unwrap();
+    assert_eq!(patch.area_m2(), 4.0);
+    assert_eq!(patch.point_count(), 3);
+    let load = [8.0, 4.0, -12.0];
+    let mut reduced = vec![0.0; model.free];
+    let applied = patch.add_load(load, &mut reduced).unwrap();
+    let mut full = vec![0.0; model.dof_map.len()];
+    for (i, index) in model.dof_map.iter().enumerate() {
+        if let Some(index) = index {
+            full[i] = reduced[*index];
+        }
+    }
+    assert_eq!(
+        applied
+            .fixed_dof_loads
+            .iter()
+            .map(|entry| entry.0)
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    for (index, value) in &applied.fixed_dof_loads {
+        full[*index] = *value;
+    }
+    let mut resultant = [0.0; 3];
+    for (node, &(x, y)) in mesh.nodes.iter().enumerate() {
+        resultant[0] += full[3 * node];
+        resultant[1] += y * full[3 * node] + full[3 * node + 2];
+        resultant[2] += -x * full[3 * node] - full[3 * node + 1];
+    }
+    let centroid = [1.625, 0.375];
+    close(resultant[0], load[0]);
+    close(resultant[1], load[1] + centroid[1] * load[0]);
+    close(resultant[2], load[2] - centroid[0] * load[0]);
+    close(applied.force[2], resultant[0]);
+    close(applied.moment[0], resultant[1]);
+    close(applied.moment[1], resultant[2]);
+    let q: Vec<f64> = (0..model.free).map(|i| 0.13 * i as f64 - 0.2).collect();
+    let v: Vec<f64> = (0..model.free)
+        .map(|i| ((i * 5) % 7) as f64 * 0.17)
+        .collect();
+    let sample = patch.sample(&q, &v).unwrap();
+    close(
+        dot(&reduced, &q),
+        load[0] * sample.displacement + load[1] * sample.slopes[1] - load[2] * sample.slopes[0],
+    );
+    close(dot(&reduced, &v), patch.power(load, &v).unwrap());
+    close(dot(&reduced, &q), dot(&load, &patch.load_vjp(&q).unwrap()));
+    let mut pressure_load = vec![0.0; model.free];
+    let pressure_applied = patch
+        .add_tractions(&[[2.0, 1.0, -3.0]; 3], &mut pressure_load)
+        .unwrap();
+    assert_eq!(reduced, pressure_load);
+    assert_eq!(applied, pressure_applied);
+}
+
+#[test]
+fn nonuniform_patch_tractions_preserve_physical_power_and_quadrature_subdivision() {
+    let mesh = mesh();
+    let model = model(&mesh, &[]);
+    let points = patch_points();
+    let patch = PlatePatchStencil::locate(&mesh, &model, &points, patch_budget()).unwrap();
+    let tractions = [[2.0, 1.0, -0.5], [-0.7, 0.4, 1.2], [3.1, -0.3, 0.9]];
+    let v: Vec<f64> = (0..model.free)
+        .map(|i| (i * 7 % 13) as f64 * 0.13 - 0.5)
+        .collect();
+    let mut nodal = vec![0.0; model.free];
+    let applied = patch.add_tractions(&tractions, &mut nodal).unwrap();
+    let mut force = 0.0;
+    let mut moment = [0.0; 2];
+    let mut power = 0.0;
+    for (point, traction) in points.iter().zip(tractions) {
+        let load = traction.map(|value| value * point.area_m2);
+        force += load[0];
+        moment[0] += load[1] + point.point[1] * load[0];
+        moment[1] += load[2] - point.point[0] * load[0];
+        let sample = PlatePointStencil::locate(&mesh, &model, point.point, budget())
+            .unwrap()
+            .sample(&v, &v)
+            .unwrap();
+        power += load[0] * sample.velocity
+            + load[1] * sample.angular_velocity[0]
+            + load[2] * sample.angular_velocity[1];
+    }
+    close(applied.force[2], force);
+    close(applied.moment[0], moment[0]);
+    close(applied.moment[1], moment[1]);
+    close(dot(&nodal, &v), power);
+    let split: Vec<_> = points
+        .iter()
+        .flat_map(|point| {
+            [PlatePatchPoint {
+                point: point.point,
+                area_m2: point.area_m2 / 2.0,
+            }; 2]
+        })
+        .collect();
+    let divided = PlatePatchStencil::locate(
+        &mesh,
+        &model,
+        &split,
+        PlatePatchBudget {
+            max_points: 6,
+            ..patch_budget()
+        },
+    )
+    .unwrap();
+    let load = [2.3, -1.2, 0.4];
+    let mut original = vec![0.0; model.free];
+    let mut subdivided = original.clone();
+    patch.add_load(load, &mut original).unwrap();
+    divided.add_load(load, &mut subdivided).unwrap();
+    for (&a, &b) in original.iter().zip(&subdivided) {
+        close(a, b);
+    }
+    close(
+        patch.power(load, &v).unwrap(),
+        divided.power(load, &v).unwrap(),
+    );
+}
+
+#[test]
+fn patch_admission_and_late_failure_preserve_the_entire_target() {
+    let mesh = mesh();
+    let model = model(&mesh, &[0]);
+    let points = patch_points();
+    assert!(PlatePatchStencil::locate(&mesh, &model, &[], patch_budget()).is_err());
+    assert!(
+        PlatePatchStencil::locate(
+            &mesh,
+            &model,
+            &points,
+            PlatePatchBudget {
+                max_points: 2,
+                ..patch_budget()
+            }
+        )
+        .is_err()
+    );
+    for area in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut bad = points;
+        bad[2].area_m2 = area;
+        assert!(PlatePatchStencil::locate(&mesh, &model, &bad, patch_budget()).is_err());
+    }
+    let mut outside = points;
+    outside[2].point = [20.0, 0.0];
+    assert!(PlatePatchStencil::locate(&mesh, &model, &outside, patch_budget()).is_err());
+    let patch = PlatePatchStencil::locate(&mesh, &model, &points, patch_budget()).unwrap();
+    let mut reduced = vec![0.3; model.free];
+    let before = reduced.clone();
+    // The first two points have already modified private scratch before the
+    // final (fully supported) point refuses its nonfinite moment.
+    assert!(
+        patch
+            .add_tractions(
+                &[[2.0; 3], [3.0; 3], [0.0, f64::INFINITY, 0.0]],
+                &mut reduced
+            )
+            .is_err()
+    );
+    assert_eq!(reduced, before);
+    assert!(patch.add_tractions(&[[2.0; 3]], &mut reduced).is_err());
+    assert_eq!(reduced, before);
+    assert!(patch.add_load([f64::NAN, 0.0, 0.0], &mut reduced).is_err());
+    assert_eq!(reduced, before);
+    assert!(patch.power([f64::INFINITY; 3], &reduced).is_err());
+    assert!(patch.sample(&reduced[..1], &reduced).is_err());
 }

@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	manufactured-expanding-finite-gas-string
+redistribution	permitted	Manufactured coupling fixture; no measured material authority
+citation	Declared affine elastic modulus and scalar thermal expansion for live electrothermal string feedback
+license	CC0-1.0
+source	fixture	expanding-properties.tsv	material-tsv-v1

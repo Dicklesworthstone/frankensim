@@ -10,6 +10,9 @@
 //! discrete stored energy, or the complete M2.5-W3b instrument qualification.
 //! No passivity repair, clipping, added damping or global gain is applied.
 
+/// Mixed rectangular and circular flow sources through the same fitting owner.
+pub mod mixed;
+
 use super::{MimoRadiationLimits, MimoRadiationModel};
 use crate::pcm_wav::baffled::openings::CircularOpening;
 use fs_bem::helmholtz::{HelmholtzError, Medium};
@@ -95,6 +98,8 @@ pub struct BaffledMimoBakeReport {
 pub enum BaffledMimoBakeError {
     /// Invalid geometry, gas, clock, numerical option or resource declaration.
     Invalid(&'static str),
+    /// Original shared surface geometry or quadrature admission refused.
+    Surface(String),
     /// A declared working or retained memory allowance is insufficient.
     Memory { /// Which separate allowance failed.
         kind: &'static str, /// Conservative required bytes.
@@ -116,6 +121,7 @@ impl core::fmt::Display for BaffledMimoBakeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Invalid(what) => write!(f, "baffled MIMO bake: {what}"),
+            Self::Surface(what) => write!(f, "baffled MIMO surface: {what}"),
             Self::Memory { kind, required, allowed } => write!(f,
                 "baffled MIMO {kind} needs {required} bytes, allowance is {allowed}"),
             Self::Sample { frequency_hz, source } => write!(f,
@@ -171,6 +177,24 @@ pub fn bake_baffled_mimo(
     let pistons: Vec<_> = apertures.iter().map(|a| BaffledPiston {
         center_m: a.center_m, radius_m: a.radius_m,
     }).collect();
+    let (impedance, report) = fit_source(
+        n, mechanics_rate_hz, band_hz, options, limits, gate,
+        |hz, gate| sample_rows(&pistons, &exterior, hz, gate),
+    )?;
+    let declaration_identity = declaration(&exterior, apertures, mechanics_rate_hz, band_hz);
+    let realization_identity = realization(declaration_identity, &impedance, options);
+    Ok((MimoRadiationModel { declaration_identity, realization_identity, exterior,
+        apertures: apertures.to_vec(), band_hz, impedance }, report))
+}
+
+// One unchanged fitting/certification owner for every physical source sampler.
+// Geometry/material/quadrature admission belongs to each caller before this sweep.
+#[allow(clippy::too_many_arguments)]
+fn fit_source(
+    n: usize, mechanics_rate_hz: u32, band_hz: [f64; 2],
+    options: BaffledMimoBakeOptions, limits: MimoRadiationLimits, gate: &CancelGate,
+    sample: impl Fn(&[f64], &CancelGate) -> Result<Vec<Vec<C64>>, BaffledMimoBakeError>,
+) -> Result<(MimoModel, BaffledMimoBakeReport), BaffledMimoBakeError> {
     let count = options.frequency_samples;
     let span = det::ln(band_hz[1] / band_hz[0]);
     let mut train_hz: Vec<_> = (0..count).map(|i|
@@ -178,13 +202,13 @@ pub fn bake_baffled_mimo(
     train_hz[0] = band_hz[0];
     train_hz[count - 1] = band_hz[1];
     let held_hz: Vec<_> = train_hz.windows(2).map(|f| f[0] * det::sqrt(f[1] / f[0])).collect();
-    let training = sample_rows(&pistons, &exterior, &train_hz, gate)?;
-    let held_out = sample_rows(&pistons, &exterior, &held_hz, gate)?;
+    let training = sample(&train_hz, gate)?;
+    let held_out = sample(&held_hz, gate)?;
     // The causality owner's half-step grid never asks the strictly-positive
     // piston owner for DC. The highest ORIGINAL sample is exactly band_hz[1].
     let causal_hz: Vec<_> = (0..count).map(|i|
         band_hz[1] * (i as f64 + 0.5) / (count as f64 - 0.5)).collect();
-    let causal_data = sample_rows(&pistons, &exterior, &causal_hz, gate)?;
+    let causal_data = sample(&causal_hz, gate)?;
     let omega = |frequencies: &[f64]| -> Vec<f64> {
         frequencies.iter().map(|f| core::f64::consts::TAU * f).collect()
     };
@@ -238,22 +262,41 @@ pub fn bake_baffled_mimo(
         maximum_held_out_relative_error)) = selected else {
         return Err(BaffledMimoBakeError::NoConvergedFit { rungs });
     };
-    let declaration_identity = declaration(&exterior, apertures, mechanics_rate_hz, band_hz);
-    let realization_identity = realization(declaration_identity, &impedance, options);
     let report = BaffledMimoBakeReport { selected_order: impedance.order(),
         frequency_samples: count, held_out_samples: held_hz.len(),
         maximum_fit_relative_error, maximum_held_out_relative_error, maximum_causality_ratio,
         continuous, sampled, rungs };
     poll(gate)?;
-    Ok((MimoRadiationModel { declaration_identity, realization_identity, exterior,
-        apertures: apertures.to_vec(), band_hz, impedance }, report))
+    Ok((impedance, report))
 }
 
 fn admit(gas: &GasState, apertures: &[CircularOpening], rate: u32, band: [f64; 2],
     opts: BaffledMimoBakeOptions, limits: MimoRadiationLimits) -> Result<(), BaffledMimoBakeError>
 {
+    admit_common(gas, apertures.len(), rate, band, opts, limits)?;
+    admit_apertures(apertures)
+}
+
+fn admit_apertures(apertures: &[CircularOpening]) -> Result<(), BaffledMimoBakeError> {
+    for (i, a) in apertures.iter().enumerate() {
+        let area = core::f64::consts::PI * a.radius_m * a.radius_m;
+        if !a.radius_m.is_finite() || a.radius_m <= 0.0
+            || !area.is_finite() || area <= 0.0 || a.center_m.iter().any(|x| !x.is_finite())
+            || apertures[..i].iter().any(|b| {
+                let distance = det::hypot(a.center_m[0] - b.center_m[0], a.center_m[1] - b.center_m[1]);
+                !distance.is_finite() || distance <= a.radius_m + b.radius_m
+            })
+        {
+            return Err(invalid("circular apertures must be finite, positive and separated"));
+        }
+    }
+    Ok(())
+}
+
+fn admit_common(gas: &GasState, n: usize, rate: u32, band: [f64; 2],
+    opts: BaffledMimoBakeOptions, limits: MimoRadiationLimits) -> Result<(), BaffledMimoBakeError>
+{
     gas.validate_coherence().map_err(|_| invalid("source gas must be coherent"))?;
-    let n = apertures.len();
     let order = opts.orders[2];
     if !(1..=MAX_BAFFLED_MIMO_PORTS).contains(&n) || rate == 0
         || !band.iter().all(|f| f.is_finite() && *f > 0.0)
@@ -279,28 +322,12 @@ fn admit(gas: &GasState, apertures: &[CircularOpening], rate: u32, band: [f64; 2
     {
         return Err(invalid("source, full-clock band, three-order ladder or explicit resource limits are inadmissible"));
     }
-    for (i, a) in apertures.iter().enumerate() {
-        let area = core::f64::consts::PI * a.radius_m * a.radius_m;
-        if !a.radius_m.is_finite() || a.radius_m <= 0.0
-            || !area.is_finite() || area <= 0.0 || a.center_m.iter().any(|x| !x.is_finite())
-            || apertures[..i].iter().any(|b| {
-                let distance = det::hypot(a.center_m[0] - b.center_m[0], a.center_m[1] - b.center_m[1]);
-                !distance.is_finite() || distance <= a.radius_m + b.radius_m
-            })
-        {
-            return Err(invalid("circular apertures must be finite, positive and separated"));
-        }
-    }
     // The shared VF stacks one response per upper-triangle entry. Account for
     // the matrix, equilibrated QR copy, vectors and dense eigensolve scratch
     // BEFORE either the source sweep or the fitter can allocate it. Hard caps
     // above keep every product representable on wasm32.
-    let responses = n * (n + 1) / 2;
-    let rows = 2 * opts.frequency_samples * responses + 1;
-    let columns = responses * (order + 1) + order + 1;
     let states = order * n;
-    let required = 8 * (4 * rows * columns + 8 * columns * columns
-        + 32 * states * states + 16 * opts.frequency_samples * n * n) + 1024 * 1024;
+    let required = fit_scratch_bytes(n, opts);
     if required > opts.max_fit_memory_bytes {
         return Err(BaffledMimoBakeError::Memory { kind: "fit scratch", required,
             allowed: opts.max_fit_memory_bytes });
@@ -314,6 +341,16 @@ fn admit(gas: &GasState, apertures: &[CircularOpening], rate: u32, band: [f64; 2
             allowed: limits.max_memory_bytes });
     }
     Ok(())
+}
+
+fn fit_scratch_bytes(n: usize, opts: BaffledMimoBakeOptions) -> usize {
+    let order = opts.orders[2];
+    let responses = n * (n + 1) / 2;
+    let rows = 2 * opts.frequency_samples * responses + 1;
+    let columns = responses * (order + 1) + order + 1;
+    let states = order * n;
+    8 * (4 * rows * columns + 8 * columns * columns
+        + 32 * states * states + 16 * opts.frequency_samples * n * n) + 1024 * 1024
 }
 
 fn sample_rows(pistons: &[BaffledPiston], gas: &GasState, hz: &[f64], gate: &CancelGate)

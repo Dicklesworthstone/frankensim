@@ -1,4 +1,4 @@
-//! Spatial Maxwell self-heating coupled to the original gravity/dead-load beam.
+//! Spatial Maxwell loss and reversible heat on the original gravity/dead-load beam.
 //!
 //! Every axial-cell/layer has its own thermal destination and original material
 //! history. The existing bridge owner integrates compatible displacement and
@@ -18,6 +18,7 @@ use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use super::{LayerThermalBinding, StripEnthalpyConfig, StripEnthalpyError, ThermalCoefficients};
 use crate::circuit_enthalpy::material::{MaterialNetworkSample, PreparedMaterialNetwork};
 use super::transport::TransportError;
+use super::exchange::{LayerThermalExchange, layer_exchange, deposit_heat_j};
 
 /// Atomic spatial tip births after a coupled interval.
 pub mod growth;
@@ -73,19 +74,82 @@ fn same(a: f64, b: f64) -> bool {
         && (a-b).abs() <= 64.0*f64::EPSILON*a.abs().max(b.abs())
 }
 
+// The native bridge already integrated every point's free-energy/work/loss
+// receipt. Reuse the original quadrature thermodynamics for both this path and
+// the circuit-coupled path; geometry, histories and thermal destinations coincide.
+struct BridgeThermalExchange {
+    layers: BTreeMap<(u64,u64),LayerThermalExchange>,
+    mechanical_internal_energy_change_j: f64,
+    mechanical_entropy_energy_change_j: f64,
+    reversible_heat_j: f64,
+    dissipated_j: f64,
+}
+fn bridge_exchange<E>(
+    old_heat:&DepositionSimulation<'_>, next_heat:&DepositionSimulation<'_>,
+    old:&solid::Bridge<'_>, next:&solid::Bridge<'_>,
+    bound:&BTreeMap<(u64,u64),&BridgeThermalBinding<'_>>,
+    energy:&BTreeMap<(u64,u64),Energy>,
+    mut checkpoint:impl FnMut()->Result<(),DepositionError>,
+) -> Result<BridgeThermalExchange,StripEnthalpyError<E>> {
+    if old.cells().len()!=next.cells().len() || energy.len()!=bound.len() {
+        return Err(StripEnthalpyError::Invalid("thermal interval changed bridge correspondence"));
+    }
+    let mut result=BridgeThermalExchange {layers:BTreeMap::new(),
+        mechanical_internal_energy_change_j:0.0,mechanical_entropy_energy_change_j:0.0,
+        reversible_heat_j:0.0,dissipated_j:0.0};
+    for (before,after) in old.cells().iter().zip(next.cells()) {
+        checkpoint()?;
+        if before.id()!=after.id() || before.length_m()!=after.length_m()
+            || before.section().layers().len()!=after.section().layers().len() {
+            return Err(StripEnthalpyError::Invalid("thermal interval changed reference section geometry"));
+        }
+        for (&layer_id,layer) in before.section().layers() {
+            checkpoint()?;
+            let id=(before.id(),layer_id);
+            let binding=bound.get(&id).ok_or(StripEnthalpyError::Invalid("unbound thermal layer"))?;
+            let following=after.section().layers().get(&layer_id)
+                .ok_or(StripEnthalpyError::Invalid("thermal interval removed material history"))?;
+            let cell=binding.section.cell;
+            let initial=old_heat.cells().get(&cell)
+                .ok_or(StripEnthalpyError::Invalid("missing original caloric cell"))?;
+            let endpoint=next_heat.cells().get(&cell)
+                .ok_or(StripEnthalpyError::Invalid("missing proposed caloric cell"))?;
+            let account=*energy.get(&id)
+                .ok_or(StripEnthalpyError::Invalid("missing original point energy account"))?;
+            let exchange=layer_exchange(layer,following,initial,endpoint,&binding.section,
+                before.length_m(),account)?;
+            result.mechanical_internal_energy_change_j=finite(result.mechanical_internal_energy_change_j
+                +exchange.mechanical_internal_energy_change_j)?;
+            result.mechanical_entropy_energy_change_j=finite(result.mechanical_entropy_energy_change_j
+                +exchange.mechanical_entropy_energy_change_j)?;
+            result.reversible_heat_j=finite(result.reversible_heat_j+exchange.reversible_heat_j)?;
+            result.dissipated_j=finite(result.dissipated_j+exchange.dissipated_j)?;
+            result.layers.insert(id,exchange);
+        }
+    }
+    if result.layers.len()!=bound.len() {
+        return Err(StripEnthalpyError::Invalid("incomplete spatial thermal exchange"));
+    }
+    Ok(result)
+}
+
 pub struct BridgeEnthalpyReport<S> {
     pub mechanical: solid::Report,
-    /// Original extensive point accounts [J], not a whole-beam heat partition.
+    /// Original extensive free-energy/work/loss accounts [J].
     pub layer_energy_j: BTreeMap<(u64,u64), Energy>,
-    /// Includes physical Maxwell heat; do not add `deposited_heat_j` again.
+    /// Includes dashpot heat and signed reversible exchange; do not add them again.
     pub thermal: EnergyAudit,
     pub source: S,
     pub nonlinear: NewtonReport,
     pub structural_trials: usize,
     pub maximum_cell_residual_j: f64,
+    /// Signed total material heat, physical dashpot loss plus reversible exchange.
     pub deposited_heat_j: f64,
+    pub reversible_heat_j: f64,
+    pub mechanical_internal_energy_change_j: f64,
+    pub mechanical_entropy_energy_change_j: f64,
     pub non_mechanical_heat_j: f64,
-    /// Elastic + thermal storage + numerical loss - dead-load work - other heat.
+    /// Mechanical internal + caloric storage + numerical loss - load work - other heat.
     /// Gravity is included in the original load work, not counted again as heat.
     pub total_energy_residual_j: f64,
 }
@@ -145,28 +209,26 @@ pub fn step_candidate<'t,'m,S,E>(
         for (&id,b) in &bound { checkpoint()?; temperatures.insert(id,endpoint.temperature_k(b.section.cell)?); }
         let (next,mechanical,layer_energy)=bridge.advance_with_cell_energy(target_s,&temperatures,
             gravity_m_s2,additional_downward_n_m,mechanics,&mut ||(*cancel.borrow_mut())())?;
+        let exchange=bridge_exchange(thermal,endpoint,bridge,&next,&bound,&layer_energy,checkpoint)
+            .map_err(BridgeEnthalpyError::Coupled)?;
         let coefficients=resolve(endpoint)
             .map_err(|e|BridgeEnthalpyError::Coupled(StripEnthalpyError::Source(e)))?;
         let other=finite(dt*endpoint.external_step_power_w(&coefficients.sources_w,
             &coefficients.conductances_w_k,checkpoint)?)?;
         let mut sources=coefficients.sources_w; let mut deposited=0.0;
-        for (id,energy) in &layer_energy {
+        for (id,account) in &exchange.layers {
             checkpoint()?;
-            if !energy.dissipated.is_finite() || energy.dissipated<0.0 {return Err(invalid("nonphysical cell heat"));}
-            let power=finite(energy.dissipated/dt)?;
-            if energy.dissipated!=0.0 && power==0.0 {return Err(invalid("cell heat underflowed to zero power"));}
-            deposited=finite(deposited+finite(dt*power)?)?;
-            if power!=0.0 {
-                let source=sources.entry(bound[id].section.cell).or_insert(0.0);
-                *source=finite(*source+power)?;
-            }
+            deposited=finite(deposited+deposit_heat_j(&mut sources,bound[id].section.cell,
+                account.total_material_heat_j,dt,c.total_energy_tolerance_j)
+                .map_err(BridgeEnthalpyError::Coupled)?)?;
         }
-        if (deposited-mechanical.energy_j.dissipated).abs()>c.total_energy_tolerance_j {
-            return Err(invalid("local physical heat differs from the whole bridge account"));
+        if (exchange.dissipated_j-mechanical.energy_j.dissipated).abs()>c.total_energy_tolerance_j
+            || (deposited-exchange.dissipated_j-exchange.reversible_heat_j).abs()>c.total_energy_tolerance_j {
+            return Err(invalid("spatial dashpot/reversible heat differs from the whole bridge account"));
         }
         Ok::<_,BridgeEnthalpyError<E>>(StepCoefficients {sources_w:sources,
             conductances_w_k:coefficients.conductances_w_k,
-            payload:(next,mechanical,layer_energy,coefficients.source,deposited,other)})
+            payload:(next,mechanical,layer_energy,coefficients.source,deposited,other,exchange)})
     },checkpoint);
     let numerical=|e|match e {FiniteDifferenceError::Source(e)=>e,
         FiniteDifferenceError::Invalid(s)=>invalid(s)};
@@ -187,9 +249,9 @@ pub fn step_candidate<'t,'m,S,E>(
     }
     let trial=evaluate(&solver.x)?;
     let maximum_cell_residual_j=trial.maximum_cell_residual_j();
-    let (thermal,(next,mechanical,layer_energy_j,source,deposited_heat_j,non_mechanical_heat_j),audit)=
+    let (thermal,(next,mechanical,layer_energy_j,source,deposited_heat_j,non_mechanical_heat_j,exchange),audit)=
         trial.accept(c.cell_energy_tolerance_j,c.thermal_energy_tolerance_j,checkpoint)?;
-    let total=finite(next.stored_energy_j()-bridge.stored_energy_j()
+    let total=finite(exchange.mechanical_internal_energy_change_j
         +audit.stored_energy_change_j+mechanical.energy_j.numerical_dissipation
         -mechanical.load_work_j-non_mechanical_heat_j)?;
     if total.abs()>c.total_energy_tolerance_j
@@ -200,6 +262,9 @@ pub fn step_candidate<'t,'m,S,E>(
     Ok(BridgeEnthalpyCandidate {thermal,bridge:next,report:BridgeEnthalpyReport {
         mechanical,layer_energy_j,thermal:audit,source,nonlinear:result.report,
         structural_trials:trials.get(),maximum_cell_residual_j,deposited_heat_j,
+        reversible_heat_j:exchange.reversible_heat_j,
+        mechanical_internal_energy_change_j:exchange.mechanical_internal_energy_change_j,
+        mechanical_entropy_energy_change_j:exchange.mechanical_entropy_energy_change_j,
         non_mechanical_heat_j,total_energy_residual_j:total}})
 }
 

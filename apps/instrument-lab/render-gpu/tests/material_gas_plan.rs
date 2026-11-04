@@ -4,7 +4,7 @@
 #[allow(dead_code)]
 mod plan;
 
-use fs_vkplate::{GasState, Instrument, kit, standard_gas};
+use fs_vkplate::{BENDING_ROOT_ROWS_PER_NODE, GasState, Instrument, kit, standard_gas};
 
 fn drum(gas: GasState) -> Instrument {
     let mut spec = kit::kick();
@@ -195,7 +195,7 @@ fn g1_gpu_plan_keeps_the_real_viscous_force_and_nonnegative_loss_operators() {
     let state = plan.state(&image).unwrap();
     assert_eq!(state.viscous_dissipated, vec![0.0; image.bodies.len()]);
     assert_eq!(plan.visc_ptr.len(), plan.nt + 1);
-    assert_eq!(plan.vroot_ptr.len(), 3 * plan.nt + 1);
+    assert_eq!(plan.vroot_ptr.len(), BENDING_ROOT_ROWS_PER_NODE * plan.nt + 1);
     let x: Vec<f64> = (0..plan.nt)
         .map(|i| ((i as f64) * 0.53).sin() * 1e-5)
         .collect();
@@ -215,9 +215,9 @@ fn g1_gpu_plan_keeps_the_real_viscous_force_and_nonnegative_loss_operators() {
                 .sum::<f64>();
             assert_eq!(actual, expected);
         }
-        for r in 0..3 * body.n {
-            let actual = (plan.vroot_ptr[3 * off + r] as usize
-                ..plan.vroot_ptr[3 * off + r + 1] as usize)
+        for r in 0..BENDING_ROOT_ROWS_PER_NODE * body.n {
+            let actual = (plan.vroot_ptr[BENDING_ROOT_ROWS_PER_NODE * off + r] as usize
+                ..plan.vroot_ptr[BENDING_ROOT_ROWS_PER_NODE * off + r + 1] as usize)
                 .map(|q| plan.vroot_val[q] * x[plan.vroot_col[q] as usize])
                 .sum::<f64>();
             let expected = (body.viscous_root.ptr[r]..body.viscous_root.ptr[r + 1])

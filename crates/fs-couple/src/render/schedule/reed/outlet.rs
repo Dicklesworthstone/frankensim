@@ -7,6 +7,7 @@ use crate::pcm_wav::baffled::CircularOutletReceiver;
 
 pub(super) struct TerminalObservation {
     pressure: OutletPressure,
+    holes: Vec<OutletPressure>,
     failure: Option<OutletError>,
 }
 
@@ -134,13 +135,32 @@ impl ObservationInput {
                     .map_err(map_drive)
             }).map_err(ReedPerformanceError::Model)?;
         let grid = voice.line.history().len();
-        let mut pressure = regional.baffled_outlet_delayed_at(rate, grid, receiver,
-            fs_duct::WallModel::from_pin(None), delay_speed_m_s)
+        let (mut pressure, mut holes) = regional
+            .baffled_outlet_and_open_holes_delayed_at(
+                rate,
+                grid,
+                receiver,
+                fs_duct::WallModel::from_pin(None),
+                delay_speed_m_s,
+            )
             .map_err(ReedPerformanceError::Outlet)?;
         // Sample -1 exists in the original feedback history. Supply exactly
         // that same wave once, before sample zero, to the terminal transfer.
-        pressure.step(voice.p_plus_prev).map_err(ReedPerformanceError::Outlet)?;
-        Ok((voice, Some(TerminalObservation { pressure, failure: None })))
+        pressure
+            .step(voice.p_plus_prev)
+            .map_err(ReedPerformanceError::Outlet)?;
+        for hole in &mut holes {
+            hole.step(voice.p_plus_prev)
+                .map_err(ReedPerformanceError::Outlet)?;
+        }
+        Ok((
+            voice,
+            Some(TerminalObservation {
+                pressure,
+                holes,
+                failure: None,
+            }),
+        ))
     }
 }
 
@@ -206,13 +226,24 @@ impl ReedPerformance {
             let RenderVoice::ReedBore(voice) = &self.renderer.context().voices[0] else {
                 unreachable!("reed performance owns exactly one reed voice")
             };
-            match terminal.pressure.step(voice.p_plus_prev) {
-                Ok(pressure) => *slot = self.observer.process(pressure),
+            let p_plus = voice.p_plus_prev;
+            let mut sum = match terminal.pressure.step(p_plus) {
+                Ok(pressure) => pressure,
                 Err(error) => {
                     terminal.failure = Some(error.clone());
                     return Err(ReedPerformanceError::Outlet(error));
                 }
+            };
+            for hole in &mut terminal.holes {
+                match hole.step(p_plus) {
+                    Ok(hole_pressure) => sum += hole_pressure,
+                    Err(error) => {
+                        terminal.failure = Some(error.clone());
+                        return Err(ReedPerformanceError::Outlet(error));
+                    }
+                }
             }
+            *slot = self.observer.process(sum);
         }
         Ok(())
     }

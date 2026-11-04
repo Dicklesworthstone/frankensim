@@ -48,6 +48,166 @@ assumption, and this example does not infer melting or transformation laws
 from a material label. Missing data, a source domain exit or ambiguous claims
 refuse; no substitute material is chosen.
 
+## Heat the spatial valve from a finite source gas
+
+Add `--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS` and the shared explicit gas
+source options to use a finite thermal reservoir. The gas exchanges heat with
+the actual exterior triangles of the same 48-cell solid used by the mechanical
+reducer. The clamped root is insulated. Shared interior faces carry heat
+between neighboring cells. Each cell retains its own temperature; a mean
+temperature is never substituted for the structural field.
+
+For the supplied hot-nitrogen record, compile the existing source packs and run:
+
+```bash
+run_dir="$(mktemp -d)"
+demo=crates/fs-couple/examples/heated_valve_sound
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nitrogen/manifest.tsv \
+  --out "$run_dir/nitrogen.species"
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nitrogen-nasa9-mcbride2002/manifest.tsv \
+  --out "$run_dir/nitrogen.nasa9"
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/nitrogen-transport-svehla1995/manifest.tsv \
+  --out "$run_dir/nitrogen.transport"
+
+cargo run --release -p fs-couple --example heated_valve_sound -- \
+  --demo 1 0 10 1 "$run_dir/finite-valve" \
+  --finite-gas 0.0001 0.001 32 \
+  --gas-record "$demo/nitrogen.gas" \
+  --gas-component "$run_dir/nitrogen.species" "$run_dir/nitrogen.nasa9" "$run_dir/nitrogen.transport" \
+  --gas-water none --gas-phase frozen
+```
+
+This starts the solid at 300 K and 0.1 litre of nitrogen at 340 K and 100000 Pa.
+The imposed solid power is zero: the gas cools as the solid warms. Change only
+the volume to `0.0004` and choose a new output prefix to compare a reservoir
+with four times the gas inventory. The initial acoustic gas is identical in
+both runs; the subsequent temperature, source elasticity, aperture and sound
+are calculated from each reservoir's actual energy history.
+
+The original pressure CSV and stereo WAV are accompanied by
+`PREFIX.thermal.csv`. Its initial row and each accepted thermal endpoint report
+solid minimum/maximum temperature, gas temperature/pressure, cumulative external
+heat, solid storage change, gas storage change, solid-to-gas heat and the actual
+combined storage residual. With zero external power, the solid gains the
+energy lost by the gas. Every complete physical calculation and sound render
+still precedes file creation. File I/O itself is not an atomic multi-file
+transaction.
+
+The finite-gas mode explicitly admits a **fully solid 280–400 K interval**,
+including a margin around the 300 K initial state for numerical Jacobian
+probes. Packs must supply their own support across that interval; there is no
+extrapolation. In addition to the mechanical/caloric properties, the bounded
+native example requires a nonnegative scalar-valued `thermal_conductivity`
+source at every actual local temperature and numerical probe. Constant claims,
+temperature curves and supported fixed-context response surfaces use the same
+material resolver. The source is selected once at the original state, then
+refreshed at every trial endpoint. Internal links and gas-facing patches consume
+the **same cell material snapshot**; conductivity is not frozen at 300 K or
+reselected separately at a boundary. An explicit zero coefficient insulates;
+missing or unsupported data refuses the entire candidate.
+
+The manufactured demo defaults to 0.2 W/(m K). To compare a temperature-dependent
+source with exactly the same initial conductivity, repeat the command above
+with a new output prefix and add:
+
+```text
+--demo-conductivity 0.1 0.2 2.0
+```
+
+These three values specify conductivity at 280, 300 and 400 K, with the ordinary
+source pack's linear-inside interpolation. The option requires `--demo` and
+`--finite-gas`; it declares manufactured material data and does not override an
+imported pack. All reference mechanical/caloric coefficients, geometry, gas,
+heating and acoustic excitation remain the same. The calculation propagates
+the changed conductivity through the spatial heat field, deformation, valve
+frequency and actual pressure. `--pack` uses the supplied conductivity law
+directly, with no demonstration override.
+
+Interior conductances use each endpoint cell's actual source conductivity,
+shared triangle area and the two centroid-to-face normal distances. The existing
+prepared material-network owner lowers those two material layers in series
+inside the **same implicit residual** as finite gas heat and local enthalpy
+storage. Different cell temperatures therefore give different half-cell
+coefficients even for a homogeneous specimen. This is an explicit coarse two-point
+thermal network. The tetrahedral mesh is not orthogonal, so the network does
+not claim a consistent continuum heat-equation discretization. It does conserve
+each signed internal transfer. Boundary conductance places the source gas and
+solid layers in series using the declared gas-layer distance and the cell's
+centroid-to-face distance. A floating-point area summation allowance is kept
+insulated; it creates no transfer patch.
+
+Volume and layer distance must each be finite and in `(0,1]` SI units; steps
+must be in `1..=1024`. Each interval uses the original backward-Euler thermal
+owner and NASA9 gas internal-energy inversion in one bounded solve. Declared
+numerical controls are: 4096 complete source trials, 24 Newton iterations,
+`1e-7 J` finite-difference scale, `1e-9 J` absolute nonlinear tolerance,
+`1e-8 J` per-cell and gas tolerances, `1e-7 J` thermal tolerance, and
+`2e-7 J` combined tolerance. Gas inversion uses 280–400 K, `1e-7 J/kg`, at most
+128 iterations, and an admitted temperature change of at most 20 K per step.
+Domain exits or budget/energy failures refuse the run; more steps can resolve
+a too-large physical interval. These controls do not certify time accuracy.
+
+The cold sound uses the initial gas state; the heated sound uses the final gas
+state. In each frozen experiment that same supplied medium reaches excitation,
+bore, radiation and propagation. The finite volume determines **thermal storage**;
+it is not a closed acoustic chamber geometry or a pressure load on the solid.
+Gas mass/composition/volume and reference solid mass stay fixed. Moving surfaces,
+gas flow and pressure-volume work need their own closures.
+
+## Retained inertial motion during heating
+
+The finite-gas mode can also advance the solid's actual displacement, velocity
+and acceleration as the spatial temperature field changes. Add:
+
+```text
+--inertial-history MAX_STEP_S MASS_DAMPING_PER_S
+```
+
+`MAX_STEP_S` is a finite positive ceiling on every thermal/mechanical interval,
+in seconds. `MASS_DAMPING_PER_S` is an explicitly authored nonnegative
+mass-proportional damping coefficient, in inverse seconds. The option requires
+`--finite-gas`. Choose `HEAT_SECONDS / STEPS <= MAX_STEP_S`; a larger interval
+refuses and asks for more finite-gas steps or a shorter heating duration. The
+ceiling is an admission control, not a temporal-error certificate: resolve the
+fastest inertial behavior of interest and check timestep refinement.
+
+For example, a short manufactured heating pulse can use `POWER_W=5000`,
+`HEAT_SECONDS=0.002`, eight finite-gas steps, and:
+
+```text
+--inertial-history 0.0003 20
+```
+
+The original thermal solve first retains each accepted source state. The
+existing sparse Newmark owner then advances one trajectory from stress-free
+rest on those **same physical endpoint times**, using each cell's refreshed
+stiffness and thermal strain. Displacement, velocity and acceleration continue
+through the whole trajectory; they are not reset to successive equilibria.
+The reference mesh, solid mass and homogeneous clamped supports stay fixed.
+Stiffness-proportional damping is zero because the changing-stiffness owner
+admits mass damping only. The acoustic loss factor is not copied into this
+mechanical history.
+
+The additional `OUTPUT_PREFIX.motion.csv` contains a row for every node at
+every accepted thermal time, including the initial state. Columns report
+reference coordinates; displacement in metres; velocity in metres/second;
+acceleration in metres/second²; kinetic and shifted elastic energy; cumulative
+external, thermal-expansion and stiffness work; damping loss; and the cumulative
+mechanical balance residual, all energies in joules. Global energy accounts are
+repeated on each node row and must not be summed over nodes.
+
+This is **prescribed one-way thermal loading**. Signed expansion/stiffness work
+is accounted by the native mechanical owner, but is not debited from caloric
+storage. Mechanical damping is not silently credited as heat. Reciprocal
+thermoelastic heat needs an admitted closure. The existing pressure CSV and WAV
+remain the two frozen-state acoustic experiments; this option does not claim
+that a live vibrating modal state has been transferred into those recordings.
+All thermal and mechanical admission and sound calculations finish before any
+output file is created, and all output paths must be new.
+
 ## Physical calculation
 
 The declared specimen is a 10 × 12 × 4 mm slab, with 27 reference nodes and
@@ -57,12 +217,12 @@ and a geometric unit-pressure load; the original load assembler determines
 the signed force-per-pascal pattern. All geometry is declared in the example.
 The mesh is deliberately coarse and does not establish continuum accuracy.
 
-Every tetrahedron has its own finite mass and caloric state. Uniform volumetric
-heating on this homogeneous, insulated specimen gives the same temperature in
+Every tetrahedron has its own finite mass and caloric state. In the default
+mode, uniform volumetric heating on the homogeneous insulated specimen gives the same temperature in
 every cell and therefore zero internal conductive flux. This exact symmetry
-is why the example needs no guessed thermal conductance. Surface heating,
-nonuniform source power and transient cooling require an explicitly resolved
-transport network or spatial conduction model; those are not silently inferred.
+is why the default mode needs no thermal conductance. The finite-gas mode uses
+the explicit transport network above to produce a nonuniform thermal field
+from the same finite source gas.
 
 The original caloric owner integrates heat. The source observer checks material
 support and solid phase at every accepted thermal substep and event. Expansion
@@ -104,3 +264,19 @@ mass conservation, source-only heat-capacity changes reaching actual pressure,
 deterministic replay and source/cancellation refusal. The library's
 `solid_enthalpy::valve` tests additionally compare the thermal tangent and both
 static pressure compliances with independent six-tetrahedron analytic integrals.
+
+The finite-gas regressions change only reservoir volume and check nonuniform
+solid heating, fixed gas mass through `p/T`, equal-and-opposite endpoint storage,
+different valve frequency and actual pressure, deterministic replay and input
+or cancellation refusal.
+
+An additional material-swap regression changes only the conductivity's
+temperature dependence while retaining its initial value. It checks unchanged
+cold pressure, changed heated deformation/frequency/pressure, conserved combined
+storage and deterministic replay. The library also covers heterogeneous original
+material cards against independently written nonlinear cell/gas energy equations.
+
+The inertial regressions exercise a finite heating pulse with changing source
+stiffness, retained Newmark kinematics, identical thermal/mechanical clocks,
+zero supports, explicit work and energy balance, actual inertial displacement,
+deterministic replay, and timestep/control/cancellation refusal.

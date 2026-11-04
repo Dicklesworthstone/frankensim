@@ -134,7 +134,7 @@ impl BaffledPressure {
             output_rate, receiver.position_m, medium)
     }
 
-    fn rectangular_surface(size_m: [f64; 2], receiver: RectangularOutletReceiver,
+    pub(crate) fn rectangular_surface(size_m: [f64; 2], receiver: RectangularOutletReceiver,
         medium: RayleighMedium) -> Result<Vec<super::SurfaceSample>, String>
     {
         let points = receiver.cells[0].checked_mul(receiver.cells[1]);

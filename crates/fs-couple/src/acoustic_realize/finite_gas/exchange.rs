@@ -72,11 +72,14 @@ pub struct FiniteGasStringExchangeFrame<R> {
     pub conductance_w_k: f64,
     /// Q - dt G(T_solid,end - T_gas,end) [J].
     pub source_residual_j: f64,
-    /// Actual solid + gas storage minus their non-exchange sources [J].
+    /// Caloric solid + gas storage minus their non-exchange heat sources [J],
+    /// including the signed thermoelastic heat supplied to the solid.
     pub thermal_energy_residual_j: f64,
     /// Concrete source evaluation retained from the accepted interface trial.
     pub source: R,
-    /// Complete source/thermal proposals, bounded by maximum_iterations + 2.
+    /// Complete interface/source proposals over all thermoelastic trials.
+    /// Each thermal trial uses at most exchange.maximum_iterations + 2;
+    /// the outer reversible-heat solve has its own explicit work ceiling.
     pub trials: usize,
 }
 
@@ -98,8 +101,9 @@ impl ThermalMaterialStringRuntime {
     /// Couple the same string and finite gas through a source-bearing heat law.
     ///
     /// Mechanics freezes the initial material viscosity/gas drag for one exact
-    /// sample. Material loss and prescribed solid heat enter h_s; aerodynamic
-    /// loss and prescribed gas heat enter u_g. One implicit transfer Q then
+    /// sample. Material loss, reversible thermoelastic exchange and prescribed
+    /// solid heat enter h_s; aerodynamic loss and prescribed gas heat enter u_g.
+    /// One implicit transfer Q then
     /// satisfies Q = dt G(T_s,end,T_g,end)(T_s,end-T_g,end), using the original
     /// solid enthalpy chart and gas internal-energy inversion at every trial.
     /// No midpoint temperatures or constant heat capacities are substituted.
@@ -142,104 +146,130 @@ impl ThermalMaterialStringRuntime {
         feedback::admit::<E>(exchange)?;
         let mut mechanical = self.mechanical.clone();
         let vibration = mechanical.step(cx, forces)?;
-        let mass = self.mechanical.specimen().mass_kg();
-        let old_h = self.thermal.specific_enthalpy_j_kg();
-        let solid_source = vibration.dissipation.material_heat_j + heat.string_heat_j;
         let gas_source = heat.gas_heat_j + vibration.dissipation.air_loss_j;
-        if !solid_source.is_finite()
-            || !gas_source.is_finite()
+        if !gas_source.is_finite()
             || (vibration.dissipation.air_loss_j != 0.0 && gas_source == heat.gas_heat_j)
             || (heat.gas_heat_j != 0.0 && gas_source == vibration.dissipation.air_loss_j)
         {
             return Err(FiniteGasStringError::Admission(
-                "solid or gas thermal sources overflow or disappear when combined",
+                "gas thermal sources overflow or disappear when combined",
             )
             .into());
         }
-        let dt = mechanical.member.model.sample_period_s();
-        let solved = feedback::solve(
-            exchange,
-            |q, trials, cancelled| {
-                let solid_heat = solid_source - q;
-                let gas_heat = gas_source + q;
-                if !solid_heat.is_finite()
-                    || !gas_heat.is_finite()
-                    || (q != 0.0 && (solid_heat == solid_source || gas_heat == gas_source))
-                {
-                    return Err(ThermalPistonError::Invalid(
-                        "exchange heat overflows or disappears in either reservoir",
-                    ));
+        let mut total_trials = 0usize;
+        // Every reversible-heat proposal restarts this SAME finite-gas exchange
+        // from the accepted reservoirs. Neither the parcel nor the string is
+        // published until both nested physical balances have been accepted.
+        let proposed = self.propose_thermal_step(
+            cx,
+            &mechanical,
+            &vibration,
+            |input| -> Result<_, FiniteGasStringExchangeError<E>> {
+                let solid_source = input.internal_heat_j + heat.string_heat_j;
+                if !solid_source.is_finite() {
+                    return Err(FiniteGasStringError::Admission(
+                        "solid thermal sources overflow when combined",
+                    ).into());
                 }
-                let solid = self
-                    .curve
-                    .advance_specific_energy(self.thermal, solid_heat / mass)?;
-                let mut next = gas.clone();
-                let gas_step = next
-                    .add_heat(gas_heat, controls.gas, &mut *cancelled)
-                    .map_err(gas_error)?;
-                let sample = resolve(next.state(), solid).map_err(ThermalPistonError::Interface)?;
-                let g = sample.conductance_w_k;
-                let delta = solid.temperature_k() - next.state().state().temperature;
-                let power = g * delta;
-                let source_heat = dt * power;
-                let residual = q - source_heat;
-                let solid_storage = mass * (solid.specific_enthalpy_j_kg() - old_h);
-                let solid_residual = solid_storage - solid_source + q;
-                let energy_residual =
-                    (solid_storage + gas_step.stored_energy_change_j) - solid_source - gas_source;
-                if !g.is_finite()
-                    || g < 0.0
-                    || !power.is_finite()
-                    || !source_heat.is_finite()
-                    || !residual.is_finite()
-                    || (g != 0.0 && delta != 0.0 && power == 0.0)
-                    || (power != 0.0 && source_heat == 0.0)
-                {
-                    return Err(ThermalPistonError::Invalid(
-                        "endpoint interface heat law is negative, nonfinite or unrepresentable",
-                    ));
-                }
-                if !solid_residual.is_finite()
-                    || !energy_residual.is_finite()
-                    || solid_residual.abs() > exchange.energy_tolerance_j
-                    || energy_residual.abs() > exchange.energy_tolerance_j
-                {
-                    return Err(ThermalPistonError::Invalid(
-                        "finite solid/gas thermal storage does not close its energy allowance",
-                    ));
-                }
-                Ok((
-                    ExchangeCandidate {
-                        gas: next,
-                        gas_step,
-                        solid,
-                        heat_j: q,
-                        sample,
-                        source_residual_j: residual,
-                        energy_residual_j: energy_residual,
-                        trials,
+                let solved = feedback::solve(
+                    exchange,
+                    |q, trials, cancelled| {
+                        let solid_heat = solid_source - q;
+                        let gas_heat = gas_source + q;
+                        if !solid_heat.is_finite()
+                            || !gas_heat.is_finite()
+                            || (q != 0.0 && (solid_heat == solid_source || gas_heat == gas_source))
+                        {
+                            return Err(ThermalPistonError::Invalid(
+                                "exchange heat overflows or disappears in either reservoir",
+                            ));
+                        }
+                        let solid = input.curve
+                            .advance_specific_energy(input.initial, solid_heat / input.mass_kg)?;
+                        let mut next = gas.clone();
+                        let gas_step = next
+                            .add_heat(gas_heat, controls.gas, &mut *cancelled)
+                            .map_err(gas_error)?;
+                        let sample = resolve(next.state(), solid).map_err(ThermalPistonError::Interface)?;
+                        let g = sample.conductance_w_k;
+                        let delta = solid.temperature_k() - next.state().state().temperature;
+                        let power = g * delta;
+                        let source_heat = input.duration_s * power;
+                        let residual = q - source_heat;
+                        let solid_storage = input.mass_kg
+                            * (solid.specific_enthalpy_j_kg() - input.initial.specific_enthalpy_j_kg());
+                        let solid_residual = solid_storage - solid_source + q;
+                        let energy_residual =
+                            (solid_storage + gas_step.stored_energy_change_j) - solid_source - gas_source;
+                        if !g.is_finite()
+                            || g < 0.0
+                            || !power.is_finite()
+                            || !source_heat.is_finite()
+                            || !residual.is_finite()
+                            || (g != 0.0 && delta != 0.0 && power == 0.0)
+                            || (power != 0.0 && source_heat == 0.0)
+                        {
+                            return Err(ThermalPistonError::Invalid(
+                                "endpoint interface heat law is negative, nonfinite or unrepresentable",
+                            ));
+                        }
+                        if !solid_residual.is_finite()
+                            || !energy_residual.is_finite()
+                            || solid_residual.abs() > exchange.energy_tolerance_j
+                            || energy_residual.abs() > exchange.energy_tolerance_j
+                        {
+                            return Err(ThermalPistonError::Invalid(
+                                "finite solid/gas thermal storage does not close its energy allowance",
+                            ));
+                        }
+                        Ok((
+                            ExchangeCandidate {
+                                gas: next,
+                                gas_step,
+                                solid,
+                                heat_j: q,
+                                sample,
+                                source_residual_j: residual,
+                                energy_residual_j: energy_residual,
+                                trials,
+                            },
+                            residual,
+                        ))
                     },
-                    residual,
-                ))
+                    &mut || cx.checkpoint().is_err(),
+                )?;
+                let difference = solved.solid.temperature_k() - solved.gas.state().state().temperature;
+                if (solved.heat_j > 0.0 && difference < 0.0)
+                    || (solved.heat_j < 0.0 && difference > 0.0)
+                {
+                    return Err(FiniteGasStringError::Admission(
+                        "accepted heat exchange would cross endpoint temperatures; tighten the source tolerance",
+                    ).into());
+                }
+                total_trials += solved.trials;
+                Ok(UniformEnthalpyStep {
+                    state: solved.solid,
+                    external_heat_j: heat.string_heat_j - solved.heat_j,
+                    energy_residual_tolerance_j: exchange.energy_tolerance_j,
+                    report: solved,
+                })
             },
-            &mut || cx.checkpoint().is_err(),
         )?;
+        let UniformEnthalpyStep {
+            state: solid,
+            external_heat_j,
+            energy_residual_tolerance_j,
+            report: solved,
+        } = proposed;
         let ExchangeCandidate {
             gas: next_gas,
             gas_step,
-            solid,
             heat_j: q,
             sample,
             source_residual_j,
             energy_residual_j,
-            trials,
+            ..
         } = solved;
-        let difference = solid.temperature_k() - next_gas.state().state().temperature;
-        if (q > 0.0 && difference < 0.0) || (q < 0.0 && difference > 0.0) {
-            return Err(FiniteGasStringError::Admission(
-                "accepted heat exchange would cross endpoint temperatures; tighten the source tolerance",
-            ).into());
-        }
         let mut candidate = self.clone();
         let string = candidate
             .finish_thermal_step(
@@ -249,8 +279,8 @@ impl ThermalMaterialStringRuntime {
                 vibration,
                 UniformEnthalpyStep {
                     state: solid,
-                    external_heat_j: heat.string_heat_j - q,
-                    energy_residual_tolerance_j: exchange.energy_tolerance_j,
+                    external_heat_j,
+                    energy_residual_tolerance_j,
                     report: (),
                 },
             )?
@@ -276,7 +306,7 @@ impl ThermalMaterialStringRuntime {
             source_residual_j,
             thermal_energy_residual_j: energy_residual_j,
             source: sample.source,
-            trials,
+            trials: total_trials,
         })
     }
 

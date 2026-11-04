@@ -691,6 +691,7 @@ dependencies = [
  "fs-plate",
  "fs-qty",
  "fs-rand",
+ "fs-rep-mesh",
  "fs-scenario",
  "fs-tribo",
  "fs-vfit",

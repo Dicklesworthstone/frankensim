@@ -275,26 +275,8 @@ impl RectangularMouthLoad {
 // in 1+t^3-(1+t^2)^(3/2) for a slender rectangle. This is an exact
 // geometric integral, not a fit or an equivalent circular aperture.
 fn rectangular_inertance(size: [f64; 2], density: f64) -> Result<f64, FlueError> {
-    let length = size[0].max(size[1]);
-    let t = size[0].min(size[1]) / length;
-    if !t.is_finite() || t <= 0.0 {
-        return Err(invalid("rectangular aspect ratio is unrepresentable"));
-    }
-    let root = fs_math::det::sqrt(1.0 + t * t);
-    // asinh(t)/t near zero; first omitted term <3.1e-18 on this interval.
-    let asinh_ratio = if t < 0.01 {
-        let t2 = t * t;
-        1.0 + t2 * (-1.0 / 6.0 + t2 * (3.0 / 40.0 - t2 * (5.0 / 112.0)))
-    } else {
-        fs_math::det::ln(t + root) / t
-    };
-    let inverse_asinh = fs_math::det::ln(1.0 + root) - fs_math::det::ln(t);
-    let shape = asinh_ratio + inverse_asinh + (t - (root * root + root + 1.0) / (root + 1.0)) / 3.0;
-    let inertia = (density / length) * (shape / core::f64::consts::PI);
-    if !inertia.is_finite() || inertia <= 0.0 {
-        return Err(invalid("rectangular inertia is unrepresentable"));
-    }
-    Ok(inertia)
+    fs_bem::helmholtz::rayleigh_modal::rectangular_static_inertance(size, density)
+        .map_err(physics)
 }
 
 /// A wave-port adapter only: all memory, stepping and energy remain in fs-vfit.
@@ -350,8 +332,12 @@ impl FlueVoice {
     pub(super) fn attach_mouth_radiation(
         &mut self,
         model: RectangularMouthLoad,
+        aperture_size_m: [f64; 2],
     ) -> Result<(), FlueError> {
-        if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some() {
+        if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some()
+            || self.dg().is_some_and(|duct| duct.load().radiation_record()
+                .is_some_and(|record| record.driven_mouth().is_some()))
+        {
             return Err(invalid("mouth radiation requires one cold attachment"));
         }
         if self.geometry.mouth_loss_rel != 0.0 {
@@ -359,12 +345,14 @@ impl FlueVoice {
                 "physical mouth radiation replaces the legacy loss; declare mouth_loss_rel zero",
             ));
         }
-        if model.size_m != [self.geometry.flue_width_m, self.geometry.cut_up_m]
+        // The acoustic aperture is bound by the performer that owns its
+        // receiver. A lip jet can be narrower than this opening.
+        if model.size_m != aperture_size_m
             || model.time_step_s.to_bits() != self.dt.to_bits()
             || model.exterior.pressure.to_bits() != self.gas.pressure.to_bits()
         {
             return Err(invalid(
-                "mouth radiation must share actual geometry, clock and static pressure",
+                "mouth radiation must share declared aperture, clock and static pressure",
             ));
         }
         let load = MouthRadiation::new(model, self.zc)?;

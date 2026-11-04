@@ -11,19 +11,23 @@
 //! skin/proximity/eddy loss, movement and variable magnetic storage are not inferred.
 //! Changing the material data before preparation changes both field and resistance;
 //! during evolution only temperature may change, with permeability held constant.
+//! Explicit material replacement at an accepted time uses `rebind_material_candidate`:
+//! conserved flux/charge, refreshed fields/current/resistance and external work.
+
+mod rebind;
+pub use rebind::{WindingMaterialRebind, WindingMaterialRebindControls};
 
 use super::{WindingError, circuit::WindingCircuit};
 use crate::planar::MagneticError;
 use fs_material::{
     conductor::ResolvedConductorState,
-    field_storage::{FieldStorageError, MAGNETIC_PERMEABILITY_PROPERTY, linear_magnetic_permeability},
-    state_point::{ResolvedMaterialStatePoint, ResolvedScalarProperty},
+    field_storage::{FieldStorageError, admit_fixed_magnetic_refresh},
+    state_point::ResolvedScalarProperty,
 };
 use fs_phs::{
     DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord,
     circuit::{Branch, CircuitDae, CircuitError},
 };
-use fs_qty::{QuantitySpec, Temperature, semantic::{QuantityKind, ValueForm}};
 
 /// One original mesh triangle's complete material/electrical source.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,11 +168,6 @@ fn positive(v: f64) -> bool { v.is_finite() && v > 0.0 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), OhmicWindingError> {
     if cancelled() { Err(OhmicWindingError::Cancelled) } else { Ok(()) }
 }
-fn temperature_axis(name: &str, quantity: Option<QuantitySpec>) -> bool {
-    quantity.and_then(QuantitySpec::semantic_type).is_some_and(|ty| {
-        ty.kind() == QuantityKind::AbsoluteTemperature && ty.form() == ValueForm::Static
-    }) || name == "T" && quantity.is_none_or(|q| q == QuantitySpec::dimensional(Temperature::DIMS))
-}
 fn admit_electrical_law(property: &ResolvedScalarProperty) -> Result<(), OhmicWindingError> {
     // Use the same canonical source-axis and applicability policy as magnetic
     // storage and thermal material owners. Pressure/composition data remain
@@ -177,53 +176,6 @@ fn admit_electrical_law(property: &ResolvedScalarProperty) -> Result<(), OhmicWi
         return Err(OhmicWindingError::Invalid(
             "winding loss requires a static Ohmic scalar with only fixed external or owned temperature support",
         ));
-    }
-    Ok(())
-}
-
-// Compare the physical source, not the usage-policy string: a refresh honestly
-// changes single-claim-only to pinned-claim without changing the selected claim.
-fn admit_refresh(
-    prepared: &ResolvedMaterialStatePoint,
-    refreshed: &ResolvedMaterialStatePoint,
-) -> Result<(), OhmicWindingError> {
-    use OhmicWindingError::Invalid;
-    if prepared.card_identity() != refreshed.card_identity()
-        || prepared.material() != refreshed.material()
-        || prepared.axis_quantities() != refreshed.axis_quantities()
-        || prepared.query_point().len() != refreshed.query_point().len()
-        || prepared.properties().len() != refreshed.properties().len()
-        || prepared.properties().iter().zip(refreshed.properties()).any(|(a, b)| {
-            a.requirement() != b.requirement() || a.source_axes() != b.source_axes()
-                || a.answer().receipt.selected != b.answer().receipt.selected
-        })
-    {
-        return Err(Invalid("winding refresh must retain the complete original card, requirements, coordinate schema and selected claims"));
-    }
-    let mut changed_temperature_axis = None;
-    let mut temperatures = 0;
-    for ((name, value), (next_name, next_value)) in prepared.query_point().iter().zip(refreshed.query_point()) {
-        if name != next_name { return Err(Invalid("winding source coordinates changed correspondence")); }
-        let is_temperature = temperature_axis(name, prepared.axis_quantities().get(name).copied());
-        if is_temperature {
-            temperatures += 1;
-            if !positive(*value) || !positive(*next_value) { return Err(Invalid("winding temperature must be positive and finite")); }
-        }
-        if value.to_bits() != next_value.to_bits() {
-            if !is_temperature { return Err(Invalid("only the owned winding temperature may change during a fixed-geometry step")); }
-            changed_temperature_axis = Some(name.as_str());
-        }
-    }
-    if temperatures > 1 { return Err(Invalid("winding temperature coordinate is ambiguous")); }
-    let mu = linear_magnetic_permeability(refreshed)?;
-    let original_mu = linear_magnetic_permeability(prepared)?;
-    let property = refreshed.property(MAGNETIC_PERMEABILITY_PROPERTY).expect("admitted permeability");
-    if mu.to_bits() != original_mu.to_bits()
-        || changed_temperature_axis.is_some_and(|temperature| {
-            property.source_axes().iter().any(|(axis, _)| axis == temperature)
-        })
-    {
-        return Err(Invalid("temperature changes prepared magnetic storage; new extraction and explicit magnetic parameter work are required"));
     }
     Ok(())
 }
@@ -270,7 +222,21 @@ fn bind(
         {
             return Err(Invalid("winding electrical source basis or triangle correspondence changed"));
         }
-        admit_refresh(&problem.materials()[source.triangle], source.conductor.material())?;
+        if problem.recoil_materials()[source.triangle].is_some() {
+            // The generic fixed-mu refresh cannot establish fixed Br, recoil
+            // slope or source limits. A conducting magnet must reuse the exact
+            // original complete bundle, including its electrical claim. No
+            // generic permeability claim is needed or substituted for recoil.
+            if &problem.materials()[source.triangle] != source.conductor.material() {
+                return Err(Invalid("conducting recoil material requires its exact original fixed-state source bundle"));
+            }
+        } else {
+            admit_fixed_magnetic_refresh(&problem.materials()[source.triangle], source.conductor.material())
+                .map_err(|e| match e {
+                    FieldStorageError::Invalid(why) => OhmicWindingError::Invalid(why),
+                    other => OhmicWindingError::Magnetic(other),
+                })?;
+        }
         admit_electrical_law(source.conductor.source_property())?;
         let j = basis.profiles_per_m2()[winding][source.triangle];
         let volume = problem.mesh().face_measure(source.triangle).ok_or(Invalid("winding triangle has no physical mesh volume"))?;
@@ -329,6 +295,7 @@ impl<'c, 'm> OhmicWindingCircuit<'c, 'm> {
         let dae = lower(magnetic, &resistance_ohm)?;
         let initial = magnetic.consistent_initial_state(currents_a, charges_c, ports, cancelled)?;
         let state = dae.consistent_initial_state(&initial, ports)?;
+        magnetic.admit_state(&state, cancelled)?;
         let h = dae.system.hamiltonian(&state);
         if !h.is_finite() || h < 0.0 || state.iter().any(|v| !v.is_finite()) {
             return Err(OhmicWindingError::Invalid("initial electrical state is not representable"));
@@ -376,7 +343,12 @@ impl<'c, 'm> OhmicWindingCircuit<'c, 'm> {
             }
         }
         poll(cancelled)?;
+        // Native flux coordinates remain delta_lambda=L*i. Permanent linkage
+        // is a separate fixed offset; the same whole-field validator used by
+        // field sampling checks both actual endpoints before publication.
+        self.magnetic.admit_state(&x0, cancelled)?;
         let (native, _) = dae.step_audited(&x0, ports, dt)?;
+        self.magnetic.admit_state(&native.x, cancelled)?;
         let stored_before_j = dae.system.hamiltonian(&x0);
         let stored_after_j = dae.system.hamiltonian(&native.x);
         if native.x.iter().chain(&native.y).any(|v| !v.is_finite())

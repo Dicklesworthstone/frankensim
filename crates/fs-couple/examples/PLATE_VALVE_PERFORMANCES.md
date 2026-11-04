@@ -190,8 +190,9 @@ dg_tube LENGTH_M RADIUS_M OUTLET ELEMENTS ORDER POLES F_MIN_HZ F_MAX_HZ MAX_REL_
 observation inlet
 ```
 
-`OUTLET` is `open`, `closed` or `matched`. These are ideal acoustic boundary
-conditions; none implies an exterior radiation model. Geometry is one uniform
+`OUTLET` is `open`, `closed`, `matched` or the explicit `baffled` source below.
+The first three are ideal acoustic boundaries without exterior radiation.
+Geometry is one uniform
 circular cylinder in the declared ambient gas. Mesh order, element count, pole
 count, checked frequency band, relative Bessel error, exponential tolerance and
 complete state budget are explicit source data. The state budget includes both
@@ -218,19 +219,19 @@ cargo run --release -p fs-couple --bin music_render -- \
   /tmp/plate-valve-dg.wav --decimate --block 37
 ```
 
-The same input is accepted by `ensemble --valve`. Its output is **internal
-step-mean inlet pressure**, not a radiated microphone. Terminal/exterior
-observation, independent exterior gas and two-sided material-modal network
-conversion refuse rather than silently substituting another model. The WAV
-sidecar reports the actual operator, mesh, complete DOFs, pole counts, band,
-checked Bessel errors and exact mean impedance.
+The same input is accepted by `ensemble --valve`. Its default output is
+**internal step-mean inlet pressure**. A computed baffled terminal can instead
+drive the explicit exterior microphone below. Two-sided material-modal network
+conversion remains a separate path. The WAV sidecar reports the actual operator,
+mesh, complete DOFs, pole counts, band, checked Bessel errors and exact mean
+impedance, plus the original radiation source when selected.
 
 The example is illustrative source data, not a measured reed or instrument.
 Finite-band Bessel admission does not establish DG spatial convergence or
 nonlinear time convergence; those refinements remain separate. The dense DG
 ledger infers wall/terminal loss from the energy deficit and does not provide
 an independent heat integral. This bounded offline route retains a single structural plate/reed mode.
-A paired modal valve and exterior radiation need their own coupled paths. Its solid sections and Maxwell
+A paired modal valve needs its own coupled path. Its solid sections and Maxwell
 spectra remain authored numeric data, not identified source material packs.
 
 
@@ -286,8 +287,58 @@ primitive gas data affects both the excitation and the resonator without editing
 their equations. The same shared DG source/load also supports other nonlinear
 sources; no second gas law, bore fit or pressure observer is introduced.
 
-The output remains internal step-mean inlet pressure. The sidecar retains the
-actual inlet/outlet gas and area, spatial wall rule, canonical field stations and
-source-pack receipts. Gas-field data is a frozen background: thermal evolution,
-mean-flow acoustic corrections, moving solid walls and an exterior microphone
-are separate physical couplings.
+The default output remains internal step-mean inlet pressure. The computed
+baffled selection below observes exterior pressure from the propagated outlet
+flow. The sidecar retains inlet/outlet gas and area, spatial wall rule, canonical
+field stations and source-pack receipts. Gas-field data is a frozen background:
+thermal evolution, mean-flow corrections and moving walls are separate couplings.
+
+### Computed DG outlet radiation and exterior pressure
+
+`plate-valve-dg-baffled.performance` adds a physical radiation reaction and
+microphone to the existing plate/valve/DG path. The same source declaration is
+used by the DG flue format; neither exciter receives a second bore or gas law.
+
+Select `baffled` in `dg_tube` or `dg_bore`. After all declared geometry and
+gas-field rows, supply these records:
+
+```text
+dg_radiation computed-baffled FMIN_HZ SAMPLES ORDER1 ORDER2 ORDER3 ITERATIONS MAX_REL_ERROR FIT_MEMORY_BYTES SUBTRACTIONS TAIL_BOUND_RATIO DATA_TOLERANCE MAX_STATES RUNTIME_MEMORY_BYTES PASSIVITY_POINTS
+dg_exterior GAS_RECORD
+```
+
+The original computed-baffled reader owns all fourteen numerical controls.
+Its upper radiation band is mechanical Nyquist. The actual DG outlet area
+determines the circle at the baffle origin. The exterior accepts shared legacy,
+mixture and thermochemical records, retaining their source receipts. Temperature
+and composition may differ from the bore; static pressure must agree.
+
+At the existing observation position, select for example:
+
+```text
+observation baffled-outlet 0 0 0.2 8 32 2000
+```
+
+The fields are X/Y/Z in metres, radial/angular quadrature counts and maximum
+frequency in Hz. `observation inlet` remains available with the same radiation
+reaction active. The original full DG endpoint response and causal radiation
+history enter the same implicit inlet/outlet solve; both histories accept
+together. Signed terminal work may return stored near-field energy to the bore.
+
+The microphone consumes the actual accepted outward outlet flow once through
+the original same-clock differentiating Rayleigh observer. It adds no second
+reaction and never substitutes inlet flow. Its geometry and medium come from
+the retained source; a conflicting programmatic exterior refuses. Its declared
+band must fit the source, wall-loss and Rayleigh quadrature admissions.
+Propagation support and uncompensated numerical filter delay remain exposed.
+Standalone decimation stays explicit. CLI and ensemble listener admission use
+the actual receiver gas, including the existing common-listener-medium check.
+
+The examples are manufactured integration data requesting a 10% fit budget;
+their numerical fitting/passivity admission has not been executed in the
+authoring environment. Original failures remain failures. Full-band fitting,
+held-out source checks and actual continuous/sampled passivity reports remain,
+including sampled GridOnly limitations. One circle in an infinite rigid baffle
+does not establish free-field bell accuracy, mouth/body radiation, paired-reed
+or measured-instrument qualification. Observer-band declaration does not itself
+low-pass the output.

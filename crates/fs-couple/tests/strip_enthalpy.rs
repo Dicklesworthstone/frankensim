@@ -53,6 +53,174 @@ fn actual_layer_heat_enters_a_conservative_two_cell_transport_solve() {
 }
 
 #[test]
+fn affine_modulus_and_retained_bending_history_share_the_original_two_cell_solve() {
+    let slopes = [-0.002,0.001];
+    let branches = [3e8,1e8];
+    let cp = [5.0,10.0];
+    let materials = [0,1].map(|i| material_with_affine_scale(cp[i],branches[i],1.0,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,
+        vec![(280.0,0.1),(320.0,0.1)],slopes[i]));
+    let conductance = 0.002;
+    let dt = 0.2;
+    let (mut heat,mut strip) = initial(&materials,conductance,vec![]);
+    let mut old_e = [[0.0;2];2];
+    let mut old_q = [[0.0;2];2];
+    let mut old_xi = [0.0;2];
+    let mut old_t = [300.0;2];
+    for (step,(strain,curvature)) in [(0.01,0.6),(0.003,-0.2)].into_iter().enumerate() {
+        let control = Control {axial:AxialControl::Strain(strain),
+            bending:BendingControl::CurvaturePerM(curvature)};
+        // Independent constant-relaxation Maxwell solution at the two native
+        // Gauss locations. These arrays advance only after the full acceptance.
+        let mut e = [[0.0;2];2]; let mut q = [[0.0;2];2];
+        let mut xi = [0.0;2]; let mut loss_without_scale = [0.0;2];
+        for i in 0..2 {
+            let shape = geometry(i);
+            for (j,sign) in [-1.0,1.0].into_iter().enumerate() {
+                let z = shape.centroid_z_m+sign*shape.thickness_m/(2.0*3.0_f64.sqrt());
+                e[i][j] = strain-z*curvature;
+                q[i][j] = (old_q[i][j]+e[i][j]-old_e[i][j])/(1.0+dt);
+                xi[i] += 0.25*VOLUME*(1e8*e[i][j].powi(2)+branches[i]*q[i][j].powi(2));
+                loss_without_scale[i] += 0.5*VOLUME*branches[i]*dt*q[i][j].powi(2);
+            }
+        }
+        // C(T-Told)=S(T)*D0+b*T*(Xi-Xiold)+dt*g*(Tother-T).
+        // This is a closed 2x2 caloric solve, independent of Newton/the receipt.
+        let a = slopes.map(|b|1.0-300.0*b);
+        let capacity = cp.map(|c|MASS*c);
+        let off = conductance*dt;
+        let diagonal = [0,1].map(|i|capacity[i]+off
+            -slopes[i]*(loss_without_scale[i]+xi[i]-old_xi[i]));
+        let rhs = [0,1].map(|i|capacity[i]*old_t[i]+a[i]*loss_without_scale[i]);
+        let determinant = diagonal[0]*diagonal[1]-off*off;
+        let temperature = [(diagonal[1]*rhs[0]+off*rhs[1])/determinant,
+            (diagonal[0]*rhs[1]+off*rhs[0])/determinant];
+        let next = step_candidate(&heat,&strip,&bindings(&materials),(step+1) as f64*dt,
+            control,config(),&[0.0;2],coefficients,||false).unwrap();
+        let mut internal = 0.0; let mut entropy_energy = 0.0;
+        let mut reversible = 0.0; let mut loss = 0.0;
+        for i in 0..2 {
+            near(next.thermal().temperature_k(CELLS[i]).unwrap(),temperature[i],1e-6);
+            for (j,point) in next.strip().layers()[&LAYERS[i]].material_points().iter().enumerate() {
+                near(point.branch_strains()[0],q[i][j],1e-13);
+            }
+            let dissipated = (a[i]+slopes[i]*temperature[i])*loss_without_scale[i];
+            near(next.report().layer_energy_j[&LAYERS[i]].dissipated,dissipated,1e-10);
+            internal += a[i]*(xi[i]-old_xi[i]);
+            entropy_energy -= slopes[i]*(temperature[i]*xi[i]-old_t[i]*old_xi[i]);
+            reversible += slopes[i]*temperature[i]*(xi[i]-old_xi[i]);
+            loss += dissipated;
+        }
+        let r = next.report();
+        near(r.mechanical_internal_energy_change_j,internal,1e-10);
+        near(r.mechanical_entropy_energy_change_j,entropy_energy,1e-10);
+        near(r.reversible_heat_j,reversible,1e-10);
+        near(r.deposited_heat_j,loss+reversible,1e-10);
+        near(r.mechanical_internal_energy_change_j,
+            next.strip().stored_energy_j()-strip.stored_energy_j()+entropy_energy,1e-10);
+        near(internal+next.thermal().energy_j()-heat.energy_j()
+            +r.mechanical.energy_j.numerical_dissipation-r.external_mechanical_work_j,0.0,2e-9);
+        assert!(r.total_energy_residual_j.abs()<config().total_energy_tolerance_j);
+        if step==0 {
+            assert!(temperature[0]<300.0 && temperature[1]>300.0);
+            assert!(reversible<0.0);
+        } else {
+            assert!(reversible>0.0,"unloading returns reversible heat from retained elastic history");
+        }
+        old_e=e; old_q=q; old_xi=xi; old_t=temperature;
+        let (t,m,_) = next.into_parts(); heat=t; strip=m;
+    }
+}
+
+#[test]
+fn lossless_affine_layers_cool_on_loading_and_heat_on_unloading() {
+    let slope = -0.002;
+    let cp = 5.0;
+    let materials = [0,1].map(|_|material_with_affine_scale(cp,0.0,1.0,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,
+        vec![(280.0,0.1),(320.0,0.1)],slope));
+    let (heat,strip) = initial(&materials,0.0,vec![]);
+    let strain: f64 = 0.01;
+    let xi = 0.5*VOLUME*1e8*strain.powi(2);
+    let capacity = MASS*cp;
+    let loaded_t = 300.0*capacity/(capacity-slope*xi);
+    let loaded = step_candidate(&heat,&strip,&bindings(&materials),0.2,stretched(strain),
+        config(),&[0.0;2],coefficients,||false).unwrap();
+    near(loaded.thermal().temperature_k(CELLS[0]).unwrap(),loaded_t,1e-7);
+    near(loaded.report().deposited_heat_j,2.0*slope*loaded_t*xi,1e-10);
+    assert_eq!(loaded.report().mechanical.energy_j.dissipated,0.0);
+    assert!(loaded.report().mechanical.energy_j.numerical_dissipation>0.0);
+    assert!(loaded.report().reversible_heat_j<0.0);
+    let unloaded = step_candidate(loaded.thermal(),loaded.strip(),&bindings(&materials),0.4,
+        stretched(0.0),config(),&[0.0;2],coefficients,||false).unwrap();
+    let unloaded_t = capacity*loaded_t/(capacity+slope*xi);
+    near(unloaded.thermal().temperature_k(CELLS[0]).unwrap(),unloaded_t,1e-7);
+    near(unloaded.report().deposited_heat_j,-2.0*slope*unloaded_t*xi,1e-10);
+    assert_eq!(unloaded.report().mechanical.energy_j.dissipated,0.0);
+    assert!(unloaded.report().reversible_heat_j>0.0);
+    assert!(unloaded.report().total_energy_residual_j.abs()<config().total_energy_tolerance_j);
+}
+
+#[test]
+fn source_expansion_distinguishes_free_motion_from_constrained_heating_and_stress() {
+    let cp = 5.0;
+    let dt = 0.2;
+    let heat_per_layer = 0.01;
+    // The source stores free strain relative to 280 K; each native point
+    // retains its actual 300 K birth datum. Only the signed source slope changes.
+    for alpha in [0.0,1e-4,-1e-4] {
+        let materials = [0,1].map(|_|material(cp,0.0,1.0,40.0*alpha));
+        let (heat,strip) = initial(&materials,0.0,vec![]);
+        let source = |s:&DepositionSimulation<'_>| coefficients(s).map(|mut c| {
+            for cell in CELLS { c.sources_w.insert(cell,heat_per_layer/dt); }
+            c
+        });
+        let free = step_candidate(&heat,&strip,&bindings(&materials),dt,
+            Control {axial:AxialControl::ForceN(0.0),bending:BendingControl::MomentNm(0.0)},
+            config(),&[0.0;2],source,||false).unwrap();
+        let free_rise = heat_per_layer/(MASS*cp);
+        near(free.strip().axial_strain(),alpha*free_rise,1e-12);
+        near(free.strip().curvature_per_m(),0.0,1e-10);
+        for cell in CELLS { near(free.thermal().temperature_k(cell).unwrap(),300.0+free_rise,1e-7); }
+        near(free.report().mechanical_internal_energy_change_j,0.0,1e-11);
+        near(free.report().deposited_heat_j,0.0,1e-11);
+        let held = step_candidate(&heat,&strip,&bindings(&materials),dt,stretched(0.0),
+            config(),&[0.0;2],source,||false).unwrap();
+        // For a lossless clamped spring, Qrev=V E alpha² T_old ΔT.
+        // This closes the coupled caloric equation independently of Newton.
+        let expansion_capacity = VOLUME*1e8*alpha*alpha;
+        let held_rise = heat_per_layer/(MASS*cp-300.0*expansion_capacity);
+        let temperature = 300.0+held_rise;
+        let stress = -1e8*alpha*held_rise;
+        let entropy_energy = 2.0*VOLUME*temperature*alpha*stress;
+        let internal = VOLUME*1e8*(alpha*held_rise).powi(2)+entropy_energy;
+        let r = held.report();
+        for (i,layer) in LAYERS.into_iter().enumerate() {
+            near(held.thermal().temperature_k(CELLS[i]).unwrap(),temperature,1e-7);
+            for p in held.strip().layers()[&layer].material_points() {
+                near(p.total_strain(),0.0,1e-13);
+                near(p.stress_pa(),stress,1e-5);
+            }
+        }
+        near(r.mechanical.axial_reaction_n,2.0*AREA*stress,1e-9);
+        near(r.mechanical_entropy_energy_change_j,entropy_energy,1e-10);
+        near(r.mechanical_internal_energy_change_j,internal,1e-10);
+        near(r.reversible_heat_j,2.0*expansion_capacity*300.0*held_rise,1e-10);
+        near(r.deposited_heat_j,r.reversible_heat_j,1e-12);
+        near(internal+held.thermal().energy_j()-heat.energy_j()
+            +r.mechanical.energy_j.numerical_dissipation-2.0*heat_per_layer,0.0,2e-9);
+        assert_eq!(r.mechanical.energy_j.dissipated,0.0);
+        assert_eq!(r.external_mechanical_work_j,0.0);
+        if alpha!=0.0 {
+            assert!(held_rise>free_rise && r.reversible_heat_j>0.0);
+            assert!(r.mechanical.energy_j.thermal_strain_work>0.0);
+            assert!(stress*alpha<0.0,"the constraint reverses thermal stress with the source slope");
+        }
+        assert_eq!(heat.time_s(),0.0); assert_eq!(strip.axial_strain(),0.0);
+    }
+}
+
+#[test]
 fn a_caloric_only_substitution_changes_compatible_curvature_and_both_heat_histories() {
     let run = |upper_cp| {
         let materials = [material(5.0,3e8,0.05,0.0),material(upper_cp,3e8,0.05,0.0)];
@@ -138,7 +306,9 @@ fn mappings_caloric_physics_and_the_final_trial_budget_are_not_silently_bypassed
     },||flag.get());
     assert!(matches!(late,Err(StripEnthalpyError::Cancelled)));
     assert_eq!(heat.cells(),&before); assert_eq!(strip,old);
-    let unsupported = [material(5.0,3e8,0.05,0.001),material(10.0,3e8,0.05,0.0)];
+    // Affine expansion is admitted, but this slope would overwhelm the
+    // declared caloric heat capacity over the source interval.
+    let unsupported = [material(5.0,3e8,0.05,0.04),material(10.0,3e8,0.05,0.0)];
     let (h,s) = initial(&unsupported,0.0,vec![]);
     assert!(matches!(step_candidate(&h,&s,&bindings(&unsupported),0.2,stretched(0.01),config(),
         &[0.0;2],coefficients,||false),Err(StripEnthalpyError::CaloricAdmission(_))));

@@ -241,7 +241,7 @@ pub struct PlateRun {
     pub samples: Vec<(f64, f64)>,
     /// Sum of squared normalized sensor displacements, divided by two.
     pub loss: f64,
-    /// Derivatives in the four dynamics parameters, then force amplitude.
+    /// Derivatives in the four dynamics parameters, then applied-load parameters.
     pub gradient: Vec<f64>,
     /// All free displacement, slope, velocity and acceleration components.
     pub final_state: SecondOrderState,
@@ -262,13 +262,28 @@ pub fn evaluate(
         plate,
         amplitude: p[4],
     };
+    evaluate_load(mesh, plate, dynamics_parameters(p), &load)
+}
+
+/// Shared forward/adjoint experiment for any original plate load adapter.
+/// Initial acceleration and all load parameters participate in the gradient.
+pub fn evaluate_load<L: PlateLoad + ?Sized>(
+    mesh: &PlateMesh,
+    plate: &PlateModel,
+    parameters: PlateDynamicsParameters,
+    load: &L,
+) -> Result<PlateRun, Box<dyn Error>> {
     let dynamics = PlateDynamics::new(
         plate,
-        dynamics_parameters(p),
-        &load,
-        dynamics_budget(plate),
+        parameters,
+        load,
+        PlateDynamicsBudget {
+            max_load_parameters: load.parameter_count(),
+            ..dynamics_budget(plate)
+        },
         &mut || false,
     )?;
+    let parameter_count = dynamics.parameter_count();
     let initial = resting_state(&dynamics)?;
     let method = method(plate.free, RHO);
     let adjoint = adjoint_config(plate.free);
@@ -280,7 +295,7 @@ pub fn evaluate(
             steps: STEPS,
             adjoint,
             max_workspace_components: method
-                .adjoint_workspace_components(5, adjoint)
+                .adjoint_workspace_components(parameter_count, adjoint)
                 .ok_or("trajectory workspace overflow")?,
         },
     )?;
@@ -317,14 +332,14 @@ pub fn evaluate(
         &mass,
         &mass,
         initial_config(),
-        initial_workspace_components(plate.free, 5, initial_config())
+        initial_workspace_components(plate.free, parameter_count, initial_config())
             .ok_or("initial workspace overflow")?,
         &mut || false,
     )?;
-    let mut force_gradient = vec![0.0; 5];
+    let mut force_gradient = vec![0.0; parameter_count];
     dynamics.forcing_vjp(0.0, &initial_gradient.forcing, &mut force_gradient)?;
     let mut gradient = result.gradient.parameters;
-    for i in 0..5 {
+    for i in 0..parameter_count {
         gradient[i] += initial_gradient.parameters[i] + force_gradient[i];
     }
     Ok(PlateRun {

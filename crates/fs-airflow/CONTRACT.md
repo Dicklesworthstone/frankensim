@@ -27,6 +27,27 @@ Runtime dependencies are `fs-blake3`, `fs-conduction`, `fs-convection`,
 quantities, as a Re/Pr handoff to the existing convection rung, and as the
 CHT ladder's correlation-rung transfer.
 
+### Material-driven natural and forced finite-cell convection
+
+`medium::convection::deposition::evaluate_material_cell_convection` binds either
+an existing forced-convection card or the Churchill-Chu vertical-plate card to
+the original finite-cell enthalpy owner. Both laws share one source, exposed-area
+and contact-coverage accounting path. Natural convection reevaluates Ra and h
+at the proposed wall temperature inside the thermal residual; density, Cp,
+viscosity and conductivity come from one admitted material transport snapshot.
+Reservoir properties and explicitly supplied volumetric expansion remain frozen
+for the interval. No liquid expansion or film state is inferred.
+
+Exact thermal equilibrium returns zero power while retaining the material
+snapshot, with no fabricated Ra=0 correlation result. Every nonzero contrast
+retains the original card's domain restrictions. Repeated bindings, authored
+heat-transfer overlap, invalid sources, work limits and cancellation refuse
+transactionally. The existing forced-only entry point delegates to the same
+ownership loop. `tests/material_cell_convection.rs` covers independent natural
+heat-transfer calculations, material substitution, both heat directions,
+negative expansion, nonlinear accepted endpoints, ambient heater startup,
+mixed-law ownership and thermal-energy balance.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `graph::thermal::medium::FrozenFlowMedium::ThermochemicalGas` retains the
@@ -56,13 +77,106 @@ input. `tests/steady_material_gas.rs` checks independent heat/pressure balances,
 temperature-dependent transport, species injection, pressure changes,
 final-state hydraulic admission and transactional failure/cancellation.
 
-This is a first-order steady reduced model with prescribed positive mass flow,
+`solve_material_gas_network` uses that same material-convection fixed point for
+the native branched and inlet-fed recirculating `SteadyGasNetwork`. There is one
+feedback implementation for the axial and graph APIs; each keeps its original
+thermal result type. Each cell's full accepted source state supplies its heat
+transfer, hydraulic response and acoustic medium. Composition and temperature
+changes therefore update the wall law inside the steady balance, rather than
+leaving an independently authored coefficient frozen. Correlation evidence and
+material receipts remain bound to the returned local states.
+
+Cells must represent the declared bulk-flow sections and correlations; junction
+or nozzle geometry is not inferred. Per-cell hydraulic losses are observations
+of prescribed flows, not a graph pressure solution. Their sum is a conservative
+common-pressure admission bound; only an axial series path identifies that sum
+with its end-to-end drop. No pump or flow-feasibility claim is added. The new
+network regressions independently reconstruct cell and external enthalpy
+balances, check recirculating species, exercise material/pressure substitutions,
+and compare the original axial API with the same graph and wall laws.
+
+`medium::convection::finite_gas::ForcedGasSurface::isochoric_body_candidate`
+connects the same material/correlation evaluator to the generic finite-gas,
+uniform-body thermal callback in `fs-couple`. Each coupled trial resolves h from
+the actual candidate gas endpoint; accepted transport and correlation sources
+remain beside the same gas state used for energy and acoustic observations.
+The original body solver retains conductivity, radiation, Biot admission and
+enthalpy, and the single exchanged heat cancels in the combined energy balance.
+A positive patch must cover the whole body surface; zero area explicitly
+insulates it. Bulk-gas property evaluation and prescribed relative flow retain
+their correlation limits. Dittus-Boelter selects its heating/cooling branch
+from the proposed signed heat inside the same residual. Its neutral zero-heat
+seed uses the smaller branch coefficient, preventing an authored direction
+from falsely rejecting the physical branch at the Biot gate. Constant-heat-flux
+duct correlations refuse on this isothermal-body path.
+The explicit constant-h API remains available. `tests/finite_gas_convection.rs`
+checks endpoint coefficient re-evaluation, transport-only data substitution,
+energy closure, fixed-h identity and transactional refusals. Additional tests in
+`tests/finite_gas_convection/uniform.rs` exercise pressure/composition changes,
+latent heat, both heat directions and late source-callback cancellation.
+No spatial flow,
+film-temperature solve or experimental fidelity claim is introduced.
+
+`solve_material_gas_transport` is a first-order steady reduced model with prescribed positive mass flow,
 supplied wall temperatures, downstream mixed-cell bulk properties and a common
 static EOS pressure. Total pressure loss must fit the explicit small-drop
 limit. It does not solve fan mass flow or axial pressure, advance reactions or
 phase, resolve boundary layers, or claim experimental accuracy. Hydraulic
 `dp*Q` is reported separately and neglected in the thermal equation; it is not
 silently added to wall heat or enthalpy.
+
+### Natural convection in finite gas and coupled surface networks
+
+`medium::convection::finite_gas::NaturalGasSurface` evaluates the shared
+vertical-plate correlation from the coupling owner's actual gas and body query
+states. The retained ideal-gas EOS supplies beta = 1/T; the same resolved
+thermochemical gas supplies density, Cp, viscosity and conductivity. Pressure
+and composition therefore propagate through Ra, Pr, h and the original signed
+gas/body heat residual. The existing piston, phase-enthalpy and gas owners
+advance their own energy, including latent heat and piston work.
+
+`finite_gas::network::exchange::GasHeatLaw::NaturalConvection` carries that
+same law into the material electrical/contact/radiation/thermal network and its
+chamber-flow step. Natural, forced and explicit conductive laws may occupy
+disjoint exposed patches, with aggregate area admission and one energy owner.
+Accepted samples retain the exact queried gas and wall states. Candidate solves,
+atomic flow-step publication and cancellation use the existing network path.
+
+This is an unconfined isothermal vertical-plate approximation evaluated at bulk
+gas properties; it does not resolve buoyant velocity or supply enclosure
+corrections. The caller must admit the geometry and temperature contrast.
+Exact equilibrium and zero patch area have zero transfer without a fabricated
+Ra=0 coefficient; every nonzero contrast retains the original correlation
+domain. Tests in `tests/finite_gas_convection/natural.rs` and
+`tests/finite_gas_convection/natural_network.rs` cover independent correlation
+values, pressure/composition substitution, both heat directions, latent heat,
+gas/body/piston energy closure, mixed surface laws, source identity, area
+overlap and late-cancellation rollback. The flow-step regression uses zero
+nozzle links and checks the original publication path.
+
+### Mixed gas heat laws after combined species transport
+
+`finite_gas::network::exchange::{transport_step_candidate, advance_with_transport}`
+connects the same conductive, forced and natural patches to the shared
+same-snapshot nozzle/Maxwell–Stefan transport owner. Both connection lists
+consume one original species allowance and reconstruct each gas once. The
+actual transported/reacted gas enters every heat/momentum trial, including its
+composition, density, heat capacity, viscosity and thermal conductivity. No
+ambient composition, coefficient cache or separate heat integrator is added.
+One resolver supplies every mixed-law path; the original `fs-couple` owner
+accounts for the complete interval and atomically publishes all histories.
+
+Nozzle and molecular paths remain distinct physical declarations. Empty lists
+disable either mechanism. Existing molar-average diffusion T/p restrictions,
+withdrawal/entropy/source gates, convection domains and first-order splitting
+remain binding. A forced patch still has prescribed relative speed; a nozzle
+mass rate does not establish a resolved surface velocity or jet thrust.
+`tests/finite_gas_convection/natural_network.rs` exercises nonzero nozzle and
+diffusive transport with mixed convection, exact independently staged physical
+endpoints, original source composition in accepted heat samples, signed cell
+heat, full endpoint energy, diffusivity-only trajectory changes and complete
+rollback after a late correlation refusal. Synthetic sources establish these
+integration identities, not empirical gas or enclosure accuracy.
 
 ### Coupled total-enthalpy endpoint adjoints
 

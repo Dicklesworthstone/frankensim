@@ -185,3 +185,84 @@ fn late_physical_refusal_poisons_the_mix_without_publishing_a_partial_pcm_callba
     assert!(matches!(mix.validate_sample_count(1), Err(RenderError::Poisoned)));
     assert_eq!(sentinel, [12345.0; 2]);
 }
+
+#[test]
+fn source_and_outer_filter_delays_align_without_changing_physical_trajectories() {
+    // The inner observer is already owned by its pressure producer, like a
+    // multirate wind receiver. The ensemble adds only outer conversion and the
+    // remaining pure delay; both original modal trajectories retain their clock.
+    let build = || {
+        let parts: Vec<_> = [1, 2].into_iter().map(|inner_ratio| {
+            let inner = DecimatedRenderer::new(source(96_000 * inner_ratio, 257, None),
+                96_000 * inner_ratio, 96_000, 257).unwrap();
+            DecimatedRenderer::new(inner, 96_000, 48_000, 257).unwrap()
+        }).collect();
+        let source_delays: Vec<_> = parts.iter().map(|part|
+            part.source().info().delay_output_samples / part.info().ratio as f64).collect();
+        PressureEnsemble::new_with_source_delays(parts, config(), &source_delays).unwrap()
+    };
+    let common = 60;
+    let mut expected = vec![0.0; 257];
+    let mut references = Vec::new();
+    for inner_ratio in [1, 2] {
+        let mut physical = source(96_000 * inner_ratio, 514 * inner_ratio as usize, None);
+        let mut trace = vec![0.0; 514 * inner_ratio as usize];
+        physical.block(&mut trace).unwrap();
+        let mut inner = Decimator::new(inner_ratio as usize, 1).unwrap();
+        let source_delay = inner.delay_output_frames() as usize / 2;
+        let mut intermediate = Vec::with_capacity(514);
+        for chunk in trace.chunks_exact(inner_ratio as usize) {
+            intermediate.push(inner.preview(chunk).unwrap()[0]);
+            inner.commit();
+        }
+        let mut outer = Decimator::new(2, 1).unwrap();
+        let alignment = common - source_delay - outer.delay_output_frames() as usize;
+        for (i, chunk) in intermediate.chunks_exact(2).enumerate() {
+            let value = outer.preview(chunk).unwrap()[0];
+            outer.commit();
+            if i + alignment < expected.len() { expected[i + alignment] += value; }
+        }
+        references.push(physical);
+    }
+    assert!(expected.iter().any(|value| value.abs() > 1e-5));
+    for partition in [1, 37, 257] {
+        let mut ensemble = build();
+        assert_eq!(ensemble.delay_output_samples(), common);
+        assert_eq!(ensemble.part_info().iter().map(|part|
+            (part.source_filter_delay_output_samples, part.total_filter_delay_output_samples,
+                part.alignment_delay_samples)).collect::<Vec<_>>(), vec![(0, 40, 20), (20, 60, 0)]);
+        let mut actual = vec![0.0; 257];
+        for block in actual.chunks_mut(partition) { ensemble.block(block).unwrap(); }
+        assert_eq!(bits(&actual), bits(&expected));
+        for (part, original) in ensemble.parts().iter().zip(&references) {
+            let physical = part.source().source();
+            assert_eq!(physical.samples_rendered(), original.samples_rendered());
+            assert_eq!(physical.applied_controls(), original.applied_controls());
+            assert_eq!(physical.pending_controls(), original.pending_controls());
+        }
+    }
+}
+
+#[test]
+fn declared_source_delays_preserve_zero_behavior_and_refuse_fractional_or_unbounded_storage() {
+    use fs_couple::pcm_wav::observation::ensemble::MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES;
+    let mut original = mixed(&[1, 2]);
+    let mut declared = PressureEnsemble::new_with_source_delays(
+        vec![observed(1), observed(2)], config(), &[0.0, 0.0],
+    ).unwrap();
+    let (mut before, mut after) = ([0.0; 257], [0.0; 257]);
+    original.block(&mut before).unwrap();
+    declared.block(&mut after).unwrap();
+    assert_eq!(bits(&before), bits(&after));
+    assert_eq!(original.part_info(), declared.part_info());
+    assert!(PressureEnsemble::new_with_source_delays(
+        vec![observed(1), observed(2)], config(), &[0.0],
+    ).is_err());
+    for source_delay in [-1.0, 0.5, 1.0 - f64::EPSILON, f64::NAN, f64::INFINITY,
+        MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES as f64]
+    {
+        assert!(PressureEnsemble::new_with_source_delays(
+            vec![observed(1), observed(2)], config(), &[0.0, source_delay],
+        ).is_err());
+    }
+}

@@ -451,6 +451,31 @@ pub struct FvFlow {
 }
 
 impl FvFlow {
+    /// Exact empty/rest field, without inventing a fluid transport tuple.
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(in crate::conjugate) fn stationary(domain: &VoxelDomain) -> Self {
+        Self {
+            field: FlowField::quiescent(domain),
+            velocity_m_s: vec![[0.0; 3]; domain.cell_count()],
+            pressure_pa: vec![0.0; domain.cell_count()],
+            eddy_viscosity_m2_s: vec![0.0; domain.cell_count()],
+            heat_eddy_viscosity_m2_s: vec![0.0; domain.cell_count()],
+            report: SimpleReport {
+                iterations: 0,
+                mass_residual: 0.0,
+                momentum_residual: 0.0,
+                max_divergence_m3_s: 0.0,
+                inflow_m3_s: 0.0,
+                outflow_m3_s: 0.0,
+                max_cell_reynolds: 0.0,
+                momentum_krylov_iterations: 0,
+                pressure_krylov_iterations: 0,
+                fan: None,
+                internal_fans: Vec::new(),
+            },
+        }
+    }
+
     /// Turbulent conductivity `rho c_p nu_t / Pr_t` per cell, W/(m K), for
     /// `ThermalSetup::eddy_conductivity_w_m_k` (zeros when laminar).
     #[must_use]
@@ -568,6 +593,60 @@ pub(super) struct Solver<'a> {
 pub(super) struct MomentumState {
     velocity: [Vec<f64>; 3],
     pressure: Vec<f64>,
+}
+
+#[cfg(feature = "enthalpy-coupling")]
+impl MomentumState {
+    /// Closed phase domains can change occupancy without a kinetic handoff
+    /// only when every newly constrained native velocity is already zero.
+    pub(super) fn admit_phase_domain(
+        &self,
+        domain: &VoxelDomain,
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        let n = domain.dims();
+        for (axis, velocity) in self.velocity.iter().enumerate() {
+            let mut dims = n;
+            dims[axis] += 1;
+            if velocity.len() != dims.iter().product::<usize>()
+                || self.pressure.len() != domain.cell_count()
+            {
+                return Err(ChtError::InvalidInput {
+                    field: "simple.momentum_state",
+                    reason: "phase momentum must retain its original staggered grid".into(),
+                });
+            }
+            for (index, &speed) in velocity.iter().enumerate() {
+                if index % 256 == 0 {
+                    poll(gate)?;
+                }
+                let plus = [index % dims[0], (index / dims[0]) % dims[1], index / (dims[0] * dims[1])];
+                let along = plus[axis];
+                let constrained = if along == 0 || along == n[axis] {
+                    true
+                } else {
+                    let mut minus = plus;
+                    minus[axis] -= 1;
+                    !domain.is_fluid(cell_of(n, minus)) || !domain.is_fluid(cell_of(n, plus))
+                };
+                if constrained && speed != 0.0 {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.momentum_state",
+                        reason: "freezing a moving native face requires an explicit momentum/kinetic-energy handoff".into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn clear_solid_pressure(&mut self, domain: &VoxelDomain) {
+        for (cell, pressure) in self.pressure.iter_mut().enumerate() {
+            if !domain.is_fluid(cell) {
+                *pressure = 0.0;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1189,6 +1268,22 @@ impl<'a> Solver<'a> {
                 field: "simple.momentum_state",
                 reason: "retained momentum must match the native staggered domain".into(),
             });
+        }
+        // Opening a formerly constrained face retains its exact zero speed.
+        // Closing one is admissible only if it already satisfies the new
+        // constraint. Never clip a live velocity and silently delete its
+        // momentum or native face-mass kinetic energy.
+        for (component, velocity) in self.comps.iter().zip(&state.velocity) {
+            for (kind, &speed) in component.kind.iter().zip(velocity) {
+                if let Kind::Fixed(required) = kind {
+                    if speed != *required {
+                        return Err(ChtError::InvalidInput {
+                            field: "simple.momentum_state",
+                            reason: "a new fixed face requires an explicit momentum/kinetic-energy handoff".into(),
+                        });
+                    }
+                }
+            }
         }
         self.vel.clone_from(&state.velocity);
         self.pressure.clone_from(&state.pressure);
