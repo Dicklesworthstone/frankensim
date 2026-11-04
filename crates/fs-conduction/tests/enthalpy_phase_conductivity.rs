@@ -468,6 +468,135 @@ fn fraction_only_kink_refuses_only_when_conductivity_depends_on_phase() {
 }
 
 #[test]
+fn shared_vertex_phase_values_retain_original_charts_and_element_fluxes() {
+    let fixture = Fixture::new();
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(5, vec![[0, 1, 2, 3], [0, 2, 1, 4]]),
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ],
+    )
+    .unwrap();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let source = ScalarField::uniform("no external heat", 0.0).unwrap();
+    let laws = [
+        phase_law(),
+        LiquidMassFractionConductivity::declared(2.0, 0.5).unwrap(),
+    ];
+    let p = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        element_materials: None,
+        source: &source,
+    };
+    with_cx(|cx| {
+        let stepper = EnthalpyBackwardEuler::uniform(
+            cx,
+            &mesh,
+            &fixture.curve,
+            2.0,
+            EnthalpyBudget {
+                max_vertices: 5,
+                max_elements: 2,
+            },
+        )
+        .unwrap()
+        .with_phase_conductivity(cx, laws.to_vec())
+        .unwrap();
+        // Exercise sensible, latent-interior and exact source-corner states.
+        // The source's public material states remain the independent reference
+        // for the numeric fields now shared by incident elements.
+        for h in [
+            [60.0, 180.0, 240.0, 420.0, 100.0],
+            [0.0, 100.0, 300.0, 700.0, 200.0],
+        ] {
+            let states: Vec<_> = h
+                .iter()
+                .map(|&h| fixture.curve.state_at_specific_enthalpy(h).unwrap())
+                .collect();
+            let got = stepper
+                .evaluate_endpoint(cx, p, None, &h, &h, DT, config(), None)
+                .unwrap();
+            for (temperature, state) in got.temperature.iter().zip(&states) {
+                assert_eq!(temperature.to_bits(), state.temperature_k().to_bits());
+            }
+            let mut expected = [0.0; 5];
+            // Each right tetrahedron has V=1/6 and the following exact P1
+            // gradients. The lower element reverses z but preserves its own
+            // phase-dependent conductivity, including the shared face nodes.
+            for (element, gradients) in [
+                [
+                    [-1.0, -1.0, -1.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                [
+                    [-1.0, -1.0, 1.0],
+                    [0.0, 1.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0],
+                ],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let vertices = mesh.complex().tets[element];
+                let mean_fraction: f64 = vertices
+                    .iter()
+                    .map(|&v| states[v as usize].liquid_mass_fraction() / 4.0)
+                    .sum();
+                let k = 2.0 * laws[element].multiplier_at(mean_fraction).unwrap();
+                let mut gradient_t = [0.0; 3];
+                for (&vertex, gradient) in vertices.iter().zip(gradients) {
+                    for d in 0..3 {
+                        gradient_t[d] += states[vertex as usize].temperature_k() * gradient[d];
+                    }
+                }
+                for (&vertex, gradient) in vertices.iter().zip(gradients) {
+                    expected[vertex as usize] +=
+                        DT * k / 6.0 * (0..3).map(|d| gradient[d] * gradient_t[d]).sum::<f64>();
+                }
+            }
+            for (&actual, expected) in got.residual_j.iter().zip(expected) {
+                assert!((actual - expected).abs() < 2e-13, "{actual} != {expected}");
+            }
+            assert!(got.residual_j.iter().sum::<f64>().abs() < 2e-13);
+        }
+        let initial = [60.0, 180.0, 240.0, 420.0, 100.0];
+        let solved = stepper
+            .advance(cx, p, None, &initial, DT, config())
+            .unwrap();
+        for (vertex, &h) in solved.specific_enthalpy_j_kg.iter().enumerate() {
+            let original = fixture.curve.state_at_specific_enthalpy(h).unwrap();
+            assert_eq!(
+                solved.temperature[vertex].to_bits(),
+                original.temperature_k().to_bits()
+            );
+            assert_eq!(
+                solved.liquid_mass_fraction[vertex].to_bits(),
+                original.liquid_mass_fraction().to_bits()
+            );
+        }
+        let mut invalid = initial;
+        invalid[4] = 701.0;
+        assert!(matches!(
+            stepper.evaluate_endpoint(cx, p, None, &initial, &invalid, DT, config(), None),
+            Err(EnthalpyError::Phase { vertex: 4, .. })
+        ));
+    });
+}
+
+#[test]
 fn invalid_phase_laws_and_assignment_shapes_refuse_and_builder_polls_cancellation() {
     let shared =
         fs_material::phase::conductivity::LiquidMassFractionConductivity::declared(4.0, 1.0)

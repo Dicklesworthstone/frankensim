@@ -220,7 +220,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 poll(cx, vertex)?;
             }
             self.curve_for_vertex(vertex)
-                .state_at_specific_enthalpy(value)
+                .values_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
         }
         let context = StepContext {

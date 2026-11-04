@@ -190,8 +190,8 @@ impl MaterialMeltingTransport {
         let density = |h| {
             caloric
                 .curve()
-                .state_at_specific_enthalpy(h)
-                .map(|state| state.bulk_density_kg_m3())
+                .values_at_specific_enthalpy(h)
+                .map(|state| state.bulk_density_kg_m3)
                 .map_err(MaterialEnthalpyError::Caloric)
         };
         let density = [density(solid_h)?, density(liquid_h)?];
@@ -286,13 +286,13 @@ impl MaterialMeltingTransport {
     ) -> Result<MeltingConductivitySample, MaterialEnthalpyError> {
         let curve = self.caloric.curve();
         let state = curve
-            .state_at_specific_enthalpy(h)
+            .values_at_specific_enthalpy(h)
             .map_err(MaterialEnthalpyError::Caloric)?;
         let [solid_h, liquid_h] = self.caloric.plateau_enthalpy_bounds_j_kg();
         let sample = if h < solid_h || h >= liquid_h {
             let phase = usize::from(h >= liquid_h);
             let table = &self.conductivity[phase];
-            let temperature = state.temperature_k();
+            let temperature = state.temperature_k;
             let slope = curve
                 .temperature_derivative_at_specific_enthalpy(h)
                 .map_err(MaterialEnthalpyError::Caloric)?;
@@ -311,7 +311,7 @@ impl MaterialMeltingTransport {
                 liquid_volume_fraction: phase as f64,
             }
         } else {
-            let f = state.liquid_mass_fraction();
+            let f = state.liquid_mass_fraction.clamp(0.0, 1.0);
             let [solid_rho, liquid_rho] = self.transition_density_ratios;
             let denominator = (1.0 - f) * liquid_rho + f * solid_rho;
             let phi = f * solid_rho / denominator;

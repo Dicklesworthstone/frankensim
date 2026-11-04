@@ -980,12 +980,14 @@ impl StepContext<'_, '_, '_, '_> {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(self.cx, vertex)?;
             }
+            // Newton and line-search candidates need numeric constitutive
+            // values, not a separately hashed material-state identity.
             let state = self
                 .storage
                 .curve_for_vertex(vertex)
-                .state_at_specific_enthalpy(value)
+                .values_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
-            temperature.push(state.temperature_k());
+            temperature.push(state.temperature_k);
         }
         Ok(temperature)
     }
@@ -1018,6 +1020,23 @@ impl StepContext<'_, '_, '_, '_> {
         let Some(policy) = &self.storage.phase_conductivity else {
             return Ok(None);
         };
+        // Shared vertices have one original chart and one phase value at this
+        // candidate. Resolve it once, instead of once per incident tetrahedron.
+        // Retain the published state's roundoff clamp and element summation order.
+        let mut nodal_fraction = Vec::with_capacity(h.len());
+        for (vertex, &value) in h.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 {
+                poll(self.cx, vertex)?;
+            }
+            nodal_fraction.push(
+                self.storage
+                    .curve_for_vertex(vertex)
+                    .values_at_specific_enthalpy(value)
+                    .map_err(|source| EnthalpyError::Phase { vertex, source })?
+                    .liquid_mass_fraction
+                    .clamp(0.0, 1.0),
+            );
+        }
         let mut scales = Vec::with_capacity(policy.element_laws.len());
         for (element, (vertices, law)) in self
             .storage
@@ -1033,14 +1052,7 @@ impl StepContext<'_, '_, '_, '_> {
             }
             let mut fraction = 0.0;
             for &vertex in vertices {
-                let vertex = vertex as usize;
-                fraction += self
-                    .storage
-                    .curve_for_vertex(vertex)
-                    .state_at_specific_enthalpy(h[vertex])
-                    .map_err(|source| EnthalpyError::Phase { vertex, source })?
-                    .liquid_mass_fraction()
-                    / 4.0;
+                fraction += nodal_fraction[vertex as usize] / 4.0;
             }
             scales.push(law.multiplier_at(fraction)?);
         }
@@ -1300,9 +1312,9 @@ impl StepContext<'_, '_, '_, '_> {
             liquid_mass_fraction.push(
                 self.storage
                     .curve_for_vertex(vertex)
-                    .state_at_specific_enthalpy(value)
+                    .values_at_specific_enthalpy(value)
                     .map_err(|source| EnthalpyError::Phase { vertex, source })?
-                    .liquid_mass_fraction(),
+                    .liquid_mass_fraction.clamp(0.0, 1.0),
             );
         }
         // Independent physical source/face integration, not the sum of Newton

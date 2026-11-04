@@ -233,9 +233,13 @@ fn check_residual(values: &[f64], tolerance_j: f64) -> Result<f64, EnthalpyError
     else { Ok(norm) }
 }
 
-fn finish_stage(context: &StepContext<'_, '_, '_, '_>, h: Vec<f64>, newton: NewtonReport,
-    carry: Option<&[Dd]>, tolerance_j: f64) -> Result<EnthalpySdirk2Stage, EnthalpyError>
-{
+fn finish_stage(
+    context: &StepContext<'_, '_, '_, '_>,
+    h: Vec<f64>,
+    newton: NewtonReport,
+    carry: Option<&[Dd]>,
+    tolerance_j: f64,
+) -> Result<EnthalpySdirk2Stage, EnthalpyError> {
     context.check_prescribed_values(&h)?;
     let temperature = context.temperatures(&h)?;
     let scales = context.phase_scales(&h)?;
@@ -254,8 +258,8 @@ fn finish_stage(context: &StepContext<'_, '_, '_, '_>, h: Vec<f64>, newton: Newt
             * (Dd::from_f64(value) - Dd::from_f64(context.old[i]));
         let prior = carry.map_or(Dd::ZERO, |carry| carry[i]);
         storage = storage + delta; carried = carried + prior;
-        liquid_mass_fraction.push(context.storage.curve_for_vertex(i).state_at_specific_enthalpy(value)
-            .map_err(|source| EnthalpyError::Phase { vertex: i, source })?.liquid_mass_fraction());
+        liquid_mass_fraction.push(context.storage.curve_for_vertex(i).values_at_specific_enthalpy(value)
+            .map_err(|source| EnthalpyError::Phase { vertex: i, source })?.liquid_mass_fraction.clamp(0.0, 1.0));
         let (columns, entries) = system.operator.row(i);
         let outward: f64 = columns.iter().zip(entries).map(|(&j, &v)| v * temperature[j]).sum();
         let outward = match &radiation { Some((load, _)) => finite(outward + load[i])?, None => finite(outward)? };

@@ -737,7 +737,7 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         }
         for (vertex, &h) in old_h.iter().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
-            self.inner.curve_for_vertex(vertex).state_at_specific_enthalpy(h)
+            self.inner.curve_for_vertex(vertex).values_at_specific_enthalpy(h)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
         }
         let mut candidate = old_h.to_vec();

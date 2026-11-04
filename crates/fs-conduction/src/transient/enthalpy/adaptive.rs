@@ -170,10 +170,10 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             }
             let state = self
                 .curve_for_vertex(vertex)
-                .state_at_specific_enthalpy(h)
+                .values_at_specific_enthalpy(h)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
-            temperature.push(state.temperature_k());
-            liquid.push(state.liquid_mass_fraction());
+            temperature.push(state.temperature_k);
+            liquid.push(state.liquid_mass_fraction.clamp(0.0, 1.0));
         }
         poll(cx, initial_specific_h.len())?;
         Ok(AdaptiveEnthalpyState {

@@ -166,7 +166,7 @@ impl<'c> PhaseFieldTransport<'c> {
         cx: &Cx<'_>,
         mesh: &ConductionMesh,
         h: &[f64],
-    ) -> Result<Vec<[f64; 3]>, EnthalpyError> {
+    ) -> Result<Vec<[f64; 3]>, EnthalpyError>{
         let (conductivity, _) = self.assemble(cx, mesh, h, false)?;
         let mut temperature = Vec::with_capacity(h.len());
         for (vertex, &value) in h.iter().enumerate() {
@@ -177,9 +177,9 @@ impl<'c> PhaseFieldTransport<'c> {
                 self.for_vertex(vertex)
                     .source
                     .caloric_curve()
-                    .state_at_specific_enthalpy(value)
+                    .values_at_specific_enthalpy(value)
                     .map_err(|source| EnthalpyError::Phase { vertex, source })?
-                    .temperature_k(),
+                    .temperature_k,
             );
         }
         let mut flux = Vec::with_capacity(mesh.element_count());

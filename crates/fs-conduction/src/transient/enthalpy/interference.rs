@@ -633,9 +633,9 @@ fn finish_interval(
             context
                 .storage
                 .curve_for_vertex(vertex)
-                .state_at_specific_enthalpy(value)
+                .values_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?
-                .liquid_mass_fraction(),
+                .liquid_mass_fraction.clamp(0.0, 1.0),
         );
         let (columns, entries) = system.operator.row(vertex);
         let transport: f64 = columns

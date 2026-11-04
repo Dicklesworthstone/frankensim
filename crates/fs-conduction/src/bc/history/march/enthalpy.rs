@@ -259,10 +259,12 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
     }
 
     fn from_storage(
-        cx: &Cx<'_>, problem: PhaseEnthalpyHistoryProblem<'h, 'm>,
+        cx: &Cx<'_>,
+        problem: PhaseEnthalpyHistoryProblem<'h, 'm>,
         conductivity: HistoryConductivity<'h>,
         storage: HeterogeneousEnthalpyBackwardEuler<'m, 'c>,
-        initial_specific_h: &[f64], budget: EnthalpyHistoryBudget,
+        initial_specific_h: &[f64],
+        budget: EnthalpyHistoryBudget,
     ) -> Result<Self, HeterogeneousEnthalpyError> {
         let mesh = problem.boundary.mesh();
         let time_s = problem.boundary.initial_time_s();
@@ -275,7 +277,7 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
             if vertex % 512 == 0 { poll(cx, vertex).map_err(conduction)?; }
             let curve = storage.phase_curve_at(vertex)
                 .ok_or_else(|| invalid("reference chart is missing for an admitted vertex"))?;
-            let state = curve.state_at_specific_enthalpy(h)
+            let state = curve.values_at_specific_enthalpy(h)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
             if let Some(source) = storage.phase_conductivity_source(storage.vertex_material_ids()[vertex]) {
                 let [lower_j_kg, upper_j_kg] = source.enthalpy_bounds_j_kg();
@@ -288,8 +290,8 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
             if let Some(source) = storage.melting_transport_source(storage.vertex_material_ids()[vertex]) {
                 source.sample_for_vertex(h, vertex)?;
             }
-            temperature.push(state.temperature_k());
-            liquid_mass_fraction.push(state.liquid_mass_fraction());
+            temperature.push(state.temperature_k);
+            liquid_mass_fraction.push(state.liquid_mass_fraction.clamp(0.0, 1.0));
         }
         let specific_h = initial_specific_h.to_vec();
         poll(cx, initial_specific_h.len()).map_err(conduction)?;
