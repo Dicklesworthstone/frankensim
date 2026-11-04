@@ -530,6 +530,11 @@ impl TransientOsmoticPair {
         right_film: Option<TransientFilm>,
         maximum_workspace_bytes: usize,
     ) -> Result<Self> {
+        if bulks.iter().any(|bulk| bulk.solubility.is_some()) {
+            return Err(invalid(
+                "transient concentration films do not model finite solid stocks or surface precipitation",
+            ));
+        }
         let count = membrane.solutes().len();
         let definitions = [left_film, right_film];
         let reference = bulks[0].solution();

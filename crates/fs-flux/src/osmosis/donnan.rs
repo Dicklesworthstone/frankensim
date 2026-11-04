@@ -147,6 +147,11 @@ impl DonnanOsmoticPair {
         hydraulic: HydraulicPermeance,
         maximum_workspace_bytes: usize,
     ) -> Result<Self> {
+        if compartments.iter().any(|cell| cell.solubility.is_some()) {
+            return Err(invalid(
+                "neutral finite solid stocks cannot participate in the fast-ion Donnan model",
+            ));
+        }
         let count = ions.valences().len();
         let reference = compartments[0].solution();
         if !positive(membrane_area_m2)

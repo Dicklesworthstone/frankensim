@@ -2948,6 +2948,46 @@ mechanical pressure loss; transient film storage, concentration-dependent
 transport, and empirically inferred crossflow coefficients remain separate.
 
 
+## Finite soluble stocks in selective membrane networks
+
+`OsmoticCompartment::with_solubility` binds the original material
+`FiniteSolubilitySolution` to the native well-mixed membrane controller.
+Each compartment retains its own solid stock. Only dissolved molecules enter
+the existing membrane donor coefficients and osmotic force; total dissolved
+plus solid inventory is conserved and used in network balance reports.
+At each implicit water trial the original cached pair laws supply finite
+capacities. A bounded piecewise-affine component equation resolves the common
+solute transfer, including crystal exhaustion or precipitation within the
+same step. It adds no iterative chemical solve, rate constant, independent
+transport integrator or hot-path allocation. Positive donor remainders use
+the native trace-preserving implicit recovery.
+
+All four prepared integration buffers own independent mutable phase storage.
+Adaptive error control includes total stocks as well as dissolved amounts:
+a reservoir cannot drain invisibly while its saturated concentration stays
+fixed. Cloning a compartment or requesting a `solubility_snapshot` prepares
+an independent checkpoint, so a caller retaining a material clone cannot
+invalidate later buffer rotations. Complete phase inventories and original
+pair-identity allocations are included in the workspace budget. Accepted
+states remain unchanged on refusal or cancellation.
+
+The extension assumes independent ideal neutral solutes, instantaneous local
+equilibrium, a common fixed temperature and incompressible solvent, negligible
+solute/solid volume, and the caller-declared species ordering. Phase-enabled
+cells must share identical ordered original solubility laws. Ordinary aqueous
+cells may share the network under its existing solvent and species convention.
+A membrane touching a phase-enabled cell must be well mixed and bare:
+quasi-steady or transient films would need their own precipitation inventory.
+Donnan ion owners refuse these neutral phase stocks; nonideal diffusion owners
+continue to require their original shared virial model. The isothermal network
+does not evolve dissolution heat, electrolyte speciation or crystal kinetics.
+
+Focused numerical cases cover exact phase-boundary limits, strong-transfer
+traces, orientation, all affine phase combinations, finite reservoir depletion,
+water-driven precipitation and redissolution, independently manufactured
+coupled water/solute endpoints, ordinary unsaturated parity, conserved
+checkpoints, unsupported mode admission and atomic cancellation.
+
 ## Nonideal finite-volume osmosis
 
 `OsmoticCompartment` retains the shared `AqueousSolution`; original

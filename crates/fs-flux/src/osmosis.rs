@@ -15,6 +15,11 @@
 //!
 //! Compartments are well mixed and isothermal, with negligible solute volume.
 //! A common declared species ordering, solvent and temperature is mandatory.
+//! Optional finite neutral solid stocks equilibrate with the original material
+//! solubility owner. Only dissolved molecules cross a bare selective membrane
+//! or contribute to osmotic pressure; each compartment retains its crystals.
+//! Solute transfer can exhaust or replenish that stock during the same implicit
+//! water step. Solid-bearing cells exclude concentration films and ion models.
 //! Ideal selective membranes can use quasi-steady concentration films, which
 //! reconstruct actual membrane-face concentrations without hidden inventories.
 //! Nonideal compartments use their shared free-energy pressure with fully
@@ -41,15 +46,20 @@ pub mod transient;
 /// Finite water exchange with conservative, fast-ion Donnan equilibrium.
 pub mod donnan;
 
+mod solubility;
+
 #[cfg(test)]
 mod nonideal_tests;
 
 #[cfg(test)]
 use fs_material::osmosis::IdealDiluteSolution;
 use fs_material::osmosis::polarization::PolarizedMembraneTransport;
-use fs_material::osmosis::{AqueousSolution, MembraneTransport, OsmosisError};
+use fs_material::osmosis::{
+    AqueousSolution, FiniteSolubilityError, FiniteSolubilitySolution, MembraneTransport,
+    OsmosisError,
+};
 
-/// Maximum independently conserved dissolved particle species.
+/// Maximum independently conserved species, including any retained solid stocks.
 pub const MAX_OSMOTIC_SPECIES: usize = 64;
 const MAX_COMPARTMENTS: usize = 65_536;
 const MAX_MEMBRANES: usize = 262_144;
@@ -61,6 +71,8 @@ pub enum OsmoticNetworkError {
     Invalid(&'static str),
     /// The original solution or membrane law refused the state.
     Material(OsmosisError),
+    /// The original finite solid/dissolved partition refused the state.
+    Solubility(FiniteSolubilityError),
     /// Source-owned solution thermodynamics or original MS friction refused.
     SolutionDiffusion(fs_material::osmosis::diffusion::SolutionDiffusionError),
     /// A smaller physical diffusion step may satisfy withdrawal or passivity.
@@ -109,6 +121,11 @@ impl std::error::Error for OsmoticNetworkError {}
 impl From<OsmosisError> for OsmoticNetworkError {
     fn from(value: OsmosisError) -> Self {
         Self::Material(value)
+    }
+}
+impl From<FiniteSolubilityError> for OsmoticNetworkError {
+    fn from(value: FiniteSolubilityError) -> Self {
+        Self::Solubility(value)
     }
 }
 
@@ -208,11 +225,26 @@ impl OsmoticPressureVolume {
 }
 
 /// One finite, well-mixed solution and its mechanical volume response.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct OsmoticCompartment {
     solution: AqueousSolution,
+    solubility: Option<FiniteSolubilitySolution>,
     pressure: OsmoticPressureVolume,
     minimum_volume_m3: f64,
+}
+
+impl Clone for OsmoticCompartment {
+    fn clone(&self) -> Self {
+        Self {
+            solution: self.solution.clone(),
+            solubility: self
+                .solubility
+                .as_ref()
+                .map(FiniteSolubilitySolution::independent_clone),
+            pressure: self.pressure,
+            minimum_volume_m3: self.minimum_volume_m3,
+        }
+    }
 }
 
 impl OsmoticCompartment {
@@ -232,17 +264,122 @@ impl OsmoticCompartment {
         pressure.pressure_pa(solution.solvent_volume_m3())?;
         Ok(Self {
             solution,
+            solubility: None,
             pressure,
             minimum_volume_m3,
         })
+    }
+    /// Prepare finite neutral dissolved/solid inventories for a bare selective
+    /// membrane. Equilibrium is instantaneous and isothermal; crystals stay in
+    /// their compartment while dissolved molecules can permeate. The original
+    /// pair laws remain the sole owners of saturation and phase partitioning.
+    /// Storage is made independent here, even if the caller supplied a clone.
+    pub fn with_solubility(
+        solution: FiniteSolubilitySolution,
+        pressure: OsmoticPressureVolume,
+        minimum_volume_m3: f64,
+    ) -> Result<Self, OsmoticNetworkError> {
+        let mut cell = Self::new(solution.solution().clone(), pressure, minimum_volume_m3)?;
+        cell.solubility = Some(solution.independent_clone());
+        Ok(cell)
     }
     /// Actual finite solvent and dissolved inventories.
     pub const fn solution(&self) -> &AqueousSolution {
         &self.solution
     }
+    /// Allocate an independent checkpoint of complete conserved inventories
+    /// and their dissolved/solid split. Cloning or retaining this checkpoint
+    /// cannot share mutable storage with the prepared transport buffers.
+    /// `solution()` provides the allocation-free dissolved-only view.
+    pub fn solubility_snapshot(&self) -> Option<FiniteSolubilitySolution> {
+        self.solubility
+            .as_ref()
+            .map(FiniteSolubilitySolution::independent_clone)
+    }
     /// Current mechanical pressure [Pa].
     pub fn pressure_pa(&self) -> Result<f64, OsmoticNetworkError> {
         self.pressure.pressure_pa(self.solution.solvent_volume_m3())
+    }
+
+    fn total_moles(&self, component: usize) -> f64 {
+        self.solubility.as_ref().map_or_else(
+            || self.solution.solute_moles()[component],
+            |phases| phases.phase_partitions()[component].total_solute.value(),
+        )
+    }
+
+    fn capacity_at_volume(
+        &self,
+        component: usize,
+        volume_m3: f64,
+    ) -> Result<Option<f64>, OsmoticNetworkError> {
+        self.solubility
+            .as_ref()
+            .map(|phases| {
+                Ok(phases
+                    .partition_at_inventory(component, volume_m3, self.total_moles(component))?
+                    .capacity
+                    .value())
+            })
+            .transpose()
+    }
+
+    fn dissolved_moles_at(
+        &self,
+        component: usize,
+        volume_m3: f64,
+        total_moles: f64,
+    ) -> Result<f64, OsmoticNetworkError> {
+        match &self.solubility {
+            Some(phases) => Ok(phases
+                .partition_at_inventory(component, volume_m3, total_moles)?
+                .dissolved
+                .value()),
+            None => Ok(total_moles),
+        }
+    }
+
+    fn osmotic_pressure_at_total(
+        &self,
+        volume_m3: f64,
+        totals: &[f64],
+    ) -> Result<f64, OsmoticNetworkError> {
+        if self.solubility.is_none() {
+            return Ok(self.solution.osmotic_pressure_at(volume_m3, totals)?);
+        }
+        let mut dissolved = [0.0; MAX_OSMOTIC_SPECIES];
+        for (i, &total) in totals.iter().enumerate() {
+            dissolved[i] = self.dissolved_moles_at(i, volume_m3, total)?;
+        }
+        Ok(self
+            .solution
+            .osmotic_pressure_at(volume_m3, &dissolved[..totals.len()])?)
+    }
+
+    fn replace_inventories(
+        &mut self,
+        volume_m3: f64,
+        totals: &[f64],
+    ) -> Result<(), OsmoticNetworkError> {
+        match &mut self.solubility {
+            Some(phases) => {
+                // The prepared owner validates the complete endpoint before
+                // mutation. Its identical aqueous view is then copied in place.
+                phases.replace_inventories(volume_m3, totals)?;
+                self.solution
+                    .replace_inventories(volume_m3, phases.solution().solute_moles())?;
+            }
+            None => self.solution.replace_inventories(volume_m3, totals)?,
+        }
+        Ok(())
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.solution.heap_bytes()
+            + self
+                .solubility
+                .as_ref()
+                .map_or(0, FiniteSolubilitySolution::heap_bytes)
     }
 }
 
@@ -331,7 +468,8 @@ pub struct OsmoticStepControls {
     pub relative_tolerance: f64,
     /// Absolute solvent-volume tolerance [m³].
     pub absolute_volume_tolerance_m3: f64,
-    /// Absolute per-species amount tolerance [mol].
+    /// Absolute per-species amount tolerance [mol], applied to dissolved
+    /// inventories and independently to complete finite dissolved/solid stocks.
     pub absolute_amount_tolerance_mol: f64,
     /// Maximum accepted substeps across the requested interval.
     pub maximum_steps: usize,
@@ -373,8 +511,8 @@ pub struct OsmoticStepReport {
     pub maximum_scaled_error: f64,
     /// Final minus initial sum of compartment solvent volumes [m³].
     pub water_balance_residual_m3: f64,
-    /// Final minus initial amount for each species [mol]; only the first
-    /// `species_count` entries are active.
+    /// Final minus initial TOTAL amount for each species [mol], including
+    /// retained solids; only the first `species_count` entries are active.
     pub solute_balance_residual_mol: [f64; MAX_OSMOTIC_SPECIES],
     /// Number of active entries in the amount balance.
     pub species_count: usize,
@@ -408,8 +546,10 @@ pub struct OsmoticNetwork {
 
 impl OsmoticNetwork {
     /// Prepare all storage, binding one explicit ordering of independent
-    /// dissolved particles. Named ions must already be separate species; this
-    /// function never infers dissociation or a van't Hoff multiplier.
+    /// species. Finite solid-bearing cells must retain identical original pair
+    /// laws and the declared solute identities. Named ions in ordinary aqueous
+    /// cells must already be separate species; this function never infers
+    /// dissociation or a van't Hoff multiplier.
     pub fn new(
         species: Vec<String>,
         cells: Vec<OsmoticCompartment>,
@@ -444,7 +584,36 @@ impl OsmoticNetwork {
                 "all cells need one solvent, temperature and species ordering",
             ));
         }
+        let reference_phases = cells.iter().find_map(|cell| cell.solubility.as_ref());
+        for phases in cells.iter().filter_map(|cell| cell.solubility.as_ref()) {
+            if phases
+                .components()
+                .iter()
+                .zip(&species)
+                .any(|(component, name)| component.law().solute().as_str() != name.as_str())
+                || reference_phases.is_some_and(|reference| {
+                    phases.solvent() != reference.solvent()
+                        || phases
+                            .components()
+                            .iter()
+                            .zip(reference.components())
+                            .any(|(component, original)| component.law() != original.law())
+                })
+            {
+                return Err(OsmoticNetworkError::Invalid(
+                    "finite solid stocks require the declared species order and identical original solvent/solute pair laws",
+                ));
+            }
+        }
         for membrane in &membranes {
+            if (cells[membrane.left].solubility.is_some()
+                || cells[membrane.right].solubility.is_some())
+                && !matches!(membrane.material, MembraneBoundary::WellMixed(_))
+            {
+                return Err(OsmoticNetworkError::Invalid(
+                    "finite solid stocks require a bare membrane; surface precipitation in concentration films is not modeled",
+                ));
+            }
             let nonideal = !cells[membrane.left].solution.is_ideal()
                 || !cells[membrane.right].solution.is_ideal();
             if nonideal
@@ -464,16 +633,16 @@ impl OsmoticNetwork {
         }
         // Four complete state buffers; input excess capacities and immutable
         // material/species data are counted conservatively. Bounded stack
-        // scratch in the scalar solve is additional (under 4 KiB).
+        // scratch in the scalar solve is additional (under 8 KiB).
         let cell_bytes = core::mem::size_of::<OsmoticCompartment>();
         let required = cells
             .capacity()
             .checked_add(3 * cells.len())
             .and_then(|n| n.checked_mul(cell_bytes))
             .and_then(|n| {
-                let heaps = cells.iter().try_fold(0usize, |total, cell| {
-                    total.checked_add(cell.solution.heap_bytes())
-                })?;
+                let heaps = cells
+                    .iter()
+                    .try_fold(0usize, |total, cell| total.checked_add(cell.heap_bytes()))?;
                 n.checked_add(heaps.checked_mul(4)?)
             })
             .and_then(|n| {
@@ -769,10 +938,12 @@ fn copy_state(
     to: &mut [OsmoticCompartment],
 ) -> Result<(), OsmoticNetworkError> {
     for (source, dest) in from.iter().zip(to) {
-        dest.solution.replace_inventories(
-            source.solution.solvent_volume_m3(),
-            source.solution.solute_moles(),
-        )?;
+        let count = source.solution.solute_moles().len();
+        let mut totals = [0.0; MAX_OSMOTIC_SPECIES];
+        for (i, total) in totals[..count].iter_mut().enumerate() {
+            *total = source.total_moles(i);
+        }
+        dest.replace_inventories(source.solution.solvent_volume_m3(), &totals[..count])?;
     }
     Ok(())
 }
@@ -804,6 +975,19 @@ fn scaled_error(
                         + controls.relative_tolerance * before.abs().max(after.abs())),
             );
         }
+        if old.solubility.is_some() {
+            // A saturated dissolved view can stay fixed while a finite solid
+            // reservoir drains. Control the conserved stock independently.
+            for i in 0..old.solution.solute_moles().len() {
+                let before = old.total_moles(i);
+                let after = fine.total_moles(i);
+                error = error.max(
+                    (after - coarse.total_moles(i)).abs()
+                        / (controls.absolute_amount_tolerance_mol
+                            + controls.relative_tolerance * before.abs().max(after.abs())),
+                );
+            }
+        }
     }
     error
 }
@@ -815,11 +999,7 @@ fn totals(cells: &[OsmoticCompartment], species: usize) -> (f64, [f64; MAX_OSMOT
     for cell in cells {
         compensated_add(&mut volume, &mut vc, cell.solution.solvent_volume_m3());
         for i in 0..species {
-            compensated_add(
-                &mut amounts[i],
-                &mut corrections[i],
-                cell.solution.solute_moles()[i],
-            );
+            compensated_add(&mut amounts[i], &mut corrections[i], cell.total_moles(i));
         }
     }
     (volume, amounts)
@@ -894,18 +1074,15 @@ fn sweep(
             cancelled,
         )?;
         let count = cells[membrane.left].solution.solute_moles().len();
-        cells[membrane.left]
-            .solution
-            .replace_inventories(endpoint.volumes[0], &endpoint.left[..count])?;
-        cells[membrane.right]
-            .solution
-            .replace_inventories(endpoint.volumes[1], &endpoint.right[..count])?;
+        cells[membrane.left].replace_inventories(endpoint.volumes[0], &endpoint.left[..count])?;
+        cells[membrane.right].replace_inventories(endpoint.volumes[1], &endpoint.right[..count])?;
     }
     Ok(())
 }
 
 struct PairEndpoint {
     volumes: [f64; 2],
+    // TOTAL inventories for finite-solid cells, dissolved amounts otherwise.
     left: [f64; MAX_OSMOTIC_SPECIES],
     right: [f64; MAX_OSMOTIC_SPECIES],
     residual_m3: f64,
@@ -960,31 +1137,46 @@ fn pair_endpoint(
                 "implicit solute coefficient overflow",
             ));
         }
-        let nl = left.solution.solute_moles()[i];
-        let nr = right.solution.solute_moles()[i];
-        let scale = 1.0_f64.max(a).max(b);
-        let a = a / scale;
-        let b = b / scale;
-        let inverse_scale = 1.0 / scale;
-        let denominator = inverse_scale + a + b;
-        let transfer = (a * nl - b * nr) / denominator;
-        // Use a shared signed transfer for resolved changes. When nearly all
-        // of a donor transfers, subtraction would erase its small but finite
-        // remainder (and possibly its significant concentration). Recover that
-        // remainder from positive implicit weights, then debit the SAME amount
-        // on the other side. No endpoint is independently clipped.
-        if transfer > 0.5 * nl {
-            endpoint.left[i] = ((inverse_scale + b) / denominator) * nl + (b / denominator) * nr;
-            endpoint.right[i] = nr + (nl - endpoint.left[i]);
-        } else if -transfer > 0.5 * nr {
-            endpoint.right[i] = ((inverse_scale + a) / denominator) * nr + (a / denominator) * nl;
-            endpoint.left[i] = nl + (nr - endpoint.right[i]);
+        let nl = left.total_moles(i);
+        let nr = right.total_moles(i);
+        if left.solubility.is_some() || right.solubility.is_some() {
+            // At fixed water transfer the original donor coefficients remain
+            // constant. Each independent component therefore has one bounded
+            // piecewise-affine inventory equation, not another transport solve.
+            let capacities = [
+                left.capacity_at_volume(i, vl)?,
+                right.capacity_at_volume(i, vr)?,
+            ];
+            [endpoint.left[i], endpoint.right[i]] =
+                solubility::finite_stock_exchange([nl, nr], capacities, [a, b])
+                    .map_err(OsmoticNetworkError::Invalid)?;
         } else {
-            endpoint.left[i] = nl - transfer;
-            endpoint.right[i] = nr + transfer;
+            let scale = 1.0_f64.max(a).max(b);
+            let a = a / scale;
+            let b = b / scale;
+            let inverse_scale = 1.0 / scale;
+            let denominator = inverse_scale + a + b;
+            let transfer = (a * nl - b * nr) / denominator;
+            // Use a shared signed transfer for resolved changes. When nearly all
+            // of a donor transfers, subtraction would erase its small but finite
+            // remainder (and possibly its significant concentration). Recover that
+            // remainder from positive implicit weights, then debit the SAME amount
+            // on the other side. No endpoint is independently clipped.
+            if transfer > 0.5 * nl {
+                endpoint.left[i] =
+                    ((inverse_scale + b) / denominator) * nl + (b / denominator) * nr;
+                endpoint.right[i] = nr + (nl - endpoint.left[i]);
+            } else if -transfer > 0.5 * nr {
+                endpoint.right[i] =
+                    ((inverse_scale + a) / denominator) * nr + (a / denominator) * nl;
+                endpoint.left[i] = nl + (nr - endpoint.right[i]);
+            } else {
+                endpoint.left[i] = nl - transfer;
+                endpoint.right[i] = nr + transfer;
+            }
         }
-        let bulk_left = endpoint.left[i] / vl;
-        let bulk_right = endpoint.right[i] / vr;
+        let bulk_left = left.dissolved_moles_at(i, vl, endpoint.left[i])? / vl;
+        let bulk_right = right.dissolved_moles_at(i, vr, endpoint.right[i])? / vr;
         (cl[i], cr[i]) = match &polarization {
             Some(coefficients) => {
                 coefficients.membrane_face_concentrations(bulk_left, bulk_right)?
@@ -1007,12 +1199,8 @@ fn pair_endpoint(
         // Admission guarantees complete retention and no dilute Fick films.
         // The same water chemical potential supplies pressure and activity;
         // independent ionic/solute leakage is not inferred from this force.
-        let osmotic_drop = left
-            .solution
-            .osmotic_pressure_at(vl, &endpoint.left[..count])?
-            - right
-                .solution
-                .osmotic_pressure_at(vr, &endpoint.right[..count])?;
+        let osmotic_drop = left.osmotic_pressure_at_total(vl, &endpoint.left[..count])?
+            - right.osmotic_pressure_at_total(vr, &endpoint.right[..count])?;
         membrane.membrane_law().hydraulic_permeance().value()
             * (left
                 .pressure
