@@ -4492,6 +4492,7 @@ pub fn acoustic_frustum_chain_outlet_wall(
         taps,
         viscothermal,
         wall,
+        None,
     )
 }
 
@@ -4511,6 +4512,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     taps: &[AcousticTap],
     viscothermal: Option<&ViscothermalPin>,
     wall: Option<&WallPin>,
+    section_media: Option<&[acoustic_outlet::AcousticSectionMedium]>,
 ) -> Result<PortHamiltonian, PhsError> {
     if !(exterior_density.is_finite()
         && exterior_density > 0.0
@@ -4528,6 +4530,27 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
             what: "distinct acoustic exterior requires separate side-mouth load owners",
         });
     }
+    let uniform = acoustic_outlet::AcousticSectionMedium {
+        density, sound_speed, viscothermal: viscothermal.copied(),
+    };
+    if section_media.is_some_and(|media| media.len() != sections.len() || !taps.is_empty()) {
+        return Err(PhsError::Unadmitted {
+            what: "regional acoustic media require one medium per section and no side taps",
+        });
+    }
+    for medium in section_media.unwrap_or(core::slice::from_ref(&uniform)) {
+        if !(medium.density.is_finite() && medium.density > 0.0
+            && medium.sound_speed.is_finite() && medium.sound_speed > 0.0) {
+            return Err(PhsError::Unadmitted { what: "acoustic medium parameters" });
+        }
+        if let Some(pin) = &medium.viscothermal
+            && (!(pin.dynamic_viscosity >= 0.0 && pin.dynamic_viscosity.is_finite()
+                && pin.gamma > 1.0 && pin.gamma.is_finite()
+                && pin.prandtl > 0.0 && pin.prandtl.is_finite()) || pin.foster_branches > 8)
+        {
+            return Err(PhsError::Unadmitted { what: "viscothermal pin parameters" });
+        }
+    }
     let mouth = match outlet {
         ChainOutlet::Radiating(flange) => Some(flange),
         ChainOutlet::PressureRelease | ChainOutlet::Rigid => None,
@@ -4540,7 +4563,9 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
                 what: "acoustic section parameters",
             });
         }
-        n_cells += s.cells;
+        n_cells = n_cells.checked_add(s.cells).ok_or(PhsError::Unadmitted {
+            what: "acoustic cell count overflow",
+        })?;
         last_radius = s.outlet();
     }
     if sections.is_empty()
@@ -4552,26 +4577,17 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
             what: "acoustic chain parameters",
         });
     }
-    if let Some(pin) = viscothermal
-        && (!(pin.dynamic_viscosity >= 0.0
-            && pin.dynamic_viscosity.is_finite()
-            && pin.gamma > 1.0
-            && pin.gamma.is_finite()
-            && pin.prandtl > 0.0
-            && pin.prandtl.is_finite())
-            || pin.foster_branches > 8)
-    {
-        return Err(PhsError::Unadmitted {
-            what: "viscothermal pin parameters",
-        });
-    }
-    let n_line = 2 * n_cells;
+    let n_line = n_cells.checked_mul(2).ok_or(PhsError::Unadmitted {
+        what: "acoustic state count overflow",
+    })?;
     let mut inertances = Vec::with_capacity(n_cells);
     let mut compliances = Vec::with_capacity(n_cells);
     let mut radii = Vec::with_capacity(n_cells);
     let mut cell_x0 = Vec::with_capacity(n_cells);
+    let mut cell_media = Vec::with_capacity(n_cells);
     let mut x_acc = 0.0;
-    for s in sections {
+    for (section, s) in sections.iter().enumerate() {
+        let medium = section_media.map_or(uniform, |media| media[section]);
         let dx = s.length / s.cells as f64;
         let r_in = s.radius;
         let r_out = s.outlet();
@@ -4582,27 +4598,36 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
             let a_inert = core::f64::consts::PI * ra * rb;
             let a_comp = core::f64::consts::PI * (ra * ra + ra * rb + rb * rb) / 3.0;
             cell_x0.push(x_acc);
-            inertances.push(density * dx / a_inert);
-            compliances.push(a_comp * dx / (density * sound_speed * sound_speed));
+            inertances.push(medium.density * dx / a_inert);
+            compliances.push(a_comp * dx / (medium.density * medium.sound_speed * medium.sound_speed));
+            cell_media.push(medium);
             radii.push(f64::midpoint(ra, rb));
             x_acc += dx;
         }
     }
     let total_length = x_acc;
-    let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
+    let omega_pin = match section_media {
+        None => core::f64::consts::PI * sound_speed / (2.0 * total_length),
+        Some(media) => {
+            let travel_s: f64 = sections.iter().zip(media)
+                .map(|(section, medium)| section.length / medium.sound_speed).sum();
+            if !travel_s.is_finite() || travel_s <= 0.0 {
+                return Err(PhsError::Unadmitted { what: "regional acoustic travel time" });
+            }
+            core::f64::consts::PI / (2.0 * travel_s)
+        }
+    };
     let n_br = viscothermal.map_or(0, |p| p.foster_branches);
     let mut cell_foster = vec![false; n_cells];
-    if let Some(pin) = viscothermal {
-        for cell in 0..n_cells {
-            if n_br == 0 || !(pin.dynamic_viscosity > 0.0) {
-                continue;
-            }
-            cell_foster[cell] = true;
-        }
+    for (cell, medium) in cell_media.iter().enumerate() {
+        cell_foster[cell] = medium.viscothermal.is_some_and(|pin|
+            pin.foster_branches > 0 && pin.dynamic_viscosity > 0.0);
     }
     // Two Foster networks per wide-tube cell: series √ω on the
     // inertance and the dual thermal √ω shunt on the compliance.
-    let n_foster = cell_foster.iter().filter(|&&b| b).count() * n_br * 2;
+    let n_foster = cell_media.iter().zip(&cell_foster).map(|(medium, &active)|
+        if active { 2 * medium.viscothermal.as_ref().expect("active pin").foster_branches } else { 0 }
+    ).sum::<usize>();
     let (n_tap_states, n_tap_foster) = tap_open_budget(
         taps,
         total_length,
@@ -4613,7 +4638,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
         viscothermal,
     )?;
     let n_pad_foster = pad_foster_count(taps, viscothermal);
-    let n_rad_foster = rad_foster_count(mouth, viscothermal);
+    let n_rad_foster = rad_foster_count(mouth, cell_media[n_cells - 1].viscothermal.as_ref());
     let n_wall = wall_state_count(n_cells, wall)?;
     let n = n_line + n_tap_states + n_tap_foster + n_pad_foster + n_rad_foster + n_foster + n_wall;
     let mut foster_off = vec![0usize; n_cells];
@@ -4621,7 +4646,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     for cell in 0..n_cells {
         foster_off[cell] = next_foster;
         if cell_foster[cell] {
-            next_foster += n_br * 2;
+            next_foster += cell_media[cell].viscothermal.as_ref().expect("active pin").foster_branches * 2;
         }
     }
     let mut q = vec![0.0; n * n];
@@ -4644,8 +4669,10 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
         j[p_last * n + q_last] = 0.0;
         j[q_last * n + p_last] = 0.0;
     }
-    if let Some(pin) = viscothermal {
-        for cell in 0..n_cells {
+    for (cell, medium) in cell_media.iter().enumerate() {
+        if let Some(pin) = &medium.viscothermal {
+            let density = medium.density;
+            let n_br = pin.foster_branches;
             let (r_series, g_shunt, l_scale, c_scale) = bessel_series_and_shunt(
                 inertances[cell],
                 compliances[cell],
@@ -4708,7 +4735,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
             1.0,
             flange,
             (n_rad_foster > 0)
-                .then_some((n_line + n_tap_states + n_tap_foster + n_pad_foster, n_br)),
+                .then_some((n_line + n_tap_states + n_tap_foster + n_pad_foster, n_rad_foster)),
         )?;
     }
     let mut open_state = 0usize;

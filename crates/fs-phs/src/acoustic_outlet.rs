@@ -11,6 +11,21 @@ use crate::{
     acoustic_frustum_chain_outlet_wall, acoustic_frustum_chain_outlet_wall_in_exterior,
 };
 
+/// Local numeric gas coefficients for one authored frustum section.
+///
+/// The caller supplies a coherent material state at the common static pressure.
+/// Geometry and region boundaries remain those of [`AcousticSection`]; each
+/// cell belongs wholly to its section, with no averaged interface density.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcousticSectionMedium {
+    /// Local equilibrium mass density [kg/m3].
+    pub density: f64,
+    /// Local adiabatic sound speed [m/s].
+    pub sound_speed: f64,
+    /// Same region's viscothermal coefficients and numerical memory budget.
+    pub viscothermal: Option<ViscothermalPin>,
+}
+
 /// Immutable physical flow row belonging to one returned acoustic chain.
 ///
 /// Positive flow leaves the terminal, in m^3/s. A rigid terminal has an exactly
@@ -130,6 +145,61 @@ pub fn acoustic_chain_with_outlet_flow_in_exterior(
         taps,
         viscothermal,
         wall,
+        None,
+    )?;
+    with_outlet_flow(system, sections, outlet)
+}
+
+/// Original frustum chain with one local medium per section and an exterior.
+///
+/// Each complete series cell retains its exact integral of rho/area, and each
+/// compression cell its volume/(rho*c^2). The original incidence joins their
+/// pressure/volume-flow ports without a density ratio or extra interface mass.
+/// Local Bessel/Foster terms use that same cell's medium. Their shared pin is
+/// the quarter-wave scale from the sum of section travel times. The terminal
+/// radiation owner uses the exterior and the terminal cell's memory budget;
+/// the authored numerical wall retains its original geometry and law.
+///
+/// Identical section media use the uniform assembler's original arithmetic.
+/// Gas EOS, common static pressure, frozen-region validity and spatial-error
+/// admission remain caller responsibilities. Side openings are not represented
+/// by this regional entry point.
+///
+/// # Errors
+/// Missing/misaligned or invalid regional coefficients, original chain
+/// admission, or an unrepresentable physical flow map.
+pub fn acoustic_chain_with_regional_outlet_flow(
+    sections: &[AcousticSection],
+    media: &[AcousticSectionMedium],
+    exterior_density: f64,
+    exterior_sound_speed: f64,
+    outlet: ChainOutlet,
+    inlets: usize,
+    wall: Option<&WallPin>,
+) -> Result<(PortHamiltonian, AcousticOutletFlow), PhsError> {
+    let Some(first) = media.first() else {
+        return Err(PhsError::Unadmitted {
+            what: "one acoustic medium per section required",
+        });
+    };
+    if media.len() != sections.len() {
+        return Err(PhsError::Unadmitted {
+            what: "one acoustic medium per section required",
+        });
+    }
+    let regional = (!media.iter().all(|medium| medium == first)).then_some(media);
+    let system = acoustic_frustum_chain_outlet_wall_in_exterior(
+        sections,
+        first.density,
+        first.sound_speed,
+        exterior_density,
+        exterior_sound_speed,
+        outlet,
+        inlets,
+        &[],
+        first.viscothermal.as_ref(),
+        wall,
+        regional,
     )?;
     with_outlet_flow(system, sections, outlet)
 }

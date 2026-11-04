@@ -33,12 +33,31 @@ this layer has no gas EOS. Distinct media with side taps refuse. The original
 compact/Foster approximation and bandwidth remain; this adds no full-wave
 interface solver. Equal media preserve original assembly arithmetic bit for bit.
 
+`acoustic_outlet::acoustic_chain_with_regional_outlet_flow` binds one
+`AcousticSectionMedium` to each authored section of that same frustum owner.
+Each series cell keeps its exact integral of local rho/area, and each
+compression cell its local volume/(rho*c^2). Region interfaces coincide with
+cell boundaries and use the original shared pressure/volume-flow incidence;
+no averaged density, density-ratio transformer or extra interface mass is
+introduced. Bessel/Foster loss uses each cell's own viscosity, gamma, Prandtl
+number and memory budget. Nonuniform profiles use the section travel-time sum
+for their common acoustic pin; terminal radiation retains the exterior and the
+terminal region's memory budget. Numerical wall geometry/law is unchanged.
+Identical media use the original uniform arithmetic. This numeric layer requires
+the caller to admit coherent frozen media at common static pressure and the
+spatial approximation; the regional entry has no side openings.
+
 Authored G1/G3 regressions cover independent compression-volume conservation
 for odd/even cylinder, single-cone and joined-frustum chains; their low-frequency
 through-flow limit with and without viscothermal memory; physical radiation
 work; rigid closure; and continued legacy spherical-source behavior. Independent
 interior cell storage and exterior radiation mass/work checks cover unequal
 media, while explicit identical media preserve storage, structure and flow bits.
+
+Authored regional regressions additionally check local frustum storage integrals,
+interface momentum, independent exterior radiation work and volume conservation
+for odd/even chains, varying local Foster budgets and unchanged neighboring
+transport, and identical-profile storage/structure/flow bits.
 
 ## Purpose and layer
 

@@ -1,7 +1,8 @@
 //! G1/G3: physical outlet flow, coordinate orientation and complete storage.
 use fs_math::c64::C64;
 use fs_phs::acoustic_outlet::{
-    acoustic_chain_with_outlet_flow, acoustic_chain_with_outlet_flow_in_exterior,
+    AcousticSectionMedium, acoustic_chain_with_outlet_flow,
+    acoustic_chain_with_outlet_flow_in_exterior, acoustic_chain_with_regional_outlet_flow,
 };
 use fs_phs::harmonic::{HarmonicBudget, HarmonicModel};
 use fs_phs::{
@@ -282,14 +283,40 @@ fn explicitly_identical_exterior_preserves_native_storage_structure_and_flow_bit
                 None,
             )
             .unwrap();
+            let media = vec![
+                AcousticSectionMedium {
+                    density: 1.2,
+                    sound_speed: 340.0,
+                    viscothermal: loss.copied(),
+                };
+                sections.len()
+            ];
+            let (regional, regional_flow) = acoustic_chain_with_regional_outlet_flow(
+                &sections,
+                &media,
+                1.2,
+                340.0,
+                ChainOutlet::Radiating(MouthFlange::Flanged),
+                1,
+                None,
+            )
+            .unwrap();
             let (j, r, g) = original.structure();
             let (ej, er, eg) = explicit.structure();
+            let (rj, rr, rg) = regional.structure();
             assert_eq!(bits(j), bits(ej));
             assert_eq!(bits(r), bits(er));
             assert_eq!(bits(g), bits(eg));
+            assert_eq!(bits(j), bits(rj));
+            assert_eq!(bits(r), bits(rr));
+            assert_eq!(bits(g), bits(rg));
             assert_eq!(
                 bits(original_flow.coefficients()),
                 bits(explicit_flow.coefficients())
+            );
+            assert_eq!(
+                bits(original_flow.coefficients()),
+                bits(regional_flow.coefficients())
             );
             for i in 0..original.state_dim() {
                 let mut basis = vec![0.0; original.state_dim()];
@@ -298,9 +325,209 @@ fn explicitly_identical_exterior_preserves_native_storage_structure_and_flow_bit
                     bits(&original.effort(&basis)),
                     bits(&explicit.effort(&basis))
                 );
+                assert_eq!(
+                    bits(&original.effort(&basis)),
+                    bits(&regional.effort(&basis))
+                );
             }
         }
     }
+}
+
+#[test]
+fn regional_frusta_keep_local_integrals_interface_power_and_exterior_radiation_work() {
+    for last_cells in [2, 3] {
+        let sections = [
+            AcousticSection {
+                length: 0.1,
+                radius: 0.01,
+                outlet_radius: 0.015,
+                cells: 2,
+            },
+            AcousticSection {
+                length: 0.2,
+                radius: 0.015,
+                outlet_radius: 0.02,
+                cells: last_cells,
+            },
+        ];
+        let media = [
+            AcousticSectionMedium {
+                density: 0.8,
+                sound_speed: 420.0,
+                viscothermal: None,
+            },
+            AcousticSectionMedium {
+                density: 2.1,
+                sound_speed: 270.0,
+                viscothermal: None,
+            },
+        ];
+        let (system, flow) = acoustic_chain_with_regional_outlet_flow(
+            &sections,
+            &media,
+            1.2,
+            340.0,
+            ChainOutlet::Radiating(MouthFlange::Flanged),
+            1,
+            None,
+        )
+        .unwrap();
+        let cells = 2 + last_cells;
+        let n = system.state_dim();
+        assert_eq!(n, 2 * cells);
+        let mut initial = vec![0.0; n];
+        let coefficients = system.effort(&vec![1.0; n]);
+        let mut cell = 0;
+        for (section, medium) in sections.iter().zip(media) {
+            let dx = section.length / section.cells as f64;
+            for i in 0..section.cells {
+                let dr = section.outlet_radius - section.radius;
+                let ra = section.radius + dr * (i as f64 / section.cells as f64);
+                let rb = section.radius + dr * ((i + 1) as f64 / section.cells as f64);
+                let volume = core::f64::consts::PI * (ra * ra + ra * rb + rb * rb) * dx / 3.0;
+                let compliance = volume / (medium.density * medium.sound_speed.powi(2));
+                let mut inertia = medium.density * dx / (core::f64::consts::PI * ra * rb);
+                if cell + 1 == cells {
+                    inertia += 1.2 * 0.8216 / (core::f64::consts::PI * rb);
+                }
+                assert!((coefficients[2 * cell] * compliance - 1.0).abs() < 1e-13);
+                assert!((coefficients[2 * cell + 1] * inertia - 1.0).abs() < 1e-13);
+                let sign = if cell % 2 == 0 { 1.0 } else { -1.0 };
+                initial[2 * cell] = sign * compliance * (100.0 + 7.0 * cell as f64);
+                initial[2 * cell + 1] = -sign * inertia * 2e-4;
+                cell += 1;
+            }
+        }
+        let effort = system.effort(&initial);
+        let (j, _, _) = system.structure();
+        // The final series branch of region 0 meets the SAME pressure node
+        // as region 1. Its physical momentum changes by p_left - p_right,
+        // without any density-ratio multiplier or added interface inertance.
+        let interface_flux = 3;
+        let momentum_rate: f64 = j[interface_flux * n..(interface_flux + 1) * n]
+            .iter()
+            .zip(&effort)
+            .map(|(a, b)| a * b)
+            .sum();
+        assert!((momentum_rate - (107.0 - 114.0)).abs() < 1e-12);
+        let dt = 1e-6;
+        let step = fs_phs::step(&system, &initial, &[3e-4], dt).unwrap();
+        let midpoint: Vec<_> = initial
+            .iter()
+            .zip(&step.x)
+            .map(|(a, b)| f64::midpoint(*a, *b))
+            .collect();
+        let outward = flow.volume_flow_m3_s(&midpoint).unwrap();
+        let volume_change: f64 = (0..cells)
+            .map(|i| {
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                sign * (step.x[2 * i] - initial[2 * i])
+            })
+            .sum();
+        let expected_volume = dt * (3e-4 - outward);
+        assert!((volume_change - expected_volume).abs() < 1e-10 * expected_volume.abs());
+        let travel_s: f64 = sections
+            .iter()
+            .zip(media)
+            .map(|(s, m)| s.length / m.sound_speed)
+            .sum();
+        let omega = core::f64::consts::PI / (2.0 * travel_s);
+        let resistance = 1.2 * omega.powi(2) / (2.0 * core::f64::consts::PI * 340.0);
+        let expected_work = dt * resistance * outward.powi(2);
+        assert!((step.dissipated - expected_work).abs() < 1e-10 * expected_work);
+    }
+}
+
+#[test]
+fn regional_foster_memory_uses_each_cells_own_transport_without_changing_its_neighbors() {
+    let sections = [section(2, false); 2];
+    let pin = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 2,
+    };
+    let first = AcousticSectionMedium {
+        density: 1.2,
+        sound_speed: 340.0,
+        viscothermal: Some(pin),
+    };
+    let mut media = [
+        first,
+        AcousticSectionMedium {
+            density: 2.0,
+            sound_speed: 280.0,
+            viscothermal: Some(ViscothermalPin {
+                foster_branches: 3,
+                ..pin
+            }),
+        },
+    ];
+    let build = |media: &[AcousticSectionMedium]| {
+        acoustic_chain_with_regional_outlet_flow(
+            &sections,
+            media,
+            1.2,
+            340.0,
+            ChainOutlet::PressureRelease,
+            1,
+            None,
+        )
+        .unwrap()
+    };
+    let (before, _) = build(&media);
+    media[1].viscothermal = Some(ViscothermalPin {
+        dynamic_viscosity: 3.1e-5,
+        gamma: 1.6,
+        prandtl: 0.8,
+        foster_branches: 3,
+    });
+    let (after, _) = build(&media);
+    // Eight physical states plus 2*(2*2 + 2*3) local Foster states.
+    assert_eq!(before.state_dim(), 28);
+    assert_eq!(after.state_dim(), before.state_dim());
+    let n = before.state_dim();
+    let unaffected: Vec<_> = (0..4).chain(8..16).collect();
+    let (_, before_r, _) = before.structure();
+    let (_, after_r, _) = after.structure();
+    for row in unaffected {
+        assert_eq!(
+            before_r[row * n..(row + 1) * n],
+            after_r[row * n..(row + 1) * n]
+        );
+        let mut basis = vec![0.0; n];
+        basis[row] = 1.0;
+        assert_eq!(before.effort(&basis), after.effort(&basis));
+    }
+    assert_ne!(before_r, after_r);
+    let step = fs_phs::step(&after, &vec![0.0; n], &[2e-4], 1e-5).unwrap();
+    assert!(step.dissipated > 0.0);
+    media[1].sound_speed = f64::NAN;
+    assert!(
+        acoustic_chain_with_regional_outlet_flow(
+            &sections,
+            &media,
+            1.2,
+            340.0,
+            ChainOutlet::PressureRelease,
+            1,
+            None,
+        )
+        .is_err()
+    );
+    assert!(
+        acoustic_chain_with_regional_outlet_flow(
+            &sections,
+            &[first],
+            1.2,
+            340.0,
+            ChainOutlet::PressureRelease,
+            1,
+            None,
+        )
+        .is_err()
+    );
 }
 
 #[test]
