@@ -1818,8 +1818,17 @@ impl DissipationStep {
     ) -> Result<Self, TriboError> {
         nonnegative_finite(dissipated_power_w, "dissipated_power_w")?;
         nonnegative_finite(duration_s, "duration_s")?;
-        partition.validate()?;
         let total_work_j = checked_mul(dissipated_power_w, duration_s, "total_work_j")?;
+        Self::from_work(total_work_j, partition)
+    }
+    /// Partition non-negative work already integrated by its physical owner.
+    ///
+    /// This also admits instantaneous releases, such as an adhesive snap, with
+    /// no invented power or duration. The caller supplies the physical thermal
+    /// and nonthermal destinations; this constructor does not infer them.
+    pub fn from_work(total_work_j: f64, partition: HeatPartition) -> Result<Self, TriboError> {
+        nonnegative_finite(total_work_j, "total_work_j")?;
+        partition.validate()?;
         let value = Self {
             total_work_j,
             surface_a_heat_j: checked_mul(total_work_j, partition.surface_a, "surface_a_heat_j")?,

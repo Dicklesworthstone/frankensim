@@ -26486,6 +26486,44 @@ finite storage, original conduction/reservoir/authored heat, scheduled boundary
 changes and continuation, latent storage and domain/cancellation rollback,
 exact native zero-drive behavior and physical-mapping refusals.
 
+## Adhesive snap release on the original finite caloric cells
+
+`friction_heat::adhesive::snap::JkrSnapHeat` retains a sealed original JKR
+branch and regenerates every accepted monotone path segment before assigning
+its jump release. The expected start version and source-bound final state must
+match; a stale retry or substituted source cannot silently deposit the same
+accepted release again. The trajectory owner must supply every path reversal.
+Smooth reversible normal work deposits exactly zero. Exact attachment and displacement-spinodal releases
+remain with `SourceJkrSphereContact` rather than caller-editable jump reports.
+
+An explicit `fs-tribo::HeatPartition` assigns surface A, surface B and named
+outside work. `DissipationStep::from_work` accepts the original integrated
+joules without inventing a power or duration; the existing `WorkLedger` retains
+their channel totals. The two ordered normal material-card identities must
+match the original `EquilibriumEnthalpyPhaseCurve` objects actually registered
+in the native timeline. Cell, segment, body, material, mass and geometry remain
+pinned. Heat-only mapping adds no conducting link or fictitious solid-contact
+area, including at detachment.
+
+One original `DepositionSimulation::apply_heat_j` updates the finite caloric
+state for a batch. Its per-cell and summed absolute storage gates, a separate
+release-transfer gate and the final cancellation check admit the thermal and
+branch-history candidates together. Invalid paths, changed receivers, material
+domain failure, exhausted budgets or cancellation publish neither owner.
+The native thermal audit labels this impulse external to the thermal subsystem;
+it is an internal debit/credit in the contact/thermal/outside work account.
+
+This is a same-time, frozen-normal-source heat split. A trajectory owner
+localizes jumps and supplies every monotone segment; thermal transport between
+events requires separate native timeline advances. The adapter does not infer
+heat fractions, solve radiated waves, refresh temperature-dependent normal
+coefficients, or claim whole-system internal-energy closure from enthalpy alone.
+Seven focused groups in `tests/adhesive_snap_heat.rs` exercise the original latent
+chart and heat update, a complete adhesive cycle including exact-fold release,
+zero heat on smooth tensile/compressive paths, source/history/material refusal,
+every cancellation phase with deterministic retry, strict transfer closure,
+and integrated-work units.
+
 ## Adhesive body islands with source-resolved finite thermal transport
 
 `friction_heat::adhesive::propose_rigid_adhesive_island_heat` couples original

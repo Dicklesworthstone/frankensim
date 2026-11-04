@@ -10,6 +10,8 @@
 
 /// Curved finite-time slip/spin, arrest and original finite-cell heat together.
 pub mod transient;
+/// Original normal snap release and explicitly declared finite-cell heat.
+pub mod snap;
 
 use super::FrictionHeatRoute;
 use super::network::{
