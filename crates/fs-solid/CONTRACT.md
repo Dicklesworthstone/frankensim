@@ -2372,8 +2372,9 @@ mesh scales, von-Mises derivatives, and refusal/cancellation/retry boundaries.
 
 `adjoint::support::trajectory` records complete prescribed-support simulations
 through `record_prescribed_controls`. For controls alone, its owning recorder
-retains only accepted interval times: the frozen linear motion Jacobian needs
-no full primal tape or finite-difference replay. Each successful original coupled step is recorded
+retains only accepted transition times and control kinds: the frozen linear
+motion Jacobian needs no full primal tape or finite-difference replay.
+Each successful original coupled step is recorded
 atomically; failed sampling, support admission, solves, cancellation or storage
 admission preserves both the accepted state and schedule. Cloning forks both.
 The typed-history adapter samples one retained force/support endpoint before
@@ -2381,8 +2382,8 @@ advancing, using the same physical time and frame binding as the original run.
 
 `reverse_with_observations` adds sparse full-nodal objective derivatives at any
 accepted endpoint, including initialization, and reverses the complete schedule
-once. It returns every initial/endpoint force row, every absolute prescribed
-displacement row, independent initial free q/all v/fixed a, and the sum of force
+once. It returns every initial/endpoint force row, each prescribed displacement
+or acceleration control row, independent initial free q/all v/fixed a, and the sum of force
 cotangents for the one frozen thermal equivalent load. Initial fixed q appears
 only in the initial displacement-control row, avoiding duplicate control
 contributions. Sparse observations preserve caller summation order with
@@ -2437,6 +2438,33 @@ and bounded recording, cloning, cancellation and refusal/retry checks.
 objective observed at every endpoint, compared with six material/damping/support/
 force directions at two parameter points, plus opt-in recording, storage refusal,
 atomic failure, cancellation/retry, clone identity and fully prescribed limits.
+
+The same recorder accepts `advance_with_support_accelerations`,
+`apply_support_acceleration_jump` and atomic
+`advance_to_support_acceleration_jump`. Displacement and acceleration controls
+may alternate; each transition reverses its original kinematic and coupled
+equilibrium owner. A finite jump preserves q/v, replaces acceleration through
+the consistent mass solve, and records distinct left/right states at one time.
+`pullback_acceleration_jump` discards all previous-a cotangents while retaining
+the actual cross-mass, damping and stiffness terms. Acceleration controls have
+separate `accelerations` rows; jump controls and forces carry `RightLimit`,
+while ordinary endpoints carry `IntervalEndpoint`. Initial fixed acceleration
+remains in `initial.a`, and solved free initial acceleration has no input gradient.
+
+The typed smooth-history adapter and
+`EventLoadHistory3::advance_recorded_accelerations_to` sample the original
+frame-bound load/support histories, including exact left/right event limits.
+The event adapter forks only the primal candidate; it never copies the existing
+trajectory tape. Both transitions and their optional material motion are admitted
+before the interval, and a late right-limit failure publishes neither. Recording
+limits count transitions, including zero-duration jumps. Sparse motion, reaction
+and stress observations can address either side independently; material and
+Rayleigh gradients use the corresponding full accepted motion in the same reverse
+sweep. Authored amplitude chains remain caller-owned, with frames and event times
+fixed. `tests/transient_support_acceleration_trajectory3.rs` checks all eighteen
+independent control/material/damping directions with reaction and stress
+objectives, an analytic typed acceleration pulse, smooth-history parity, and
+cancellation, budget and late-jump rollback.
 
 ## Public types and semantics
 

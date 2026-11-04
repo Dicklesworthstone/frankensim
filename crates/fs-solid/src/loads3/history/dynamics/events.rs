@@ -8,6 +8,8 @@ use crate::loads3::transient::events::LoadJump3;
 use fs_scenario::frame::{Frame, FrameMotion};
 use fs_scenario::payload::{OutsideDomainPolicy, SampleSource, TableInterpolation};
 use fs_scenario::signal::Interp;
+
+mod recorded;
 use fs_qty::QtyAny;
 use super::super::supports::{TetSupportAccelerationSample3, TetSupportSample3};
 
@@ -468,6 +470,11 @@ pub struct EventTransientRun3<'h, 'a, 'g, 'm, 'p, 's> {
 impl<'g, 'm, 'p, 's> EventTransientRun3<'_, '_, 'g, 'm, 'p, 's> {
     /// Read-only access to motion, response recovery and the existing diagnostics.
     pub fn run(&self) -> &TetTransientRun3<'g, 'm, 'p, 's> { &self.run }
+
+    /// Transfer the accepted native state to another motion owner without
+    /// resampling, reinitializing acceleration or copying the assembled model.
+    /// A control recorder can then use the SAME schedule's recorded adapter.
+    pub fn into_run(self) -> TetTransientRun3<'g, 'm, 'p, 's> { self.run }
 
     /// Advance ONE interval to the next authored knot, target or step cap.
     /// Call repeatedly to reach target. Left/right loads and frame tilts use the

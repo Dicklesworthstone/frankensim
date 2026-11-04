@@ -4,12 +4,13 @@
 //! not on the primal state. Control recording therefore retains O(steps) times.
 //! Material design optionally retains bounded full endpoint motion. Sparse
 //! motion, support-reaction and stress observations seed accepted endpoints; one
-//! reverse sweep returns material, force and support-displacement derivatives.
+//! reverse sweep returns material, force and support-control derivatives.
 use super::super::material::{MaterialGradientBudget3, MaterialScaleGradient3};
 use super::super::trajectory::{ControlForceKind3, ForceCotangent3};
 use super::super::{TransientAdjointConfig3, TransientAdjointError3, check, number};
 use super::{NodalMotionCotangent3, PrescribedTransientAdjoint3, SupportAdjointBudget3};
 use crate::loads3::TetLoadCase3;
+use crate::loads3::transient::events::{LoadJump3, TransientEventStep3};
 use crate::loads3::transient::{TetTransientRun3, TransientStep3};
 use fs_exec::Cx;
 
@@ -19,8 +20,9 @@ pub use stress::ElementStressObservation3;
 /// Bounds on the accepted schedule, returned gradients and sparse observations.
 #[derive(Debug, Clone, Copy)]
 pub struct PrescribedRecordingBudget3 {
+    /// Maximum recorded transitions, including zero-duration acceleration jumps.
     pub maximum_steps: usize,
-    /// All returned q/v/a, force, displacement-control and thermal scalars.
+    /// All returned q/v/a, force, support-control and thermal scalars.
     /// Times and vector metadata are instead bounded by `maximum_steps`.
     pub maximum_gradient_values: usize,
     /// Total caller-owned motion, reaction or stress rows per reverse sweep.
@@ -38,7 +40,9 @@ impl Default for PrescribedRecordingBudget3 {
 
 /// A scalar objective's derivative at one node of an accepted motion state.
 /// `state == 0` addresses initialization; subsequent states follow accepted
-/// intervals. Multiple rows are added in caller order. Values have objective
+/// intervals or acceleration jumps. Left and right limits at the same physical
+/// time have distinct state indices. Multiple rows are added in caller order.
+/// Values have objective
 /// per motion units, and are not physical displacement/velocity/acceleration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NodalMotionObservation3 {
@@ -77,18 +81,34 @@ pub struct PrescribedDisplacementCotangent3 {
     pub values: Vec<f64>,
 }
 
+/// Derivatives of prescribed endpoint acceleration [objective/(m/s²)].
+/// Initial prescribed acceleration remains in `PrescribedControlGradient3::initial`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrescribedAccelerationCotangent3 {
+    pub time_s: f64,
+    /// IntervalEndpoint is the left endpoint of an event; RightLimit is its
+    /// subsequent acceleration switch. Equal-time rows retain forward order.
+    pub kind: ControlForceKind3,
+    /// Sorted `RecordedPrescribedTransient3::adjoint().fixed_dofs()` order.
+    pub values: Vec<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrescribedControlGradient3 {
     /// Independent initial free displacement, all initial velocities and fixed
     /// accelerations. Fixed q derivatives are in `displacements[0]`, so these
     /// entries are zero here; free a entries are zero because a0 was solved.
     pub initial: NodalMotionCotangent3,
-    /// Initial load, then accepted interval endpoints in forward time order.
+    /// Initial load, then every recorded interval endpoint or right-limit switch.
     pub forces: Vec<ForceCotangent3>,
-    /// Initial support displacement, then every accepted interval endpoint.
+    /// Initial support displacement, then displacement-controlled endpoints.
     /// Omitted forward support rows still mean zero; only chain derivatives
     /// into the controls the caller actually varies.
     pub displacements: Vec<PrescribedDisplacementCotangent3>,
+    /// Only acceleration-controlled endpoints and right-limit switches, in
+    /// forward order. Omitted components are zero controls; chain only those
+    /// the caller varies. Rows have distinct physical units from displacements.
+    pub accelerations: Vec<PrescribedAccelerationCotangent3>,
     /// Derivative of the ONE frozen reduced thermal equivalent load, summed
     /// across initialization and all intervals. No material derivative implied.
     pub thermal_equivalent_force: Vec<f64>,
@@ -159,9 +179,17 @@ struct MaterialTape3 {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Interval3 {
+struct RecordedSupportTransition3 {
     time_s: f64,
     h_s: f64,
+    kind: SupportTransitionKind3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportTransitionKind3 {
+    Displacement,
+    Acceleration,
+    AccelerationJump,
 }
 
 /// An owning recorder prevents advancement that would bypass its time record.
@@ -170,7 +198,7 @@ struct Interval3 {
 pub struct RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
     run: TetTransientRun3<'g, 'm, 'p, 's>,
     adjoint: PrescribedTransientAdjoint3<'g, 'm, 'p, 's>,
-    intervals: Vec<Interval3>,
+    transitions: Vec<RecordedSupportTransition3>,
     initial_time_s: f64,
     budget: PrescribedRecordingBudget3,
     material: Option<MaterialTape3>,
@@ -206,7 +234,7 @@ impl<'g, 'm, 'p, 's> TetTransientRun3<'g, 'm, 'p, 's> {
         Ok(RecordedPrescribedTransient3 {
             run: self,
             adjoint,
-            intervals: Vec::new(),
+            transitions: Vec::new(),
             initial_time_s,
             budget,
             material: None,
@@ -222,10 +250,10 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         &self.adjoint
     }
     pub fn sample_count(&self) -> usize {
-        self.intervals.len() + 1
+        self.transitions.len() + 1
     }
     pub fn accepted_times(&self) -> impl Iterator<Item = f64> + '_ {
-        std::iter::once(self.initial_time_s).chain(self.intervals.iter().map(|i| i.time_s))
+        std::iter::once(self.initial_time_s).chain(self.transitions.iter().map(|i| i.time_s))
     }
 
     /// Retain original accepted full motion for material-design derivatives.
@@ -237,7 +265,7 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         cx: &Cx<'_>,
     ) -> Result<(), TransientAdjointError3> {
         check(cx)?;
-        if !self.intervals.is_empty() || self.material.is_some() {
+        if !self.transitions.is_empty() || self.material.is_some() {
             return Err(TransientAdjointError3::Invalid(
                 "enable material recording once before the first recorded step",
             ));
@@ -256,11 +284,15 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
     }
 
     pub(crate) fn admit_next_step(&self, cx: &Cx<'_>) -> Result<(), TransientAdjointError3> {
+        self.admit_transitions(1, cx)
+    }
+
+    fn admit_transitions(&self, count: usize, cx: &Cx<'_>) -> Result<(), TransientAdjointError3> {
         check(cx)?;
         let next = self
-            .intervals
+            .transitions
             .len()
-            .checked_add(1)
+            .checked_add(count)
             .ok_or(TransientAdjointError3::Budget)?;
         admit_gradient_size(
             next,
@@ -280,6 +312,49 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         Ok(())
     }
 
+    fn reserve_transitions(
+        &mut self,
+        count: usize,
+        cx: &Cx<'_>,
+    ) -> Result<(), TransientAdjointError3> {
+        self.admit_transitions(count, cx)?;
+        self.transitions
+            .try_reserve(count)
+            .map_err(|_| TransientAdjointError3::Budget)?;
+        if let Some(tape) = &mut self.material {
+            tape.motion
+                .try_reserve(count)
+                .map_err(|_| TransientAdjointError3::Budget)?;
+        }
+        Ok(())
+    }
+
+    fn recorded_motion(
+        &self,
+        candidate: &TetTransientRun3<'_, '_, '_, '_>,
+        cx: &Cx<'_>,
+    ) -> Result<Option<[Vec<[f64; 3]>; 3]>, TransientAdjointError3> {
+        if self.material.is_some() {
+            Ok(Some(candidate.nodal_motion(cx)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn append_transition(
+        &mut self,
+        time_s: f64,
+        h_s: f64,
+        kind: SupportTransitionKind3,
+        motion: Option<[Vec<[f64; 3]>; 3]>,
+    ) {
+        self.transitions
+            .push(RecordedSupportTransition3 { time_s, h_s, kind });
+        if let (Some(tape), Some(motion)) = (&mut self.material, motion) {
+            tape.motion.push(motion);
+        }
+    }
+
     /// Advance the original coupled solver and record its accepted time, plus
     /// full endpoint motion when material recording is enabled.
     /// Storage refusal, malformed support inputs, numerical refusal and
@@ -291,32 +366,131 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         h_s: f64,
         cx: &Cx<'_>,
     ) -> Result<TransientStep3, TransientAdjointError3> {
-        self.admit_next_step(cx)?;
-        self.intervals
-            .try_reserve(1)
-            .map_err(|_| TransientAdjointError3::Budget)?;
-        if let Some(tape) = &mut self.material {
-            tape.motion
-                .try_reserve(1)
-                .map_err(|_| TransientAdjointError3::Budget)?;
-        }
-        let mut candidate = self.run.clone();
-        let report = candidate.advance_with_supports(load, prescribed_dofs_m, h_s, cx)?;
-        let motion = if self.material.is_some() {
-            Some(candidate.nodal_motion(cx)?)
-        } else {
-            None
-        };
-        check(cx)?;
-        self.intervals.push(Interval3 {
-            time_s: report.time_s,
+        self.advance_controlled(
+            load,
+            prescribed_dofs_m,
             h_s,
-        });
-        if let (Some(tape), Some(motion)) = (&mut self.material, motion) {
-            tape.motion.push(motion);
-        }
+            SupportTransitionKind3::Displacement,
+            cx,
+        )
+    }
+
+    /// Integrate and record prescribed acceleration using the original coupled
+    /// motion owner. Mixed displacement/acceleration intervals retain their
+    /// own transpose maps and physical control units. Initial acceleration is
+    /// still differentiated through the original initialization mass solve.
+    pub fn advance_with_support_accelerations(
+        &mut self,
+        load: &TetLoadCase3<'_, '_>,
+        prescribed_dofs_m_s2: &[(usize, f64)],
+        h_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TransientStep3, TransientAdjointError3> {
+        self.advance_controlled(
+            load,
+            prescribed_dofs_m_s2,
+            h_s,
+            SupportTransitionKind3::Acceleration,
+            cx,
+        )
+    }
+
+    fn advance_controlled(
+        &mut self,
+        load: &TetLoadCase3<'_, '_>,
+        values: &[(usize, f64)],
+        h_s: f64,
+        kind: SupportTransitionKind3,
+        cx: &Cx<'_>,
+    ) -> Result<TransientStep3, TransientAdjointError3> {
+        self.reserve_transitions(1, cx)?;
+        let mut candidate = self.run.clone();
+        let report = match kind {
+            SupportTransitionKind3::Displacement => {
+                candidate.advance_with_supports(load, values, h_s, cx)?
+            }
+            SupportTransitionKind3::Acceleration => {
+                candidate.advance_with_support_accelerations(load, values, h_s, cx)?
+            }
+            SupportTransitionKind3::AccelerationJump => {
+                return Err(TransientAdjointError3::Invalid(
+                    "a finite interval requires a displacement or acceleration endpoint",
+                ));
+            }
+        };
+        let motion = self.recorded_motion(&candidate, cx)?;
+        check(cx)?;
+        self.append_transition(report.time_s, h_s, kind, motion);
         self.run = candidate;
         Ok(report)
+    }
+
+    /// Record a finite acceleration/load switch with continuous q/v. This
+    /// consumes one recording slot and no primal time-step slot. Reverse uses
+    /// the exact mass-equilibrium map; replaced acceleration has no remaining
+    /// dependence on its previous value. Event times remain fixed controls.
+    pub fn apply_support_acceleration_jump(
+        &mut self,
+        load: &TetLoadCase3<'_, '_>,
+        prescribed_dofs_m_s2: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<LoadJump3, TransientAdjointError3> {
+        self.reserve_transitions(1, cx)?;
+        let mut candidate = self.run.clone();
+        let report = candidate.apply_support_acceleration_jump(load, prescribed_dofs_m_s2, cx)?;
+        let motion = self.recorded_motion(&candidate, cx)?;
+        check(cx)?;
+        self.append_transition(
+            report.time_s,
+            0.0,
+            SupportTransitionKind3::AccelerationJump,
+            motion,
+        );
+        self.run = candidate;
+        Ok(report)
+    }
+
+    /// Atomically record a left-limit interval and its finite right-limit
+    /// acceleration/load switch. Two recording slots expose both physical
+    /// limits to observations. One private primal fork and optional endpoint
+    /// motion samples suffice; no existing trajectory tape is copied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_support_acceleration_jump(
+        &mut self,
+        load_before: &TetLoadCase3<'_, '_>,
+        acceleration_before_m_s2: &[(usize, f64)],
+        load_after: &TetLoadCase3<'_, '_>,
+        acceleration_after_m_s2: &[(usize, f64)],
+        h_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TransientEventStep3, TransientAdjointError3> {
+        self.reserve_transitions(2, cx)?;
+        let mut candidate = self.run.clone();
+        let interval = candidate.advance_with_support_accelerations(
+            load_before,
+            acceleration_before_m_s2,
+            h_s,
+            cx,
+        )?;
+        let left = self.recorded_motion(&candidate, cx)?;
+        let jump =
+            candidate.apply_support_acceleration_jump(load_after, acceleration_after_m_s2, cx)?;
+        let right = self.recorded_motion(&candidate, cx)?;
+        check(cx)?;
+        self.append_transition(
+            interval.time_s,
+            h_s,
+            SupportTransitionKind3::Acceleration,
+            left,
+        );
+        self.append_transition(
+            jump.time_s,
+            0.0,
+            SupportTransitionKind3::AccelerationJump,
+            right,
+        );
+        self.run = candidate;
+        Ok(TransientEventStep3 { interval, jump })
     }
 
     /// Reverse a terminal full-nodal motion objective through all intervals.
@@ -329,12 +503,13 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
     }
 
     /// Add sparse objective seeds at arbitrary accepted endpoints, then reverse
-    /// the original recurrence once. A weighted sampled-time integral or
+    /// the original recurrence once, including finite acceleration switches.
+    /// A weighted sampled-time integral or
     /// least-squares objective supplies its actual quadrature/residual weights
     /// here; no continuous-time or interpolation derivative is inferred.
     ///
     /// The source frame, knot times, step schedule, operators and support axes
-    /// are fixed. Chain returned integrated-force and world-displacement rows
+    /// are fixed. Chain returned integrated-force and world-support rows
     /// through the caller's authored controls; direct control costs are added
     /// by their owner. Cancellation/refusal returns no partial gradient.
     pub fn reverse_with_observations(
@@ -447,7 +622,7 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
             .checked_sub(extra)
             .ok_or(TransientAdjointError3::Budget)?;
         admit_gradient_size(
-            self.intervals.len(),
+            self.transitions.len(),
             self.run.problem.nodes_m.len(),
             self.run.free_dofs().len(),
             remaining,
@@ -573,7 +748,7 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         let nodes = self.run.problem.nodes_m.len();
         let free = self.run.free_dofs().len();
         terminal.validate(nodes, cx)?;
-        admit_gradient_size(self.intervals.len(), nodes, free, self.budget)?;
+        admit_gradient_size(self.transitions.len(), nodes, free, self.budget)?;
         if observations.len() > self.budget.maximum_observations {
             return Err(TransientAdjointError3::Budget);
         }
@@ -604,44 +779,89 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         }
         let mut seed = terminal.clone();
         let mut forces = reserved(self.sample_count())?;
-        let mut displacements = reserved(self.sample_count())?;
+        let acceleration_count = self
+            .transitions
+            .iter()
+            .filter(|step| step.kind != SupportTransitionKind3::Displacement)
+            .count();
+        let mut displacements = reserved(self.sample_count() - acceleration_count)?;
+        let mut accelerations = reserved(acceleration_count)?;
         let mut thermal = filled(free, 0.0)?;
         let mut iterations = 0usize;
         let mut maximum_relative = 0.0_f64;
         inject(
             &mut seed,
-            self.intervals.len(),
+            self.transitions.len(),
             observations,
             &heads,
             &next,
             cx,
         )?;
         visit(ReverseVisit3::Observation {
-            state: self.intervals.len(),
+            state: self.transitions.len(),
             seed: &mut seed,
         })?;
-        for (i, interval) in self.intervals.iter().enumerate().rev() {
+        for (i, interval) in self.transitions.iter().enumerate().rev() {
             check(cx)?;
-            let pb = self.adjoint.pullback_step(interval.h_s, &seed, cx)?;
+            let (previous, force, control, solve_iterations, relative) = match interval.kind {
+                SupportTransitionKind3::Displacement => {
+                    let pb = self.adjoint.pullback_step(interval.h_s, &seed, cx)?;
+                    (
+                        pb.previous,
+                        pb.force,
+                        pb.prescribed_displacement,
+                        pb.iterations,
+                        pb.true_relative_residual,
+                    )
+                }
+                SupportTransitionKind3::Acceleration | SupportTransitionKind3::AccelerationJump => {
+                    let pb = if interval.kind == SupportTransitionKind3::AccelerationJump {
+                        self.adjoint.pullback_acceleration_jump(&seed, cx)?
+                    } else {
+                        self.adjoint
+                            .pullback_acceleration_step(interval.h_s, &seed, cx)?
+                    };
+                    (
+                        pb.previous,
+                        pb.force,
+                        pb.prescribed_acceleration,
+                        pb.iterations,
+                        pb.true_relative_residual,
+                    )
+                }
+            };
+            let kind = if interval.kind == SupportTransitionKind3::AccelerationJump {
+                ControlForceKind3::RightLimit
+            } else {
+                ControlForceKind3::IntervalEndpoint
+            };
             visit(ReverseVisit3::Residual {
                 state: i + 1,
-                force: &pb.force,
+                force: &force,
             })?;
-            add_thermal(&mut thermal, &pb.force, cx)?;
+            add_thermal(&mut thermal, &force, cx)?;
             iterations = iterations
-                .checked_add(pb.iterations)
+                .checked_add(solve_iterations)
                 .ok_or(TransientAdjointError3::Budget)?;
-            maximum_relative = maximum_relative.max(pb.true_relative_residual);
+            maximum_relative = maximum_relative.max(relative);
             forces.push(ForceCotangent3 {
                 time_s: interval.time_s,
-                kind: ControlForceKind3::IntervalEndpoint,
-                values: pb.force,
+                kind,
+                values: force,
             });
-            displacements.push(PrescribedDisplacementCotangent3 {
-                time_s: interval.time_s,
-                values: pb.prescribed_displacement,
-            });
-            seed = pb.previous;
+            if interval.kind == SupportTransitionKind3::Displacement {
+                displacements.push(PrescribedDisplacementCotangent3 {
+                    time_s: interval.time_s,
+                    values: control,
+                });
+            } else {
+                accelerations.push(PrescribedAccelerationCotangent3 {
+                    time_s: interval.time_s,
+                    kind,
+                    values: control,
+                });
+            }
+            seed = previous;
             inject(&mut seed, i, observations, &heads, &next, cx)?;
             visit(ReverseVisit3::Observation {
                 state: i,
@@ -675,11 +895,13 @@ impl<'g, 'm, 'p, 's> RecordedPrescribedTransient3<'g, 'm, 'p, 's> {
         });
         forces.reverse();
         displacements.reverse();
+        accelerations.reverse();
         check(cx)?;
         Ok(PrescribedControlGradient3 {
             initial: initial.initial,
             forces,
             displacements,
+            accelerations,
             thermal_equivalent_force: thermal,
             total_adjoint_iterations: iterations,
             maximum_adjoint_relative_residual: maximum_relative,

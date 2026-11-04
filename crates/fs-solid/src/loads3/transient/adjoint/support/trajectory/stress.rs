@@ -28,7 +28,8 @@ impl RecordedPrescribedTransient3<'_, '_, '_, '_> {
     /// B' C' w and the direct stiffness-scale term w' stress are retained.
     /// Their implicit and direct contributions are accumulated in one reverse
     /// sweep; density and damping enter through the original trajectory.
-    /// Support displacements and applied loads remain independent controls.
+    /// Prescribed displacement/acceleration and applied loads remain independent
+    /// controls. Acceleration jumps use their recorded left/right state indices.
     ///
     /// maximum_strain is the same finite positive total/elastic Mandel-strain
     /// ceiling as stress recovery, checked at states with stress observations.

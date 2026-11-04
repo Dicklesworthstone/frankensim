@@ -250,6 +250,28 @@ impl crate::loads3::transient::adjoint::trajectory::RecordedTransient3<'_, '_, '
 }
 
 impl crate::loads3::transient::adjoint::support::trajectory::RecordedPrescribedTransient3<'_, '_, '_, '_> {
+    /// Sample typed support acceleration and forces at one physical endpoint,
+    /// then record the original coupled map. Reverse returns endpoint m/s²
+    /// control cotangents; authored interpolation/frame derivatives remain
+    /// with their owner. Use the recorded event adapter for held pulse edges.
+    pub fn advance_history_with_support_accelerations(
+        &mut self, history: &TetLoadHistory3<'_>, supports: &[SupportAcceleration3<'_>],
+        h_s: f64, cx: &Cx<'_>,
+    ) -> Result<TransientStep3, crate::loads3::transient::adjoint::TransientAdjointError3> {
+        self.admit_next_step(cx)?;
+        let start = self.run().state().time_s;
+        let time = start + h_s;
+        if !h_s.is_finite() || h_s <= 0.0 || !time.is_finite() || time <= start {
+            return Err(TransientError3::Invalid("recorded acceleration history needs a finite later endpoint").into());
+        }
+        let endpoint = history.at_with_support_accelerations(
+            self.run().geometry, self.run().problem, supports, time, cx,
+        )?;
+        self.advance_with_support_accelerations(
+            &endpoint.loads.case, endpoint.prescribed_dofs_m_s2(), h_s, cx,
+        )
+    }
+
     /// Sample typed forces and prescribed displacements together, then record
     /// one accepted coupled step. Reverse results address integrated forces and
     /// world-component support values at these exact physical times. Authored

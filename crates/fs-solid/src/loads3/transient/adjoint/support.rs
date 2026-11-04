@@ -87,7 +87,7 @@ pub struct PrescribedStepPullback3 {
     pub true_relative_residual: f64,
 }
 
-/// Reverse of a step driven by prescribed endpoint support acceleration.
+/// Reverse of a finite step or jump driven by prescribed support acceleration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrescribedAccelerationStepPullback3 {
     /// Full previous q/v/a. Chain earlier intervals or initialization to
@@ -341,6 +341,34 @@ impl PrescribedTransientAdjoint3<'_, '_, '_, '_> {
             prescribed_acceleration,
             iterations: reduced.iterations,
             true_relative_residual: reduced.true_relative_residual,
+        })
+    }
+
+    /// Reverse a finite acceleration/load switch at fixed time. The original
+    /// mass equilibrium replaces free acceleration; prescribed acceleration is
+    /// the new control. Displacement and velocity pass through continuously.
+    /// All PREVIOUS acceleration cotangents are zero because no old acceleration
+    /// enters this zero-duration map. No impulse or event-time derivative is
+    /// inferred. The same consistent M_fc, C_fc and K_fc transpose is retained.
+    pub fn pullback_acceleration_jump(
+        &self,
+        seed: &NodalMotionCotangent3,
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedAccelerationStepPullback3, TransientAdjointError3> {
+        let mut equilibrium = self.pullback_initialization(seed, cx)?;
+        let mut prescribed_acceleration = Vec::with_capacity(self.fixed.len());
+        for &dof in self.fixed_dofs() {
+            check(cx)?;
+            prescribed_acceleration.push(equilibrium.initial.a[dof / 3][dof % 3]);
+            equilibrium.initial.a[dof / 3][dof % 3] = 0.0;
+        }
+        check(cx)?;
+        Ok(PrescribedAccelerationStepPullback3 {
+            previous: equilibrium.initial,
+            force: equilibrium.force,
+            prescribed_acceleration,
+            iterations: equilibrium.iterations,
+            true_relative_residual: equilibrium.true_relative_residual,
         })
     }
 
