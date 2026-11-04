@@ -41,6 +41,10 @@ the crash cascade with structurally exact energy accounting.
   models and scalar/cross-mode analytic stiffness; G3 checks reciprocity and
   preservation of admitted asymmetry. The action is not a discrete-gradient
   step Jacobian, a harmonic truncation bound, or an orbit-stability claim.
+  The same action is exposed through `Storage::continuous_tangent`, including
+  after assembly into `Box<dyn Storage>` and supported pHS composition. Ordinary
+  harmonic-balance and variational adapters can therefore differentiate the
+  actual assembled law without maintaining a second force model or callback.
 - `assemble(storage, zetas, strike_weights)` — the pHS: symplectic
   pair blocks, per-mode viscous damping `R = diag(0, 2 zeta w)`
   (zetas come from the caller; the visco-damping facility's per-mode

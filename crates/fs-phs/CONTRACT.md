@@ -1615,6 +1615,38 @@ uncoupled history, unchanged mechanical coordinates, independently integrated
 heat and the original energy balance. Native execution remains unverified for
 this increment.
 
+## Continuous tangents of the original storage law
+
+`Storage::continuous_tangent` optionally exposes a `ContinuousStorageTangent`
+owned by the same boxed Hamiltonian/gradient. Its action is the complete
+continuous derivative `D(gradient H)(x) v` in original state coordinates,
+including every nonlinear and material-memory contribution. The default is
+unsupported. This capability supplies neither a discrete-gradient endpoint
+Jacobian nor permission to replace nonlinear storage with its quadratic part.
+Declared action failure or incomplete/nonfinite output refuses analytic use;
+consumers must not silently switch a declared action to finite differences.
+
+`QuadraticStorage` applies its original sparse-row Q, including admitted tiny
+asymmetry, without allocation. `SumStorage` retains the capability only when
+both complete child laws supply it and composes their original directional
+derivatives over the exact state split. Immutable shared-storage handles delegate
+it unchanged. Composition uses no state copies, symmetrization, numerical
+probes or altered physical coefficients. Input dimensions and finite inputs
+are checked before slice access; all successful output components are finite.
+Callback work and scratch remain owner responsibilities. This local derivative
+does not establish harmonic truncation, temporal accuracy or orbit stability.
+
+Original Maxwell composition preserves a supported base tangent and adds the
+complete arm derivative. With `b(x)=sqrt(k)*strain(x)`, `e=b(x)-z` and
+`delta_e=gradient(b).v_x-v_z`, it adds
+`delta_e*gradient(b)+e*Hessian(b)*v_x` to the base effort direction and
+`-delta_e` to the original memory row. Nonlinear strain retains the actual
+prestress-dependent curvature and both state/memory cross derivatives. Linear
+arms allocate no scratch. Mapped arms lazily allocate two base-dimension
+derivative vectors per action and reuse them across all mapped arms; incomplete
+or nonfinite map derivatives refuse. No memory coordinate, dissipation law,
+equilibrium stiffness or stored prestress is eliminated or replaced.
+
 ## Immutable constitutive sharing for transactional preparation
 
 `PortHamiltonian::share_storage` copies the original J/R/G matrices during cold

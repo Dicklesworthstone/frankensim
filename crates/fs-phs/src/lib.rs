@@ -104,6 +104,25 @@ pub trait ConstitutiveDiscreteGradient {
     ) -> bool { false }
 }
 
+/// Continuous directional derivative of the ORIGINAL storage effort law.
+///
+/// This capability belongs to the same storage that supplies the Hamiltonian
+/// and gradient, so composition and boxing retain the complete physical law.
+/// It includes every nonlinear and material-memory contribution in the original
+/// coordinate order and units. It is neither a discrete-gradient endpoint
+/// Jacobian nor a quadratic approximation to a nonlinear Hamiltonian.
+pub trait ContinuousStorageTangent {
+    /// Write `D(gradient H)(state) * direction` into every output component.
+    ///
+    /// Inputs and output must have the complete storage dimension. Return false
+    /// for invalid/nonfinite inputs, unsupported source states or unrepresentable
+    /// arithmetic. Success requires complete finite output. A declared action
+    /// that refuses must not silently switch to numerical differentiation.
+    /// Evaluation is deterministic and read-only; the owner documents its work
+    /// and scratch requirements. On refusal, output contents are unspecified.
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool;
+}
+
 /// Energy storage: the Hamiltonian and its exact gradient.
 ///
 /// Implementations supply ANALYTIC gradients; the discrete-gradient
@@ -119,6 +138,12 @@ pub trait Storage {
     fn hamiltonian(&self, x: &[f64]) -> f64;
     /// `grad H(x)` into `out` (efforts).
     fn gradient(&self, x: &[f64], out: &mut [f64]);
+
+    /// Optional complete continuous derivative of this storage's original
+    /// gradient. `None` leaves this capability unavailable; a consumer can still
+    /// use separately declared COMPLETE exact-quadratic metadata. A quadratic
+    /// part alone is insufficient. Supported actions survive `Box<dyn Storage>`.
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> { None }
 
     /// Optional complete constitutive discrete gradient. The default retains
     /// the canonical Gonzalez rule. Independent energy accounting still uses
@@ -241,6 +266,8 @@ impl QuadraticStorage {
 }
 
 impl Storage for QuadraticStorage {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> { Some(self) }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
         // `quadratic_midpoint_remainder` over the stored columns.
         let n = self.n;
@@ -287,6 +314,18 @@ impl Storage for QuadraticStorage {
             }
             out[i] = row;
         }
+    }
+}
+
+impl ContinuousStorageTangent for QuadraticStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        if state.len() != self.n || direction.len() != self.n || out.len() != self.n
+            || state.iter().chain(direction).any(|value| !value.is_finite())
+        { return false; }
+        // The original Q, including admitted roundoff asymmetry and its sparse
+        // row traversal, is the exact derivative of the coded effort law.
+        self.gradient(direction, out);
+        out.iter().all(|value| value.is_finite())
     }
 }
 
@@ -357,6 +396,11 @@ pub struct SumStorage {
 }
 
 impl Storage for SumStorage {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        (self.a.0.continuous_tangent().is_some()
+            && self.b.0.continuous_tangent().is_some()).then_some(self)
+    }
+
     fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
         (self.a.0.discrete_gradient_rule().is_some()
             || self.b.0.discrete_gradient_rule().is_some()).then_some(self)
@@ -401,6 +445,22 @@ impl Storage for SumStorage {
         let na = self.a.1;
         self.a.0.gradient(&x[..na], &mut out[..na]);
         self.b.0.gradient(&x[na..], &mut out[na..]);
+    }
+}
+
+impl ContinuousStorageTangent for SumStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        let Some(n) = self.a.1.checked_add(self.b.1) else { return false; };
+        if state.len() != n || direction.len() != n || out.len() != n
+            || state.iter().chain(direction).any(|value| !value.is_finite())
+        { return false; }
+        let (Some(a), Some(b)) = (self.a.0.continuous_tangent(), self.b.0.continuous_tangent())
+            else { return false; };
+        let na = self.a.1;
+        out.fill(f64::NAN);
+        a.apply(&state[..na], &direction[..na], &mut out[..na])
+            && b.apply(&state[na..], &direction[na..], &mut out[na..])
+            && out.iter().all(|value| value.is_finite())
     }
 }
 
@@ -736,6 +796,10 @@ struct RelaxationStorage {
 }
 
 impl Storage for RelaxationStorage {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        self.base.continuous_tangent().map(|_| self as &dyn ContinuousStorageTangent)
+    }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
         let mut remainder = self.base.midpoint_energy_remainder(
             &a[..self.base_dim],

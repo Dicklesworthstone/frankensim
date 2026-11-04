@@ -41,7 +41,7 @@
 //! sine); out-of-plane shape is whatever grid the caller samples.
 
 use fs_math::det;
-use fs_phs::{PhsError, PortHamiltonian, Storage};
+use fs_phs::{ContinuousStorageTangent, PhsError, PortHamiltonian, Storage};
 
 pub mod longitudinal;
 pub mod sav;
@@ -191,9 +191,9 @@ impl SosModalStorage {
     /// Two matrix-vector passes per channel keep memory constant and work
     /// `O(channel_count * mode_count^2)`. Traversal order is fixed. Original
     /// model admission is rechecked because its frequency/channel fields are
-    /// public. A periodic or variational solver can use
-    /// `|x, v, out| storage.hessian_action(x, v, out).is_ok()` as its analytic
-    /// action, without a dependency on that solver's crate.
+    /// public. [`Storage::continuous_tangent`] exposes this same action after
+    /// boxing, composition and assembly, so periodic/variational solvers can
+    /// discover it without a second model or a solver dependency here.
     ///
     /// This is a continuous constitutive tangent, not the endpoint Jacobian of
     /// a discrete-gradient time step. It establishes neither harmonic
@@ -281,7 +281,17 @@ impl SosModalStorage {
     }
 }
 
+impl ContinuousStorageTangent for SosModalStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        self.hessian_action(state, direction, out).is_ok()
+    }
+}
+
 impl Storage for SosModalStorage {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        Some(self)
+    }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
         // The quadratic modal energies have zero midpoint remainder. For
         // V(q) = c/4 (q^T E q)^2, write q = m +/- d/2. Factoring the

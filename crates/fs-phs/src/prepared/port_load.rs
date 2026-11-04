@@ -9,6 +9,9 @@ impl Storage for SharedStorage {
     }
     fn hamiltonian(&self, x: &[f64]) -> f64 { self.0.hamiltonian(x) }
     fn gradient(&self, x: &[f64], out: &mut [f64]) { self.0.gradient(x, out); }
+    fn continuous_tangent(&self) -> Option<&dyn crate::ContinuousStorageTangent> {
+        self.0.continuous_tangent()
+    }
     fn discrete_gradient_rule(&self) -> Option<&dyn crate::ConstitutiveDiscreteGradient> {
         self.0.discrete_gradient_rule()
     }

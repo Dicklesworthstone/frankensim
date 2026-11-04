@@ -1,11 +1,14 @@
 //! Independent work checks for composed storage with arbitrary energy datums.
 use fs_phs::{
-    DescriptorPortHamiltonian, PortHamiltonian, QuadraticStorage, ScalarLaw, SeparableStorage,
-    StepWorkspace, Storage, SumStorage, discrete_gradient, step, step_descriptor,
+    ContinuousStorageTangent, DescriptorPortHamiltonian, PortHamiltonian, QuadraticStorage,
+    ScalarLaw, SeparableStorage, StepWorkspace, Storage, SumStorage, discrete_gradient, step,
+    step_descriptor,
 };
 
 struct ShiftedQuartic(f64);
 impl Storage for ShiftedQuartic {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> { Some(self) }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         self.0 + 0.25 * x[0].powi(4)
     }
@@ -19,6 +22,16 @@ impl Storage for ShiftedQuartic {
                 + m * (db.powi(3) - da.powi(3))
                 + 0.25 * (db.powi(4) - da.powi(4)),
         )
+    }
+}
+
+impl ContinuousStorageTangent for ShiftedQuartic {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        if state.len() != 1 || direction.len() != 1 || out.len() != 1
+            || state.iter().chain(direction).any(|v| !v.is_finite())
+        { return false; }
+        out[0] = 3.0 * state[0] * state[0] * direction[0];
+        out[0].is_finite()
     }
 }
 
@@ -78,6 +91,39 @@ fn direct_sum_keeps_both_constitutive_remainders() {
     let gradient = discrete_gradient(law.as_ref(), &[2.0, 1.0], &[4.0, 3.0]);
     assert_eq!(gradient, [4.0, 9.0]);
     assert_eq!(gradient.iter().sum::<f64>() * 2.0, 26.0);
+}
+
+#[test]
+fn original_continuous_tangent_survives_boxing_sum_and_shared_storage() {
+    let mut original = system(1e30);
+    let shared = original.share_storage();
+    let state = [0.7, 1.2];
+    let direction = [0.3, -0.4];
+    for source in [&original, &shared] {
+        let tangent = source.storage().continuous_tangent().unwrap();
+        let mut actual = [f64::NAN; 2];
+        assert!(tangent.apply(&state, &direction, &mut actual));
+        close(actual[0], 0.3);
+        close(actual[1], -1.728);
+        assert!(!tangent.apply(&state[..1], &direction, &mut actual));
+        assert!(!tangent.apply(&state, &[0.3, f64::INFINITY], &mut actual));
+        assert!(!tangent.apply(&state, &direction, &mut actual[..1]));
+    }
+}
+
+#[test]
+fn quadratic_continuous_tangent_retains_the_original_coupled_effort() {
+    let storage = QuadraticStorage::new(vec![2.0, 0.5 + 1e-12, 0.5, 3.0], 2).unwrap();
+    let direction = [0.3, -0.4];
+    let mut expected = [0.0; 2];
+    storage.gradient(&direction, &mut expected);
+    let boxed: Box<dyn Storage> = Box::new(storage);
+    let tangent = boxed.continuous_tangent().unwrap();
+    let mut actual = [f64::NAN; 2];
+    assert!(tangent.apply(&[1e12, -2e12], &direction, &mut actual));
+    assert_eq!(actual, expected);
+    assert!(!tangent.apply(&[f64::NAN, 0.0], &direction, &mut actual));
+    assert!(!tangent.apply(&[0.0; 2], &direction[..1], &mut actual));
 }
 
 #[test]
@@ -144,6 +190,7 @@ fn unsupported_child_does_not_manufacture_a_complete_remainder() {
         law.midpoint_energy_remainder(&[1.0, 1.0], &[2.0, 2.0], &[1.5, 1.5]),
         None
     );
+    assert!(law.continuous_tangent().is_none());
 }
 
 struct ShiftedQuadratic {
