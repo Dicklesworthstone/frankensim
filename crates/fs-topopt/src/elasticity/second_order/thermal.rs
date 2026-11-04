@@ -34,12 +34,15 @@ pub struct ThermalLoadCase<'a> {
     pub strains: TetThermalStrainField<'a>,
 }
 
-enum OwnedThermalField {
+pub(crate) enum OwnedThermalField {
     Uniform(TetThermalStrainState),
     PerElement(Vec<TetThermalStrainState>),
 }
 impl OwnedThermalField {
-    fn new(field: TetThermalStrainField<'_>, cells: usize) -> Result<Self, ComplianceError> {
+    pub(crate) fn new(
+        field: TetThermalStrainField<'_>,
+        cells: usize,
+    ) -> Result<Self, ComplianceError> {
         match field {
             TetThermalStrainField::Uniform(state) => Ok(Self::Uniform(*state)),
             TetThermalStrainField::PerElement(states) if states.len() == cells => {
@@ -58,7 +61,7 @@ impl OwnedThermalField {
         }
     }
 
-    fn borrowed(&self) -> TetThermalStrainField<'_> {
+    pub(crate) fn borrowed(&self) -> TetThermalStrainField<'_> {
         match self {
             Self::Uniform(state) => TetThermalStrainField::Uniform(state),
             Self::PerElement(states) => TetThermalStrainField::PerElement(states),

@@ -19,6 +19,10 @@ use crate::filter::DensityFilter;
 use crate::pipeline::{LoadCase, SimpParams};
 use crate::simp_second_order::{SimpComplianceGoal, robust_parameters};
 use crate::{DensityElasticity, DesignPipeline, EvaluationStop, RobustPipeline, SolveBudget, SolveControl};
+use crate::elasticity::second_order::thermal::OwnedThermalField;
+
+mod thermal;
+use thermal::CachedGoal;
 
 /// SI kilograms for a physical material inventory objective or constraint.
 pub const MASS_DIMS: Dims = Dims([0, 1, 0, 0, 0, 0]);
@@ -50,7 +54,7 @@ impl SimpNewtonResources {
 
 struct Cached<'a> {
     bits: Vec<u64>,
-    goal: SimpComplianceGoal<'a>,
+    goal: CachedGoal<'a>,
     volume: PhysicsSample,
     mass: Option<PhysicsSample>,
 }
@@ -72,6 +76,8 @@ struct Cached<'a> {
 /// A failed preparation never replaces the previous cache. A successful trial
 /// may evict it; evaluating an older accepted tape re-prepares that exact point.
 /// Loads, parameters, geometry and weights cannot change during the model's life.
+/// Thermal constructors retain the original prescribed-temperature sources and
+/// differentiate their design-dependent equivalent forces in this same owner.
 /// Raw densities are in [0,1]; the native second-order goal additionally requires
 /// stiffness projected densities strictly inside (1e-12,1). No endpoint Hessian,
 /// certified feature size, process checkpoint, or continuum certificate is claimed.
@@ -81,6 +87,7 @@ pub struct SimpNewtonModel<'a> {
     volume_eta: f64,
     elasticity: &'a DensityElasticity,
     loads: Vec<(Vec<f64>, f64)>,
+    thermal: Option<Vec<OwnedThermalField>>,
     volumes: Vec<f64>,
     options: ComplianceSolveOptions,
     resources: SimpNewtonResources,
@@ -231,6 +238,7 @@ impl<'a> SimpNewtonModel<'a> {
             .ok_or(PhysicsError::InvalidInput("too many loads"))?;
         Ok(Self { filter, params: p, volume_eta, elasticity,
             loads: loads.iter().map(|l| (l.force.to_vec(), l.weight)).collect(),
+            thermal: None,
             volumes: volumes.to_vec(), options, resources: SimpNewtonResources::new(budget),
             cache: RefCell::new(None),
             last_native_error: RefCell::new(None) })
@@ -349,8 +357,7 @@ impl<'a> SimpNewtonModel<'a> {
             let loads: Vec<_> = self.loads.iter().map(|(force, weight)| LoadCase { force, weight: *weight }).collect();
             let has_mass = self.elasticity.reference_cell_masses_kg().is_some();
             let prepared = self.controlled(loads.len() + 3 + usize::from(has_mass), cx, |control| {
-                let goal = SimpComplianceGoal::prepare(self.filter, self.params, self.volume_eta,
-                    self.elasticity, point, &loads, self.options, control)?;
+                let goal = self.prepare_goal(point, &loads, control)?;
                 let (value, gradient) = goal.volume_value_gradient(&self.volumes, control)?;
                 let mass = if has_mass {
                     let (value, gradient) = goal.mass_value_gradient(control)?;

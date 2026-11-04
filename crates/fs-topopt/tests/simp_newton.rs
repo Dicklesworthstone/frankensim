@@ -1,4 +1,6 @@
 //! Native SIMP physics, shared dual-output state, and live-IR consumption.
+#[path = "simp_newton/thermal.rs"]
+mod thermal;
 use std::ops::ControlFlow;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey, TilePool};

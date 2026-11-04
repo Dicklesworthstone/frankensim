@@ -1,5 +1,8 @@
 //! Thermal design must differentiate its equivalent load as well as stiffness.
 
+#[path = "thermal_compliance/simp.rs"]
+mod simp;
+
 use std::ops::ControlFlow;
 
 use fs_blake3::ContentHash;
