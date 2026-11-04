@@ -8365,13 +8365,35 @@ New D3Q19 constructors select `ConversionRedistribution3::Local`.
 version-1 trajectories, including their nonlocal pooling. The frozen pour
 sentinel selects this replay mode and retains its original four-quadrant hash;
 new locality and thermal regressions exercise the corrected default. The
-independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 4 for the current default;
+independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 5 for the current default;
 version 2 introduced local redistribution, and version 3 corrects the density
 and force handling of fresh-cell initialization described below. Version 4
 uses the physical Guo frame in gas-pressure reconstruction as described above.
+Version 5 retains actual positive density in fill fractions and actual total
+mass in relative conservation diagnostics, without an absolute numerical floor.
 Explicit `LegacyGlobal` replay retains its historical conversion and
 gas-pressure arithmetic, leaving the unchanged D3Q19 core, boundary and sparse
 goldens untouched.
+
+Both native free-surface owners compute interface volume as `mass/density` at
+every admitted positive density. Rescaling both quantities by the same factor
+therefore preserves fill, resolved/smoothed geometry, curvature and the fill
+weights of mass exchange. The sparse relative mass diagnostic likewise uses
+the actual initial inventory, so a small total mass cannot conceal a large
+fractional loss. An unchanged empty inventory reports zero; creation from zero
+or nonfinite inventory reports infinite defect. Initial zero-density wet cells
+remain refused by their existing constructors. Both streaming paths also refuse
+nonpositive or nonfinite endpoint carrier density before publishing populations
+or mass, including at zero surface tension. A dry interface has zero tracked
+liquid mass and positive carrier density; its fill and velocity remain defined.
+These corrections do not change
+the imposed gas-pressure datum, which remains reference density one, and do not
+claim a physical low-pressure or rarefied-flow regime.
+
+Focused G0/G3 regressions cover disk/sphere initialization and geometry under
+power-of-two density rescalings, mass/volume conversion, zero-density refusal,
+dry-interface readback, pressure-driven density collapse before publication,
+and fractional mass defects across small, ordinary and large inventories.
 
 D3Q19 records direct donor/recipient mass routes, including reversed routes for
 conversion debt. The original extensive enthalpy transport consumes these same

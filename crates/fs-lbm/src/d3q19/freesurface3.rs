@@ -84,9 +84,12 @@ use transport::{MassLocation3, MassTransport3};
 /// Version 3 initializes ingress and newly wet cells in the full Guo source
 /// frame, interpolating physical velocity across unequal neighbor densities.
 /// Version 4 reconstructs gas links in that same physical source frame.
+/// Version 5 removes absolute density/mass floors from volume fractions and
+/// conservation readback, preserving geometry at every admitted density scale.
+/// Streamed density must stay positive even when surface tension is zero.
 /// Explicit `LegacyGlobal` replay retains its historical conversion and gas
 /// reconstruction arithmetic.
-pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 4;
+pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 5;
 
 /// Conversion semantics for new simulations versus historical trajectory replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -691,6 +694,7 @@ impl FreeSurface3 {
     }
 
     /// Fill fraction (fluid 1, gas 0, interface `m/ρ` clamped) — 2-D port.
+    /// Uses the actual admitted density, without a unit-dependent lower floor.
     #[must_use]
     pub fn fill(&self, key: u64, lane: usize) -> f64 {
         let tile = &self.tiles[&key];
@@ -699,7 +703,7 @@ impl FreeSurface3 {
             Cell3::Interface => {
                 let slot = self.grid.slot_of(key).expect("active");
                 let rho: f64 = self.grid.populations(slot, lane).iter().sum();
-                (tile.mass[lane] / rho.max(1e-12)).clamp(0.0, 1.0)
+                (tile.mass[lane] / rho).clamp(0.0, 1.0)
             }
             Cell3::Gas => 0.0,
         }
@@ -1159,6 +1163,8 @@ impl FreeSurface3 {
     /// # Errors
     /// [`FreeSurfaceError3::Collision`] fail-closed on the first refusing
     /// wet cell in canonical order (state unchanged in that case).
+    /// Nonpositive/nonfinite streamed density or an unresolved capillary wave
+    /// returns [`FreeSurfaceError3::Transport`] before physical-state publication.
     pub fn step(&mut self) -> Result<(), FreeSurfaceError3> {
         self.step_with_gate(&CancelGate::new_clock_free())
     }
@@ -1437,11 +1443,11 @@ impl FreeSurface3 {
                 if let Some(coefficients) = body_pressure_source {
                     forcing::close_body_pressure(&mut new_f, coefficients)?;
                 }
-                if sigma > 0.0
-                    && !crate::admit_explicit_capillary_density(sigma, new_f.iter().sum())
-                {
+                // A newly dry interface still needs a positive carrier
+                // density for fill and velocity, including without capillarity.
+                if !crate::admit_explicit_capillary_density(sigma, new_f.iter().sum()) {
                     return Err(FreeSurfaceError3::Transport(
-                        "surface tension exceeds conservative explicit capillary-wave bound at streamed density",
+                        "nonpositive or nonfinite streamed density, or explicit capillary-wave bound exceeded",
                     ));
                 }
                 new_populations.push((key, lane, new_f));
@@ -1472,7 +1478,7 @@ impl FreeSurface3 {
         self.apply_conversions(transport)?;
 
         let ledger_after = self.ledger_mass();
-        let violation = ((ledger_after - ledger_before) / ledger_before.max(1e-12)).abs();
+        let violation = relative_mass_violation(ledger_before, ledger_after);
         if violation > self.worst_step_violation {
             self.worst_step_violation = violation;
         }
@@ -1858,6 +1864,19 @@ fn check_cancel(gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
     }
 }
 
+// A relative conservation diagnostic has no absolute mass scale. An empty
+// system stays exactly empty; creation from zero or nonfinite inventory cannot
+// disappear behind a floor (or a NaN comparison in the worst-step reduction).
+fn relative_mass_violation(before: f64, after: f64) -> f64 {
+    if !before.is_finite() || !after.is_finite() {
+        f64::INFINITY
+    } else if before == after {
+        0.0
+    } else {
+        ((after - before) / before).abs()
+    }
+}
+
 /// Neighbor resolution outcome.
 enum Neighbor {
     /// Out-of-domain or inactive-tile space: wall by sparse convention.
@@ -1880,6 +1899,203 @@ mod capillary_boundary_tests {
             fs_exec::Budget::INFINITE,
             fs_exec::ExecMode::Deterministic,
         )))
+    }
+
+    #[test]
+    fn g3_fill_volume_and_curvature_ignore_density_normalization() {
+        with_cx(|cx| {
+            let make = |scale: f64| {
+                let mut initial = Vec::new();
+                for z in 0..12 {
+                    for y in 0..12 {
+                        for x in 0..12 {
+                            let radius =
+                                (x as f64 - 5.5).hypot(y as f64 - 5.5).hypot(z as f64 - 5.5);
+                            let fill_fraction = (4.5 - radius).clamp(0.0, 1.0);
+                            if fill_fraction > 0.0 {
+                                initial.push(FreeSurfaceInitialCell3 {
+                                    coordinates: [x, y, z],
+                                    fill_fraction,
+                                    density: scale * (0.75 + 0.125 * ((x + 2 * y + z) % 5) as f64),
+                                    velocity: [0.02, -0.01, 0.03],
+                                });
+                            }
+                        }
+                    }
+                }
+                let mut surface = FreeSurface3::from_cells(
+                    [12; 3],
+                    0.8,
+                    [0.0; 3],
+                    0.0,
+                    ContactModel3::Neutral,
+                    &[],
+                    &initial,
+                    cx,
+                )
+                .unwrap();
+                surface.refresh_fill(&CancelGate::new_clock_free()).unwrap();
+                (surface, initial)
+            };
+            let (reference, reference_initial) = make(1.0);
+            let expected_volume: f64 = reference_initial
+                .iter()
+                .map(|cell| cell.fill_fraction)
+                .sum();
+            // These are equivalent geometry/mass units, not a claim that an
+            // unscaled reference-one gas pressure yields the same trajectory.
+            for scale in [2.0_f64.powi(-60), 2.0_f64.powi(-40), 2.0_f64.powi(40)] {
+                let (surface, initial) = make(scale);
+                assert_eq!(surface.fill_smooth, reference.fill_smooth);
+                let mut volume = 0.0;
+                let mut curved = 0;
+                for cell in initial {
+                    let [x, y, z] = cell.coordinates;
+                    let sample = surface.sample_at(x, y, z).unwrap();
+                    let expected = reference.sample_at(x, y, z).unwrap();
+                    assert_eq!(sample.fill_fraction, expected.fill_fraction);
+                    assert!((sample.fill_fraction - cell.fill_fraction).abs() < 2e-15);
+                    volume += sample.fill_fraction;
+                    if sample.cell == Cell3::Interface {
+                        let (slot, lane) = surface
+                            .grid
+                            .resolve_source(x as i64, y as i64, z as i64)
+                            .unwrap();
+                        let key = surface.grid.active_keys()[slot];
+                        let curvature = surface.curvature(key, lane);
+                        assert_eq!(curvature, reference.curvature(key, lane));
+                        curved += usize::from(curvature.abs() > 0.01);
+                    }
+                }
+                assert!((volume - expected_volume).abs() < 2e-12);
+                assert_eq!(surface.ledger_mass() / scale, reference.ledger_mass());
+                assert!(curved > 0);
+            }
+        });
+    }
+
+    #[test]
+    fn g0_zero_density_wet_initial_cell_is_refused_without_a_floor() {
+        with_cx(|cx| {
+            let initial = [FreeSurfaceInitialCell3 {
+                coordinates: [3; 3],
+                fill_fraction: 0.5,
+                density: 0.0,
+                velocity: [0.0; 3],
+            }];
+            assert!(matches!(
+                FreeSurface3::from_cells(
+                    [8; 3],
+                    0.8,
+                    [0.0; 3],
+                    0.0,
+                    ContactModel3::Neutral,
+                    &[],
+                    &initial,
+                    cx,
+                ),
+                Err(FreeSurfaceError3::InvalidInitialState { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn g0_zero_tension_stream_refuses_nonpositive_density_before_publication() {
+        with_cx(|cx| {
+            let initial = [FreeSurfaceInitialCell3 {
+                coordinates: [3; 3],
+                fill_fraction: 0.5,
+                density: 6.0,
+                velocity: [0.0; 3],
+            }];
+            let mut surface = FreeSurface3::from_cells(
+                [8; 3],
+                0.8,
+                [0.0; 3],
+                0.0,
+                ContactModel3::Neutral,
+                &[],
+                &initial,
+                cx,
+            )
+            .unwrap();
+            let before = surface.clone();
+            // With every moving link facing gas at rho=1, this rest
+            // equilibrium would reconstruct rho_next=(4-rho)/3 < 0.
+            assert!(matches!(
+                surface.step(),
+                Err(FreeSurfaceError3::Transport(_))
+            ));
+            assert_eq!(surface.grid.active_keys(), before.grid.active_keys());
+            for &key in surface.grid.active_keys() {
+                let slot = surface.grid.slot_of(key).unwrap();
+                let old_slot = before.grid.slot_of(key).unwrap();
+                for lane in 0..TILE_CELLS {
+                    assert_eq!(
+                        surface.grid.populations(slot, lane),
+                        before.grid.populations(old_slot, lane)
+                    );
+                }
+                assert_eq!(surface.tiles[&key].cells, before.tiles[&key].cells);
+                assert_eq!(surface.tiles[&key].mass, before.tiles[&key].mass);
+            }
+            assert_eq!(surface.carry, before.carry);
+            assert_eq!(surface.ledger_mass(), before.ledger_mass());
+            assert_eq!(surface.worst_step_violation(), 0.0);
+            assert_eq!(surface.conversions.to_fluid, 0);
+            assert_eq!(surface.conversions.gas_to_interface, 0);
+        });
+    }
+
+    #[test]
+    fn g0_dry_interface_retains_positive_carrier_density() {
+        with_cx(|cx| {
+            let initial = [FreeSurfaceInitialCell3 {
+                coordinates: [3; 3],
+                fill_fraction: 0.5,
+                density: 1.0,
+                velocity: [0.0; 3],
+            }];
+            let mut surface = FreeSurface3::from_cells(
+                [8; 3],
+                0.8,
+                [0.0; 3],
+                0.0,
+                ContactModel3::Neutral,
+                &[],
+                &initial,
+                cx,
+            )
+            .unwrap();
+            let (slot, lane) = surface.grid.resolve_source(3, 3, 3).unwrap();
+            let key = surface.grid.active_keys()[slot];
+            surface.tiles.get_mut(&key).unwrap().mass[lane] = 0.0;
+            assert_eq!(surface.fill(key, lane), 0.0);
+            surface.step().unwrap();
+            let sample = surface.sample_at(3, 3, 3).unwrap();
+            assert_eq!(sample.cell, Cell3::Interface);
+            assert_eq!(sample.fill_fraction, 0.0);
+            assert_eq!(surface.ledger_mass(), 0.0);
+            assert_eq!(surface.worst_step_violation(), 0.0);
+            assert!(sample.density.is_finite() && sample.density > 0.0);
+            assert!(sample.velocity.iter().all(|v| v.is_finite()));
+        });
+    }
+
+    #[test]
+    fn g0_relative_mass_violation_retains_small_inventories_and_empty_limit() {
+        for mass in [2.0_f64.powi(-60), 2.0_f64.powi(-40), 1.0, 2.0_f64.powi(40)] {
+            assert_eq!(relative_mass_violation(mass, mass * 1.125), 0.125);
+            assert_eq!(relative_mass_violation(mass, mass * 0.875), 0.125);
+            assert_eq!(relative_mass_violation(mass, 0.0), 1.0);
+        }
+        assert_eq!(relative_mass_violation(0.0, 0.0), 0.0);
+        assert_eq!(relative_mass_violation(0.0, 1e-30), f64::INFINITY);
+        assert_eq!(relative_mass_violation(f64::NAN, 0.0), f64::INFINITY);
+        assert_eq!(
+            relative_mass_violation(f64::INFINITY, f64::INFINITY),
+            f64::INFINITY
+        );
     }
 
     fn assert_physical_equilibrium(surface: &FreeSurface3, p: [usize; 3], velocity: [f64; 3]) {

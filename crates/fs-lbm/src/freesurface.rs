@@ -469,13 +469,15 @@ impl FreeSurface {
     }
 
     /// Fill fraction of a cell (fluid 1, gas 0, interface m/ρ).
+    /// The admitted positive liquid density is used without an absolute floor:
+    /// changing density units must not change liquid volume or curvature.
     #[must_use]
     pub fn fill(&self, i: usize) -> f64 {
         match self.grid.flags[i] {
             Cell::Fluid => 1.0,
             Cell::Interface => {
                 let rho: f64 = self.grid.f[i].iter().sum();
-                (self.mass[i] / rho.max(1e-12)).clamp(0.0, 1.0)
+                (self.mass[i] / rho).clamp(0.0, 1.0)
             }
             _ => 0.0,
         }
@@ -796,15 +798,13 @@ impl FreeSurface {
                         });
                     }
                 }
-                if self.sigma > 0.0
-                    && !crate::admit_explicit_capillary_density(
-                        self.sigma,
-                        new_f[i].iter().sum(),
-                    )
-                {
+                // A dry interface has zero tracked mass, not zero carrier
+                // density. Enforce that denominator even with capillarity off,
+                // before either populations or mass are published.
+                if !crate::admit_explicit_capillary_density(self.sigma, new_f[i].iter().sum()) {
                     return Err(FreeSurfacePressureError2::Invalid {
                         coordinates: Some([x, y]),
-                        reason: "surface tension exceeds conservative explicit capillary-wave domain at streamed density",
+                        reason: "nonpositive or nonfinite streamed density, or explicit capillary-wave bound exceeded",
                     });
                 }
             }
@@ -1092,6 +1092,121 @@ pub fn surge_front(fs: &FreeSurface) -> usize {
 #[cfg(test)]
 mod capillary_tests {
     use super::*;
+
+    #[test]
+    fn g3_fill_volume_and_curvature_ignore_density_normalization() {
+        // The same disk and physical mass can be represented with reciprocal
+        // choices of lattice density and density unit. Geometry uses m/rho,
+        // including below the former absolute 1e-12 density floor. This tests
+        // initial geometry, not the separate reference-one pressure boundary.
+        let make = |scale: f64| {
+            let mut grid = Grid::uniform(12, 12, 0.8);
+            grid.periodic_x = false;
+            grid.periodic_y = false;
+            let mut fills = vec![0.0; 144];
+            for y in 0..12 {
+                for x in 0..12 {
+                    let cell = grid.idx(x, y);
+                    let radius = (x as f64 - 5.5).hypot(y as f64 - 5.5);
+                    let fill = (4.5 - radius).clamp(0.0, 1.0);
+                    fills[cell] = fill;
+                    grid.flags[cell] = if fill == 0.0 {
+                        Cell::Gas
+                    } else if fill == 1.0 {
+                        Cell::Fluid
+                    } else {
+                        Cell::Interface
+                    };
+                    let density = scale * (0.75 + 0.125 * ((x + 2 * y) % 5) as f64);
+                    grid.f[cell] = equilibrium(density, 0.02, -0.01);
+                }
+            }
+            let mut surface = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+            for (cell, fill) in fills.iter().enumerate() {
+                surface.mass[cell] = fill * surface.grid.f[cell].iter().sum::<f64>();
+            }
+            surface.refresh_fill();
+            (surface, fills.iter().sum::<f64>())
+        };
+        let (reference, expected_volume) = make(1.0);
+        for scale in [2.0_f64.powi(-60), 2.0_f64.powi(-40), 2.0_f64.powi(40)] {
+            let (surface, _) = make(scale);
+            assert_eq!(surface.fill_raw, reference.fill_raw);
+            assert_eq!(surface.fill_smooth, reference.fill_smooth);
+            let volume: f64 = (0..144).map(|cell| surface.fill(cell)).sum();
+            assert!((volume - expected_volume).abs() < 2e-13);
+            assert_eq!(surface.ledger_mass() / scale, reference.ledger_mass());
+            let mut curved = 0;
+            for y in 0..12 {
+                for x in 0..12 {
+                    let cell = surface.grid.idx(x, y);
+                    if surface.grid.flags[cell] == Cell::Interface {
+                        let curvature = surface.curvature(x, y);
+                        assert_eq!(curvature, reference.curvature(x, y));
+                        curved += usize::from(curvature.abs() > 0.01);
+                    }
+                }
+            }
+            assert!(curved > 0);
+        }
+    }
+
+    #[test]
+    fn g0_zero_density_wet_initial_cell_is_refused_without_a_floor() {
+        let mut grid = Grid::uniform(4, 4, 0.8);
+        grid.f[5] = [0.0; Q];
+        assert!(
+            std::panic::catch_unwind(|| { FreeSurface::new(grid, 0.0, ContactModel::Neutral) })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn g0_zero_tension_stream_refuses_nonpositive_density_before_publication() {
+        let mut grid = Grid::uniform(8, 8, 0.8);
+        grid.flags.fill(Cell::Gas);
+        let cell = grid.idx(3, 3);
+        grid.flags[cell] = Cell::Interface;
+        grid.f[cell] = equilibrium(12.0, 0.0, 0.0);
+        let mut surface = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+        let before = surface.clone();
+        // All eight moving links face gas at rho=1. At rest this pressure
+        // reconstruction would give rho_next=(10-rho)/9 < 0. Positive initial
+        // density alone is insufficient to admit this finite timestep.
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                surface.step();
+            }))
+            .is_err()
+        );
+        assert_eq!(surface.grid.f, before.grid.f);
+        assert_eq!(surface.grid.flags, before.grid.flags);
+        assert_eq!(surface.mass, before.mass);
+        assert_eq!(surface.carry, before.carry);
+        assert_eq!(surface.ledger_mass(), before.ledger_mass());
+        assert_eq!(surface.conversions.to_fluid, 0);
+        assert_eq!(surface.conversions.gas_to_interface, 0);
+    }
+
+    #[test]
+    fn g0_dry_interface_retains_positive_carrier_density() {
+        let mut grid = Grid::uniform(8, 8, 0.8);
+        grid.flags.fill(Cell::Gas);
+        let cell = grid.idx(3, 3);
+        grid.flags[cell] = Cell::Interface;
+        let mut surface = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+        // Newly created interface cells carry an interpolated liquid carrier
+        // with zero liquid inventory until mass arrives through a wet link.
+        surface.mass[cell] = 0.0;
+        assert_eq!(surface.fill(cell), 0.0);
+        surface.step();
+        assert_eq!(surface.grid.flags[cell], Cell::Interface);
+        assert_eq!(surface.fill(cell), 0.0);
+        assert_eq!(surface.ledger_mass(), 0.0);
+        let state = surface.grid.moments(cell);
+        assert!(state.rho.is_finite() && state.rho > 0.0);
+        assert!(state.u.iter().all(|v| v.is_finite()));
+    }
 
     #[test]
     fn g1_conversion_preserves_physical_velocity_and_stress_at_unequal_density() {
