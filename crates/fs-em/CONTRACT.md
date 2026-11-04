@@ -2493,6 +2493,44 @@ requires the workspace constellation dependencies. This feature does not add
 transients, incident near-field excitation, rough/finite film edges, arbitrary
 three-dimensional scattering, or empirical material-frequency qualification.
 
+### Finite detector apertures preserve spatial interference
+
+`PlanarAngularSpectrum::measure_aperture` observes the original coherent vector
+field through an explicitly positioned, axis-aligned rectangular area in the
+observation plane. The result separates area-mean vector Poynting flux (W/m²)
+from signed integrated normal power (W). It retains every cross-mode term in
+E cross H* before integration. Detector width and position therefore resolve
+fringe visibility and washout; neither an average amplitude squared nor a
+whole-cell sum substitutes for the actual detector.
+
+The original modal-field reconstruction supplies incident, reflected, total
+incident-side or transmitted E/H, including critical and evanescent exit
+fields. Analytic rectangular Fourier integrals reuse the shared
+`fs-fft::harmonic_window` difference kernel, with coordinates in metres and
+wavenumbers in radians/metre. Actual admitted axis-wavevector differences,
+source products and reductions retain double-double precision. There is one
+cycle-mean factor of one half. Reflected power and local energy backflow keep
+their physical negative signs; no detector absorption law is inferred.
+
+A query uses O(N²) ordered modal-pair contractions, O(W²+H²) cached spatial
+kernels for an N=W*H grid, and no FFT or new material/film solve. Explicit pair
+and logical-storage limits admit the work before allocation; the conservative
+storage allowance includes the original beam workspace and axis caches.
+Cancellation polls during cache construction, modal reconstruction and bounded
+pair batches, returning no partial measurement. These are operation/storage
+bounds, not a throughput claim. The source remains the authored periodic field;
+apertures outside its cell observe its periodic continuation. Isolated-edge
+convergence, detector back-action, quantum efficiency and temporal exposure
+remain separate questions.
+
+Focused native kernel tests cover analytic fringe position/width response,
+positive subwavelength dark-fringe power, independent direct vector-field
+area quadrature including evanescent and backward waves, whole-cell
+orthogonality, detector subdivision, darkness, resource limits and cancellation.
+Source-backed integration tests exercise the public original-film/beam adapter,
+TIR, reflected power and refusal replay; their full Cargo execution requires
+the constellation dependencies.
+
 ### Diffraction-resolved fields and dielectric heating inside finite films
 
 `PlanarDielectricLayers::prepare_layer_field` retains one original film and

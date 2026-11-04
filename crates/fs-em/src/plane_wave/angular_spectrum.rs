@@ -28,6 +28,11 @@ use modes::{
 
 mod modes;
 
+mod aperture;
+pub use aperture::{
+    AngularSpectrumAperture, AngularSpectrumApertureLimits, AngularSpectrumApertureReading,
+};
+
 mod layers;
 pub use layers::{
     AngularSpectrumLayerField, AngularSpectrumLayerLimits, PreparedAngularSpectrumLayer,
@@ -424,6 +429,40 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
     ) -> Result<AngularSpectrumField, AngularSpectrumError> {
         let (electric, magnetic) = self.modal_field(side, distance_from_face_m, &mut cancelled)?;
         self.synthesize(electric, magnetic, &mut cancelled)
+    }
+
+    /// Measure the original coherent field through a finite rectangular
+    /// detector in the observation plane. The aperture averages E cross H*,
+    /// including interference between distinct Fourier modes, before applying
+    /// its physical area. It neither interpolates the sampled field nor uses
+    /// whole-cell orthogonality for a smaller detector.
+    ///
+    /// This is cycle-mean, signed Poynting transport through an ideal passive
+    /// observation surface, not a model of detector absorption or back-action.
+    /// Rectangles outside the original cell observe its periodic continuation.
+    pub fn measure_aperture(
+        &self,
+        side: AngularSpectrumSide,
+        distance_from_face_m: f64,
+        aperture: AngularSpectrumAperture,
+        limits: AngularSpectrumApertureLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumApertureReading, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        if !distance_from_face_m.is_finite() || distance_from_face_m < 0.0 {
+            return Err(bad("field distance must be finite and nonnegative"));
+        }
+        let prepared = aperture::PreparedAperture::prepare(
+            self.grid,
+            aperture,
+            self.workspace_bytes,
+            limits,
+            |column| self.modes[column].kx,
+            |row| self.modes[row * self.grid.width].ky,
+            &mut cancelled,
+        )?;
+        let (electric, magnetic) = self.modal_field(side, distance_from_face_m, &mut cancelled)?;
+        prepared.measure(&electric, &magnetic, &mut cancelled)
     }
 
     // The exposure owner combines equal-frequency sources here, before a

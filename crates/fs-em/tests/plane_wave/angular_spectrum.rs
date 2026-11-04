@@ -1,8 +1,9 @@
 use super::*;
 use fs_em::plane_wave::{
     angular_spectrum::{
-        AngularSpectrumError, AngularSpectrumGrid, AngularSpectrumLimits,
-        AngularSpectrumSide as Side, PlanarAngularSpectrum,
+        AngularSpectrumAperture, AngularSpectrumApertureLimits, AngularSpectrumError,
+        AngularSpectrumGrid, AngularSpectrumLimits, AngularSpectrumSide as Side,
+        PlanarAngularSpectrum,
     },
     layers::{DielectricLayer, PlanarDielectricLayers},
 };
@@ -510,4 +511,140 @@ fn budgets_light_cone_and_cancellation_refuse_without_mutating_the_beam() {
         }),
         Err(AngularSpectrumError::Cancelled)
     ));
+}
+
+#[test]
+fn finite_detector_resolves_original_beam_fringe_width_position_and_weak_dark_flux() {
+    let material = material(1.0, 1.0);
+    let stack = PlanarDielectricLayers::try_new(
+        &material,
+        DielectricResponse::Lossless(&material),
+        1.0,
+        &[],
+    )
+    .unwrap();
+    let grid = AngularSpectrumGrid {
+        width: 4,
+        height: 1,
+        spacing_m: [8.0; 2],
+    };
+    let q = core::f64::consts::TAU / 32.0;
+    let kz = det::sqrt(1.0 - q * q);
+    let bounds = AngularSpectrumApertureLimits {
+        maximum_mode_pairs: 16,
+        maximum_workspace_bytes: 1 << 20,
+    };
+    for sign in [1.0, -1.0] {
+        let samples: Vec<_> = (0..4)
+            .map(|i| {
+                let x = i as f64 * 8.0;
+                [C64::ZERO, phase(-q * x) + phase(q * x).scale(sign)]
+            })
+            .collect();
+        let beam =
+            PlanarAngularSpectrum::prepare(&stack, grid, &samples, limits(), || false).unwrap();
+        for (center, width) in [(0.0, 0.013), (1.3, 5.0), (0.0, 16.0)] {
+            let detector =
+                AngularSpectrumAperture::try_new([center - width / 2.0, -0.4], [width, 2.0])
+                    .unwrap();
+            let actual = beam
+                .measure_aperture(Side::Transmitted, 0.37, detector, bounds, || false)
+                .unwrap();
+            let expected =
+                kz * (1.0 + sign * (2.0 * q * center).cos() * (q * width).sin() / (q * width));
+            near(actual.mean_poynting_w_m2[2], expected, 3e-14);
+            near(actual.normal_power_w, expected * detector.area_m2(), 1e-12);
+        }
+        if sign < 0.0 {
+            let width = 1e-7;
+            let detector =
+                AngularSpectrumAperture::try_new([-width / 2.0, 0.0], [width, 2.0]).unwrap();
+            let actual = beam
+                .measure_aperture(Side::Incident, 0.0, detector, bounds, || false)
+                .unwrap();
+            let expected = kz * (q * width).powi(2) / 6.0;
+            near(actual.mean_poynting_w_m2[2], expected, expected * 3e-7);
+            assert!(actual.normal_power_w > 0.0);
+        }
+    }
+}
+
+#[test]
+fn finite_detector_keeps_original_reflection_tir_and_whole_cell_power() {
+    let incident = material(1.0, 1.0);
+    let exit = material(0.04, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&incident, DielectricResponse::Lossless(&exit), 1.0, &[])
+            .unwrap();
+    let grid = AngularSpectrumGrid {
+        width: 4,
+        height: 2,
+        spacing_m: [8.0; 2],
+    };
+    let samples: Vec<_> = (0..8)
+        .map(|i| {
+            [
+                C64::new(0.3 + i as f64 * 0.1, -0.2),
+                C64::new(-0.7, 0.1 * i as f64),
+            ]
+        })
+        .collect();
+    let beam = PlanarAngularSpectrum::prepare(&stack, grid, &samples, limits(), || false).unwrap();
+    let bounds = AngularSpectrumApertureLimits {
+        maximum_mode_pairs: 64,
+        maximum_workspace_bytes: 1 << 20,
+    };
+    let detector = AngularSpectrumAperture::try_new([-3.0, 0.7], [32.0, 16.0]).unwrap();
+    for side in [
+        Side::Incident,
+        Side::Reflected,
+        Side::TotalIncidentSide,
+        Side::Transmitted,
+    ] {
+        let sampled = beam.field(side, 0.63, || false).unwrap();
+        let observed = beam
+            .measure_aperture(side, 0.63, detector, bounds, || false)
+            .unwrap();
+        relative(observed.normal_power_w, sampled.normal_power_w());
+        if side == Side::Reflected {
+            assert!(observed.normal_power_w < 0.0);
+        }
+    }
+    assert!(matches!(
+        beam.measure_aperture(Side::Transmitted, 0.0, detector, bounds, || true),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    assert!(
+        beam.measure_aperture(Side::Transmitted, -1.0, detector, bounds, || false)
+            .is_err()
+    );
+    assert!(
+        beam.measure_aperture(
+            Side::Transmitted,
+            0.0,
+            detector,
+            AngularSpectrumApertureLimits {
+                maximum_mode_pairs: 63,
+                ..bounds
+            },
+            || false
+        )
+        .is_err()
+    );
+    let before = beam
+        .measure_aperture(Side::Transmitted, 0.0, detector, bounds, || false)
+        .unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        beam.measure_aperture(Side::Transmitted, 0.0, detector, bounds, || {
+            polls += 1;
+            polls > 20
+        }),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    assert_eq!(
+        beam.measure_aperture(Side::Transmitted, 0.0, detector, bounds, || false)
+            .unwrap(),
+        before
+    );
 }
