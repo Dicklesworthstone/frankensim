@@ -14,6 +14,20 @@ fn importance(connections_per_vertex: u32) -> PointFixtureSampling {
     }
 }
 
+fn reference_policies() -> [PointFixtureSampling; 5] {
+    [
+        PointFixtureSampling::All,
+        importance(1),
+        importance(4),
+        PointFixtureSampling::ImportanceCdf {
+            connections_per_vertex: 1,
+        },
+        PointFixtureSampling::ImportanceCdf {
+            connections_per_vertex: 4,
+        },
+    ]
+}
+
 fn image_job<'scene, 'field>(
     scene: &'scene Scene,
     sources: &'scene [PhotometricSource],
@@ -338,7 +352,7 @@ fn g1_sampled_unequal_spectra_and_beams_match_independent_eighty_bin_luminance()
         let scene = colored_receiver();
         let (sources, references) = colored_rig();
         let expected = spectral_lambertian_reference(&references, None, false);
-        for policy in [PointFixtureSampling::All, importance(1), importance(4)] {
+        for policy in reference_policies() {
             let mut job = image_job(
                 &scene,
                 &sources,
@@ -382,7 +396,7 @@ fn g1_sampled_connections_retain_real_occlusion_and_both_spectral_beer_legs() {
         .unwrap();
         let expected = spectral_lambertian_reference(&references, Some(1), true);
         assert!(expected < spectral_lambertian_reference(&references, None, true));
-        for policy in [PointFixtureSampling::All, importance(1), importance(4)] {
+        for policy in reference_policies() {
             let mut job = image_job(
                 &scene,
                 &sources,
@@ -474,7 +488,7 @@ fn g1_sampled_haze_connections_match_hg_and_rayleigh_single_scatter_integrals() 
                 2.0e-7,
                 "independent haze quadrature refinement",
             );
-            for policy in [PointFixtureSampling::All, importance(1), importance(4)] {
+            for policy in reference_policies() {
                 let mut job = image_job(
                     &scene,
                     &sources,
@@ -512,7 +526,7 @@ fn g1_probe_direct_lux_stays_exact_while_reflected_connections_are_sampled() {
         // is below 8*rho*I/(5*100^5) = 8e-9 lx for this rho=0.5, I=100 cd.
         let reflected = 50.0 * (1.0 - 4.0 * PI / (9.0 * 3.0_f64.sqrt()));
         let mut exact_bits = None;
-        for policy in [PointFixtureSampling::All, importance(1), importance(4)] {
+        for policy in reference_policies() {
             let mut job = probe_job(
                 &scene,
                 &sources,

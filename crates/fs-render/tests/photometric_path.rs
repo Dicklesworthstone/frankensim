@@ -33,6 +33,9 @@ mod projector;
 #[path = "photometric_path/point_sampling.rs"]
 mod point_sampling;
 
+#[path = "photometric_path/point_cdf_sampling.rs"]
+mod point_cdf_sampling;
+
 #[path = "photometric_path/spectral_reference.rs"]
 mod spectral_reference;
 
