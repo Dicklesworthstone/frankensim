@@ -99,9 +99,72 @@ fn water_vapor_quality_converts_to_void_volume_before_shared_acoustics() {
         mixture.void_fraction(),
     )
     .unwrap();
-    assert_eq!(from_owners.state(), mixture.state());
+    // These constructors accept different rounded coordinates. Agreement is
+    // numerical; a mass-basis state must not round-trip through the void fraction.
+    near(
+        from_owners.state().density_kg_m3(),
+        mixture.state().density_kg_m3(),
+    );
+    near(
+        from_owners.state().sound_speed_m_s(),
+        mixture.state().sound_speed_m_s(),
+    );
     let shared: &dyn FluidAcoustics = &mixture;
     assert_eq!(shared.acoustic_state().unwrap(), mixture.state());
+}
+
+#[test]
+fn mass_basis_density_and_compliance_preserve_both_constituent_inventories() {
+    use fs_material::fluid_acoustics::FrozenHomogeneousMixture;
+    let liquid = FluidAcousticState::from_adiabatic_bulk_modulus(1000.0, 2.0e9).unwrap();
+    let gas = FluidAcousticState::from_adiabatic_bulk_modulus(0.01, 1400.0).unwrap();
+    let mixed = FrozenHomogeneousMixture::from_mass_fraction(liquid, gas, 0.5).unwrap();
+
+    // Independently build a 2 kg specimen from 1 kg of each phase. The density
+    // is total mass / total volume, and dV/dp is the sum of each phase response.
+    let liquid_volume = 0.001;
+    let gas_volume = 100.0;
+    let volume = liquid_volume + gas_volume;
+    near(mixed.state().density_kg_m3(), 2.0 / volume);
+    near(
+        mixed.state().adiabatic_compressibility_per_pa(),
+        (liquid_volume / 2.0e9 + gas_volume / 1400.0) / volume,
+    );
+    near(mixed.liquid_volume_fraction(), liquid_volume / volume);
+    near(mixed.void_fraction(), gas_volume / volume);
+    assert_eq!(mixed.dispersed_mass_fraction(), 0.5);
+
+    let exchanged = FrozenHomogeneousMixture::from_mass_fraction(gas, liquid, 0.5).unwrap();
+    assert_eq!(mixed.state(), exchanged.state());
+    assert_eq!(mixed.liquid_volume_fraction(), exchanged.void_fraction());
+    assert_eq!(mixed.void_fraction(), exchanged.liquid_volume_fraction());
+}
+
+#[test]
+fn finite_phase_mass_survives_a_volume_fraction_rounded_to_one() {
+    use fs_material::fluid_acoustics::FrozenHomogeneousMixture;
+    // An arithmetic-limit fixture, not a claim of continuum acoustics at this
+    // gas density. Both constituent masses and their individual volume ratios
+    // are representable even though the larger fraction rounds to exactly one.
+    let liquid = FluidAcousticState::try_new(1000.0, 1500.0).unwrap();
+    let gas = FluidAcousticState::try_new(1e-14, 340.0).unwrap();
+    let mixed = FrozenHomogeneousMixture::from_mass_fraction(liquid, gas, 0.5).unwrap();
+    assert_eq!(mixed.void_fraction(), 1.0);
+    assert!(mixed.liquid_volume_fraction() > 0.0);
+    near(mixed.liquid_volume_fraction(), 1e-17);
+    near(mixed.state().density_kg_m3(), 2e-14);
+    assert_eq!(mixed.dispersed_mass_fraction(), 0.5);
+    near(
+        mixed.state().sound_speed_m_s(),
+        gas.sound_speed_m_s() / 2.0_f64.sqrt(),
+    );
+
+    for x in [0.0, 1.0] {
+        let pure = FrozenHomogeneousMixture::from_mass_fraction(liquid, gas, x).unwrap();
+        assert_eq!(pure.state(), if x == 0.0 { liquid } else { gas });
+        assert_eq!(pure.dispersed_mass_fraction(), x);
+        assert_eq!(pure.liquid_volume_fraction(), 1.0 - x);
+    }
 }
 
 fn near(actual: f64, expected: f64) {

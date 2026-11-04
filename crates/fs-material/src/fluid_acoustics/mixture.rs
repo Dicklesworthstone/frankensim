@@ -20,7 +20,9 @@ use crate::MaterialError;
 pub struct FrozenHomogeneousMixture {
     liquid: FluidAcousticState,
     dispersed: FluidAcousticState,
+    liquid_volume_fraction: f64,
     void_fraction: f64,
+    dispersed_mass_fraction: f64,
     state: FluidAcousticState,
 }
 
@@ -53,7 +55,10 @@ impl FrozenHomogeneousMixture {
         Ok(Self {
             liquid,
             dispersed,
+            liquid_volume_fraction: 1.0 - void_fraction,
             void_fraction,
+            dispersed_mass_fraction: void_fraction * dispersed.density_kg_m3()
+                / state.density_kg_m3(),
             state,
         })
     }
@@ -73,6 +78,13 @@ impl FrozenHomogeneousMixture {
 
     /// Convert the phase-transfer owner's vapor MASS fraction using additive
     /// specific volumes. This is not alpha=x or a linear density interpolation.
+    ///
+    /// Density and Wood compliance are evaluated directly from the two phase
+    /// volumes per unit mixture mass. Neither reconstructs a small phase from
+    /// `1 - alpha`: that subtraction loses finite phase mass when densities
+    /// differ strongly. The supplied mass fraction and both volume fractions
+    /// are retained independently, including when the larger fraction rounds
+    /// to one. A positive phase volume that cannot be represented still refuses.
     pub fn from_mass_fraction(
         liquid: FluidAcousticState,
         dispersed: FluidAcousticState,
@@ -91,13 +103,34 @@ impl FrozenHomogeneousMixture {
         let liquid_volume = (1.0 - x) / liquid.density_kg_m3();
         let dispersed_volume = x / dispersed.density_kg_m3();
         let volume = liquid_volume + dispersed_volume;
+        let liquid_fraction = liquid_volume / volume;
         let alpha = dispersed_volume / volume;
-        if !volume.is_finite() || volume <= 0.0 || alpha <= 0.0 || alpha >= 1.0 {
+        if ![
+            liquid_volume,
+            dispersed_volume,
+            volume,
+            liquid_fraction,
+            alpha,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+        {
             return Err(MaterialError::Parameters {
                 what: "two-phase mass-to-volume fraction conversion is not representable".into(),
             });
         }
-        Self::try_new(liquid, dispersed, alpha)
+        let compliance = liquid_fraction * liquid.adiabatic_compressibility_per_pa()
+            + alpha * dispersed.adiabatic_compressibility_per_pa();
+        let state =
+            FluidAcousticState::from_adiabatic_bulk_modulus(volume.recip(), compliance.recip())?;
+        Ok(Self {
+            liquid,
+            dispersed,
+            liquid_volume_fraction: liquid_fraction,
+            void_fraction: alpha,
+            dispersed_mass_fraction: x,
+            state,
+        })
     }
 
     /// Original liquid acoustic response, without mixture changes.
@@ -108,6 +141,11 @@ impl FrozenHomogeneousMixture {
     pub const fn dispersed(self) -> FluidAcousticState {
         self.dispersed
     }
+    /// Liquid volume fraction, retained directly when mass fractions were supplied.
+    /// Use this instead of `1 - void_fraction()` at large density contrasts.
+    pub const fn liquid_volume_fraction(self) -> f64 {
+        self.liquid_volume_fraction
+    }
     /// Actual dispersed-phase volume fraction alpha.
     pub const fn void_fraction(self) -> f64 {
         self.void_fraction
@@ -116,9 +154,9 @@ impl FrozenHomogeneousMixture {
     pub const fn state(self) -> FluidAcousticState {
         self.state
     }
-    /// Actual dispersed mass fraction corresponding to the retained alpha.
-    pub fn dispersed_mass_fraction(self) -> f64 {
-        self.void_fraction * self.dispersed.density_kg_m3() / self.state.density_kg_m3()
+    /// Actual dispersed mass fraction, preserving an explicitly supplied quality.
+    pub const fn dispersed_mass_fraction(self) -> f64 {
+        self.dispersed_mass_fraction
     }
 }
 

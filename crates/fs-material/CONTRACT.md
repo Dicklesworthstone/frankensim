@@ -9843,6 +9843,12 @@ attenuation, heat or mass exchange, slip, equilibrium boiling sound speed, bubbl
 inception or collapse. G0/G3 regressions cover source retention/refresh, quantity
 refusal, original water coefficients, pure limits, phase exchange, mass/volume
 conversion and independent compression of the separate phase volumes.
+Mass-basis admission retains its authored quality and both constituent volume
+fractions independently. Density and compliance are computed directly from those
+volumes, avoiding a lossy mass-to-volume-to-mass round trip at high density
+contrast. `liquid_volume_fraction()` preserves a small liquid volume even when
+`void_fraction()` rounds to one; neither rounded fraction alone identifies a
+pure phase for a mass-basis state. Unrepresentable positive phase volumes refuse.
 
 ## Real-gas pressure forces and mechanical tangents
 
