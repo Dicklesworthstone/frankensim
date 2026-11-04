@@ -1,8 +1,8 @@
 //! Trial-local phase changes, native impulse moments and independent accounts.
 use super::{
-    CancelGate, JkrBranch, JkrNormalMotion, JkrNormalMotionError, JkrNormalMotionEvent,
-    JkrNormalMotionState, JkrNormalMotionStep, JkrState, MAX_JKR_NORMAL_EVENTS, finite, poll,
-    solve,
+    CancelGate, JkrBranch, JkrNormalDissipationSegment, JkrNormalMotion, JkrNormalMotionError,
+    JkrNormalMotionEvent, JkrNormalMotionState, JkrNormalMotionStep, JkrState,
+    MAX_JKR_NORMAL_EVENTS, damping, finite, poll, solve,
 };
 
 pub(super) fn run(
@@ -11,6 +11,7 @@ pub(super) fn run(
     load: f64,
     dt: f64,
     gate: &CancelGate,
+    mut trace: Option<&mut Vec<JkrNormalDissipationSegment>>,
 ) -> Result<JkrNormalMotionStep, JkrNormalMotionError> {
     poll(gate)?;
     let before = law.response(previous)?;
@@ -45,6 +46,12 @@ pub(super) fn run(
     let mut support_work = Sum::default();
     let mut support_work_magnitude = Sum::default();
     let mut support_peak = 0.0_f64;
+    let mut damping_impulse = Sum::default();
+    let mut damping_moment = Sum::default();
+    let mut damping_work = Sum::default();
+    let mut damping_dissipation = Sum::default();
+    let mut damping_peak = 0.0_f64;
+    let mut support_reaction_peak = 0.0_f64;
     let mut released = Sum::default();
     let mut travel = Sum::default();
     let mut events = [None; MAX_JKR_NORMAL_EVENTS];
@@ -67,6 +74,16 @@ pub(super) fn run(
             if trials == law.budget.maximum_substeps {
                 return Err(JkrNormalMotionError::TrialBudget);
             }
+            if law.damping_n_s_per_m > 0.0 {
+                // Use the representable clock span as the ordinary quadrature
+                // weight. Repeated rounded clock additions otherwise drift
+                // from the time weights, visible under large opposing loads.
+                let mut end = (elapsed + h).min(dt);
+                if end - elapsed > h {
+                    end = end.next_down();
+                }
+                h = end - elapsed;
+            }
             if h <= 0.0 || elapsed + h == elapsed {
                 return Err(JkrNormalMotionError::Unresolved(
                     "normal substep time precision",
@@ -80,7 +97,8 @@ pub(super) fn run(
                 }
                 Err(error @ JkrNormalMotionError::Range(_))
                     if state.contact.branch() == JkrBranch::Detached
-                        && law.support.stiffness == 0.0 =>
+                        && law.support.stiffness == 0.0
+                        && law.damping_n_s_per_m == 0.0 =>
                 {
                     return Err(error);
                 }
@@ -115,6 +133,29 @@ pub(super) fn run(
         support_work.add(elastic_work)?;
         support_work_magnitude.add(elastic_work.abs())?;
         support_peak = support_peak.max(segment.support_peak);
+        let viscous_impulse = finite(h * segment.damping_force, "viscous impulse")?;
+        damping_impulse.add(viscous_impulse)?;
+        damping_moment.add(finite(
+            viscous_impulse * (elapsed + 0.5 * h),
+            "viscous time moment",
+        )?)?;
+        damping_work.add(finite(
+            segment.damping_force * increment,
+            "viscous conjugate work",
+        )?)?;
+        damping_dissipation.add(segment.damping_dissipation)?;
+        damping_peak = damping_peak.max(segment.damping_peak);
+        support_reaction_peak = support_reaction_peak.max(segment.support_reaction_peak);
+        if let Some(records) = trace.as_deref_mut() {
+            damping::record(
+                records,
+                law.budget.maximum_substeps,
+                elapsed,
+                h,
+                segment.midpoint_velocity,
+                segment.damping_dissipation,
+            )?;
+        }
         travel.add(segment.travel)?;
         if travel.value > law.budget.maximum_accumulated_travel_m {
             return Err(JkrNormalMotionError::Range("accumulated normal travel"));
@@ -172,7 +213,7 @@ pub(super) fn run(
         state.contact.indentation_m(),
     )?;
     let kinetic_residual = finite(
-        kinetic_change + work.value + support_work.value - applied,
+        kinetic_change + work.value + support_work.value + damping_dissipation.value - applied,
         "normal kinetic work residual",
     )?;
     let storage_residual = finite(
@@ -182,6 +223,10 @@ pub(super) fn run(
     let support_residual = finite(
         support_change - support_work.value,
         "support storage work residual",
+    )?;
+    let damping_residual = finite(
+        damping_dissipation.value - damping_work.value,
+        "viscous work conjugacy residual",
     )?;
     let energy_residual = finite(
         kinetic_residual + storage_residual + support_residual,
@@ -197,7 +242,8 @@ pub(super) fn run(
             + support_work.value.abs()
             + work.value.abs()
             + applied.abs()
-            + released.value,
+            + released.value
+            + damping_dissipation.value,
         "normal energy scale",
     )?;
     // Channel-sized gates prevent a large, arbitrary spring preload datum from
@@ -208,12 +254,20 @@ pub(super) fn run(
         + work.value.abs()
         + released.value;
     let support_scale = support_change.abs() + support_work_magnitude.value;
-    let kinetic_scale =
-        kinetic_before + kinetic + work.value.abs() + support_work_magnitude.value + applied.abs();
+    let kinetic_scale = kinetic_before
+        + kinetic
+        + work.value.abs()
+        + support_work_magnitude.value
+        + damping_dissipation.value
+        + applied.abs();
     for (residual, scale) in [
         (kinetic_residual, kinetic_scale),
         (storage_residual, contact_scale),
         (support_residual, support_scale),
+        (
+            damping_residual,
+            damping_dissipation.value + damping_work.value.abs(),
+        ),
         (energy_residual, energy_scale),
     ] {
         let energy_tolerance = finite(
@@ -234,11 +288,11 @@ pub(super) fn run(
         "normal momentum change",
     )?;
     let reaction_impulse = finite(
-        impulse.value + support_impulse.value,
+        impulse.value + support_impulse.value + damping_impulse.value,
         "total reaction impulse",
     )?;
     let reaction_moment = finite(
-        moment.value + support_moment.value,
+        moment.value + support_moment.value + damping_moment.value,
         "total reaction time moment",
     )?;
     let impulse_residual = finite(
@@ -249,7 +303,8 @@ pub(super) fn run(
         law.mass_kg * (state.velocity_m_s.abs() + previous.velocity_m_s.abs())
             + supplied_impulse.abs()
             + impulse.value.abs()
-            + support_impulse.value.abs(),
+            + support_impulse.value.abs()
+            + damping_impulse.value.abs(),
         "normal impulse scale",
     )?;
     let impulse_tolerance = finite(
@@ -307,6 +362,12 @@ pub(super) fn run(
         support_work_j: support_work.value,
         support_energy_j: support_energy,
         support_force_bound_n: support_peak,
+        damping_force_n: damping::force(law, state.velocity_m_s)?,
+        damping_impulse_n_s: damping_impulse.value,
+        damping_time_moment_n_s2: damping_moment.value,
+        damping_dissipation_j: damping_dissipation.value,
+        damping_force_bound_n: damping_peak,
+        support_reaction_force_bound_n: support_reaction_peak,
         applied_work_j: applied,
         released_energy_j: released.value,
         kinetic_energy_j: kinetic,

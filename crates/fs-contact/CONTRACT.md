@@ -2211,6 +2211,52 @@ caller-owned bodies carry inertia. Fold crossing, snap-induced elastic waves,
 interfacial kinetic energy, damping, thermal partition and changing sources
 need additional physical owners. No release is converted to an impulse or heat.
 
+### Finite-inertia JKR motion with elastic and viscous support
+
+`normal_patch::adhesive::motion::JkrNormalMotion` advances the original
+quasistatic JKR branches with a fixed relative mass and held applied force.
+`new_with_support` supplies an undamped linear spring;
+`new_with_damped_support` also admits a nonnegative viscous coefficient.
+These are external mechanical support laws, not a modified adhesive surface
+law or a calibrated viscoelastic material model. Their coefficients and anchor
+are frozen and bound into the sealed continuation identity.
+
+The spring path mean and dashpot midpoint force participate in the same scalar
+discrete-gradient equation as the original contact path mean. Smooth support
+loss is `D = c * h * v_mid^2 >= 0`; spring work remains reversible storage,
+and adhesive snaps release only the original branch storage. The finite-time
+account closes kinetic, contact and spring energy changes plus viscous loss
+and snap release against applied work. Reaction impulses and first time
+moments retain distinct contact, elastic and viscous channels. Native adapters
+can independently reconstruct those channels on their original bodies.
+
+The original touch/fold thresholds still split the motion and preserve event
+velocity. Event duration includes viscous work, while arrival direction uses
+the actual endpoint velocity. The supported conservative barrier cannot be
+crossed by crediting negative partial drag work. Damping timescale refinement
+avoids the pure-dashpot midpoint velocity sign-flip artifact; it consumes the
+original trial allowance. True endpoint and trajectory damping/combined
+support force bounds remain separate from the midpoint impulse force.
+Zero damping retains the elastic path and zero support retains exact flight.
+
+`advance_with_dissipation_trace` optionally retains an immutable
+`JkrNormalMotionTrace`: its privately held original step and positive-loss
+segments expose original offsets, duration, midpoint velocity, average power
+and work. Fallible storage is bounded by the existing trial limit. Ordinary
+`advance` retains no segment allocation, and `JkrNormalMotionStep` remains
+copyable. Receiving heat code consumes this sealed trace rather than mutable
+public work observations.
+
+The midpoint loss is a time-discrete passive quadrature, not the exact
+continuous integral along the quadratic interpolation. Mechanical timestep
+refinement remains necessary. Source applicability, quasistatic contact
+radius, frozen normal geometry/material, root/travel/force/work limits and
+bounded cancellation remain binding. Physical contact waves, arbitrary
+support networks, rotating normals and temperature feedback are outside this
+owner. Focused tests exercise damped oscillator convergence, passive loss,
+damping-driven capture and pull-off, force/refinement gates, trace work and
+unchanged zero-damping motion.
+
 ## Original normal work in mixed adhesive assemblies
 
 `NormalLawSource::mean_force_between` also supplies the original Hertz and

@@ -1,6 +1,8 @@
 //! Finite machine stiffness: conservative support and original JKR events.
 #[path = "source_point/common.rs"]
 mod common;
+#[path = "adhesive_jkr_support/damping.rs"]
+mod damping;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{motion::*, *};

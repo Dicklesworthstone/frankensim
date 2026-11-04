@@ -179,6 +179,7 @@ fn resolution(normal: &SourceJkrSphereContact, point: f64) -> f64 {
     8.0 * f64::EPSILON * point.abs().max(normal.indentation_scale_m())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_barrier(
     law: &JkrNormalMotion<'_>,
     state: JkrNormalMotionState,
@@ -186,15 +187,23 @@ pub(super) fn check_barrier(
     low: f64,
     high: f64,
     barrier: Option<f64>,
+    damping_force: f64,
 ) -> Result<(), JkrNormalMotionError> {
     if let Some(critical) = barrier.filter(|d| *d > low && *d < high) {
         let from = state.contact.indentation_m();
-        let needed = finite(
+        let conservative = finite(
             law.normal.reversible_work_between(from, critical)?
                 + law.support.work(from, critical)?
                 - load * (critical - from),
             "supported adhesive barrier work",
         )?;
+        let drag_work = finite(damping_force * (critical - from), "barrier viscous work")?;
+        // A coarse reversal cannot fund barrier crossing with a held viscous
+        // force doing positive work on that subpath. Resolve the turn first.
+        if drag_work < 0.0 {
+            return Err(JkrNormalMotionError::Unresolved("viscous barrier reversal"));
+        }
+        let needed = finite(conservative + drag_work, "dissipative barrier work")?;
         let kinetic = finite(
             0.5 * law.mass_kg * state.velocity_m_s * state.velocity_m_s,
             "normal barrier kinetic energy",

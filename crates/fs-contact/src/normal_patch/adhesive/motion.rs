@@ -3,10 +3,11 @@
 //! One fixed normal coordinate has caller-supplied relative mass and held
 //! external force. Each attached substep is the scalar condensation of the
 //! complete kinetic/contact discrete gradient: its original path mean supplies
-//! both impulse and work. Optional undamped linear support participates in
-//! the same equation with separate work and impulse accounts. Detached motion
-//! is conservative midpoint motion, or exact constant-force flight at zero
-//! support stiffness.
+//! both impulse and work. Optional Kelvin--Voigt support participates in the
+//! same equation with separate spring and viscous work/impulse accounts.
+//! Viscous loss is the passive midpoint quadrature c*h*v_mid^2; the quadratic
+//! geometry envelope is not an exact continuous dashpot trajectory. Detached
+//! motion is midpoint motion, or exact flight without spring or damping.
 //! Touch and the displacement fold split the trajectory at their original
 //! thresholds. A snap changes only contact phase/storage, never momentum.
 //!
@@ -22,8 +23,10 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
 
 mod advance;
+mod damping;
 mod elastic;
 mod solve;
+pub use damping::{JkrNormalDissipationSegment, JkrNormalMotionTrace};
 
 /// Fixed event storage; the caller may impose a smaller limit.
 pub const MAX_JKR_NORMAL_EVENTS: usize = 16;
@@ -42,7 +45,7 @@ pub struct JkrNormalMotionBudget {
     /// Actual travel, including a within-branch reversal, over one call.
     pub maximum_accumulated_travel_m: f64,
     pub maximum_normal_speed_m_s: f64,
-    /// Independently bounds held load, contact and support force on every path.
+    /// Bounds held load, contact, spring, viscous and combined support forces.
     pub maximum_force_n: f64,
     pub coordinate_absolute_tolerance_m: f64,
     pub coordinate_relative_tolerance: f64,
@@ -114,6 +117,15 @@ pub struct JkrNormalMotionStep {
     pub support_energy_j: f64,
     /// Maximum absolute support force over all accepted interpolation extrema.
     pub support_force_bound_n: f64,
+    /// Endpoint constitutive viscous reaction c*v, distinct from its path mean.
+    pub damping_force_n: f64,
+    pub damping_impulse_n_s: f64,
+    pub damping_time_moment_n_s2: f64,
+    /// Nonnegative discrete-gradient viscous work, excluding source snaps.
+    pub damping_dissipation_j: f64,
+    pub damping_force_bound_n: f64,
+    /// Maximum |spring + c*v| over the accepted quadratic geometry envelope.
+    pub support_reaction_force_bound_n: f64,
     pub applied_work_j: f64,
     /// Energy leaving quasistatic storage at source-owned branch changes.
     pub released_energy_j: f64,
@@ -130,10 +142,10 @@ pub struct JkrNormalMotionStep {
 }
 impl JkrNormalMotionStep {
     pub fn reaction_impulse_n_s(&self) -> f64 {
-        self.normal_impulse_n_s + self.support_impulse_n_s
+        self.normal_impulse_n_s + self.support_impulse_n_s + self.damping_impulse_n_s
     }
     pub fn reaction_time_moment_n_s2(&self) -> f64 {
-        self.normal_time_moment_n_s2 + self.support_time_moment_n_s2
+        self.normal_time_moment_n_s2 + self.support_time_moment_n_s2 + self.damping_time_moment_n_s2
     }
     pub const fn initial_state(&self) -> JkrNormalMotionState {
         self.initial
@@ -194,6 +206,7 @@ pub struct JkrNormalMotion<'a> {
     budget: JkrNormalMotionBudget,
     identity: ContentHash,
     support: elastic::Support,
+    damping_n_s_per_m: f64,
 }
 impl<'a> JkrNormalMotion<'a> {
     pub fn new(
@@ -213,6 +226,26 @@ impl<'a> JkrNormalMotion<'a> {
         budget: JkrNormalMotionBudget,
         stiffness_n_per_m: f64,
         zero_force_indentation_m: f64,
+    ) -> Result<Self, JkrNormalMotionError> {
+        Self::new_with_damped_support(
+            normal,
+            mass_kg,
+            budget,
+            stiffness_n_per_m,
+            zero_force_indentation_m,
+            0.0,
+        )
+    }
+
+    /// Add a frozen Kelvin--Voigt support. Viscous work is c*h*v_mid^2;
+    /// it is outgoing mechanical energy with no implicit heat partition.
+    pub fn new_with_damped_support(
+        normal: &'a SourceJkrSphereContact,
+        mass_kg: f64,
+        budget: JkrNormalMotionBudget,
+        stiffness_n_per_m: f64,
+        zero_force_indentation_m: f64,
+        damping_n_s_per_m: f64,
     ) -> Result<Self, JkrNormalMotionError> {
         let positive = [
             mass_kg,
@@ -238,6 +271,8 @@ impl<'a> JkrNormalMotion<'a> {
             || !(1..=4096).contains(&budget.maximum_substeps)
             || !(1..=64).contains(&budget.maximum_root_iterations)
             || !(1..=MAX_JKR_NORMAL_EVENTS).contains(&budget.maximum_events)
+            || !damping_n_s_per_m.is_finite()
+            || damping_n_s_per_m < 0.0
         {
             return Err(JkrNormalMotionError::Invalid(
                 "finite mass and bounded explicit motion controls",
@@ -249,7 +284,12 @@ impl<'a> JkrNormalMotion<'a> {
             zero_force_indentation_m,
             budget.maximum_root_iterations,
         )?;
-        let mut hash = DomainHasher::new("fs-contact/jkr-normal-motion/v2");
+        // Preserve the existing zero-damping identity and arithmetic path.
+        let mut hash = DomainHasher::new(if damping_n_s_per_m == 0.0 {
+            "fs-contact/jkr-normal-motion/v2"
+        } else {
+            "fs-contact/jkr-normal-motion/v3"
+        });
         hash.update(normal.identity().as_bytes());
         for value in positive.into_iter().chain(relative).chain([
             budget.minimum_indentation_m,
@@ -265,12 +305,16 @@ impl<'a> JkrNormalMotion<'a> {
         ] {
             hash.update(&(count as u64).to_le_bytes());
         }
+        if damping_n_s_per_m > 0.0 {
+            hash.update(&damping_n_s_per_m.to_bits().to_le_bytes());
+        }
         Ok(Self {
             normal,
             mass_kg,
             budget,
             identity: hash.finalize(),
             support,
+            damping_n_s_per_m,
         })
     }
 
@@ -288,6 +332,9 @@ impl<'a> JkrNormalMotion<'a> {
     }
     pub const fn support_zero_force_indentation_m(&self) -> f64 {
         self.support.anchor
+    }
+    pub const fn support_damping_n_s_per_m(&self) -> f64 {
+        self.damping_n_s_per_m
     }
     pub fn support_energy_j(
         &self,
@@ -369,6 +416,14 @@ impl<'a> JkrNormalMotion<'a> {
         if self.support.force(state.contact.indentation_m())?.abs() > self.budget.maximum_force_n {
             return Err(JkrNormalMotionError::Range("support force"));
         }
+        let viscous = damping::force(self, state.velocity_m_s)?;
+        let combined = finite(
+            self.support.force(state.contact.indentation_m())? + viscous,
+            "endpoint support reaction",
+        )?;
+        if viscous.abs().max(combined.abs()) > self.budget.maximum_force_n {
+            return Err(JkrNormalMotionError::Range("viscous support reaction"));
+        }
         Ok(response)
     }
 
@@ -382,7 +437,7 @@ impl<'a> JkrNormalMotion<'a> {
         dt_s: f64,
         gate: &CancelGate,
     ) -> Result<JkrNormalMotionStep, JkrNormalMotionError> {
-        advance::run(self, previous, external_force_n, dt_s, gate)
+        advance::run(self, previous, external_force_n, dt_s, gate, None)
     }
 
     fn coordinate_tolerance(&self, scale: f64) -> f64 {
