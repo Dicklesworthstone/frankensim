@@ -42,6 +42,40 @@ impl HarmonicTransferSample {
         project(receiver, values, derivatives)
     }
 
+    /// Observe a fixed complex linear receiver, such as a coherent phased
+    /// sensor combination. The receiver is applied as a transfer row,
+    /// `sum receiver[i] * values[i]` (not a Hermitian inner product).
+    /// Frequency dependence belongs in `project_complex_with_derivative`.
+    pub fn project_complex(
+        receiver: &[C64],
+        values: &[C64],
+        derivatives: &[C64],
+    ) -> Result<Self, HarmonicResponseError> {
+        project_complex(receiver, None, values, derivatives)
+    }
+
+    /// Observe a complex receiver whose transfer weights vary with angular
+    /// frequency. `receiver_angular_derivative` is d(receiver)/domega in the
+    /// same ordering, and the returned tangent retains both chain-rule terms:
+    /// `sum(receiver' * value + receiver * value')`.
+    ///
+    /// This is observation only: it changes no mechanical solve, load,
+    /// dissipation or source work. The caller owns the receiver's physical
+    /// phase/delay/filter law and its frequency support.
+    pub fn project_complex_with_derivative(
+        receiver: &[C64],
+        receiver_angular_derivative: &[C64],
+        values: &[C64],
+        derivatives: &[C64],
+    ) -> Result<Self, HarmonicResponseError> {
+        project_complex(
+            receiver,
+            Some(receiver_angular_derivative),
+            values,
+            derivatives,
+        )
+    }
+
     // Only its sign is used. Independent normalization avoids overflow from
     // squaring a high-Q response or multiplying its still larger derivative.
     fn slope(self) -> f64 {
@@ -81,6 +115,58 @@ impl HarmonicFrequencyResponse {
     ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
         HarmonicTransferSample::project_real(
             receiver,
+            &self.response.velocity,
+            &self.velocity_derivative,
+        )
+    }
+
+    /// Observe displacement through fixed complex transfer weights.
+    pub fn displacement_transfer_complex(
+        &self,
+        receiver: &[C64],
+    ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
+        HarmonicTransferSample::project_complex(
+            receiver,
+            &self.response.displacement,
+            &self.displacement_derivative,
+        )
+    }
+
+    /// Observe displacement through a frequency-dependent complex transfer row.
+    pub fn displacement_transfer_complex_with_derivative(
+        &self,
+        receiver: &[C64],
+        receiver_angular_derivative: &[C64],
+    ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
+        HarmonicTransferSample::project_complex_with_derivative(
+            receiver,
+            receiver_angular_derivative,
+            &self.response.displacement,
+            &self.displacement_derivative,
+        )
+    }
+
+    /// Observe velocity through fixed complex transfer weights.
+    pub fn velocity_transfer_complex(
+        &self,
+        receiver: &[C64],
+    ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
+        HarmonicTransferSample::project_complex(
+            receiver,
+            &self.response.velocity,
+            &self.velocity_derivative,
+        )
+    }
+
+    /// Observe velocity through a frequency-dependent complex transfer row.
+    pub fn velocity_transfer_complex_with_derivative(
+        &self,
+        receiver: &[C64],
+        receiver_angular_derivative: &[C64],
+    ) -> Result<HarmonicTransferSample, HarmonicResponseError> {
+        HarmonicTransferSample::project_complex_with_derivative(
+            receiver,
+            receiver_angular_derivative,
             &self.response.velocity,
             &self.velocity_derivative,
         )
@@ -125,6 +211,70 @@ fn project(
     if !finite(amplitude) || !finite(angular_derivative) {
         return Err(invalid(
             "physical transfer or its derivative is not representable",
+        ));
+    }
+    Ok(HarmonicTransferSample {
+        amplitude,
+        angular_derivative,
+    })
+}
+
+fn project_complex(
+    receiver: &[C64],
+    receiver_angular_derivative: Option<&[C64]>,
+    values: &[C64],
+    derivatives: &[C64],
+) -> Result<HarmonicTransferSample, HarmonicResponseError> {
+    if receiver.len() != values.len()
+        || receiver_angular_derivative.is_some_and(|slope| slope.len() != values.len())
+        || derivatives.len() != values.len()
+        || receiver.is_empty()
+        || receiver.iter().any(|z| !finite(*z))
+        || receiver_angular_derivative
+            .is_some_and(|slope| slope.iter().any(|z| !finite(*z)))
+    {
+        return Err(invalid(
+            "one finite complex receiver weight and slope per coordinate required",
+        ));
+    }
+    let mut sums = [0.0; 4];
+    let mut correction = [0.0; 4];
+    let mut add = |slot: usize, term: f64| {
+        let next = sums[slot] + term;
+        correction[slot] += if sums[slot].abs() >= term.abs() {
+            (sums[slot] - next) + term
+        } else {
+            (term - next) + sums[slot]
+        };
+        sums[slot] = next;
+    };
+    for (i, ((&weight, &value), &derivative)) in receiver
+        .iter()
+        .zip(values)
+        .zip(derivatives)
+        .enumerate()
+    {
+        let weight_derivative =
+            receiver_angular_derivative.map_or(C64::ZERO, |slope| slope[i]);
+        add(0, weight.re * value.re);
+        add(0, -weight.im * value.im);
+        add(1, weight.re * value.im);
+        add(1, weight.im * value.re);
+
+        add(2, weight_derivative.re * value.re);
+        add(2, -weight_derivative.im * value.im);
+        add(2, weight.re * derivative.re);
+        add(2, -weight.im * derivative.im);
+        add(3, weight_derivative.re * value.im);
+        add(3, weight_derivative.im * value.re);
+        add(3, weight.re * derivative.im);
+        add(3, weight.im * derivative.re);
+    }
+    let amplitude = C64::new(sums[0] + correction[0], sums[1] + correction[1]);
+    let angular_derivative = C64::new(sums[2] + correction[2], sums[3] + correction[3]);
+    if !finite(amplitude) || !finite(angular_derivative) {
+        return Err(invalid(
+            "complex physical transfer or its derivative is not representable",
         ));
     }
     Ok(HarmonicTransferSample {

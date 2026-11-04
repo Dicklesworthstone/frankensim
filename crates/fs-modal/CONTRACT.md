@@ -158,6 +158,14 @@ bound each query; refinement also stops at irreducible floating-point spacing,
 visible in the returned brackets. Cancellation or a physical evaluator's
 refusal publishes no partial result and preserves the original error.
 
+Complex receiver transfer rows are first-class observations. Fixed complex
+weights retain coherent phase between coordinates; optional per-radian weight
+derivatives enter the response tangent through the complete chain rule
+`r' x + r x'`. This supports phase-weighted sensor combinations, propagation
+delays and linear receiver/filter laws without changing the mechanical solve.
+The receiver law, its frequency support and its derivative remain caller-owned.
+The original real-receiver methods and arithmetic remain unchanged.
+
 These are local numerical queries. The caller isolates one continuous
 extremum/crossing per bracket and retains the same physical source, receiver
 and model. Opposite signs do not certify uniqueness, spectral completeness,
