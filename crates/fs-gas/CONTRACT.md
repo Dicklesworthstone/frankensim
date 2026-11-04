@@ -3852,6 +3852,18 @@ source-bound U,V equilibrium. Every trial uses that same caloric owner and its
 finite phase-screen evidence. No equilibrium Cp/Cv, dilute transport, extra
 latent heat, chemical reaction or phase-change kinetics is inferred.
 
+`exchange_isobaric_mixture_parcel` uses this same implicit thermal owner with
+the original `IsobaricMixtureEquilibriumParcel` and `IsobaricMixtureThermalControl`.
+Its PH source resolves heat as Delta H, including latent phase redistribution,
+while volume changes against the prescribed constant pressure load. The source
+independently supplies Delta U and actual outward `p Delta V`; the final joint
+gas/wall first law includes that work exactly once. The common heat report's
+mechanical work to gas is `-p Delta V`, while `heat_to_gas_j` is Delta H.
+The original isobaric caloric receipt exposes both energy changes and work.
+Finite-wall exchange remains equal and opposite even through a latent plateau.
+Mass, species and pressure stay fixed; changing contact geometry, piston inertia
+and evaporation kinetics remain outside this quasistatic lumped model.
+
 The existing bounded wall scalar owner solves
 `Q = dt G (Twall(-Q) - Tgas(Q))` in signed heat coordinates. `G` is the complete
 authored conductance in W/K, fixed during the supplied physical interval.
@@ -3862,21 +3874,21 @@ trial, missing sign bracket or unresolved original phase search refuses rather
 than extrapolating or switching to a homogeneous approximation. Numerical
 secants accelerate the safeguarded scalar root; they carry no heat-capacity or
 physical-tangent authority. The accepted source-bearing trial is retained and
-published without another U,V solve.
+published without another caloric solve.
 
 Actual represented gas energy, original finite-wall h/u changes and endpoint
 heat flux must independently close in joules. Original wall enthalpy keeps its
 declared pressure-work convention; it is not relabelled rigid-volume internal
 energy. Reservoir heat is external, finite-wall exchange is internal, and
 latent storage already belongs to the original thermodynamic potentials.
-The U,V residual allowance reserves part of the thermal budget; a nonzero
+The U,V or PH residual allowance reserves part of the thermal budget; a nonzero
 initial flux tightens the absolute root allowance so a small exchange does not
 vanish into a loose configured tolerance. Source increments cancel species
 formation and entropy datums before rounding.
 
 `MixtureThermalControl` bounds heat queries and all original PT selections for
 the complete interval, in addition to the existing per-trial pressure/phase
-limits. Remaining PT work is passed into every original U,V solve. Reports
+limits. Remaining PT work is passed into every original caloric solve. Reports
 retain actual aggregate heat/PT/pressure work and the sum of original EOS work
 ceilings, separately from the accepted trial's caloric report. Final
 cancellation, source/balance failures and work exhaustion leave both supplied
@@ -3887,7 +3899,7 @@ parcel and retained original wall state supply deterministic retry state.
 This is a first-order backward-Euler, spatially uniform thermal interface.
 Uniform gas/wall assumptions, authored conductance applicability and time
 refinement remain caller obligations. It does not establish spatial conduction,
-evaporation rate, slip, moving-boundary work, global Gibbs stability, calibrated
+evaporation rate, slip, dynamically resolved boundaries, global Gibbs stability, calibrated
 heat-transfer correlations or experimental fluid accuracy. The gas source
 entropy increment is retained; an arbitrary finite wall may lack its own
 entropy law, so the API makes no combined entropy-production theorem.
@@ -3900,6 +3912,12 @@ and finite source-domain refusal; and whole-call work, final cancellation and
 deterministic retry. The methane/ethane fixture uses synthetic NASA capacities;
 its original cubic/fugacity references test constitutive consistency, not a
 measured-mixture validation claim.
+
+Four additional isobaric regression groups verify independent bubble/dew
+transition references, reservoir and finite-wall heat, Delta H/Delta U/actual
+pressure work, reversal into a latent wall, large species-datum invariance,
+source/work refusal, exact rest and final-cancellation replay. They exercise the
+public consumer and shared scalar owner, with no second phase or heat model.
 
 Native validation compiled the production path and passed five of these six
 cases. The finite-wall phase-crossing fixture now declares a supported heat
