@@ -14,7 +14,15 @@
 //!      - i omega SUM_s Zm_rs b_s = F_r`
 //! cavity row q:
 //!   `[omega_q^2 (1 - i eta_a) - omega^2] a_q
-//!      - (rho0 c0^2 / Lambda_q) omega^2 SUM_r C_rq b_r = 0`
+//!      - (rho0 c0^2 / Lambda_q) omega^2 SUM_r C_rq b_r
+//!      = -i omega (rho0 c0^2 / Lambda_q) Q_q`
+//!
+//! [`VibroacousticModel::frf_with_sources`] admits prescribed volume injection
+//! `Q_q = INT psi_q s dV + INT psi_q v_in dA`, positive INTO the cavity.
+//! The same modal pressure performs source work `Re(a_q conj(Q_q))/2`.
+//! These are volume-flow projections, not pressures or accelerations. Their
+//! structural reaction, exterior radiation and material losses are solved
+//! together; a source must not also be included as a driven structural wall.
 //!
 //! (Under `e^{-i omega t}` the DISSIPATIVE hysteretic stiffness is
 //! `k (1 - i eta)`; the opposite sign pumps energy, and the power
@@ -27,9 +35,9 @@
 //! `omega_q = 0` then gives `a = -(rho0 c0^2 / Lambda) C^T b`:
 //! deflection away from the cavity rarefies it). One convention must
 //! be shared by BOTH rows; an inconsistent flip between them is the
-//! "sign-flipped interface normal" mutation, caught by the
-//! interface-equals-cavity audit residual, not the (tautological)
-//! input balance. `Zm` is the exterior radiation impedance matrix
+//! "sign-flipped interface normal" mutation, exposed by the independent
+//! cavity-work audit and the total balance that uses that same cavity loss.
+//! `Zm` is the exterior radiation impedance matrix
 //! projected onto the structural modes
 //! ([`project_radiation_impedance`]; produced upstream by
 //! `fs_bem::helmholtz::radiation_impedance_matrix`). Hysteretic loss
@@ -56,8 +64,10 @@
 //! POWER ACCOUNTING (the audit surface this module exists to make
 //! real): at every solved frequency the response carries the complete
 //! per-channel steady-state power breakdown —
-//! `input = structural + interface + radiated` and
-//! `interface = cavity` — with both residuals reported, never hidden.
+//! `input = structural + cavity + radiated` and
+//! `interface + acoustic_input = cavity` — with both residuals reported.
+//! `input` includes structural and acoustic source work. The signed interface
+//! work may be negative when the cavity drives the structure.
 //! The casebook integrates these over one period into an fs-couple
 //! [`crate::WindowAuditReport`].
 //!
@@ -455,6 +465,72 @@ pub fn assemble_coupling(
     Ok(c)
 }
 
+/// Project prescribed inward boundary velocity onto original cavity modes.
+///
+/// `node_areas` [m^2] and `inward_velocity` [m/s] use the same surface
+/// quadrature and order as `cavity.interface`. The returned source is
+/// `Q_q = sum_i psi_q(i) A_i v_in(i)` [m^3/s], ready for
+/// [`VibroacousticModel::frf_with_sources`]. Signed mode shapes are retained;
+/// spatially cancelling source projections must not become monopoles.
+/// The same quadrature gives the power identity
+/// `sum_q a_q conj(Q_q) = sum_i p(i) A_i conj(v_in(i))`.
+///
+/// This is a prescribed source surface, distinct from any moving wall already
+/// included through [`assemble_coupling`]. It adds no inferred source physics.
+///
+/// # Errors
+/// Mismatched shapes, negative/non-finite areas, non-finite mode/velocity
+/// samples, or an unrepresentable projection.
+pub fn project_cavity_boundary_flow(
+    cavity: &CavityModes,
+    node_areas: &[f64],
+    inward_velocity: &[C64],
+) -> Result<Vec<C64>, VibroError> {
+    if cavity.interface.len() != cavity.omegas.len()
+        || inward_velocity.len() != node_areas.len()
+        || cavity
+            .interface
+            .iter()
+            .any(|shape| shape.len() != node_areas.len())
+    {
+        return Err(VibroError::ShapeMismatch {
+            what: "cavity source modes, areas and velocities must share their original quadrature",
+        });
+    }
+    if node_areas
+        .iter()
+        .any(|&area| !area.is_finite() || area < 0.0)
+        || inward_velocity
+            .iter()
+            .any(|v| !v.re.is_finite() || !v.im.is_finite())
+        || cavity
+            .interface
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+    {
+        return Err(VibroError::BadParameter {
+            what: "cavity source samples must be finite and quadrature areas nonnegative",
+        });
+    }
+    cavity
+        .interface
+        .iter()
+        .map(|shape| {
+            let mut flow = C64::ZERO;
+            for ((&psi, &area), &velocity) in shape.iter().zip(node_areas).zip(inward_velocity) {
+                flow = flow + velocity.scale(psi * area);
+            }
+            if !flow.re.is_finite() || !flow.im.is_finite() {
+                return Err(VibroError::BadParameter {
+                    what: "cavity boundary volume-flow projection is unrepresentable",
+                });
+            }
+            Ok(flow)
+        })
+        .collect()
+}
+
 /// Project a panel-space radiation impedance matrix (`p = Z v`,
 /// row-major over wet panels, from
 /// `fs_bem::helmholtz::radiation_impedance_matrix`) onto the
@@ -497,21 +573,28 @@ pub fn project_radiation_impedance(
 /// residuals reported rather than hidden.
 #[derive(Debug, Clone, Copy)]
 pub struct PowerBreakdown {
-    /// Input power `1/2 Re SUM F_r conj(v_r)`.
+    /// Total signed input power, `structural_input + acoustic_input`.
     pub input: f64,
+    /// Mechanical source work `1/2 Re SUM F_r conj(v_r)`.
+    pub structural_input: f64,
+    /// Prescribed cavity-source work `1/2 Re SUM a_q conj(Q_q)`.
+    /// Zero for the structural-force-only entry points.
+    pub acoustic_input: f64,
     /// Structural dissipation from the exclusive hysteretic or full modal
     /// viscous owner. Viscous loss is `1/2 Re(v^H C v)`.
     pub structural: f64,
     /// Power flowing through the interface into the cavity.
     pub interface: f64,
-    /// Cavity hysteretic dissipation.
+    /// Cavity dissipation from the selected hysteretic or molecular law.
     pub cavity: f64,
     /// Exterior radiated power `1/2 Re (v^H Zm v)` (zero without a
     /// radiation matrix).
     pub radiated: f64,
-    /// `input - structural - interface - radiated`, relative to input.
+    /// `input - structural - cavity - radiated`, relative to the largest
+    /// absolute input or dissipated power (with a finite zero-work floor).
     pub balance_residual: f64,
-    /// `interface - cavity`, relative to max(interface, cavity).
+    /// `interface + acoustic_input - cavity`, relative to the largest
+    /// absolute term (with a finite zero-work floor).
     pub interface_residual: f64,
 }
 
@@ -844,6 +927,42 @@ impl VibroacousticModel {
         self.frf_truncated(omega, modal_force, self.omegas_s.len(), self.omegas_a.len())
     }
 
+    /// Drive the same coupled structure, cavity and exterior with both
+    /// structural modal forces and prescribed acoustic volume injection.
+    ///
+    /// `cavity_volume_flow[q] = integral(psi_q s dV) + integral(psi_q v_in dA)`
+    /// uses the ORIGINAL pressure eigenfunction and its normalization, with
+    /// distributed source density `s` [1/s] or inward boundary velocity
+    /// `v_in` [m/s]. For a compact source at `x`, its contribution is
+    /// `psi_q(x) Q` for physical volume flow `Q` [m^3/s]. Rescaling `psi_q`
+    /// requires rescaling this projection as well as its norm and coupling.
+    /// No division by the mode norm belongs in the supplied source vector.
+    ///
+    /// A positive source compresses a sealed cavity. Pressure reacts on the
+    /// structure through the original reciprocal interface, and may transfer
+    /// power OUT of the cavity. Both source powers remain signed, including
+    /// an actuator absorbing work from another coherent source. Structural
+    /// wall motion already represented in `coupling` must not be supplied
+    /// again as volume injection. This is a prescribed linear source; it does
+    /// not infer an actuator impedance, nonlinear jet or source mechanism.
+    ///
+    /// # Errors
+    /// As [`Self::frf`], plus a cavity-source shape or non-finite-source refusal.
+    pub fn frf_with_sources(
+        &self,
+        omega: f64,
+        modal_force: &[C64],
+        cavity_volume_flow: &[C64],
+    ) -> Result<VibroResponse, VibroError> {
+        self.frf_truncated_with_sources(
+            omega,
+            modal_force,
+            cavity_volume_flow,
+            self.omegas_s.len(),
+            self.omegas_a.len(),
+        )
+    }
+
     /// [`Self::frf`] restricted to the first `keep_s` structural and
     /// `keep_a` cavity modes — the observability hook the convergence
     /// check uses.
@@ -857,6 +976,34 @@ impl VibroacousticModel {
         keep_s: usize,
         keep_a: usize,
     ) -> Result<VibroResponse, VibroError> {
+        self.solve_sources(omega, modal_force, None, keep_s, keep_a)
+    }
+
+    /// [`Self::frf_with_sources`] on retained prefixes of both original bases.
+    /// Both source vectors still name the FULL bases, so changing a retained
+    /// count never changes the meaning or normalization of a source entry.
+    ///
+    /// # Errors
+    /// As [`Self::frf_with_sources`], plus invalid retained mode counts.
+    pub fn frf_truncated_with_sources(
+        &self,
+        omega: f64,
+        modal_force: &[C64],
+        cavity_volume_flow: &[C64],
+        keep_s: usize,
+        keep_a: usize,
+    ) -> Result<VibroResponse, VibroError> {
+        self.solve_sources(omega, modal_force, Some(cavity_volume_flow), keep_s, keep_a)
+    }
+
+    fn solve_sources(
+        &self,
+        omega: f64,
+        modal_force: &[C64],
+        cavity_volume_flow: Option<&[C64]>,
+        keep_s: usize,
+        keep_a: usize,
+    ) -> Result<VibroResponse, VibroError> {
         if !(omega > 0.0 && omega.is_finite()) {
             return Err(VibroError::BadParameter {
                 what: "frequency must be positive and finite",
@@ -867,6 +1014,20 @@ impl VibroacousticModel {
         if modal_force.len() != n_s_full {
             return Err(VibroError::ShapeMismatch {
                 what: "modal force length must equal the structural mode count",
+            });
+        }
+        if cavity_volume_flow.is_some_and(|flow| flow.len() != n_a_full) {
+            return Err(VibroError::ShapeMismatch {
+                what: "cavity volume-flow length must equal the cavity mode count",
+            });
+        }
+        if modal_force
+            .iter()
+            .chain(cavity_volume_flow.unwrap_or(&[]))
+            .any(|value| !value.re.is_finite() || !value.im.is_finite())
+        {
+            return Err(VibroError::BadParameter {
+                what: "structural forces and cavity volume flows must be finite",
             });
         }
         if keep_s == 0 || keep_s > n_s_full || keep_a == 0 || keep_a > n_a_full {
@@ -940,6 +1101,21 @@ impl VibroacousticModel {
         }
         let mut rhs = vec![C64::ZERO; n];
         rhs[..keep_s].copy_from_slice(&modal_force[..keep_s]);
+        if let Some(flow) = cavity_volume_flow {
+            for q in 0..keep_a {
+                // The pressure weak form uses -i omega Q with exp(-i omega t).
+                // Scale by equilibrium K/ Lambda just as for the reciprocal
+                // structural boundary term; molecular K(omega) is already in
+                // the pressure mass and must not be counted a second time.
+                rhs[keep_s + q] =
+                    C64::new(0.0, -omega) * flow[q].scale(self.rho_c2 / self.lambdas[q]);
+                if !rhs[keep_s + q].re.is_finite() || !rhs[keep_s + q].im.is_finite() {
+                    return Err(VibroError::BadParameter {
+                        what: "cavity source acceleration is unrepresentable",
+                    });
+                }
+            }
+        }
         let lu = lu_complex(&mat, n).map_err(|_| VibroError::Singular)?;
         lu.solve(&mut rhs);
         let b: Vec<C64> = rhs[..keep_s].to_vec();
@@ -947,12 +1123,12 @@ impl VibroacousticModel {
 
         // Power accounting (e^{-i omega t}: v_r = -i omega b_r).
         let vel = |b_r: C64| C64::new(0.0, -omega) * b_r;
-        let mut input = 0.0;
+        let mut structural_input = 0.0;
         let mut structural = 0.0;
         let mut interface = 0.0;
         for r in 0..keep_s {
             let v = vel(b[r]);
-            input += 0.5 * (modal_force[r] * v.conj()).re;
+            structural_input += 0.5 * (modal_force[r] * v.conj()).re;
             let wr2 = self.omegas_s[r] * self.omegas_s[r];
             structural += 0.5 * omega * self.eta_s * wr2 * b[r].norm_sq();
             // Pressure force on structure = +SUM_q C_rq a_q; power INTO
@@ -980,7 +1156,11 @@ impl VibroacousticModel {
             }
         }
         let mut cavity = 0.0;
+        let mut acoustic_input = 0.0;
         for (q, aq) in a.iter().enumerate() {
+            if let Some(flow) = cavity_volume_flow {
+                acoustic_input += 0.5 * (*aq * flow[q].conj()).re;
+            }
             // Cavity oscillator mass Lambda_q / (rho0 c0^2 omega^2)
             // in the pressure coordinate: hysteretic dissipation
             // 1/2 omega eta_a (Lambda/(rho c^2)) (omega_q/omega)^2 |a_q|^2.
@@ -1005,21 +1185,33 @@ impl VibroacousticModel {
                 }
             }
         }
-        let balance = input - structural - interface - radiated;
-        let denom = input.abs().max(1e-300);
-        let iface_denom = interface.abs().max(cavity.abs()).max(1e-300);
+        let input = structural_input + acoustic_input;
+        let balance = input - structural - cavity - radiated;
+        let denom = input
+            .abs()
+            .max(structural_input.abs())
+            .max(acoustic_input.abs())
+            .max(structural.abs() + cavity.abs() + radiated.abs())
+            .max(1e-300);
+        let iface_denom = interface
+            .abs()
+            .max(acoustic_input.abs())
+            .max(cavity.abs())
+            .max(1e-300);
         Ok(VibroResponse {
             omega,
             b,
             a,
             power: PowerBreakdown {
                 input,
+                structural_input,
+                acoustic_input,
                 structural,
                 interface,
                 cavity,
                 radiated,
                 balance_residual: balance / denom,
-                interface_residual: (interface - cavity) / iface_denom,
+                interface_residual: (interface + acoustic_input - cavity) / iface_denom,
             },
         })
     }
@@ -1038,6 +1230,34 @@ impl VibroacousticModel {
         modal_force: &[C64],
         tolerance: f64,
     ) -> Result<ConvergedResponse, VibroError> {
+        self.sources_with_convergence(omega, modal_force, None, tolerance)
+    }
+
+    /// [`Self::frf_with_sources`] with the same observed full-versus-halved
+    /// modal convergence check as [`Self::frf_with_convergence`]. The same
+    /// physical force/flow projections drive both solves, and the compared
+    /// quantity is total signed source power. As for the existing check,
+    /// this one quantity does not bound pointwise pressure or a quiet notch.
+    ///
+    /// # Errors
+    /// As [`Self::frf_with_sources`], plus the original truncation refusal.
+    pub fn frf_with_sources_and_convergence(
+        &self,
+        omega: f64,
+        modal_force: &[C64],
+        cavity_volume_flow: &[C64],
+        tolerance: f64,
+    ) -> Result<ConvergedResponse, VibroError> {
+        self.sources_with_convergence(omega, modal_force, Some(cavity_volume_flow), tolerance)
+    }
+
+    fn sources_with_convergence(
+        &self,
+        omega: f64,
+        modal_force: &[C64],
+        cavity_volume_flow: Option<&[C64]>,
+        tolerance: f64,
+    ) -> Result<ConvergedResponse, VibroError> {
         if !(tolerance > 0.0 && tolerance.is_finite()) {
             return Err(VibroError::BadParameter {
                 what: "truncation tolerance must be positive and finite",
@@ -1045,10 +1265,10 @@ impl VibroacousticModel {
         }
         let n_s = self.omegas_s.len();
         let n_a = self.omegas_a.len();
-        let full = self.frf(omega, modal_force)?;
+        let full = self.solve_sources(omega, modal_force, cavity_volume_flow, n_s, n_a)?;
         let half_s = (n_s / 2).max(1);
         let half_a = (n_a / 2).max(1);
-        let half = self.frf_truncated(omega, modal_force, half_s, half_a)?;
+        let half = self.solve_sources(omega, modal_force, cavity_volume_flow, half_s, half_a)?;
         let denom = full.power.input.abs().max(1e-300);
         let truncation_delta = (full.power.input - half.power.input).abs() / denom;
         if truncation_delta > tolerance {
@@ -1882,3 +2102,6 @@ mod viscosity_tests;
 
 #[cfg(test)]
 mod gas_tests;
+
+#[cfg(test)]
+mod source_tests;

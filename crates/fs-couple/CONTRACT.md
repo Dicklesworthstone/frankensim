@@ -5815,14 +5815,32 @@ cavity (composes with the BEM's outward panel velocities).
 
 - `VibroacousticModel::frf` / `frf_truncated` — dense complex coupled
   solve; every response carries the complete power breakdown with BOTH
-  audit residuals (`input = structural + interface + radiated`,
-  `interface = cavity`) — algebraically exact identities, measured at
-  1e-13.
+  audit residuals (`input = structural + cavity + radiated`,
+  `interface + acoustic_input = cavity`). The force-only paths retain zero
+  acoustic input and use the same original coupled operator.
+- `frf_with_sources` / `frf_truncated_with_sources` admit original-basis
+  volume-flow projections `Q_q = integral(psi_q s dV) + integral(psi_q v_in dA)`
+  with inward injection positive. The pressure row receives
+  `-i omega rho0 c0^2 Q_q/Lambda_q`; the same source supplies signed work
+  `Re(a_q conj(Q_q))/2`. Pressure backreaction, full modal structural viscosity,
+  molecular compressibility and exterior radiation remain in the same solve.
+  Source vectors retain full-basis ordering under truncation. A driven structural
+  wall must not also appear as a prescribed cavity source. This admits imposed
+  linear acoustic excitation; it does not infer jet physics or source impedance.
+  `project_cavity_boundary_flow` maps an explicit inward velocity through the
+  original cavity surface quadrature, retaining signed cancellations and the
+  equality between integrated surface work and modal source work.
+  The source tests compare sealed-cavity compliance with an independent closed
+  form, integrate pressure/flow work over a cycle, and check reciprocal mixed
+  transfers, coherent superposition, signed normalization and truncation.
 - `frf_with_convergence` — truncation error OBSERVED (full vs halved
   bases) and refused (`FS-COUPLE-VIBRO-TRUNCATION-NOT-CONVERGED`)
   above the caller tolerance; near-resonance rows are genuinely
   truncation-sensitive (measured 0.28 on the casebook fixture) and the
   casebook exposes rather than hides that.
+  `frf_with_sources_and_convergence` applies the same check to the total work
+  of the prescribed force and volume sources. This scalar comparison does not
+  certify pointwise pressure convergence or a quiet transfer-function notch.
 - `undamped_natural_frequencies` — exact `x = omega^2` linearization
   (unit-triangular `B`), pinned by the two-oscillator closed form at
   ~1e-16 across a five-decade coupling sweep, a first-order added-mass
