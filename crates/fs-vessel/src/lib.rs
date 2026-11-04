@@ -39,11 +39,12 @@ pub use race::{
     race_base_losses, screen_laminar_lips, screen_lips, screening_losses,
 };
 pub use robust::{
-    LaminarRobustError, LaminarRobustReport, RobustReport, robustify, robustify_laminar,
+    LaminarCandidateReport, LaminarRobustError, LaminarRobustReport, RobustReport, robustify,
+    robustify_laminar,
 };
 pub use stability::laminar::{
-    LaminarFilmError, LaminarFilmSection, LaminarFilmStudy, LaminarGrowthReport,
-    LaminarPourConditions,
+    LaminarBandGrowthReport, LaminarFilmBandStudy, LaminarFilmError, LaminarFilmSection,
+    LaminarFilmStudy, LaminarGrowthObjective, LaminarGrowthReport, LaminarPourConditions,
 };
 pub use stability::{VesselProfile, growth_objective};
 

@@ -10,6 +10,8 @@
 //! Source: Scheid et al., Phys. Fluids 14 (2002), DOI 10.1063/1.1515270,
 //! equation (7), zero thermal terms; their R = 3 Re. Author manuscript:
 //! <https://www.uni-muenster.de/Physik.TP/pauli/~thiele/Paper/SOCT2002pf.pdf>.
+
+/// Original liquid-source coefficients for the same Newtonian film owner.
 pub mod material;
 
 /// Prescribed uniform Newtonian liquid properties; no material calibration.
@@ -42,6 +44,21 @@ pub struct FilmMode {
     pub kh: f64,
     /// Reynolds number times kh.
     pub re_kh: f64,
+}
+
+/// Maximum of the admitted Benney dispersion over a closed wavenumber band.
+/// This is a floating-point model result, not an enclosure or a claim about
+/// wavelengths outside the band. The entire band passes the long-wave budgets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilmBandMaximum {
+    /// Wavenumber attaining the maximum, in rad/m; lower k wins exact ties.
+    pub wavenumber_rad_m: f64,
+    /// Native mode at the maximizing wavenumber.
+    pub mode: FilmMode,
+    /// Largest kh in the whole requested band.
+    pub max_kh: f64,
+    /// Largest Re*kh in the whole requested band.
+    pub max_re_kh: f64,
 }
 /// A physical or numerical admission failure; no clipped substitute is returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,8 +133,7 @@ impl NusseltFilm {
         // Log scaling avoids underflow in nu*q and overflow in 3*nu*q.
         // Use the existing deterministic owner, never platform cbrt/powf.
         let h = fs_math::det::exp(
-            (fs_math::det::ln(3.0) + fs_math::det::ln(nu)
-                + fs_math::det::ln(q)
+            (fs_math::det::ln(3.0) + fs_math::det::ln(nu) + fs_math::det::ln(q)
                 - fs_math::det::ln(gt))
                 / 3.0,
         );
@@ -237,6 +253,65 @@ impl NusseltFilm {
         })
     }
 
+    /// Maximize over every wavenumber in `[minimum, maximum]`, in rad/m.
+    ///
+    /// The dispersion is q*(A*k^2-B*k^4), with B >= 0. Its maximum is at
+    /// an endpoint or, when A and B are positive, k=sqrt(A/(2*B)). Thus at
+    /// most three native mode evaluations replace an arbitrarily dense scan.
+    /// The upper endpoint must be admitted even if the maximum lies lower;
+    /// an unsupported tail is never silently truncated. Including k=0 retains
+    /// the exactly neutral mass-conservation mode.
+    pub fn long_wave_band(
+        self,
+        wavenumbers_rad_m: [f64; 2],
+        limits: LongWaveLimits,
+    ) -> Result<FilmBandMaximum, FilmError> {
+        let [lower, upper] = wavenumbers_rad_m;
+        if !lower.is_finite() || !upper.is_finite() || lower < 0.0 || upper < lower {
+            return Err(FilmError::InvalidInput("wavenumber band"));
+        }
+        let low = self.long_wave_mode(lower, limits)?;
+        let high = self.long_wave_mode(upper, limits)?;
+        let mut maximum = FilmBandMaximum {
+            wavenumber_rad_m: lower,
+            mode: low,
+            max_kh: high.kh,
+            max_re_kh: high.re_kh,
+        };
+        let driving = (6.0_f64 / 5.0).mul_add(self.reynolds, -self.normal_ratio);
+        let sigma = self.material.surface_tension_n_m;
+        if driving > 0.0 && sigma > 0.0 && upper > lower {
+            // Log scaling keeps the stationary point meaningful when forming
+            // A*rho*g/(2*sigma) would overflow despite a representable k.
+            let log_peak = 0.5
+                * (fs_math::det::ln(driving)
+                    + fs_math::det::ln(self.material.density_kg_m3)
+                    + fs_math::det::ln(self.tangent)
+                    - fs_math::det::ln(2.0)
+                    - fs_math::det::ln(sigma));
+            let log_lower = if lower == 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                fs_math::det::ln(lower)
+            };
+            let log_upper = fs_math::det::ln(upper);
+            if log_peak > log_lower && log_peak < log_upper {
+                let peak = fs_math::det::exp(log_peak).clamp(lower, upper);
+                represented(peak, true)?;
+                let mode = self.long_wave_mode(peak, limits)?;
+                if mode.growth_per_s > maximum.mode.growth_per_s {
+                    maximum.wavenumber_rad_m = peak;
+                    maximum.mode = mode;
+                }
+            }
+        }
+        if high.growth_per_s > maximum.mode.growth_per_s {
+            maximum.wavenumber_rad_m = upper;
+            maximum.mode = high;
+        }
+        Ok(maximum)
+    }
+
     fn coordinate(self, y: f64) -> Result<f64, FilmError> {
         if !y.is_finite() || y < 0.0 || y > self.thickness {
             return Err(FilmError::InvalidInput("wall-normal coordinate"));
@@ -288,8 +363,8 @@ mod tests {
             let u = film.velocity_m_s(z * h).unwrap();
             let tau = film.shear_pa(z * h).unwrap();
             flow += w * u * h / 6.0;
-            dissipation += w * tau * tau * h
-                / (6.0 * WATER.density_kg_m3 * WATER.kinematic_viscosity_m2_s);
+            dissipation +=
+                w * tau * tau * h / (6.0 * WATER.density_kg_m3 * WATER.kinematic_viscosity_m2_s);
         }
         near(flow, q);
         near(dissipation, WATER.density_kg_m3 * gt * q);
@@ -297,7 +372,10 @@ mod tests {
     }
     #[test]
     fn neutral_threshold_and_capillary_cutoff_follow_independent_coefficients() {
-        let dry_capillary = FilmMaterial { surface_tension_n_m: 0.0, ..WATER };
+        let dry_capillary = FilmMaterial {
+            surface_tension_n_m: 0.0,
+            ..WATER
+        };
         for factor in [0.99, 1.01] {
             let q = (5.0 / 6.0) * WATER.kinematic_viscosity_m2_s * factor;
             let film = NusseltFilm::new(dry_capillary, q, 4.0, 4.0).unwrap();
@@ -306,8 +384,8 @@ mod tests {
         }
         let film = NusseltFilm::new(WATER, 1e-6, 4.0, 4.0).unwrap();
         let h = film.thickness_m();
-        let inertial = 2.0 * 4.0 * 4.0 * h.powi(6)
-            / (15.0 * WATER.kinematic_viscosity_m2_s.powi(3));
+        let inertial =
+            2.0 * 4.0 * 4.0 * h.powi(6) / (15.0 * WATER.kinematic_viscosity_m2_s.powi(3));
         let hydrostatic = 4.0 * h.powi(3) / (3.0 * WATER.kinematic_viscosity_m2_s);
         let capillary = WATER.surface_tension_n_m * h.powi(3)
             / (3.0 * WATER.density_kg_m3 * WATER.kinematic_viscosity_m2_s);
@@ -315,16 +393,25 @@ mod tests {
         for factor in [0.5, 2.0] {
             let k = cutoff * factor;
             let mode = film.long_wave_mode(k, LIMITS).unwrap();
-            near(mode.growth_per_s, (inertial - hydrostatic) * k * k - capillary * k.powi(4));
+            near(
+                mode.growth_per_s,
+                (inertial - hydrostatic) * k * k - capillary * k.powi(4),
+            );
             assert_eq!(mode.growth_per_s > 0.0, factor < 1.0);
-            near(mode.angular_frequency_rad_s, 3.0 * film.mean_velocity_m_s() * k);
+            near(
+                mode.angular_frequency_rad_s,
+                3.0 * film.mean_velocity_m_s() * k,
+            );
         }
         assert_eq!(film.long_wave_mode(0.0, LIMITS).unwrap().growth_per_s, 0.0);
     }
     #[test]
     fn material_scaling_and_small_flow_do_not_invent_a_reynolds_floor() {
         let first = NusseltFilm::new(WATER, 1e-6, 4.0, 3.0).unwrap();
-        let viscous = FilmMaterial { kinematic_viscosity_m2_s: 8e-6, ..WATER };
+        let viscous = FilmMaterial {
+            kinematic_viscosity_m2_s: 8e-6,
+            ..WATER
+        };
         let second = NusseltFilm::new(viscous, 1e-6, 4.0, 3.0).unwrap();
         near(second.thickness_m(), 2.0 * first.thickness_m());
         near(second.mean_velocity_m_s(), 0.5 * first.mean_velocity_m_s());
@@ -335,17 +422,33 @@ mod tests {
     }
     #[test]
     fn invalid_or_unresolved_modes_refuse_without_clamping() {
-        assert_eq!(NusseltFilm::new(WATER, 0.0, 4.0, 3.0), Err(FilmError::DryFilm));
+        assert_eq!(
+            NusseltFilm::new(WATER, 0.0, 4.0, 3.0),
+            Err(FilmError::DryFilm)
+        );
         assert!(NusseltFilm::new(WATER, 1e-6, 0.0, 3.0).is_err());
         assert!(NusseltFilm::new(WATER, f64::NAN, 4.0, 3.0).is_err());
         let film = NusseltFilm::new(WATER, 2e-6, 4.0, 3.0).unwrap();
         assert!(film.velocity_m_s(-1.0).is_err());
         assert!(film.shear_pa(film.thickness_m() * 2.0).is_err());
-        assert_eq!(film.long_wave_mode(0.15 / film.thickness_m(), LIMITS),
-            Err(FilmError::OutsideLongWaveRegime)); // kh passes; Re*kh fails.
-        assert_eq!(film.long_wave_mode(0.25 / film.thickness_m(), LIMITS),
-            Err(FilmError::OutsideLongWaveRegime));
+        assert_eq!(
+            film.long_wave_mode(0.15 / film.thickness_m(), LIMITS),
+            Err(FilmError::OutsideLongWaveRegime)
+        ); // kh passes; Re*kh fails.
+        assert_eq!(
+            film.long_wave_mode(0.25 / film.thickness_m(), LIMITS),
+            Err(FilmError::OutsideLongWaveRegime)
+        );
         assert!(film.long_wave_mode(f64::NAN, LIMITS).is_err());
-        assert!(film.long_wave_mode(1.0, LongWaveLimits { max_kh: 1.0, ..LIMITS }).is_err());
+        assert!(
+            film.long_wave_mode(
+                1.0,
+                LongWaveLimits {
+                    max_kh: 1.0,
+                    ..LIMITS
+                }
+            )
+            .is_err()
+        );
     }
 }

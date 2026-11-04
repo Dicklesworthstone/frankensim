@@ -11102,3 +11102,19 @@ native/source thermal history, physical source conversion and spatial relaxation
 The 3/16 wall-location claim is restricted to uniformly forced, fully developed,
 constant-viscosity planar flow. It does not certify variable-viscosity wall
 accuracy, interface flow, nonlinear convection or global stability.
+
+## Continuous long-wave film bands
+
+`NusseltFilm::long_wave_band` maximizes the native Benney growth over an
+explicit closed nonnegative wavenumber interval. The quartic dispersion needs
+only its endpoints and, when present, its interior stationary point: at most
+three native mode evaluations, without allocation or an arbitrary sampling
+resolution. The entire interval must pass both long-wave budgets. The result
+retains the maximizing wavenumber and actual band-wide kh/Re*kh maxima.
+Including zero retains the neutral mass-conservation mode; zero capillarity,
+point intervals and boundary maxima retain their physical meanings.
+
+This is an Estimated maximum of the declared local model, not a floating-point
+enclosure, arbitrary-wavelength stability proof or full free-surface eigensolve.
+`tests/film_band.rs` checks independent dimensional extrema, an unstable
+interior missed by endpoint samples, monotone/neutral limits and tail refusals.

@@ -47,6 +47,49 @@ pub struct LaminarFilmStudy<'a> {
     pub limits: LongWaveLimits,
 }
 
+/// Growth objective shared by sampled and continuous-band physical studies.
+/// Risk and racing consume this owner without reimplementing film physics.
+pub trait LaminarGrowthObjective {
+    /// Worst admitted local temporal growth, in 1/s.
+    fn growth_per_s(
+        &self,
+        width_scale: f64,
+        conditions: LaminarPourConditions,
+    ) -> Result<f64, LaminarFilmError>;
+}
+
+/// Physical study over every wavenumber in an explicit closed SI interval.
+/// The native quartic dispersion needs at most three evaluations per section;
+/// no sampled grid can miss an interior unstable long-wave mode.
+#[derive(Debug, Clone, Copy)]
+pub struct LaminarFilmBandStudy<'a> {
+    /// Locally planar sections in path order.
+    pub sections: &'a [LaminarFilmSection],
+    /// Inclusive nonnegative angular-wavenumber interval, in rad/m.
+    pub wavenumbers_rad_m: [f64; 2],
+    /// Both limits must admit the entire interval at every section.
+    pub limits: LongWaveLimits,
+}
+
+/// Maximum of the local Benney model over the declared continuous band.
+/// This remains an Estimated model result, not a numerical enclosure or a
+/// finite-length/global-stability certificate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaminarBandGrowthReport {
+    /// Largest temporal growth rate, in 1/s.
+    pub max_growth_per_s: f64,
+    /// First section attaining the maximum.
+    pub section: usize,
+    /// Physical wavenumber attaining that maximum, in rad/m.
+    pub wavenumber_rad_m: f64,
+    /// Minimum and maximum mean-speed film Reynolds numbers.
+    pub reynolds_range: [f64; 2],
+    /// Maximum kh over every section and the complete interval.
+    pub max_kh: f64,
+    /// Maximum Re*kh over every section and the complete interval.
+    pub max_re_kh: f64,
+}
+
 /// Worst sampled local temporal growth and the actual nondimensional range.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaminarGrowthReport {
@@ -96,6 +139,13 @@ pub enum LaminarFilmError {
         /// Native refusal, without substitution or clipping.
         source: FilmError,
     },
+    /// The requested continuous interval was refused by the native owner.
+    Band {
+        /// Path section.
+        section: usize,
+        /// Original physical or long-wave admission refusal.
+        source: FilmError,
+    },
 }
 
 impl core::fmt::Display for LaminarFilmError {
@@ -109,8 +159,15 @@ impl core::fmt::Display for LaminarFilmError {
                 write!(f, "film section {section} has an invalid scaled width")
             }
             Self::Film { section, source } => write!(f, "film section {section}: {source}"),
-            Self::Mode { section, mode, source } => {
+            Self::Mode {
+                section,
+                mode,
+                source,
+            } => {
                 write!(f, "film section {section}, mode {mode}: {source}")
+            }
+            Self::Band { section, source } => {
+                write!(f, "film section {section}, wavenumber band: {source}")
             }
         }
     }
@@ -151,35 +208,18 @@ impl LaminarFilmStudy<'_> {
             max_re_kh: 0.0,
         };
         for (section, geometry) in self.sections.iter().enumerate() {
-            let width = geometry.width_m * width_scale;
-            if !geometry.width_m.is_finite()
-                || geometry.width_m <= 0.0
-                || !width.is_finite()
-                || width <= 0.0
-            {
-                return Err(LaminarFilmError::InvalidWidth { section });
-            }
-            let flux = conditions.volume_flow_m3_s / width;
-            if !flux.is_finite() || flux <= 0.0 {
-                return Err(LaminarFilmError::Film {
-                    section,
-                    source: FilmError::NonRepresentable,
-                });
-            }
-            let film = NusseltFilm::new(
-                conditions.material,
-                flux,
-                geometry.tangential_acceleration_m_s2,
-                geometry.normal_acceleration_m_s2,
-            )
-            .map_err(|source| LaminarFilmError::Film { section, source })?;
+            let film = section_film(*geometry, width_scale, conditions, section)?;
             let re = film.reynolds();
             report.reynolds_range[0] = report.reynolds_range[0].min(re);
             report.reynolds_range[1] = report.reynolds_range[1].max(re);
             for (mode, &wavenumber) in self.wavenumbers_rad_m.iter().enumerate() {
                 let wave = film
                     .long_wave_mode(wavenumber, self.limits)
-                    .map_err(|source| LaminarFilmError::Mode { section, mode, source })?;
+                    .map_err(|source| LaminarFilmError::Mode {
+                        section,
+                        mode,
+                        source,
+                    })?;
                 if wave.growth_per_s > report.max_growth_per_s {
                     report.max_growth_per_s = wave.growth_per_s;
                     report.section = section;
@@ -191,4 +231,100 @@ impl LaminarFilmStudy<'_> {
         }
         Ok(report)
     }
+}
+
+impl LaminarGrowthObjective for LaminarFilmStudy<'_> {
+    fn growth_per_s(
+        &self,
+        width_scale: f64,
+        conditions: LaminarPourConditions,
+    ) -> Result<f64, LaminarFilmError> {
+        self.evaluate(width_scale, conditions)
+            .map(|report| report.max_growth_per_s)
+    }
+}
+
+impl LaminarFilmBandStudy<'_> {
+    /// Evaluate all sections and the entire band in O(section count) work,
+    /// without allocating or performing a wavenumber search.
+    pub fn evaluate(
+        &self,
+        width_scale: f64,
+        conditions: LaminarPourConditions,
+    ) -> Result<LaminarBandGrowthReport, LaminarFilmError> {
+        if self.sections.is_empty() {
+            return Err(LaminarFilmError::EmptyPath);
+        }
+        if !width_scale.is_finite() || width_scale <= 0.0 {
+            return Err(LaminarFilmError::InvalidWidthScale);
+        }
+        if !conditions.volume_flow_m3_s.is_finite() || conditions.volume_flow_m3_s <= 0.0 {
+            return Err(LaminarFilmError::InvalidVolumeFlow);
+        }
+        let mut report = LaminarBandGrowthReport {
+            max_growth_per_s: f64::NEG_INFINITY,
+            section: 0,
+            wavenumber_rad_m: 0.0,
+            reynolds_range: [f64::INFINITY, 0.0],
+            max_kh: 0.0,
+            max_re_kh: 0.0,
+        };
+        for (section, &geometry) in self.sections.iter().enumerate() {
+            let film = section_film(geometry, width_scale, conditions, section)?;
+            let maximum = film
+                .long_wave_band(self.wavenumbers_rad_m, self.limits)
+                .map_err(|source| LaminarFilmError::Band { section, source })?;
+            if maximum.mode.growth_per_s > report.max_growth_per_s {
+                report.max_growth_per_s = maximum.mode.growth_per_s;
+                report.section = section;
+                report.wavenumber_rad_m = maximum.wavenumber_rad_m;
+            }
+            report.reynolds_range[0] = report.reynolds_range[0].min(film.reynolds());
+            report.reynolds_range[1] = report.reynolds_range[1].max(film.reynolds());
+            report.max_kh = report.max_kh.max(maximum.max_kh);
+            report.max_re_kh = report.max_re_kh.max(maximum.max_re_kh);
+        }
+        Ok(report)
+    }
+}
+
+impl LaminarGrowthObjective for LaminarFilmBandStudy<'_> {
+    fn growth_per_s(
+        &self,
+        width_scale: f64,
+        conditions: LaminarPourConditions,
+    ) -> Result<f64, LaminarFilmError> {
+        self.evaluate(width_scale, conditions)
+            .map(|report| report.max_growth_per_s)
+    }
+}
+
+fn section_film(
+    geometry: LaminarFilmSection,
+    width_scale: f64,
+    conditions: LaminarPourConditions,
+    section: usize,
+) -> Result<NusseltFilm, LaminarFilmError> {
+    let width = geometry.width_m * width_scale;
+    if !geometry.width_m.is_finite()
+        || geometry.width_m <= 0.0
+        || !width.is_finite()
+        || width <= 0.0
+    {
+        return Err(LaminarFilmError::InvalidWidth { section });
+    }
+    let flux = conditions.volume_flow_m3_s / width;
+    if !flux.is_finite() || flux <= 0.0 {
+        return Err(LaminarFilmError::Film {
+            section,
+            source: FilmError::NonRepresentable,
+        });
+    }
+    NusseltFilm::new(
+        conditions.material,
+        flux,
+        geometry.tangential_acceleration_m_s2,
+        geometry.normal_acceleration_m_s2,
+    )
+    .map_err(|source| LaminarFilmError::Film { section, source })
 }

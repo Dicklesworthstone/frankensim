@@ -244,8 +244,8 @@ pub fn screen_lips(lips: &[f64], seed: u64) -> Result<LipScreenReport, ScreenErr
 /// admitted; a physical refusal names its index and produces no race verdict.
 /// The existing deterministic demonstration jitter is retained in 1/s; it is
 /// not a measured fluid uncertainty or evidence of turbulence/transition.
-pub fn screen_laminar_lips(
-    study: &crate::stability::laminar::LaminarFilmStudy<'_>,
+pub fn screen_laminar_lips<S: crate::stability::laminar::LaminarGrowthObjective + ?Sized>(
+    study: &S,
     width_scales: &[f64],
     conditions: crate::stability::laminar::LaminarPourConditions,
     seed: u64,
@@ -260,8 +260,7 @@ pub fn screen_laminar_lips(
         .enumerate()
         .map(|(candidate, &width)| {
             study
-                .evaluate(width, conditions)
-                .map(|report| report.max_growth_per_s)
+                .growth_per_s(width, conditions)
                 .map_err(|source| ScreenError::Film { candidate, source })
         })
         .collect::<Result<Vec<_>, _>>()?;

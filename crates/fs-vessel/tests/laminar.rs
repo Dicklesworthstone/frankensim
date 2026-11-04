@@ -4,7 +4,8 @@ use fs_lbm::film::{FilmError, FilmMaterial, LongWaveLimits};
 use fs_vessel::race::{ScreenError, race_base_losses, screen_laminar_lips};
 use fs_vessel::robust::{LaminarRobustError, robustify_laminar};
 use fs_vessel::stability::laminar::{
-    LaminarFilmError, LaminarFilmSection, LaminarFilmStudy, LaminarPourConditions,
+    LaminarFilmBandStudy, LaminarFilmError, LaminarFilmSection, LaminarFilmStudy,
+    LaminarPourConditions,
 };
 
 const MATERIAL: FilmMaterial = FilmMaterial {
@@ -26,6 +27,80 @@ const SECTIONS: [LaminarFilmSection; 2] = [
 ];
 const WAVES: [f64; 3] = [2.0, 4.0, 6.0];
 const WIDTHS: [f64; 5] = [0.7, 1.0, 1.5, 2.0, 3.0];
+
+#[test]
+fn continuous_band_reaches_existing_cvar_and_race_owners() {
+    let study = LaminarFilmBandStudy {
+        sections: &SECTIONS,
+        wavenumbers_rad_m: [2.0, 200.0],
+        limits: LongWaveLimits {
+            max_kh: 0.3,
+            max_re_kh: 0.5,
+        },
+    };
+    let nominal = conditions(1.0, 1.0);
+    let band = [
+        conditions(0.8, 1.6),
+        conditions(1.3, 0.7),
+        conditions(1.1, 1.2),
+    ];
+    let risk = robustify_laminar(&study, &WIDTHS, nominal, &band, 0.5).unwrap();
+    assert!(risk.robust_band_cvar_per_s <= risk.nominal_band_cvar_per_s);
+    let mut nominal_losses = Vec::new();
+    let mut risks = Vec::new();
+    for &width in &WIDTHS {
+        let result = study.evaluate(width, nominal).unwrap();
+        nominal_losses.push(result.max_growth_per_s);
+        let independent_max = SECTIONS
+            .iter()
+            .map(|section| {
+                let q = nominal.volume_flow_m3_s / (width * section.width_m);
+                let a = q * (1.2 * q / MATERIAL.kinematic_viscosity_m2_s - 0.75);
+                let b = q * MATERIAL.surface_tension_n_m / (MATERIAL.density_kg_m3 * 4.0);
+                let k = if a > 0.0 {
+                    (a / (2.0 * b)).sqrt().clamp(2.0, 200.0)
+                } else {
+                    2.0
+                };
+                a * k * k - b * k.powi(4)
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((result.max_growth_per_s - independent_max).abs() < 2e-13);
+        let losses: Vec<_> = band
+            .iter()
+            .map(|&fluid| study.evaluate(width, fluid).unwrap().max_growth_per_s)
+            .collect();
+        risks.push(fs_vessel::robust::cvar(&losses, 0.5).unwrap());
+    }
+    assert_eq!(
+        risk.robust_candidate,
+        risks
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0
+    );
+    assert_eq!(
+        screen_laminar_lips(&study, &WIDTHS, nominal, 1234).unwrap(),
+        race_base_losses(&nominal_losses, 1234).unwrap()
+    );
+    let refused = LaminarFilmBandStudy {
+        wavenumbers_rad_m: [0.0, 1e9],
+        ..study
+    };
+    assert!(matches!(
+        robustify_laminar(&refused, &WIDTHS, nominal, &band, 0.5),
+        Err(LaminarRobustError::Film {
+            candidate: 0,
+            fluid: None,
+            source: LaminarFilmError::Band {
+                section: 0,
+                source: FilmError::OutsideLongWaveRegime
+            }
+        })
+    ));
+}
 
 fn study() -> LaminarFilmStudy<'static> {
     LaminarFilmStudy {
@@ -108,29 +183,47 @@ fn laminar_domain_failure_never_becomes_a_stable_score_or_skipped_station() {
     let study = study();
     let nominal = conditions(1.0, 1.0);
     for width in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        assert_eq!(study.evaluate(width, nominal), Err(LaminarFilmError::InvalidWidthScale));
+        assert_eq!(
+            study.evaluate(width, nominal),
+            Err(LaminarFilmError::InvalidWidthScale)
+        );
     }
     assert_eq!(
         study.evaluate(1.0, conditions(0.0, 1.0)),
         Err(LaminarFilmError::InvalidVolumeFlow)
     );
     assert_eq!(
-        LaminarFilmStudy { sections: &[], ..study }.evaluate(1.0, nominal),
+        LaminarFilmStudy {
+            sections: &[],
+            ..study
+        }
+        .evaluate(1.0, nominal),
         Err(LaminarFilmError::EmptyPath)
     );
     assert_eq!(
-        LaminarFilmStudy { wavenumbers_rad_m: &[], ..study }.evaluate(1.0, nominal),
+        LaminarFilmStudy {
+            wavenumbers_rad_m: &[],
+            ..study
+        }
+        .evaluate(1.0, nominal),
         Err(LaminarFilmError::EmptyModes)
     );
     let mut sections = SECTIONS;
     sections[1].tangential_acceleration_m_s2 = 0.0;
     assert!(matches!(
-        LaminarFilmStudy { sections: &sections, ..study }.evaluate(1.0, nominal),
+        LaminarFilmStudy {
+            sections: &sections,
+            ..study
+        }
+        .evaluate(1.0, nominal),
         Err(LaminarFilmError::Film { section: 1, .. })
     ));
     assert!(matches!(
-        LaminarFilmStudy { wavenumbers_rad_m: &[2.0, 1e6], ..study }
-            .evaluate(1.0, nominal),
+        LaminarFilmStudy {
+            wavenumbers_rad_m: &[2.0, 1e6],
+            ..study
+        }
+        .evaluate(1.0, nominal),
         Err(LaminarFilmError::Mode {
             section: 0,
             mode: 1,
@@ -143,7 +236,11 @@ fn laminar_domain_failure_never_becomes_a_stable_score_or_skipped_station() {
 fn laminar_cvar_selects_physical_candidates_and_allows_a_shared_boundary_optimum() {
     let study = study();
     let nominal = conditions(1.0, 1.0);
-    let band = [conditions(0.8, 1.6), conditions(1.3, 0.7), conditions(1.1, 1.2)];
+    let band = [
+        conditions(0.8, 1.6),
+        conditions(1.3, 0.7),
+        conditions(1.1, 1.2),
+    ];
     let report = robustify_laminar(&study, &WIDTHS, nominal, &band, 0.5).unwrap();
     let mut best_nominal = (usize::MAX, f64::INFINITY);
     let mut best_robust = (usize::MAX, f64::INFINITY);
@@ -171,7 +268,11 @@ fn laminar_cvar_selects_physical_candidates_and_allows_a_shared_boundary_optimum
     let invalid_band = [nominal, conditions(0.0, 1.0)];
     assert!(matches!(
         robustify_laminar(&study, &WIDTHS, nominal, &invalid_band, 0.5),
-        Err(LaminarRobustError::Film { candidate: 0, fluid: Some(1), .. })
+        Err(LaminarRobustError::Film {
+            candidate: 0,
+            fluid: Some(1),
+            ..
+        })
     ));
     assert!(matches!(
         robustify_laminar(&study, &WIDTHS, nominal, &band, f64::NAN),
@@ -183,7 +284,8 @@ fn laminar_cvar_selects_physical_candidates_and_allows_a_shared_boundary_optimum
 fn laminar_screen_drives_the_original_race_with_native_growth_and_refuses_bad_modes() {
     let study = study();
     let nominal = conditions(1.0, 1.0);
-    let losses: Vec<_> = WIDTHS.iter()
+    let losses: Vec<_> = WIDTHS
+        .iter()
         .map(|&width| study.evaluate(width, nominal).unwrap().max_growth_per_s)
         .collect();
     let expected = race_base_losses(&losses, 0x7E55).unwrap();
@@ -191,7 +293,10 @@ fn laminar_screen_drives_the_original_race_with_native_growth_and_refuses_bad_mo
     assert_eq!(actual, expected);
     assert!(matches!(
         screen_laminar_lips(&study, &[1.0, 0.0], nominal, 0x7E55),
-        Err(ScreenError::Film { candidate: 1, source: LaminarFilmError::InvalidWidthScale })
+        Err(ScreenError::Film {
+            candidate: 1,
+            source: LaminarFilmError::InvalidWidthScale
+        })
     ));
     assert!(matches!(
         screen_laminar_lips(&study, &[1.0], nominal, 0x7E55),

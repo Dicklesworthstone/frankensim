@@ -278,3 +278,21 @@ inertia, not a rotated body-force proxy. A native comparison also verifies the
 explicit historical smoke path is bitwise identical to its prior implementation.
 The core's independent momentum/stress and pure-Coriolis tests cover the force
 operator; this consumer does not claim global energy exactness for LBM/VOF.
+
+## Continuous-band physical optimization
+
+`LaminarFilmBandStudy` asks the original Nusselt/Benney owner for the maximum
+over every wavenumber in an authored SI interval at each actual section.
+Its evaluation is allocation-free and O(sections), independent of wavelength
+sampling density. It reports the worst section/wavenumber and full-band
+nondimensional extrema. An unsupported band tail refuses the candidate even
+when its maximizing mode would be admissible.
+
+`LaminarGrowthObjective` lets the existing `robustify_laminar` and
+`screen_laminar_lips` consume either sampled or continuous-band physical studies.
+Risk still uses canonical empirical CVaR; racing retains its declared synthetic
+jitter. Robust reports now retain every evaluated candidate's nominal growth,
+band CVaR and band maximum, so product consumers can plot actual objectives
+without repeating the candidate/fluid sweep. Existing sampled studies keep
+their previous semantics. Continuous-band maxima do not establish global,
+finite-length, nonlinear or turbulent stability.
