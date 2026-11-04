@@ -19,16 +19,18 @@
 pub mod articulated;
 /// Source-bound compliant pads on the original articulated dynamics owner.
 pub mod attachments;
+/// Source-bound creeping-flow resistance and buoyancy on native rigid motion.
+pub mod creeping_flow;
 /// Compatible nonuniform deformation with conserved material mass.
 pub mod deformation;
 /// Source-bound continuous nodal density and conserved affine mass transport.
 pub mod density_field;
-/// Principal-frame adaptation for the existing free-body and contact APIs.
-pub mod principal;
+/// Exact anisotropic exterior Stokes resistance on the native rigid-body owner.
+pub mod ellipsoid_flow;
 /// Material-driven buoyancy, displacement and hydrostatic torque.
 pub mod hydrostatic;
-/// Source-bound creeping-flow resistance and buoyancy on native rigid motion.
-pub mod creeping_flow;
+/// Principal-frame adaptation for the existing free-body and contact APIs.
+pub mod principal;
 
 /// Source-integrated free expansion with conserved reference material mass.
 pub mod thermal;
@@ -72,10 +74,14 @@ impl core::fmt::Display for MaterialInertiaError {
 }
 impl std::error::Error for MaterialInertiaError {}
 impl From<MaterialStatePointError> for MaterialInertiaError {
-    fn from(e: MaterialStatePointError) -> Self { Self::Material(e) }
+    fn from(e: MaterialStatePointError) -> Self {
+        Self::Material(e)
+    }
 }
 impl From<ArticulatedError> for MaterialInertiaError {
-    fn from(e: ArticulatedError) -> Self { Self::Dynamics(e) }
+    fn from(e: ArticulatedError) -> Self {
+        Self::Dynamics(e)
+    }
 }
 
 /// Geometry/material assignment for one non-overlapping region, in ONE body frame.
@@ -104,13 +110,21 @@ pub struct ResolvedRegion {
 }
 impl ResolvedRegion {
     /// Original region identity.
-    pub fn key(&self) -> &str { &self.key }
+    pub fn key(&self) -> &str {
+        &self.key
+    }
     /// Geometry at the authored physical state, without inferred expansion.
-    pub const fn geometry(&self) -> VolumeMoments { self.geometry }
+    pub const fn geometry(&self) -> VolumeMoments {
+        self.geometry
+    }
     /// Exact material state-point bundle and density usage receipt.
-    pub const fn material(&self) -> &ResolvedMaterialStatePoint { &self.material }
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        &self.material
+    }
     /// Region inertia in the same body frame as the complete body.
-    pub const fn inertia(&self) -> SpatialInertia { self.inertia }
+    pub const fn inertia(&self) -> SpatialInertia {
+        self.inertia
+    }
 }
 
 /// Immutable source-backed body, suitable for the existing `Link::new` API.
@@ -121,9 +135,13 @@ pub struct ResolvedBody {
 }
 impl ResolvedBody {
     /// Existing canonical spatial-inertia type; no copied solver coefficients.
-    pub const fn inertia(&self) -> SpatialInertia { self.inertia }
+    pub const fn inertia(&self) -> SpatialInertia {
+        self.inertia
+    }
     /// Every original geometry and material bundle in canonical region-key order.
-    pub fn regions(&self) -> &[ResolvedRegion] { &self.regions }
+    pub fn regions(&self) -> &[ResolvedRegion] {
+        &self.regions
+    }
 }
 
 /// Compile material assignments into one rigid-body inertia.
@@ -146,35 +164,57 @@ pub fn resolve_body(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ResolvedBody, MaterialInertiaError> {
     poll(&mut cancelled)?;
-    if max_regions == 0 || max_regions > MAX_BODY_REGIONS
-        || bindings.is_empty() || bindings.len() > max_regions {
-        return Err(MaterialInertiaError::Invalid("body needs 1..=max_regions regions within the 4096 cap"));
+    if max_regions == 0
+        || max_regions > MAX_BODY_REGIONS
+        || bindings.is_empty()
+        || bindings.len() > max_regions
+    {
+        return Err(MaterialInertiaError::Invalid(
+            "body needs 1..=max_regions regions within the 4096 cap",
+        ));
     }
     let mut ordered: Vec<_> = bindings.iter().collect();
     ordered.sort_by_key(|b| b.key);
     for (i, binding) in ordered.iter().enumerate() {
-        if binding.key.trim().is_empty() || binding.key.len() > 128
-            || (i > 0 && ordered[i - 1].key == binding.key) {
-            return Err(MaterialInertiaError::Invalid("region keys must be nonblank, unique and at most 128 bytes"));
+        if binding.key.trim().is_empty()
+            || binding.key.len() > 128
+            || (i > 0 && ordered[i - 1].key == binding.key)
+        {
+            return Err(MaterialInertiaError::Invalid(
+                "region keys must be nonblank, unique and at most 128 bytes",
+            ));
         }
     }
     let requirement = ScalarPropertyRequirement::try_new(
-        DENSITY_PROPERTY, Density::DIMS, ScalarAdmissibility::StrictlyPositive,
+        DENSITY_PROPERTY,
+        Density::DIMS,
+        ScalarAdmissibility::StrictlyPositive,
     )?;
     let mut regions = Vec::with_capacity(ordered.len());
     let mut combined = None;
     for binding in ordered {
         poll(&mut cancelled)?;
-        let material = resolve_material_state_point(binding.material, binding.point,
-            core::slice::from_ref(&requirement), binding.selection.clone())?;
-        let density = material.property(DENSITY_PROPERTY)
-            .expect("the required density was resolved").value_si();
+        let material = resolve_material_state_point(
+            binding.material,
+            binding.point,
+            core::slice::from_ref(&requirement),
+            binding.selection.clone(),
+        )?;
+        let density = material
+            .property(DENSITY_PROPERTY)
+            .expect("the required density was resolved")
+            .value_si();
         let inertia = binding.geometry.with_density(density)?;
         combined = Some(match combined {
             None => inertia,
             Some(previous) => merge_inertias(previous, inertia)?,
         });
-        regions.push(ResolvedRegion { key: binding.key.into(), geometry: binding.geometry, material, inertia });
+        regions.push(ResolvedRegion {
+            key: binding.key.into(),
+            geometry: binding.geometry,
+            material,
+            inertia,
+        });
     }
     let inertia = combined.expect("nonempty region list admitted");
     // A finite centroidal tensor alone need not have a representable spatial
@@ -185,25 +225,50 @@ pub fn resolve_body(
 }
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), MaterialInertiaError> {
-    if cancelled() { Err(MaterialInertiaError::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(MaterialInertiaError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
-fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
+fn positive(x: f64) -> bool {
+    x.is_finite() && x > 0.0
+}
 
 // Merge about the centres, never by subtracting enormous origin moments.
 // I = Ia + Ib + ma*mb/(ma+mb) * (|cb-ca|² 1 - (cb-ca)(cb-ca)^T).
-fn merge_inertias(a: SpatialInertia, b: SpatialInertia) -> Result<SpatialInertia, MaterialInertiaError> {
+fn merge_inertias(
+    a: SpatialInertia,
+    b: SpatialInertia,
+) -> Result<SpatialInertia, MaterialInertiaError> {
     let mass = a.mass() + b.mass();
-    if !positive(mass) { return Err(MaterialInertiaError::Invalid("combined mass is unrepresentable")); }
+    if !positive(mass) {
+        return Err(MaterialInertiaError::Invalid(
+            "combined mass is unrepresentable",
+        ));
+    }
     let weight = b.mass() / mass;
     let reduced = a.mass().min(b.mass()) * (a.mass().max(b.mass()) / mass);
     if !positive(weight) || !positive(reduced) {
-        return Err(MaterialInertiaError::Invalid("region mass ratio is unrepresentable"));
+        return Err(MaterialInertiaError::Invalid(
+            "region mass ratio is unrepresentable",
+        ));
     }
     let delta = b.center_of_mass() - a.center_of_mass();
     let center = a.center_of_mass() + delta.scale(weight);
     let shift = delta.scale(reduced.sqrt());
     let [x, y, z] = [shift.x, shift.y, shift.z];
-    let parallel = [y*y+z*z, -x*y, -x*z, -x*y, x*x+z*z, -y*z, -x*z, -y*z, x*x+y*y];
+    let parallel = [
+        y * y + z * z,
+        -x * y,
+        -x * z,
+        -x * y,
+        x * x + z * z,
+        -y * z,
+        -x * z,
+        -y * z,
+        x * x + y * y,
+    ];
     let mut tensor = a.inertia_com();
     for (i, entry) in tensor.m.iter_mut().enumerate() {
         *entry += b.inertia_com().m[i] + parallel[i];

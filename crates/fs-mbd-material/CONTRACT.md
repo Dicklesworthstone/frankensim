@@ -1611,3 +1611,15 @@ against an independent continuum branch-cut inversion, changing-force
 storage/heat/impulse closure and native trajectory identity, zero-drive
 equivalence after forcing, and late-cancellation/retry plus invalid-drive
 atomicity. These are numerical model checks, not experimental validation.
+
+## Material-bound anisotropic ellipsoid drag
+
+`ellipsoid_flow::CreepingEllipsoid` extends exterior creeping-flow resistance to one explicitly declared, uniformly filled no-slip ellipsoid in an unbounded frozen uniform Newtonian fluid. The original fluid supplies density and viscosity once; the original material region supplies mass and full inertia. The caller declares the actual exterior: matching volume and moments alone does not prove that geometry.
+
+All six exact Stokes resistances are prepared from positive geometric integrals with compensated accumulation, bounded composite-Gauss refinement, and an exact spherical limit. The refinement difference is an error estimate, not a certified bound. The force path performs no quadrature or allocation. Authored shape axes transform through the actual native principal frame.
+
+The original rigid-body owner retains gyroscopic momentum and attitude updates. Bounded rotary load iteration and anisotropic translational elimination use its midpoint attitude and actual endpoint-average velocities. The receipt separates viscous heat, maintained-flow work and held external-wrench work; the actual stored-energy balance is checked before returning the candidate. Longest-semiaxis Reynolds and fluid-diffusion gates, plus step, rotation, iteration and work budgets, refuse outside scope without advancing accepted state.
+
+Seven regressions cover reduction to the driven sphere, independent prolate/oblate formulas for all six coefficients, authored/native frame ordering and offset center of mass, driven trajectory refinement, rotating triaxial covariance and work, viscosity source swaps, and refusal/cancellation. The physical coefficients and independent spheroid formulas follow Anand and Narsimhan, Journal of Fluid Mechanics 983 (2024), Appendix B, DOI: https://doi.org/10.1017/jfm.2024.136.
+
+This owner excludes finite Reynolds number, fluid memory or added mass, ambient strain or vorticity, walls and gaps, free surfaces, rarefaction and particle interactions. Those effects cannot be inferred from a scalar drag multiplier.
