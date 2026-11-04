@@ -13,6 +13,10 @@
 //! remain required; there is no fluid inertia, thermal evolution or noise source.
 use super::{FilmError, ResistiveFilm, MAX_CELLS, MAX_PORTS, dot, fail};
 
+/// Independent pressure supplies with explicit mass and free-energy exchange.
+pub mod reservoirs;
+use reservoirs::{GasChannelFlow, GasFilmFlowReport, Reservoir};
+
 /// Explicit, fixed thermal and pressure reservoir; no gas-name lookup.
 #[derive(Clone, Copy, Debug)]
 pub struct AmbientGas {
@@ -182,29 +186,77 @@ impl IsothermalFilm {
     /// Closed passages have EXACTLY zero mobility. Interior exchange conserves
     /// mass even for arbitrary discrete efforts, not only endpoint gradients.
     pub fn flow_into(&self,q:&[f64],z:&[f64],effort:&[f64],out:&mut[f64])->Result<f64,FilmError> {
+        Ok(self.flow_with_reservoirs::<false>(q,z,effort,&[],out,&mut [])?.dissipated_power_w)
+    }
+    fn flow_with_reservoirs<const DRIVEN: bool>(&self,q:&[f64],z:&[f64],effort:&[f64],
+        reservoirs:&[Option<Reservoir>],out:&mut[f64],channels:&mut[GasChannelFlow])
+        ->Result<GasFilmFlowReport,FilmError> {
         if effort.len()!=self.cell_count() || out.len()!=effort.len() || effort.iter().any(|e|!e.is_finite()) {
             return fail("film mass-flow effort/shape");
         }
+        if DRIVEN && channels.len()!=self.geometry.channel_count() {
+            return fail("gas reservoir channel output shape");
+        }
         let s=self.state(q,z)?;let mut candidate=[0.0;MAX_CELLS];let mut power=0.0;
+        let mut passage=[GasChannelFlow::default();super::MAX_CHANNELS];
+        let mut supplied=0.0;let mut supply_magnitude=0.0;let mut mass_rate=0.0;
+        let rt=self.gas.temperature_k*self.gas.specific_gas_constant_j_kg_k;
         for (k,c) in self.geometry.channels.iter().enumerate() {
             let h=c.gap.reference_m-dot(&c.gap.closure,q);if h<=0.0 {continue;}
-            let pi=s.pressure[c.from];let pj=c.to.map_or(self.gas.pressure_pa,|j|s.pressure[j]);
+            let reservoir=if DRIVEN {reservoirs[k]}else{None};
+            let pi=s.pressure[c.from];let pj=c.to.map_or(
+                reservoir.map_or(self.gas.pressure_pa,|b|b.pressure_pa),|j|s.pressure[j]);
             let mean=pressure_mean(pi,pj,0.0,0.0).0;
             let mobility=self.geometry.factors[k]*h*h*h*mean;
-            let delta=effort[c.from]/self.scales[c.from]-c.to.map_or(0.0,|j|effort[j]/self.scales[j]);
+            let delta=effort[c.from]/self.scales[c.from]-c.to.map_or(
+                reservoir.map_or(0.0,|b|b.effort),|j|effort[j]/self.scales[j]);
             let flux=mobility*delta;candidate[c.from]+=flux/self.scales[c.from];
             if let Some(j)=c.to {candidate[j]-=flux/self.scales[j];}
-            power+=mobility*delta*delta;
+            let loss=mobility*delta*delta;power+=loss;
+            if DRIVEN {
+                let source=-reservoir.map_or(0.0,|b|b.effort)*flux;
+                let mass_flow=flux/rt;
+                if !mass_flow.is_finite() || !source.is_finite() {
+                    return fail("gas reservoir mass or free-energy flow overflow");
+                }
+                passage[k]=GasChannelFlow{mass_flow_kg_s:mass_flow,
+                    dissipated_power_w:loss,reservoir_power_w:source};
+                supplied+=source;supply_magnitude+=source.abs();
+                if c.to.is_none() {mass_rate-=mass_flow;}
+            }
         }
         if !power.is_finite() || power<0.0 || candidate[..out.len()].iter().any(|x|!x.is_finite()) {
             return fail("film mass-flow overflow");
         }
-        out.copy_from_slice(&candidate[..self.cell_count()]);Ok(power)
+        let mut report=GasFilmFlowReport{dissipated_power_w:power,..Default::default()};
+        if DRIVEN {
+            let storage=-dot(effort,&candidate[..self.cell_count()]);
+            let residual=storage+power-supplied;
+            let effort_magnitude=effort.iter().zip(candidate).map(|(e,f)|(e*f).abs()).sum::<f64>();
+            let tolerance=64.0*f64::EPSILON*(self.cell_count()+self.geometry.channel_count()) as f64
+                *(effort_magnitude+power+supply_magnitude);
+            if ![supplied,mass_rate,storage,residual,tolerance].iter().all(|x|x.is_finite())
+                || residual.abs()>tolerance {
+                return fail("gas reservoir free-energy balance is unrepresentable");
+            }
+            report.reservoir_power_w=supplied;
+            report.mass_storage_power_w=storage;
+            report.reservoir_mass_rate_kg_s=mass_rate;
+            report.power_residual_w=residual;
+            channels.copy_from_slice(&passage[..channels.len()]);
+        }
+        out.copy_from_slice(&candidate[..self.cell_count()]);Ok(report)
     }
     /// Exact directional derivative of both gap conductance and pressure mobility.
     #[allow(clippy::too_many_arguments)]
     pub fn flow_tangent_into(&self,q:&[f64],z:&[f64],e:&[f64],dq:&[f64],dz:&[f64],de:&[f64],
         out:&mut[f64])->Result<(),FilmError> {
+        self.flow_tangent_with_reservoirs::<false>(q,z,e,dq,dz,de,&[],&[],out)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn flow_tangent_with_reservoirs<const DRIVEN: bool>(&self,q:&[f64],z:&[f64],e:&[f64],
+        dq:&[f64],dz:&[f64],de:&[f64],reservoirs:&[Option<Reservoir>],
+        reservoir_direction_pa:&[Option<f64>],out:&mut[f64])->Result<(),FilmError> {
         let n=self.cell_count();
         if e.len()!=n || dz.len()!=n || de.len()!=n || out.len()!=n || dq.len()!=self.port_count()
             || e.iter().chain(dq).chain(dz).chain(de).any(|x|!x.is_finite()) {return fail("film flow tangent shape");}
@@ -215,12 +267,16 @@ impl IsothermalFilm {
         for (k,c) in self.geometry.channels.iter().enumerate() {
             let h=c.gap.reference_m-dot(&c.gap.closure,q);if h<=0.0 {continue;}
             let dh=-dot(&c.gap.closure,dq);
-            let pi=s.pressure[c.from];let pj=c.to.map_or(self.gas.pressure_pa,|j|s.pressure[j]);
-            let (mean,dm)=pressure_mean(pi,pj,dp[c.from],c.to.map_or(0.0,|j|dp[j]));
+            let reservoir=if DRIVEN {reservoirs[k]}else{None};
+            let db=if DRIVEN {reservoir_direction_pa[k].unwrap_or(0.0)}else{0.0};
+            let pi=s.pressure[c.from];let pj=c.to.map_or(
+                reservoir.map_or(self.gas.pressure_pa,|b|b.pressure_pa),|j|s.pressure[j]);
+            let (mean,dm)=pressure_mean(pi,pj,dp[c.from],c.to.map_or(db,|j|dp[j]));
             let g=self.geometry.factors[k]*h*h*h;
             let dg=3.0*self.geometry.factors[k]*h*h*dh;
-            let delta=e[c.from]/self.scales[c.from]-c.to.map_or(0.0,|j|e[j]/self.scales[j]);
-            let dd=de[c.from]/self.scales[c.from]-c.to.map_or(0.0,|j|de[j]/self.scales[j]);
+            let delta=e[c.from]/self.scales[c.from]-c.to.map_or(
+                reservoir.map_or(0.0,|b|b.effort),|j|e[j]/self.scales[j]);
+            let dd=de[c.from]/self.scales[c.from]-c.to.map_or(db/pj,|j|de[j]/self.scales[j]);
             let df=(dg*mean+g*dm)*delta+g*mean*dd;
             result[c.from]+=df/self.scales[c.from];if let Some(j)=c.to {result[j]-=df/self.scales[j];}
         }

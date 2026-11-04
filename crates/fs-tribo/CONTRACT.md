@@ -1039,6 +1039,39 @@ outside this law. The existing nine pressure-law tests run through the fs-flux
 compatibility surface, while fs-couple tests exercise reciprocal mechanical
 reaction, joint dissipation and atomic retry in its existing time integrator.
 
+## Pressure-fed compressible gas films
+
+`resistive_film::isothermal::reservoirs::PressureDrivenGasFilm` binds one positive
+absolute pressure per original exterior passage, including shut passages;
+internal passages require `None`. It retains the original `IsothermalFilm`
+mass coordinates, geometry, ideal-gas storage, normal-pressure gradient and
+Hessian. The original ambient remains the fixed mechanical back pressure and
+free-energy reference. Changing supplies or uniform/spatial viscosity does not
+reset gas inventory. Reservoir logarithms are compiled once; evaluation and
+the complete geometry/mass/effort/supply-pressure tangent need no heap allocation.
+
+The same logarithmic-mean mobility recovers compressible Poiseuille mass flow
+`G*(p_i^2-p_j^2)/(2*R*T)` at the physical gradient. At arbitrary joint discrete
+effort it conserves internal mass and reports, together, signed passage mass
+flows, nonnegative isothermal free-energy dissipation, signed reservoir supply
+and mass-storage power. Supply uses `-R*T*log(p_b/p_ref)*mass_flow_out`; storage
+power plus dissipation equals supply. Mechanical pressure work remains in the
+original storage gradient. Shape, topology, pressure, finite-arithmetic and
+work refusals leave both output slices untouched. Explicit common ambient
+recovers the existing passive flow and tangent bitwise.
+
+This distinct active-port type cannot substitute for a passive-only resistance.
+A surrounding integrator must advance mass and motion using the same effort
+and integrate the supplied work; the existing passive impact attachment is not
+silently rebound. Reservoir temperature/composition stay equal to the reference
+gas, viscosity is pressure independent, and ideal-gas, laminar, no-slip, thin-gap
+assumptions remain. This is a free-energy account, not isolated thermal energy
+or enthalpy, with no finite supply storage, channel inertia or thermal owner.
+Seventeen original native isothermal tests pass, including seven new groups
+covering independent bidirectional Poiseuille/work oracles, a pressure-supported
+steady throughflow, arbitrary discrete effort, full supply-sensitive tangent,
+legacy parity, viscosity continuation, sealed/reopened inventory and refusals.
+
 ## Mass-conserving cavitating liquid films
 
 `resistive_film::cavitation` extends the same `ResistiveFilm` cell/channel/gap
