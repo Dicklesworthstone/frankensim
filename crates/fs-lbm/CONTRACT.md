@@ -2942,10 +2942,10 @@ scalars with dynamic subgrid-scale models*, CTR Annual Research Briefs,
 section 2.1. It does not copy that paper's spectral discretization or claim
 its channel-flow accuracy.
 
-Normal derivatives use the quadratic through the two nearest fluid centres
-and the actual halfway boundary condition. Each preparation supplies both
-uniform wall velocities and independent scalar `Value` or `ZeroGradient`
-conditions. A scalar zero-gradient wall requires three normal fluid cells:
+Declared velocity and scalar wall derivatives use the quadratic through the
+two nearest fluid centres and the halfway boundary condition. Each preparation supplies both
+uniform wall velocities and independent scalar `Value`, `ZeroGradient`, or
+`Interior` policies. A scalar zero-gradient wall requires three normal fluid cells:
 the filtered scalar uses a second-order one-sided derivative of its actual
 Favre-filtered interior values there. Density weighting need not preserve the
 physical scalar's zero normal gradient, so that boundary condition is not
@@ -2956,6 +2956,19 @@ walls differ. Filtering, strain and scalar gradients share the same geometry;
 scalar diffusivity remains independently fitted even when momentum transport
 is zero. The existing explicit no-backscatter policy, coefficient admission
 bounds, finite-value checks and exploratory-use restriction remain in force.
+
+`Interior` reconstructs the wall-adjacent cell derivative from three current
+fluid centres at both physical and Favre-filtered levels. It is exact for a
+quadratic and second-order for smooth resolved fields; it supplies neither a
+wall temperature nor a transport boundary law. Flux/film and coupled-flux
+owners can use it without deriving a gradient from a diffusivity still being
+fitted, substituting a reservoir for the surface, or consuming an old wall
+report. The opposite wall retains its own independent policy. Three normal
+fluid cells are admitted before uniform-field shortcuts whenever interior
+reconstruction is needed; two cells remain sufficient for two fixed values.
+Kernel regressions cover mixed policies along every normal axis, analytic
+Favre density covariance, affine and reversed scalar coordinates, and early
+refusal of insufficient normal resolution.
 
 The reused numerical storage remains 136 bytes per fluid cell for momentum
 and 64 for one scalar, with actual-capacity admission. Plane reduction is
@@ -4126,10 +4139,16 @@ The checked source owner snapshots both the active laws and last accepted
 report. It admits active fluid temperatures, prescribed wall temperatures,
 and every resolved wall trace against the caller's scalar interval. A late
 refusal preserves the original populations, histories, wall laws and report.
-The channel dynamic SGS filter consumes active prescribed-temperature or
-zero-flux conditions; it refuses nonzero flux and film laws until its filter
-supports their local traces. Other ordinary/source thermal steps use the
-same wall streaming operator in both dimensions.
+The channel dynamic SGS filter retains declared temperatures and zero-flux
+conditions independently at each wall. For nonzero flux/film walls it uses
+three-fluid-centre reconstruction of both physical and Favre scalar gradients.
+The original reflected-pair operator still applies actual surface heat, and
+the same source transaction admits temperature, Mach, cancellation and heat
+balance before publishing state. The filter neither invents a wall trace nor
+adds modeled mechanical dissipation as a heat source. Its zero-diffusion path
+retains ordinary transport and local molecular rates; physical-unit and
+source-resolved material adapters use the same coupling. Other ordinary/source
+thermal steps share the original wall streaming operator in both dimensions.
 
 `MaterialThermalWall` provides the same laws in SI through the retained
 material slab. It converts signed `q''` by `dt/(rho*Cp*dx*DeltaT)` and `h`

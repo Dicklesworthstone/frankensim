@@ -1,3 +1,11 @@
+use fs_exec::CancelGate;
+use fs_lbm::d3q19::equilibrium3;
+use fs_lbm::sgs3::SgsUse;
+use fs_lbm::sgs3::dynamic::channel::{
+    ChannelDynamicScalarConfig, ChannelDynamicSgsConfig,
+};
+use fs_lbm::thermal::sources::sgs3::channel::ThermalChannelSgsConfig;
+use fs_lbm::thermal::sources::HeatBalance;
 use fs_lbm::material::{
     MaterialSlab, MaterialSlab3, MaterialThermalSlab, MaterialThermalSlab3,
     MaterialThermalWall, plan_scaling_from_material,
@@ -315,5 +323,223 @@ fn g0_material_queries_admit_active_temperatures_and_declared_walls_without_ghos
             three.lattice.last_wall_exchange()), (&saved3.0, &saved3.1, &saved3.2, saved3.3));
         assert_eq!(two.lattice.thermal_walls(), laws2);
         assert_eq!(three.lattice.thermal_walls(), laws3);
+    }
+}
+
+
+const CHANNEL_FLUX_W_M2: f64 = 2.5;
+const CHANNEL_FILM_W_M2_K: f64 = 0.7;
+const CHANNEL_AMBIENT_K: f64 = 300.0;
+const CHANNEL_POWER_W_M3: f64 = 4.0;
+
+fn channel_config() -> ThermalChannelSgsConfig {
+    ThermalChannelSgsConfig {
+        momentum: ChannelDynamicSgsConfig {
+            maximum_coefficient_squared: 10.0,
+            maximum_eddy_to_molecular: 100.0,
+            usage: SgsUse::Exploration,
+        },
+        heat: ChannelDynamicScalarConfig {
+            maximum_coefficient: 10.0,
+            maximum_diffusivity_to_molecular: 100.0,
+            usage: SgsUse::Exploration,
+        },
+        maximum_mach: 0.2,
+    }
+}
+
+fn channel_walls() -> [MaterialThermalWall; 2] {
+    [
+        MaterialThermalWall::HeatFlux(CHANNEL_FLUX_W_M2),
+        MaterialThermalWall::Convective {
+            h_w_m2_k: CHANNEL_FILM_W_M2_K,
+            ambient_temperature_k: CHANNEL_AMBIENT_K,
+        },
+    ]
+}
+
+fn channel_power(slab: &MaterialSlab3) -> Vec<f64> {
+    let plane = slab.lattice.grid.nx * slab.lattice.grid.ny;
+    let cells = slab.lattice.gpop.len();
+    let mut power = vec![0.0; cells];
+    power[plane..cells - plane].fill(CHANNEL_POWER_W_M3);
+    power
+}
+
+fn check_channel_joules(slab: &MaterialSlab3, before: f64, heat: &HeatBalance) {
+    let plane = slab.lattice.grid.nx * slab.lattice.grid.ny;
+    let fluid = slab.lattice.gpop.len() - 2 * plane;
+    let wall_area = plane as f64 * DX * DX;
+    let wall = slab.last_wall_exchange().unwrap().unwrap();
+    let measured = (fluid_sum(&slab.lattice.gpop, plane) - before)
+        * RHO * CP * DX * DX * DX * slab.temperature_difference_k();
+    let source = CHANNEL_POWER_W_M3 * fluid as f64 * DX * DX * DX * DT;
+    close(heat.source_j, source, 2e-12);
+    close(wall[0].heat_in_j, CHANNEL_FLUX_W_M2 * wall_area * DT, 2e-12);
+    // This uses the actual wall trace, not the fluid-cell or ambient
+    // temperature in place of the surface. The identity also holds for DeltaT<0.
+    close(wall[1].heat_in_j,
+        CHANNEL_FILM_W_M2_K * (CHANNEL_AMBIENT_K - wall[1].mean_temperature_k)
+            * wall_area * DT, 2e-12);
+    close(heat.bottom_wall_j, wall[0].heat_in_j, 2e-12);
+    close(heat.top_wall_j, wall[1].heat_in_j, 2e-12);
+    close(heat.stored_change_j, measured, 2e-11);
+    close(measured, source + wall[0].heat_in_j + wall[1].heat_in_j, 2e-11);
+    close(heat.defect_j, 0.0, 1e-11);
+}
+
+#[test]
+fn g0_zero_channel_sgs_preserves_ordinary_si_flux_and_film_steps() {
+    let gate = CancelGate::new_clock_free();
+    for reverse in [false, true] {
+        let (_, mut actual) = slabs(reverse, 0.0);
+        let (_, mut ordinary) = slabs(reverse, 0.0);
+        actual.set_thermal_walls(channel_walls()).unwrap();
+        ordinary.set_thermal_walls(channel_walls()).unwrap();
+        let cells = actual.lattice.gpop.len();
+        let plane = actual.lattice.grid.nx * actual.lattice.grid.ny;
+        let power = channel_power(&actual);
+        let forces = vec![[0.0; 3]; cells];
+        let bytes = actual.lattice.required_thermal_channel_sgs_workspace_bytes().unwrap();
+        let mut workspace = actual.lattice.thermal_channel_sgs_workspace(bytes).unwrap();
+        // With zero accepted velocity, wall heat and volumetric heating must
+        // still advance through the original owner with unchanged rates.
+        for _ in 0..2 {
+            let before = fluid_sum(&actual.lattice.gpop, plane);
+            let expected = ordinary.step_with_power_density(&power, &forces, limits()).unwrap();
+            let result = actual.step_with_power_density_and_channel_sgs(
+                &power, &forces, limits(), channel_config(), &mut workspace, &gate,
+            ).unwrap();
+            assert_eq!(result.heat, expected);
+            assert_eq!(result.sgs.transport.momentum.maximum_eddy_viscosity_lu, 0.0);
+            assert_eq!(result.sgs.transport.maximum_eddy_diffusivity_lu, 0.0);
+            assert_eq!(actual.lattice.gpop, ordinary.lattice.gpop);
+            assert_eq!(actual.lattice.grid.f, ordinary.lattice.grid.f);
+            assert_eq!(actual.lattice.grid.fext, ordinary.lattice.grid.fext);
+            assert_eq!(actual.lattice.grid.tau, ordinary.lattice.grid.tau);
+            assert_eq!(actual.lattice.tau_g, ordinary.lattice.tau_g);
+            assert_eq!(actual.lattice.last_wall_exchange(), ordinary.lattice.last_wall_exchange());
+            check_channel_joules(&actual, before, &result.heat);
+        }
+    }
+}
+
+fn channel_noise(i: usize, salt: u64) -> f64 {
+    let mut h = (i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ salt;
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^= h >> 31;
+    (h >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+}
+
+fn seeded_channel_slab(reverse: bool) -> MaterialSlab3 {
+    // The small broad-band field used by the native channel regressions has
+    // independent positive heat and momentum fits. It is a manufactured
+    // resolved field, not a turbulent inlet or a DNS validation case.
+    let material = FluidTransportState::try_new(RHO, CP, K, 0.2).unwrap();
+    let scale = plan_scaling_from_material(&material, DX, DT, 0.1).unwrap();
+    let (bottom, top) = if reverse { (300.0, 320.0) } else { (320.0, 300.0) };
+    let mut slab = scale.thermal_slab3(MaterialThermalSlab3 {
+        nx: 5, ny: 4, nz: 5, bottom_temperature_k: bottom, top_temperature_k: top,
+        gravity_m_s2: 9.81, expansion_per_k: 1e-3, max_cells: 140,
+    }).unwrap();
+    let plane = slab.lattice.grid.nx * slab.lattice.grid.ny;
+    let fluid = slab.lattice.gpop.len() - 2 * plane;
+    // The constructor's unit-temperature, stationary equilibrium supplies the
+    // existing D3Q7 weights; no duplicate quadrature or thermal solver is needed.
+    let weights = slab.lattice.gpop[0];
+    for active in 0..fluid {
+        let cell = active + plane;
+        let h = (active / plane) as f64 + 0.5;
+        let envelope = 4.0 * h * (5.0 - h) / 25.0;
+        let velocity = core::array::from_fn(|axis|
+            0.02 * envelope * channel_noise(active, 31 * axis as u64 + 7));
+        slab.lattice.grid.f[cell] = equilibrium3(1.0, velocity);
+        let authored = 1.0 - h / 5.0 + 0.05 * envelope * channel_noise(active, 101);
+        // Both orientations represent the SAME physical temperature field.
+        // Only its affine scalar coordinates (and the sign of source units) change.
+        let normalized = if reverse { 1.0 - authored } else { authored };
+        slab.lattice.gpop[cell] = weights.map(|weight| weight * normalized);
+    }
+    slab.set_thermal_walls(channel_walls()).unwrap();
+    slab
+}
+
+#[test]
+fn g1_channel_flux_and_film_keep_si_heat_balances_with_fitted_and_local_transport() {
+    let gate = CancelGate::new_clock_free();
+    for local_material in [false, true] {
+        let mut forward_rates: Option<(Vec<f64>, Vec<f64>)> = None;
+        for reverse in [false, true] {
+            let mut slab = seeded_channel_slab(reverse);
+            let cells = slab.lattice.gpop.len();
+            let plane = slab.lattice.grid.nx * slab.lattice.grid.ny;
+            let fluid = cells - 2 * plane;
+            let power = channel_power(&slab);
+            let forces = vec![[0.01, 0.0, 0.0]; cells];
+            let admission = HeatSourceLimits { max_cells: cells, ..limits() };
+            let before = fluid_sum(&slab.lattice.gpop, plane);
+            let original_momentum = slab.lattice.grid.tau.clone();
+            let original_thermal = slab.lattice.tau_g;
+            let bytes = slab.lattice.required_thermal_channel_sgs_workspace_bytes().unwrap();
+            let mut workspace = slab.lattice.thermal_channel_sgs_workspace(bytes).unwrap();
+            let (heat, sgs) = if local_material {
+                let mut queries = 0;
+                let result = slab.step_with_material_transport_and_channel_sgs(
+                    &power, &forces, admission, channel_config(), &mut workspace, &gate,
+                    |_, kelvin, retained| {
+                        queries += 1;
+                        assert_eq!(retained.density_kg_m3(), RHO);
+                        assert_eq!(retained.specific_heat_j_kg_k(), CP);
+                        Ok(FluidTransportState::try_new(
+                            RHO, CP, K * (1.0 + 0.005 * (kelvin - 300.0)),
+                            0.2 * (1.0 + 0.01 * (kelvin - 300.0)),
+                        ).unwrap())
+                    },
+                ).unwrap();
+                assert_eq!(queries, 2 * fluid);
+                assert_eq!(result.material.applied.len(), fluid);
+                assert_eq!(result.material.endpoint.len(), fluid);
+                let rates = workspace.relaxation();
+                assert!(result.material.applied.iter().any(|sample|
+                    rates.thermal[sample.cell] > sample.thermal_relaxation));
+                // The actual source evaluations remain molecular; modeled
+                // diffusion is step-local and never returned as material k.
+                for sample in &result.material.applied {
+                    close(sample.transport.thermal_conductivity_w_m_k(),
+                        K * (1.0 + 0.005 * (sample.temperature_k - 300.0)), 1e-14);
+                    assert!(rates.thermal[sample.cell] >= sample.thermal_relaxation);
+                }
+                (result.material.heat, result.sgs)
+            } else {
+                let result = slab.step_with_power_density_and_channel_sgs(
+                    &power, &forces, admission, channel_config(), &mut workspace, &gate,
+                ).unwrap();
+                (result.heat, result.sgs)
+            };
+            assert!(sgs.transport.momentum.maximum_eddy_viscosity_lu > 0.0);
+            assert!(sgs.transport.maximum_eddy_diffusivity_lu > 0.0);
+            assert!(sgs.transport.momentum.sgs_dissipation_lu > 0.0);
+            assert!(sgs.heat_fit.maximum_coefficient.is_finite());
+            assert!(sgs.heat_fit.maximum_coefficient > 0.0);
+            assert!(sgs.heat_fit.maximum_diffusivity.is_finite());
+            // Positive modeled mechanical dissipation remains diagnostic:
+            // independent population storage equals only source plus wall heat.
+            check_channel_joules(&slab, before, &heat);
+            assert_eq!(slab.lattice.grid.tau, original_momentum);
+            assert_eq!(slab.lattice.tau_g, original_thermal);
+            let rates = workspace.relaxation();
+            if let Some((momentum, thermal)) = &forward_rates {
+                // Affine temperature reversal must not change an independently
+                // fitted diffusivity or the physical molecular transport.
+                for (&actual, &expected) in rates.momentum.iter().zip(momentum)
+                    .chain(rates.thermal.iter().zip(thermal))
+                {
+                    close(actual, expected, 1e-11);
+                }
+            } else {
+                forward_rates = Some((rates.momentum.to_vec(), rates.thermal.to_vec()));
+            }
+        }
     }
 }
