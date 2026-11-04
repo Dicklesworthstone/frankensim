@@ -5,6 +5,10 @@
 //! amorphous material from crystals at the same temperature. Other materials
 //! keep their original caloric laws, so a finite mold or substrate exchanges
 //! heat through the same links without a fictitious crystal fraction.
+//! Scheduled births enter with their original mass/enthalpy and explicitly
+//! zero kinetic exposure. Older cells retain their complete phase history.
+//! Birth, contact, separation and boundary events use the original timeline
+//! owner in authored order, including events exactly at the requested endpoint.
 //! Existing heat links and physical
 //! boundary channels supply heat to the original enthalpy account; the material
 //! law resolves temperature and crystal fraction together. Latent heat is never
@@ -21,7 +25,8 @@
 
 use super::{
     Boundary, CellId, DepositedCell, DepositionError, DepositionSimulation, EnergyAudit, Event,
-    MaterialId, ThermalLaw, ThermalStorageBasis, finite, nonnegative, positive,
+    MaterialId, ThermalLaw, ThermalLink, ThermalStorageBasis, TimedEvent, finite, nonnegative,
+    positive,
 };
 use crate::crystallization::{
     CrystallizationError, CrystallizationLaw, CrystallizationSolve, CrystallizationState,
@@ -112,25 +117,22 @@ pub struct CrystallizationSimulation<'a> {
 }
 
 impl<'a> CrystallizationSimulation<'a> {
-    /// Bind activated all-amorphous material on the original thermal owner.
+    /// Bind all-amorphous material on the original thermal owner.
     /// Material IDs without a crystallization binding keep their original
     /// caloric law and storage basis, with no phase-history state allocated.
-    /// Future topology/birth events require an explicit phase-history transfer
-    /// and are refused here. Boundary changes remain available at endpoints.
+    /// Already active bound cells and subsequent scheduled births start at zero
+    /// exposure. This is an explicit all-amorphous incoming-state convention;
+    /// precrystallized inflow needs a separate supplied history and is not
+    /// inferred from temperature. An empty timeline can be attached before its
+    /// first birth. `advance_to` activates events without pre-birth aging.
     pub fn new(
         thermal: DepositionSimulation<'a>,
         materials: &[CrystallizationMaterial<'a>],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, CrystallizationTimelineError> {
         checkpoint()?;
-        if thermal.cells.is_empty()
-            || !thermal.pending_events().is_empty()
-            || materials.len() > thermal.budget.max_cells
-        {
-            return Err(DepositionError::InvalidInput(
-                "crystallization requires activated cells, bounded materials and no pending events",
-            )
-            .into());
+        if materials.len() > thermal.budget.max_cells {
+            return Err(DepositionError::Budget("crystallization materials").into());
         }
         let mut map = BTreeMap::new();
         for &material in materials {
@@ -161,45 +163,7 @@ impl<'a> CrystallizationSimulation<'a> {
             let Some(model) = map.get(&cell.material_id) else {
                 continue;
             };
-            let mut state = model
-                .law
-                .state_at_temperature(thermal.temperature_k(id)?, 0.0)?;
-            // A source chart's forward/inverse interpolation can differ by a
-            // few ulps. Preserve the exact original account even then; never
-            // replace it by the round-tripped value or accept a different datum.
-            if state.specific_enthalpy_j_kg() != cell.specific_h_j_kg {
-                let roundoff = 64.0
-                    * f64::EPSILON
-                    * cell
-                        .specific_h_j_kg
-                        .abs()
-                        .max(state.specific_enthalpy_j_kg().abs())
-                        .max(1.0);
-                if (state.specific_enthalpy_j_kg() - cell.specific_h_j_kg).abs() > roundoff {
-                    return Err(DepositionError::InvalidInput(
-                        "crystallization amorphous branch differs from the original cell enthalpy",
-                    )
-                    .into());
-                }
-                let mut refused = None;
-                let result = model.law.state_at_enthalpy(
-                    cell.specific_h_j_kg,
-                    0.0,
-                    CrystallizationSolve::default(),
-                    || match checkpoint() {
-                        Ok(()) => false,
-                        Err(error) => {
-                            refused = Some(error);
-                            true
-                        }
-                    },
-                );
-                if let Some(error) = refused {
-                    return Err(error.into());
-                }
-                state = result?;
-            }
-            states.insert(id, state);
+            states.insert(id, amorphous_state(&thermal, id, model, &mut checkpoint)?);
         }
         checkpoint()?;
         Ok(Self {
@@ -214,6 +178,14 @@ impl<'a> CrystallizationSimulation<'a> {
     }
     pub fn cells(&self) -> &BTreeMap<CellId, DepositedCell> {
         &self.thermal.cells
+    }
+    /// Current original heat links, including scheduled contact/separation.
+    pub fn links(&self) -> &BTreeMap<u64, ThermalLink> {
+        self.thermal.links()
+    }
+    /// Original remaining events; a checkpoint retains this exact cursor.
+    pub fn pending_events(&self) -> &[TimedEvent] {
+        self.thermal.pending_events()
     }
     /// Only cells whose material has a crystallization binding have a state.
     /// Ordinary substrate/mold cells retain their own calorics without a
@@ -242,6 +214,7 @@ impl<'a> CrystallizationSimulation<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
         checkpoint()?;
+        self.require_processed_events()?;
         let mut next = self.thermal.clone();
         next.apply(Event::Boundary(id, boundary), &mut empty_audit())?;
         checkpoint()?;
@@ -258,6 +231,7 @@ impl<'a> CrystallizationSimulation<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
         checkpoint()?;
+        self.require_processed_events()?;
         let mut next = self.thermal.clone();
         next.set_step_conductances(conductances_w_k, &mut checkpoint)?;
         checkpoint()?;
@@ -268,6 +242,8 @@ impl<'a> CrystallizationSimulation<'a> {
     /// Advance heat transport and finite-rate phase history as one candidate.
     /// All local evaluations retain the original cell mass and storage coordinate.
     /// A local source failure or cancellation publishes no changed cell or time.
+    /// Events split the physical intervals exactly and share this call's work
+    /// budget. New cells never exchange heat or accumulate exposure before birth.
     pub fn advance_to(
         &self,
         target_s: f64,
@@ -298,12 +274,53 @@ impl<'a> CrystallizationSimulation<'a> {
         let mut residual = Sum::default();
         let mut defects = Sum::default();
         let mut crystals = Sum::default();
-        while next.time_s() < target_s {
+        let mut incoming_mass = Sum::default();
+        let mut incoming_energy = Sum::default();
+        loop {
             checkpoint()?;
+            while next
+                .thermal
+                .schedule
+                .get(next.thermal.cursor)
+                .is_some_and(|event| event.time_s == next.time_s())
+            {
+                checkpoint()?;
+                let event = next.thermal.schedule[next.thermal.cursor].event.clone();
+                let birth = match &event {
+                    Event::Birth(cell) => Some(cell.id),
+                    _ => None,
+                };
+                let mut event_audit = empty_audit();
+                next.thermal.apply(event, &mut event_audit)?;
+                if let Some(id) = birth {
+                    let cell = &next.thermal.cells[&id];
+                    if let Some(model) = next.materials.get(&cell.material_id) {
+                        let state = amorphous_state(&next.thermal, id, model, &mut checkpoint)?;
+                        next.states.insert(id, state);
+                    }
+                }
+                incoming_mass.add(event_audit.incoming_mass_kg)?;
+                incoming_energy.add(event_audit.incoming_energy_j)?;
+                next.thermal.cursor += 1;
+                audit.thermal.events += 1;
+                checkpoint()?;
+            }
+            if next.time_s() == target_s {
+                break;
+            }
+            let stop = next
+                .thermal
+                .schedule
+                .get(next.thermal.cursor)
+                .map_or(target_s, |event| event.time_s.min(target_s));
+            if next.thermal.cells.is_empty() {
+                next.thermal.time_s = stop;
+                continue;
+            }
             if audit.thermal.substeps >= self.thermal.budget.max_substeps {
                 return Err(DepositionError::Budget("crystallization thermal substeps").into());
             }
-            let remaining = target_s - next.time_s();
+            let remaining = stop - next.time_s();
             let rates = next.thermal.heat_rates_with_calorics(
                 controls.maximum_dt_s.min(remaining),
                 |id, cell| match next.states.get(&id) {
@@ -320,7 +337,7 @@ impl<'a> CrystallizationSimulation<'a> {
             )?;
             let dt = rates.explicit_dt_s;
             let endpoint = if dt == remaining {
-                target_s
+                stop
             } else {
                 next.time_s() + dt
             };
@@ -404,6 +421,12 @@ impl<'a> CrystallizationSimulation<'a> {
                 return Err(DepositionError::EnergyBalance(defects.value()).into());
             }
         }
+        // Birth energy enters storage exactly once. The independent heat
+        // residual continues to use cell-relative changes, never subtraction
+        // of large formation-energy totals or incoming birth energy.
+        stored.add(incoming_energy.value())?;
+        audit.thermal.incoming_mass_kg = incoming_mass.value();
+        audit.thermal.incoming_energy_j = incoming_energy.value();
         audit.thermal.stored_energy_change_j = stored.value();
         audit.thermal.external_heat_j = external.value();
         audit.thermal.residual_j = residual.value();
@@ -412,6 +435,68 @@ impl<'a> CrystallizationSimulation<'a> {
         checkpoint()?;
         Ok((next, audit))
     }
+
+    fn require_processed_events(&self) -> Result<(), DepositionError> {
+        if self
+            .pending_events()
+            .first()
+            .is_some_and(|event| event.time_s <= self.time_s())
+        {
+            return Err(DepositionError::InvalidInput(
+                "process due crystallization events before endpoint boundary changes",
+            ));
+        }
+        Ok(())
+    }
+}
+
+// One admission path for already active cells and future all-amorphous births.
+// The original object/identity binding is validated once at construction.
+fn amorphous_state(
+    thermal: &DepositionSimulation<'_>,
+    id: CellId,
+    model: &CrystallizationMaterial<'_>,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<CrystallizationState, CrystallizationTimelineError> {
+    let cell = &thermal.cells[&id];
+    let state = model
+        .law
+        .state_at_temperature(thermal.temperature_k(id)?, 0.0)?;
+    if state.specific_enthalpy_j_kg() == cell.specific_h_j_kg {
+        return Ok(state);
+    }
+    // A source chart's forward/inverse interpolation can differ by a few ulps.
+    // Preserve incoming m*h exactly instead of replacing it with a round trip.
+    let roundoff = 64.0
+        * f64::EPSILON
+        * cell
+            .specific_h_j_kg
+            .abs()
+            .max(state.specific_enthalpy_j_kg().abs())
+            .max(1.0);
+    if (state.specific_enthalpy_j_kg() - cell.specific_h_j_kg).abs() > roundoff {
+        return Err(DepositionError::InvalidInput(
+            "crystallization amorphous branch differs from the original cell enthalpy",
+        )
+        .into());
+    }
+    let mut refused = None;
+    let result = model.law.state_at_enthalpy(
+        cell.specific_h_j_kg,
+        0.0,
+        CrystallizationSolve::default(),
+        || match checkpoint() {
+            Ok(()) => false,
+            Err(error) => {
+                refused = Some(error);
+                true
+            }
+        },
+    );
+    if let Some(error) = refused {
+        return Err(error.into());
+    }
+    Ok(result?)
 }
 
 fn empty_audit() -> EnergyAudit {

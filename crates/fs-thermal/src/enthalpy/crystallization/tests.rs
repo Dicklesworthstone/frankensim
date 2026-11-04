@@ -607,3 +607,265 @@ fn attachment_requires_identified_original_and_kinetic_parent_calorics() {
         assert!(CrystallizationSimulation::new(thermal, &[binding], || Ok(())).is_err());
     }
 }
+
+fn scheduled(
+    events: Vec<TimedEvent>,
+    materials: &[(MaterialId, &'static dyn ThermalLaw)],
+) -> DepositionSimulation<'static> {
+    DepositionSimulation::new(
+        events,
+        materials,
+        DepositionBudget {
+            max_cells: 16,
+            max_links: 16,
+            max_events: 32,
+            max_substeps: 100_000,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn delayed_births_keep_their_own_kinetic_age_and_conserve_incoming_enthalpy() {
+    // K is constant over every temperature reached by this calorimetry test,
+    // then continuously vanishes at the original 500 K melting boundary.
+    let rate = |t: f64| Ok(0.025 * (500.0 - t).clamp(0.0, 10.0));
+    let law = CrystallizationLaw::new(&AMORPHOUS, &CRYSTALLINE, &rate, law().config()).unwrap();
+    let template = thermal(&[380.0, 380.0], 0.0, 0.0);
+    let events = [2.0, 4.0]
+        .into_iter()
+        .enumerate()
+        .map(|(i, time_s)| TimedEvent {
+            time_s,
+            event: Event::Birth(template.cells()[&CellId(i as u64 + 10)].clone()),
+        })
+        .collect();
+    let start = CrystallizationSimulation::new(
+        scheduled(events, &[(MaterialId(3), &AMORPHOUS)]),
+        &[material(&law)],
+        || Ok(()),
+    )
+    .unwrap();
+    let (empty, idle_audit) = start.advance_to(1.0, controls(0.125), || Ok(())).unwrap();
+    assert!(empty.cells().is_empty());
+    assert_eq!(idle_audit.thermal, empty_audit());
+    let (born, born_audit) = start.advance_to(2.0, controls(0.125), || Ok(())).unwrap();
+    assert_eq!(born_audit.thermal.substeps, 0);
+    assert_eq!(born_audit.thermal.events, 1);
+    assert_eq!(born_audit.thermal.incoming_mass_kg, 0.01);
+    assert_eq!(born_audit.thermal.incoming_energy_j, 800.0);
+    assert_eq!(born_audit.thermal.stored_energy_change_j, 800.0);
+    assert_eq!(born.states()[&CellId(10)].exposure(), 0.0);
+    assert!(!born.cells().contains_key(&CellId(11)));
+
+    let (middle, _) = start.advance_to(4.0, controls(0.125), || Ok(())).unwrap();
+    assert_eq!(middle.states()[&CellId(10)].exposure(), 0.5);
+    assert_eq!(middle.states()[&CellId(11)].exposure(), 0.0);
+    let (next, audit) = start.advance_to(6.0, controls(0.125), || Ok(())).unwrap();
+    for (id, age) in [(CellId(10), 4.0_f64), (CellId(11), 2.0_f64)] {
+        let exposure = 0.25 * age;
+        let fraction = 0.8 * -(-(exposure * exposure)).exp_m1();
+        assert_eq!(next.states()[&id].exposure(), exposure);
+        close(
+            next.states()[&id].crystalline_mass_fraction(),
+            fraction,
+            2e-15,
+        );
+        close(
+            next.temperature_k(id).unwrap(),
+            380.0 + 100.0 * fraction,
+            1e-8,
+        );
+        assert_eq!(next.cells()[&id].specific_h_j_kg, 80_000.0);
+    }
+    assert_eq!(audit.thermal.events, 2);
+    assert_eq!(audit.thermal.incoming_mass_kg, 0.02);
+    assert_eq!(audit.thermal.incoming_energy_j, 1600.0);
+    assert_eq!(audit.thermal.stored_energy_change_j, 1600.0);
+    assert_eq!(audit.thermal.external_heat_j, 0.0);
+    assert_eq!(audit.thermal.residual_j, 0.0);
+    close(
+        audit.crystallized_mass_kg,
+        next.states()
+            .values()
+            .map(|state| 0.01 * state.crystalline_mass_fraction())
+            .sum(),
+        1e-16,
+    );
+    let resumed = middle
+        .clone()
+        .advance_to(6.0, controls(0.125), || Ok(()))
+        .unwrap()
+        .0;
+    assert_eq!(next.cells(), resumed.cells());
+    assert_eq!(next.states(), resumed.states());
+    assert!(next.pending_events().is_empty());
+    assert_eq!(start.pending_events().len(), 2);
+    assert!(start.cells().is_empty());
+}
+
+#[test]
+fn scheduled_contact_separation_and_baths_use_the_original_event_intervals() {
+    let law = law();
+    let template = finite_bath();
+    let events = vec![
+        TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(template.cells()[&CellId(10)].clone()),
+        },
+        TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(template.cells()[&CellId(11)].clone()),
+        },
+        TimedEvent {
+            time_s: 1.0,
+            event: Event::Contact(template.links()[&1].clone()),
+        },
+        TimedEvent {
+            time_s: 2.0,
+            event: Event::Separation(1),
+        },
+        TimedEvent {
+            time_s: 2.0,
+            event: Event::Boundary(CellId(10), boundary(20.0)),
+        },
+    ];
+    let start = CrystallizationSimulation::new(
+        scheduled(
+            events,
+            &[(MaterialId(3), &AMORPHOUS), (MaterialId(4), &MOLD)],
+        ),
+        &[material(&law)],
+        || Ok(()),
+    )
+    .unwrap();
+    let (contact, first) = start.advance_to(1.0, controls(0.125), || Ok(())).unwrap();
+    assert_eq!(first.thermal.events, 3);
+    assert_eq!(contact.links().len(), 1);
+    assert_eq!(contact.temperature_k(CellId(11)).unwrap(), 300.0);
+    assert!(contact.temperature_k(CellId(10)).unwrap() > 380.0);
+    assert!(!contact.states().contains_key(&CellId(11)));
+    let (separated, second) = contact.advance_to(2.0, controls(0.125), || Ok(())).unwrap();
+    assert!(separated.links().is_empty());
+    assert_eq!(second.thermal.events, 2);
+    assert_eq!(second.thermal.external_heat_j, 0.0);
+    close(separated.energy_j(), contact.energy_j(), 1e-8);
+    assert!(separated.temperature_k(CellId(11)).unwrap() > 300.0);
+    let mold_h = separated.cells()[&CellId(11)].specific_h_j_kg;
+    let (cooled, third) = separated
+        .advance_to(2.5, controls(0.125), || Ok(()))
+        .unwrap();
+    assert_eq!(cooled.cells()[&CellId(11)].specific_h_j_kg, mold_h);
+    assert!(third.thermal.external_heat_j < 0.0);
+    close(
+        cooled.energy_j() - separated.energy_j(),
+        third.thermal.external_heat_j,
+        1e-8,
+    );
+    let (whole, audit) = start.advance_to(2.5, controls(0.125), || Ok(())).unwrap();
+    assert_eq!(whole.cells(), cooled.cells());
+    assert_eq!(whole.states(), cooled.states());
+    assert_eq!(audit.thermal.events, 5);
+    close(
+        whole.energy_j(),
+        audit.thermal.incoming_energy_j + audit.thermal.external_heat_j,
+        1e-8,
+    );
+    close(audit.thermal.incoming_mass_kg, 0.06, 1e-17);
+    assert!(audit.crystallized_mass_kg > 0.0);
+}
+
+#[test]
+fn failed_scheduled_birth_and_cancellation_preserve_phase_history_and_cursor() {
+    let full = law();
+    let law = CrystallizationLaw::new(
+        &AMORPHOUS,
+        &CRYSTALLINE,
+        &RATE,
+        CrystallizationConfig {
+            temperature_range_k: [250.0, 450.0],
+            ..full.config()
+        },
+    )
+    .unwrap();
+    let template = thermal(&[380.0, 490.0], 0.0, 0.0);
+    let events = [0.0, 1.0]
+        .into_iter()
+        .enumerate()
+        .map(|(i, time_s)| TimedEvent {
+            time_s,
+            event: Event::Birth(template.cells()[&CellId(i as u64 + 10)].clone()),
+        })
+        .collect();
+    let start = CrystallizationSimulation::new(
+        scheduled(events, &[(MaterialId(3), &AMORPHOUS)]),
+        &[material(&law)],
+        || Ok(()),
+    )
+    .unwrap()
+    .advance_to(0.0, controls(0.125), || Ok(()))
+    .unwrap()
+    .0;
+    assert!(matches!(
+        start.advance_to(2.0, controls(0.125), || Ok(())),
+        Err(CrystallizationTimelineError::Material(
+            CrystallizationError::TemperatureOutOfRange { .. }
+        ))
+    ));
+    assert_eq!(start.time_s(), 0.0);
+    assert_eq!(start.cells().len(), 1);
+    assert_eq!(start.states()[&CellId(10)].exposure(), 0.0);
+    assert_eq!(start.pending_events().len(), 1);
+    let mut polls = 0;
+    assert!(matches!(
+        start.advance_to(0.5, controls(0.125), || {
+            polls += 1;
+            if polls == 80 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }),
+        Err(CrystallizationTimelineError::Thermal(
+            DepositionError::Cancelled
+        ))
+    ));
+    assert_eq!(start.time_s(), 0.0);
+    assert_eq!(start.states()[&CellId(10)].exposure(), 0.0);
+    assert_eq!(start.pending_events()[0].time_s, 1.0);
+}
+
+#[test]
+fn schedule_cannot_renew_substep_budget_and_due_events_precede_manual_boundaries() {
+    let law = law();
+    let template = thermal(&[380.0, 390.0], 0.0, 0.0);
+    let events = [0.0, 0.125]
+        .into_iter()
+        .enumerate()
+        .map(|(i, time_s)| TimedEvent {
+            time_s,
+            event: Event::Birth(template.cells()[&CellId(i as u64 + 10)].clone()),
+        })
+        .collect();
+    let mut thermal = scheduled(events, &[(MaterialId(3), &AMORPHOUS)]);
+    thermal.budget.max_substeps = 1;
+    let mut start = CrystallizationSimulation::new(thermal, &[material(&law)], || Ok(())).unwrap();
+    assert!(
+        start
+            .set_boundary(CellId(10), boundary(10.0), || Ok(()))
+            .is_err()
+    );
+    assert!(matches!(
+        start.advance_to(0.25, controls(0.125), || Ok(())),
+        Err(CrystallizationTimelineError::Thermal(
+            DepositionError::Budget(_)
+        ))
+    ));
+    assert_eq!(start.time_s(), 0.0);
+    assert!(start.cells().is_empty());
+    assert_eq!(start.pending_events().len(), 2);
+    let mut born = start.advance_to(0.0, controls(0.125), || Ok(())).unwrap().0;
+    born.set_boundary(CellId(10), boundary(10.0), || Ok(()))
+        .unwrap();
+    assert_eq!(born.cells()[&CellId(10)].boundary.htc_w_m2_k, 10.0);
+}
