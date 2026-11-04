@@ -76,6 +76,10 @@ impl ModalGalerkin {
                 .source
                 .regional_gases()
                 .is_some_and(|gases| gases.iter().any(|gas| gas != original.gas()))
+            || self
+                .source
+                .gas_field()
+                .is_some_and(|field| field.uniform_state().is_none())
         {
             return Err(invalid(
                 "molecular modal source needs its exact uniform gas state",

@@ -17,9 +17,11 @@
 use fs_duct::RadiusProfile;
 use fs_duct::modal::ModeCount;
 use fs_duct::modal::time_domain::{
-    ModalEnd, ModalGalerkinSource, ModalTimeError, assemble_lossless, assemble_lossless_regional,
+    ModalEnd, ModalGalerkinSource, ModalTimeError, assemble_lossless, assemble_lossless_field,
+    assemble_lossless_regional,
 };
 use fs_material::gas::GasState;
+use fs_material::gas_field::AxialGasField;
 use fs_phs::PortHamiltonian;
 use fs_phs::linear_exact::{
     LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, MultiportScatteringStepRecord,
@@ -118,6 +120,42 @@ impl ContinuousModalLine {
         Self::prepare(source, system, None, duration, budget, &mut cancelled)
     }
 
+    /// Prepare the original full modal time evolution in a source-backed
+    /// temperature/composition field. The shared assembler evaluates the actual
+    /// gas at each physical Gauss point and retains its source receipts; this
+    /// runtime uses the resulting consistent mass and stiffness without a fit.
+    /// Both external faces retain their own gas/area wave references.
+    ///
+    /// The background is prescribed, common-pressure and frozen. Material
+    /// stations must align with axial element boundaries. The complete state,
+    /// all retained modes and original exact-flow resource limits remain active.
+    ///
+    /// # Errors
+    /// Original material, field/grid, capacity, cancellation and exact-flow refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_field(
+        profile: &RadiusProfile,
+        field: &AxialGasField,
+        modes: ModeCount,
+        elements: usize,
+        end: ModalEnd,
+        duration: f64,
+        budget: LinearSplitBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ModalTimeError> {
+        let image = assemble_lossless_field(
+            profile,
+            field,
+            modes,
+            elements,
+            end,
+            budget.max_modes,
+            &mut cancelled,
+        )?;
+        let (source, system) = image.into_parts();
+        Self::prepare(source, system, None, duration, budget, &mut cancelled)
+    }
+
     /// Attach a quiescent complete original modal load to every mouth mode, then
     /// prepare ONE exact coupled evolution. The load sees actual mouth pressure
     /// and returns outward duct flow: U_duct=-U_load, P_load=P_duct. Every
@@ -195,6 +233,39 @@ impl ContinuousModalLine {
                     "regional modal source requires a mouth gas",
                 ))?;
         Self::validate_load_binding(profile, mouth_gas, modes, &load)?;
+        Self::prepare_loaded(source, duct, load, duration, budget, &mut cancelled)
+    }
+
+    /// Interconnect a complete original mouth load with the source-backed
+    /// primitive-field duct before preparing one exact coupled evolution.
+    /// The load binds to the actual endpoint gas, radial basis and aperture;
+    /// every load state, mutual term and loss enters the same physical clock.
+    ///
+    /// # Errors
+    /// The refusals of [`Self::new_field`] and the original mouth/load binding
+    /// and complete coupled-state capacity checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_field_loaded(
+        profile: &RadiusProfile,
+        field: &AxialGasField,
+        modes: ModeCount,
+        elements: usize,
+        load: ModalAdmittanceLoad,
+        duration: f64,
+        budget: LinearSplitBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ModalTimeError> {
+        let image = assemble_lossless_field(
+            profile,
+            field,
+            modes,
+            elements,
+            ModalEnd::Ports,
+            budget.max_modes,
+            &mut cancelled,
+        )?;
+        let (source, duct) = image.into_parts();
+        Self::validate_load_binding(profile, source.outlet_gas(), modes, &load)?;
         Self::prepare_loaded(source, duct, load, duration, budget, &mut cancelled)
     }
 

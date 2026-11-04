@@ -29,7 +29,10 @@
 use super::riccati::{Basis, ModeCount};
 use crate::{DuctError, LossModel, RadiusProfile};
 use fs_la::factor::cholesky;
+use fs_material::MaterialError;
 use fs_material::gas::GasState;
+use fs_material::gas_field::AxialGasField;
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM;
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage};
 
@@ -52,6 +55,8 @@ pub enum ModalEnd {
 /// Refusal from the physical duct source or the existing structural owner.
 #[derive(Debug)]
 pub enum ModalTimeError {
+    /// Original primitive-field, thermodynamic, transport or phase refusal.
+    Material(MaterialError),
     /// Original geometry, gas, mode or cancellation refusal.
     Duct(DuctError),
     /// Original passive-structure / exact-propagation refusal.
@@ -62,13 +67,28 @@ pub enum ModalTimeError {
 impl core::fmt::Display for ModalTimeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Material(error) => write!(f, "modal gas field: {error}"),
             Self::Duct(error) => write!(f, "modal time source: {error}"),
             Self::Structure(error) => write!(f, "modal time structure: {error}"),
             Self::Invalid(what) => write!(f, "modal time source: {what}"),
         }
     }
 }
-impl core::error::Error for ModalTimeError {}
+impl core::error::Error for ModalTimeError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Material(error) => Some(error),
+            Self::Duct(error) => Some(error),
+            Self::Structure(error) => Some(error),
+            Self::Invalid(_) => None,
+        }
+    }
+}
+impl From<MaterialError> for ModalTimeError {
+    fn from(error: MaterialError) -> Self {
+        Self::Material(error)
+    }
+}
 impl From<DuctError> for ModalTimeError {
     fn from(error: DuctError) -> Self {
         Self::Duct(error)
@@ -87,7 +107,12 @@ impl From<PhsError> for ModalTimeError {
 pub struct ModalGalerkinSource {
     profile: RadiusProfile,
     gas: GasState,
+    outlet_gas: GasState,
     regional_gases: Option<Vec<GasState>>,
+    gas_field: Option<AxialGasField>,
+    /// Original source evaluations, in element/low-Gauss/high-Gauss order.
+    /// A uniform field borrows its one original resolved state instead.
+    quadrature_gases: Vec<ResolvedThermochemicalGasState>,
     modes: ModeCount,
     elements: usize,
     end: ModalEnd,
@@ -106,14 +131,25 @@ impl ModalGalerkinSource {
         &self.profile
     }
     /// Original admitted inlet gas. For a regional source, the other original
-    /// states remain available through [`Self::gas_at_element`].
+    /// states remain available through [`Self::gas_at_element`]. A primitive
+    /// field retains its full evaluations through [`Self::gas_at_quadrature`].
     pub const fn gas(&self) -> &GasState {
         &self.gas
     }
+    /// Actual gas at the mouth, including the endpoint of a primitive field.
+    pub const fn outlet_gas(&self) -> &GasState {
+        &self.outlet_gas
+    }
     /// Original gas of one axial element, without averaging its density,
-    /// compressibility or source state. Out-of-range indices return None.
+    /// compressibility or source state. Out-of-range indices and nonuniform
+    /// primitive fields return None; use their actual quadrature evaluations.
     pub fn gas_at_element(&self, element: usize) -> Option<&GasState> {
-        if element >= self.elements {
+        if element >= self.elements
+            || self
+                .gas_field
+                .as_ref()
+                .is_some_and(|field| field.uniform_state().is_none())
+        {
             return None;
         }
         Some(
@@ -126,6 +162,40 @@ impl ModalGalerkinSource {
     /// The uniform constructor retains its single original state instead.
     pub fn regional_gases(&self) -> Option<&[GasState]> {
         self.regional_gases.as_deref()
+    }
+    /// Original primitive temperature/composition field and all material sources.
+    pub const fn gas_field(&self) -> Option<&AxialGasField> {
+        self.gas_field.as_ref()
+    }
+    /// Physical position of an assembly Gauss point [m]. Points 0 and 1 are
+    /// ordered from inlet to mouth within the original axial element.
+    pub fn gas_quadrature_position_m(&self, element: usize, point: usize) -> Option<f64> {
+        if element >= self.elements || point >= 2 {
+            return None;
+        }
+        let offset = 0.5 / fs_math::det::sqrt(3.0);
+        let fraction = if point == 0 {
+            0.5 - offset
+        } else {
+            0.5 + offset
+        };
+        Some((element as f64 + fraction) * (self.profile.length() / self.elements as f64))
+    }
+    /// Original source-resolved gas at an assembly Gauss point. Uniform fields
+    /// return their one retained source; a numerical-only constructor has none.
+    /// This is a read-only cached evaluation, with no material query or allocation.
+    pub fn gas_at_quadrature(
+        &self,
+        element: usize,
+        point: usize,
+    ) -> Option<&ResolvedThermochemicalGasState> {
+        if element >= self.elements || point >= 2 {
+            return None;
+        }
+        let field = self.gas_field.as_ref()?;
+        field
+            .uniform_state()
+            .or_else(|| self.quadrature_gases.get(2 * element + point))
     }
     /// Complete retained radial basis, including the plane mode.
     pub const fn modes(&self) -> ModeCount {
@@ -238,7 +308,7 @@ pub fn assemble_lossless(
     cancelled: impl FnMut() -> bool,
 ) -> Result<ModalGalerkin, ModalTimeError> {
     assemble(
-        profile, gas, None, modes, elements, end, max_states, cancelled,
+        profile, gas, None, None, modes, elements, end, max_states, cancelled,
     )
 }
 
@@ -277,8 +347,73 @@ pub fn assemble_lossless_regional(
         profile,
         inlet,
         Some(gases),
+        None,
         modes,
         gases.len(),
+        end,
+        max_states,
+        cancelled,
+    )
+}
+
+/// Assemble the same complete modal operator from a source-backed primitive
+/// gas field. Each physical Gauss point reevaluates temperature and composition
+/// through the original thermochemistry/transport owner. Density and sound speed
+/// are never interpolated independently, and no modal coordinate is removed.
+///
+/// The field must cover the exact profile length. For a nonuniform field,
+/// every interior material station must coincide with an axial element boundary
+/// to floating-point roundoff; refine the element grid if it does not. Thus a
+/// cellwise jump or primitive-slope break is never hidden inside a quadrature
+/// element. Both face references use their actual endpoint gas. A uniform field
+/// delegates to the original uniform assembly and retains its source receipts.
+///
+/// The common-pressure background remains prescribed and frozen. This supplies
+/// lossless multimodal acoustics, not heat/species transport, mean flow, wall
+/// diffusion or nonuniform molecular absorption. Axial and radial convergence
+/// remain separate obligations.
+///
+/// # Errors
+/// Original material/phase refusals, field extent or station-grid mismatch,
+/// complete-state capacity, cancellation, or the original assembly refusals.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_lossless_field(
+    profile: &RadiusProfile,
+    field: &AxialGasField,
+    modes: ModeCount,
+    elements: usize,
+    end: ModalEnd,
+    max_states: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ModalGalerkin, ModalTimeError> {
+    cancelled_at(&mut cancelled, 0)?;
+    if field.length_m() != profile.length() {
+        return Err(ModalTimeError::Invalid(
+            "modal gas field must cover the exact complete profile length",
+        ));
+    }
+    if let Some(uniform) = field.uniform_state() {
+        let mut image = assemble_lossless(
+            profile,
+            uniform.state(),
+            modes,
+            elements,
+            end,
+            max_states,
+            &mut cancelled,
+        )?;
+        image.source.gas_field = Some(field.clone());
+        cancelled_at(&mut cancelled, elements)?;
+        return Ok(image);
+    }
+    let inlet = field.state_at(0.0)?;
+    assemble(
+        profile,
+        inlet.state(),
+        None,
+        Some(field),
+        modes,
+        elements,
         end,
         max_states,
         cancelled,
@@ -290,6 +425,7 @@ fn assemble(
     profile: &RadiusProfile,
     gas: &GasState,
     regional_gases: Option<&[GasState]>,
+    gas_field: Option<&AxialGasField>,
     modes: ModeCount,
     elements: usize,
     end: ModalEnd,
@@ -340,9 +476,13 @@ fn assemble(
             }
         }
     }
-    let outlet_gas = regional_gases.map_or(gas, |gases| &gases[elements - 1]);
+    let outlet_gas = if let Some(field) = gas_field {
+        *field.state_at(profile.length())?.state()
+    } else {
+        *regional_gases.map_or(gas, |gases| &gases[elements - 1])
+    };
     let mouth_reference = crate::segment_wave(
-        outlet_gas,
+        &outlet_gas,
         profile.outlet_radius(),
         1.0,
         LossModel::Lossless,
@@ -355,18 +495,37 @@ fn assemble(
             "axial element width is unrepresentable",
         ));
     }
+    if let Some(field) = gas_field {
+        for &station in &field.stations_m()[1..field.stations_m().len() - 1] {
+            cancelled_at(&mut cancelled, 0)?;
+            let index = (station / h).round();
+            let tolerance = 8.0 * f64::EPSILON * station.abs().max(h);
+            if index < 1.0 || index >= elements as f64 || (station - index * h).abs() > tolerance {
+                return Err(ModalTimeError::Invalid(
+                    "modal gas field stations must align with axial element boundaries; refine the grid",
+                ));
+            }
+        }
+    }
     let basis = Basis::new(n);
     let entries = coordinates * coordinates;
     let mut mass = vec![0.0; entries];
     let mut stiffness = vec![0.0; entries];
     let local = 2 * n;
     let mut gradient = vec![0.0; n * local];
+    let mut quadrature_gases =
+        Vec::with_capacity(if gas_field.is_some() { 2 * elements } else { 0 });
     let offset = 0.5 / fs_math::det::sqrt(3.0);
     for element in 0..elements {
         cancelled_at(&mut cancelled, element)?;
         let local_gas = regional_gases.map_or(gas, |gases| &gases[element]);
         for fraction in [0.5 - offset, 0.5 + offset] {
             let x = (element as f64 + fraction) * h;
+            let resolved = gas_field.map(|field| field.state_at(x)).transpose()?;
+            let local_gas = resolved.as_ref().map_or(local_gas, |sample| sample.state());
+            if resolved.is_some() {
+                crate::validate_gas(local_gas)?;
+            }
             let radius = profile.radius(x)?;
             let flare = profile.slope(x)? / radius;
             let area = core::f64::consts::PI * radius * radius;
@@ -418,6 +577,9 @@ fn assemble(
                     }
                     stiffness[row * coordinates + column] += kinetic_weight * k;
                 }
+            }
+            if let Some(resolved) = resolved {
+                quadrature_gases.push(resolved);
             }
         }
     }
@@ -496,7 +658,10 @@ fn assemble(
         source: ModalGalerkinSource {
             profile: profile.clone(),
             gas: *gas,
+            outlet_gas,
             regional_gases: regional_gases.map(<[GasState]>::to_vec),
+            gas_field: gas_field.cloned(),
+            quadrature_gases,
             modes,
             elements,
             end,

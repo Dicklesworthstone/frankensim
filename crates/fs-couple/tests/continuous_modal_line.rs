@@ -11,6 +11,9 @@ use fs_phs::harmonic::{HarmonicBudget, HarmonicModel};
 use fs_phs::linear_exact::LinearSplitBudget;
 use fs_phs::{PortHamiltonian, QuadraticStorage};
 
+#[path = "continuous_modal_line/gas_field.rs"]
+mod gas_field;
+
 fn line(duration: f64) -> ContinuousModalLine {
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
     let profile = RadiusProfile::exponential(0.025, 10.0, 0.12).unwrap();

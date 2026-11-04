@@ -9,6 +9,9 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_math::{c64::C64, det};
 use fs_phs::harmonic::{HarmonicBudget, HarmonicModel, PoleOptions};
 
+#[path = "modal_time_domain/gas_field.rs"]
+mod gas_field;
+
 fn air() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
 }

@@ -2850,6 +2850,36 @@ transition against independent pressure/flow formulas, then refine the first
 closed/open physical pole against the analytic two-section boundary root.
 Original gas-coherence, capacity and cancellation refusals remain mandatory.
 
+`assemble_lossless_field` binds the same complete weak operator to the original
+`fs_material::gas_field::AxialGasField`. Each physical two-point Gauss node uses
+the source-resolved temperature/composition state in `S/rho` and
+`S/(rho*c^2)`. It retains the primitive field, material/thermochemical receipts,
+and every resolved quadrature state. Density, speed and compressibility are not
+interpolated independently. Uniform fields delegate to the original uniform
+assembly bit for bit; aligned cellwise fields reproduce the regional operator.
+Both face references use their own endpoint gas. A nonuniform field has no
+single `gas_at_element` value: callers inspect the actual cached
+`gas_at_quadrature` and its physical position, or the original `gas_field`.
+
+The field must cover the exact profile length. Every nonuniform field station
+must lie on an axial element boundary to representational roundoff, so neither
+a primitive-slope break nor a material jump is hidden inside a quadrature
+element. Misalignment asks for refinement; capacity never reduces resolution.
+Original material/phase refusals and early/late cancellation publish no source.
+Uniform molecular attachment still refuses a nonuniform field. This is frozen,
+lossless, axisymmetric acoustics, with no new mean flow, background transport,
+wall diffusion, nonuniform molecular law or measured instrument claim.
+
+The G1/G3 regressions in `tests/modal_time_domain/gas_field.rs` retain source
+identities and exact uniform/regional parity, compare weak storage and both
+axial/transverse stiffness with analytic mixture integrals, and refine the
+complete modal response against an independent pressure/flow ODE through a
+temperature/composition-induced transverse cutoff. A flared two-face fixture
+checks mutual response, reciprocity and physical port work. The existing
+`fs-couple::mm_line::continuous::ContinuousModalLine` consumes this same owner
+through `new_field` and `new_field_loaded`, including original mouth-load memory
+and heat on the one prepared physical clock.
+
 
 ## Two-face continuous modal ports
 
