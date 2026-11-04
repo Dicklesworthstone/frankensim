@@ -44,7 +44,10 @@ pub use harmonic::{
 };
 
 mod observation;
-pub use observation::{HarmonicAcousticSample, HeterogeneousProbe, TransientAcousticSample};
+pub use observation::{
+    ElementFace, HarmonicAcousticSample, HarmonicSurfacePower, HeterogeneousProbe,
+    HeterogeneousSurfaceProbe, SurfaceProbeLimits, TransientAcousticSample,
+};
 
 /// Broadband evolution in the original pressure-potential coordinates.
 pub mod time;

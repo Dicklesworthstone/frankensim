@@ -438,15 +438,38 @@ impl<'c> HelmholtzFe<'c> {
         key.sort_unstable();
         let fi = self.space.complex.faces.binary_search(&key)
             .map_err(|_| AcousticFeError::FaceNotInMesh { face })?;
-        let (tet, omit, count) = self.owners[fi];
+        let (tet, _, count) = self.owners[fi];
         if count != 1 { return Err(AcousticFeError::FaceNotOnBoundary { face }); }
+        self.element_face_geometry(tet as usize, face)
+    }
+
+    /// One original tetrahedron face, including an INTERNAL material interface.
+    /// The returned vertices follow the caller's order; the unit normal points
+    /// OUTWARD from the explicitly selected tetrahedron, independently of winding.
+    /// Selecting the other owner of a shared face reverses the normal.
+    pub fn element_face_geometry(&self, element: usize, face: [u32; 3])
+        -> Result<([[f64; 3]; 3], [f64; 3], f64), AcousticFeError>
+    {
+        let tet = self.space.complex.tets.get(element).ok_or(
+            AcousticFeError::InvalidInput { what: "surface requires an original tetrahedron index" },
+        )?;
+        let mut key = face;
+        key.sort_unstable();
+        if key[0] == key[1] || key[1] == key[2] || face.iter().any(|v| !tet.contains(v)) {
+            return Err(AcousticFeError::InvalidInput {
+                what: "surface face must contain three distinct vertices of the selected tetrahedron",
+            });
+        }
+        let opposite = tet.iter().find(|v| !face.contains(v)).ok_or(
+            AcousticFeError::InvalidInput { what: "surface face has no opposite tetrahedron vertex" },
+        )?;
         let vertices = face.map(|v| self.positions[v as usize]);
         let area_vector = cross3(sub3(vertices[1], vertices[0]), sub3(vertices[2], vertices[0]));
         let twice_area = fs_math::det::sqrt(dot3(area_vector, area_vector));
-        let opposite = self.positions[self.space.complex.tets[tet as usize][omit as usize] as usize];
+        let opposite = self.positions[*opposite as usize];
         let sign = if dot3(area_vector, sub3(opposite, vertices[0])) < 0.0 { 1.0 } else { -1.0 };
         if !twice_area.is_finite() || twice_area <= 0.0 {
-            return Err(AcousticFeError::DegenerateTet { tet: tet as usize });
+            return Err(AcousticFeError::DegenerateTet { tet: element });
         }
         Ok((vertices, area_vector.map(|v| sign * v / twice_area), 0.5 * twice_area))
     }

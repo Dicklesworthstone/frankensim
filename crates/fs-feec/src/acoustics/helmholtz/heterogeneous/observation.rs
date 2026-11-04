@@ -13,6 +13,11 @@ use super::{
 };
 use fs_math::c64::C64;
 
+mod surface;
+pub use surface::{
+    ElementFace, HarmonicSurfacePower, HeterogeneousSurfaceProbe, SurfaceProbeLimits,
+};
+
 /// Complex peak fields in `exp(+i omega t)` and time-averaged energy flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarmonicAcousticSample {

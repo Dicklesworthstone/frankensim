@@ -311,6 +311,7 @@ fn oblique_refraction_and_evanescent_pressure_converge_to_snell_fields() {
     for tangential_k in [0.6, 1.4] {
         let mut errors = Vec::new();
         let mut intensity_errors = Vec::new();
+        let mut power_errors = Vec::new();
         for refinement in [1, 2, 4] {
             let (complex, positions) = brick([2 * refinement, refinement, 1], [1.0, 0.5, 0.2]);
             let geometry = HelmholtzFe::new(&complex, &positions, 2, UNIFORM).unwrap();
@@ -413,6 +414,42 @@ fn oblique_refraction_and_evanescent_pressure_converge_to_snell_fields() {
             );
             errors.push(error);
             intensity_errors.push(intensity_error);
+            // Measure the RECEIVING side of the actual material interface.
+            // Its outward normal points back toward the incident medium.
+            let mut interface = Vec::new();
+            for (element, tet) in geometry.tetrahedra().iter().enumerate() {
+                let center_x = tet.iter().map(|&v| 0.25 * positions[v as usize][0]).sum::<f64>();
+                if center_x <= 0.5 {
+                    continue;
+                }
+                let on_face: Vec<_> = tet.iter().copied()
+                    .filter(|&v| positions[v as usize][0] == 0.5).collect();
+                if on_face.len() == 3 {
+                    interface.push(ElementFace {
+                        element,
+                        vertices: [on_face[0], on_face[1], on_face[2]],
+                    });
+                }
+            }
+            let surface = model.surface_probe(&interface, 3, SurfaceProbeLimits::default(),
+                &mut source, &mut || false).unwrap();
+            assert!((surface.area_m2() - 0.1).abs() < 1e-14);
+            let power = surface.harmonic(&field.pressure_pa, prepared.frequency_hz(),
+                &mut || false).unwrap();
+            let transmission = interface_wave([0.5, 0.0, 0.0], true, tangential_k).0;
+            let factor = 0.1 * transmission.norm_sq() / 8.0;
+            let expected_power = C64::new(-normal_k.re, normal_k.im).scale(factor);
+            let measured_power = C64::new(power.active_power_w, power.reactive_power_w);
+            power_errors.push((measured_power - expected_power).abs() / expected_power.abs());
+            if refinement == 4 {
+                if tangential_k < 1.0 {
+                    assert!(power.active_power_w < 0.0, "refracted power enters receiving medium");
+                } else {
+                    assert!(power.reactive_power_w < 0.0);
+                    assert!(power.active_power_w.abs() < 0.1 * expected_power.abs(),
+                        "evanescent interface does not transmit normal active power");
+                }
+            }
             assert_eq!(field.boundary_dissipation_w, 0.0);
             assert!(field.input_power_w.abs() < 1e-10);
             if tangential_k > 1.0 && refinement == 4 {
@@ -439,6 +476,9 @@ fn oblique_refraction_and_evanescent_pressure_converge_to_snell_fields() {
         assert!(intensity_errors[2] < 0.1, "kt={tangential_k}: {intensity_errors:?}");
         assert!(intensity_errors[2] < intensity_errors[1] && intensity_errors[1] < intensity_errors[0],
             "gradient/intensity convergence is independent of pressure: kt={tangential_k}: {intensity_errors:?}");
+        assert!(power_errors[2] < 0.1, "kt={tangential_k}: power errors {power_errors:?}");
+        assert!(power_errors[2] < power_errors[1] && power_errors[1] < power_errors[0],
+            "integrated interface power needs independent convergence: kt={tangential_k}: {power_errors:?}");
     }
 }
 
