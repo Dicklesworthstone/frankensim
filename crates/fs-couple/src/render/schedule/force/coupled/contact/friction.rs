@@ -26,11 +26,12 @@
 //! component/connection limits and state transaction remain in charge.
 //!
 //! One tangential coordinate and a prescribed nonnegative normal load are
-//! supported. Where a Stribeck or hyperbolic law meets the load line more than
+//! supported. Where a shared dry law meets the load line more than
 //! once, the contact keeps the branch it occupies (McIntyre, Schumacher &
 //! Woodhouse 1983, through `stribeck_friction::StribeckLoadLine`), and every
-//! frame discloses the root count and the committed root. Other laws keep the
-//! scalar bisection. No normal collision, finite contact patch, thermal/wear
+//! frame discloses the root count and the committed root. Coulomb and clipped
+//! linear laws retain their own kinetic-arrest branch and exact affine roots.
+//! No normal collision, finite contact patch, thermal/wear
 //! evolution, experimental validation or hard-real-time claim is implied. Input law coefficients retain caller authority. A nonzero drive
 //! speed is an explicit work source; zero drive gives a passive internal brake.
 
@@ -237,8 +238,8 @@ pub struct FrictionModalFrame {
     /// The branch-continuation owner bisects each root to adjacent floats and
     /// refuses when that exceeds `max_iterations`.
     pub iterations: usize,
-    /// Root disclosure of a Stribeck or hyperbolic step; `None` for laws
-    /// without a disclosed root rule and for a released contact.
+    /// Root disclosure of an active dry or adhesive step; `None` for a
+    /// released contact. Every shared dry law uses the same continuation rule.
     pub roots: Option<FrictionRoots>,
 }
 
@@ -618,27 +619,25 @@ impl FrictionModalSystem {
         Ok(accepted)
     }
 
-    // Stribeck, hyperbolic and shifted-power laws take the branch-continuation
-    // owner on the same endpoint load line, v = v_free - (c/dt) F with
+    // Every dry law takes the branch-continuation owner on the same endpoint
+    // load line, v = v_free - (c/dt) F with
     // v_free = free_slip/dt, starting from the branch the contact occupies.
-    // Every other law, and a released contact, keeps the scalar bisection unchanged.
+    // Released contacts keep the original zero-force path.
     fn solve_contact(&mut self, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
         -> Result<(f64, ModalFrictionRegime, usize, Option<FrictionRoots>), ModalFrictionError>
     {
-        let continued = matches!(self.port.law,
-            FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. } | FrictionLaw::ShiftedPower { .. });
         if let Some(binding) = &self.adhesive {
             let contact = binding.tangential().contact();
             if normal != contact.repulsive_normal_force_n() {
                 return Err(invalid("held adhesive input must match the current repulsive normal load").into());
             }
-            if !continued || contact.area_m2() == 0.0 {
+            if contact.area_m2() == 0.0 {
                 let (traction, regime, iterations) = binding.solve(self.config, self.displacement_compliance,
                     self.network.dt, free_slip, normal, gate)?;
                 self.staged_branch = ContactBranch::Fresh;
                 return Ok((traction, regime, iterations, None));
             }
-        } else if !continued || normal == 0.0 {
+        } else if normal == 0.0 {
             self.staged_branch = ContactBranch::Fresh;
             let (traction, regime, iterations) = scalar::solve(&self.port.law, self.config, self.compliance, self.network.dt, free_slip, normal, gate)?;
             return Ok((traction, regime, iterations, None));

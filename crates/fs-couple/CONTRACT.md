@@ -18,6 +18,15 @@ Seven native G0/G1/G3 regression groups
 cover these limits, both slope signs, reversal and adhesive offsets. This adds
 no state-ageing law, thermal evolution or continuous-time passivity claim.
 
+Single and simultaneous modal friction ports use this continuation for every
+active dry law. Each accepted step publishes its own branch and root disclosure;
+release retains the original zero-force path. Stateful shear layers and Mindlin
+microslip remain with their original owners. Direct and interface-bound bow
+declarations now admit Coulomb and clipped-linear laws through the same solver,
+without translating them to Stribeck curves. Focused native integration fixtures
+exercise kinetic continuation inside the static cone, opposite port directions,
+actual mechanical work and the independent exact-oscillator load line.
+
 ## Source-backed ionic phases during finite moisture exchange
 
 `FiniteMoistureSolution::with_electrolyte_solubility` retains the original
@@ -19156,8 +19165,7 @@ and zero repulsion with real contact area does not release the junction.
 
 The `FrictionDrive` normal input must equal the repulsive force held over the
 current tangential sample. It is
-not the signed net adhesive reaction. Coulomb and affine pressure contributions
-use the original held-effort solve. Stribeck and hyperbolic pressure contributions
+not the signed net adhesive reaction. All shared dry pressure contributions
 use the same cached `StribeckLoadLine` continuation as dry friction, with actual
 `tau_kinetic A` added to sliding force and independent `tau_static A` in the
 static cone. This offset changes the residual without changing its critical

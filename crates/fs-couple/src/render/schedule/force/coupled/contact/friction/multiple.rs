@@ -96,8 +96,8 @@ pub struct FrictionPortFrame {
     pub constitutive_residual_n: f64,
     /// Dry contact branch, or explicitly resolved elastic/plastic material shear.
     pub regime: ModalFrictionRegime,
-    /// Root disclosure for a Stribeck or hyperbolic port; `None` for laws
-    /// without a disclosed rule and for a released contact.
+    /// Root disclosure for an active dry port; `None` for a released contact
+    /// or a stateful layer/microslip law with its own constitutive response.
     pub roots: Option<FrictionRoots>,
     /// Independent material-layer storage/loss, absent for unchanged dry ports.
     pub shear_layer: Option<layer::ShearLayerFrame>,
@@ -739,10 +739,10 @@ impl MultiFrictionModalSystem {
         if held && self.endpoint_line { self.creeps[i] } else { 0.0 }
     }
 
-    // Stribeck and hyperbolic ports take the branch-continuation owner on
-    // their own held-force load line, keeping the branch each occupies across
-    // the joint sweep; the branch commits only when the step publishes. Every
-    // other law, and a released port, keeps the scalar bisection unchanged.
+    // Every dry port takes the branch-continuation owner on its own held-force
+    // load line, keeping the branch it occupies across the joint sweep. The
+    // branch commits only when the step publishes. Released ports keep their
+    // original zero-force path; stateful shear and microslip have their own laws.
     fn solve_point(&mut self, i: usize, free: f64, normal: f64, gate: Option<&CancelGate>)
         -> Result<(f64, ModalFrictionRegime, usize, Option<FrictionRoots>), ModalFrictionError>
     {
@@ -763,9 +763,7 @@ impl MultiFrictionModalSystem {
             self.staged_branches[i] = ContactBranch::Fresh;
             return contact.solve(free, compliance, normal, dt, config);
         }
-        let continued = matches!(law,
-            FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. } | FrictionLaw::ShiftedPower { .. });
-        if !continued || normal == 0.0 {
+        if normal == 0.0 {
             self.staged_branches[i] = ContactBranch::Fresh;
             let (force, regime, iterations) = scalar::solve(&law, config, compliance, dt, free, normal, gate)?;
             return Ok((force, regime, iterations, None));

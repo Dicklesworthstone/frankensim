@@ -108,6 +108,41 @@ fn first_sample_matches_independent_oscillator_solution() {
     assert!((sample.total_modal_energy_j - 0.5 * (v * v + omega * omega * q * q)).abs() < 1e-16);
 }
 
+/// G1: the original bow runtime accepts each affine shared law and drives its
+/// original exact oscillator with the independently eliminated contact force.
+#[test]
+fn affine_bow_laws_match_the_original_modal_load_line() {
+    for slope in [None, Some(-0.25), Some(0.25)] {
+        let mut cfg = config();
+        cfg.card.mode_count = 1;
+        cfg.card.zetas = vec![0.0];
+        cfg.subsamples = 1;
+        cfg.gesture = BowGesture::admit(0.2, 0.025, 0.2).unwrap();
+        cfg.island = FrictionIsland::Constitutive(match slope {
+            None => fs_tribo::FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.2 },
+            Some(slope_per_speed) => fs_tribo::FrictionLaw::VelocityDependent {
+                static_mu: 0.8, mu_zero: 0.2, slope_per_speed,
+            },
+        });
+        let kappa = core::f64::consts::PI / cfg.card.length_m;
+        let omega = kappa * (cfg.card.tension_n / cfg.card.linear_density_kg_m).sqrt();
+        let norm = (cfg.card.linear_density_kg_m * cfg.card.length_m * 0.5).sqrt();
+        let phi = (core::f64::consts::PI * 0.2).sin() / norm;
+        let unit_v = (omega / 48000.0).sin() / omega;
+        let mobility = phi * phi * unit_v;
+        let relative = (0.2 - mobility * 0.025 * 0.2)
+            / (1.0 + mobility * 0.025 * slope.unwrap_or(0.0));
+        let traction = 0.025 * (0.2 + slope.unwrap_or(0.0) * relative);
+        let sample = BowedStringState::new(&cfg, 1).unwrap().step().unwrap();
+        assert!((sample.relative_velocity_m_s - relative).abs() < 1e-13);
+        assert!((sample.bow_point_velocity_m_s - mobility * traction).abs() < 1e-13);
+        assert_eq!(sample.contact.branch,
+            fs_couple::stribeck_friction::ContactBranch::SlidingLow { positive: true });
+        assert_eq!((sample.contact.roots, sample.contact.selected), (1, 0));
+        assert!(sample.total_modal_energy_j > 0.0);
+    }
+}
+
 #[test]
 fn lifting_bow_preserves_ringdown_and_removes_even_viscous_contact() {
     let mut cfg = config();

@@ -105,6 +105,44 @@ fn two_body_coulomb_brake_matches_independent_forced_oscillators() {
     assert!((s.total_energy_j().unwrap()-energy+f.friction_dissipation_j).abs() < 1e-12);
 }
 
+/// G1: the native modal owner continues kinetic sliding even when a separate
+/// sticking solution appears inside the static cone on the following sample.
+#[test]
+fn affine_modal_friction_retains_sliding_inside_the_static_cone() {
+    for slope in [None, Some(-0.25), Some(0.25)] {
+        let law = match slope {
+            None => FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.2 },
+            Some(slope_per_speed) => FrictionLaw::VelocityDependent {
+                static_mu: 0.8, mu_zero: 0.2, slope_per_speed,
+            },
+        };
+        let model = ModalAcousticTimeModel::try_new_with_free_coordinates(48000,
+            vec![ModalAcousticMode { angular_frequency_rad_s: 0.0, damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO }],
+            ModalAcousticTimeBudget::audible_reference()).unwrap();
+        let gate = CancelGate::new_clock_free();
+        let network = CoupledModalSystem::new(vec![model], vec![], budgets(), &gate).unwrap();
+        let mut owner = FrictionModalSystem::new(network, ModalFrictionPort {
+            left: ModalAttachment { component: 0, shapes: vec![1.0] }, right: None, law,
+        }, ModalFrictionConfig { maximum_force_n: 1e5, ..config() }, &gate).unwrap();
+        let normal = 48000.0; // m=1 kg and dt=1/48000 s give m_discrete*N=1 m/s.
+        assert_eq!(owner.step(&[0.0], drive(1.2, normal)).unwrap().regime,
+            ModalFrictionRegime::Sliding);
+        let velocity = owner.components()[0].states()[0].velocity_m_sqrt_kg_per_s;
+        let frame = *owner.step(&[0.0], drive(velocity + 0.5, normal)).unwrap();
+        let expected_slip = 0.3 / (1.0 + slope.unwrap_or(0.0));
+        let expected_force = normal * (0.2 + slope.unwrap_or(0.0) * expected_slip);
+        assert_eq!(frame.regime, ModalFrictionRegime::Sliding);
+        let roots = frame.roots.unwrap();
+        assert_eq!((roots.found, roots.selected), (2, 1));
+        assert_eq!(frame.iterations, 0);
+        assert!((frame.traction_n - expected_force).abs() < 1e-8);
+        assert!((frame.end_slip_speed_m_s - expected_slip).abs() < 1e-12);
+        assert!(frame.friction_dissipation_j > 0.0);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    }
+}
+
 #[test]
 fn stribeck_reversals_follow_owner_law_and_close_actual_drive_work() {
     let mut s = system(true);

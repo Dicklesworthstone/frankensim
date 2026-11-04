@@ -235,9 +235,9 @@ impl BowedStringCard {
 pub enum FrictionIsland {
     /// Legacy Stribeck declaration; the shared unregularized law owns contact.
     Stribeck(StribeckFriction),
-    /// A direct shared Stribeck or hyperbolic dry law. The original load-line
-    /// owner retains the declared functional form and static branch. Other
-    /// laws refuse because that owner's root continuation does not admit them.
+    /// A direct shared dry law. The original load-line owner retains its
+    /// functional form, static capacity and occupied kinetic branch, including
+    /// Coulomb and clipped-linear velocity dependence.
     Constitutive(fs_tribo::FrictionLaw),
     /// Ordered dry-interface law with a fixed temperature and nominal area.
     /// The card retains caller authority, not measured-data admission. This
@@ -250,7 +250,7 @@ pub enum FrictionIsland {
         /// Declared nominal contact area [m²], used to compute N/area.
         nominal_contact_area_m2: f64,
     },
-    /// Ordered source-bound Stribeck or hyperbolic law. Identity, physical
+    /// Ordered source-bound dry law. Identity, physical
     /// coefficients and state-domain checks stay with the original card;
     /// no conversion to a Gaussian or regularized sliding law takes place.
     Interface {
@@ -297,11 +297,6 @@ impl FrictionIsland {
                 return Ok(None);
             }
         };
-        if !matches!(law, fs_tribo::FrictionLaw::Stribeck { .. } | fs_tribo::FrictionLaw::Hyperbolic { .. }
-            | fs_tribo::FrictionLaw::ShiftedPower { .. }) {
-            return Err(BowedRunError::Friction(
-                "set-valued bow contact requires a Stribeck, hyperbolic or shifted-power law"));
-        }
         law.validate().map_err(BowedRunError::Interface)?;
         Ok(Some(law))
     }

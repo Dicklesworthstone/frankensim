@@ -76,6 +76,46 @@ fn all_states(s: &MultiFrictionModalSystem) -> Vec<ModalAcousticState> {
     s.components().iter().flat_map(|m| m.states().iter().copied()).collect()
 }
 
+/// G1/G3: every dry port, including added contacts, retains its own kinetic
+/// branch and direction through the original joint solve and energy transaction.
+#[test]
+fn joint_affine_contacts_preserve_independent_sliding_histories() {
+    let gate = CancelGate::new_clock_free();
+    let models = (0..2).map(|_| ModalAcousticTimeModel::try_new_with_free_coordinates(
+        48000, vec![ModalAcousticMode { angular_frequency_rad_s: 0.0,
+            damping_ratio: 0.0, pressure_per_modal_velocity: C64::ZERO }],
+        ModalAcousticTimeBudget::audible_reference()).unwrap()).collect();
+    let network = CoupledModalSystem::new(models, vec![], budgets(), &gate).unwrap();
+    let cfg = ModalFrictionConfig { maximum_force_n: 1e5, ..config() };
+    let port = |component, law| ModalFrictionPort {
+        left: ModalAttachment { component, shapes: vec![1.0] }, right: None, law,
+    };
+    let core = FrictionModalSystem::new(network, port(0, FrictionLaw::Coulomb {
+        static_mu: 0.8, kinetic_mu: 0.2,
+    }), cfg, &gate).unwrap();
+    let mut bank = core.with_additional_ports(vec![(port(1,
+        FrictionLaw::VelocityDependent { static_mu: 0.8, mu_zero: 0.2,
+            slope_per_speed: 0.25 }), cfg)], joint_config(), &gate).unwrap();
+    let normal = 48000.0;
+    bank.step(&[0.0; 2], &[drive(1.2, normal), drive(-1.2, normal)]).unwrap();
+    let controls: Vec<_> = bank.components().iter().enumerate().map(|(i, model)|
+        drive(model.states()[0].velocity_m_sqrt_kg_per_s
+            + if i == 0 { 0.5 } else { -0.5 }, normal)).collect();
+    let frame = bank.step(&[0.0; 2], &controls).unwrap();
+    for (i, result) in frame.ports.iter().enumerate() {
+        let (sign, slope) = if i == 0 { (1.0, 0.0) } else { (-1.0, 0.25) };
+        let slip = 0.3 / (1.0 + slope);
+        let force = sign * normal * (0.2 + slope * slip);
+        assert_eq!(result.regime, ModalFrictionRegime::Sliding);
+        let roots = result.roots.unwrap();
+        assert_eq!((roots.found, roots.selected), (2, 1));
+        assert!((result.traction_n - force).abs() < 1e-8);
+        assert!((result.end_slip_speed_m_s.unwrap() - sign * slip).abs() < 1e-12);
+        assert!(result.dissipation_j > 0.0);
+    }
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+}
+
 #[test]
 fn resolved_surface_returns_opposite_impulse_without_an_actuator() {
     // G1: two freely moving masses, an internal Coulomb brake and no external
