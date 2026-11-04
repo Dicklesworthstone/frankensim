@@ -14,7 +14,8 @@ use fs_matdb::{
 };
 use fs_material::cavitation::dissolved_gas::{
     DIFFUSIVITY_DIMS, DISSOLVED_DIFFUSIVITY_PROPERTY, DissolutionFilm, DissolvedGasCalorics,
-    DissolvedGasControls, DissolvedGasInventory, HENRY_SOLUBILITY_DIMS, HENRY_SOLUBILITY_PROPERTY,
+    DissolvedGasControls, DissolvedGasError, DissolvedGasInventory, GAS_FILM_DIFFUSIVITY_PROPERTY,
+    GAS_FILM_MOLE_FRACTION_AXIS, GasFilmSource, HENRY_SOLUBILITY_DIMS, HENRY_SOLUBILITY_PROPERTY,
     HenryDissolution, HenrySource, MolarPermeance,
 };
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
@@ -151,12 +152,15 @@ fn caloric(cp: f64) -> ResolvedHeatCapacityCurve {
     .unwrap()
 }
 fn gas() -> ClosedGasParcel {
+    gas_with_fractions([0.8, 0.2])
+}
+fn gas_with_fractions(fractions: [f64; 2]) -> ClosedGasParcel {
     let (a, at) = gas_fixture::component("A", M, 0.0);
     let (b, bt) = gas_fixture::component("B", M, 0.0);
     let model = ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
             vec![a, b],
-            Composition::new(CompositionBasis::MoleFraction, vec![0.8, 0.2]).unwrap(),
+            Composition::new(CompositionBasis::MoleFraction, fractions.to_vec()).unwrap(),
         )
         .unwrap(),
         vec![at, bt],
@@ -221,6 +225,33 @@ fn film() -> DissolutionFilm {
         thickness_m: 1e-5,
         gas_side_transfer: Some(MolarPermeance::try_new(H * D / 1e-5).unwrap()),
     }
+}
+fn sourced_gas_film(law: HenryDissolution, maximum_temperature: f64) -> (HenryDissolution, f64) {
+    let diffusivity = 2e-10;
+    let fraction = q(QuantityKind::Composition(
+        fs_qty::semantic::CompositionBasis::MoleFraction,
+    ));
+    let mut property = claim(
+        GAS_FILM_DIFFUSIVITY_PROPERTY,
+        DIFFUSIVITY_DIMS,
+        [diffusivity * 200.0 / T0, diffusivity * 500.0 / T0],
+        maximum_temperature,
+    );
+    property.validity =
+        property
+            .validity
+            .with_quantity(GAS_FILM_MOLE_FRACTION_AXIS, fraction, 0.0, 0.05);
+    let source = GasFilmSource {
+        species: id("A"),
+        material: card("synthetic dilute A gas-film diffusivity", vec![property]),
+        point: point(T0)
+            .with_quantity(GAS_FILM_MOLE_FRACTION_AXIS, fraction, 0.01)
+            .unwrap(),
+        selection: MaterialPropertySelection::SingleClaimOnly,
+        maximum_mole_fraction: 0.05,
+    };
+    let thickness = diffusivity * film().thickness_m / (H * R * T0 * D);
+    (law.with_gas_film(source, thickness).unwrap(), thickness)
 }
 fn controls() -> ThermalDissolutionControls {
     ThermalDissolutionControls {
@@ -544,4 +575,102 @@ fn g4_late_source_or_cancellation_refusal_keeps_all_temperatures_sources_and_clo
     assert_eq!(gas, original_gas);
     assert_eq!(laws, saved_laws);
     assert_eq!(liquids, original_liquids);
+}
+
+#[test]
+fn g1_sourced_gas_film_continues_its_temperature_and_both_interface_fluxes() {
+    let mut gas = gas_with_fractions([0.01, 0.99]);
+    let (law, thickness) = sourced_gas_film(law(&gas, "A", SOLUTION_HEAT, true, 500.0), 500.0);
+    let mut laws = [law];
+    let mut liquids = [DissolvedGasInventory::new(VL, 0.0, 0.0).unwrap()];
+    let film = DissolutionFilm {
+        gas_side_transfer: None,
+        ..film()
+    };
+    let report = advance_thermal_mixture(
+        &mut laws,
+        &mut gas,
+        &mut liquids,
+        &[film],
+        &solvent(),
+        300.0,
+        20_000.0,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let t = report.final_temperature_k;
+    assert!(t > 309.0);
+    near(
+        laws[0].gas_film_diffusivity_m2_s().unwrap(),
+        2e-10 * t / T0,
+        1e-24,
+    );
+    assert_eq!(
+        laws[0].gas_film_source().unwrap().point.axes()["temperature"],
+        t
+    );
+    let sample = &report.endpoint_sources[0];
+    near(
+        sample.molar_flux_mol_m2_s,
+        D / film.thickness_m
+            * (sample.interface_concentration_mol_m3 - sample.concentration_mol_m3),
+        1e-18,
+    );
+    near(
+        sample.molar_flux_mol_m2_s,
+        (2e-10 * t / T0) / (thickness * R * t)
+            * (sample.partial_pressure_pa - sample.interface_partial_pressure_pa),
+        1e-18,
+    );
+    for material in sample.gas_film_material.as_ref().unwrap() {
+        assert!(
+            material
+                .query_point()
+                .iter()
+                .any(|(axis, value)| axis == "temperature" && *value == t)
+        );
+    }
+    near(report.energy_residual_j, 0.0, controls().energy_tolerance_j);
+}
+
+#[test]
+fn g4_thermal_continuation_keeps_gas_film_source_and_relaxation_refusals() {
+    let original = gas_with_fractions([0.01, 0.99]);
+    let film = DissolutionFilm {
+        gas_side_transfer: None,
+        ..film()
+    };
+    let liquid = DissolvedGasInventory::new(VL, 0.0, 0.0).unwrap();
+    let (supported, _) = sourced_gas_film(law(&original, "A", SOLUTION_HEAT, false, 500.0), 500.0);
+    let mut strict = controls().exchange;
+    strict.maximum_film_relaxation_ratio = 1e-4;
+    assert!(matches!(
+        supported.at_conditions(&original, liquid, film, strict),
+        Err(DissolvedGasError::GasFilmRelaxation { .. })
+    ));
+
+    let (bounded, _) = sourced_gas_film(law(&original, "A", SOLUTION_HEAT, false, 500.0), 305.0);
+    let mut gas = original.clone();
+    let mut laws = [bounded.clone()];
+    let mut liquids = [liquid];
+    assert!(matches!(
+        advance_thermal_mixture(
+            &mut laws,
+            &mut gas,
+            &mut liquids,
+            &[film],
+            &solvent(),
+            300.0,
+            20_000.0,
+            controls(),
+            || false,
+        ),
+        Err(ThermalDissolutionError::Dissolution(
+            DissolvedGasError::Material(_)
+        ))
+    ));
+    assert_eq!(gas, original);
+    assert_eq!(laws, [bounded]);
+    assert_eq!(liquids, [liquid]);
 }

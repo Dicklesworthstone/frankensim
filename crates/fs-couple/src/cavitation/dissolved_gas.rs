@@ -363,6 +363,8 @@ pub fn advance_thermal_mixture(
     let mut concentration = Dd::ZERO;
     let mut interface_excess = Dd::ZERO;
     let mut active_pressure = Dd::ZERO;
+    let mut gas_partial_sum = Dd::ZERO;
+    let mut gas_fraction_limit: Option<f64> = None;
     for &i in &order {
         poll(&mut cancelled)?;
         let (law, sample) =
@@ -373,8 +375,22 @@ pub fn advance_thermal_mixture(
                     .concentration_mol_m3
                     .max(sample.interface_concentration_mol_m3),
             );
+        gas_partial_sum = gas_partial_sum
+            + Dd::from_f64(
+                sample
+                    .partial_pressure_pa
+                    .max(sample.interface_partial_pressure_pa),
+            );
+        if let Some(source) = law.gas_film_source() {
+            gas_fraction_limit = Some(
+                gas_fraction_limit.map_or(source.maximum_mole_fraction, |maximum| {
+                    maximum.min(source.maximum_mole_fraction)
+                }),
+            );
+        }
         if films[i].area_m2 > 0.0
             && law.diffusivity_m2_s() > 0.0
+            && law.gas_film_diffusivity_m2_s().is_none_or(|d| d > 0.0)
             && films[i]
                 .gas_side_transfer
                 .is_none_or(|k| k.value_si() > 0.0)
@@ -395,6 +411,16 @@ pub fn advance_thermal_mixture(
         .into());
     }
     let pressure = accepted_gas.state().state().pressure;
+    if let Some(maximum) = gas_fraction_limit {
+        let fraction = finite(gas_partial_sum.to_f64() / pressure)?;
+        if fraction > maximum {
+            return Err(DissolvedGasError::GasFilmConcentration {
+                actual_mole_fraction: fraction,
+                maximum_mole_fraction: maximum,
+            }
+            .into());
+        }
+    }
     if finite(interface_excess.to_f64())?
         > pressure - active_pressure.to_f64() + 64.0 * f64::EPSILON * pressure
     {

@@ -432,20 +432,39 @@ impl HenryDissolution {
             .species_specific_enthalpy_j_kg(&law.species, temperature)?;
         law.source.point = point;
         law.resolved = resolved;
-        let prepared = PreparedFilm::new(&law, film)?;
+        law.gas_film = self
+            .gas_film
+            .as_ref()
+            .map(|source| {
+                source.at_conditions(
+                    temperature,
+                    gas.state().state().pressure,
+                    gas.species_partial_pressure_pa(&self.species)?,
+                )
+            })
+            .transpose()?;
         let capacity = finite(
             1.0 / liquid.liquid_volume_m3
                 + law.henry_mol_m3_pa * (R * temperature / gas.volume_m3()),
         )?;
-        let ratio =
-            finite(film.area_m2 * film.thickness_m * capacity * prepared.liquid_gradient_fraction)?;
-        if prepared.conductance_m3_s > 0.0 && ratio > controls.maximum_film_relaxation_ratio {
+        let response = law.film_response(film, capacity)?;
+        let ratio = response.liquid_relaxation_ratio;
+        if response.conductance_m3_s > 0.0 && ratio > controls.maximum_film_relaxation_ratio {
             return Err(DissolvedGasError::FilmRelaxation {
                 ratio,
                 maximum: controls.maximum_film_relaxation_ratio,
             });
         }
-        let sample = law.sample(gas, liquid, prepared, controls)?;
+        if let Some(ratio) = response.gas_relaxation_ratio
+            && response.conductance_m3_s > 0.0
+            && ratio > controls.maximum_film_relaxation_ratio
+        {
+            return Err(DissolvedGasError::GasFilmRelaxation {
+                ratio,
+                maximum: controls.maximum_film_relaxation_ratio,
+            });
+        }
+        let sample = law.sample(gas, liquid, controls, response)?;
         Ok((law, sample))
     }
 

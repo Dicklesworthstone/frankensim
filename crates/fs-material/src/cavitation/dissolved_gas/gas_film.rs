@@ -51,11 +51,12 @@ pub(super) struct ResolvedGasFilm {
 }
 
 impl ResolvedGasFilm {
-    pub(super) fn sample(
+    fn point(
         &self,
+        temperature_k: f64,
         total_pressure_pa: f64,
         partial_pressure_pa: f64,
-    ) -> Result<ResolvedMaterialStatePoint> {
+    ) -> Result<QueryPoint> {
         let fraction = finite(partial_pressure_pa / total_pressure_pa)?;
         if partial_pressure_pa > 0.0 && fraction == 0.0 {
             return Err(invalid("positive gas-film mole fraction underflows"));
@@ -69,15 +70,56 @@ impl ResolvedGasFilm {
                 maximum_mole_fraction: self.source.maximum_mole_fraction,
             });
         }
-        let point = self
-            .source
+        self.source
             .point
             .clone()
-            .with_quantity("pressure", typed(QuantityKind::Pressure), total_pressure_pa)
+            .with_quantity(
+                "temperature",
+                typed(QuantityKind::AbsoluteTemperature),
+                temperature_k,
+            )
+            .and_then(|point| {
+                point.with_quantity("pressure", typed(QuantityKind::Pressure), total_pressure_pa)
+            })
             .and_then(|point| {
                 point.with_quantity(GAS_FILM_MOLE_FRACTION_AXIS, mole_fraction_type(), fraction)
             })
-            .map_err(|_| invalid("unrepresentable gas-film source conditions"))?;
+            .map_err(|_| invalid("unrepresentable gas-film source conditions"))
+    }
+
+    /// Continue the same selected diffusivity claim before preparing a new
+    /// temperature-dependent interval. Bulk/interface sampling below still
+    /// requires the refreshed value to be constant at that fixed temperature.
+    pub(super) fn at_conditions(
+        &self,
+        temperature_k: f64,
+        total_pressure_pa: f64,
+        partial_pressure_pa: f64,
+    ) -> Result<Self> {
+        let point = self.point(temperature_k, total_pressure_pa, partial_pressure_pa)?;
+        let resolved = self
+            .resolved
+            .at_query_point(&self.source.material, &point)?;
+        let mut next = self.clone();
+        next.diffusivity_m2_s = resolved
+            .property(GAS_FILM_DIFFUSIVITY_PROPERTY)
+            .unwrap()
+            .value_si();
+        next.resolved = resolved;
+        next.source.point = point;
+        Ok(next)
+    }
+
+    pub(super) fn sample(
+        &self,
+        total_pressure_pa: f64,
+        partial_pressure_pa: f64,
+    ) -> Result<ResolvedMaterialStatePoint> {
+        let point = self.point(
+            self.source.point.axes()["temperature"],
+            total_pressure_pa,
+            partial_pressure_pa,
+        )?;
         let at = self
             .resolved
             .at_query_point(&self.source.material, &point)?;
