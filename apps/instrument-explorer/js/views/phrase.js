@@ -65,6 +65,23 @@ function untimedText(p) {
   return fmt.plural(n, p.kind === 'chords' ? 'chord' : 'part') + (refused ? `, ${silentCounts(p.notes).join(', ')}` : '');
 }
 
+function when(iso) {
+  return h('time', { datetime: iso, title: `${iso} UTC` }, fmt.datetime(iso));
+}
+
+/** When the phrase's audio was rendered, from which commit. A row of test pages gives the range of its notes' renders; a phrase
+ * made before dates were kept says only that it is older than the first phrase build that still holds it. */
+export function phraseStamp(p) {
+  const t = p.rendered_utc;
+  if (!t && !p.rendered_before_utc) return null;
+  const sha = /^[0-9a-f]{7,}/.exec(String(p.git_sha || ''));
+  return h('div.renderstamp', null, h('div.when', null,
+    h('span.label', null, t ? 'Latest render' : 'Older render'),
+    t ? [p.rendered_from_utc && p.rendered_from_utc !== t ? [when(p.rendered_from_utc), ' to '] : null, when(t)]
+      : ['before ', when(p.rendered_before_utc)],
+    sha ? h('span.sha', null, sha[0].slice(0, 9)) : null));
+}
+
 /** A gallery card: the phrase's map as a thumbnail you can play in place, and a link to its page. */
 export function phraseCard(p, familyTitle) {
   const player = phrasePlayer(p, familyTitle);
@@ -84,6 +101,9 @@ export function phraseCard(p, familyTitle) {
         ? h('div.pitchline', null, h('span.pitchdots', { 'aria-hidden': 'true' }, (p.notes || []).filter(n => pitchClass(n) !== 'none').slice(0, 24).map(n => h(`i.${pitchClass(n)}`))),
           h('span', null, t.in === total ? `all ${total} notes in tune` : `${t.in} of ${total} in tune${t.out - t.refused ? `, ${t.out - t.refused} wrong` : ''}${t.refused ? `, ${silentCounts(p.notes).join(', ')}` : ''}`))
         : h('div.pitchline', null, h('span', null, untimedText(p))),
+      p.rendered_utc || p.rendered_before_utc
+        ? h('div.pitchline', null, h('span', null, p.rendered_utc ? 'Rendered ' : 'Rendered before ', fmt.datetime(p.rendered_utc || p.rendered_before_utc)))
+        : null,
       h('a.open', { href: page, 'aria-label': `Full analysis of ${p.title}` },
         h('span', null, p.real || p.ref ? 'Compare with the real one' : 'Full analysis'), h('span.arrow', { 'aria-hidden': 'true' }, '→'))));
   player.on(q => {
@@ -153,6 +173,7 @@ export function phraseStage(p, familyTitle) {
     h('div', null, h('h4', null, 'What to listen for'), listenFor(p)));
   return h('div.stage', null,
     h('div.detailhead', null, h('h2', null, p.title), h('span.chip.kind', null, KIND_LABEL[p.kind] || p.kind)),
+    phraseStamp(p),
     summary,
     controls(player, { keys: Boolean(p.real) }),
     maps, legend, strip, how);

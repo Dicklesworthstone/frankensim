@@ -4,7 +4,7 @@
 import { h, s, fmt, link, getJSON, DATA, empty } from '../app.js';
 import { controls } from '../audio.js';
 import { mapFrame, pitchClass, silentCounts, silentWhy, unpitched } from '../spectro.js';
-import { phrasePlayer, KIND_LABEL, pitchTally } from './phrase.js';
+import { phrasePlayer, phraseStamp, KIND_LABEL, pitchTally } from './phrase.js';
 
 let titleText = 'Phrase';
 export function title() {
@@ -345,6 +345,7 @@ export async function render(main, r) {
     h('nav.crumbs', { 'aria-label': 'Breadcrumb' }, h('a', { href: '#/' }, 'Listen'), h('span', null, '›'),
       h('a', { href: link('f', p.family) }, fam.title), h('span', null, '›'), h('span', null, KIND_LABEL[p.kind] || p.kind)),
     h('h1', null, p.title),
+    phraseStamp(p),
     h('p.lede', null, real
       ? ['The simulation and a real recording, measured the same way and drawn on one time axis. Press play: every lane, the maps and the note panel follow the playhead.',
         h('span.kbdonly', null, ' Keys 1 and 2 switch what you hear without losing your place.')]
