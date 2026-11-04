@@ -11,6 +11,9 @@ use crate::compose::{ComposeOptions, TwoPort};
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, ProperHarmonicProduct};
 use fs_math::dd::Dd;
 
+mod welch;
+pub use welch::NetworkFieldBinStatistics;
+
 mod spectrum;
 pub use spectrum::{
     MAX_FIELD_FREQUENCIES, MAX_FIELD_SPECTRAL_LINES, NetworkFieldExposureLimits,

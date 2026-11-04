@@ -3,6 +3,7 @@ use crate::network::field::*;
 use fs_fft::harmonic_window::HarmonicWindow;
 
 mod spectrum;
+mod welch;
 
 fn pressure_source(label: &str, value: C64) -> PortSource {
     PortSource {

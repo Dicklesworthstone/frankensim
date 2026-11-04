@@ -8,6 +8,8 @@
 
 use super::*;
 
+mod welch;
+
 /// Physical coordinate of one prepared source. Mixed-coordinate covariances
 /// have the product of the two indicated SI units; they are not dimensionless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,8 +29,9 @@ pub struct NetworkSourceCoordinate {
     pub quantity: NetworkSourceQuantity,
 }
 
-/// Bounds on one statistical application. Source count and rank are also
-/// independently capped at 32; storage never depends on an unbounded rank.
+/// Bounds on one statistical application. Source count and authored factor
+/// rank are capped at 32; recorded Welch bins admit up to 4096 segment factors
+/// under the same total product ceiling. Storage never scales with rank.
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkCoherenceBudget {
     /// Largest admitted number of supplied factors (or independent sources).
@@ -36,6 +39,8 @@ pub struct NetworkCoherenceBudget {
     /// Maximum complex products in field, moment and work contractions.
     /// Dense factors cost rank*(4*ports*sources + 3*ports² + 6*ports);
     /// independent sources replace 4*ports*sources by 4*ports per source.
+    /// Recorded bins additionally count two peak-conversion products per
+    /// source and segment. Interior-field queries document their own count.
     pub maximum_complex_products: usize,
 }
 
@@ -386,7 +391,7 @@ impl PreparedNetworkSources {
         output: &mut NetworkSourceStatistics,
     ) -> Result<(), DuctError> {
         output.valid = false;
-        self.admit_statistics(output, rank, false, budget)?;
+        self.admit_statistics(output, rank, false, budget, false)?;
         let count = self.coordinates.len();
         if factors.len() != count * rank || factors.iter().any(|&v| !finite(v)) {
             return Err(bad("coherence factors need finite complete source vectors"));
@@ -412,7 +417,7 @@ impl PreparedNetworkSources {
     ) -> Result<(), DuctError> {
         output.valid = false;
         let count = self.coordinates.len();
-        self.admit_statistics(output, count, true, budget)?;
+        self.admit_statistics(output, count, true, budget, false)?;
         if second_moments.len() != count
             || second_moments.iter().any(|&v| !v.is_finite() || v < 0.0)
         {
@@ -528,13 +533,15 @@ impl PreparedNetworkSources {
         rank: usize,
         independent: bool,
         budget: NetworkCoherenceBudget,
+        recorded: bool,
     ) -> Result<(), DuctError> {
         if output.omega.to_bits() != self.omega.to_bits() || output.ports != self.ports {
             return Err(bad("prepared statistics have different frequency or ports"));
         }
-        if rank == 0 || rank > MAX_NETWORK_PORTS || rank > budget.maximum_rank {
+        let rank_cap = if recorded { 4096 } else { MAX_NETWORK_PORTS };
+        if rank == 0 || rank > rank_cap || rank > budget.maximum_rank {
             return Err(bad(
-                "source coherence rank exceeds the explicit 1..=32 budget",
+                "source coherence rank exceeds its native or caller budget",
             ));
         }
         let n = self.ports.len();
@@ -543,7 +550,12 @@ impl PreparedNetworkSources {
         } else {
             self.coordinates.len()
         };
-        let products = rank * (4 * n * columns + 3 * n * n + 6 * n);
+        let conversion = if recorded {
+            2 * self.coordinates.len()
+        } else {
+            0
+        };
+        let products = rank * (4 * n * columns + 3 * n * n + 6 * n + conversion);
         if products > budget.maximum_complex_products || products > 262_144 {
             return Err(bad("source coherence contraction exceeds its work budget"));
         }

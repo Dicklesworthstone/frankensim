@@ -3634,3 +3634,38 @@ LU, Jacobi, gas/coherence and source kernels; unused flanged, tabulated and
 Levine–Schwinger entry adapters refuse and are not validated by it. DSR/RCH and
 the seven required sibling Git checkouts remain unavailable, so this does not
 claim a full Cargo/workspace or flanged-source integration pass.
+
+### Measured coherence in loaded duct networks and interior fields
+
+`PreparedNetworkSources::observe_welch_bin_into` and
+`PreparedNetworkFields::observe_welch_bin` consume borrowed measured factors
+through the original prepared physical operators. Source labels, pressure/flow
+SI quantity identities, canonical order and physical frequency must match
+exactly. The shared checked `WelchPeakBin` conversion supplies sqrt(2 df) once,
+followed by the original peak-amplitude half once. Outputs are bin-integrated
+moments and work, not densities per hertz. DC and Nyquist refuse.
+
+The source owner retains complete complex cross-port p/p, U/U and p/U moments,
+plus signed generator, source-interface, internal-source-loss, exterior-load
+and network work. The interior owner retains DD pressure/flow interference,
+complex reactive quadrature and directed power/intensity, including standing
+wave pressure antinodes with zero real transported flux. Its particle velocity
+is the original cross-section mean axial velocity, not a resolved radial field.
+
+Factors stream through fixed 32-source scratch. The source application is
+allocation-free; local observations retain only four DD sums and one result
+per original probe. At most 4096 recorded segments are admitted under the
+original 262144-product ceiling and caller budget, while authored factors keep
+their existing rank cap. No new graph solve, material interpolation, dense
+covariance, independent-realization/confidence assumption or cross-frequency
+coherence is introduced. Cancellation invalidates source statistics or returns
+no interior result; a previous successful output cannot remain falsely valid.
+
+Six focused native tests pass using the exact retained source/work and interior
+contractions and actual FFT/Welch/math implementations. Independent analytical
+resistor and wave fixtures cover full work/moment matrices, source heating at
+a pressure null, traveling/standing/reversed waves, partial coherence, Hann
+normalization, forty recorded segments, identity/budget refusal and cancellation.
+They do not execute graph/material assembly. One additional original lossy and
+lossless graph integration test is authored but unrun; full Cargo/DSR remains
+unavailable without the sibling constellation checkouts.
