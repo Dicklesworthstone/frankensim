@@ -39,7 +39,7 @@ pub use boundary::{
     DryBodyExchange3, DryLubricatedCarriersExchange3, DryLubricatedPlanesExchange3,
     DryLubricatedSurfacesExchange3, Face3, FaceBoundary3, FiniteLubricationPlane3, FiniteMassWall3,
     FiniteMassWallReceipt3, FinitePlaneResponse3, ImmersedMomentum3, InletFlux3, LinkMaskTile3,
-    LinearResistance3, ResistanceMomentumExchange3,
+    DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3,
     LubricatedPlanesExchange3, LubricationPlane3, LubricationPlanePatch3, LubricationSurface3,
     MovingCarrierExchange3, MovingCarrierSurface3, MovingFiniteLubricationPlane3,
     MovingFinitePlaneExchange3, MovingLubricatedCarriersExchange3, MovingLubricatedPlanesExchange3,

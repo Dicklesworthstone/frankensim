@@ -147,6 +147,29 @@ The local drag/work identity is not a transported kinetic-energy equality.
 Uniform resolved relaxation is second order and has bounded relative source
 energy; stiff trapezoidal updates can reverse velocity and are not L-stable.
 
+### Vector-speed Darcy–Forchheimer extension
+
+`DarcyForchheimer3` and the serial/pooled `step_with_darcy_forchheimer`
+methods add `-beta |u-v_s| (u-v_s)` to the same anisotropic linear resistance
+owner. The finite nonnegative coefficient is force density per speed squared,
+including any physical density factor. The quadratic term uses vector speed,
+not separate principal-component magnitudes. Isotropic linear resistance has
+a stable analytic quadratic endpoint; anisotropy solves one monotone speed
+equation with safeguarded Newton and a 64-iteration cap. Individual positive
+quadratic roots bracket its speed within a factor of sqrt(3), independently
+of principal resistance contrast. Zero beta uses the exact linear arithmetic.
+
+The original collision, pull stream, wall exchange and atomic force/population
+publication remain shared. Skeleton reaction is the endpoint-averaged drag.
+The nonlinear relative dissipation is
+`beta/8 (r0+r1) (|v0+v1|²+(r0-r1)²)`, a nonnegative expression equal to its
+trapezoidal force work, rather than the different midpoint-speed cubic.
+Analytic quadratic endpoints, resolved nonlinear decay order, rotated
+anisotropy, large principal contrast, wall/source/skeleton momentum and work,
+serial/pooled parity, exact beta-zero reduction and nonlinear atomic refusal
+are exercised in `tests/boundary_forcing.rs`. The preceding prescribed-skeleton,
+closed/periodic, floating-point, no-heat and stiff-time-resolution limits apply.
+
 ## D3Q27 TRT for wall-bounded laminar flow
 
 `CollisionModel27::Trt { tau, magic, equilibrium }` extends the original

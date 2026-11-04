@@ -1794,4 +1794,385 @@ mod linear_resistance {
         ));
         assert_eq!(snapshot(&grid), before);
     }
+
+    mod forchheimer {
+        use super::*;
+        use fs_lbm::d3q19::DarcyForchheimer3;
+
+        fn norm(v: [f64; 3]) -> f64 {
+            dot(v, v).sqrt()
+        }
+        fn nonlinear_force(law: DarcyForchheimer3, velocity: [f64; 3]) -> [f64; 3] {
+            let linear = force(law.linear, velocity);
+            let v = core::array::from_fn(|a| velocity[a] - law.linear.skeleton_velocity[a]);
+            core::array::from_fn(|a| linear[a] - law.quadratic * norm(v) * v[a])
+        }
+
+        #[test]
+        fn isotropic_quadratic_oracle_closes_work_and_bounds_stiff_relative_energy() {
+            let gate = CancelGate::new_clock_free();
+            for model in models() {
+                for beta in [2.0, 100.0, 8000.0] {
+                    let (mut grid, mut rotated) = (uniform_grid(model), uniform_grid(model));
+                    let law = DarcyForchheimer3 {
+                        linear: LinearResistance3 {
+                            principal: [0.08; 3],
+                            skeleton_velocity: [0.002, -0.001, 0.0005],
+                            ..LinearResistance3::default()
+                        },
+                        quadratic: beta,
+                    };
+                    for step in 0..5 {
+                        let before = grid.velocity(0, 0, 0);
+                        let v0 =
+                            core::array::from_fn(|a| before[a] - law.linear.skeleton_velocity[a]);
+                        let q = v0.map(|v| (1.4 - 0.04 - 0.5 * beta * norm(v0)) * v);
+                        // Direct quadratic formula, independent of production's
+                        // scaled conjugate root and material-frame iteration.
+                        let speed =
+                            ((1.44_f64.powi(2) + 2.0 * beta * norm(q)).sqrt() - 1.44) / beta;
+                        let expected = core::array::from_fn::<_, 3, _>(|a| {
+                            law.linear.skeleton_velocity[a] + q[a] / (1.44 + 0.5 * beta * speed)
+                        });
+                        let receipt = grid.step_with_darcy_forchheimer(|_| law, &gate).unwrap();
+                        let rotated_law = DarcyForchheimer3 {
+                            linear: LinearResistance3 {
+                                axes: AXES,
+                                ..law.linear
+                            },
+                            ..law
+                        };
+                        let same = rotated
+                            .step_with_darcy_forchheimer(|_| rotated_law, &gate)
+                            .unwrap();
+                        assert_eq!(snapshot(&grid), snapshot(&rotated));
+                        assert_eq!(receipt, same);
+                        let after = grid.velocity(0, 0, 0);
+                        let v1 =
+                            core::array::from_fn(|a| after[a] - law.linear.skeleton_velocity[a]);
+                        for a in 0..3 {
+                            close(after[a], expected[a], 3e-13);
+                        }
+                        let loss = 32.0 * 1.4 * (dot(v0, v0) - dot(v1, v1));
+                        assert!(loss >= -2e-14);
+                        close(loss, receipt.relative_dissipation, 3e-13);
+                        close(
+                            receipt.fluid_drag_work + receipt.skeleton_work,
+                            -receipt.relative_dissipation,
+                            3e-13,
+                        );
+                        if step == 0 && beta == 8000.0 {
+                            assert!(dot(v0, v1) < 0.0);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn pure_quadratic_decay_is_second_order_and_rotated_anisotropy_is_covariant() {
+            let gate = CancelGate::new_clock_free();
+            let initial = [0.011, -0.009, 0.006];
+            let mut errors = Vec::new();
+            for steps in [8, 16, 32] {
+                let mut grid = uniform_grid(models()[0]);
+                let law = DarcyForchheimer3 {
+                    quadratic: 1.4 * 40.0 / f64::from(steps),
+                    ..DarcyForchheimer3::default()
+                };
+                for _ in 0..steps {
+                    let _ = grid.step_with_darcy_forchheimer(|_| law, &gate).unwrap();
+                }
+                errors.push(
+                    (grid.velocity(0, 0, 0)[0] - initial[0] / (1.0 + 40.0 * norm(initial))).abs(),
+                );
+            }
+            for pair in errors.windows(2) {
+                assert!((3.9..4.1).contains(&(pair[0] / pair[1])), "{errors:?}");
+            }
+            let rotate = |v: [f64; 3]| {
+                core::array::from_fn::<_, 3, _>(|a| (0..3).map(|k| AXES[k][a] * v[k]).sum())
+            };
+            let base = DarcyForchheimer3 {
+                linear: LinearResistance3 {
+                    principal: [0.0, 0.2, 0.7],
+                    body_force: [1e-4, -2e-4, 3e-4],
+                    skeleton_velocity: [0.001, -0.002, 0.003],
+                    ..LinearResistance3::default()
+                },
+                quadratic: 80.0,
+            };
+            let rotated = DarcyForchheimer3 {
+                linear: LinearResistance3 {
+                    axes: AXES,
+                    body_force: rotate(base.linear.body_force),
+                    skeleton_velocity: rotate(base.linear.skeleton_velocity),
+                    ..base.linear
+                },
+                ..base
+            };
+            let (mut original, mut transformed) =
+                (uniform_grid(models()[0]), uniform_grid(models()[0]));
+            transformed
+                .initialize_uniform_equilibrium(1.4, rotate(initial), &gate)
+                .unwrap();
+            for _ in 0..4 {
+                let _ = original
+                    .step_with_darcy_forchheimer(|_| base, &gate)
+                    .unwrap();
+                let _ = transformed
+                    .step_with_darcy_forchheimer(|_| rotated, &gate)
+                    .unwrap();
+                for (actual, expected) in transformed
+                    .velocity(0, 0, 0)
+                    .into_iter()
+                    .zip(rotate(original.velocity(0, 0, 0)))
+                {
+                    close(actual, expected, 3e-14);
+                }
+            }
+        }
+
+        #[test]
+        fn anisotropic_transport_closes_wall_skeleton_momentum_and_matches_pool() {
+            let gate = CancelGate::new_clock_free();
+            let origin = [-0.3, 0.7, 1.2];
+            let make = || {
+                let mut grid = BoundaryGrid3::new(
+                    12,
+                    8,
+                    8,
+                    0.9,
+                    [0.0; 3],
+                    BoundarySpec3::lid_cavity([0.003, 0.0, 0.0]),
+                );
+                grid.voxelize_sdf(|p| {
+                    (p[0] - 3.0)
+                        .abs()
+                        .max((p[1] - 4.0).abs())
+                        .max((p[2] - 3.0).abs())
+                        - 0.8
+                });
+                for [x, y, z] in cells(&grid) {
+                    grid.set_populations(
+                        x,
+                        y,
+                        z,
+                        &equilibrium3(0.8 + 0.01 * (x + 2 * y + z) as f64, [0.004, -0.003, 0.001]),
+                    );
+                }
+                grid
+            };
+            let law = |[x, y, z]: [usize; 3], step: usize| DarcyForchheimer3 {
+                linear: LinearResistance3 {
+                    principal: [
+                        0.02 + 0.001 * x as f64,
+                        0.1 + 0.004 * y as f64,
+                        0.3 + 0.002 * z as f64,
+                    ],
+                    axes: AXES,
+                    body_force: [
+                        1e-5 * (y + step + 1) as f64,
+                        -2e-6 * (z + 1) as f64,
+                        3e-6 * (x + step) as f64,
+                    ],
+                    skeleton_velocity: [0.0001 * x as f64, -0.001, 0.0002 * z as f64],
+                },
+                quadratic: (5 + x + y + z + step) as f64,
+            };
+            for workers in [1, 3] {
+                let pool = TilePool::for_host(workers, 0xF02C4);
+                let (mut serial, mut pooled) = (make(), make());
+                let links = serial.boundary_links();
+                for step in 0..3 {
+                    let before = fluid_momentum(&serial);
+                    let angular_before = angular(&serial, origin);
+                    let receipt = serial
+                        .step_with_darcy_forchheimer_and_wall_momentum(
+                            |c| law(c, step),
+                            &links,
+                            origin,
+                            &gate,
+                        )
+                        .unwrap();
+                    let parallel = pooled
+                        .step_pooled_with_darcy_forchheimer_and_wall_momentum(
+                            &pool,
+                            &gate,
+                            |c| law(c, step),
+                            &links,
+                            origin,
+                        )
+                        .unwrap();
+                    assert_eq!(snapshot(&serial), snapshot(&pooled));
+                    assert_eq!(receipt, parallel);
+                    let after = fluid_momentum(&serial);
+                    let angular_after = angular(&serial, origin);
+                    for a in 0..3 {
+                        close(
+                            after[a] - before[a],
+                            receipt.external_impulse[a] - receipt.skeleton_impulse[a]
+                                + receipt.walls.fluid_population_impulse[a],
+                            2e-11,
+                        );
+                        close(
+                            angular_after[a] - angular_before[a],
+                            receipt.external_angular_impulse[a]
+                                - receipt.skeleton_angular_impulse[a]
+                                + receipt.walls.fluid_population_angular_impulse[a],
+                            3e-11,
+                        );
+                    }
+                    close(
+                        receipt.fluid_drag_work + receipt.skeleton_work,
+                        -receipt.relative_dissipation,
+                        3e-13,
+                    );
+                    assert!(receipt.relative_dissipation >= 0.0);
+                    for c @ [x, y, z] in cells(&serial) {
+                        for (actual, expected) in serial
+                            .force_density(x, y, z)
+                            .into_iter()
+                            .zip(nonlinear_force(law(c, step), serial.velocity(x, y, z)))
+                        {
+                            close(actual, expected, 3e-14);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn anisotropic_speed_matches_independent_root_at_large_resistance_contrast() {
+            let gate = CancelGate::new_clock_free();
+            for beta in [0.5, 80.0, 8000.0] {
+                let mut grid = uniform_grid(models()[0]);
+                grid.initialize_uniform_equilibrium(1.4, [0.01, 1e-8, -0.004], &gate)
+                    .unwrap();
+                let law = DarcyForchheimer3 {
+                    linear: LinearResistance3 {
+                        principal: [0.0, 1e6, 0.1],
+                        ..LinearResistance3::default()
+                    },
+                    quadratic: beta,
+                };
+                for _ in 0..4 {
+                    let rho = grid.populations(0, 0, 0).iter().sum::<f64>();
+                    let initial = grid.velocity(0, 0, 0);
+                    let force = nonlinear_force(law, initial);
+                    let q: [f64; 3] = core::array::from_fn(|a| rho * initial[a] + 0.5 * force[a]);
+                    let diagonal = law.linear.principal.map(|d| rho + 0.5 * d);
+                    // A separate plain bisection starts from the broad
+                    // force/rho bound, not production's component-root bracket.
+                    let (mut lower, mut upper) = (0.0, norm(q) / rho);
+                    for _ in 0..90 {
+                        let midpoint = 0.5 * (lower + upper);
+                        let velocity =
+                            core::array::from_fn(|a| q[a] / (diagonal[a] + 0.5 * beta * midpoint));
+                        if norm(velocity) > midpoint {
+                            lower = midpoint;
+                        } else {
+                            upper = midpoint;
+                        }
+                    }
+                    let speed = 0.5 * (lower + upper);
+                    let expected: [f64; 3] =
+                        core::array::from_fn(|a| q[a] / (diagonal[a] + 0.5 * beta * speed));
+                    let _ = grid.step_with_darcy_forchheimer(|_| law, &gate).unwrap();
+                    for (actual, expected) in grid.velocity(0, 0, 0).into_iter().zip(expected) {
+                        close(actual, expected, 5e-14);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn zero_quadratic_reduces_exactly_and_bad_nonlinear_endpoints_are_atomic() {
+            let gate = CancelGate::new_clock_free();
+            let pool = TilePool::for_host(3, 0xF02C4);
+            let linear = LinearResistance3 {
+                principal: [0.01, 0.04, 0.1],
+                axes: AXES,
+                body_force: [1e-5, -2e-5, 3e-5],
+                ..LinearResistance3::default()
+            };
+            for model in models() {
+                let (mut original, mut extension) = (uniform_grid(model), uniform_grid(model));
+                for _ in 0..3 {
+                    let receipt = original
+                        .step_with_linear_resistance(|_| linear, &gate)
+                        .unwrap();
+                    let reduced = extension
+                        .step_pooled_with_darcy_forchheimer(&pool, &gate, |_| linear.into())
+                        .unwrap();
+                    assert_eq!(snapshot(&original), snapshot(&extension));
+                    assert_eq!(receipt, reduced);
+                }
+            }
+            for pooled in [false, true] {
+                for case in 0..4 {
+                    let (mut grid, mut control) =
+                        (uniform_grid(models()[0]), uniform_grid(models()[0]));
+                    if case == 3 {
+                        grid.initialize_uniform_equilibrium(1e-300, [0.01, -0.02, 0.03], &gate)
+                            .unwrap();
+                        control
+                            .initialize_uniform_equilibrium(1e-300, [0.01, -0.02, 0.03], &gate)
+                            .unwrap();
+                    }
+                    let skeleton = grid.velocity(0, 0, 0);
+                    let before = snapshot(&grid);
+                    let cancel = CancelGate::new_clock_free();
+                    let sample = |cell: [usize; 3]| {
+                        let mut law = DarcyForchheimer3 {
+                            linear,
+                            quadratic: 10.0,
+                        };
+                        if cell == [3, 3, 3] {
+                            match case {
+                                0 => law.quadratic = -1.0,
+                                1 => law.quadratic = f64::NAN,
+                                2 => cancel.request(),
+                                _ => {}
+                            }
+                        }
+                        if case == 3 {
+                            // Initial relative velocity is zero: collision is
+                            // representable, but the endpoint principal speed
+                            // q/(rho+D/2) underflows and must not publish.
+                            law.linear = LinearResistance3 {
+                                principal: [f64::MAX, 0.0, 0.0],
+                                body_force: [1e-301, 0.0, 0.0],
+                                skeleton_velocity: skeleton,
+                                ..LinearResistance3::default()
+                            };
+                        }
+                        law
+                    };
+                    let result = if pooled {
+                        grid.step_pooled_with_darcy_forchheimer(&pool, &cancel, sample)
+                    } else {
+                        grid.step_with_darcy_forchheimer(sample, &cancel)
+                    };
+                    assert!(
+                        matches!(
+                            result,
+                            Err(BoundaryStepError3::Cancelled
+                                | BoundaryStepError3::EndpointForce { .. }
+                                | BoundaryStepError3::Unphysical { .. })
+                        ),
+                        "case {case}: {result:?}"
+                    );
+                    assert_eq!(snapshot(&grid), before);
+                    let _ = grid
+                        .step_with_darcy_forchheimer(|_| DarcyForchheimer3::default(), &gate)
+                        .unwrap();
+                    let _ = control
+                        .step_with_darcy_forchheimer(|_| DarcyForchheimer3::default(), &gate)
+                        .unwrap();
+                    assert_eq!(snapshot(&grid), snapshot(&control));
+                }
+            }
+        }
+    }
 }

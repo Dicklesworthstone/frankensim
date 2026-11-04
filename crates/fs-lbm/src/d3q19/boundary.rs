@@ -28,7 +28,8 @@ pub use profile::{
 };
 mod forcing;
 pub use forcing::{
-    BoundaryForcingError3, LinearResistance3, ResistanceMomentumExchange3, RigidFrame3,
+    BoundaryForcingError3, DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3,
+    RigidFrame3,
 };
 use forcing::{EndpointForcing3, PreparedResistance3, ResistanceStream3};
 mod curved;

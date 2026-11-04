@@ -4,8 +4,10 @@ use super::*;
 
 mod frame;
 pub use frame::RigidFrame3;
+mod forchheimer;
 mod impulse;
 mod resistance;
+pub use forchheimer::DarcyForchheimer3;
 pub use resistance::{LinearResistance3, ResistanceMomentumExchange3};
 pub(super) use resistance::{PreparedResistance3, ResistanceStream3};
 

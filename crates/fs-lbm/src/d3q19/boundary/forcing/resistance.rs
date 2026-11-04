@@ -1,4 +1,4 @@
-//! Implicit linear porous resistance on the native D3Q19 momentum owner.
+//! Implicit porous resistance on the native D3Q19 momentum owner.
 
 use super::*;
 
@@ -55,7 +55,7 @@ impl Default for LinearResistance3 {
 /// transported fluid kinetic-energy change: density, pressure, advection and
 /// collision remain owned by the original lattice operator. No heat is
 /// deposited, and native wall work retains its separate link convention.
-/// The skeleton impulse/work is the constitutive midpoint transfer, retained
+/// The skeleton impulse/work is the endpoint-averaged constitutive transfer, retained
 /// separately even when a larger body force rounds a tiny drag out of the
 /// total lattice force. Sub-ULP impulses are not guaranteed to accumulate in
 /// the executed fluid momentum; this receipt is not a compensated integrator.
@@ -76,14 +76,15 @@ pub struct ResistanceMomentumExchange3 {
     pub fluid_drag_work: f64,
     /// Skeleton impulse dotted with prescribed skeleton velocity.
     pub skeleton_work: f64,
-    /// Nonnegative `sum (u_mid-v_s)^T D (u_mid-v_s)` for the admitted law.
+    /// Nonnegative linear midpoint dissipation plus, for [`DarcyForchheimer3`],
+    /// its nonnegative trapezoidal vector-speed contribution.
     pub relative_dissipation: f64,
     /// Native exchange on the selected wall links, from this same collision.
     pub walls: WallMomentumExchange3,
 }
 
 impl LinearResistance3 {
-    fn admit(self) -> Result<(), BoundaryStepError3> {
+    pub(super) fn admit(self) -> Result<(), BoundaryStepError3> {
         let invalid = |reason| BoundaryStepError3::EndpointForce { reason };
         if !self.principal.iter().all(|x| x.is_finite() && *x >= 0.0)
             || !self
@@ -111,7 +112,7 @@ impl LinearResistance3 {
         Ok(())
     }
 
-    fn drag(self, velocity: [f64; 3]) -> [f64; 3] {
+    pub(super) fn drag(self, velocity: [f64; 3]) -> [f64; 3] {
         if self.principal == [0.0; 3] {
             return [0.0; 3];
         }
@@ -128,7 +129,7 @@ impl LinearResistance3 {
         core::array::from_fn(|a| (0..3).map(|k| self.axes[k][a] * principal[k]).sum())
     }
 
-    fn force(self, velocity: [f64; 3]) -> [f64; 3] {
+    pub(super) fn force(self, velocity: [f64; 3]) -> [f64; 3] {
         // Preserve the native held-force reduction exactly when drag is zero.
         if self.principal == [0.0; 3] {
             self.body_force
@@ -138,7 +139,11 @@ impl LinearResistance3 {
         }
     }
 
-    fn endpoint_force(self, rho: f64, momentum: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
+    pub(super) fn endpoint_force(
+        self,
+        rho: f64,
+        momentum: [f64; 3],
+    ) -> Option<([f64; 3], [f64; 3])> {
         if self.principal == [0.0; 3] {
             return Some((self.body_force, [0.0; 3]));
         }
@@ -207,7 +212,7 @@ impl ResistanceMomentumExchange3 {
 
 #[derive(Clone, Copy, Default)]
 pub(in crate::d3q19::boundary) struct PreparedResistance3 {
-    law: LinearResistance3,
+    law: DarcyForchheimer3,
     velocity: [f64; 3],
 }
 
@@ -250,19 +255,19 @@ impl ResistanceStream3<'_> {
             return false;
         };
         let prepared = self.prepared[tile * TILE_CELLS + lane];
-        let law = prepared.law;
-        let Some((force, endpoint_drag)) = law.endpoint_force(rho, momentum) else {
+        let law = prepared.law.linear;
+        let Some((force, endpoint_drag)) = prepared.law.endpoint_force(rho, momentum) else {
             return false;
         };
         let velocity: [f64; 3] = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
         let midpoint = core::array::from_fn(|a| 0.5 * prepared.velocity[a] + 0.5 * velocity[a]);
-        let initial_drag = law.drag(prepared.velocity);
+        let initial_drag = prepared.law.drag(prepared.velocity);
         // Preserve a small physical reaction even when the independent body
         // force is large enough to round it away in the total force vector.
         let reaction = core::array::from_fn(|a| -0.5 * initial_drag[a] - 0.5 * endpoint_drag[a]);
         let offset = core::array::from_fn(|a| cell[a] as f64 + 0.5 - self.origin[a]);
         let relative = core::array::from_fn(|a| midpoint[a] - law.skeleton_velocity[a]);
-        let relative_dissipation = if law.principal.iter().all(|&d| d == law.principal[0]) {
+        let mut relative_dissipation = if law.principal.iter().all(|&d| d == law.principal[0]) {
             law.principal[0] * dot(relative, relative)
         } else {
             (0..3)
@@ -272,6 +277,11 @@ impl ResistanceStream3<'_> {
                 })
                 .sum()
         };
+        if prepared.law.quadratic != 0.0 {
+            relative_dissipation += prepared
+                .law
+                .nonlinear_dissipation(prepared.velocity, velocity);
+        }
         let exchange = ResistanceMomentumExchange3 {
             external_impulse: law.body_force,
             external_angular_impulse: cross(offset, law.body_force),
@@ -315,13 +325,13 @@ impl BoundaryGrid3 {
     /// in this overload use the zero origin; no wall links are measured.
     pub fn step_with_linear_resistance(
         &mut self,
-        resistance: impl FnMut([usize; 3]) -> LinearResistance3,
+        mut resistance: impl FnMut([usize; 3]) -> LinearResistance3,
         gate: &CancelGate,
     ) -> Result<ResistanceMomentumExchange3, BoundaryStepError3> {
-        self.step_linear_resistance_inner::<fs_exec::TilePool>(
+        self.step_resistance_inner::<fs_exec::TilePool>(
             None,
             gate,
-            resistance,
+            |cell| resistance(cell).into(),
             &[],
             [0.0; 3],
         )
@@ -331,15 +341,15 @@ impl BoundaryGrid3 {
     /// Both skeleton and wall moments use `moment_origin`.
     pub fn step_with_linear_resistance_and_wall_momentum(
         &mut self,
-        resistance: impl FnMut([usize; 3]) -> LinearResistance3,
+        mut resistance: impl FnMut([usize; 3]) -> LinearResistance3,
         links: &[BoundaryLink3],
         moment_origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<ResistanceMomentumExchange3, BoundaryStepError3> {
-        self.step_linear_resistance_inner::<fs_exec::TilePool>(
+        self.step_resistance_inner::<fs_exec::TilePool>(
             None,
             gate,
-            resistance,
+            |cell| resistance(cell).into(),
             links,
             moment_origin,
         )
@@ -350,9 +360,15 @@ impl BoundaryGrid3 {
         &mut self,
         pool: &P,
         gate: &CancelGate,
-        resistance: impl FnMut([usize; 3]) -> LinearResistance3,
+        mut resistance: impl FnMut([usize; 3]) -> LinearResistance3,
     ) -> Result<ResistanceMomentumExchange3, BoundaryStepError3> {
-        self.step_linear_resistance_inner(Some(pool), gate, resistance, &[], [0.0; 3])
+        self.step_resistance_inner(
+            Some(pool),
+            gate,
+            |cell| resistance(cell).into(),
+            &[],
+            [0.0; 3],
+        )
     }
 
     /// Pooled source step returning the same selected native wall exchange.
@@ -360,18 +376,24 @@ impl BoundaryGrid3 {
         &mut self,
         pool: &P,
         gate: &CancelGate,
-        resistance: impl FnMut([usize; 3]) -> LinearResistance3,
+        mut resistance: impl FnMut([usize; 3]) -> LinearResistance3,
         links: &[BoundaryLink3],
         moment_origin: [f64; 3],
     ) -> Result<ResistanceMomentumExchange3, BoundaryStepError3> {
-        self.step_linear_resistance_inner(Some(pool), gate, resistance, links, moment_origin)
+        self.step_resistance_inner(
+            Some(pool),
+            gate,
+            |cell| resistance(cell).into(),
+            links,
+            moment_origin,
+        )
     }
 
-    fn step_linear_resistance_inner<P: KernelRunner>(
+    pub(super) fn step_resistance_inner<P: KernelRunner>(
         &mut self,
         pool: Option<&P>,
         gate: &CancelGate,
-        mut resistance: impl FnMut([usize; 3]) -> LinearResistance3,
+        mut resistance: impl FnMut([usize; 3]) -> DarcyForchheimer3,
         links: &[BoundaryLink3],
         origin: [f64; 3],
     ) -> Result<ResistanceMomentumExchange3, BoundaryStepError3> {
@@ -382,7 +404,7 @@ impl BoundaryGrid3 {
             .any(|&face| self.boundaries.face(face).is_open())
         {
             return Err(BoundaryStepError3::EndpointForce {
-                reason: "implicit linear resistance requires closed or periodic boundaries",
+                reason: "implicit resistance requires closed or periodic boundaries",
             });
         }
         let mut prepared = vec![PreparedResistance3::default(); self.f[0].len() * TILE_CELLS];
@@ -510,7 +532,7 @@ impl BoundaryGrid3 {
             }
             if !exchange.is_finite() {
                 return Err(BoundaryStepError3::EndpointForce {
-                    reason: "linear-resistance aggregate impulse or work is not representable",
+                    reason: "resistance aggregate impulse or work is not representable",
                 });
             }
             exchange.walls = walls;
