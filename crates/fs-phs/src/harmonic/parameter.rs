@@ -82,11 +82,11 @@ impl HarmonicParameterDirection<'_> {
     }
 }
 
-fn at(matrix: Option<&[f64]>, index: usize) -> f64 {
+pub(super) fn at(matrix: Option<&[f64]>, index: usize) -> f64 {
     matrix.map_or(0.0, |a| a[index])
 }
 
-fn accumulate(sum: &mut C64, correction: &mut C64, term: C64) {
+pub(super) fn accumulate(sum: &mut C64, correction: &mut C64, term: C64) {
     let adjusted = term - *correction;
     let next = *sum + adjusted;
     *correction = (next - *sum) - adjusted;
@@ -220,6 +220,42 @@ impl HarmonicParameterResponse {
     }
 }
 
+/// Shared admission for one complete original physical parameter tangent.
+pub(super) fn admit_response(model: &HarmonicModel) -> Result<(), HarmonicError> {
+    let (n, m) = (model.n, model.m);
+    let (base_bytes, base_work) = resource_bounds(n, m)?;
+    let bytes = n
+        .checked_mul(192)
+        .and_then(|v| m.checked_mul(64).and_then(|p| v.checked_add(p)))
+        .and_then(|v| base_bytes.checked_add(v))
+        .ok_or_else(|| invalid("parameter derivative payload bound overflow"))?;
+    let additional_work = (n as u64)
+        .checked_mul(n as u64 + m as u64)
+        .and_then(|v| v.checked_mul(8))
+        .ok_or_else(|| invalid("parameter derivative work bound overflow"))?;
+    let work = base_work
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(additional_work))
+        .ok_or_else(|| invalid("parameter derivative work bound overflow"))?;
+    if bytes > model.budget.max_dense_bytes || work > model.budget.max_dense_work {
+        return Err(invalid(
+            "insufficient parameter derivative byte or work budget",
+        ));
+    }
+    Ok(())
+}
+
+/// Physical state/material observations before the actual source-work account.
+/// Loaded boundaries supply their restored input tangent only after dy is known.
+pub(super) struct ParameterStateDerivative {
+    pub(super) state: Vec<C64>,
+    pub(super) effort: Vec<C64>,
+    pub(super) output: Vec<C64>,
+    pub(super) energy: f64,
+    pub(super) dissipation: f64,
+    pub(super) relative_residual: f64,
+}
+
 impl HarmonicFactor<'_> {
     /// Differentiate the complete driven physical response at fixed frequency.
     ///
@@ -254,25 +290,7 @@ impl HarmonicFactor<'_> {
                 "one finite input derivative per source port required",
             ));
         }
-        let (base_bytes, base_work) = resource_bounds(n, m)?;
-        let bytes = n
-            .checked_mul(192)
-            .and_then(|v| m.checked_mul(64).and_then(|p| v.checked_add(p)))
-            .and_then(|v| base_bytes.checked_add(v))
-            .ok_or_else(|| invalid("parameter derivative payload bound overflow"))?;
-        let additional_work = (n as u64)
-            .checked_mul(n as u64 + m as u64)
-            .and_then(|v| v.checked_mul(8))
-            .ok_or_else(|| invalid("parameter derivative work bound overflow"))?;
-        let work = base_work
-            .checked_mul(2)
-            .and_then(|v| v.checked_add(additional_work))
-            .ok_or_else(|| invalid("parameter derivative work bound overflow"))?;
-        if bytes > model.budget.max_dense_bytes || work > model.budget.max_dense_work {
-            return Err(invalid(
-                "insufficient parameter derivative byte or work budget",
-            ));
-        }
+        admit_response(model)?;
         direction.validate(model, &mut cancelled)?;
         let response = self.response(input, &mut cancelled)?;
         let action = generator_action(
@@ -303,119 +321,181 @@ impl HarmonicFactor<'_> {
         }
         let (state_derivative, relative_derivative_residual) =
             self.solve_rhs(&rhs, &mut cancelled)?;
-        let mut effort_derivative = state_derivative.clone();
-        let mut energy_derivative = 0.0;
-        for i in 0..model.n_diff {
-            poll(&mut cancelled)?;
-            effort_derivative[i] = action.storage[i];
-            let mut correction = C64::ZERO;
-            for j in 0..model.n_diff {
-                accumulate(
-                    &mut effort_derivative[i],
-                    &mut correction,
-                    state_derivative[j].scale(model.q[i * n + j]),
-                );
-            }
-            energy_derivative += 0.5 * half_pair(state_derivative[i], response.effort[i])?
-                + 0.5 * half_pair(response.state[i], effort_derivative[i])?;
+        let observed = observe_state(
+            model,
+            &response,
+            direction,
+            state_derivative,
+            &action.storage,
+            relative_derivative_residual,
+            &mut cancelled,
+        )?;
+        finish_response(response, observed, input, input_derivative, &mut cancelled)
+    }
+}
+
+/// The original storage, output and independent material loss chain rules.
+/// No boundary feedback is included in R or counted as material heat.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe_state(
+    model: &HarmonicModel,
+    response: &HarmonicResponse,
+    direction: HarmonicParameterDirection<'_>,
+    state_derivative: Vec<C64>,
+    storage_derivative: &[C64],
+    relative_derivative_residual: f64,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ParameterStateDerivative, HarmonicError> {
+    let (n, m) = (model.n, model.m);
+    let mut effort_derivative = state_derivative.clone();
+    let mut energy_derivative = 0.0;
+    for i in 0..model.n_diff {
+        poll(&mut cancelled)?;
+        effort_derivative[i] = storage_derivative[i];
+        let mut correction = C64::ZERO;
+        for j in 0..model.n_diff {
+            accumulate(
+                &mut effort_derivative[i],
+                &mut correction,
+                state_derivative[j].scale(model.q[i * n + j]),
+            );
         }
-        let mut output_derivative = vec![C64::ZERO; m];
-        for p in 0..m {
-            poll(&mut cancelled)?;
-            let mut correction = C64::ZERO;
-            for i in 0..n {
-                accumulate(
-                    &mut output_derivative[p],
-                    &mut correction,
-                    effort_derivative[i].scale(model.g[i * m + p])
-                        + response.effort[i].scale(at(direction.ports, i * m + p)),
-                );
-            }
-        }
-        let mut loss_derivative = 0.0;
+        energy_derivative += 0.5 * half_pair(state_derivative[i], response.effort[i])?
+            + 0.5 * half_pair(response.state[i], effort_derivative[i])?;
+    }
+    let mut output_derivative = vec![C64::ZERO; m];
+    for p in 0..m {
+        poll(&mut cancelled)?;
+        let mut correction = C64::ZERO;
         for i in 0..n {
-            poll(&mut cancelled)?;
-            let mut resistance = C64::ZERO;
-            let mut d_resistance = C64::ZERO;
-            let mut correction = C64::ZERO;
-            let mut d_correction = C64::ZERO;
-            for j in 0..n {
+            accumulate(
+                &mut output_derivative[p],
+                &mut correction,
+                effort_derivative[i].scale(model.g[i * m + p])
+                    + response.effort[i].scale(at(direction.ports, i * m + p)),
+            );
+        }
+    }
+    let mut loss_derivative = 0.0;
+    for i in 0..n {
+        poll(&mut cancelled)?;
+        let mut resistance = C64::ZERO;
+        let mut d_resistance = C64::ZERO;
+        let mut correction = C64::ZERO;
+        let mut d_correction = C64::ZERO;
+        for j in 0..n {
+            accumulate(
+                &mut resistance,
+                &mut correction,
+                response.effort[j].scale(model.r[i * n + j]),
+            );
+            accumulate(
+                &mut d_resistance,
+                &mut d_correction,
+                effort_derivative[j].scale(model.r[i * n + j])
+                    + response.effort[j].scale(at(direction.dissipation, i * n + j)),
+            );
+            if let Some(t) = &model.resisting_tangent {
                 accumulate(
                     &mut resistance,
                     &mut correction,
-                    response.effort[j].scale(model.r[i * n + j]),
+                    response.state[j].scale(t[i * n + j]),
                 );
                 accumulate(
                     &mut d_resistance,
                     &mut d_correction,
-                    effort_derivative[j].scale(model.r[i * n + j])
-                        + response.effort[j].scale(at(direction.dissipation, i * n + j)),
+                    state_derivative[j].scale(t[i * n + j]),
                 );
-                if let Some(t) = &model.resisting_tangent {
-                    accumulate(
-                        &mut resistance,
-                        &mut correction,
-                        response.state[j].scale(t[i * n + j]),
-                    );
-                    accumulate(
-                        &mut d_resistance,
-                        &mut d_correction,
-                        state_derivative[j].scale(t[i * n + j]),
-                    );
-                }
-                if let Some(dt) = direction.resisting_flow {
-                    accumulate(
-                        &mut d_resistance,
-                        &mut d_correction,
-                        response.state[j].scale(dt[i * n + j]),
-                    );
-                }
             }
-            loss_derivative += half_pair(effort_derivative[i], resistance)?
-                + half_pair(response.effort[i], d_resistance)?;
+            if let Some(dt) = direction.resisting_flow {
+                accumulate(
+                    &mut d_resistance,
+                    &mut d_correction,
+                    response.state[j].scale(dt[i * n + j]),
+                );
+            }
         }
-        let mut port_power_derivative = Vec::with_capacity(m);
-        for p in 0..m {
-            poll(&mut cancelled)?;
-            let derivative = if let Some(du) = input_derivative {
-                half_pair(du[p], response.output[p])?
-            } else {
-                0.0
-            } + half_pair(input[p], output_derivative[p])?;
-            port_power_derivative.push(derivative);
-        }
-        let supply_derivative: f64 = port_power_derivative.iter().sum();
-        let balance_derivative = loss_derivative - supply_derivative;
-        if effort_derivative
-            .iter()
-            .chain(&output_derivative)
-            .any(|&v| !finite(v))
-            || port_power_derivative.iter().any(|v| !v.is_finite())
-            || [
-                energy_derivative,
-                loss_derivative,
-                supply_derivative,
-                balance_derivative,
-            ]
-            .iter()
-            .any(|v| !v.is_finite())
-        {
-            return Err(invalid("parameter derivative observation overflow"));
-        }
-        poll(&mut cancelled)?;
-        Ok(HarmonicParameterResponse {
-            response,
-            state_derivative,
-            effort_derivative,
-            output_derivative,
-            mean_stored_energy_derivative: energy_derivative,
-            port_power_derivative,
-            supplied_power_derivative: supply_derivative,
-            dissipated_power_derivative: loss_derivative,
-            power_residual_derivative: balance_derivative,
-            relative_derivative_residual,
-        })
+        loss_derivative += half_pair(effort_derivative[i], resistance)?
+            + half_pair(response.effort[i], d_resistance)?;
     }
+    if effort_derivative
+        .iter()
+        .chain(&output_derivative)
+        .any(|&value| !finite(value))
+        || !energy_derivative.is_finite()
+        || !loss_derivative.is_finite()
+    {
+        return Err(invalid("parameter derivative observation overflow"));
+    }
+    poll(&mut cancelled)?;
+    Ok(ParameterStateDerivative {
+        state: state_derivative,
+        effort: effort_derivative,
+        output: output_derivative,
+        energy: energy_derivative,
+        dissipation: loss_derivative,
+        relative_residual: relative_derivative_residual,
+    })
+}
+
+/// Close the original physical account using actual inputs and their tangents.
+pub(super) fn finish_response(
+    response: HarmonicResponse,
+    observed: ParameterStateDerivative,
+    input: &[C64],
+    input_derivative: Option<&[C64]>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<HarmonicParameterResponse, HarmonicError> {
+    let m = response.output.len();
+    let ParameterStateDerivative {
+        state: state_derivative,
+        effort: effort_derivative,
+        output: output_derivative,
+        energy: energy_derivative,
+        dissipation: loss_derivative,
+        relative_residual: relative_derivative_residual,
+    } = observed;
+    let mut port_power_derivative = Vec::with_capacity(m);
+    for p in 0..m {
+        poll(&mut cancelled)?;
+        let derivative = if let Some(du) = input_derivative {
+            half_pair(du[p], response.output[p])?
+        } else {
+            0.0
+        } + half_pair(input[p], output_derivative[p])?;
+        port_power_derivative.push(derivative);
+    }
+    let supply_derivative: f64 = port_power_derivative.iter().sum();
+    let balance_derivative = loss_derivative - supply_derivative;
+    if effort_derivative
+        .iter()
+        .chain(&output_derivative)
+        .any(|&v| !finite(v))
+        || port_power_derivative.iter().any(|v| !v.is_finite())
+        || [
+            energy_derivative,
+            loss_derivative,
+            supply_derivative,
+            balance_derivative,
+        ]
+        .iter()
+        .any(|v| !v.is_finite())
+    {
+        return Err(invalid("parameter derivative observation overflow"));
+    }
+    poll(&mut cancelled)?;
+    Ok(HarmonicParameterResponse {
+        response,
+        state_derivative,
+        effort_derivative,
+        output_derivative,
+        mean_stored_energy_derivative: energy_derivative,
+        port_power_derivative,
+        supplied_power_derivative: supply_derivative,
+        dissipated_power_derivative: loss_derivative,
+        power_residual_derivative: balance_derivative,
+        relative_derivative_residual,
+    })
 }
 
 fn half_pair(left: C64, right: C64) -> Result<f64, HarmonicError> {

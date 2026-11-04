@@ -120,6 +120,11 @@ impl EquilibriumLinearization {
     /// All existing AC, isolated-pole, contour and participation APIs, in LOCAL
     /// perturbation coordinates. No discretized time-step frequencies are used.
     pub fn model(&self) -> &HarmonicModel { &self.model }
+    /// Consume the admitted local image for composition with a physical load.
+    /// The model keeps its original Hessian, resisting-flow tangent, descriptor
+    /// chart and budgets; responses still describe local perturbations. Inspect
+    /// operating-point metadata before consuming this wrapper.
+    pub fn into_model(self) -> HarmonicModel { self.model }
     pub fn equilibrium_state(&self) -> &[f64] { &self.state }
     pub fn equilibrium_input(&self) -> &[f64] { &self.input }
     pub fn equilibrium_effort(&self) -> &[f64] { &self.effort }
