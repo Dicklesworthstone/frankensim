@@ -14,17 +14,19 @@ use crate::{Duct, DuctError, HoleState, LossModel, Segment, TabulatedLoad, Termi
 mod media;
 pub use media::NetworkMedia;
 mod loaded;
+/// Original molecular and viscothermal edge laws in the loaded graph.
+pub mod molecular;
 pub use loaded::{
     network_drive, network_drive_coherent, network_drive_coherent_regional, network_drive_coupled,
     network_drive_coupled_regional, network_drive_regional, network_drive_source_bank,
     network_drive_source_bank_regional, network_drive_sources, network_drive_sources_regional,
     network_prepare_sources, network_prepare_sources_regional,
 };
-pub mod observation;
 pub mod field;
+pub mod observation;
+mod prepared;
 /// Prepared incident/reflected pressure waves on the original loaded graph.
 pub mod scattering;
-mod prepared;
 pub use prepared::{
     NetworkCoherenceBudget, NetworkSourceCoordinate, NetworkSourceQuantity,
     NetworkSourceStatistics, NetworkSourceWork, PreparedNetworkSources,

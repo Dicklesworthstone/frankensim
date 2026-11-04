@@ -1541,6 +1541,37 @@ equations, not Rust compilation.
 
 ### Regional material and exterior binding
 
+`network::molecular::MolecularNetwork` binds each exact edge identity to its
+original evaluated `RelaxationState` and optional circular shear/thermal
+diffusion spectra. At every requested angular frequency, the original
+`MolecularDuct` owner supplies its complex storage and absorption two-port.
+Those blocks enter the existing fully loaded scattering equations, without
+constructing an equilibrium-gas network impedance or fitting attenuation.
+The joint molecular/thermal pressure law is retained; independent thermal and
+molecular shunts are not added. Radial diffusion eigensolves occur at binding
+and their positive spectra are reused throughout a frequency sweep.
+
+The returned `PreparedNetworkSources` retains complete pressure/flow transfers,
+coherent source phases, scalar or coupled source/load impedances, signed work
+and existing statistics/finite-window consumers. It can close a loaded graph
+even when an open-circuit impedance would be singular. The original
+`NetworkMedia` records and explicit exterior remain accessible. Each molecular
+state must exactly match its edge's gas; matching only equilibrium sound speed
+does not admit a different material. Gas heat and internal boundary work are
+not separately attributed by the graph's net work balance.
+
+This path admits frozen cylinders, cones, profiles, branches and loops with one
+state per edge, common static pressure and mechanically rigid walls. Chimneys
+must be explicit graph branches with declared mouth boundaries; embedded
+compact tone holes refuse. The aggregate propagation-block cap, original wall
+frequency support, graph condition/capacity bounds and cancellation are
+preserved without resolution reduction. The focused tests in
+`src/network/molecular/tests.rs` compare independent complex line equations and
+source work, regional branch interference with a full reciprocal source bank,
+joint wall/molecular chain subdivision, half-wave loaded closure and exact
+binding/capacity refusals. Native execution is pending because the current
+checkout lacks required sibling repositories.
+
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,
 plus one independently specified homogeneous exterior. Mixture composition,
 NASA-9 query states and source-pack receipts remain in those records and in
