@@ -95,6 +95,8 @@ pub enum MixedViscoTetError {
     ExactIncompressibleImpulse,
     /// Finite-compliance material uses the mass-only impulse entry instead.
     FiniteCompliancePressureImpulse,
+    /// A constant-velocity material drift does not enforce exact volume.
+    ExactIncompressibleSplit,
     EnergyGate {
         quantity: &'static str,
         value_j: f64,
@@ -118,6 +120,10 @@ impl core::fmt::Display for MixedViscoTetError {
             Self::FiniteCompliancePressureImpulse => write!(
                 f,
                 "pressure-constrained impulses require exact-incompressible motion"
+            ),
+            Self::ExactIncompressibleSplit => write!(
+                f,
+                "force/contact/drift requires finite-compliance mixed material"
             ),
             Self::EnergyGate {
                 quantity,
@@ -149,6 +155,8 @@ fn gate(
 }
 
 /// Immutable accepted solid. A rejected candidate cannot advance any history.
+/// Velocity-only candidates share displacement, pressure, stress and history
+/// buffers; physical endpoint evolution publishes new immutable buffers.
 #[derive(Debug)]
 pub struct MixedViscoTetSolid<'a> {
     nodes_m: &'a [[f64; 3]],
@@ -159,13 +167,15 @@ pub struct MixedViscoTetSolid<'a> {
     budget: TetAssemblyBudget,
     quadrature_points_per_dir: usize,
     maximum_quadrature_points: usize,
-    displacement_m: Vec<[f64; 3]>,
-    pressure_pa: Vec<f64>,
-    states: Vec<ViscoRemainderState>,
-    first_piola_pa: Vec<[f64; 9]>,
+    displacement_m: Arc<[[f64; 3]]>,
+    pressure_pa: Arc<[f64]>,
+    states: Arc<[ViscoRemainderState]>,
+    first_piola_pa: Arc<[[f64; 9]]>,
     remainder_energy_j: f64,
     bulk_energy_j: f64,
     time_s: f64,
+    /// Velocity-only candidates share one immutable material/configuration state.
+    accepted_identity: Arc<()>,
 }
 
 /// Complete proposed endpoint. Dropping it leaves the previous solid intact.
@@ -256,13 +266,14 @@ impl<'a> MixedViscoTetSolid<'a> {
             budget,
             quadrature_points_per_dir,
             maximum_quadrature_points,
-            displacement_m: vec![[0.0; 3]; nodes_m.len()],
-            pressure_pa,
-            states,
-            first_piola_pa,
+            displacement_m: vec![[0.0; 3]; nodes_m.len()].into(),
+            pressure_pa: pressure_pa.into(),
+            states: states.into(),
+            first_piola_pa: first_piola_pa.into(),
             remainder_energy_j,
             bulk_energy_j: 0.0,
             time_s: 0.0,
+            accepted_identity: Arc::new(()),
         })
     }
 
@@ -542,13 +553,14 @@ impl<'a> MixedViscoTetSolid<'a> {
             budget: self.budget,
             quadrature_points_per_dir: self.quadrature_points_per_dir,
             maximum_quadrature_points: self.maximum_quadrature_points,
-            displacement_m: equilibrium.displacement_m.clone(),
-            pressure_pa: equilibrium.pressure_pa.clone(),
-            states,
-            first_piola_pa,
+            displacement_m: equilibrium.displacement_m.clone().into(),
+            pressure_pa: equilibrium.pressure_pa.clone().into(),
+            states: states.into(),
+            first_piola_pa: first_piola_pa.into(),
             remainder_energy_j: energy.remainder_after_j,
             bulk_energy_j: energy.bulk_after_j,
             time_s,
+            accepted_identity: Arc::new(()),
         };
         Ok((
             MixedViscoTetStep {

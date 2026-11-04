@@ -16,6 +16,11 @@
 //! work allowances can reject the complete candidate without changing history.
 //! This first-order path permits budgeted numerical damping; it is not the
 //! instrument-render doctrine's zero-algorithmic-damping/discrete-gradient integrator.
+//!
+//! The separate finite-compliance force/contact/drift entry uses accepted Piola
+//! forces, the same consistent mass and a pressure-only native material endpoint.
+//! It retains post-contact velocity during drift and reports numerical splitting
+//! work independently of relaxation. Complete path admission belongs to the caller.
 
 use std::sync::Arc;
 
@@ -30,8 +35,11 @@ use crate::inertia::{BackwardEulerInertia, ReferenceMass};
 
 pub use crate::hyper3::mixed::impulse::{MixedImpulseControls, MixedImpulseReport};
 pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
+pub use crate::hyper3::visco::dynamics::{
+    FiniteViscoContactDrift, FiniteViscoContactDriftControls,
+};
 pub use crate::inertia::{
-    InertialEnergy, SolidImpulseControls, SolidImpulseReport, SolidMotionMomentum,
+    InertialEnergy, SolidImpulseControls, SolidImpulseReport, SolidMomentum, SolidMotionMomentum,
     SolidPointKinematics, SolidPointMobility, SolidPointMobilityMatrix, Tet10ImpulsePoint,
 };
 
@@ -39,6 +47,9 @@ mod impulse;
 pub use impulse::{
     MixedViscoConstrainedImpulse, MixedViscoConstrainedResponse, MixedViscoMotionImpulse,
 };
+
+mod split;
+pub use split::MixedViscoForceKick;
 
 /// Immutable accepted displacement, continuous pressure, memory and velocity.
 #[derive(Debug)]

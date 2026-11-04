@@ -1,5 +1,19 @@
 # fs-material — CONTRACT
 
+## Original mixed pressure dual without unused remainder tangents
+
+`MixedFiniteStrainPotential::mixed_pressure_potential` exposes the original
+scalar pressure/volume dual for prescribed-displacement pressure solves. It uses
+the same equilibrium law, deformation/stretch checks, finite-pressure checks,
+positive reconstructed volume and bulk-branch restrictions as the full mixed
+response, including the original log-squared convex branch. It does not evaluate
+the remainder Hessian or substitute a new bulk model. The native residual owner
+must separately admit remainder/history; this scalar response is not a complete
+material-state admission. Full mixed-state and tangent APIs retain their existing
+semantics. The native solid regressions compare both original bulk laws against
+the full pressure block and independent residual derivatives; execution remains
+unverified under the workspace resource blocker.
+
 ## Frozen source thermoelasticity in native small-strain mechanics
 
 `ResolvedThermoelastic::try_mechanical_law` prepares a borrowed

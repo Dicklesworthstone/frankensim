@@ -1,5 +1,48 @@
 # fs-solid CONTRACT
 
+## Native quadratic Maxwell force, contact and pressure drift
+
+`MixedViscoTetMotion::force_kick_candidate` integrates the accepted original
+mixed Piola stress and authored nodal/reference-volume loads through the original
+curved P2 quadrature and supported consistent mass. Signed corner weights, all
+midsides, heterogeneous quadrature material and actual load moments remain
+present. Compensated accumulation retains small loads between large opposing
+inputs. The kick retains separate source, internal and support impulse/work
+accounts; it changes velocity while sharing immutable geometry, pressure,
+stress and Maxwell-history buffers with subsequent contact impulses.
+
+`contact_drift_candidate` retains the post-contact velocity and prescribes every
+displacement to its represented kinetic drift. The original mixed owner then
+solves continuous P1 pressure with the original accepted histories frozen during
+the solve. Physical storage remains remainder plus `U(J(p))`, including when the
+weak pressure projection differs from pointwise `U(det F)`. Reactions from these
+prescribed material-evaluation coordinates are not physical support impulses or
+work. The private force-phase identity rejects skipped, superseded or already
+advanced phases; public diagnostic mutation cannot change continuation.
+
+Native relaxation, source displacement work, source/force splitting, endpoint
+work defect and momentum residuals remain separate. The common drift receipt's
+`native_loading_work_j` includes native remainder loading and reversible bulk
+storage change. A noncancelling numerical-work allowance gates the split; no
+numerical loss becomes heat. This first-order finite-compliance entry requires
+stationary held velocities, caller-owned complete path admission and refinement.
+Exact incompressibility explicitly refuses this unconstrained kinetic subflow.
+
+Fully prescribed `OriginalMaterial` endpoints assemble only the original pp
+tangent, retaining global pressure indices, scaling, factorization and native
+residual/domain gates. Unused displacement Hessians and up blocks are omitted;
+public full tangent evaluation and final native support evaluation are unchanged.
+Existing assembly admission remains conservative. New physical endpoints own new
+immutable buffers; velocity-only phases no longer copy every material history.
+
+Focused native regressions specify curved heterogeneous force/support torque,
+signed body loads, complete history replay, independent P1 pressure projection
+and physical bulk storage, phase binding and rollback. Additional pressure tests
+compare the original full block and residual derivatives for quadratic and
+log-squared bulk laws. Exact-rational moment checks and pinned source formatting
+passed; native Cargo compilation and Rust test execution remain unverified under
+the workspace resource blocker. No runtime speedup is measured here.
+
 ## Original quadratic Maxwell momentum during native motion
 
 `MixedViscoTetMotion::advance_with_momentum` advances the same original P2/P1

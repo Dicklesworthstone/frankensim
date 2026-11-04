@@ -351,6 +351,19 @@ pub trait MixedFiniteStrainPotential {
     ) -> Result<([f64; 9], f64), MaterialError>;
     /// Bulk-free remainder gradient, value and Hessian from one prepared point.
     fn remainder_response(&self, f: &[f64; 9]) -> Result<RemainderResponse, MaterialError>;
+    /// Original pressure/volume dual without evaluating the remainder Hessian.
+    /// A prescribed-displacement pressure solve needs only this scalar law.
+    /// Original deformation and bulk-branch restrictions still apply; callers
+    /// separately admit the remainder/history through the native residual.
+    fn mixed_pressure_potential(
+        &self,
+        f: &[f64; 9],
+        pressure_pa: f64,
+        treatment: VolumetricTreatment,
+    ) -> Result<PressurePotential, MaterialError> {
+        check_split_state(self.equilibrium_law(), f)?;
+        pressure_data(self.equilibrium_law(), f, pressure_pa, treatment)
+    }
     /// Mixed potential and residuals for a spatial residual line search.
     fn mixed_state(
         &self,

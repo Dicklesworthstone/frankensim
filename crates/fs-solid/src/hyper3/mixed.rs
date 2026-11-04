@@ -33,7 +33,7 @@ use fs_sparse::{
 use crate::linear3::{TetAssemblyBudget, TetElasticError};
 
 mod element;
-use element::PreparedMixedMesh;
+use element::{MixedPoint, PreparedMixedElement, PreparedMixedMesh};
 
 /// Retained finite-strain viscoelastic histories on the mixed solid.
 pub mod visco;
@@ -43,6 +43,9 @@ pub mod conservative;
 
 /// Fixed-configuration impulses with the original incompressibility constraint.
 pub mod impulse;
+
+#[cfg(test)]
+mod pressure_tests;
 
 /// Constitutive laws retain their spatial identity; no coefficients are averaged.
 #[derive(Debug)]
@@ -531,16 +534,7 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
             let mut local_k = [[0.0; 34]; 34];
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
-                let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-                for a in 1..10 {
-                    for i in 0..3 {
-                        for j in 0..3 {
-                            f[3 * i + j] += (displacement_m[element.connectivity[a]][i]
-                                - displacement_m[element.connectivity[0]][i])
-                                * point.gradients[a][j];
-                        }
-                    }
-                }
+                let f = point_deformation(element, point, displacement_m);
                 let p = (0..4)
                     .map(|a| pressure_pa[element.pressure_indices[a]] * point.pressure_shapes[a])
                     .sum();
@@ -668,6 +662,72 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
             potential_j,
             min_det_f,
         })
+    }
+
+    /// The original pp block for a fully prescribed displacement endpoint.
+    /// Global DOF indices and element accumulation order match the full mixed
+    /// assembly; no displacement Hessian or up coupling is formed. The normal
+    /// residual owner still evaluates material stresses, history and domains.
+    fn pressure_tangent(
+        &self,
+        displacement_m: &[[f64; 3]],
+        pressure_pa: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Csr, MixedUpError> {
+        checkpoint(cx)?;
+        self.validate_state(displacement_m, pressure_pa)?;
+        let nu = 3 * self.mesh.nodes_count;
+        let total = nu + self.mesh.pressure_nodes.len();
+        let mut coo = Coo::new(total, total);
+        for (e, element) in self.mesh.elements.iter().enumerate() {
+            checkpoint(cx)?;
+            let mut local = [[0.0; 4]; 4];
+            for (q, point) in element.points.iter().enumerate() {
+                checkpoint(cx)?;
+                let f = point_deformation(element, point, displacement_m);
+                let p = (0..4)
+                    .map(|a| pressure_pa[element.pressure_indices[a]] * point.pressure_shapes[a])
+                    .sum();
+                let bulk = self
+                    .problem
+                    .material
+                    .at(e, q, self.mesh.points_per_element)
+                    .mixed_pressure_potential(&f, p, self.problem.volumetric)
+                    .map_err(|error| MixedUpError::Material {
+                        element: e,
+                        point: q,
+                        error,
+                    })?;
+                for (a, row) in local.iter_mut().enumerate() {
+                    for (b, entry) in row.iter_mut().enumerate() {
+                        *entry += point.weight_m3
+                            * point.pressure_shapes[a]
+                            * point.pressure_shapes[b]
+                            * -bulk.compliance_per_pa;
+                    }
+                }
+            }
+            for (a, row) in local.iter().enumerate() {
+                for (b, &value) in row.iter().enumerate() {
+                    coo.push(
+                        nu + element.pressure_indices[a],
+                        nu + element.pressure_indices[b],
+                        value,
+                    );
+                }
+            }
+        }
+        let tangent = coo.assemble();
+        for row in nu..total {
+            if (row - nu) % 128 == 0 {
+                checkpoint(cx)?;
+            }
+            if tangent.row(row).1.iter().any(|v| !v.is_finite()) {
+                return Err(invalid("assembled pressure tangent is unrepresentable"));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(tangent)
     }
 
     pub fn solve(&self, cx: &Cx<'_>) -> Result<MixedUpSolution, MixedUpError> {
@@ -851,6 +911,24 @@ struct Linearization {
     factor: LdltFactor,
 }
 
+fn point_deformation(
+    element: &PreparedMixedElement,
+    point: &MixedPoint,
+    displacement_m: &[[f64; 3]],
+) -> [f64; 9] {
+    let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    for a in 1..10 {
+        for i in 0..3 {
+            for j in 0..3 {
+                f[3 * i + j] += (displacement_m[element.connectivity[a]][i]
+                    - displacement_m[element.connectivity[0]][i])
+                    * point.gradients[a][j];
+            }
+        }
+    }
+    f
+}
+
 struct Endpoint<'p, 'a, 'c, 'scope, L: MixedFiniteStrainPotential> {
     prepared: &'p PreparedMixedUpProblem<'a, L>,
     base_u: &'p [[f64; 3]],
@@ -898,10 +976,19 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
         // matrix/factor before allocating the next numeric factor and scratch.
         *self.linearization.borrow_mut() = None;
         let (u, p) = self.physical_state(x)?;
-        let evaluation =
+        let full = if self.prepared.free_displacements == 0
+            && self.prepared.problem.volumetric == VolumetricTreatment::OriginalMaterial
+        {
+            // Inertia affects displacement rows only, all prescribed here.
+            // The full native residual and final support/energy evaluation
+            // remain unchanged; only unused tangent blocks are omitted.
+            self.prepared.pressure_tangent(&u, &p, self.cx)?
+        } else {
             self.prepared
-                .evaluate_with_inertia(&u, &p, true, self.inertia, self.cx)?;
-        let full = evaluation.tangent.expect("requested original tangent");
+                .evaluate_with_inertia(&u, &p, true, self.inertia, self.cx)?
+                .tangent
+                .expect("requested original tangent")
+        };
         let nu = 3 * u.len();
         if let Some((node, _)) = self.prepared.problem.pressure_gauge {
             // A pressure pin is only a gauge when its constant component is a

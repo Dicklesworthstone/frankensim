@@ -254,7 +254,7 @@ impl<'a> MixedViscoTetMotion<'a> {
             .solid
             .nodes_m
             .iter()
-            .zip(&self.solid.displacement_m)
+            .zip(self.solid.displacement_m.iter())
             .enumerate()
         {
             if node % 256 == 0 {
@@ -279,13 +279,14 @@ impl<'a> MixedViscoTetMotion<'a> {
             budget: self.solid.budget,
             quadrature_points_per_dir: self.solid.quadrature_points_per_dir,
             maximum_quadrature_points: self.solid.maximum_quadrature_points,
-            displacement_m: self.solid.displacement_m.clone(),
-            pressure_pa: self.solid.pressure_pa.clone(),
-            states: self.solid.states.clone(),
-            first_piola_pa: self.solid.first_piola_pa.clone(),
+            displacement_m: Arc::clone(&self.solid.displacement_m),
+            pressure_pa: Arc::clone(&self.solid.pressure_pa),
+            states: Arc::clone(&self.solid.states),
+            first_piola_pa: Arc::clone(&self.solid.first_piola_pa),
             remainder_energy_j: self.solid.remainder_energy_j,
             bulk_energy_j: self.solid.bulk_energy_j,
             time_s: self.solid.time_s,
+            accepted_identity: Arc::clone(&self.solid.accepted_identity),
         };
         checkpoint(cx)?;
         Ok(Self {

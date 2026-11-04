@@ -19,6 +19,7 @@ use fs_solver::nonlinear::NewtonKrylovConfig;
 
 mod impulse;
 mod momentum;
+mod split;
 
 const VOLUME: f64 = 1.0 / 6.0;
 const DENSITY: f64 = 6.0;
