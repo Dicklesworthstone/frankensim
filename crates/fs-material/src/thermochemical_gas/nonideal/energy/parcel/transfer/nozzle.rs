@@ -12,6 +12,9 @@
 //! a flash, resolve shocks,
 //! model a diverging nozzle, wall friction or jet momentum in the receiving tank.
 
+/// Finite adiabatic depletion and physical-time real-gas nozzle blowdown.
+pub mod blowdown;
+
 use super::{
     IsochoricRealGasParcel, RealGasMassTransferCandidate, RealGasMassTransferSolve,
 };
