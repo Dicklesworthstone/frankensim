@@ -207,10 +207,6 @@ impl SparseGrid3 {
         molecular: Option<&[CollisionModel3]>,
     ) -> Result<SgsReport, SparseSgsError3> {
         checkpoint(gate)?;
-        config.validate()?;
-        if workspace.tile_dims != self.tile_dims() || workspace.keys != self.keys {
-            return Err(SparseSgsError3::TopologyChanged);
-        }
         if let Some(field) = molecular {
             if field.len() != workspace.local.collisions.len() {
                 return Err(SparseSgsError3::MolecularFieldLength {
@@ -219,16 +215,49 @@ impl SparseGrid3 {
                 });
             }
         }
+        self.prepare_sgs_sampled(gate, config, workspace, |slot, lane, _| {
+            let original = molecular.map_or(self.model, |field| field[slot * TILE_CELLS + lane]);
+            if molecular.is_some() {
+                original
+                    .validate()
+                    .map_err(|source| SparseError3::Collision {
+                        tile_key: self.keys[slot],
+                        lane,
+                        source,
+                    })?;
+            }
+            Ok(original)
+        })
+    }
+
+    // One gradient reconstruction serves both the source rheology and SGS.
+    // The sampler returns an admitted ORIGINAL molecular collision, never a
+    // previous SGS-augmented field. Its error retains the original source.
+    fn prepare_sgs_sampled<E: From<SparseSgsError3>>(
+        &self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SparseSgsWorkspace3,
+        mut sample: impl FnMut(usize, usize, [[f64; 3]; 3]) -> Result<CollisionModel3, E>,
+    ) -> Result<SgsReport, E> {
+        checkpoint(gate)?;
+        config.validate().map_err(SparseSgsError3::from)?;
+        if workspace.tile_dims != self.tile_dims() || workspace.keys != self.keys {
+            return Err(SparseSgsError3::TopologyChanged.into());
+        }
         self.model
             .validate()
             .map_err(|source| SparseError3::Collision {
                 tile_key: self.keys[0],
                 lane: 0,
                 source,
-            })?;
+            })
+            .map_err(SparseSgsError3::from)?;
         let uniform_nu = self.model.kinematic_viscosity();
         if !uniform_nu.is_finite() || uniform_nu <= 0.0 {
-            return Err(SgsError::InvalidMolecularViscosity { cell: 0 }.into());
+            return Err(
+                SparseSgsError3::from(SgsError::InvalidMolecularViscosity { cell: 0 }).into(),
+            );
         }
         for (slot, &key) in self.keys.iter().enumerate() {
             checkpoint(gate)?;
@@ -247,7 +276,8 @@ impl SparseGrid3 {
                     return Err(SparseSgsError3::InvalidState {
                         tile_key: key,
                         lane,
-                    });
+                    }
+                    .into());
                 }
                 let cell = slot * TILE_CELLS + lane;
                 workspace.local.velocity[cell] = u;
@@ -259,43 +289,36 @@ impl SparseGrid3 {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
                 let cell = slot * TILE_CELLS + lane;
-                let original = molecular.map_or(self.model, |field| field[cell]);
-                let nu = if molecular.is_some() {
-                    original
-                        .validate()
-                        .map_err(|source| SparseError3::Collision {
-                            tile_key: key,
-                            lane,
-                            source,
-                        })?;
-                    original.kinematic_viscosity()
-                } else {
-                    uniform_nu
-                };
-                if !nu.is_finite() || nu <= 0.0 {
-                    return Err(SgsError::InvalidMolecularViscosity { cell }.into());
-                }
                 let gradient = workspace.gradient(slot, lane);
-                let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)?;
+                let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)
+                    .map_err(SparseSgsError3::from)?;
+                let original = sample(slot, lane, gradient)?;
+                let nu = original.kinematic_viscosity();
+                if !nu.is_finite() || nu <= 0.0 {
+                    return Err(SparseSgsError3::from(SgsError::InvalidMolecularViscosity {
+                        cell,
+                    })
+                    .into());
+                }
                 let ratio = eddy / nu;
                 if !ratio.is_finite() || ratio > config.maximum_eddy_to_molecular {
-                    return Err(SgsError::ViscosityRatioExceeded {
+                    return Err(SparseSgsError3::from(SgsError::ViscosityRatioExceeded {
                         cell,
                         ratio,
                         maximum: config.maximum_eddy_to_molecular,
-                    }
+                    })
                     .into());
                 }
                 workspace.local.collisions[cell] = if eddy == 0.0 {
                     original
                 } else {
-                    D3q19::with_shear_relaxation(original, 0.5 + (nu + eddy) / D3q19::CS2).map_err(
-                        |source| SparseError3::Collision {
+                    D3q19::with_shear_relaxation(original, 0.5 + (nu + eddy) / D3q19::CS2)
+                        .map_err(|source| SparseError3::Collision {
                             tile_key: key,
                             lane,
                             source,
-                        },
-                    )?
+                        })
+                        .map_err(SparseSgsError3::from)?
                 };
                 let mut strain2 = 0.0;
                 let dilation_third = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
@@ -316,7 +339,7 @@ impl SparseGrid3 {
         }
         checkpoint(gate)?;
         if !report.resolved_dissipation_lu.is_finite() || !report.sgs_dissipation_lu.is_finite() {
-            return Err(SgsError::NonFiniteViscosity.into());
+            return Err(SparseSgsError3::from(SgsError::NonFiniteViscosity).into());
         }
         Ok(report)
     }

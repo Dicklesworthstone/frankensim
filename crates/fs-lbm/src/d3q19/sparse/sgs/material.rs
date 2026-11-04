@@ -3,6 +3,7 @@
 //! One frozen source epoch supplies molecular viscosity. Resolved temperature,
 //! composition and source-law evaluation stay with their existing owners; this
 //! adapter does not invent a second material model or an energy equation.
+//! [`rheology`] resamples those original sources at incoming resolved shear.
 
 use super::{SparseGrid3, SparseSgsError3, SparseSgsWorkspace3, checkpoint};
 use crate::d3q19::sparse::{SparseError3, demorton3};
@@ -13,6 +14,9 @@ use crate::sgs3::{SgsConfig, SgsReport};
 use fs_exec::{CancelGate, KernelRunner};
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
+
+/// Live source viscosity evaluated at the current resolved shear rate.
+pub mod rheology;
 
 /// Complete original response and the molecular relaxation applied at one
 /// active cell. Borrowed concrete sources and `&dyn FluidTransport` work too.

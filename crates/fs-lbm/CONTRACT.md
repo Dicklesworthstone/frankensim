@@ -11195,3 +11195,32 @@ all six point/face/cell and homogeneous/plane observations with explicit
 apply/step/endpoint sequences, demonstrate changed resolved velocity and energy
 exchange relative to held inflow, and cover budgets, catch-up, cancelled/dropped
 retry and native fluid refusal.
+
+## Live source rheology under sparse SGS
+
+`d3q19::sparse::sgs::material::rheology::SparseRheologySgsWorkspace3` and
+`MaterialScaling::{sparse_rheology_sgs_workspace,
+step_sparse_with_material_rheology_and_sgs,
+step_sparse_pooled_with_material_rheology_and_sgs}` resample original
+`FluidTransport` responses at incoming resolved shear on the native sparse
+trajectory. Existing immersed source points/samples, robust `sqrt(2 D:D)/dt`,
+momentum scaling and the force-centered wall-aware sparse gradient are shared.
+One reconstructed gradient supplies both rheology and SGS. Each response is
+read once per active cell; Morton coordinates decode once per tile.
+
+The local molecular response supplies collision viscosity, molecular
+dissipation and the SGS ratio. Zero SGS retains local rheology. Topology,
+dx/dt/reference density and the native collision law bind the workspace.
+Two reserved source buffers introduce no adapter step allocation; storage
+owned by returned material responses and native pooled scheduling remain
+with their original owners. Accepted populations, step count, source epoch
+and report survive source, ratio, native-step or cancellation refusal.
+Callback side effects remain caller-owned and cannot be rolled back.
+
+This is explicit incoming-time resolved-shear generalized-Newtonian LES.
+Evaluating nonlinear molecular stress at filtered strain does not close its
+unresolved correlations. This adds no constitutive memory, implicit coupling,
+thermal/composition evolution or turbulence-validation authority. Four groups
+in `material/rheology/tests.rs` cover frozen-source and zero-SGS equivalence,
+physical shear and live viscosity feedback, source/ratio refusals, serial/pooled
+parity, late cancellation and preserved accepted source epochs.

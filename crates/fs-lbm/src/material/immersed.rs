@@ -227,7 +227,7 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
 
 // Six independent components of sqrt(2 D:D), scaled before squaring.
 // The antisymmetric (rigid rotation) part cancels before the norm.
-fn strain_rate(g: [[f64; 3]; 3]) -> f64 {
+pub(crate) fn strain_rate(g: [[f64; 3]; 3]) -> f64 {
     let components = [
         core::f64::consts::SQRT_2 * g[0][0],
         core::f64::consts::SQRT_2 * g[1][1],
