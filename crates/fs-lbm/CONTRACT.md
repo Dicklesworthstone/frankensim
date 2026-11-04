@@ -3668,6 +3668,22 @@ electronics cooling (the wedge's second physics after steady conduction).
   heterogeneous large-datum invariance, independent disconnected reservoirs,
   and refusal rollback. This is a finite-duration mechanical pressure impulse;
   it neither supplies a viscous steady-flow law nor updates a thermodynamic EOS.
+- `StaggeredBoundaryPressure` and
+  `project_density_volume_source_with_pressure_profile` resolve a separate
+  reservoir pressure at each native x/y/z boundary face. The caller-owned
+  optional-pressure buffers must match the existing staggered layout exactly;
+  `Some` is finite and allowed only on a fluid-exposed `Free` exterior slot.
+  `None` supplies zero there; interior, solid, `Wall` and `Fixed` slots must
+  remain `None`. Admission precedes field cloning, with no profile allocation.
+  The original half-cell inertia, solve and work audit use each actual slot;
+  component references remain independent even for disconnected regions on
+  the same plane. Constant/zero profiles retain the original plane API bits.
+  G1/G3 regressions reproduce affine-gradient acceleration and reservoir work,
+  sharp-stratification hydrostatic rest through the actual gravity predictor
+  on graded grids in all axes, and simultaneous inflow/outflow on one plane.
+  G0/G4 checks cover native shape/role/finite admission, independent large
+  references and transactional refusal. Continuous-profile face averaging,
+  time-dependent reservoirs and thermodynamic state remain caller-owned.
 - `FlowField::predict_density_body_force` supplies native staggered momentum
   prediction from frozen physical density, uniform acceleration and an explicit
   cell body-force density. Each face integrates the same two half-cells as the

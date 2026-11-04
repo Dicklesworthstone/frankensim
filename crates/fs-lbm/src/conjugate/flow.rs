@@ -26,7 +26,7 @@ pub use density_projection::{
     DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls,
     DensityProjectionReport, ForcedDensityProjection, ForcedDensityProjectionReport,
     MaterialDensityMomentumControls, MaterialDensityMomentumInput, MaterialDensityMomentumReport,
-    MaterialDensityMomentumStep,
+    MaterialDensityMomentumStep, StaggeredBoundaryPressure,
 };
 mod density_transport;
 pub use density_transport::{
@@ -455,8 +455,9 @@ impl FlowField {
                         None => {
                             drains |= faces[f] == FlowFace::Free;
                             if faces[f] == FlowFace::Free && reference.is_none() {
+                                let (slot, _) = self.slot(domain, c, f);
                                 reference =
-                                    Some(density.map_or(0.0, |d| d.boundary_pressure_pa[f]));
+                                    Some(density.map_or(0.0, |d| d.boundary_pressure_pa(f, slot)));
                             }
                             let q = self.outward(domain, c, f);
                             // Compensated boundary-only reduction: interior
@@ -528,9 +529,9 @@ impl FlowField {
         };
         let mut coo = Coo::new(n, n);
         let mut b = vec![0.0f64; n];
-        let boundary_potential = |row: usize, f: usize| {
+        let boundary_potential = |row: usize, f: usize, slot: usize| {
             density.map_or(0.0, |d| {
-                d.boundary_potential(f, reference_pressure_pa[component[row]])
+                d.boundary_potential(f, slot, reference_pressure_pa[component[row]])
             })
         };
         for (row, &c) in fluid.iter().enumerate() {
@@ -554,7 +555,8 @@ impl FlowField {
                         let g = conductance(c, f, None);
                         finite_positive("flow.projection_conductance", g)?;
                         diag += g;
-                        let value = boundary_potential(row, f);
+                        let (slot, _) = self.slot(domain, c, f);
+                        let value = boundary_potential(row, f, slot);
                         finite("flow.boundary_pressure_potential", value)?;
                         // Preserve the original zero-boundary arithmetic.
                         if value != 0.0 {
@@ -605,7 +607,8 @@ impl FlowField {
                         -conductance(c, f, Some(nb)) * (phi[row_of[nb]] - phi[row])
                     }
                     None if faces[f] == FlowFace::Free => {
-                        conductance(c, f, None) * (phi[row] - boundary_potential(row, f))
+                        let (slot, _) = self.slot(domain, c, f);
+                        conductance(c, f, None) * (phi[row] - boundary_potential(row, f, slot))
                     }
                     _ => continue,
                 };

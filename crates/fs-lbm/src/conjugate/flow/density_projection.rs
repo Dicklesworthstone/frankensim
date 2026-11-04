@@ -34,6 +34,81 @@ pub struct DensityProjectionControls {
     pub maximum_energy_defect_j: f64,
 }
 
+/// Borrowed reservoir correction pressures in the native staggered face layout.
+///
+/// Each slice has exactly the length of its corresponding [`FlowField`] flux
+/// buffer. `Some(p)` prescribes a finite face-constant pressure in Pa at a
+/// fluid-exposed `Free` boundary face; `None` retains zero there. All interior,
+/// solid, `Wall` and `Fixed` slots must be `None`, including when the authored
+/// pressure would be zero. Thus a profile cannot also prescribe a held velocity.
+///
+/// Storage is caller-owned and can be reused across steps. Admission checks
+/// the three existing face counts before indexing or cloning the flow field;
+/// no profile-sized allocation or callback occurs in the projection. The
+/// caller owns face averaging and spatial refinement of a continuous profile.
+#[derive(Debug, Clone, Copy)]
+pub struct StaggeredBoundaryPressure<'a> {
+    /// X-normal face pressures: `(z * ny + y) * (nx + 1) + i`, `0 <= i <= nx`.
+    pub x_pa: &'a [Option<f64>],
+    /// Y-normal face pressures: `(z * (ny + 1) + j) * nx + x`, `0 <= j <= ny`.
+    pub y_pa: &'a [Option<f64>],
+    /// Z-normal face pressures: `(k * ny + y) * nx + x`, `0 <= k <= nz`.
+    pub z_pa: &'a [Option<f64>],
+}
+
+impl StaggeredBoundaryPressure<'_> {
+    fn value(self, axis: usize, slot: usize) -> Option<f64> {
+        [self.x_pa, self.y_pa, self.z_pa][axis][slot]
+    }
+
+    fn admit(
+        self,
+        field: &FlowField,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        poll(gate)?;
+        if [self.x_pa, self.y_pa, self.z_pa]
+            .iter()
+            .zip(field.face_arrays())
+            .any(|(pressure, flux)| pressure.len() != flux.len())
+        {
+            return Err(refuse(
+                "flow.boundary_pressure_shape",
+                "pressure buffers must match all three native staggered face layouts",
+            ));
+        }
+        for c in 0..domain.cell_count() {
+            poll_every(gate, c)?;
+            for f in 0..6 {
+                let nb = domain.neighbor(c, f);
+                // Check every native slot once, including faces of solids.
+                if nb.is_some() && f % 2 == 0 {
+                    continue;
+                }
+                let (slot, _) = field.slot(domain, c, f);
+                if let Some(pressure) = self.value(f / 2, slot) {
+                    finite("flow.boundary_pressure_pa", pressure)?;
+                    if nb.is_some() || !domain.is_fluid(c) || faces[f] != FlowFace::Free {
+                        return Err(refuse(
+                            "flow.boundary_pressure_role",
+                            "pressure is only admissible on a fluid-exposed Free exterior face",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BoundaryPressure<'a> {
+    Planes([f64; 6]),
+    Profile(StaggeredBoundaryPressure<'a>),
+}
+
 /// Independent flux and mechanical-energy readback of the returned field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DensityProjectionReport {
@@ -87,12 +162,19 @@ pub(super) struct FrozenDensity<'a> {
     pub(super) target_outflow_m3_s: &'a [f64],
     duration_s: f64,
     pub(super) uniform_density: Option<f64>,
-    pub(super) boundary_pressure_pa: [f64; 6],
+    boundary_pressure: BoundaryPressure<'a>,
 }
 
 impl FrozenDensity<'_> {
-    pub(super) fn boundary_potential(&self, f: usize, reference_pa: f64) -> f64 {
-        let relative_pressure = self.boundary_pressure_pa[f] - reference_pa;
+    pub(super) fn boundary_pressure_pa(&self, f: usize, slot: usize) -> f64 {
+        match self.boundary_pressure {
+            BoundaryPressure::Planes(values) => values[f],
+            BoundaryPressure::Profile(profile) => profile.value(f / 2, slot).unwrap_or(0.0),
+        }
+    }
+
+    pub(super) fn boundary_potential(&self, f: usize, slot: usize, reference_pa: f64) -> f64 {
+        let relative_pressure = self.boundary_pressure_pa(f, slot) - reference_pa;
         self.uniform_density.map_or(relative_pressure, |rho| {
             relative_pressure / (rho / self.duration_s)
         })
@@ -196,8 +278,9 @@ impl FlowField {
     /// connected fluid component; pressure readback restores the authored
     /// gauge. Consequently atmospheric or other large reference pressures do
     /// not hide a small pressure-driven acceleration in the solver tolerance.
-    /// Pressures are uniform on each authored domain plane; spatially varying
-    /// reservoir profiles and their thermodynamic states belong to the caller.
+    /// Pressures are uniform on each authored domain plane. Use
+    /// [`Self::project_density_volume_source_with_pressure_profile`] for a
+    /// spatially varying head; reservoir thermodynamic states belong to the caller.
     ///
     /// All density, source, compatibility and rollback requirements of
     /// [`Self::project_density_volume_source`] continue to apply. This entry
@@ -230,6 +313,73 @@ impl FlowField {
                 }
             }
         }
+        self.project_density_volume_source_with_reservoirs(
+            domain,
+            faces,
+            BoundaryPressure::Planes(boundary_pressure_pa.map(|p| p.unwrap_or(0.0))),
+            density_kg_m3,
+            target_outflow_m3_s,
+            controls,
+            gate,
+        )
+    }
+
+    /// Project using a spatial reservoir-pressure profile on the open faces.
+    ///
+    /// Each native boundary slot acts through its own physical half-cell mass.
+    /// A hydrostatic pressure profile can therefore balance gravity along a
+    /// vertical opening; it is not replaced by one pressure for the whole plane.
+    /// The first exposed reservoir slot supplies the reference independently
+    /// in each connected fluid component. This preserves small differences
+    /// even when components share a plane but have different large references.
+    /// Reservoir work is `dt sum((p_face - p_reference) Q_out)` over the actual
+    /// returned boundary fluxes, with the same reference used for source and
+    /// held-boundary work. The original pressure/volume/energy owner is reused.
+    ///
+    /// For hydrostatic rest, first use [`Self::predict_density_body_force`]
+    /// with the same density and duration, then project its returned field
+    /// with the corresponding pressure head. Pressure is a mechanical impulse;
+    /// this does not evolve reservoir density, thermodynamic state, or energy.
+    /// All source, geometry and rollback requirements of
+    /// [`Self::project_density_volume_source`] apply.
+    ///
+    /// # Errors
+    /// Incorrect native face counts, a non-finite pressure, a pressure on an
+    /// interior/solid/held face, or any native projection refusal. The input
+    /// field and caller-owned profile are unchanged on every refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_density_volume_source_with_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        density_kg_m3: &[f64],
+        target_outflow_m3_s: &[f64],
+        controls: DensityProjectionControls,
+        gate: &CancelGate,
+    ) -> Result<DensityProjection, ChtError> {
+        self.project_density_volume_source_with_reservoirs(
+            domain,
+            faces,
+            BoundaryPressure::Profile(profile),
+            density_kg_m3,
+            target_outflow_m3_s,
+            controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_density_volume_source_with_reservoirs<'a>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: BoundaryPressure<'a>,
+        density_kg_m3: &'a [f64],
+        target_outflow_m3_s: &'a [f64],
+        controls: DensityProjectionControls,
+        gate: &CancelGate,
+    ) -> Result<DensityProjection, ChtError> {
         let mut density = self.admit_density_projection(
             domain,
             faces,
@@ -238,7 +388,10 @@ impl FlowField {
             controls,
             gate,
         )?;
-        density.boundary_pressure_pa = boundary_pressure_pa.map(|p| p.unwrap_or(0.0));
+        if let BoundaryPressure::Profile(profile) = boundary_pressure {
+            profile.admit(self, domain, faces, gate)?;
+        }
+        density.boundary_pressure = boundary_pressure;
         let mut field = self.clone();
         let (projection, potential) = field.project_with_density(
             domain,
@@ -306,7 +459,7 @@ impl FlowField {
             target_outflow_m3_s,
             duration_s: controls.duration_s,
             uniform_density,
-            boundary_pressure_pa: [0.0; 6],
+            boundary_pressure: BoundaryPressure::Planes([0.0; 6]),
         };
         if let Some(reference) = uniform_density {
             finite_positive("flow.pressure_scale", reference / controls.duration_s)?;
@@ -474,8 +627,11 @@ fn audit(
             if nb.is_none() && faces[f] == FlowFace::Fixed {
                 boundary_work.add(controls.duration_s * pressure[c] * q1);
             } else if nb.is_none() && faces[f] == FlowFace::Free {
+                let (slot, _) = after.slot(domain, c, f);
                 open_work.add(
-                    controls.duration_s * (density.boundary_pressure_pa[f] - reference_pa) * q1,
+                    controls.duration_s
+                        * (density.boundary_pressure_pa(f, slot) - reference_pa)
+                        * q1,
                 );
             }
         }
