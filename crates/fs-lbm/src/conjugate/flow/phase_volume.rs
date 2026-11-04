@@ -9,9 +9,9 @@ pub use conduction::{
 mod momentum;
 pub use momentum::{
     ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
-    ResolvedViscousThermalVolumeMomentumStep, ThermalResistanceCouplingReport,
-    ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
-    ViscousThermalVolumeMomentumStep,
+    ResolvedResistiveThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
+    ThermalResistanceCouplingReport, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,
+    ThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep,
 };
 
 use fs_material::phase::{

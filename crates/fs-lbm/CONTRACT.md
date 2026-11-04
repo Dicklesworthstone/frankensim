@@ -1,5 +1,38 @@
 # CONTRACT: fs-lbm
 
+## Endpoint-source phase, resistance and thermal-volume feedback
+
+The resolved phase-resistance thermal-volume momentum entries close the
+original enthalpy chart, actual-density continuity, physical Darcy heating
+and material-source resistance in one bounded accepted step. Original and
+trial endpoint phases resolve through the existing source owner. True liquid
+volume fraction sets permeability; dynamic viscosity retains its current
+source density, including kinematic-viscosity conversion.
+
+Every returned endpoint source must match the exact phase, law and density.
+The applied native beta field and endpoint source beta are retained as
+distinct data. Their difference is bounded on accepted native velocities by
+non-cancelling half-cell impulse and heat sums; these share original force,
+caloric and local heat budgets. No arbitrary coefficient-relative tolerance
+replaces the physical residual. One accepted pressure field supplies volume,
+momentum and material routes. Numerical trial heat/impulses are never replayed
+into the original inventories.
+
+Original, incoming, returned and accepted caloric-intermediate states must
+remain mobile. Exact solids refuse before their liquid-property query.
+The intermediate check prevents hot incoming material from concealing an
+unsupported solid pretransport split. Endpoint receipts are retained;
+current M/V, the net-enthalpy pressure-work convention, bounded iterations,
+explicit source shear coordinates and atomic cancellation remain unchanged.
+
+Focused regressions cover an independent unequal-density coupled endpoint
+(h=60 J/kg, rho=2.5 kg/m³, beta=5/27 Pa s/m², outlet flux=2/15 m³/s,
+physical heat=1/1215 J),
+source identity and phase refusals, concealed caloric immobility and retry.
+The source model is still a bounded equilibrium/mobile fixed-grid law.
+This adds no exact-solid momentum constraint, moving skeleton, kinetic
+phase law, source shear inference or pressure-dependent thermodynamic EOS.
+
 ## Coupled physical Darcy heating and thermodynamic volume
 
 The resistance-aware piecewise thermal-volume momentum entries solve a

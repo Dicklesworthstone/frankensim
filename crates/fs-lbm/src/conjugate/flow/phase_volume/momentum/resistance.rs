@@ -1,5 +1,8 @@
 //! Coupled physical Darcy heating and original-chart density/volume evolution.
 
+mod phase;
+pub use phase::ResolvedResistiveThermalVolumeMomentumStep;
+
 use std::borrow::Cow;
 
 use fs_material::phase::EquilibriumPhaseState;

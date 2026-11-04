@@ -149,10 +149,11 @@ pub use flow::{
     ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep,
     ResistiveMaterialMomentumAdvance, ResistiveThermalVolumeMomentumControls,
     ResistiveThermalVolumeMomentumStep, ResolvedPhaseResistanceMomentumStep,
-    ResolvedViscousThermalVolumeMomentumStep, StaggeredBoundaryPressure,
-    ThermalResistanceCouplingReport, ThermalVolumeControls, ThermalVolumeMomentumControls,
-    ThermalVolumeMomentumInput, ThermalVolumeMomentumStep, ThermalVolumeStep,
-    ViscousMaterialMomentumAdvance, ViscousThermalVolumeMomentumStep, lbm_duct_flow,
+    ResolvedResistiveThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
+    StaggeredBoundaryPressure, ThermalResistanceCouplingReport, ThermalVolumeControls,
+    ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
+    ThermalVolumeStep, ViscousMaterialMomentumAdvance, ViscousThermalVolumeMomentumStep,
+    lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{
