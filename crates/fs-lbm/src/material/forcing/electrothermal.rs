@@ -104,15 +104,45 @@ fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 fn temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
     slab: &MaterialSlab<S>, limits: HeatSourceLimits, gate: &CancelGate,
 ) -> Result<Vec<f64>, ElectricHeatError> {
+    use super::transport::{self, MaterialTransportError};
+    use crate::thermal::boundary::ThermalWall;
+
     let [lo, hi] = limits.temperature_range_k;
-    slab.lattice.populations().iter().enumerate().map(|(cell, p)| {
-        if cell % 256 == 0 { poll(gate)?; }
-        if !p.iter().all(|x| x.is_finite()) { return Err(invalid("nonfinite temperature population")); }
-        let t = slab.temperature_si(p.iter().sum())
-            .map_err(ThermalSourceError::from)?;
-        if t < lo || t > hi { return Err(invalid("temperature outside the admitted material interval")); }
-        Ok(t)
-    }).collect()
+    if !positive(lo) || !positive(hi) || lo > hi {
+        return Err(invalid("invalid material temperature interval"));
+    }
+    // One shared preflight admits actual fluid temperatures and authored
+    // fixed-temperature walls before any electrical or material callback.
+    let mut temperature = transport::temperatures::<S, D, Q>(
+        slab, &slab.lattice, [lo, hi], gate,
+    ).map_err(|error| match error {
+        MaterialTransportError::Invalid(reason) => invalid(reason),
+        MaterialTransportError::Thermal(error) => error.into(),
+        MaterialTransportError::Cancelled => ElectricHeatError::Cancelled,
+        // This read-only preflight invokes no constitutive or SGS owner.
+        _ => invalid("material temperature admission failed"),
+    })?;
+    let (cells, plane) = slab.lattice.layout()?;
+    for (side, wall) in slab.lattice.thermal_walls().into_iter().enumerate() {
+        poll(gate)?;
+        let start = if side == 0 { 0 } else { cells - plane };
+        if let ThermalWall::Temperature(value) = wall {
+            let kelvin = slab.temperature_si(value).map_err(ThermalSourceError::from)?;
+            temperature[start..start + plane].fill(kelvin);
+        } else {
+            // Electrical admission requires positive Kelvin even in insulating
+            // cells, before querying resistivity. Both stationary and magnetic
+            // source adapters exclude these wall slots from the caller's law.
+            // Extend adjacent admitted fluid values as metadata only: these
+            // slots carry neither heat storage nor a reconstructed wall trace.
+            // The same extension at both endpoints also preserves midpoint
+            // residuals, because each padding value duplicates a fluid value.
+            let near = if side == 0 { plane } else { cells - 2 * plane };
+            temperature.copy_within(near..near + plane, start);
+        }
+    }
+    poll(gate)?;
+    Ok(temperature)
 }
 
 fn admit<S: Slab<D, Q>, const D: usize, const Q: usize>(

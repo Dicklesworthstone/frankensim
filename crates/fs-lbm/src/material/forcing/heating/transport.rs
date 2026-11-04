@@ -141,7 +141,7 @@ fn admit_wall_temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
     Ok(())
 }
 
-fn temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
+pub(in crate::material::forcing) fn temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
     mapping: &MaterialSlab<S>, state: &S, range: [f64; 2], gate: &CancelGate,
 ) -> Result<Vec<f64>, MaterialTransportError> {
     poll(gate)?;
