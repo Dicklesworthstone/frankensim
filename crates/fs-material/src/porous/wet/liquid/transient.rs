@@ -14,6 +14,8 @@
 //! apply to the actual material-side face pressure and speed.
 //! Neither clips saturation or opens a dry seal with an epsilon. Temperature
 //! and gas pressure remain prescribed; no coupled gas or caloric solve is added.
+//! Adaptive implicit windows estimate temporal error by comparing one complete
+//! step with two conservative half steps and retain only accepted face transfers.
 
 use super::{
     LiquidCapillaryPressure, WetPoreLiquidLaw, WetPoreLiquidState, fraction, invalid, positive,
@@ -25,6 +27,11 @@ pub use boundary::{LiquidSaturationBoundary, LiquidSaturationBoundaryStepInput};
 mod implicit;
 pub use implicit::{
     LiquidSaturationImplicitControls, LiquidSaturationImplicitError, LiquidSaturationImplicitReport,
+};
+mod adaptive;
+pub use adaptive::{
+    LiquidSaturationAdvanceCandidate, LiquidSaturationAdvanceControls,
+    LiquidSaturationAdvanceError, LiquidSaturationAdvanceReport,
 };
 
 /// One rigid finite volume of porous material, per unit transverse area.

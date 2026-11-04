@@ -26,7 +26,7 @@ pub struct LiquidSaturationImplicitControls {
     pub maximum_line_search_trials: usize,
 }
 impl LiquidSaturationImplicitControls {
-    fn validate(self) -> Result<(), MaterialError> {
+    pub(super) fn validate(self) -> Result<(), MaterialError> {
         if !positive(self.absolute_saturation_residual_tolerance)
             || self.absolute_saturation_residual_tolerance >= 1.0
             || !self.relative_saturation_residual_tolerance.is_finite()

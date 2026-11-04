@@ -11853,6 +11853,24 @@ requires supported convergent states and representable time advancement; it
 does not certify temporal accuracy, introduce hidden substeps, solve gas or
 heat storage, infer fluid density, or add hysteresis or capillary work.
 
+`advance_candidate_implicit` and its boundary-conditioned counterpart advance
+one complete requested interval with bounded adaptive substeps. A coarse
+backward-Euler endpoint and two fine endpoints estimate local saturation error;
+only the two original fine endpoints and their signed face transfers are
+accepted. Absolute tolerance and relative tolerance on the actual saturation
+change control refinement independently of the nonlinear residual tolerances.
+The comparison accounts for unequal representable half intervals. Minimum and
+maximum comparison steps and an explicit implicit-solve budget bound work.
+Unsupported original source coordinates remain fatal; supported nonlinear
+failure or excess temporal error can shorten a trial. Rejected probes never
+contribute to the compensated integrated face and net boundary transfers.
+Acceptance recomputes the original-to-final water-volume balance against one
+fixed whole-window budget, without multiplying it by the accepted step count.
+No partial state escapes a refusal or cancellation. The local first-order error
+estimate is not a certificate of global, spatial or constitutive accuracy.
+Independent nonlinear ODE refinement, closed unequal-cell equilibration and
+prescribed-flux inventory fixtures exercise the public whole-window path.
+
 `LiquidSaturationBoundary` supplies sealed, signed superficial-flux and
 pressure/resistive-pressure conditions to that same explicit/implicit flux
 owner. Positive flux points left to right on both ends. Surface hydraulic
