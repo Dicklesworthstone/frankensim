@@ -26,6 +26,9 @@ use fs_aeroac::curle3d::moving::trajectory::TimedSourceKinematics;
 use fs_aeroac::curle3d::moving::{CompactSourceStrength, SourceKinematics, TimedCompactSource};
 use fs_mbd::{DynamicsError, PreparedRigidPointMotion, Vec3};
 
+/// Native articulated-link adapters using the same paired history owner.
+pub mod articulated;
+
 /// A source law evaluated in the original body's instantaneous coordinate frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BodyFrameCompactSourceStrength {
@@ -48,7 +51,9 @@ pub struct RigidAcousticSample {
     pub source: TimedCompactSource,
 }
 
-/// A material point fixed in the original centre-of-mass body coordinates.
+/// A material point fixed in the original body's coordinates.
+/// Standalone rigid queries use centre-of-mass-relative coordinates. The
+/// explicit `*_link` queries use the native articulated LINK origin instead.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidAcousticAttachment {
     arm_body_m: Vec3,
@@ -64,7 +69,7 @@ impl RigidAcousticAttachment {
         Ok(Self { arm_body_m })
     }
 
-    /// Original centre-of-mass-relative attachment [m].
+    /// Original body-coordinate attachment [m]; `*_link` methods use the link origin.
     pub const fn arm_body_m(self) -> Vec3 {
         self.arm_body_m
     }
@@ -102,16 +107,7 @@ impl RigidAcousticAttachment {
         motion: &PreparedRigidPointMotion,
         strength: BodyFrameCompactSourceStrength,
     ) -> Result<RigidAcousticSample, RigidAcousticError> {
-        if !strength.volume_flow_m3_s.is_finite()
-            || !strength.volume_flow_rate_m3_s2.is_finite()
-            || strength
-                .force_on_fluid_body_n
-                .iter()
-                .chain(&strength.force_rate_on_fluid_body_n_s)
-                .any(|value| !value.is_finite())
-        {
-            return Err(nonfinite("rigid acoustic body-frame strength"));
-        }
+        validate_strength(strength)?;
         let kinematics = self.kinematics(time_s, motion)?;
         let force_body = vector(strength.force_on_fluid_body_n);
         let derivative_body = vector(strength.force_rate_on_fluid_body_n_s)
@@ -204,6 +200,14 @@ impl RigidAcousticHistory {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), RigidAcousticError> {
         poll(cancelled)?;
+        self.admit_append(time_s)?;
+        let sample = self.attachment.sample(time_s, motion, strength)?;
+        poll(cancelled)?;
+        self.publish(sample);
+        Ok(())
+    }
+
+    fn admit_append(&self, time_s: f64) -> Result<(), RigidAcousticError> {
         if self.sources.len() >= self.maximum_samples {
             return Err(invalid(
                 "rigid acoustic history endpoint capacity exhausted",
@@ -219,11 +223,14 @@ impl RigidAcousticHistory {
                 "rigid acoustic times must be finite and strictly increasing",
             ));
         }
-        let sample = self.attachment.sample(time_s, motion, strength)?;
-        poll(cancelled)?;
+        Ok(())
+    }
+
+    // Capacity and the paired clock have already been admitted. No fallible
+    // operation or cancellation checkpoint belongs between these publications.
+    fn publish(&mut self, sample: RigidAcousticSample) {
         self.kinematics.push(sample.kinematics);
         self.sources.push(sample.source);
-        Ok(())
     }
 
     /// Accepted trajectory endpoints for the original C2 path preparers.
@@ -281,6 +288,20 @@ impl std::error::Error for RigidAcousticError {
             Self::Acoustic(error) => Some(error),
         }
     }
+}
+
+fn validate_strength(strength: BodyFrameCompactSourceStrength) -> Result<(), RigidAcousticError> {
+    if !strength.volume_flow_m3_s.is_finite()
+        || !strength.volume_flow_rate_m3_s2.is_finite()
+        || strength
+            .force_on_fluid_body_n
+            .iter()
+            .chain(&strength.force_rate_on_fluid_body_n_s)
+            .any(|value| !value.is_finite())
+    {
+        return Err(nonfinite("rigid acoustic body-frame strength"));
+    }
+    Ok(())
 }
 
 fn components(v: Vec3) -> [f64; 3] {
