@@ -459,6 +459,7 @@ fn empty_report(n: usize) -> StepReport {
         left_boundary_change: empty_totals(n),
         right_boundary_change: empty_totals(n),
         area_momentum_impulse: 0.0,
+        source_change: crate::body_force::ForceChange::default(),
         conservation_residual: empty_totals(n),
     }
 }

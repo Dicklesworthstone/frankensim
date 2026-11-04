@@ -12,6 +12,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod chemistry;
 
+/// Conservative distributed mechanical forcing of the original 1-D gas fields.
+#[cfg(feature = "experimental-euler")]
+pub mod body_force;
+
 #[cfg(feature = "experimental-euler")]
 pub mod dynamics;
 

@@ -784,6 +784,7 @@ impl MixtureNetwork1d {
                 left_boundary_change: Totals::from_values(&left[..m], n),
                 right_boundary_change: Totals::from_values(&right[..m], n),
                 area_momentum_impulse: impulse,
+                source_change: crate::body_force::ForceChange::default(),
                 conservation_residual: Totals::from_values(&residual[..m], n),
             };
             after.add(&branch_after.species_masses[..n], branch_after.energy)?;

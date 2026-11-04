@@ -1,5 +1,32 @@
 # fs-gas contract
 
+## Distributed mechanical work on native 1-D fields
+
+With `experimental-euler`, `body_force::{BodyForce,ForceControl,ForceChange}`
+serves both `dynamics::Euler1d` and `multicomponent::MixtureEuler1d`.
+`apply_body_force` applies a held source without advancing the transport clock;
+`step_with_body_force` composes exact source half-steps around the original
+MUSCL/HLLC SSP-RK2 transport and its bounded retries. Uniform or per-cell
+acceleration uses the density at EACH source stage; force density remains an
+independent N/m³ input. One lazy flat scratch buffer is reused by each owner.
+The all-zero source takes the original ordinary step without allocating it.
+
+Represented momentum increment times midpoint velocity is the source work.
+Species/mass and formation-energy references are unchanged by the source maps;
+they add no heat. An impulse lost to momentum rounding cannot create energy.
+`source_change` exposes compensated actual impulse, conjugate work and source
+energy-representation residual. The complete step subtracts the work once and
+retains the actual conservation defect without an energy correction. Existing
+boundary enthalpy/pressure work, area force and atmosphere gravity stay distinct;
+an additional body force must not reapply the bound gravitational acceleration.
+
+Original EOS admission, explicit source-endpoint Mach limits and full-interval
+CFL checks precede publication. A refused source, failed retry or cancellation
+changes no accepted cell or clock. These are held-source stationary-mesh maps;
+moving boundaries, finite networks, chemistry and molecular/wall exchanges keep
+their existing separate composing owners. State/time-dependent source values
+need temporal refinement; no new entropy-stability theorem is asserted.
+
 ## Constant-pressure finite-rate chemistry
 
 `chemistry::isobaric::IsobaricReactor` advances a sealed ideal-gas parcel at

@@ -3,7 +3,10 @@ use super::{
     Boundaries, Boundary, Cell, Conserved, Error, MAX_COMPONENTS, MAX_SPECIES, Mesh1d, MixtureGas,
     Primitive, Reconstruction, StepControl, allocated, cell, poll, positive, sum,
 };
+use crate::body_force::{BodyForce, ForceChange, ForceControl};
 use fs_qty::{Length, Time};
+
+mod forcing;
 
 /// Extensive conserved integrals in the canonical source-species order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,7 +88,9 @@ pub struct StepReport {
     pub right_boundary_change: Totals,
     /// Stationary area-wall pressure impulse [kg m/s].
     pub area_momentum_impulse: f64,
-    /// `after - before - boundary_change - area momentum impulse`.
+    /// Held distributed mechanical source, without changing the species amounts.
+    pub source_change: ForceChange,
+    /// `after - before - boundary_change - area momentum impulse - body source`.
     pub conservation_residual: Totals,
 }
 
@@ -118,6 +123,7 @@ pub struct MixtureEuler1d {
     pub(super) time: f64,
     pub(super) work: Workspace,
     pub(super) moving: Option<crate::dynamics::MovingWorkspace>,
+    body_force_stage: Option<Vec<f64>>,
 }
 impl MixtureEuler1d {
     /// Construct a uniform fixed-area flow from complete conservative cells.
@@ -202,6 +208,7 @@ impl MixtureEuler1d {
             time,
             work,
             moving: None,
+            body_force_stage: None,
         })
     }
     /// Source bank, formation-energy gauge and caloric domain.
@@ -326,7 +333,7 @@ impl MixtureEuler1d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
-        self.advance(maximum_duration, controls, [None; 2], cancelled)
+        self.advance(maximum_duration, controls, [None; 2], None, cancelled)
     }
 
     /// Advance against prescribed stationary reservoirs at the left/right ends.
@@ -380,7 +387,7 @@ impl MixtureEuler1d {
                 *target = Some((state, self.gas.primitive(state, &mut cancelled)?));
             }
         }
-        self.advance(maximum_duration, controls, admitted, cancelled)
+        self.advance(maximum_duration, controls, admitted, None, cancelled)
     }
 
     fn advance(
@@ -388,6 +395,7 @@ impl MixtureEuler1d {
         maximum_duration: Time,
         controls: StepControl,
         reservoirs: ReservoirEnds<'_>,
+        forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -429,19 +437,41 @@ impl MixtureEuler1d {
             } else {
                 controls.reconstruction
             };
-            match attempt(
-                &self.gas,
-                &self.states,
-                &self.mesh,
-                self.boundaries,
-                dt,
-                controls.cfl,
-                order,
-                reservoirs,
-                &mut self.work,
-                &mut cancelled,
-            ) {
-                Ok((a, b)) => {
+            let result = if let Some((force, force_controls)) = forcing {
+                forcing::attempt(
+                    &self.gas,
+                    &self.states,
+                    &self.mesh,
+                    self.boundaries,
+                    dt,
+                    controls.cfl,
+                    order,
+                    reservoirs,
+                    &mut self.work,
+                    self.body_force_stage
+                        .as_mut()
+                        .expect("body-force scratch admitted"),
+                    force,
+                    force_controls,
+                    &mut cancelled,
+                )
+            } else {
+                attempt(
+                    &self.gas,
+                    &self.states,
+                    &self.mesh,
+                    self.boundaries,
+                    dt,
+                    controls.cfl,
+                    order,
+                    reservoirs,
+                    &mut self.work,
+                    &mut cancelled,
+                )
+                .map(|(a, b)| (a, b, ForceChange::default(), 0.0))
+            };
+            match result {
+                Ok((a, b, source_change, source_signal_rate)) => {
                     let after =
                         totals(&self.work.candidate, self.mesh.volumes(), n, &mut cancelled)?;
                     let mut boundary = [0.0; MAX_COMPONENTS];
@@ -463,7 +493,13 @@ impl MixtureEuler1d {
                         residual[k] = after.get(k)
                             - before.get(k)
                             - boundary[k]
-                            - if k == n { area_momentum_impulse } else { 0.0 };
+                            - if k == n {
+                                area_momentum_impulse + source_change.impulse
+                            } else if k == n + 1 {
+                                source_change.work
+                            } else {
+                                0.0
+                            };
                     }
                     if !boundary[..m]
                         .iter()
@@ -480,7 +516,7 @@ impl MixtureEuler1d {
                     self.time += dt;
                     return Ok(StepReport {
                         elapsed: Time::new(dt),
-                        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
+                        maximum_cfl: a.signal_rate.max(b.signal_rate).max(source_signal_rate) * dt,
                         halvings,
                         hll_fallback_faces: a.fallbacks + b.fallbacks,
                         limited_cells: a.limited + b.limited,
@@ -492,6 +528,7 @@ impl MixtureEuler1d {
                         left_boundary_change: Totals::from_values(&left[..m], n),
                         right_boundary_change: Totals::from_values(&right[..m], n),
                         area_momentum_impulse,
+                        source_change,
                         conservation_residual: Totals::from_values(&residual[..m], n),
                     });
                 }
@@ -912,12 +949,27 @@ pub(super) fn operator_with_face_motion(
         let data = if wall {
             let normal = if face == 0 { -1.0 } else { 1.0 };
             if let Some(velocity) = face_velocity {
-                gas.moving_wall_flux(cell(&left[..m], n), pl, normal, velocity[face], flux, cancelled)?
+                gas.moving_wall_flux(
+                    cell(&left[..m], n),
+                    pl,
+                    normal,
+                    velocity[face],
+                    flux,
+                    cancelled,
+                )?
             } else {
                 gas.wall_flux(cell(&left[..m], n), pl, normal, flux, cancelled)?
             }
         } else if let Some(velocity) = face_velocity {
-            gas.moving_interface(&left[..m], pl, &right[..m], pr, velocity[face], flux, cancelled)?
+            gas.moving_interface(
+                &left[..m],
+                pl,
+                &right[..m],
+                pr,
+                velocity[face],
+                flux,
+                cancelled,
+            )?
         } else {
             gas.interface(&left[..m], pl, &right[..m], pr, flux, cancelled)?
         };

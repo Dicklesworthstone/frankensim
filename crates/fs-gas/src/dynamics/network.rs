@@ -436,6 +436,7 @@ fn empty_report() -> StepReport {
         wall_momentum_impulse: 0.0,
         wall_heat: 0.0,
         wall_work: 0.0,
+        source_change: crate::body_force::ForceChange::default(),
         conservation_residual: Totals::default(),
     }
 }

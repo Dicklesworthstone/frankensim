@@ -589,6 +589,7 @@ impl GasNetwork1d {
                 wall_momentum_impulse: wall.momentum,
                 wall_heat: wall.heat,
                 wall_work: wall.work,
+                source_change: crate::body_force::ForceChange::default(),
                 conservation_residual: residual,
             };
             after.add(branch_after.mass, branch_after.energy)?;

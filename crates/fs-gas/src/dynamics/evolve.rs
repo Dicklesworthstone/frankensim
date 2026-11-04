@@ -1,6 +1,9 @@
 use super::hydrostatic::HydrostaticBalance;
 use super::{Conserved, Error, FaceFlux, FrozenGas, Mesh1d, Primitive, allocated, poll, positive};
+use crate::body_force::{BodyForce, ForceChange, ForceControl};
 use fs_qty::{Length, Time};
+
+mod forcing;
 
 /// Physical boundary on one end of a stationary interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,7 +130,9 @@ pub struct StepReport {
     /// Mechanical work entering gas from prescribed sliding radial walls [J].
     /// End-wall pressure work, when present, remains in boundary_change.
     pub wall_work: f64,
-    /// `after - before - boundary_change - geometric/gravitational/wall sources`.
+    /// Held distributed body-force impulse/work, separate from gravity and walls.
+    pub source_change: ForceChange,
+    /// `after - before - boundary_change - geometric/gravitational/wall/body sources`.
     pub conservation_residual: Totals,
 }
 
@@ -177,6 +182,7 @@ pub struct Euler1d {
     pub(super) work: Workspace,
     pub(super) hydrostatic: Option<HydrostaticBalance>,
     pub(super) moving: Option<super::moving::MovingWorkspace>,
+    body_force_stage: Option<Vec<Conserved>>,
 }
 
 impl Euler1d {
@@ -237,6 +243,7 @@ impl Euler1d {
             work,
             hydrostatic: None,
             moving: None,
+            body_force_stage: None,
         })
     }
     /// Original frozen-mixture EOS and source.
@@ -312,7 +319,13 @@ impl Euler1d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
-        self.advance(maximum_duration, controls, None::<&mut NoPorts>, cancelled)
+        self.advance(
+            maximum_duration,
+            controls,
+            None::<&mut NoPorts>,
+            None,
+            cancelled,
+        )
     }
 
     /// [`Self::step`] whose end faces may be supplied by caller-owned ports.
@@ -340,7 +353,13 @@ impl Euler1d {
                 "atmosphere end ports need a gravitational energy convention",
             ));
         }
-        self.advance(maximum_duration, controls, Some(&mut ports), cancelled)
+        self.advance(
+            maximum_duration,
+            controls,
+            Some(&mut ports),
+            None,
+            cancelled,
+        )
     }
 
     /// Replace every cell average through a local, caller-owned source update
@@ -377,6 +396,7 @@ impl Euler1d {
         maximum_duration: Time,
         controls: StepControl,
         mut ports: Option<&mut P>,
+        forcing: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error>
     where
@@ -432,20 +452,43 @@ impl Euler1d {
             } else {
                 controls.reconstruction
             };
-            match attempt(
-                &self.gas,
-                &self.states,
-                &self.mesh,
-                self.boundaries,
-                [self.time, dt],
-                controls.cfl,
-                reconstruction,
-                self.hydrostatic.as_ref(),
-                &mut self.work,
-                ports.as_deref_mut(),
-                &mut cancelled,
-            ) {
-                Ok((a, b)) => {
+            let result = if let Some((force, force_controls)) = forcing {
+                forcing::attempt(
+                    &self.gas,
+                    &self.states,
+                    &self.mesh,
+                    self.boundaries,
+                    [self.time, dt],
+                    controls.cfl,
+                    reconstruction,
+                    self.hydrostatic.as_ref(),
+                    &mut self.work,
+                    self.body_force_stage
+                        .as_mut()
+                        .expect("body-force scratch admitted"),
+                    force,
+                    force_controls,
+                    ports.as_deref_mut(),
+                    &mut cancelled,
+                )
+            } else {
+                attempt(
+                    &self.gas,
+                    &self.states,
+                    &self.mesh,
+                    self.boundaries,
+                    [self.time, dt],
+                    controls.cfl,
+                    reconstruction,
+                    self.hydrostatic.as_ref(),
+                    &mut self.work,
+                    ports.as_deref_mut(),
+                    &mut cancelled,
+                )
+                .map(|(a, b)| (a, b, ForceChange::default(), 0.0))
+            };
+            match result {
+                Ok((a, b, source_change, source_signal_rate)) => {
                     let after = totals(&self.work.candidate, self.mesh.volumes(), &mut cancelled)?;
                     let factor = 0.5 * dt;
                     let left_area = self.mesh.face_areas()[0];
@@ -469,8 +512,12 @@ impl Euler1d {
                             - before.array()[k]
                             - boundary.array()[k]
                             - match k {
-                                1 => area_momentum_impulse + gravity_momentum_impulse,
-                                2 => gravity_work,
+                                1 => {
+                                    area_momentum_impulse
+                                        + gravity_momentum_impulse
+                                        + source_change.impulse
+                                }
+                                2 => gravity_work + source_change.work,
                                 _ => 0.0,
                             }
                     }));
@@ -490,7 +537,7 @@ impl Euler1d {
                     self.time += dt;
                     return Ok(StepReport {
                         elapsed: Time::new(dt),
-                        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
+                        maximum_cfl: a.signal_rate.max(b.signal_rate).max(source_signal_rate) * dt,
                         halvings,
                         hll_fallback_faces: a.fallbacks + b.fallbacks,
                         limited_cells: a.limited + b.limited,
@@ -507,6 +554,7 @@ impl Euler1d {
                         wall_momentum_impulse: 0.0,
                         wall_heat: 0.0,
                         wall_work: 0.0,
+                        source_change,
                         conservation_residual: residual,
                     });
                 }
