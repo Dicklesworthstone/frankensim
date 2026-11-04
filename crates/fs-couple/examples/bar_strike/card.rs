@@ -67,6 +67,10 @@ pub struct Card {
     pub substeps: u32,
     pub rate_hz: u32,
     pub full_scale_pa: f64,
+    /// Largest certificate half-width a mode may carry, relative to its eigenvalue. The optional row
+    /// `maximum_relative_halfwidth`; absent, 1e-8. It builds the same bar and loosens only what is accepted, so
+    /// a card that sets it says so, with the half-width in Hz from the report's `eigen_uncertainty_hz`.
+    pub maximum_relative_halfwidth: f64,
     /// Printed modal frequencies of the same bar, for the report only (never used to build the bar).
     pub reference_vertical_hz: Vec<f64>,
     pub resonator: Option<Resonator>,
@@ -282,6 +286,10 @@ impl Card {
             substeps: rows.count("substeps")? as u32,
             rate_hz: rows.count("rate_hz")? as u32,
             full_scale_pa: rows.number("full_scale_pa")?,
+            maximum_relative_halfwidth: match rows.get("maximum_relative_halfwidth") {
+                Err(_) => 1e-8,
+                Ok(_) => rows.number("maximum_relative_halfwidth")?,
+            },
             reference_vertical_hz: rows
                 .get("reference_vertical_hz")
                 .map(|v| v.iter().filter_map(|x| x.parse().ok()).collect())
@@ -319,6 +327,9 @@ impl Card {
             if !(v > 0.0) {
                 return Err(format!("`{name}` must be positive"));
             }
+        }
+        if !(self.maximum_relative_halfwidth > 0.0 && self.maximum_relative_halfwidth <= 1e-6) {
+            return Err("maximum_relative_halfwidth must lie in (0, 1e-6]".into());
         }
         let [nx, ny, nz] = self.mesh_counts;
         if nx % 4 != 0 || ny % 2 != 0 || nz == 0 {

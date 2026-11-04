@@ -164,6 +164,9 @@ fn slice_options() -> SliceOptions {
     o
 }
 
+/// Windows that may factor at once under `band_modes_in`'s budget.
+const MAX_WINDOWS_AT_WORK: usize = 13;
+
 /// Every elastic mode of the free body from 20 Hz to the card's band, in ordered parallel windows.
 ///
 /// A window edge that falls within the certificate's half-width of an eigenvalue leaves that window
@@ -194,15 +197,17 @@ fn band_modes_in(
     let edges: Vec<f64> = (0..=n)
         .map(|i| ELASTIC_LOW_HZ + (card.band_hz - ELASTIC_LOW_HZ) * i as f64 / n as f64)
         .collect();
+    // Each window at work may hold a 1 GiB factor against the 16 GiB cap, so 13 run at once and a longer plan
+    // queues the rest. At 13 windows or fewer this is `n`, as it always was.
     let plan = WindowPlan {
         windows: edges
             .windows(2)
             .map(|w| ((TAU * w[0]).powi(2), (TAU * w[1]).powi(2)))
             .collect(),
-        threads: n,
+        threads: n.min(MAX_WINDOWS_AT_WORK),
         maximum_windows: n,
         maximum_bytes: 16 << 30,
-        maximum_relative_halfwidth: 1e-8,
+        maximum_relative_halfwidth: card.maximum_relative_halfwidth,
         coordinates: None,
     };
     let report = slice_windows(&a.stiffness, &a.mass, &plan, &slice_options(), cx)

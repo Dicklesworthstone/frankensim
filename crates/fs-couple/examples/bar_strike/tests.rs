@@ -180,6 +180,23 @@ fn card_refusals_are_explicit() {
 }
 
 #[test]
+fn certificate_row_is_optional_and_bounded() {
+    let text = blank().text;
+    assert_eq!(blank().maximum_relative_halfwidth, 1e-8);
+    let with = |value: &str| format!("{text}\nmaximum_relative_halfwidth\t{value}\n");
+    let card = Card::parse(&with("1e-7"), &root()).expect("the row parses");
+    assert_eq!(card.maximum_relative_halfwidth, 1e-7);
+    for bad in ["0", "-1e-7", "1e-5"] {
+        assert!(
+            Card::parse(&with(bad), &root())
+                .unwrap_err()
+                .contains("maximum_relative_halfwidth"),
+            "{bad} must be refused"
+        );
+    }
+}
+
+#[test]
 fn arc_profile_is_flat_in_the_middle_and_full_thickness_outside_the_cut() {
     let p = Profile::Arc {
         stone_radius_m: 0.0625,
