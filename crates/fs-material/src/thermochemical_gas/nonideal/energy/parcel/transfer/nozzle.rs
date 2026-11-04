@@ -7,14 +7,16 @@
 //! and sound speed. No ideal-gas gamma, pressure law or caloric surrogate enters.
 //!
 //! This is a homogeneous single-phase engineering nozzle model. It assumes one
-//! continuous mechanically/calorically stable PR branch over the caller's
-//! density/temperature bounds. It does not perform a flash, resolve shocks,
+//! continuous mechanically/calorically stable PR branch up to the selected
+//! throat inside the caller's density/temperature bounds. It does not perform
+//! a flash, resolve shocks,
 //! model a diverging nozzle, wall friction or jet momentum in the receiving tank.
 
 use super::{
     IsochoricRealGasParcel, RealGasMassTransferCandidate, RealGasMassTransferSolve,
 };
 use crate::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasState;
+use crate::thermochemical_gas::nonideal::energy::entropy::RealGasEntropySolution;
 use crate::thermochemical_gas::energy::{
     GasEnergyError, poll,
     entropy::{GasEntropyError, GasEntropySolve},
@@ -36,7 +38,7 @@ pub struct RealGasNozzleStepSolve {
     pub pressure_tolerance_pa: f64,
     /// Absolute residual of c^2-v^2 at a sonic throat [m2/s2].
     pub sonic_tolerance_m2_s2: f64,
-    /// Bisection work for each outer pressure/sonic density solve.
+    /// Bisection work for temperature-domain bracketing and each pressure/sonic solve.
     pub maximum_iterations: usize,
     /// Largest admitted fraction of donor inventory transferred in one step.
     pub maximum_donor_fraction: f64,
@@ -117,6 +119,13 @@ impl IsochoricRealGasParcel {
         let solved = self.model().reconstruct_density_entropy_change(
             self.point(), self.density_kg_m3(), density, 0.0, controls, &mut *cancelled,
         ).map_err(map_entropy)?;
+        self.nozzle_sample_from_entropy(solved)
+    }
+
+    fn nozzle_sample_from_entropy(
+        &self,
+        solved: RealGasEntropySolution,
+    ) -> Result<IsentropicSample, GasEnergyError> {
         let inner_iterations = solved.iterations();
         let entropy_residual = solved.residual_j_kg_k();
         let state = solved.into_state();
@@ -135,6 +144,54 @@ impl IsochoricRealGasParcel {
         Ok(IsentropicSample {
             state, entropy_residual, inner_iterations, velocity_squared,
         })
+    }
+
+    // The lower density is a search limit, not a state the nozzle must reach.
+    // Its temperature may be unsupported even though the first physical exit
+    // is admitted. Recover only entropy bracket misses: source, stability,
+    // convergence and cancellation failures retain their original refusal.
+    fn nozzle_admitted_lower_density(
+        &self,
+        minimum_density: f64,
+        back_pressure_pa: f64,
+        controls: RealGasNozzleStepSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, IsentropicSample, usize), GasEnergyError> {
+        let mut unsupported = minimum_density;
+        let mut supported = self.density_kg_m3();
+        let mut trial = minimum_density;
+        for searches in 0..=controls.maximum_iterations {
+            poll(cancelled)?;
+            match self.model().reconstruct_density_entropy_change(
+                self.point(), self.density_kg_m3(), trial, 0.0,
+                controls.entropy, &mut *cancelled,
+            ) {
+                Ok(solved) => {
+                    let sample = self.nozzle_sample_from_entropy(solved)?;
+                    let sonic = sample.state.sound_speed_m_s().powi(2)
+                        - sample.velocity_squared;
+                    if sample.state.pressure_pa() <= back_pressure_pa
+                        || sonic <= 0.0
+                        || trial == minimum_density
+                    {
+                        return Ok((trial, sample, searches));
+                    }
+                    supported = trial;
+                }
+                Err(GasEntropyError::OutsideBracket { .. }) => unsupported = trial,
+                Err(error) => return Err(map_entropy(error)),
+            }
+            let next = unsupported + 0.5 * (supported - unsupported);
+            if !(next > unsupported && next < supported) {
+                return Err(GasEnergyError::Invalid(
+                    "real-gas nozzle leaves its temperature bracket before back pressure or sonic choking",
+                ));
+            }
+            trial = next;
+        }
+        Err(GasEnergyError::Invalid(
+            "real-gas nozzle admitted density search exhausted its work budget",
+        ))
     }
 
     fn nozzle_density_root(
@@ -242,14 +299,14 @@ impl IsochoricRealGasParcel {
                 "real-gas nozzle minimum density is unrepresentable",
             ));
         }
-        let low = self.nozzle_isentropic_sample(
-            rho_min, controls.entropy, &mut cancelled,
+        let (admitted_density, low, searches) = self.nozzle_admitted_lower_density(
+            rho_min, back_pressure_pa, controls, &mut cancelled,
         )?;
         let pressure_root = if back_pressure_pa > 0.0
             && low.state.pressure_pa() <= back_pressure_pa
         {
             Some(self.nozzle_density_root(
-                rho_min, rho0, controls.pressure_tolerance_pa, controls,
+                admitted_density, rho0, controls.pressure_tolerance_pa, controls,
                 |sample| sample.state.pressure_pa() - back_pressure_pa,
                 &mut cancelled,
             )?)
@@ -259,7 +316,7 @@ impl IsochoricRealGasParcel {
         let sonic_low = low.state.sound_speed_m_s().powi(2) - low.velocity_squared;
         let sonic_root = if sonic_low <= 0.0 {
             Some(self.nozzle_density_root(
-                rho_min, rho0, controls.sonic_tolerance_m2_s2, controls,
+                admitted_density, rho0, controls.sonic_tolerance_m2_s2, controls,
                 |sample| sample.state.sound_speed_m_s().powi(2) - sample.velocity_squared,
                 &mut cancelled,
             )?)
@@ -304,7 +361,7 @@ impl IsochoricRealGasParcel {
             choked,
             upstream_enthalpy_j_kg: h0,
             entropy_residual_j_kg_k: selected.entropy_residual,
-            iterations: selected.inner_iterations + outer,
+            iterations: selected.inner_iterations + outer + searches,
         })
     }
 

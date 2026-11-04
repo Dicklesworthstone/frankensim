@@ -94,6 +94,102 @@ fn deep_backpressure_selects_the_source_backed_sonic_state() {
 }
 
 #[test]
+fn pressure_matching_needs_only_the_temperature_range_up_to_the_exit() {
+    let model = bound();
+    let gas = parcel(model.clone(), 5.0e6, 0.01);
+    let mut bounded = controls();
+    // The physical exit is 296.327 K. The exploratory rho/rho0=.5 state
+    // would require 220.693 K, beyond both this bracket and the actual nozzle.
+    bounded.entropy.minimum_temperature_k = 295.0;
+    let flow = gas.nozzle_flow_to(4.8e6, nozzle(), bounded, || false).unwrap();
+    assert!(!flow.choked);
+    close(flow.throat().pressure_pa(), 4.8e6, 2e-5);
+    close(flow.throat().temperature_k(), 296.327_413_254_839_35, 2e-8);
+    close(flow.throat().density_kg_m3(), 46.586_933_930_034_394, 2e-8);
+    close(flow.velocity_m_s, 92.021_757_539_019_58, 2e-7);
+    close(flow.mass_flow_kg_s, 0.003_429_609_230_876_759_5, 2e-11);
+    assert!(flow.entropy_residual_j_kg_k.abs()
+        <= bounded.entropy.entropy_tolerance_j_kg_k);
+
+    // The supported throat also drives the original conservative finite-tank
+    // transfer, without relaxing either endpoint's energy admission.
+    let receiver = parcel(model, 4.8e6, 0.02);
+    let (candidate, transferred_flow) = gas
+        .through_nozzle_to(&receiver, nozzle(), 2e-5, bounded, || false)
+        .unwrap();
+    assert_eq!(transferred_flow, flow);
+    close(candidate.step().transferred_mass_kg, flow.mass_flow_kg_s * 2e-5,
+        bounded.transfer.mass_tolerance_kg);
+    assert!(candidate.step().energy_residual_j.abs()
+        <= bounded.transfer.energy_tolerance_j);
+    assert!(candidate.donor().state().pressure_pa()
+        > candidate.receiver().state().pressure_pa());
+}
+
+#[test]
+fn sonic_choking_needs_no_temperature_support_beyond_the_throat() {
+    let gas = parcel(bound(), 5.0e6, 0.01);
+    let mut bounded = controls();
+    bounded.entropy.minimum_temperature_k = 240.0;
+    for back_pressure in [1.0e6, 0.0] {
+        let flow = gas.nozzle_flow_to(back_pressure, nozzle(), bounded, || false).unwrap();
+        assert!(flow.choked);
+        close(flow.mach_number, 1.0, 1e-5);
+        close(flow.throat().temperature_k(), 246.138_609_574_328_88, 2e-8);
+        close(flow.throat().pressure_pa(), 2_606_775.478_614_349_7, 5e-4);
+        close(flow.throat().density_kg_m3(), 30.672_132_687_941_348, 2e-8);
+        close(flow.velocity_m_s, 350.440_664_370_255_6, 2e-7);
+        close(flow.mass_flow_kg_s, 0.008_599_010_045_451_84, 2e-11);
+        assert!(flow.entropy_residual_j_kg_k.abs()
+            <= bounded.entropy.entropy_tolerance_j_kg_k);
+    }
+}
+
+#[test]
+fn recovering_a_search_bracket_preserves_physical_and_work_refusals() {
+    let gas = parcel(bound(), 5.0e6, 0.01);
+    let mut bounded = controls();
+    // The true 296.327 K pressure exit is outside this bracket. Recovery must
+    // refuse instead of clipping temperature or publishing an incorrect flow.
+    bounded.entropy.minimum_temperature_k = 298.0;
+    assert!(gas.nozzle_flow_to(4.8e6, nozzle(), bounded, || false).is_err());
+
+    bounded.entropy.minimum_temperature_k = 295.0;
+    bounded.maximum_iterations = 1;
+    assert!(matches!(
+        gas.nozzle_flow_to(4.8e6, nozzle(), bounded, || false),
+        Err(GasEnergyError::Invalid(
+            "real-gas nozzle admitted density search exhausted its work budget"
+        ))
+    ));
+
+    // The NASA source starts at 200 K. Actual source-domain failures retain
+    // their material error; only an entropy root outside its bracket recovers.
+    bounded = controls();
+    bounded.entropy.minimum_temperature_k = 150.0;
+    assert!(matches!(
+        gas.nozzle_flow_to(4.8e6, nozzle(), bounded, || false),
+        Err(GasEnergyError::Material(_))
+    ));
+
+    bounded.entropy.minimum_temperature_k = 295.0;
+    let mut polls = 0;
+    gas.nozzle_flow_to(4.8e6, nozzle(), bounded, || {
+        polls += 1;
+        false
+    }).unwrap();
+    let mut seen = 0;
+    assert!(matches!(
+        gas.nozzle_flow_to(4.8e6, nozzle(), bounded, || {
+            seen += 1;
+            seen == polls
+        }),
+        Err(GasEnergyError::Cancelled)
+    ));
+    assert_eq!(seen, polls);
+}
+
+#[test]
 fn formation_references_cannot_erase_choked_unchoked_or_small_pressure_drives() {
     let plain = parcel(bound(), 5e6, 0.01);
     for back_pressure in [4.8e6, 1e6, 5e6 - 1.0] {
