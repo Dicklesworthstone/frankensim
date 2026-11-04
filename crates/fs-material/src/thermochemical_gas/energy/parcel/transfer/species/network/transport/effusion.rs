@@ -13,6 +13,8 @@
 
 /// Prescribed molecular reservoirs and vacuum outlets in one open transaction.
 pub mod reservoir;
+/// Adaptive whole-window advancement of finite gases and molecular boundaries.
+pub mod trajectory;
 /// Finite gas networks with explicitly open, zero-return-beam vacuum outlets.
 pub mod vacuum;
 
