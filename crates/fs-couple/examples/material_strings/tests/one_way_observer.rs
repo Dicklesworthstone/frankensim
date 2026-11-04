@@ -70,22 +70,41 @@ fn skinned(text: &str, cx: &Cx<'_>, gate: &CancelGate) -> Ready {
 // Manufactured molecular reservoirs on the existing manufactured shell. These
 // coefficients exercise wiring; they are not measured nitrogen/oxygen data.
 // The 100..250 Hz band at 8 kHz needs L_w = 286 (closed form: U(285) = 1.13e-10,
-// U(286) = 9.78e-11 against 1e-10); 286 + 286 < 8192/4.
+// U(286) = 9.78e-11 against 1e-10). That bound is for a flat transfer: the moving
+// coarse skin's own kernel needs 360 at this rate, as its refusal at 286 prints.
+// 400 samples is 50 ms, and 400 + 286 < 8192/4.
+const MOLECULAR_BAND: &str = "100 250 400";
 fn molecular_source(p_tau: f64) -> String {
-    source("").replace("120 400 256", "100 250 286").replace("cavity none\n", &format!(
+    source("").replace("120 400 256", MOLECULAR_BAND).replace("cavity none\n", &format!(
         "observer_molecular declared 2 N2 1 vibration 1 900 1 power {p_tau} 293.15 0 200 500 O2 0\ncavity none\n"))
 }
 
 fn coarse_skin() -> String {
     // The parent's 20 outward faces use the original 12 shell vertices, each
     // still anchored to its original node. This is an explicitly coarse skin.
+    // All 12 are clamped: the shell's one free node is 25, the midpoint of the
+    // parent edge 4-5. The two faces on that edge are bisected there, because a
+    // skin with no moving vertex has exactly zero traces and radiates nothing.
+    const FREE_NODE: usize = 25;
+    assert!(SHELL.contains("support 25 110111\n"), "the coarse skin must keep the shell's free node");
     let fine = own_skin();
     let triangles: Vec<Vec<usize>> = SHELL.lines().filter(|line| line.starts_with("triangle "))
         .map(|line| line.split_ascii_whitespace().skip(1).take(3)
             .map(|v| v.parse().unwrap()).collect()).collect();
-    let mut out = format!("{}skin-triangles 20\n", fine.split("skin-triangles ").next().unwrap());
+    let mut faces = Vec::new();
     for group in triangles.chunks_exact(4) {
-        out += &format!("skin-triangle {} {} {}\n", group[0][0], group[1][0], group[2][0]);
+        let (a, b, c) = (group[0][0], group[1][0], group[2][0]);
+        // Each parent's first child is [a, ab, ca], so its last corner is the midpoint of edge c-a.
+        if group[0][2] == FREE_NODE {
+            faces.extend([[a, b, FREE_NODE], [FREE_NODE, b, c]]);
+        } else {
+            faces.push([a, b, c]);
+        }
+    }
+    assert_eq!(faces.len(), 22);
+    let mut out = format!("{}skin-triangles {}\n", fine.split("skin-triangles ").next().unwrap(), faces.len());
+    for [a, b, c] in faces {
+        out += &format!("skin-triangle {a} {b} {c}\n");
     }
     out + "skin-apertures 0\n"
 }
@@ -201,7 +220,7 @@ fn molecular_skin_refuses_missing_species_stale_gas_and_unsupported_reciprocal_l
     let mut spec = input::Spec::parse(source.as_bytes()).unwrap();
     assert_eq!(spec.observer_molecular.as_ref().unwrap().gas(), &spec.gas);
     for text in [
-        source.replace(&RECORD.replace("120 400 256", "100 250 286"), ""),
+        source.replace(&RECORD.replace("120 400 256", MOLECULAR_BAND), ""),
         source.replace("declared 2 N2", "declared 1 N2").replace(" O2 0\n", "\n"),
         source.replace("200 500 O2 0", "200 500 O2 0 trailing"),
         source.replace("cavity none\n", "observer_molecular declared 2 N2 0 O2 0\ncavity none\n"),
@@ -209,8 +228,12 @@ fn molecular_skin_refuses_missing_species_stale_gas_and_unsupported_reciprocal_l
     ] {
         assert!(input::Spec::parse(text.as_bytes()).is_err());
     }
-    spec.gas = input::Spec::parse(source.replace("101325", "202650").as_bytes()).unwrap().gas;
-    assert!(spec.validate_shell_observer().is_err());
+    // 150 kPa is inside the gas model's declared 10-200 kPa, so the replacement gas parses.
+    // Only the gas changes between these two checks, and the refusal names the stale exterior gas.
+    spec.validate_shell_observer().unwrap();
+    spec.gas = input::Spec::parse(source.replace("101325", "150000").as_bytes()).unwrap().gas;
+    let refusal = spec.validate_shell_observer().unwrap_err().to_string();
+    assert!(refusal.contains("observer_molecular requires its original exterior gas"), "{refusal}");
 }
 
 #[test]
