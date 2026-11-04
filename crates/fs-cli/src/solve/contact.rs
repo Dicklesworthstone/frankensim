@@ -386,7 +386,8 @@ pub(super) fn admit(
     // contact feedback composed before they can expose trajectory derivatives.
     let capacity_adjoint = capacity_contact
         && setup.radiation.is_none()
-        && setup.enclosure_radiation.is_none()
+        && setup.enclosure_radiation.as_ref().is_none_or(|row|
+            row.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise))
         && !setup.boundaries.iter().any(|row| {
             matches!(
                 row.condition,
@@ -445,8 +446,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed/open enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed/open enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed, natural or transported-air boundaries with optional closed/open area-mean enclosures and whole-law contact controls. Capacity final/sampled-peak adjoints admit prescribed or scheduled thermal boundaries; this requested composition needs additional complete contact feedback",
-            "use an admitted storage and boundary composition; steady contact adjoints require prescribed, natural or transported-air boundaries with optional area-mean closed/open enclosures and no ambient/pointwise radiation or prescribed-temperature controls; capacity contact adjoints require temperature-final-adjoint or temperature-sampled-peak-adjoint with prescribed or scheduled boundaries and no derived convection or radiation; steady and capacity radiation admit area-mean ambient and closed/open enclosure exchange; pointwise emission requires total enthalpy; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed/open enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed/open enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed, natural or transported-air boundaries with optional closed/open area-mean enclosures and whole-law contact controls. Capacity final/sampled-peak adjoints admit prescribed or scheduled thermal boundaries with optional closed/open area-mean enclosures; this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition; steady contact adjoints require prescribed, natural or transported-air boundaries with optional area-mean closed/open enclosures and no ambient/pointwise radiation or prescribed-temperature controls; capacity contact adjoints require temperature-final-adjoint or temperature-sampled-peak-adjoint with prescribed or scheduled boundaries and optional area-mean closed/open enclosures, with no ambient/pointwise radiation or derived convection; steady and capacity radiation admit area-mean ambient and closed/open enclosure exchange; pointwise emission requires total enthalpy; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())

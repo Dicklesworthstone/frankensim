@@ -1,16 +1,16 @@
 //! Source-preserving controls of the complete capacity/enclosure transpose.
 //! The numerical boundary, reflected tangent and remap belong to fs-conduction.
 
-use fs_conduction::radiation::GrayDiffuseEnclosure;
 use crate::solve::radiation::LoweredRadiation;
 
-use super::{SolveRefusal, bad};
+use super::{EnclosureModel, SolveRefusal, bad};
 use super::super::super::{json_string, number};
 
 pub(super) fn fragment(
     lowering: &LoweredRadiation,
-    model: &GrayDiffuseEnclosure,
+    model: &EnclosureModel,
     emissivities: &[f64],
+    ambient_derivative: f64,
     steps: usize,
     radiosity_iterations: usize,
     worst_radiosity_residual: f64,
@@ -43,9 +43,21 @@ pub(super) fn fragment(
             number(emissivities[index])?, json_string(directions),
         ));
     }
+    let (method, parameters, factors, bath) = match model {
+        EnclosureModel::Closed(model) => (
+            "complete-closed-gray-diffuse-capacity-tangent",
+            "absolute-per-surface-emissivity-throughout-selected-trajectory",
+            model.view_factors(), String::new()),
+        EnclosureModel::Open(model, ambient) => (
+            "complete-open-gray-diffuse-capacity-tangent",
+            "absolute-per-surface-emissivity-and-shared-black-environment-temperature-throughout-selected-trajectory",
+            model.view_factors(), format!(
+                ",\"black_environment\":{{\"temperature_k\":{},\"dtemperature_dambient_temperature_k_per_k\":{},\"feasible_directions\":\"two-sided-within-positive-kelvin\"}}",
+                number(*ambient)?, number(ambient_derivative)?)),
+    };
     Ok(format!(
-        ",\"radiation\":{{\"method\":\"complete-closed-gray-diffuse-capacity-tangent\",\"patch_count\":{},\"control_steps\":{},\"radiosity_adjoint_krylov_iterations\":{},\"maximum_radiosity_dual_relative_residual\":{},\"parameters\":\"absolute-per-surface-emissivity-throughout-selected-trajectory\",\"view_factor_identity\":{},\"surfaces\":[{}]}}",
+        ",\"radiation\":{{\"method\":\"{method}\",\"patch_count\":{},\"control_steps\":{},\"radiosity_adjoint_krylov_iterations\":{},\"maximum_radiosity_dual_relative_residual\":{},\"parameters\":\"{parameters}\",\"view_factor_identity\":{}{bath},\"surfaces\":[{}]}}",
         emissivities.len(), steps, radiosity_iterations, number(worst_radiosity_residual)?,
-        json_string(&model.view_factors().identity().to_hex()), rows.join(","),
+        json_string(&factors.identity().to_hex()), rows.join(","),
     ))
 }

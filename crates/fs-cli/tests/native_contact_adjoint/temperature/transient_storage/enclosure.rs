@@ -3,7 +3,7 @@
 //! that the imported contact pair geometrically forms a closed enclosure.
 
 use super::*;
-use super::radiation::{Cooling, radiating_fixture, reservoir_heat, solve_radiating};
+use super::radiation::{Cooling, radiating_fixture, reservoir_heat, solve_radiating, solve_radiating_output};
 use fs_project::{ConductionEnclosure, EnclosureRadiatingSurface, EnclosureViewFactorEvidence};
 
 const START_K: f64 = 300.0;
@@ -334,9 +334,9 @@ fn native_capacity_open_enclosure_uses_the_same_owner_with_static_contact() {
 }
 
 #[test]
-fn native_capacity_open_enclosure_refuses_unimplemented_trajectory_adjoints() {
+fn native_capacity_open_contact_enclosure_refuses_unimplemented_material_controls() {
     let f = open_fixture(Cooling::Prescribed);
-    for (ordinal, output) in [(219, "temperature-final-adjoint"), (220, "temperature-sampled-peak-adjoint")] {
+    for (ordinal, output) in [(219, "temperature-final-material-adjoint"), (220, "temperature-sampled-peak-material-adjoint")] {
         let (source, contact, ledger) = prepare_with_pack(&f, ordinal, Some(output), temperature_pack());
         let output = super::radiation::run_radiating(&f, &source, &contact, &ledger);
         assert_ne!(output.exit_code, fs_cli::exit::SUCCESS);
@@ -344,4 +344,169 @@ fn native_capacity_open_enclosure_refuses_unimplemented_trajectory_adjoints() {
         assert!(refusal.contains("radiation") || refusal.contains("enclosure"), "{refusal}");
         assert!(!refusal.contains("run_receipt"), "unsupported derivative published history: {refusal}");
     }
+}
+
+fn adjoint(receipt: &J) -> &J { receipt.get("transient").unwrap().get("adjoint").unwrap() }
+
+fn same_history(plain: &J, plain_field: &J, differentiated: &J, field: &J) {
+    assert_eq!(plain_field.get("temperature"), field.get("temperature"));
+    for key in ["energy", "interfaces", "radiation", "conjugate", "natural"] {
+        assert_eq!(plain.get(key), differentiated.get(key), "changed forward {key}");
+    }
+    for key in ["coarse", "fine", "energy", "temperature_contact", "sampled_peak"] {
+        assert_eq!(plain.get("transient").unwrap().get(key),
+            differentiated.get("transient").unwrap().get(key), "changed trajectory {key}");
+    }
+    let derivative = adjoint(differentiated);
+    assert_eq!(n(derivative, "reconstructed_solid_endpoints"), 0.0);
+    assert_eq!(n(derivative, "reconstruction_krylov_iterations"), 0.0);
+    assert_eq!(n(derivative, "revalidated_solid_endpoints"), n(derivative, "state_index"));
+    assert!(n(derivative, "maximum_dual_relative_residual") < 1e-12);
+}
+
+fn bath_derivative(receipt: &J) -> f64 {
+    let radiation = adjoint(receipt).get("radiation").unwrap();
+    assert_eq!(radiation.str_field("method"), Some("complete-open-gray-diffuse-capacity-tangent"));
+    let bath = radiation.get("black_environment").unwrap();
+    close(n(bath, "temperature_k"), OPEN_BATH_K, 0.0);
+    n(bath, "dtemperature_dambient_temperature_k_per_k")
+}
+
+fn agrees(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 2e-4 * expected.abs().max(0.01),
+        "complete trajectory derivative {actual:e} versus physical histories {expected:e}");
+}
+
+#[test]
+fn native_capacity_enclosure_contact_adjoints_preserve_schedules_and_full_feedback() {
+    for open in [false, true] {
+        let mut f = if open { open_fixture(Cooling::Prescribed) } else { enclosed_fixture(Cooling::Prescribed) };
+        let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.boundaries.iter_mut().find(|row| row.target == "cold").unwrap().condition =
+            ThermalBoundaryCondition::Convection {
+                coefficient: QtyAny::new(2.0, dims::HEAT_TRANSFER_COEFFICIENT),
+                reference_temperature: QtyAny::new(297.0, dims::TEMPERATURE),
+            };
+        time(&mut f).boundary_schedules = vec![TransientBoundarySchedule {
+            target: "cold".into(), kind: TransientBoundaryTarget::ConvectionTemperature,
+            source: "synthetic held reservoirs".into(),
+            steps: [(0.25, 297.0), (0.75, 302.0), (1.0, 298.0)].into_iter()
+                .map(|(until, reference)| TransientBoundaryStep {
+                    until: QtyAny::new(until, dims::TIME), value: QtyAny::new(reference, dims::TEMPERATURE),
+                }).collect(),
+        }];
+        let pack = || if open { temperature_surface_pack() } else { temperature_pack() };
+        let (plain, plain_field) = solve_radiating(&f, 230, pack());
+        let (receipt, field) = solve_radiating_output(&f, 231, Some("temperature-final-adjoint"), pack());
+        same_history(&plain, &plain_field, &receipt, &field);
+        let derivative = adjoint(&receipt);
+        let vertex = n(derivative, "active_vertex") as usize;
+        close(n(derivative, "value_k"), values(&field, "temperature")[vertex], 0.0);
+        let radiation = derivative.get("radiation").unwrap();
+        assert_eq!(n(radiation, "patch_count"), 2.0);
+        assert_eq!(n(radiation, "control_steps"), n(derivative, "state_index"));
+        assert_eq!(radiation.get("black_environment").is_some(), open);
+        for row in radiation.get("surfaces").unwrap().as_array().unwrap() {
+            assert_eq!(row.str_field("card").unwrap().len(), 64);
+            assert!(n(row, "dtemperature_demissivity_k").is_finite());
+        }
+        let robin = &derivative.get("robin").unwrap().as_array().unwrap()[0];
+        assert_eq!(robin.get("reference_history_held_fixed"), Some(&J::Bool(true)));
+        close(n(robin, "dtemperature_dreference_k_per_k"), 0.0, 0.0);
+        let hot = derivative.get("regional_power").unwrap().as_array().unwrap().iter()
+            .find(|row| row.str_field("region") == Some("hot")).unwrap();
+        let derivatives = [n(hot, "dtemperature_duniform_added_watts_k_per_w"),
+            n(derivative, "dtemperature_dcapacity_multiplier_k"),
+            n(derivative, "dtemperature_duniform_initial_k_per_k"),
+            if open { bath_derivative(&receipt) } else { 0.0 }];
+        for (coordinate, epsilon) in [0.01, 0.001, 0.01, 0.01].into_iter().enumerate() {
+            if coordinate == 3 && !open { continue; }
+            let mut probes = Vec::new();
+            for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+                let mut changed = Fixture { dir: f.dir.clone(), project: f.project.clone() };
+                match coordinate {
+                    0 => for step in &mut time(&mut changed).power_schedules[0].steps {
+                        step.watts.value += sign * epsilon;
+                    },
+                    1 => for row in &mut time(&mut changed).capacities {
+                        row.volumetric_heat_capacity.value *= 1.0 + sign * epsilon;
+                    },
+                    2 => time(&mut changed).initial_temperature = TransientInitialTemperature::Uniform(
+                        QtyAny::new(START_K + sign * epsilon, dims::TEMPERATURE)),
+                    _ => changed.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                        .enclosure_radiation.as_mut().unwrap().ambient_temperature.as_mut().unwrap().value += sign * epsilon,
+                }
+                let (_, field) = solve_radiating(&changed, 232 + 2 * coordinate + side, pack());
+                probes.push(values(&field, "temperature")[vertex]);
+            }
+            agrees(derivatives[coordinate], (probes[1] - probes[0]) / (2.0 * epsilon));
+        }
+    }
+}
+
+#[test]
+fn native_open_capacity_contact_peaks_reverse_only_the_selected_prefix() {
+    for initial in [false, true] {
+        let mut f = open_fixture(Cooling::Prescribed);
+        if !initial {
+            for (index, step) in time(&mut f).power_schedules[0].steps.iter_mut().enumerate() {
+                step.watts.value = if index == 0 { 1000.0 } else { 0.0 };
+            }
+        }
+        let (plain, plain_field) = solve_radiating(&f, 245, temperature_pack());
+        let (receipt, field) = solve_radiating_output(&f, 246,
+            Some("temperature-sampled-peak-adjoint"), temperature_pack());
+        same_history(&plain, &plain_field, &receipt, &field);
+        let derivative = adjoint(&receipt);
+        let selected = n(derivative, "state_index") as usize;
+        let intervals = derivative.get("intervals").unwrap().as_array().unwrap();
+        if initial {
+            assert_eq!(selected, 0);
+            close(bath_derivative(&receipt), 0.0, 0.0);
+            close(n(derivative, "dtemperature_dcapacity_multiplier_k"), 0.0, 0.0);
+            close(n(derivative, "dtemperature_duniform_initial_k_per_k"), 1.0, 0.0);
+            for surface in derivative.get("radiation").unwrap().get("surfaces").unwrap().as_array().unwrap() {
+                close(n(surface, "dtemperature_demissivity_k"), 0.0, 0.0);
+            }
+        } else {
+            assert!(selected > 0 && selected < intervals.len());
+            let epsilon = 0.01;
+            let mut peaks = Vec::new();
+            for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+                let mut changed = Fixture { dir: f.dir.clone(), project: f.project.clone() };
+                changed.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                    .enclosure_radiation.as_mut().unwrap().ambient_temperature.as_mut().unwrap().value += sign * epsilon;
+                let (probe, _) = solve_radiating(&changed, 247 + side, temperature_pack());
+                let peak = probe.get("transient").unwrap().get("sampled_peak").unwrap();
+                close(n(peak, "time_s"), n(derivative, "time_s"), 0.0);
+                peaks.push(n(peak, "value_k"));
+            }
+            agrees(bath_derivative(&receipt), (peaks[1] - peaks[0]) / (2.0 * epsilon));
+        }
+        for interval in &intervals[selected..] {
+            close(n(interval, "dtemperature_dsource_multiplier_k"), 0.0, 0.0);
+            for region in interval.get("regional_power").unwrap().as_array().unwrap() {
+                close(n(region, "dtemperature_ddelivered_watts_k_per_w"), 0.0, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_open_capacity_static_contact_keeps_existing_natural_air_derivatives() {
+    let f = open_fixture(Cooling::Mixed);
+    let (plain, plain_field, _) = f.solve(0.3, None, 250);
+    let (receipt, field, _) = f.solve(0.3, Some("temperature-final-adjoint"), 251);
+    same_history(&plain, &plain_field, &receipt, &field);
+    let vertex = n(adjoint(&receipt), "active_vertex") as usize;
+    let epsilon = 0.01;
+    let mut probes = Vec::new();
+    for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+        let mut changed = Fixture { dir: f.dir.clone(), project: f.project.clone() };
+        changed.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .enclosure_radiation.as_mut().unwrap().ambient_temperature.as_mut().unwrap().value += sign * epsilon;
+        let (_, field, _) = changed.solve(0.3, None, 252 + side);
+        probes.push(values(&field, "temperature")[vertex]);
+    }
+    agrees(bath_derivative(&receipt), (probes[1] - probes[0]) / (2.0 * epsilon));
 }

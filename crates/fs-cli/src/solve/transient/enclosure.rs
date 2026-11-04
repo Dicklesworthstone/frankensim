@@ -30,13 +30,6 @@ impl Model {
 
     pub(super) fn is_open(&self) -> bool { matches!(self, Self::Open(..)) }
 
-    pub(super) fn closed(&self) -> Result<&GrayDiffuseEnclosure, SolveRefusal> {
-        match self {
-            Self::Closed(model) => Ok(model),
-            Self::Open(..) => Err(bad("open area-mean capacity radiation does not expose trajectory adjoints")),
-        }
-    }
-
     pub(super) fn surface_heat_w(&self, report: &RadiosityReport) -> Result<f64, SolveRefusal> {
         let heat = report.net_outward_heat_w.get(..self.surfaces().len())
             .ok_or_else(|| bad("capacity enclosure lost its physical-surface heat rows"))?;

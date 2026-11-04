@@ -21,8 +21,8 @@ Focused native physical re-solves cover closed curve/Newton and open
 source-surface/Picard contact, source power, bath temperature and air inlet.
 Mixed Robin/flux numerical tests additionally check emissivity and stale-field
 refusal. Rust syntax and source review passed; runtime execution remains
-pending. Ambient/pointwise contact-radiation derivatives, prescribed-temperature
-controls and radiating contact trajectory adjoints remain unsupported. No
+pending. Ambient/pointwise contact-radiation derivatives and steady prescribed-temperature
+controls remain unsupported; driver 119 adds the enclosure trajectory composition below. No
 continuum, unique-maximum-at-a-tie or gradient-error certificate is added.
 
 ## Capacity storage in open radiative cavities — driver 117
@@ -46,10 +46,10 @@ Per-step and final receipts retain applied and fresh physical patch heat,
 independently evaluated bath power, original source identities and complete
 contact/radiation/Newton/backtrack/Krylov work. Cancellation, exhausted budgets
 and refused source queries publish no accepted partial history. Driver 117
-invalidates prior cached producer results. Pointwise capacity emission,
-area-mean open total-enthalpy histories and open-capacity radiation adjoints
-remain unsupported; existing admitted contact-only trajectory adjoints and
-pointwise total-enthalpy open radiation retain their own owners.
+invalidates prior cached producer results. Pointwise capacity emission and
+area-mean open total-enthalpy histories remain unsupported. The capacity
+adjoint composition below extends the existing contact and radiation owners;
+pointwise total-enthalpy open radiation retains its own owner.
 
 Focused numerical and native regressions independently reconstruct reflected
 bath heat, storage, scheduled input, live contact queries and convection-only
@@ -57,6 +57,36 @@ air gain. They cover both source algorithms, static-contact reuse, fixed-node
 storage reactions, domain/budget/cancellation refusal and deterministic retry.
 The resource-constrained implementation session checked Rust syntax and diffs;
 native runtime execution remains required.
+
+### Capacity trajectory adjoints with reflected radiation — driver 119
+
+Final-time and sampled-peak capacity reports now reuse the original bound
+closed/open enclosure model through the complete reverse traversal. Every
+selected endpoint is revalidated without a replacement forward solve. The
+same reflected mean-Robin and mean-flux factors enter the stored-energy
+transpose, including radiating Neumann patches with no artificial convection.
+One independent black-environment temperature control joins the original
+per-surface emissivities; the reservoir has no solid trace or heat capacity.
+
+Live source contacts compose with this enclosure response for prescribed and
+scheduled thermal boundaries. The contact owner re-queries both independent
+traces on the fresh radiative boundary and retains the complete bulk/contact
+tangent. Source, initial-temperature, capacity, flux and prescribed-boundary
+partials use the same total watt-coordinate dual with no extra timestep factor.
+Held schedules and original accepted time grids remain fixed. Earlier selected
+peaks reverse only their prefix; an initial peak has zero future radiation
+controls while retaining their original physical identities.
+
+Ordinary fixed interfaces retain the existing natural/air reverse coupling,
+including open bath radiation and separate convection-only air heat. Live
+contact trajectories still refuse ambient/pointwise radiation, derived
+convection and material/contact-scale derivative reports. Source corners,
+stale endpoints, cancellation and work/memory exhaustion remain refusals.
+Numerical and imported-project tests compare full-history perturbations,
+nonuniform surface capacity, scheduled boundaries, source-curve/surface paths,
+selected prefixes and unchanged forward histories. Syntax/source review is
+separate from required native runtime execution.
+Driver 119 invalidates prior cached producer results.
 
 ## Live source contacts in open radiative cavities — driver 116
 
@@ -2926,7 +2956,9 @@ bath. Transient calibration consumes the matching pointwise enthalpy bath
 control over the selected prefix; absent, closed or ambiguous owners refuse.
 Driver 117 adds patch-mean open trajectories with declared regional capacity,
 including live source contacts. Patch-mean open total-enthalpy histories,
-open-capacity radiation adjoints and continuum bounds still refuse explicitly.
+pointwise capacity emission and continuum bounds still refuse explicitly.
+The capacity reverse composition above also exposes the complete open bath
+and physical-emissivity controls without changing the forward history.
 The existing native tests exercise independent reflected heat equations in
 both directions and real pointwise vacuum histories with original enthalpy
 storage. Native adjoint regressions compare fresh complete trajectories under
@@ -3609,7 +3641,8 @@ applied patch heat and all counted work remain attached to their actual solve.
 Enclosure callbacks, nested contact responses, Newton updates, backtracks and
 Krylov work keep their separate bounded counts. Later drivers add prescribed
 contact-only trajectory adjoints (115) and open-enclosure capacity histories
-(117). Pointwise capacity radiation and capacity contact/radiation derivatives
+(117). The capacity reverse composition above adds live-contact enclosure
+feedback; pointwise capacity and live-contact ambient radiation derivatives
 remain unsupported.
 Focused native and imported-project regressions accompany the integration;
 syntax checks do not replace their required native execution.
@@ -3709,6 +3742,8 @@ Imported-project regressions compare curve/surface source laws and nonlinear
 bulk transport against fresh full-history perturbations. They check exact
 forward-field and energy invariance, prescribed-bath and scheduled-reservoir
 controls, selected-prefix accounting and source-corner refusal. Source/material
-kinks still refuse classical derivatives. Contact with total enthalpy,
-radiation, natural convection or transported air and material/contact-scale
-trajectory controls remain outside this product composition.
+kinks still refuse classical derivatives. The capacity reverse composition
+above adds closed/open area-mean enclosure feedback for prescribed/scheduled
+boundaries. Contact with total enthalpy, ambient radiation, natural convection
+or transported air and material/contact-scale trajectory controls remain
+outside this product composition.
