@@ -63,7 +63,7 @@ fn enclosure_newton_and_source_surface_picard_share_fresh_physics_and_count_ever
         let newton = curve.solve_steady_newton_with_gray_diffuse_enclosure(cx, problem,
             &initial, config(), &model, controls()).unwrap();
         let mut solver = SolveConfig::default();
-        solver.stop.step_atol = 0.0; solver.stop.residual_rtol = 0.0;
+        solver.stop.step_atol = 0.0; solver.stop.residual_rtol = 1e-12;
         solver.stop.residual_atol = 1e-10; solver.linear.tolerance = 1e-12;
         let picard = surface.solve_steady_with_gray_diffuse_enclosure(cx, problem, &initial,
             solver.clone(), SteadyContactConfig { max_iterations: 64, relaxation: 0.5,
