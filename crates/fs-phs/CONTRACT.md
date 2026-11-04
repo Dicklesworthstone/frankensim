@@ -353,6 +353,32 @@ matched-boundary linewidth, coherent reflected-wave peak shifts, actual reaction
 force peaks, displacement/effort consistency, cancellation/replay and rejection
 of reflection dips. All ordinary-query limits above still apply.
 
+### Physical parameter motion of observed resonance peaks
+
+`HarmonicModel::driven_resonance_with_parameter_derivative` differentiates one
+caller-isolated observed peak and, when requested, both half-height crossings,
+bandwidth and response Q. It accepts the complete original parameter direction
+and a frequency-independent input-parameter derivative. Fixed observation
+weights retain their original state/effort/output meaning. Implicit derivatives
+of `Re(y_omega/y)=0` use exact second-frequency and mixed frequency/parameter
+state solves through the same LU. Source and observation dG terms, storage dQ,
+descriptor reactions and material memory remain in the chain rule. The complex
+observation derivative follows the moving peak, including its phase.
+
+One peak factor and two optional edge factors are reserved from the original
+evaluation cap. The peak factor is released before either edge factor is made.
+The native budget additionally admits six ordinary work scores and the ordinary
+payload plus `512*n+256*ports` bytes. A strictly negative finite peak curvature
+and nonzero edge slopes are required. Cancellation or refusal publishes no
+partial sensitivity. Returned stationarity and backward residuals expose finite
+numerical resolution; they are not forward or interval certificates. This local
+smooth-branch derivative does not predict finite parameter changes, automatic
+bias updates, topology changes, peak switching or a complete resonance spectrum.
+Seven native regressions check analytic mass/stiffness/damping peak and width
+derivatives, a Q=200,000 linewidth, displacement versus free-pole motion, changing
+source/port phase, constrained RLC resistance, causal Maxwell relaxation and
+transactional cancellation/replay. Production uses no finite differences.
+
 ### Finite resonance poles of the complete continuous model
 
 `HarmonicModel::resonance_pole` refines one caller-seeded finite free mode of

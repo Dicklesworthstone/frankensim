@@ -13,6 +13,9 @@
 use super::{HarmonicError, HarmonicModel, finite, poll};
 use fs_math::{c64::C64, dd::Dd};
 
+mod sensitivity;
+pub use sensitivity::{DrivenResonanceParameterResponse, HalfPowerBandwidthDerivative};
+
 /// A fixed real observation of original physical phasors, using the supplied
 /// weights without normalization. Units and coordinate meaning belong to the
 /// caller. Negative weights retain interference and antiresonances.
