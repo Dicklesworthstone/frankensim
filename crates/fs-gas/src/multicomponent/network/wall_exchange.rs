@@ -36,7 +36,7 @@ pub use shared::{
 };
 
 mod transport;
-pub use transport::CircularLaminarWall;
+pub use transport::{CircularLaminarWall, CircularTurbulentWall, CircularWallModel};
 use transport::CircularWallTransport;
 
 #[cfg(feature = "material")]
@@ -105,6 +105,8 @@ struct BranchShape {
 /// branch to one finite axial inertia, with bounded mechanical time refinement.
 /// [`Self::with_circular_laminar_transport`] derives selected branch coefficients
 /// from current source-owned gas properties instead of retaining authored values.
+/// [`Self::with_circular_transport`] also admits explicit turbulent rough-pipe
+/// models through the same source, heat and momentum transaction.
 /// [`Self::with_material_heat_storage`] supplies original source-dependent finite thermal
 /// storage, including exact latent plateaus, instead of a constant capacity.
 pub struct NetworkWallOperator<'law> {

@@ -2793,6 +2793,46 @@ after reaction also checks whole-network/finite-wall rollback. These are
 manufactured numerical integration tests, not experimental combustion or
 convection validation.
 
+### Current material state and roughness in turbulent pipe-wall friction
+
+`NetworkWallOperator::with_circular_transport` accepts one explicit
+`CircularWallModel` per selected branch. Laminar and turbulent branches use the
+same original `TransportLaw`, conservative gas fields, thermal storage,
+finite-support mechanics and atomic source transaction. The laminar convenience
+constructor retains its existing Poiseuille law; `circular_walls` exposes the
+complete selected models in branch order.
+
+`CircularTurbulentWall` resolves the Darcy factor from the implicit
+Colebrook-White equation using actual density, source-owned viscosity and
+wall-relative velocity. It requires authored equivalent sand-grain roughness,
+the original circular diameter, an explicit Reynolds interval within
+4000..1e8, roughness/diameter in 0..0.05 and a Mach ceiling at most 0.3.
+Equivalent sand roughness is not inferred from a bulk material name or equated
+to a surface's RMS height. Its Nusselt number remains an independent declared
+heat-transfer input. Reference: Colebrook (1939),
+[DOI 10.1680/ijoti.1939.13150](https://doi.org/10.1680/ijoti.1939.13150), and
+[NASA KSC-STD-Z-0017 Rev A](https://standards.nasa.gov/sites/default/files/standards/KSC/A/0/KSC-STD-Z-0017_RevA_Final.pdf),
+section 7.4.1, equation 4.
+
+The allocation-free scalar solve uses a strictly monotone reciprocal-square-root
+residual, deterministic logarithms, safeguarded Newton updates and a 32-iteration
+cap. The existing exact frozen Darcy step then advances momentum. Prescribed
+wall work, opposite support impulse, slip heating and wall heat retain their
+original separate energy accounts. The factor refreshes at every source
+interval; entering and leaving material/flow states must both be admissible.
+A domain exit, source refusal or cancellation publishes no partial gas or wall
+state. No interpolation through transitional flow is supplied.
+
+This is an Estimated developed-flow correlation with first-order constitutive
+lag, not resolved turbulence, an unsteady boundary-layer model or a
+high-compressibility correction. G1/G3 regressions check the original Colebrook
+equation, smooth/rough limits, viscosity/roughness changes, reverse slip,
+moving-frame work and heat, mixed laminar/turbulent branches and refreshed
+factors. An 8/16/32-step ladder compares native braking with an independent RK4
+solution of the continuously refreshed Colebrook law and checks first-order
+constitutive convergence. A G4 endpoint-domain regression checks the actual cells, finite walls
+and previous report after refusal.
+
 ### Existing source composition
 
 `DissipatingNetwork1d::step_with_wall` performs W/2, D/2, A, D/2, W/2.

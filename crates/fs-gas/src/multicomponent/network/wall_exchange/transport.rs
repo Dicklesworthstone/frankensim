@@ -6,6 +6,9 @@ use crate::multicomponent::dissipation::evolve::fractions;
 use crate::multicomponent::{Cell, MAX_SPECIES, Mesh1d, MixtureGas, allocated, positive};
 use fs_qty::{Length, Pressure, Temperature};
 
+mod turbulent;
+pub use turbulent::CircularTurbulentWall;
+
 /// Explicit circular, developed-laminar approximation for one complete branch.
 ///
 /// The diameter must agree with the original mesh's constant circular area and
@@ -48,31 +51,76 @@ impl CircularLaminarWall {
                 "circular wall geometry or applicability",
             ));
         }
-        let area = core::f64::consts::FRAC_PI_4 * self.diameter.value() * self.diameter.value();
-        let Some(mesh_area) = mesh.uniform_cross_section() else {
-            return Err(WallExchangeError::Invalid(
-                "developed circular wall requires constant area",
-            ));
-        };
-        if !positive(area) || !same_geometry(area, mesh_area) {
-            return Err(WallExchangeError::Invalid(
-                "wall diameter differs from original branch area",
-            ));
-        }
-        for (faces, &volume) in mesh.positions().windows(2).zip(mesh.volumes()) {
-            if !same_geometry(volume, mesh_area * (faces[1] - faces[0])) {
-                return Err(WallExchangeError::Invalid(
-                    "circular wall volume differs from original geometry",
-                ));
+        admit_circular_mesh(self.diameter, mesh)
+    }
+}
+
+/// An explicitly selected developed-flow model on one circular branch.
+///
+/// Laminar and turbulent branches can share one original transport owner.
+/// No automatic interpolation through the transitional regime is inferred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CircularWallModel {
+    /// Circular Poiseuille drag and an authored Nusselt number.
+    Laminar(CircularLaminarWall),
+    /// Colebrook-White drag and an authored Nusselt number.
+    Turbulent(CircularTurbulentWall),
+}
+
+impl CircularWallModel {
+    fn admit_mesh(self, mesh: &Mesh1d) -> Result<(), WallExchangeError> {
+        match self {
+            Self::Laminar(model) => model.admit_mesh(mesh),
+            Self::Turbulent(model) => {
+                model.validate()?;
+                admit_circular_mesh(model.diameter, mesh)
             }
         }
-        Ok(())
     }
+
+    fn parameters(self) -> (Length, f64, [f64; 2], f64) {
+        match self {
+            Self::Laminar(model) => (
+                model.diameter,
+                model.nusselt_number,
+                model.reynolds_number,
+                model.maximum_mach_number,
+            ),
+            Self::Turbulent(model) => (
+                model.diameter,
+                model.nusselt_number,
+                model.reynolds_number,
+                model.maximum_mach_number,
+            ),
+        }
+    }
+}
+
+fn admit_circular_mesh(diameter: Length, mesh: &Mesh1d) -> Result<(), WallExchangeError> {
+    let area = core::f64::consts::FRAC_PI_4 * diameter.value() * diameter.value();
+    let Some(mesh_area) = mesh.uniform_cross_section() else {
+        return Err(WallExchangeError::Invalid(
+            "developed circular wall requires constant area",
+        ));
+    };
+    if !positive(area) || !same_geometry(area, mesh_area) {
+        return Err(WallExchangeError::Invalid(
+            "wall diameter differs from original branch area",
+        ));
+    }
+    for (faces, &volume) in mesh.positions().windows(2).zip(mesh.volumes()) {
+        if !same_geometry(volume, mesh_area * (faces[1] - faces[0])) {
+            return Err(WallExchangeError::Invalid(
+                "circular wall volume differs from original geometry",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) struct CircularWallTransport {
     law: Box<dyn TransportLaw + Send + Sync>,
-    branches: Vec<Option<CircularLaminarWall>>,
+    branches: Vec<Option<CircularWallModel>>,
     binary: Vec<f64>,
 }
 
@@ -99,9 +147,31 @@ impl NetworkWallOperator<'_> {
     /// Bind before the first accepted wall step. This consumes the law but no
     /// gas/wall state; it does not silently change an existing accepted report.
     pub fn with_circular_laminar_transport<L: TransportLaw + Send + Sync + 'static>(
-        mut self,
+        self,
         law: L,
         branches: Vec<Option<CircularLaminarWall>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        let mut models = allocated(branches.len(), None)?;
+        for (model, branch) in models.iter_mut().zip(branches) {
+            poll(&mut cancelled)?;
+            *model = branch.map(CircularWallModel::Laminar);
+        }
+        self.with_circular_transport(law, models, cancelled)
+    }
+
+    /// Resolve laminar or turbulent wall friction from each branch's actual gas.
+    ///
+    /// The original transport law supplies current viscosity and conductivity;
+    /// the selected model supplies geometry, roughness, the Nusselt number and
+    /// an explicit applicability domain. The same wall transaction retains heat,
+    /// moving-wall work, finite-support recoil and whole-network rollback.
+    /// Coefficients are frozen per source interval and checked at both endpoints.
+    pub fn with_circular_transport<L: TransportLaw + Send + Sync + 'static>(
+        mut self,
+        law: L,
+        branches: Vec<Option<CircularWallModel>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, WallExchangeError> {
         poll(&mut cancelled)?;
@@ -142,8 +212,8 @@ impl NetworkWallOperator<'_> {
             .map(|transport| transport.law.as_ref() as &dyn TransportLaw)
     }
 
-    /// Original developed-wall geometry and applicability, in branch order.
-    pub fn circular_laminar_walls(&self) -> Option<&[Option<CircularLaminarWall>]> {
+    /// Original developed-wall models, geometry and applicability, in branch order.
+    pub fn circular_walls(&self) -> Option<&[Option<CircularWallModel>]> {
         self.transport
             .as_ref()
             .map(|transport| transport.branches.as_slice())
@@ -187,29 +257,50 @@ impl CircularWallTransport {
                 "wall law viscosity or conductivity",
             ));
         }
-        let diameter = model.diameter.value();
+        let (diameter, nusselt_number, reynolds_number, maximum_mach_number) = model.parameters();
         let motion = contact.drag.moving_velocity();
         let slip = primitive.velocity - motion.unwrap_or(0.0);
-        let reynolds = primitive.density * slip.abs() * diameter / viscosity;
+        let reynolds = primitive.density * slip.abs() * diameter.value() / viscosity;
         let mach = slip.abs() / primitive.sound_speed;
-        let [minimum, maximum] = model.reynolds_number;
+        let [minimum, maximum] = reynolds_number;
         admit("Reynolds number", reynolds, minimum, maximum)?;
-        admit("Mach number", mach, 0.0, model.maximum_mach_number)?;
-        contact.drag = WallDrag::circular_laminar(
-            coefficients.dynamic_viscosity,
-            primitive.density,
-            model.diameter,
-        )?;
-        if let Some(wall_velocity_m_s) = motion {
-            let WallDrag::Linear { rate_per_s } = contact.drag else {
-                unreachable!("circular laminar drag is linear")
-            };
-            contact.drag = WallDrag::MovingLinear { rate_per_s, wall_velocity_m_s };
-        }
+        admit("Mach number", mach, 0.0, maximum_mach_number)?;
+        contact.drag = match model {
+            CircularWallModel::Laminar(_) => {
+                let drag = WallDrag::circular_laminar(
+                    coefficients.dynamic_viscosity,
+                    primitive.density,
+                    diameter,
+                )?;
+                match (drag, motion) {
+                    (WallDrag::Linear { rate_per_s }, Some(wall_velocity_m_s)) => {
+                        WallDrag::MovingLinear {
+                            rate_per_s,
+                            wall_velocity_m_s,
+                        }
+                    }
+                    _ => drag,
+                }
+            }
+            CircularWallModel::Turbulent(turbulent) => {
+                let friction_factor = turbulent.darcy_factor(reynolds)?;
+                match motion {
+                    Some(wall_velocity_m_s) => WallDrag::MovingDarcy {
+                        friction_factor,
+                        hydraulic_diameter_m: diameter.value(),
+                        wall_velocity_m_s,
+                    },
+                    None => WallDrag::Darcy {
+                        friction_factor,
+                        hydraulic_diameter_m: diameter.value(),
+                    },
+                }
+            }
+        };
         // The original source solver owns wall storage and energy exchange;
         // this binding supplies only its instantaneous constitutive coefficients.
         let conductance =
-            model.nusselt_number * conductivity * (4.0 * volume / diameter) / diameter;
+            nusselt_number * conductivity * (4.0 * volume / diameter.value()) / diameter.value();
         if !conductance.is_finite() || conductance < 0.0 {
             return Err(WallExchangeError::Invalid(
                 "wall conductance is unrepresentable",
