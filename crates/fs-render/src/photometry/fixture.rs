@@ -18,7 +18,7 @@
 
 use core::fmt;
 use core::ops::Range;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fs_exec::{Cancelled, Cx};
 
@@ -27,8 +27,8 @@ use crate::tracer::{Material, Primitive, Shape};
 
 use super::CompensatedSum;
 use super::area::{
-    GoboTransmission, ParaxialBeamSplitter, ParaxialBoxDiffuser, PhotometricAreaEmitter,
-    ThinLensProjector,
+    GoboMask, GoboMaskError, GoboTransmission, MAX_GOBO_TEXELS, ParaxialBeamSplitter,
+    ParaxialBoxDiffuser, PhotometricAreaEmitter, ThinLensProjector,
 };
 use super::source::{PhotometricSource, SPECTRAL_BINS, SourceError};
 
@@ -131,6 +131,7 @@ pub struct FixtureOpticalState {
     transmittance: [f64; SPECTRAL_BINS],
     lens_scale: [f64; 2],
     gobo: Option<GoboTransmission>,
+    gobo_mask: Option<(GoboMask, [usize; 2])>,
     beam_splitter: FixtureOpticOverride<ParaxialBeamSplitter>,
     diffuser: FixtureOpticOverride<ParaxialBoxDiffuser>,
 }
@@ -142,6 +143,7 @@ impl Default for FixtureOpticalState {
             transmittance: [1.0; SPECTRAL_BINS],
             lens_scale: [1.0; 2],
             gobo: None,
+            gobo_mask: None,
             beam_splitter: FixtureOpticOverride::Retain,
             diffuser: FixtureOpticOverride::Retain,
         }
@@ -179,6 +181,39 @@ impl FixtureOpticalState {
     pub fn with_gobo(mut self, gobo: GoboTransmission) -> Self {
         self.gobo = Some(gobo);
         self
+    }
+
+    /// Apply a shared polygonal iris and framing shutters in the gobo plane.
+    ///
+    /// The mask clips each emitter's authored or shared replacement gobo.
+    /// Integer X/Y subdivisions refine its texels without changing physical
+    /// dimensions or clear-output calibration. Preparation retains each cell's
+    /// average transmitted power; its spatial approximation has no error bound.
+    /// Replacing this control does not compound the previous shared mask.
+    pub fn with_gobo_mask(
+        mut self,
+        mask: GoboMask,
+        subdivisions: [usize; 2],
+    ) -> Result<Self, SourceError> {
+        if subdivisions.contains(&0) {
+            return Err(SourceError::InvalidDistribution);
+        }
+        if subdivisions[0]
+            .checked_mul(subdivisions[1])
+            .is_none_or(|count| count > MAX_GOBO_TEXELS)
+        {
+            return Err(SourceError::DistributionTooLarge);
+        }
+        self.gobo_mask = Some((mask, subdivisions));
+        Ok(self)
+    }
+
+    /// Optional shared mask and integer texel subdivision factors.
+    #[must_use]
+    pub fn gobo_mask(&self) -> Option<(&GoboMask, [usize; 2])> {
+        self.gobo_mask
+            .as_ref()
+            .map(|(mask, subdivisions)| (mask, *subdivisions))
     }
 
     /// Retain, remove or replace each projector's native beam splitter.
@@ -220,7 +255,10 @@ impl FixtureOpticalState {
     }
 
     fn has_component_overrides(&self) -> bool {
-        self.gobo.is_some() || !self.beam_splitter.is_retained() || !self.diffuser.is_retained()
+        self.gobo.is_some()
+            || self.gobo_mask.is_some()
+            || !self.beam_splitter.is_retained()
+            || !self.diffuser.is_retained()
     }
 
     fn lens_distances(&self, projector: &ThinLensProjector) -> Result<[f64; 2], SourceError> {
@@ -240,17 +278,40 @@ impl FixtureOpticalState {
     fn controlled_projector(
         &self,
         original: &ThinLensProjector,
-    ) -> Result<ThinLensProjector, SourceError> {
-        let [distance, focal_length] = self.lens_distances(original)?;
-        original.with_optical_state(
-            distance,
-            focal_length,
-            self.gobo.as_ref().unwrap_or(original.gobo()).clone(),
-            self.beam_splitter
-                .resolve(original.beam_splitter())
-                .cloned(),
-            self.diffuser.resolve(original.diffuser()).copied(),
-        )
+        masks: &mut GoboMaskCache,
+        cx: &Cx<'_>,
+    ) -> Result<ThinLensProjector, GoboMaskError> {
+        let [distance, focal_length] = self
+            .lens_distances(original)
+            .map_err(GoboMaskError::Source)?;
+        let original_gobo = self.gobo.as_ref().unwrap_or(original.gobo());
+        let gobo = if let Some((mask, subdivisions)) = &self.gobo_mask {
+            let key = (
+                original_gobo.storage_key(),
+                mask.storage_key(),
+                *subdivisions,
+            );
+            if let Some(prepared) = masks.get(&key) {
+                prepared.clone()
+            } else {
+                let prepared = original_gobo.masked(mask, *subdivisions, cx)?;
+                masks.insert(key, prepared.clone());
+                prepared
+            }
+        } else {
+            original_gobo.clone()
+        };
+        original
+            .with_optical_state(
+                distance,
+                focal_length,
+                gobo,
+                self.beam_splitter
+                    .resolve(original.beam_splitter())
+                    .cloned(),
+                self.diffuser.resolve(original.diffuser()).copied(),
+            )
+            .map_err(GoboMaskError::Source)
     }
 
     /// Scale each finite projector's original gobo distance and focal length.
@@ -374,7 +435,7 @@ pub enum FixtureError {
         /// Stable fixture and emitter identities, including a dark emitter.
         identity: FixtureEmitterIdentity,
     },
-    /// Shared gobo, splitter or diffuser controls require an authored finite
+    /// Shared gobo, mask, splitter or diffuser controls require an authored finite
     /// projector, even when an unsupported point or Lambertian source is dark.
     UnsupportedProjectorControl {
         /// Stable fixture and emitter identities.
@@ -466,7 +527,8 @@ pub struct PhotometricRig {
 
 impl PhotometricRig {
     /// Assemble a complete immutable snapshot with a checkpoint per fixture,
-    /// emitter and body part. Storage is bounded before source cloning begins.
+    /// emitter and body part. Counts are bounded before source cloning begins;
+    /// mask preparation adds its native texel cap and cancellation checkpoints.
     /// Source validation, filtering and rigid placement use their native owners.
     pub fn try_new(
         fixtures: &[PhotometricFixture],
@@ -510,6 +572,7 @@ impl PhotometricRig {
         };
         let mut fixture_ids = BTreeSet::new();
         let mut geometry_ids = BTreeSet::new();
+        let mut masks = GoboMaskCache::new();
         for fixture in fixtures {
             cx.checkpoint()?;
             if fixture.id.0 == 0 || !fixture_ids.insert(fixture.id) {
@@ -571,8 +634,13 @@ impl PhotometricRig {
                         .ok_or(FixtureError::UnsupportedProjectorControl { identity })?;
                     let projector = fixture
                         .optics
-                        .controlled_projector(original)
-                        .map_err(|error| FixtureError::Source { identity, error })?;
+                        .controlled_projector(original, &mut masks, cx)
+                        .map_err(|error| match error {
+                            GoboMaskError::Cancelled => FixtureError::Cancelled,
+                            GoboMaskError::Source(error) => {
+                                FixtureError::Source { identity, error }
+                            }
+                        })?;
                     Some(
                         emitter
                             .source
@@ -799,6 +867,12 @@ impl PhotometricRig {
     }
 }
 
+// Inputs keep both Arc identities alive throughout assembly. Keys are used
+// only for lookup, never traversal or summation order, and never leave this
+// preparation scope. Resulting projectors share each prepared map and frost
+// integral; different masks/resolutions cannot reuse stale preparation.
+type GoboMaskCache = BTreeMap<(usize, usize, [usize; 2]), GoboTransmission>;
+
 fn reserved<T>(count: usize) -> Result<Vec<T>, FixtureError> {
     let mut values = Vec::new();
     values
@@ -911,6 +985,88 @@ mod tests {
             .unwrap(),
         });
         input
+    }
+
+    #[test]
+    fn g3_shared_masks_reuse_maps_without_crossing_source_control_or_resolution() {
+        use crate::photometry::area::FramingShutter;
+
+        with_cx(|cx, _| {
+            let map = GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![1.0]).unwrap();
+            let half =
+                GoboMask::try_new(None, vec![FramingShutter::try_new(0.0, 0.0).unwrap()]).unwrap();
+            let three_quarters =
+                GoboMask::try_new(None, vec![FramingShutter::try_new(0.0, 0.5).unwrap()]).unwrap();
+            let mut inputs = Vec::new();
+            for index in 0..5 {
+                let mut input = surface_fixture(index + 1, 1);
+                let source_map = if index == 3 {
+                    GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![0.5]).unwrap()
+                } else {
+                    map.clone()
+                };
+                let projector =
+                    ThinLensProjector::try_new(RigidTransform::identity(), 1.0, 0.5, source_map)
+                        .unwrap()
+                        .with_diffuser(ParaxialBoxDiffuser::try_new([0.1; 2], 0.5, 1.0).unwrap())
+                        .unwrap();
+                input.surfaces[0].source = input.surfaces[0]
+                    .source
+                    .clone()
+                    .with_projector(projector)
+                    .unwrap();
+                input.optics = input
+                    .optics
+                    .with_gobo_mask(
+                        if index == 2 {
+                            three_quarters.clone()
+                        } else {
+                            half.clone()
+                        },
+                        if index == 4 { [16; 2] } else { [8; 2] },
+                    )
+                    .unwrap();
+                inputs.push(input);
+            }
+            let rig =
+                PhotometricRig::try_new(&inputs, FixtureAssemblyLimits::default(), cx).unwrap();
+            let keys: Vec<_> = rig
+                .surface_sources()
+                .iter()
+                .map(|source| source.projector().unwrap().gobo().storage_key())
+                .collect();
+            assert_eq!(keys[0], keys[1]);
+            for index in 2..5 {
+                assert_ne!(keys[0], keys[index]);
+            }
+            for (source, expected) in rig
+                .surface_sources()
+                .iter()
+                .zip([100.0, 100.0, 150.0, 50.0, 100.0])
+            {
+                assert_eq!(source.clear_flux_lm(), 200.0);
+                assert_eq!(source.flux_lm(), expected);
+            }
+            assert_eq!(
+                rig.surface_sources()[4]
+                    .projector()
+                    .unwrap()
+                    .gobo()
+                    .columns(),
+                16
+            );
+            assert_eq!(map.columns(), 1);
+            assert_eq!(map.mean_transmission(), 1.0);
+            assert_eq!(
+                inputs[0].surfaces[0]
+                    .source
+                    .projector()
+                    .unwrap()
+                    .gobo()
+                    .storage_key(),
+                map.storage_key()
+            );
+        });
     }
 
     #[test]

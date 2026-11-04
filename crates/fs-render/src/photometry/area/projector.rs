@@ -43,6 +43,10 @@ pub use beam_splitter::{MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter, ProjectorBeam
 mod diffuser;
 pub use diffuser::ParaxialBoxDiffuser;
 use diffuser::PreparedDiffuser;
+mod masking;
+pub use masking::{
+    FramingShutter, GoboMask, GoboMaskError, MAX_FRAMING_SHUTTERS, MAX_IRIS_BLADES, PolygonalIris,
+};
 
 /// Maximum admitted samples in one passive gobo transmission map.
 pub const MAX_GOBO_TEXELS: usize = 1_048_576;
@@ -85,6 +89,11 @@ impl PartialEq for GoboTransmission {
 }
 
 impl GoboTransmission {
+    /// Transient preparation-cache identity, never a semantic or result ID.
+    pub(crate) fn storage_key(&self) -> usize {
+        Arc::as_ptr(&self.data) as usize
+    }
+
     /// Admit positive finite dimensions and one finite `[0,1]` transmission
     /// per texel. A wholly opaque map is valid and emits zero flux.
     pub fn try_new(

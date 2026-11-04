@@ -3935,13 +3935,53 @@ gobo; concurrent first preparations can temporarily build duplicate trees.
 This is an allocation-sharing property, not a measured throughput claim.
 
 The optical laws retain their existing scope: achromatic piecewise-constant
-gobos, ideal paraxial beam replication and passive box-slope diffusion. They
-do not add iris/shutter geometry, wavelength-dependent prism refraction,
-measured frost BSDFs or calibrated hardware control channels. Regressions
+gobos, ideal paraxial beam replication and passive box-slope diffusion.
+Gobo-plane irises and framing shutters use the sampled-mask extension below.
+Wavelength-dependent prism refraction, measured frost BSDFs and calibrated
+hardware control channels remain outside these models. Regressions
 exercise transformed mixed-calibration projectors through native camera and
 probe paths, component power accounting, cache sharing, refusal/cancellation,
 and a 300-fixture rig with 24 emitters per fixture. Calibration, discretization
 and total physical error remain unqualified.
+
+#### Polygonal iris and framing shutters
+
+`GoboMask` combines a centered `PolygonalIris` with up to four angled
+`FramingShutter` half-planes in the existing optical gobo plane. Iris inradius
+and shutter offsets are metres; rotations are radians. The iris has an
+explicit 3-to-64 blade count and is a regular polygon, not a circular-aperture
+claim. A shutter passes `normal dot position <= offset`; its offset may be
+negative. Zero iris inradius is an explicitly closed aperture.
+
+`GoboTransmission::masked` subdivides each original texel by positive integer
+X/Y factors, retaining the original physical rectangle. It clips each output
+cell against the admitted half-planes and multiplies the original transmission
+by the open-area fraction. It uses fixed-size convex-polygon scratch and area
+integration, not point classification at the cell centre. The represented
+integrated flux follows those cell averages without renormalizing blocked
+power. Spatial mask edges remain piecewise constant; neither clipping
+roundoff nor the spatial approximation has a certified error bound.
+
+Output dimensions obey `MAX_GOBO_TEXELS`; invalid subdivisions and
+unrepresentable scales or positive transmission products refuse. Allocation
+is fallible and preparation checks cancellation within bounded cell work,
+publishing only a complete validated gobo. A mask with no boundaries and
+unit subdivision retains its original map.
+
+`FixtureOpticalState::with_gobo_mask` applies the mask to each emitter's
+authored or shared replacement gobo before the existing atomic projector
+update. Lens distances, splitter/frost state, spectrum and clear calibration
+retain their native owners. Assembly reuses a result for shared gobo/mask
+storage and equal subdivisions. These transient lookup identities never
+determine source order, numerical sums or published fixture/emitter IDs.
+Different source maps, masks or resolutions cannot reuse stale preparation.
+Closed projectors retain their identities; unsupported point and Lambertian
+sources refuse even when dark.
+
+Native regressions use analytical polygon/shutter areas, passivity and cache
+isolation. These masks represent planar opaque blade geometry sampled into
+the native gobo law; three-dimensional blade placement, diffraction,
+manufactured-iris calibration and total physical error remain unqualified.
 
 #### Bounded direct-area references for fixture rigs
 
