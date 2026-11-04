@@ -79,10 +79,17 @@ the crash cascade with structurally exact energy accounting.
   material's physical high-frequency validity band.
 - `von_karman_sampled_plate` / `SampledPlateMode` — same Airy
   channels from a regular sampled `w` grid. Second-order FD is the
-  production stencil (FE `w` is C⁰). Second vs fourth Hessians
+  production stencil (FE `w` is C⁰). All interior nodes participate,
+  including the first ring next to the boundary; the Airy trace is zero
+  on the boundary itself. Displacement Hessians are prepared once and
+  reused across pairs and Airy channels. Airy indices must be strictly
+  below the grid Nyquist limit to prevent a zero or aliased stress field;
+  this admission does not certify the resolution of displacement products.
+  Second vs fourth Hessians
   must agree to `0.9` of the (dimensional) channel scale or
-  construction refuses; a sine-grid reprint of the analytic Airy
-  channel is the accuracy pin. Clamped and orthotropic bending
+  construction refuses; signed sine-mode interactions must converge
+  quadratically to the analytic Airy overlaps under grid refinement.
+  Nonfinite inputs and assembled storage are refused. Clamped and orthotropic bending
   enter as FE-sampled displacement; the membrane channel stays the
   analytic sine Airy basis (in-plane movable). Callers with
   orthotropic `E1 ≠ E2` pass `(E1+E2)/2` as `params.young`.

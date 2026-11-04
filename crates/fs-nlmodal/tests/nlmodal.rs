@@ -1277,3 +1277,105 @@ fn sampled_sine_grid_reprints_the_analytic_airy_channel() {
         "empty sampled list must refuse"
     );
 }
+
+#[test]
+fn sampled_harmonic_interactions_converge_with_their_signed_analytic_overlaps() {
+    let params = steel_plate();
+    let disp = [SineMode { m: 1, n: 1 }, SineMode { m: 2, n: 2 }];
+    let stress = [
+        SineMode { m: 2, n: 2 },
+        SineMode { m: 4, n: 2 },
+        SineMode { m: 2, n: 6 },
+    ];
+    let analytic = von_karman_ss_plate(&params, &disp, &stress).expect("analytic overlaps");
+    let mut previous = [f64::INFINITY; 3];
+    for side in [17, 33, 65] {
+        let sampled_modes: Vec<_> = disp
+            .iter()
+            .enumerate()
+            .map(|(k, mode)| {
+                let mut w = vec![0.0; side * side];
+                for j in 0..side {
+                    for i in 0..side {
+                        w[j * side + i] = (mode.m as f64 * core::f64::consts::PI * i as f64
+                            / (side - 1) as f64)
+                            .sin()
+                            * (mode.n as f64 * core::f64::consts::PI * j as f64
+                                / (side - 1) as f64)
+                                .sin();
+                    }
+                }
+                SampledPlateMode {
+                    omega: analytic.storage.omegas[k],
+                    w,
+                    nx: side,
+                    ny: side,
+                }
+            })
+            .collect();
+        let sampled =
+            von_karman_sampled_plate(&params, &sampled_modes, &stress).expect("sampled overlaps");
+        for (k, channel) in sampled.storage.channels.iter().enumerate() {
+            // The off-diagonal entries preserve the signs of weak nonlinear
+            // interactions as well as the dominant interaction. Omitting
+            // the first interior ring loses nearly 8% of the last overlap
+            // even on the finest grid, while both FD orders can still agree.
+            let expected = analytic.storage.channels[k].coupling[1];
+            let actual = channel.coupling[1];
+            assert_eq!(actual.signum(), expected.signum());
+            let error = (actual - expected).abs() / expected.abs();
+            assert!(
+                error < 0.28 * previous[k],
+                "channel {k}, grid {side}: {error} after {} must converge quadratically",
+                previous[k]
+            );
+            if side == 65 {
+                assert!(error < 0.01, "channel {k}: relative overlap error {error}");
+            }
+            previous[k] = error;
+        }
+    }
+}
+
+#[test]
+fn sampled_airy_modes_cannot_alias_onto_another_spatial_harmonic() {
+    let params = steel_plate();
+    let mode = SampledPlateMode {
+        omega: 100.0,
+        w: (0..81)
+            .map(|k| {
+                (core::f64::consts::PI * (k % 9) as f64 / 8.0).sin()
+                    * (core::f64::consts::PI * (k / 9) as f64 / 8.0).sin()
+            })
+            .collect(),
+        nx: 9,
+        ny: 9,
+    };
+    von_karman_sampled_plate(
+        &params,
+        std::slice::from_ref(&mode),
+        &[SineMode { m: 1, n: 1 }],
+    )
+    .expect("resolved Airy mode");
+    // Index 8 vanishes at all samples; index 17 aliases exactly onto 1.
+    // Comparing FD orders cannot detect either failure in the Airy field.
+    for stress in [
+        SineMode { m: 8, n: 1 },
+        SineMode { m: 1, n: 8 },
+        SineMode { m: 17, n: 1 },
+        SineMode { m: 1, n: 17 },
+    ] {
+        assert!(
+            matches!(
+                von_karman_sampled_plate(&params, std::slice::from_ref(&mode), &[stress]),
+                Err(NlModalError::Parameter { .. })
+            ),
+            "unresolved Airy mode {stress:?} must refuse"
+        );
+    }
+    for invalid in [f64::NAN, f64::INFINITY] {
+        let mut bad = mode.clone();
+        bad.w[40] = invalid;
+        assert!(von_karman_sampled_plate(&params, &[bad], &[SineMode { m: 1, n: 1 }]).is_err());
+    }
+}
