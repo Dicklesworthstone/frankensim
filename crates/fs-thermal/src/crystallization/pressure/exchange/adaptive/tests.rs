@@ -299,3 +299,78 @@ fn comparison_budget_and_last_checkpoint_refuse_without_partial_publication() {
     assert_eq!(left.volume_m3(), 0.0025);
     assert_eq!(right.state().temperature_k(), 300.0);
 }
+
+#[test]
+fn endpoint_dependent_conductance_follows_the_nonlinear_cooling_oracle() {
+    let law = law(700.0);
+    let left = parcel(&law, 500.0, 0.0, 2.0);
+    let right = parcel(&law, 300.0, 0.0, 3.0);
+    let mut queries = 0;
+    let (cooled, heated, report) = advance_exchange_to_with_conductance(
+        &left,
+        &right,
+        |a, b| {
+            queries += 1;
+            assert_eq!(a.time_s(), b.time_s());
+            assert!(a.time_s() > 0.0);
+            assert!(std::ptr::eq(a.law(), &law));
+            let difference = a.state().temperature_k() - b.state().temperature_k();
+            Ok(100.0 + 0.01 * difference * difference)
+        },
+        2.0,
+        side(),
+        side(),
+        exchange(),
+        controls(0.005),
+        || false,
+    )
+    .unwrap();
+    // With D=Ta-Tb and conserved C_a*Ta+C_b*Tb, the independently
+    // integrated ODE is D'=-alpha*(G0*D+k*D^3).
+    let attenuation = (-100.0_f64 * (1.0 / 2000.0 + 1.0 / 3000.0) * 2.0).exp();
+    let exact_difference = 200.0 * attenuation
+        / (1.0 + 0.01 / 100.0 * 200.0_f64.powi(2) * (1.0 - attenuation * attenuation)).sqrt();
+    close(
+        cooled.state().temperature_k(),
+        380.0 + 0.6 * exact_difference,
+        0.3,
+    );
+    close(
+        heated.state().temperature_k(),
+        380.0 - 0.4 * exact_difference,
+        0.3,
+    );
+    assert_eq!(queries, report.evaluated_candidates);
+    assert!(report.maximum_accepted_error.normalized <= 1.0);
+    assert!(report.absolute_energy_residual_j <= controls(0.005).energy_tolerance_j);
+
+    // The callback path reuses the exact same scalar and temporal owners when
+    // an original source happens to return a constant conductance.
+    let (fixed_left, fixed_right, fixed) = advance_exchange_to(
+        &left,
+        &right,
+        500.0,
+        2.0,
+        side(),
+        side(),
+        exchange(),
+        controls(0.01),
+        || false,
+    )
+    .unwrap();
+    let (queried_left, queried_right, queried) = advance_exchange_to_with_conductance(
+        &left,
+        &right,
+        |_, _| Ok(500.0),
+        2.0,
+        side(),
+        side(),
+        exchange(),
+        controls(0.01),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(fixed_left.state(), queried_left.state());
+    assert_eq!(fixed_right.state(), queried_right.state());
+    assert_eq!(fixed, queried);
+}

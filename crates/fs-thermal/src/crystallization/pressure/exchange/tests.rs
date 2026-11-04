@@ -428,3 +428,195 @@ fn g0_contact_uses_the_shared_represented_clock_increment_and_refuses_lost_time(
     let exact_q = 400.0 * 150.0 / (1.0 + 400.0 * (1.0 / 1000.0 + 1.0 / 1000.0));
     near(report.heat_left_to_right_j, exact_q, 1e-6);
 }
+
+#[test]
+fn g1_original_endpoint_conductance_matches_an_independent_radiative_cubic_oracle() {
+    let (parent, crystal) = phases(1000.0);
+    let ll = CrystallizationLaw::new(&parent, &crystal, &inactive, config(0xa1)).unwrap();
+    let rl = CrystallizationLaw::new(&parent, &crystal, &inactive, config(0xa2)).unwrap();
+    let left = parcel(&ll, 450.0, 0.0, 1.0, 1e5);
+    let right = parcel(&rl, 300.0, 0.0, 1.0, 2e5);
+    // Authored radiation-shaped fixture: qdot=alpha*(Tl^4-Tr^4).
+    // Its endpoint conductance is alpha*(Tl+Tr)*(Tl^2+Tr^2).
+    let alpha = 5e-8;
+    let dt = 10.0;
+    let mut source_queries = 0;
+    let mut lowest_left: f64 = 450.0;
+    let mut highest_left: f64 = 250.0;
+    let control = IsobaricExchangeControls {
+        residual_tolerance_j: 1e-7,
+        ..controls([0.0, 20_000.0])
+    };
+    let (next_left, next_right, report) = exchange_heat_with_conductance(
+        &left,
+        &right,
+        |l, r| {
+            source_queries += 1;
+            assert_eq!(l.time_s(), dt);
+            assert_eq!(r.time_s(), dt);
+            assert_eq!(l.state().crystalline_mass_fraction(), 0.0);
+            assert_eq!(r.state().crystalline_mass_fraction(), 0.0);
+            assert_eq!(l.volume_m3(), 0.001);
+            assert_eq!(r.volume_m3(), 0.001);
+            let tl = l.state().temperature_k();
+            let tr = r.state().temperature_k();
+            lowest_left = lowest_left.min(tl);
+            highest_left = highest_left.max(tl);
+            Ok(alpha * (tl + tr) * (tl * tl + tr * tr))
+        },
+        dt,
+        side(),
+        side(),
+        control,
+        || false,
+    )
+    .unwrap();
+    // Equal capacities preserve M=(Tl+Tr)/2=375. With d=(Tl-Tr)/2,
+    // Q=C*(75-d) gives a*d^3+(C+a*M^2)*d=C*75, a=8*alpha*dt*M.
+    // This analytic hyperbolic form solves the depressed cubic independently
+    // of the production bracket and its factored endpoint conductance.
+    let capacity = 1000.0;
+    let mean = 375.0;
+    let a = 8.0 * alpha * dt * mean;
+    let p = (capacity + a * mean * mean) / a;
+    let r = capacity * 75.0 / a;
+    let root_scale = (p / 3.0).sqrt();
+    let d = 2.0 * root_scale * ((r / (2.0 * root_scale.powi(3))).asinh() / 3.0).sinh();
+    let exact_q = capacity * (75.0 - d);
+    near(report.heat_left_to_right_j, exact_q, 1e-6);
+    near(next_left.state().temperature_k(), mean + d, 1e-9);
+    near(next_right.state().temperature_k(), mean - d, 1e-9);
+    assert_eq!(source_queries, report.evaluated_candidates);
+    assert!(lowest_left < highest_left);
+    let tl = next_left.state().temperature_k();
+    let tr = next_right.state().temperature_k();
+    assert_eq!(
+        report.conductance_w_k,
+        alpha * (tl + tr) * (tl * tl + tr * tr)
+    );
+    near(
+        report.heat_left_to_right_j,
+        alpha * dt * (tl.powi(4) - tr.powi(4)),
+        1e-7,
+    );
+    let frozen_g = alpha * (450.0 + 300.0) * (450.0 * 450.0 + 300.0 * 300.0);
+    let frozen = exchange_heat(&left, &right, frozen_g, dt, side(), side(), control, || {
+        false
+    })
+    .unwrap();
+    assert!((frozen.2.heat_left_to_right_j - report.heat_left_to_right_j).abs() > 1.0);
+    assert!(report.conductance_w_k < frozen_g);
+    assert!(report.absolute_energy_residual_j <= control.energy_tolerance_j);
+}
+
+#[test]
+fn g4_endpoint_conductance_source_failures_and_final_cancellation_publish_neither_body() {
+    let (parent, crystal) = phases(1000.0);
+    let law = CrystallizationLaw::new(&parent, &crystal, &inactive, config(0xa3)).unwrap();
+    let left = parcel(&law, 450.0, 0.0, 1.0, 1e5);
+    let right = parcel(&law, 300.0, 0.0, 1.0, 2e5);
+    let accepted_left = left.clone();
+    let accepted_right = right.clone();
+    let control = controls([0.0, 1000.0]);
+    let source_error = CrystallizationError::TemperatureOutOfRange {
+        temperature_k: 450.0,
+        minimum_k: 250.0,
+        maximum_k: 440.0,
+    };
+    let mut queries = 0;
+    let failure = exchange_heat_with_conductance(
+        &left,
+        &right,
+        |_, _| {
+            queries += 1;
+            if queries == 2 {
+                Err(source_error)
+            } else {
+                Ok(1.0)
+            }
+        },
+        1.0,
+        side(),
+        side(),
+        control,
+        || false,
+    );
+    assert_eq!(failure.err(), Some(source_error));
+    assert_eq!(queries, 2);
+    // Validation is per proposed endpoint, not only at the first source query.
+    for invalid_g in [f64::NAN, f64::INFINITY, -1.0] {
+        let mut queries = 0;
+        let failure = exchange_heat_with_conductance(
+            &left,
+            &right,
+            |_, _| {
+                queries += 1;
+                Ok(if queries == 2 { invalid_g } else { 1.0 })
+            },
+            1.0,
+            side(),
+            side(),
+            control,
+            || false,
+        );
+        assert_eq!(
+            failure.err(),
+            Some(invalid(
+                "isobaric exchange conductance must be finite and nonnegative"
+            ))
+        );
+        assert_eq!(queries, 2);
+    }
+    let cancelled_by_source = std::cell::Cell::new(false);
+    let failure = exchange_heat_with_conductance(
+        &left,
+        &right,
+        |_, _| {
+            cancelled_by_source.set(true);
+            Ok(1.0)
+        },
+        1.0,
+        side(),
+        side(),
+        control,
+        || cancelled_by_source.get(),
+    );
+    assert_eq!(failure.err(), Some(CrystallizationError::Cancelled));
+    let mut complete_checks = 0;
+    let with_source = exchange_heat_with_conductance(
+        &left,
+        &right,
+        |_, _| Ok(1.0),
+        1.0,
+        side(),
+        side(),
+        control,
+        || {
+            complete_checks += 1;
+            false
+        },
+    )
+    .unwrap();
+    let with_fixed =
+        exchange_heat(&left, &right, 1.0, 1.0, side(), side(), control, || false).unwrap();
+    assert_eq!(with_source.2, with_fixed.2);
+    same_parcel(&with_source.0, &with_fixed.0);
+    same_parcel(&with_source.1, &with_fixed.1);
+    let mut checks = 0;
+    let failure = exchange_heat_with_conductance(
+        &left,
+        &right,
+        |_, _| Ok(1.0),
+        1.0,
+        side(),
+        side(),
+        control,
+        || {
+            checks += 1;
+            checks == complete_checks
+        },
+    );
+    assert_eq!(failure.err(), Some(CrystallizationError::Cancelled));
+    same_parcel(&left, &accepted_left);
+    same_parcel(&right, &accepted_right);
+}

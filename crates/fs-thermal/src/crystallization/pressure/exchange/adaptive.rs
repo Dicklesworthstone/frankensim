@@ -11,7 +11,8 @@ use super::super::{
     parcel::IsobaricCrystallizationParcel, positive, product, sum,
 };
 use super::{
-    IsobaricExchangeControls, IsobaricExchangeSideControls, IsobaricExchangeStep, exchange_heat,
+    IsobaricExchangeControls, IsobaricExchangeSideControls, IsobaricExchangeStep,
+    exchange_heat_impl,
 };
 
 /// Explicit local accuracy and whole-call work/energy limits.
@@ -143,6 +144,89 @@ pub fn advance_exchange_to<'ll, 'ls, 'rl, 'rs>(
     right_controls: IsobaricExchangeSideControls,
     exchange: IsobaricExchangeControls,
     adaptivity: IsobaricExchangeAdaptivity,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        IsobaricCrystallizationParcel<'ll, 'ls>,
+        IsobaricCrystallizationParcel<'rl, 'rs>,
+        AdaptiveIsobaricExchangeStep,
+    ),
+    CrystallizationError,
+> {
+    advance_exchange_to_impl(
+        left,
+        right,
+        |_, _| Ok(conductance_w_k),
+        target_s,
+        left_controls,
+        right_controls,
+        exchange,
+        adaptivity,
+        Some(conductance_w_k),
+        cancelled,
+    )
+}
+
+/// Adaptive contact with an original conductance query at both proposed
+/// endpoint states. The same source is used by full and retained half steps.
+///
+/// The query may read temperature, kinetic mass fraction, volume and original
+/// source identities from each side. It must be deterministic and immutable in
+/// its physical meaning: comparisons and rejected candidates must not advance
+/// source history. No conductivity mixture rule or contact geometry is inferred.
+/// Each evaluated value must be finite and nonnegative. Source errors propagate
+/// unchanged, and the same time-error/work/energy semantics as
+/// [`advance_exchange_to`] apply to the complete coupled nonlinear evolution.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn advance_exchange_to_with_conductance<'ll, 'ls, 'rl, 'rs>(
+    left: &IsobaricCrystallizationParcel<'ll, 'ls>,
+    right: &IsobaricCrystallizationParcel<'rl, 'rs>,
+    conductance: impl FnMut(
+        &IsobaricCrystallizationParcel<'ll, 'ls>,
+        &IsobaricCrystallizationParcel<'rl, 'rs>,
+    ) -> Result<f64, CrystallizationError>,
+    target_s: f64,
+    left_controls: IsobaricExchangeSideControls,
+    right_controls: IsobaricExchangeSideControls,
+    exchange: IsobaricExchangeControls,
+    adaptivity: IsobaricExchangeAdaptivity,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        IsobaricCrystallizationParcel<'ll, 'ls>,
+        IsobaricCrystallizationParcel<'rl, 'rs>,
+        AdaptiveIsobaricExchangeStep,
+    ),
+    CrystallizationError,
+> {
+    advance_exchange_to_impl(
+        left,
+        right,
+        conductance,
+        target_s,
+        left_controls,
+        right_controls,
+        exchange,
+        adaptivity,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_exchange_to_impl<'ll, 'ls, 'rl, 'rs>(
+    left: &IsobaricCrystallizationParcel<'ll, 'ls>,
+    right: &IsobaricCrystallizationParcel<'rl, 'rs>,
+    mut conductance: impl FnMut(
+        &IsobaricCrystallizationParcel<'ll, 'ls>,
+        &IsobaricCrystallizationParcel<'rl, 'rs>,
+    ) -> Result<f64, CrystallizationError>,
+    target_s: f64,
+    left_controls: IsobaricExchangeSideControls,
+    right_controls: IsobaricExchangeSideControls,
+    exchange: IsobaricExchangeControls,
+    adaptivity: IsobaricExchangeAdaptivity,
+    fixed_conductance_w_k: Option<f64>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<
     (
@@ -157,7 +241,7 @@ pub fn advance_exchange_to<'ll, 'ls, 'rl, 'rs>(
     exchange.validate()?;
     left_controls.validate()?;
     right_controls.validate()?;
-    if !nonnegative(conductance_w_k)
+    if fixed_conductance_w_k.is_some_and(|value| !nonnegative(value))
         || !target_s.is_finite()
         || target_s <= left.time_s()
         || left.time_s() != right.time_s()
@@ -209,34 +293,37 @@ pub fn advance_exchange_to<'ll, 'ls, 'rl, 'rs>(
             return Err(CrystallizationError::NonConverged);
         }
         report.attempted_trials += 1;
-        let (coarse_left, coarse_right, coarse) = exchange_heat(
+        let (coarse_left, coarse_right, coarse) = exchange_heat_impl(
             &current_left,
             &current_right,
-            conductance_w_k,
+            &mut conductance,
             dt,
             left_controls,
             right_controls,
             exchange,
+            fixed_conductance_w_k,
             &mut cancelled,
         )?;
-        let (middle_left, middle_right, first) = exchange_heat(
+        let (middle_left, middle_right, first) = exchange_heat_impl(
             &current_left,
             &current_right,
-            conductance_w_k,
+            &mut conductance,
             midpoint - time,
             left_controls,
             right_controls,
             exchange,
+            fixed_conductance_w_k,
             &mut cancelled,
         )?;
-        let (fine_left, fine_right, second) = exchange_heat(
+        let (fine_left, fine_right, second) = exchange_heat_impl(
             &middle_left,
             &middle_right,
-            conductance_w_k,
+            &mut conductance,
             endpoint - midpoint,
             left_controls,
             right_controls,
             exchange,
+            fixed_conductance_w_k,
             &mut cancelled,
         )?;
         if coarse_left.time_s() != endpoint || fine_left.time_s() != endpoint {

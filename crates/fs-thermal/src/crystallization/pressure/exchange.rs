@@ -13,6 +13,8 @@
 //! The inner phase adaptivity resolves its prescribed linear enthalpy path; it
 //! does not estimate this backward-Euler contact step's time-discretization error.
 //! A contact residual, a caloric error and an energy balance are distinct tests.
+//! [`exchange_heat_with_conductance`] instead evaluates an admitted original
+//! conductance source at BOTH proposed endpoints within this same scalar solve.
 
 /// Bounded contact time refinement using the same implicit two-body step.
 #[path = "exchange/adaptive.rs"]
@@ -77,6 +79,7 @@ impl IsobaricExchangeControls {
 pub struct IsobaricExchangeStep {
     /// Actual represented increment of both initially equal parcel clocks.
     pub duration_s: f64,
+    /// Accepted endpoint conductance, W/K; fixed or original-source evaluated.
     pub conductance_w_k: f64,
     pub heat_left_to_right_j: f64,
     /// Signed Q-G*dt*(T_left_end-T_right_end), J.
@@ -110,6 +113,87 @@ pub fn exchange_heat<'ll, 'ls, 'rl, 'rs>(
     left_controls: IsobaricExchangeSideControls,
     right_controls: IsobaricExchangeSideControls,
     controls: IsobaricExchangeControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        IsobaricCrystallizationParcel<'ll, 'ls>,
+        IsobaricCrystallizationParcel<'rl, 'rs>,
+        IsobaricExchangeStep,
+    ),
+    CrystallizationError,
+> {
+    exchange_heat_impl(
+        left,
+        right,
+        |_, _| Ok(conductance_w_k),
+        duration_s,
+        left_controls,
+        right_controls,
+        controls,
+        Some(conductance_w_k),
+        cancelled,
+    )
+}
+
+/// Solve contact with an original conductance source evaluated at both proposed
+/// endpoint parcels. The source can use their actual temperatures, kinetic mass
+/// fractions, densities/volumes and its own ordered material/interface binding.
+/// Kinetic crystal fraction is never relabelled as an equilibrium liquid fraction.
+///
+/// The source must be immutable and deterministic over the transaction. `FnMut`
+/// permits integration with existing query APIs and diagnostics; speculative
+/// calls must not advance physical interface history or change source data.
+/// Every returned G must be finite and nonnegative. Its errors propagate without
+/// fallback, and the report retains the conductance of the accepted endpoint.
+/// The caller supplies an admitted, continuous residual bracket; no uniqueness
+/// or source-domain validity is inferred from successful endpoint samples.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn exchange_heat_with_conductance<'ll, 'ls, 'rl, 'rs>(
+    left: &IsobaricCrystallizationParcel<'ll, 'ls>,
+    right: &IsobaricCrystallizationParcel<'rl, 'rs>,
+    conductance: impl FnMut(
+        &IsobaricCrystallizationParcel<'ll, 'ls>,
+        &IsobaricCrystallizationParcel<'rl, 'rs>,
+    ) -> Result<f64, CrystallizationError>,
+    duration_s: f64,
+    left_controls: IsobaricExchangeSideControls,
+    right_controls: IsobaricExchangeSideControls,
+    controls: IsobaricExchangeControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        IsobaricCrystallizationParcel<'ll, 'ls>,
+        IsobaricCrystallizationParcel<'rl, 'rs>,
+        IsobaricExchangeStep,
+    ),
+    CrystallizationError,
+> {
+    exchange_heat_impl(
+        left,
+        right,
+        conductance,
+        duration_s,
+        left_controls,
+        right_controls,
+        controls,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn exchange_heat_impl<'ll, 'ls, 'rl, 'rs>(
+    left: &IsobaricCrystallizationParcel<'ll, 'ls>,
+    right: &IsobaricCrystallizationParcel<'rl, 'rs>,
+    mut conductance: impl FnMut(
+        &IsobaricCrystallizationParcel<'ll, 'ls>,
+        &IsobaricCrystallizationParcel<'rl, 'rs>,
+    ) -> Result<f64, CrystallizationError>,
+    duration_s: f64,
+    left_controls: IsobaricExchangeSideControls,
+    right_controls: IsobaricExchangeSideControls,
+    controls: IsobaricExchangeControls,
+    fixed_conductance_w_k: Option<f64>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<
     (
@@ -123,10 +207,8 @@ pub fn exchange_heat<'ll, 'ls, 'rl, 'rs>(
     controls.validate()?;
     left_controls.validate()?;
     right_controls.validate()?;
-    if !conductance_w_k.is_finite() || conductance_w_k < 0.0 {
-        return Err(invalid(
-            "isobaric exchange conductance must be finite and nonnegative",
-        ));
+    if let Some(value) = fixed_conductance_w_k {
+        check_conductance(value)?;
     }
     if !duration_s.is_finite() || duration_s <= 0.0 || left.time_s() != right.time_s() {
         return Err(invalid(
@@ -140,7 +222,9 @@ pub fn exchange_heat<'ll, 'ls, 'rl, 'rs>(
             "isobaric exchange elapsed-time increment is unrepresentable",
         ));
     }
-    let conductance_time = product(conductance_w_k, represented_duration)?;
+    let fixed = fixed_conductance_w_k
+        .map(|g| product(g, represented_duration).map(|g_dt| (g, g_dt)))
+        .transpose()?;
     let mut evaluate = |heat: f64| -> Result<Candidate<'ll, 'ls, 'rl, 'rs>, CrystallizationError> {
         check_cancelled(&mut cancelled)?;
         let (next_left, left_step) = left.advance_heat(
@@ -164,6 +248,14 @@ pub fn exchange_heat<'ll, 'ls, 'rl, 'rs>(
         {
             return Err(invalid("isobaric exchange candidate clocks disagree"));
         }
+        let (conductance_w_k, conductance_time) = if let Some(pair) = fixed {
+            pair
+        } else {
+            let value = conductance(&next_left, &next_right)?;
+            check_cancelled(&mut cancelled)?;
+            check_conductance(value)?;
+            (value, product(value, represented_duration)?)
+        };
         let difference =
             finite(next_left.state().temperature_k() - next_right.state().temperature_k())?;
         let residual = sum(&[heat, -product(conductance_time, difference)?])?;
@@ -175,22 +267,23 @@ pub fn exchange_heat<'ll, 'ls, 'rl, 'rs>(
             right_step,
             heat,
             residual,
+            conductance_w_k,
         })
     };
     let [mut lower, mut upper] = controls.heat_bracket_j;
     // No-conductance still advances both phase histories adiabatically.
-    if conductance_w_k == 0.0 {
+    if fixed_conductance_w_k == Some(0.0) {
         if lower > 0.0 || upper < 0.0 {
             return Err(invalid(
                 "zero-conductance exchange bracket must contain zero heat",
             ));
         }
         let candidate = evaluate(0.0)?;
-        return candidate.finish(conductance_w_k, 1, controls, &mut cancelled);
+        return candidate.finish(1, controls, &mut cancelled);
     }
     let lower_candidate = evaluate(lower)?;
     if lower_candidate.residual.abs() <= controls.residual_tolerance_j {
-        return lower_candidate.finish(conductance_w_k, 1, controls, &mut cancelled);
+        return lower_candidate.finish(1, controls, &mut cancelled);
     }
     if lower == upper {
         return Err(invalid(
@@ -202,7 +295,7 @@ pub fn exchange_heat<'ll, 'ls, 'rl, 'rs>(
     }
     let upper_candidate = evaluate(upper)?;
     if upper_candidate.residual.abs() <= controls.residual_tolerance_j {
-        return upper_candidate.finish(conductance_w_k, 2, controls, &mut cancelled);
+        return upper_candidate.finish(2, controls, &mut cancelled);
     }
     let mut lower_residual = lower_candidate.residual;
     let mut upper_residual = upper_candidate.residual;
@@ -239,7 +332,7 @@ pub fn exchange_heat<'ll, 'ls, 'rl, 'rs>(
         }
         let candidate = evaluate(proposal)?;
         if candidate.residual.abs() <= controls.residual_tolerance_j {
-            return candidate.finish(conductance_w_k, evaluations, controls, &mut cancelled);
+            return candidate.finish(evaluations, controls, &mut cancelled);
         }
         if candidate.residual.is_sign_positive() == lower_residual.is_sign_positive() {
             lower = proposal;
@@ -259,13 +352,13 @@ struct Candidate<'ll, 'ls, 'rl, 'rs> {
     right_step: IsobaricCrystallizationStep,
     heat: f64,
     residual: f64,
+    conductance_w_k: f64,
 }
 
 impl<'ll, 'ls, 'rl, 'rs> Candidate<'ll, 'ls, 'rl, 'rs> {
     #[allow(clippy::type_complexity)]
     fn finish(
         self,
-        conductance_w_k: f64,
         evaluated_candidates: usize,
         controls: IsobaricExchangeControls,
         cancelled: &mut impl FnMut() -> bool,
@@ -322,7 +415,7 @@ impl<'ll, 'ls, 'rl, 'rs> Candidate<'ll, 'ls, 'rl, 'rs> {
             self.right,
             IsobaricExchangeStep {
                 duration_s: left.duration_s,
-                conductance_w_k,
+                conductance_w_k: self.conductance_w_k,
                 heat_left_to_right_j: self.heat,
                 residual_j: self.residual,
                 evaluated_candidates,
@@ -344,6 +437,16 @@ fn midpoint(lower: f64, upper: f64) -> f64 {
         lower + 0.5 * width
     } else {
         0.5 * lower + 0.5 * upper
+    }
+}
+
+fn check_conductance(value: f64) -> Result<(), CrystallizationError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(invalid(
+            "isobaric exchange conductance must be finite and nonnegative",
+        ))
     }
 }
 

@@ -168,6 +168,25 @@ maximum timestep must resolve the original source's features. Three native
 regressions cover convergence to finite-body exponential cooling, latent
 inventory-driven refinement and atomic work-budget/cancellation refusal.
 
+`exchange_heat_with_conductance` and
+`adaptive::advance_exchange_to_with_conductance` evaluate an admitted original
+conductance source on BOTH proposed endpoint parcels. Temperature, kinetic
+mass fraction, original material identity and actual volume remain available
+to that source; crystal fraction is never substituted for equilibrium liquid
+fraction. The source must be deterministic and physically immutable during
+speculation. Its finite nonnegative result enters the same contact residual,
+and its exact refusal propagates. The fixed-conductance and source-query APIs
+share one scalar owner and one adaptive controller, with the existing fixed-G
+insulation shortcut retained.
+
+These APIs do not invent conductivity mixing or interface geometry. Source
+continuity and the admitted heat bracket remain caller obligations; successful
+endpoint samples cannot prove global source validity or root uniqueness. Two
+native endpoint regressions exercise a nonlinear radiation-shaped conductance
+against an independent cubic oracle and source/cancellation failures. An
+adaptive regression compares nonlinear finite-body cooling with its analytic
+ODE solution and verifies constant-source/fixed-G replay equivalence.
+
 ## Finite-rate crystallization and latent thermal feedback
 
 `crystallization::CrystallizationLaw` retains an independent Nakamura exposure
