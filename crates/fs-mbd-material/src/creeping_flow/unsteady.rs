@@ -1,6 +1,6 @@
 //! Driven unsteady Stokes motion with reciprocal fluid inertia and Basset memory.
 //!
-//! For a nonrotating no-slip sphere in a quiescent unbounded Newtonian fluid,
+//! For the translational channel of a no-slip sphere in quiescent unbounded Newtonian fluid,
 //! Z(s) = 6*pi*mu*a*(1 + a*sqrt(s/nu)) + rho*V*s/2. The body's weight and
 //! Archimedes force are separate from this force/velocity impedance. See
 //! Candelier, Mehaddi, Mehlig & Magnaudet, JFM 954 (2023), A25, equation (1.1):
@@ -16,9 +16,14 @@
 //! Midpoint elimination of the branch momenta supplies ONE wrench to the
 //! existing rigid-body integrator. It remains the only owner of body momentum,
 //! position and attitude; no alternate body trajectory is advanced here.
+//! The explicit [`rotation`] owner adds the distinct causal rotary impedance
+//! and one shared native Cayley step; the original owner remains nonrotating.
 
 use super::*;
 use std::sync::Arc;
+
+/// Rotational fluid memory coupled to the same translating native body.
+pub mod rotation;
 
 /// Numerical approximation of the continuum history kernel, not material data.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,14 +57,18 @@ pub struct UnsteadyStepControls {
 pub struct UnsteadySphereStep {
     pub dynamics: StepReceipt,
     /// Includes buoyancy, steady resistance, memory and added-mass reaction.
+    /// With spin history, its body torque is the work-conjugate Cayley pullback
+    /// of the physical world torque in `rotation`, not an instantaneous rotation.
     pub fluid_wrench: Wrench,
     pub history_force_world_n: Vec3,
     pub added_mass_force_world_n: Vec3,
     /// Steady Stokes loss plus all branch dashpot loss, never stored energy.
     pub viscous_heat_j: f64,
-    /// Work of the separately supplied centre-of-mass driving force.
+    /// Work of the separately supplied centre-of-mass force and optional
+    /// body-frame couple, using the accepted native midpoint velocities.
     pub applied_work_j: f64,
     pub added_mass_energy_change_j: f64,
+    /// Sum of all represented translational and optional rotary fluid storage.
     pub memory_energy_change_j: f64,
     /// Added mass and branch generalized momentum, not total field momentum.
     pub spectral_fluid_momentum_change_ns: Vec3,
@@ -69,6 +78,8 @@ pub struct UnsteadySphereStep {
     /// Dry-body kinetic + gravity/buoyancy potential + represented fluid energy.
     pub stored_energy_change_j: f64,
     pub energy_defect_j: f64,
+    /// Present for a rotating owner; its heat/storage also enter the totals above.
+    pub rotation: Option<rotation::RotationalHistoryStep>,
 }
 
 /// One restartable body and its complete accepted viscous-memory history.
@@ -79,6 +90,7 @@ pub struct UnsteadySphereMotion<'s, 'f, 'b, F: FluidTransport + ?Sized> {
     resolution: BassetResolution,
     branches: Arc<[BassetBranch]>,
     fluid_velocities: Vec<Vec3>,
+    rotation: Option<rotation::RotationHistory>,
     state: RigidBodyState,
     time_s: f64,
 }
@@ -91,6 +103,7 @@ impl<F: FluidTransport + ?Sized> Clone for UnsteadySphereMotion<'_, '_, '_, F> {
             resolution: self.resolution,
             branches: Arc::clone(&self.branches),
             fluid_velocities: self.fluid_velocities.clone(),
+            rotation: self.rotation.clone(),
             state: self.state,
             time_s: self.time_s,
         }
@@ -161,6 +174,7 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
             resolution,
             branches: branches.into(),
             fluid_velocities: vec![Vec3::ZERO; resolution.intervals],
+            rotation: None,
             state,
             time_s: 0.0,
         })
@@ -248,14 +262,29 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
         &self,
         applied: Wrench,
         controls: UnsteadyStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, UnsteadySphereStep), Error> {
+        self.advance_with_wrench(applied, controls, None, cancelled)
+    }
+
+    fn advance_with_wrench(
+        &self,
+        applied: Wrench,
+        controls: UnsteadyStepControls,
+        rotational_controls: Option<rotation::RotatingStepControls>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, UnsteadySphereStep), Error> {
         poll(&mut cancelled)?;
         vector(applied.force_world)?;
         vector(applied.torque_body)?;
-        if applied.torque_body != Vec3::ZERO {
+        if self.rotation.is_none() && applied.torque_body != Vec3::ZERO {
             return Err(Error::Invalid(
                 "unsteady translational sphere drag requires zero applied torque",
+            ));
+        }
+        if self.rotation.is_some() != rotational_controls.is_some() {
+            return Err(Error::Invalid(
+                "rotational history requires its explicit controls",
             ));
         }
         let dt = positive(controls.duration_s)?;
@@ -307,7 +336,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 .acceleration_world()
                 .scale(-self.sphere.fluid_mass_kg),
         )?;
-        let wrench = Wrench {
+        let mut wrench = Wrench {
             force_world: vector(
                 buoyancy
                     .add(history_force)
@@ -320,8 +349,28 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
             force_world: vector(wrench.force_world.add(applied.force_world))?,
             torque_body: Vec3::ZERO,
         };
-        let dynamics =
-            RigidBodyIntegrator::new(self.sphere.gravity).step(self.state, p, total_wrench, dt)?;
+        let (dynamics, rotation_trial) = match (&self.rotation, rotational_controls) {
+            (Some(history), Some(rotational)) => {
+                let trial = history.native_candidate(
+                    self,
+                    total_wrench.force_world,
+                    applied.torque_body,
+                    rotational,
+                    &mut cancelled,
+                )?;
+                wrench.torque_body = trial.fluid_torque_body_nm;
+                (trial.dynamics, Some(trial))
+            }
+            _ => (
+                RigidBodyIntegrator::new(self.sphere.gravity).step(
+                    self.state,
+                    p,
+                    total_wrench,
+                    dt,
+                )?,
+                None,
+            ),
+        };
         self.sphere
             .load_frame(self.body.frame(), dynamics.state_after, &mut cancelled)?;
         let v1 = dynamics.state_after.center_of_mass_velocity_world(p)?;
@@ -341,20 +390,45 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
             heat = finite(heat + dt * branch.resistance_kg_s * vm.sub(um).norm_squared())?;
             fluid_velocities.push(u1);
         }
+        let (rotation, rotation_receipt) =
+            match (&self.rotation, rotation_trial, rotational_controls) {
+                (Some(history), Some(trial), Some(rotational)) => {
+                    let (next, receipt) = history.finish(
+                        self,
+                        trial,
+                        applied.torque_body,
+                        rotational,
+                        &mut cancelled,
+                    )?;
+                    memory_energy = finite(memory_energy + receipt.memory_energy_change_j)?;
+                    heat = finite(heat + receipt.viscous_heat_j)?;
+                    (Some(next), Some(receipt))
+                }
+                _ => (None, None),
+            };
         let added_energy = finite(added_mass * v1.sub(v0).dot(vm))?;
         let dx = dynamics
             .state_after
             .pose()
             .position_world()
             .sub(self.state.pose().position_world());
-        let stored = finite(
+        let mut stored = finite(
             dynamics.diagnostics_after.translational_kinetic_energy
                 - dynamics.diagnostics_before.translational_kinetic_energy
                 - effective_weight.dot(dx)
                 + added_energy
                 + memory_energy,
         )?;
-        let applied_power = finite(applied.force_world.dot(vm))?;
+        let mut applied_power = finite(applied.force_world.dot(vm))?;
+        if let Some(trial) = rotation_trial {
+            stored = finite(
+                stored
+                    + (dynamics.diagnostics_after.rotational_kinetic_energy
+                        - dynamics.diagnostics_before.rotational_kinetic_energy),
+            )?;
+            applied_power =
+                finite(applied_power + applied.torque_body.dot(trial.omega_body_midpoint))?;
+        }
         let applied_work = finite(dt * applied_power)?;
         if applied_power != 0.0 && applied_work == 0.0 {
             return Err(Error::Invalid(
@@ -391,6 +465,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
             resolution: self.resolution,
             branches: Arc::clone(&self.branches),
             fluid_velocities,
+            rotation,
             state: dynamics.state_after,
             time_s,
         };
@@ -410,6 +485,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 momentum_residual_ns: momentum_residual,
                 stored_energy_change_j: stored,
                 energy_defect_j: energy_defect,
+                rotation: rotation_receipt,
             },
         ))
     }

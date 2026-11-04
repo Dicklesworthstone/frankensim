@@ -1665,3 +1665,17 @@ The fluid material and ambient field are frozen. Ambient strain needs its
 stresslet and work channel and remains excluded, as do fluid inertia/memory,
 centrifugal pressure, finite rotating vessels, walls, finite-Re wakes and
 particle interactions. This is not a general affine-flow or finite-vessel solver.
+
+## Simultaneous unsteady sphere translation and spin
+
+`CreepingSphere::unsteady_rotating_motion` adds causal rotational fluid history to the existing rest-started translational Basset owner. Geometry, fluid transport, material mass/inertia and both memory channels remain bound to one native body and clock. Its explicit controls admit torque coupling, Cayley rotation increments, work, linear and angular impulse, and cancellation before any candidate publication.
+
+For tau=a²/nu and d=8*pi*mu*a³, the exact rotary impedance is Z_r(s)=d*(1+tau*s/(3*(1+sqrt(tau*s)))). Unlike translation, spin has no instantaneous added moment of inertia. Positive logarithmic spectral branches have c_j=2*d*x_j³*delta(log x)/(3*pi*(1+x_j²)), rate x_j²/tau and inertia c_j/rate. Their world-fixed angular velocities retain fluid memory as the body's attitude changes. The finite low-frequency entrained inertia lives in these modes and must not be added again to the dry body's instantaneous inertia. Source: Fluids 9 (2024), 260, equations (10)-(11), https://www.mdpi.com/2311-5521/9/11/260.
+
+The original native Cayley integrator advances the full body. Its finite-step Rbar torque pullback closes physical world angular impulse and power together. A fixed-size diagonal-minus-skew elimination handles rotary viscous stiffness and the pullback; bounded native closure retains the original inertia without replacing it by a spherical fit. All source coefficients are prepared once. Step work and candidate history storage are O(branch count), independent of elapsed steps; no growing convolution, repeated source lookup or quadrature is introduced.
+
+The main receipt includes total body/fluid storage, heat and external force/couple work. Its optional rotary receipt separately exposes physical world torque, memory storage/heat, spectral fluid angular momentum, far-field angular impulse and the actual angular-balance residual. The main body-frame fluid torque is the discrete Cayley pullback, not an instantaneous rotated world torque. Heat is deposited in the prescribed fluid reservoir; no finite thermal field is inferred.
+
+Five regression groups cover independent analytic rotary impedance and spectral tails, zero instantaneous added inertia, convergence to an independently inverted continuum spin-up response, simultaneous changing force/three-axis torque with native replay and work/impulse checks, world-frame covariance of both histories, and refusal/cancellation/retry. The original nonrotating entry point retains its existing path and rejects applied torque.
+
+Scope remains a no-slip uniform sphere, frozen unbounded Newtonian fluid initially at rest, low translational and rotational Reynolds numbers, and zero initial body momenta. Cutoff, quadrature and physical-time refinement remain required. No ambient vorticity/strain, wall/gap interaction, fluid prehistory, finite-Re Magnus force or nonspherical history is inferred.

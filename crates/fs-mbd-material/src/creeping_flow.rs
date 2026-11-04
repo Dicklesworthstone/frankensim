@@ -71,6 +71,17 @@ pub enum CreepingFlowError {
     },
     /// Native body plus retained spectral-fluid impulse balance failed.
     MomentumDefect { residual_ns: Vec3, maximum_ns: f64 },
+    /// Native world angular impulse plus retained rotary-fluid impulse failed.
+    AngularMomentumDefect {
+        residual_nms: Vec3,
+        maximum_nms: f64,
+    },
+    /// Fluid history and the actual native midpoint angular velocity did not close.
+    RotationalCoupling {
+        relative_residual: f64,
+        tolerance: f64,
+        iterations: usize,
+    },
     /// Cancellation before publication; accepted state remains untouched.
     Cancelled,
 }
@@ -153,7 +164,9 @@ pub struct CreepingLoad {
     pub buoyancy_force_world_n: Vec3,
     /// Nonnegative viscous loss deposited in the external fluid reservoir [W].
     pub dissipated_power_w: f64,
-    /// Work supplied by maintaining the uniform background flow, F_drag dot U.
+    /// Work supplied by maintaining the admitted background flow. The uniform
+    /// sphere uses F_drag dot U; an ambient-rotation owner also includes
+    /// its rotary drag moment dotted with the local fluid angular velocity.
     pub background_power_w: f64,
     /// Diameter-based Reynolds number at the supplied relative velocity.
     pub translation_reynolds: f64,
