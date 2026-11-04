@@ -6,7 +6,7 @@ const WORK: usize = 100_000_000;
 const COLUMN: [f64; 1] = [0.003];
 const FORCE: [C64; 1] = [C64::new(1e-5, -4e-6)];
 
-fn preparation(reference: f64) -> DgPolePreparation {
+pub(super) fn preparation(reference: f64) -> DgPolePreparation {
     DgPolePreparation {
         reference_rate_per_s: reference,
         maximum_dimension: 256,
@@ -14,7 +14,7 @@ fn preparation(reference: f64) -> DgPolePreparation {
         maximum_work: 100_000_000,
     }
 }
-fn pole_options() -> PoleOptions {
+pub(super) fn pole_options() -> PoleOptions {
     PoleOptions {
         spectral_scale: 1800.0,
         step_tolerance: 1e-12,
@@ -25,7 +25,7 @@ fn pole_options() -> PoleOptions {
         max_work: 1_000_000_000,
     }
 }
-fn options() -> DgPoleResponseOptions {
+pub(super) fn options() -> DgPoleResponseOptions {
     DgPoleResponseOptions {
         numerical: PoleResponseOptions {
             spectral_scale: 1800.0,
@@ -48,7 +48,7 @@ fn close(actual: C64, expected: C64) {
         "{actual:?} != {expected:?}"
     );
 }
-fn vector_error(actual: &[C64], expected: &[C64]) -> f64 {
+pub(super) fn vector_error(actual: &[C64], expected: &[C64]) -> f64 {
     assert_eq!(actual.len(), expected.len());
     let scale = expected.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     let error = actual
@@ -72,7 +72,10 @@ fn resolve(prepared: &PreparedModalDgPoles<'_>, s: C64, force: &[C64]) -> Vec<C6
         .unwrap();
     state
 }
-fn physical_pole(prepared: &PreparedModalDgPoles<'_>, gate: &CancelGate) -> DgLoadedModalPole {
+pub(super) fn physical_pole(
+    prepared: &PreparedModalDgPoles<'_>,
+    gate: &CancelGate,
+) -> DgLoadedModalPole {
     let response = prepared
         .source
         .harmonic_response_with_load(1810.0, &FORCE, prepared.load, &COLUMN, WORK, gate)

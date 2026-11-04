@@ -179,6 +179,103 @@ impl Pencil {
         )
     }
 
+    /// Audit the differentiated ORIGINAL rows, preserving separate stiffness,
+    /// rate, inertia and source-action envelopes. One common amplitude keeps
+    /// very small/large parameter units from overflowing the row contractions.
+    /// Fixed numerical row scales are not differentiated. Zero tangents are valid.
+    pub fn parameter_residual(
+        &self,
+        s: C64,
+        state: &[C64],
+        ds: C64,
+        tangent: &[C64],
+        action: &[C64],
+        envelope: &[f64],
+        cancel: &mut impl FnMut() -> bool,
+    ) -> Result<f64, NonlinearEigError> {
+        let n = self.dimension;
+        if [state, tangent, action]
+            .iter()
+            .any(|v| v.len() != n || v.iter().any(|&z| !finite(z)))
+            || envelope.len() != n
+            || envelope.iter().any(|&v| !v.is_finite() || v < 0.0)
+            || !finite(s)
+            || !finite(ds)
+        {
+            return Err(invalid(
+                "joint pole tangent requires every finite original row",
+            ));
+        }
+        let state_norm = state.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let tangent_norm = tangent.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let mut amplitude = tangent_norm.max(ds.abs());
+        for (value, &scale) in action.iter().zip(&self.rows) {
+            amplitude = amplitude.max(value.abs() / scale);
+        }
+        if !state_norm.is_finite() || state_norm == 0.0 || !amplitude.is_finite() {
+            return Err(invalid("joint pole tangent amplitude is not representable"));
+        }
+        if amplitude == 0.0 {
+            return Ok(0.0);
+        }
+        let amplitude_dd = Dd::from_f64(amplitude);
+        let re = Dd::from_f64(s.re);
+        let im = Dd::from_f64(s.im);
+        let sr = re * re - im * im;
+        let si = Dd::from_f64(2.0) * re * im;
+        let dr = Dd::from_f64(ds.re) / amplitude_dd;
+        let di = Dd::from_f64(ds.im) / amplitude_dd;
+        let mut relative = 0.0_f64;
+        for i in 0..n {
+            poll(cancel)?;
+            let scale = Dd::from_f64(self.rows[i]);
+            let mut real = Dd::from_f64(action[i].re) / scale / amplitude_dd;
+            let mut imag = Dd::from_f64(action[i].im) / scale / amplitude_dd;
+            let mut denominator = Dd::from_f64(envelope[i]) / scale / amplitude_dd;
+            for j in 0..n {
+                let a = Dd::from_f64(self.constant[i * n + j]) / scale;
+                let b = Dd::from_f64(self.linear[i * n + j]) / scale;
+                let m = if i == j {
+                    Dd::from_f64(self.quadratic_diagonal[i]) / scale
+                } else {
+                    Dd::ZERO
+                };
+                let cr = a + re * b + sr * m;
+                let ci = im * b + si * m;
+                let br = b + Dd::from_f64(2.0) * re * m;
+                let bi = Dd::from_f64(2.0) * im * m;
+                let xr = Dd::from_f64(state[j].re);
+                let xi = Dd::from_f64(state[j].im);
+                let vr = Dd::from_f64(tangent[j].re) / amplitude_dd;
+                let vi = Dd::from_f64(tangent[j].im) / amplitude_dd;
+                let pr = br * xr - bi * xi;
+                let pi = br * xi + bi * xr;
+                real = real + cr * vr - ci * vi + dr * pr - di * pi;
+                imag = imag + cr * vi + ci * vr + dr * pi + di * pr;
+                let rate = Dd::from_f64(s.abs());
+                let state_row = a.abs() + rate * b.abs() + rate * rate * m.abs();
+                let spectral_row = b.abs() + Dd::from_f64(2.0) * rate * m.abs();
+                denominator = denominator
+                    + state_row * Dd::from_f64(tangent_norm / amplitude)
+                    + spectral_row * Dd::from_f64(state_norm) * Dd::from_f64(ds.abs() / amplitude);
+            }
+            let denominator = denominator.to_f64();
+            let residual = det::hypot(real.to_f64(), imag.to_f64());
+            let row = if denominator == 0.0 {
+                if residual == 0.0 { 0.0 } else { f64::INFINITY }
+            } else {
+                residual / denominator
+            };
+            if !row.is_finite() || !denominator.is_finite() {
+                return Err(invalid(
+                    "joint original tangent residual is not representable",
+                ));
+            }
+            relative = relative.max(row);
+        }
+        Ok(relative)
+    }
+
     /// Check uncombined ORIGINAL coefficient rows in double-double arithmetic.
     /// Each row's coefficient envelope multiplies the full vector infinity norm.
     /// Thus a nodal/dark coordinate may contain roundoff without an O(1) defect,

@@ -17,8 +17,10 @@ use pencil::Pencil;
 mod spectrum;
 pub use spectrum::{BeynOptions, DgLoadedModalSpectrum, DgLoadedSpectrumError, ResonanceRegion};
 mod response;
-pub use response::{DgLoadedModalForceResidue, DgPoleResponseError, DgPoleResponseOptions,
-    PoleResponseOptions, PreparedDgPoleResponse};
+pub use response::{
+    DgLoadedModalForceResidue, DgLoadedModalPoleDerivative, DgPoleParameterDirection,
+    DgPoleResponseError, DgPoleResponseOptions, PoleResponseOptions, PreparedDgPoleResponse,
+};
 
 /// Cold complete-pencil resources, excluding already owned physical sources.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -204,8 +206,12 @@ impl CoupledModalSystem {
             return Err(invalid("complete joint pole preparation exceeds its explicit dimension, byte or work budget").into());
         }
         let mut pencil = Pencil::new(dimension, budget.reference_rate_per_s);
-        for (i, (mode, &damping)) in self.models.iter()
-            .flat_map(|m| m.modes().iter().zip(m.damping_rates_per_s())).enumerate() {
+        for (i, (mode, &damping)) in self
+            .models
+            .iter()
+            .flat_map(|m| m.modes().iter().zip(m.damping_rates_per_s()))
+            .enumerate()
+        {
             poll(Some(gate))?;
             let w = mode.angular_frequency_rad_s;
             pencil.constant[i * dimension + i] = w * w;

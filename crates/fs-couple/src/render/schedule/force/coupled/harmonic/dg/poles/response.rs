@@ -1,4 +1,4 @@
-//! Physical modal-force participation in the complete coupled polynomial pencil.
+//! Physical forcing and native parameter response of the complete coupled pencil.
 //! The shared bordered-pole owner supplies the true left/right participation;
 //! neither a right-mode force projection nor a reduced oscillator is substituted.
 
@@ -7,8 +7,11 @@ pub use fs_la::pole_response::PoleResponseOptions;
 use fs_la::pole_response::{PoleResponseError, PreparedPole};
 use fs_math::dd::Dd;
 
+mod parameter;
+pub use parameter::{DgLoadedModalPoleDerivative, DgPoleParameterDirection};
+
 /// Separate limits for the shared numerical factor and complete physical maps.
-/// They apply to preparation and independently to each complete force batch.
+/// They apply to preparation and independently to each complete response batch.
 #[derive(Clone, Copy, Debug)]
 pub struct DgPoleResponseOptions {
     pub numerical: PoleResponseOptions,
@@ -115,7 +118,7 @@ fn admit(d: usize, options: &DgPoleResponseOptions) -> Result<(), DgPoleResponse
 }
 
 impl<'source> PreparedModalDgPoles<'source> {
-    /// Prepare physical forcing residues at a previously resolved simple pole.
+    /// Prepare forcing residues and native parameter tangents at a resolved pole.
     /// Cached pole observations/residuals are not trusted: the complete supplied
     /// state is rechecked against THIS pencil, its source bands and original
     /// split coefficient rows. The native pivot-one normalization is retained.
