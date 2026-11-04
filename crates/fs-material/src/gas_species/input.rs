@@ -8,16 +8,18 @@ pub mod temperature;
 
 use super::{GasSpecies, resolve_gas_mixture};
 use crate::MaterialError;
+use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
+use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use crate::fluid_transport::{
     FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
 };
 use crate::gas::GasState;
-use fs_qty::semantic::{Composition, CompositionBasis};
 use crate::thermochemical_gas::{
     ResolvedThermochemicalGasState, ThermochemicalGasModel,
     energy::{GasEnergyError, IsochoricGasParcel},
     packs::{SpeciesPackRef, from_packs},
 };
+use fs_qty::semantic::{Composition, CompositionBasis};
 use fs_thermochem::{SpeciesId, mixture::MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1};
 use std::str::SplitAsciiWhitespace;
 
@@ -86,6 +88,29 @@ impl ThermalFluidTransport for GasRecord {
         match self {
             Self::Thermochemical(gas) => gas.thermal_transport_state(),
             Self::Legacy(gas) | Self::Mixture(gas, _) => gas.thermal_transport_state(),
+        }
+    }
+}
+
+// Keep the source-bearing ingress value usable by the same generic flow,
+// diffusion and sound consumers. In particular, IsobaricGasLaw endpoints must
+// not need to discard their composition or NASA-9/transport receipts to enter
+// a duct, cavity, radiation or aeroacoustic solve. Each original owner still
+// admits its complete state; these views introduce no gas law or defaults.
+impl FluidAcoustics for GasRecord {
+    fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+        match self {
+            Self::Thermochemical(gas) => gas.acoustic_state(),
+            Self::Legacy(gas) | Self::Mixture(gas, _) => gas.acoustic_state(),
+        }
+    }
+}
+
+impl ThermoviscousFluid for GasRecord {
+    fn thermoviscous_state(&self) -> Result<ThermoviscousFluidState, MaterialError> {
+        match self {
+            Self::Thermochemical(gas) => gas.thermoviscous_state(),
+            Self::Legacy(gas) | Self::Mixture(gas, _) => gas.thermoviscous_state(),
         }
     }
 }
@@ -482,6 +507,110 @@ fn read(fields: &mut SplitAsciiWhitespace<'_>, inherited: Option<f64>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shared_fluid_views(record: &GasRecord) {
+        let original = record.clone();
+        let source: &dyn ThermoviscousFluid = record;
+        let acoustic = source.acoustic_state().unwrap();
+        let viscothermal = source.thermoviscous_state().unwrap();
+        let transport = source.transport_state().unwrap();
+        assert_eq!(acoustic, record.state().acoustic_state().unwrap());
+        assert_eq!(viscothermal, record.state().thermoviscous_state().unwrap());
+        assert_eq!(viscothermal.acoustic(), acoustic);
+        assert_eq!(viscothermal.transport(), transport);
+        assert_eq!(
+            record.thermal_transport_state().unwrap().transport(),
+            transport
+        );
+        assert_eq!(record, &original);
+    }
+
+    #[test]
+    fn g0_gas_records_share_complete_acoustic_and_transport_admission() {
+        for text in [
+            "300 100000 0.5",
+            "mixture 300 100000 mole 2 N2 0.75 O2 0.25",
+            "mixture 300 100000 mass 2 He 0.5 CO2 0.5",
+        ] {
+            let mut record =
+                read_gas_record(&mut text.split_ascii_whitespace(), None, None).unwrap();
+            shared_fluid_views(&record);
+            // Public legacy/named records must not launder stale derived fields
+            // through a more permissive generic acoustic/viscothermal adapter.
+            match &mut record {
+                GasRecord::Legacy(gas) | GasRecord::Mixture(gas, _) => gas.sound_speed *= 1.01,
+                GasRecord::Thermochemical(_) => unreachable!(),
+            }
+            assert!(record.acoustic_state().is_err());
+            assert!(record.thermoviscous_state().is_err());
+            assert!(record.transport_state().is_err());
+        }
+    }
+
+    #[test]
+    fn g3_source_temperature_feedback_reaches_all_fluid_views_without_losing_its_owner() {
+        use super::temperature::IsobaricGasLaw;
+        use crate::thermochemical_gas::tests::{model_in_domains, point};
+        use fs_qty::Temperature;
+        use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+        // Manufactured source laws: species A has Cp/R = 3.5 + 0.001 T,
+        // species B has Cp/R = 2.5. The transport curves belong to those same
+        // immutable source cards. This is an algebraic, not measured-gas test.
+        let model = model_in_domains(
+            vec![0.75, 0.25],
+            0.001,
+            [250.0, 500.0],
+            [250.0, 500.0],
+            [50000.0, 200000.0],
+        );
+        let law = IsobaricGasLaw::try_from_model(model, point(300.0, 100000.0)).unwrap();
+        let cold = law.reference();
+        let hot = law.at_temperature(Temperature::new(450.0)).unwrap();
+        let mole_mass = 0.75 * 0.028 + 0.25 * 0.004;
+        for record in [cold, &hot] {
+            shared_fluid_views(record);
+            let gas = record.state();
+            let cp_over_r = 0.75 * (3.5 + 0.001 * gas.temperature) + 0.25 * 2.5;
+            let cp = cp_over_r * R / mole_mass;
+            let gamma = cp_over_r / (cp_over_r - 1.0);
+            let acoustic = record.acoustic_state().unwrap();
+            assert!(
+                (acoustic.density_kg_m3() * R * gas.temperature / (100000.0 * mole_mass) - 1.0)
+                    .abs()
+                    < 3e-14
+            );
+            assert!(
+                (acoustic.sound_speed_m_s().powi(2) / (gamma * R * gas.temperature / mole_mass)
+                    - 1.0)
+                    .abs()
+                    < 3e-14
+            );
+            assert!(
+                (record.transport_state().unwrap().specific_heat_j_kg_k() / cp - 1.0).abs() < 3e-14
+            );
+        }
+        let (GasRecord::Thermochemical(a), GasRecord::Thermochemical(b)) = (cold, &hot) else {
+            panic!("temperature feedback discarded its thermochemical source");
+        };
+        assert_eq!(
+            a.thermodynamics().receipt().species(),
+            b.thermodynamics().receipt().species()
+        );
+        assert_eq!(
+            a.thermodynamics().receipt().mole_fraction_bits(),
+            b.thermodynamics().receipt().mole_fraction_bits()
+        );
+        for (a, b) in a.components().iter().zip(b.components()) {
+            assert_eq!(a.card_identity(), b.card_identity());
+            assert_ne!(a.query_point(), b.query_point());
+        }
+        assert!(hot.state().sound_speed > cold.state().sound_speed);
+        assert!(hot.state().gamma < cold.state().gamma);
+        assert!(hot.state().dynamic_viscosity > cold.state().dynamic_viscosity);
+        assert!(law.at_temperature(Temperature::new(501.0)).is_err());
+        assert_eq!(law.reference(), cold);
+    }
 
     #[test]
     fn thermochemical_without_registry_refuses_without_consuming() {

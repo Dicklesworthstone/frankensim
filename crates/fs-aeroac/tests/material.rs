@@ -12,7 +12,8 @@ use fs_lbm::core2::CollisionModel2;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::GasState;
-use fs_material::gas_species::input::read_gas_state;
+use fs_material::gas_species::input::temperature::IsobaricGasLaw;
+use fs_material::gas_species::input::{read_gas_record, read_gas_state};
 use fs_math::{c64::C64, det};
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::region3::pressure::DensePressureSolve;
@@ -62,7 +63,10 @@ fn close(actual: f64, expected: f64) {
 
 // Independent Hann-window DFT of a real force history. Positive
 // exponent returns amplitudes for the workspace's exp(-i omega t) convention.
-fn force_line(run: &MaterialJetLabiumRun<'_>, bin: usize) -> ([C64; 2], f64) {
+fn force_line<F: FluidTransport + FluidAcoustics + ?Sized>(
+    run: &MaterialJetLabiumRun<'_, F>,
+    bin: usize,
+) -> ([C64; 2], f64) {
     let n = run.force_series_n_m().len() as f64;
     let mut force = [C64::new(0.0, 0.0); 2];
     let means = [0, 1].map(|axis| run.force_series_n_m().iter().map(|f| f[axis]).sum::<f64>() / n);
@@ -264,18 +268,28 @@ fn g0_actual_lattice_force_and_frequency_have_correct_physical_units() {
 
 #[test]
 fn g3_data_only_pressure_temperature_and_composition_swaps_reach_flow_and_sound() {
-    let states = [
-        gas("mixture 300 100000 mole 2 N2 0.8 O2 0.2"),
-        gas("mixture 300 200000 mole 2 N2 0.8 O2 0.2"),
-        gas("mixture 300 100000 mole 3 N2 0.4 O2 0.1 CO2 0.5"),
-        gas("mixture 320 100000 mole 2 N2 0.8 O2 0.2"),
+    let read = |text: &str| read_gas_record(&mut text.split_ascii_whitespace(), None, None).unwrap();
+    let reference = read("mixture 300 100000 mole 2 N2 0.8 O2 0.2");
+    let law = IsobaricGasLaw::try_from_record(reference.clone()).unwrap();
+    // Carry the actual ingress/feedback owners through both the lattice and
+    // acoustic consumers, without extracting a source-free GasState first.
+    let records = [
+        reference,
+        read("mixture 300 200000 mole 2 N2 0.8 O2 0.2"),
+        read("mixture 300 100000 mole 3 N2 0.4 O2 0.1 CO2 0.5"),
+        law.at_temperature(Temperature::new(320.0)).unwrap(),
     ];
+    let states = records.each_ref().map(|record| record.state());
     let setup = setup();
-    let models: Vec<_> = states
+    let models: Vec<_> = records
         .iter()
         .map(|gas| MaterialJetLabium::try_new(gas, &setup, physical()).unwrap())
         .collect();
     let runs: Vec<_> = models.iter().map(|model| model.run().unwrap()).collect();
+    for (record, run) in records.iter().zip(&runs) {
+        assert!(std::ptr::eq(record, run.material()));
+        assert_eq!(run.acoustic(), record.acoustic_state().unwrap());
+    }
     let observed: Vec<_> = runs
         .iter()
         .map(|run| {

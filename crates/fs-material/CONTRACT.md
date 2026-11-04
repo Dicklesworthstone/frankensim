@@ -2949,8 +2949,14 @@ thermochemical packs enter through `read_source_temperature_law`, retaining the
 NASA-9 and transport models, typed coordinates and pack identities at every
 evaluation; this evolving path requires explicit frozen-gas phase admission.
 Density, heat capacity, viscosity and conductivity come from that same local
-state. `GasRecord` exposes the existing `FluidTransport` view, preserving its
-original source-bearing record. No pressure evolution, species transport,
+state. `GasRecord` implements `FluidAcoustics` and `ThermoviscousFluid` alongside
+its existing flow and thermal transport interfaces. Generic ducts, radiation,
+FE cavities and aeroacoustic consumers can borrow the complete parsed or
+temperature-refreshed record directly, retaining composition and NASA-9/transport
+receipts. Each view delegates to the original owner and its complete coherence
+admission; no new gas law or default atmosphere is introduced. These are frozen
+local snapshots, with explicit temperature updates owned by `IsobaricGasLaw`.
+No pressure evolution, species transport,
 compressible inertia, phase equilibrium or experimental validation is implied.
 G0/G3 unit tests cover fixed-composition EOS scaling, viscosity/conductivity
 response, humid cooling refusal and source/domain preservation.

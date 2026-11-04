@@ -78,7 +78,7 @@ fn gas_mixtures_keep_original_bessel_and_wide_tube_propagation() {
         for loss in [LossModel::Lossless, LossModel::WideTube, LossModel::Bessel] {
             for omega in [100.0, 1000.0, 10000.0] {
                 let original = fs_duct::segment_wave(gas, 0.02, omega, loss).unwrap();
-                let generic = fluid::segment_wave_with_loss(gas, 0.02, omega, loss).unwrap();
+                let generic = fluid::segment_wave_with_loss(&record, 0.02, omega, loss).unwrap();
                 near(generic.wavenumber, original.wavenumber, 1e-20, 3e-13);
                 near(
                     generic.characteristic_impedance,
@@ -120,7 +120,7 @@ fn gas_mixtures_keep_original_bessel_and_wide_tube_propagation() {
                 let original =
                     fs_duct::input_impedance_load_with_wall(&duct, gas, 700.0, loss, load, wall)
                         .unwrap();
-                let generic = solve(&duct, gas, 700.0, loss, Some(load), wall, ConeSlices::Auto);
+                let generic = solve(&duct, &record, 700.0, loss, Some(load), wall, ConeSlices::Auto);
                 near(generic.z_in, original.impedance, 1.0, 2e-11);
                 near(
                     generic.u_out_over_u_in,

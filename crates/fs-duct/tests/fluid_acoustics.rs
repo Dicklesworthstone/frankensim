@@ -118,7 +118,7 @@ fn gas_and_liquid_substitutions_drive_pipe_pressure_flow_and_travel_phase() {
         let mut words = text.split_ascii_whitespace();
         let record = read_gas_record(&mut words, None, None).unwrap();
         assert!(words.next().is_none());
-        *record.state()
+        record
     };
     let air = gas("mixture 293.15 100000 mole 2 N2 0.79 O2 0.21");
     let helium = gas("mixture 293.15 100000 mole 1 He 1");
