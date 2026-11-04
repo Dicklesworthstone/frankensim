@@ -20,6 +20,9 @@ use fs_math::det;
 /// isotropic elastic law, retaining the original property-use receipts.
 pub mod sourced;
 
+/// Coherent P/SV/SH reflection at a perfectly bonded isotropic interface.
+pub mod interface;
+
 mod constitutive;
 pub use constitutive::ElasticStrainResponse;
 
