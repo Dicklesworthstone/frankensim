@@ -175,6 +175,106 @@ fn g1_spatial_fourier_heat_uses_all_physical_axes_and_refines_quadratically() {
 }
 
 #[test]
+fn g1_pressure_outlet_survives_zero_transport_molecular_composition() {
+    use crate::compressible::spatial::PressureOutletBoundary;
+    let source = gas(0.4);
+    let grid = CartesianGrid::new(3, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let boundaries = Boundaries3d {
+        x: AxisBoundaries::Ends {
+            lower: BoundaryCondition::Reflecting,
+            upper: BoundaryCondition::Transmissive,
+        },
+        ..PERIODIC
+    };
+    let outlet = PressureOutletBoundary {
+        side: BoundarySide::XMax,
+        pressure_pa: 0.8,
+    };
+    let make = || {
+        Euler3d::new_with_open_boundaries(
+            source.clone(),
+            grid,
+            vec![State::from_primitive(&source, 1.0, [0.0; 3], 1.0).unwrap(); 12],
+            boundaries,
+            &[],
+            &[outlet],
+            || false,
+        )
+        .unwrap()
+    };
+    let mut reference = make();
+    let mut coupled = MolecularEuler3d::new(make(), law(&source, 0.0, 0.0, 0.0), || false).unwrap();
+    for _ in 0..3 {
+        let expected = reference
+            .step(Time::new(0.001), StepControl::default(), || false)
+            .unwrap();
+        let actual = coupled
+            .step(Time::new(0.001), MolecularStepControl::default(), || false)
+            .unwrap();
+        assert_eq!(actual.advection, expected);
+        assert_eq!(coupled.flow().states(), reference.states());
+        assert_eq!(coupled.flow().pressure_outlet(outlet.side), Some(outlet));
+        assert!(actual.boundary_change.mass < 0.0);
+        for residual in actual.conservation_residual.array() {
+            close(residual, 0.0, 3e-13);
+        }
+    }
+}
+
+#[test]
+fn g1_sonic_pressure_outlet_bounds_the_complete_molecular_interval() {
+    use crate::compressible::spatial::PressureOutletBoundary;
+    let source = gas(0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let outlet = PressureOutletBoundary {
+        side: BoundarySide::XMax,
+        pressure_pa: 1e-12,
+    };
+    let initial = Euler3d::new_with_open_boundaries(
+        source.clone(),
+        grid,
+        vec![State::from_primitive(&source, 1.0, [0.0; 3], 1.0).unwrap(); 8],
+        Boundaries3d {
+            x: AxisBoundaries::Ends {
+                lower: BoundaryCondition::Reflecting,
+                upper: BoundaryCondition::Transmissive,
+            },
+            ..PERIODIC
+        },
+        &[],
+        &[outlet],
+        || false,
+    )
+    .unwrap();
+    let mut coupled =
+        MolecularEuler3d::new(initial, law(&source, 0.01, 0.005, 0.01), || false).unwrap();
+    let controls = MolecularStepControl {
+        advection: StepControl {
+            cfl: 0.1,
+            maximum_halvings: 0,
+            reconstruction: planar::Reconstruction::FirstOrder,
+        },
+        maximum_coupling_retries: 0,
+        ..MolecularStepControl::default()
+    };
+    let report = coupled.step(Time::new(1.0), controls, || false).unwrap();
+    let sonic = 2.0 * 1.4_f64.sqrt() / 2.4;
+    let bound = controls.advection.cfl * 0.1 / (3.0 * 2.0 * sonic);
+    assert!(report.elapsed.value() <= bound * (1.0 + 2e-10));
+    assert_eq!(report.coupling_retries, 0);
+    assert_eq!(report.advection.halvings, 0);
+    assert_eq!(report.first.elapsed.value() * 2.0, report.elapsed.value());
+    assert_eq!(report.second.elapsed, report.first.elapsed);
+    assert_eq!(report.advection.elapsed, report.elapsed);
+    assert_eq!(coupled.flow().pressure_outlet(outlet.side), Some(outlet));
+    assert!(report.boundary_change.mass < 0.0);
+    assert!(report.boundary_change.energy < 0.0);
+    for residual in report.conservation_residual.array() {
+        close(residual, 0.0, 3e-13);
+    }
+}
+
+#[test]
 fn g1_spatial_oblique_shear_and_compression_include_every_cross_derivative() {
     let n = 8;
     let h = 1.0 / n as f64;

@@ -15,7 +15,7 @@ use fs_qty::Time;
 mod cartesian;
 mod evolve;
 mod reservoir;
-pub use reservoir::ReservoirBoundary;
+pub use reservoir::{PressureOutletBoundary, ReservoirBoundary};
 /// Conservative body impulse and mechanical work on the original time owner.
 pub mod forcing;
 pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d};
@@ -451,13 +451,34 @@ impl Euler3d {
         states: Vec<State>,
         boundaries: Boundaries3d,
         reservoirs: &[ReservoirBoundary],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::new_with_open_boundaries(gas, grid, states, boundaries, reservoirs, &[], cancelled)
+    }
+
+    /// Combine complete-state reservoirs and pressure-only outgoing boundaries.
+    ///
+    /// Every binding occupies one unique transmissive side. Outlet pressure
+    /// selects the source-owned outgoing shock/expansion; entropy, density and
+    /// tangential motion follow the interior gas. Backflow through a pressure
+    /// outlet refuses the transaction instead of inventing incoming gas data.
+    /// All accepted mass, momentum and enthalpy exchange uses the original
+    /// boundary impulses and shared Euler/forcing/molecular time owner.
+    pub fn new_with_open_boundaries(
+        gas: FrozenGas,
+        grid: CartesianGrid,
+        states: Vec<State>,
+        boundaries: Boundaries3d,
+        reservoirs: &[ReservoirBoundary],
+        outlets: &[PressureOutletBoundary],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(&mut cancelled)?;
         if states.len() != grid.len() {
             return Err(Error::Invalid("volumetric Cartesian state count"));
         }
-        let reservoirs = reservoir::Reservoirs::new(&gas, boundaries, reservoirs, &mut cancelled)?;
+        let reservoirs =
+            reservoir::Reservoirs::new(&gas, boundaries, reservoirs, outlets, &mut cancelled)?;
         let n = states.len();
         let mut primitive = allocated(n, Primitive::default())?;
         for (p, q) in primitive.iter_mut().zip(&states) {
@@ -513,6 +534,10 @@ impl Euler3d {
             .get(side.axis(), side.sign())
             .map(|state| state.input)
     }
+    /// Original immutable backpressure on one physical side, if supplied.
+    pub fn pressure_outlet(&self, side: BoundarySide) -> Option<PressureOutletBoundary> {
+        self.reservoirs.outlet(side.axis(), side.sign())
+    }
     /// Current cell averages, x fastest.
     pub fn states(&self) -> &[State] {
         &self.states
@@ -567,7 +592,10 @@ impl Euler3d {
             return self.step(maximum_duration, controls, cancelled);
         }
         self.step_impl(
-            maximum_duration, controls, Some((force, force_controls, workspace)), cancelled,
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            cancelled,
         )
     }
 
@@ -586,7 +614,9 @@ impl Euler3d {
         {
             return Err(Error::Invalid("volumetric duration, CFL or retry controls"));
         }
-        let mut rate = self.reservoirs.maximum_rate(&self.grid);
+        let mut rate =
+            self.reservoirs
+                .maximum_rate(&self.gas, &self.grid, &self.states, &mut cancelled)?;
         for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
             *p = q.primitive(&self.gas, &mut cancelled)?;
             if let Some((_, controls, _)) = &forcing {
@@ -607,14 +637,34 @@ impl Euler3d {
             }
             let trial = match forcing.as_mut() {
                 Some((force, force_controls, workspace)) => forcing::attempt(
-                    &self.gas, &self.grid, self.boundaries, &self.reservoirs, &self.states,
-                    &mut self.work, workspace, *force, *force_controls,
-                    dt, controls.cfl, reconstruction, &mut cancelled,
+                    &self.gas,
+                    &self.grid,
+                    self.boundaries,
+                    &self.reservoirs,
+                    &self.states,
+                    &mut self.work,
+                    workspace,
+                    *force,
+                    *force_controls,
+                    dt,
+                    controls.cfl,
+                    reconstruction,
+                    &mut cancelled,
                 ),
                 None => evolve::attempt(
-                    &self.gas, &self.grid, self.boundaries, &self.reservoirs, &self.states,
-                    &mut self.work, dt, controls.cfl, reconstruction, None, &mut cancelled,
-                ).map(|stats| (stats, ForceChange3d::default())),
+                    &self.gas,
+                    &self.grid,
+                    self.boundaries,
+                    &self.reservoirs,
+                    &self.states,
+                    &mut self.work,
+                    dt,
+                    controls.cfl,
+                    reconstruction,
+                    None,
+                    &mut cancelled,
+                )
+                .map(|stats| (stats, ForceChange3d::default())),
             };
             match trial {
                 Ok((stats, source_change)) => {
@@ -632,8 +682,11 @@ impl Euler3d {
                     let b = before.array();
                     let c = boundary_change.array();
                     let source = [
-                        0.0, source_change.impulse[0], source_change.impulse[1],
-                        source_change.impulse[2], source_change.work,
+                        0.0,
+                        source_change.impulse[0],
+                        source_change.impulse[1],
+                        source_change.impulse[2],
+                        source_change.work,
                     ];
                     let report = StepReport {
                         elapsed: Time::new(dt),
@@ -650,7 +703,13 @@ impl Euler3d {
                             a[k] - b[k] - c[k] - source[k]
                         })),
                     };
-                    if !a.into_iter().chain(b).chain(c).chain(source).all(f64::is_finite) {
+                    if !a
+                        .into_iter()
+                        .chain(b)
+                        .chain(c)
+                        .chain(source)
+                        .all(f64::is_finite)
+                    {
                         return Err(Error::Invalid(
                             "unrepresentable volumetric extensive balance",
                         ));

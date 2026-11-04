@@ -4333,3 +4333,32 @@ step with the existing supplied-tension result in both directions and phase
 orders, retain original inventory/owner identity, and reject thick interfaces
 or invalid wall/phase controls. These continuum/material tests require the
 normal runtime build.
+
+## Source-owned pressure outlets in three-dimensional compressible flow
+
+`Euler3d::new_with_open_boundaries` combines complete-state reservoirs with
+`PressureOutletBoundary` on distinct, explicitly transmissive Cartesian sides.
+A pressure outlet supplies only positive absolute backpressure. The original
+`FrozenGas` characteristic owner resolves the outgoing compression/expansion,
+including sonic fan sampling and supersonic departure; density, temperature and
+both tangential velocities follow the outgoing interior gas. A reversed contact
+refuses without publishing state, time, loads or a successful report.
+
+The first-order and MUSCL paths use that same source closure. Outlet mass,
+all momentum components, pressure traction and total enthalpy enter the existing
+shared face flux and RK boundary impulse. Fixed six-side metadata introduces no
+face-sized storage or per-step allocation. Initial outgoing boundary wave bounds
+are included before choosing the complete Euler or molecular split interval;
+the existing stage CFL gates remain active. Bindings survive body forcing and
+molecular composition through the original accepted/trial owner.
+
+A pressure outlet supplies no incoming thermodynamic state and is therefore
+unsuitable for reversal; a full reservoir is required for that case. Fixed
+backpressure is not a nonreflecting boundary. Molecular open-face heat/stress
+conditions remain unchanged, and no finite exterior storage is represented.
+
+G0/G1 regressions cover uniform flow and pressure-driven discharge on all six
+sides, both reconstruction modes, reservoir/body-force composition, shared
+boundary work, zero-transport molecular parity and positive-transport sonic
+interval agreement. G4 covers topology/duplicate/pressure admission, backflow
+and cancellation without partial publication.

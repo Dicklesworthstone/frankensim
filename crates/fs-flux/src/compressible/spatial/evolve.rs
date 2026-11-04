@@ -173,7 +173,23 @@ fn spatial(
                 sign,
                 condition,
             } => {
-                if let Some(exterior) = reservoirs.get(axis, sign) {
+                if let Some(outlet) = reservoirs.outlet(axis, sign) {
+                    if first_order {
+                        gas.pressure_outlet_spatial_flux(
+                            states[k].normal(axis),
+                            sign,
+                            outlet.pressure_pa,
+                            &mut *cancelled,
+                        )?
+                    } else {
+                        gas.pressure_outlet_spatial_flux_from_primitive(
+                            reconstruct(k, 0.5 * sign),
+                            sign,
+                            outlet.pressure_pa,
+                            &mut *cancelled,
+                        )?
+                    }
+                } else if let Some(exterior) = reservoirs.get(axis, sign) {
                     if first_order {
                         let inside = states[k].normal(axis);
                         let outside = exterior.state.normal(axis);

@@ -275,7 +275,10 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             return self.step(maximum_duration, controls, cancelled);
         }
         self.step_impl(
-            maximum_duration, controls, Some((force, force_controls, workspace)), cancelled,
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            cancelled,
         )
     }
 
@@ -303,7 +306,12 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             self.accepted.grid.cell_volume(),
             &mut cancelled,
         )?;
-        let mut rate = self.accepted.reservoirs.maximum_rate(&self.accepted.grid);
+        let mut rate = self.accepted.reservoirs.maximum_rate(
+            &self.accepted.gas,
+            &self.accepted.grid,
+            &self.accepted.states,
+            &mut cancelled,
+        )?;
         for q in &self.accepted.states {
             let p = q.primitive(&self.accepted.gas, &mut cancelled)?;
             if let Some((_, controls, _)) = &forcing {
@@ -338,12 +346,14 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     .copy_from_slice(&self.molecular.boundary_impulses);
                 let advection = match forcing.as_mut() {
                     Some((force, force_controls, workspace)) => self.trial.step_impl(
-                        Time::new(dt), controls.advection,
-                        Some((*force, *force_controls, &mut **workspace)), &mut cancelled,
+                        Time::new(dt),
+                        controls.advection,
+                        Some((*force, *force_controls, &mut **workspace)),
+                        &mut cancelled,
                     )?,
-                    None => self.trial.step(
-                        Time::new(dt), controls.advection, &mut cancelled,
-                    )?,
+                    None => self
+                        .trial
+                        .step(Time::new(dt), controls.advection, &mut cancelled)?,
                 };
                 if advection.elapsed.value() != dt {
                     shortened = Some(advection.elapsed.value());
@@ -383,13 +393,14 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     let mut endpoint_rate = 0.0_f64;
                     for state in &self.trial.states {
                         let primitive = state.primitive(&self.trial.gas, &mut cancelled)?;
-                        force_controls.admit_velocity::<Error>(
-                            primitive.velocity, primitive.sound_speed,
-                        )?;
-                        let local: f64 = (0..3).map(|axis| {
-                            (primitive.velocity[axis].abs() + primitive.sound_speed)
-                                / self.trial.grid.spacing[axis]
-                        }).sum();
+                        force_controls
+                            .admit_velocity::<Error>(primitive.velocity, primitive.sound_speed)?;
+                        let local: f64 = (0..3)
+                            .map(|axis| {
+                                (primitive.velocity[axis].abs() + primitive.sound_speed)
+                                    / self.trial.grid.spacing[axis]
+                            })
+                            .sum();
                         endpoint_rate = endpoint_rate.max(local);
                     }
                     check_cfl::<Error>(endpoint_rate * dt, controls.advection.cfl)?;
@@ -406,11 +417,12 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 let boundary_change = Totals::from_array(outward.map(|v| -v));
                 let source_change = advection.source_change;
                 let source_totals = Totals {
-                    mass: 0.0, momentum: source_change.impulse, energy: source_change.work,
+                    mass: 0.0,
+                    momentum: source_change.impulse,
+                    energy: source_change.work,
                 };
-                let conservation_residual = balance(
-                    before, after, add_totals(boundary_change, source_totals),
-                )?;
+                let conservation_residual =
+                    balance(before, after, add_totals(boundary_change, source_totals))?;
                 poll(&mut cancelled)?;
                 Ok(MolecularStepReport3d {
                     elapsed: Time::new(dt),

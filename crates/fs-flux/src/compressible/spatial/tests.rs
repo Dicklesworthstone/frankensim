@@ -704,3 +704,267 @@ fn g0_spatial_geometry_source_and_extensive_admission() {
     );
     assert_eq!(flow.time().value(), 0.0);
 }
+
+#[test]
+fn g0_pressure_outlet_preserves_uniform_advection_on_every_side() {
+    let grid = CartesianGrid::new(2, 3, 4, 0.1, 0.2, 0.3).unwrap();
+    for side in BoundarySide::ALL {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let source = gas(0.4);
+            let mut velocity = [0.2, -0.1, 0.3];
+            velocity[side.axis()] = side.sign() * 0.4;
+            let state = State::from_primitive(&source, 1.0, velocity, 1.0).unwrap();
+            let mut topology = PERIODIC;
+            match side.axis() {
+                0 => topology.x = OPEN,
+                1 => topology.y = OPEN,
+                _ => topology.z = OPEN,
+            }
+            let outlet = PressureOutletBoundary {
+                side,
+                pressure_pa: 1.0,
+            };
+            let mut flow = Euler3d::new_with_open_boundaries(
+                source,
+                grid,
+                vec![state; grid.len()],
+                topology,
+                &[],
+                &[outlet],
+                || false,
+            )
+            .unwrap();
+            for _ in 0..3 {
+                let report = flow
+                    .step(
+                        Time::new(0.001),
+                        StepControl {
+                            reconstruction,
+                            ..StepControl::default()
+                        },
+                        || false,
+                    )
+                    .unwrap();
+                balance(&report);
+                for actual in flow.states() {
+                    for (a, b) in actual.array().into_iter().zip(state.array()) {
+                        close(a, b, 2e-11);
+                    }
+                }
+            }
+            assert_eq!(flow.pressure_outlet(side), Some(outlet));
+            assert_eq!(flow.reservoir(side), None);
+        }
+    }
+}
+
+#[test]
+fn g1_pressure_outlet_drives_conservative_discharge_on_all_six_faces() {
+    let grid = CartesianGrid::new(2, 3, 4, 0.1, 0.2, 0.3).unwrap();
+    for side in BoundarySide::ALL {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let source = gas(0.4);
+            let mut velocity = [0.2, -0.1, 0.3];
+            velocity[side.axis()] = 0.0;
+            let state = State::from_primitive(&source, 1.0, velocity, 1.0).unwrap();
+            let pair = AxisBoundaries::Ends {
+                lower: if side.sign() < 0.0 {
+                    BoundaryCondition::Transmissive
+                } else {
+                    BoundaryCondition::Reflecting
+                },
+                upper: if side.sign() > 0.0 {
+                    BoundaryCondition::Transmissive
+                } else {
+                    BoundaryCondition::Reflecting
+                },
+            };
+            let mut topology = PERIODIC;
+            match side.axis() {
+                0 => topology.x = pair,
+                1 => topology.y = pair,
+                _ => topology.z = pair,
+            }
+            let outlet = PressureOutletBoundary {
+                side,
+                pressure_pa: 0.8,
+            };
+            let mut flow = Euler3d::new_with_open_boundaries(
+                source,
+                grid,
+                vec![state; grid.len()],
+                topology,
+                &[],
+                &[outlet],
+                || false,
+            )
+            .unwrap();
+            let report = flow
+                .step(
+                    Time::new(0.001),
+                    StepControl {
+                        reconstruction,
+                        ..StepControl::default()
+                    },
+                    || false,
+                )
+                .unwrap();
+            balance(&report);
+            assert!(report.boundary_change.mass < 0.0);
+            assert!(report.boundary_change.energy < 0.0);
+            assert!(side.sign() * report.after.momentum[side.axis()] > 0.0);
+            let [a, b] = tangents(side.axis());
+            let mut outward_mass = 0.0;
+            let mut outward_energy = 0.0;
+            for impulse in flow.boundary_impulses(side) {
+                assert!(impulse.mass > 0.0);
+                close(impulse.momentum[a], velocity[a] * impulse.mass, 2e-12);
+                close(impulse.momentum[b], velocity[b] * impulse.mass, 2e-12);
+                outward_mass += impulse.mass;
+                outward_energy += impulse.energy;
+            }
+            close(outward_mass, -report.boundary_change.mass, 2e-12);
+            close(outward_energy, -report.boundary_change.energy, 2e-12);
+        }
+    }
+}
+
+#[test]
+fn g1_pressure_outlet_composes_with_reservoir_and_body_force() {
+    let source = gas(0.4);
+    let grid = CartesianGrid::new(3, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let state = State::from_primitive(&source, 1.0, [0.4, 0.0, 0.0], 1.0).unwrap();
+    let inlet = ReservoirBoundary {
+        side: BoundarySide::XMin,
+        density: 1.0,
+        velocity: [0.4, 0.0, 0.0],
+        pressure_pa: 1.0,
+    };
+    let outlet = PressureOutletBoundary {
+        side: BoundarySide::XMax,
+        pressure_pa: 0.8,
+    };
+    let mut flow = Euler3d::new_with_open_boundaries(
+        source,
+        grid,
+        vec![state; grid.len()],
+        Boundaries3d {
+            x: OPEN,
+            ..PERIODIC
+        },
+        &[inlet],
+        &[outlet],
+        || false,
+    )
+    .unwrap();
+    let mut work = flow.forcing_workspace(4096).unwrap();
+    let report = flow
+        .step_with_forcing(
+            Time::new(0.001),
+            StepControl::default(),
+            BodyForce3d::UniformAcceleration([0.0, 0.1, 0.0]),
+            ForceControl3d { maximum_mach: 1.0 },
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    balance(&report);
+    assert!(report.source_change.impulse[1] > 0.0);
+    assert!(
+        flow.boundary_impulses(inlet.side)
+            .iter()
+            .all(|f| f.mass < 0.0)
+    );
+    assert!(
+        flow.boundary_impulses(outlet.side)
+            .iter()
+            .all(|f| f.mass > 0.0)
+    );
+    assert_eq!(flow.reservoir(inlet.side), Some(inlet));
+    assert_eq!(flow.pressure_outlet(outlet.side), Some(outlet));
+}
+
+#[test]
+fn g4_pressure_outlet_admission_backflow_and_cancellation_are_atomic() {
+    let source = gas(0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let state = State::from_primitive(&source, 1.0, [0.3, 0.0, 0.0], 1.0).unwrap();
+    let outlet = PressureOutletBoundary {
+        side: BoundarySide::XMax,
+        pressure_pa: 0.8,
+    };
+    let topology = Boundaries3d {
+        x: OPEN,
+        ..PERIODIC
+    };
+    let make = |topology, reservoirs: &[ReservoirBoundary], outlets: &[PressureOutletBoundary]| {
+        Euler3d::new_with_open_boundaries(
+            source.clone(),
+            grid,
+            vec![state; grid.len()],
+            topology,
+            reservoirs,
+            outlets,
+            || false,
+        )
+    };
+    assert!(make(PERIODIC, &[], &[outlet]).is_err());
+    assert!(make(WALLS, &[], &[outlet]).is_err());
+    assert!(make(topology, &[], &[outlet, outlet]).is_err());
+    for pressure_pa in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            make(
+                topology,
+                &[],
+                &[PressureOutletBoundary {
+                    pressure_pa,
+                    ..outlet
+                }]
+            )
+            .is_err()
+        );
+    }
+    let conflicting = ReservoirBoundary {
+        side: outlet.side,
+        density: 1.0,
+        velocity: [0.0; 3],
+        pressure_pa: 1.0,
+    };
+    assert!(make(topology, &[conflicting], &[outlet]).is_err());
+    let mut reversed = make(
+        topology,
+        &[],
+        &[PressureOutletBoundary {
+            side: BoundarySide::XMin,
+            pressure_pa: 1.0,
+        }],
+    )
+    .unwrap();
+    let before = reversed.states().to_vec();
+    assert!(matches!(
+        reversed.step(Time::new(0.001), StepControl::default(), || false),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(reversed.states(), before);
+    assert_eq!(reversed.time().value(), 0.0);
+    assert!(reversed.last_step.is_none());
+    let mut flow = make(topology, &[], &[outlet]).unwrap();
+    flow.step(Time::new(0.001), StepControl::default(), || false)
+        .unwrap();
+    let before = flow.states().to_vec();
+    let time = flow.time();
+    let report = flow.last_step;
+    let impulses = flow.boundary_impulses(outlet.side).to_vec();
+    let mut polls = 0;
+    assert_eq!(
+        flow.step(Time::new(0.001), StepControl::default(), || {
+            polls += 1;
+            polls > 20
+        }),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(flow.states(), before);
+    assert_eq!(flow.time(), time);
+    assert_eq!(flow.last_step, report);
+    assert_eq!(flow.boundary_impulses(outlet.side), impulses);
+}
