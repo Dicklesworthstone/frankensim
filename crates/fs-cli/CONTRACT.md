@@ -1,5 +1,22 @@
 # CONTRACT: fs-cli
 
+## Live source contacts in open radiative cavities — driver 116
+
+Steady base and uniform-ladder cooling solves now compose source-backed matching
+contact laws with explicit open gray-diffuse enclosure radiation. Source curves
+retain complete bulk/contact Newton responses; source surfaces retain the
+bounded contact fixed point. Both call the same reflected-radiosity owner as
+closed enclosures and compose with existing natural and transported-air cooling.
+
+The unchanged final field passes fresh contact/radiation residual, prescribed
+reaction, heat-closure and radiosity watt gates. Only physical-surface heat enters
+the solid's outward balance; the independent black-reservoir row closes the
+radiation system. Original convection alone reaches air transport. Receipts
+retain the actual field, source states, separate reservoir heat, and every nested
+contact, nonlinear and Krylov response. The new driver version invalidates
+earlier cached producer results. Contact/radiation adjoints, steady pointwise
+emission and capacity-storage open-cavity histories remain unsupported.
+
 ## Source-caloric cooling scenes
 
 `cooling-cht` accepts an explicit top-level `fluid_enthalpy` object on an
@@ -3568,8 +3585,9 @@ transported air; contact and closed-enclosure exchange remain internal.
 Published counters include the initial solid response, every radiation trial
 and all nested contact, nonlinear and Krylov work. The final numerical history
 continues to describe its applied load; fresh endpoint evidence is reported
-separately, with no hidden replacement solve. Live steady contact with open or
-pointwise enclosure radiation and contact/radiation adjoints remain unsupported.
+separately, with no hidden replacement solve. Driver 116 extends this shared
+owner to open cavities; steady pointwise exchange and contact/radiation adjoints
+remain unsupported.
 
 ### Live-contact adjoints through transported air and mixed convection — driver 114
 

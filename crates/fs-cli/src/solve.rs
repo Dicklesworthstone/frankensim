@@ -302,7 +302,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// natural/forced convection, including inlet and native fan-speed controls.
 /// Version 115 connects prescribed-boundary capacity histories to the complete
 /// live-contact endpoint transpose, including the full prescribed-bath lift.
-pub const SOLVE_DRIVER_VERSION: u32 = 115;
+/// Version 116 composes steady live contact with open enclosure radiation,
+/// retaining physical-surface heat separately from the explicit black reservoir.
+pub const SOLVE_DRIVER_VERSION: u32 = 116;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

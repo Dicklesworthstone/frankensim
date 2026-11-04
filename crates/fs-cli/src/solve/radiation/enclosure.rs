@@ -434,7 +434,7 @@ impl EnclosureResult {
     ) -> Result<String, SolveRefusal> {
         match self {
             Self::Closed(result) => result.receipt(lowering, convective_out_w, thermal_responses),
-            Self::Open(result) => result.receipt(lowering, convective_out_w),
+            Self::Open(result) => result.receipt(lowering, convective_out_w, thermal_responses),
         }
     }
 }
