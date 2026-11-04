@@ -16,19 +16,23 @@
 //! <https://arxiv.org/abs/2302.08826>. Each separating fluid uses the original
 //! pressure/normal-velocity transfer described in the parent layers module.
 
+use super::super::absorption::{
+    LayerAbsorbedPower, LayerAbsorption, LayerAbsorptionBudget, LayerAbsorptionError, admit,
+    finish_partition, layer_loss, poll,
+};
 use super::super::transmission::{
     LayeredTransmission, LogAmplitude, TransmittedState, log_scaled, positive_product_ratio,
 };
 use super::super::{
-    Layer, MAX_LAYERS, PreparedLayer, RigidBackedLayers, bad, divided, finite, magnitude_scale,
-    normal_wavenumber_ratio, retained_fluid_snapshot,
+    Layer, LayerTransfer, MAX_LAYERS, PreparedLayer, RigidBackedLayers, bad, divided, finite,
+    magnitude_scale, normal_wavenumber_ratio, retained_fluid_snapshot,
 };
 use super::plate::{PlateBoundary, bounded_wave, parity_boundary_pair};
 use crate::MaterialError;
 use crate::elastic::acoustic::ElasticAcousticState;
 use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 
 /// Ordered physical sections from the incident fluid to the receiving fluid.
 /// Zero thickness is an identity but does not waive original source admission.
@@ -65,6 +69,15 @@ struct PreparedPlate<'a> {
 enum PreparedSection<'a> {
     Fluid { source: Layer<'a>, index: usize },
     Plate(PreparedPlate<'a>),
+}
+
+// A section's original bounded pressure/velocity pair and the two separately
+// accumulated log factors relating its faces. A plate's signed transmission
+// only changes their common phase, which cancels in every local work integral.
+#[derive(Clone, Copy, Default)]
+struct SectionTransfer {
+    fields: LayerTransfer,
+    log_factors: [f64; 2],
 }
 
 /// At most [`MAX_LAYERS`] fluid-coupled sections at one original frequency.
@@ -213,6 +226,11 @@ impl<'a> ElasticPlateStack<'a> {
         })
     }
 
+    /// Original physical sections, including lossless plates and identities.
+    pub fn layer_count(&self) -> usize {
+        self.sections.len()
+    }
+
     pub const fn incident_source(&self) -> &'a dyn ThermoviscousFluid {
         self.prepared.source
     }
@@ -236,8 +254,104 @@ impl<'a> ElasticPlateStack<'a> {
     /// Coherent pressure R at the entrance and T at the final receiving face.
     /// Original fluid/solid critical angles and evanescent gaps are retained.
     pub fn scattering(&self, cosine: f64) -> Result<LayeredTransmission, MaterialError> {
+        self.scattering_with_sections(cosine, |_, _| Ok(()))
+    }
+
+    /// Resolve acoustic heat in each original porous section, including layers
+    /// before, between and after elastic plates. Rows and the work budget count
+    /// ALL declared sections in their physical order. Lossless plates, fluid
+    /// gaps and zero-thickness identities retain exact-zero heat rows.
+    ///
+    /// The existing coherent P/S plate and equivalent-fluid propagation supplies
+    /// both faces of every layer. Positive analytic viscous/thermal work retains
+    /// losses below the resolution of `1-R-T`, including oblique tangential
+    /// pore velocity. Transmitted sound and reactive evanescence are not heat.
+    /// No material is re-queried, no additional field solve or spatial quadrature
+    /// occurs, and no temperature or fluid/frame heat partition is inferred.
+    /// Fixed storage and two linear passes are bounded by `max_layers`, with
+    /// cancellation per section in both passes and before publication.
+    pub fn layer_absorption(
+        &self,
+        cosine: f64,
+        incident_power_w: f64,
+        budget: LayerAbsorptionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<LayerAbsorption, LayerAbsorptionError> {
+        admit(
+            self.layer_count(),
+            cosine,
+            incident_power_w,
+            budget,
+            &mut cancelled,
+        )?;
+        let mut transfers = [SectionTransfer::default(); MAX_LAYERS];
+        let response =
+            self.scattering_with_sections::<LayerAbsorptionError>(cosine, |i, step| {
+                poll(&mut cancelled)?;
+                transfers[i] = step;
+                Ok(())
+            })?;
+        // Unit incident pressure means p_front + Z_ref*v_front = 2. Absolute
+        // phase is unnecessary: the existing integral needs only the common
+        // face magnitudes and each layer's retained internal phase relation.
+        let front = transfers[0].fields;
+        let mut amplitude = LogAmplitude::new(if self.sections.is_empty() {
+            0.0
+        } else {
+            core::f64::consts::LN_2 - det::ln((front.front_pressure + front.front_velocity).abs())
+        });
+        let mut layers = [LayerAbsorbedPower::default(); MAX_LAYERS];
+        let mut total = Dd::ZERO;
+        for (i, section) in self.sections.iter().enumerate() {
+            poll(&mut cancelled)?;
+            let step = transfers[i];
+            let front_log = amplitude.log;
+            for factor in step.log_factors {
+                amplitude.add(factor);
+            }
+            if let PreparedSection::Fluid { source, index } = section
+                && source.thickness_m() > 0.0
+                && let Some(porous) = self.prepared.layers[*index].porous
+            {
+                let [viscous, thermal] = layer_loss(
+                    &self.prepared,
+                    cosine,
+                    source.thickness_m(),
+                    &porous,
+                    step.fields,
+                    [front_log, amplitude.log],
+                )?;
+                let power = incident_power_w * (viscous + thermal);
+                if !power.is_finite() {
+                    return Err(LayerAbsorptionError::Invalid(
+                        "elastic stack layer absorbed power is unrepresentable",
+                    ));
+                }
+                layers[i] = LayerAbsorbedPower {
+                    viscous_absorbed_fraction: viscous,
+                    thermal_absorbed_fraction: thermal,
+                    absorbed_power_w: power,
+                };
+                total = total + Dd::from_f64(viscous) + Dd::from_f64(thermal);
+            }
+        }
+        finish_partition(
+            incident_power_w,
+            [response.reflected_fraction, response.transmitted_fraction],
+            layers,
+            self.layer_count(),
+            total,
+            &mut cancelled,
+        )
+    }
+
+    fn scattering_with_sections<E: From<MaterialError>>(
+        &self,
+        cosine: f64,
+        mut observe: impl FnMut(usize, SectionTransfer) -> Result<(), E>,
+    ) -> Result<LayeredTransmission, E> {
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
-            return Err(bad("elastic stack needs incidence cosine in (0,1]"));
+            return Err(bad("elastic stack needs incidence cosine in (0,1]").into());
         }
         let q = normal_wavenumber_ratio(
             self.speed_ratio,
@@ -247,7 +361,7 @@ impl<'a> ElasticPlateStack<'a> {
         );
         let receiving_kn = q.scale(self.prepared.k0);
         if !finite(receiving_kn) || (q != C64::ZERO && receiving_kn == C64::ZERO) {
-            return Err(bad("elastic stack receiving wavenumber is unrepresentable"));
+            return Err(bad("elastic stack receiving wavenumber is unrepresentable").into());
         }
         let load = if q == C64::ZERO {
             C64::ZERO
@@ -264,11 +378,16 @@ impl<'a> ElasticPlateStack<'a> {
         let mut velocity = divided(load, initial_scale);
         let mut amplitude = LogAmplitude::new(-det::ln(initial_scale));
         let mut sign = 1.0;
-        for section in self.sections.iter().rev() {
+        for (section_index, section) in self.sections.iter().enumerate().rev() {
+            let mut step = SectionTransfer {
+                fields: LayerTransfer::identity(pressure, velocity),
+                log_factors: [0.0; 2],
+            };
             match section {
                 PreparedSection::Fluid { source, index } => {
                     let thickness = source.thickness_m();
                     if thickness == 0.0 {
+                        observe(section_index, step)?;
                         continue;
                     }
                     let normalization;
@@ -279,33 +398,47 @@ impl<'a> ElasticPlateStack<'a> {
                         pressure,
                         velocity,
                     )?;
+                    step.fields.front_pressure = pressure;
+                    step.fields.front_velocity = velocity;
+                    step.fields.normalization = normalization;
+                    step.fields.normal_wavenumber = kn;
                     if kn.im == 0.0 {
-                        amplitude.add(-log_scaled(16.0, normalization));
+                        step.log_factors[0] = -log_scaled(16.0, normalization);
+                        amplitude.add(step.log_factors[0]);
                     } else {
-                        amplitude.add(kn.im * thickness - log_scaled(8.0, normalization));
+                        step.log_factors[0] = kn.im * thickness - log_scaled(8.0, normalization);
+                        amplitude.add(step.log_factors[0]);
                         amplitude.rotate(-kn.re * thickness);
                     }
                 }
                 PreparedSection::Plate(plate) => {
                     if plate.thickness == 0.0 {
+                        observe(section_index, step)?;
                         continue;
                     }
                     let next = plate.propagate(&self.prepared, cosine, pressure, velocity)?;
                     let scale = magnitude_scale(next.pressure).max(magnitude_scale(next.velocity));
                     if !finite(next.pressure) || !finite(next.velocity) || scale == 0.0 {
-                        return Err(bad("elastic stack boundary pair is unrepresentable"));
+                        return Err(bad("elastic stack boundary pair is unrepresentable").into());
                     }
                     pressure = divided(next.pressure, scale);
                     velocity = divided(next.velocity, scale);
+                    step.fields.front_pressure = pressure;
+                    step.fields.front_velocity = velocity;
                     // Keep every signed transmission factor in log magnitude;
                     // an exact zero remains zero without an admittance pole.
                     if next.transmission < 0.0 {
                         sign = -sign;
                     }
-                    amplitude.add(det::ln(next.transmission.abs()));
-                    amplitude.add(next.transmission_log_scale - det::ln(scale));
+                    step.log_factors = [
+                        det::ln(next.transmission.abs()),
+                        next.transmission_log_scale - det::ln(scale),
+                    ];
+                    amplitude.add(step.log_factors[0]);
+                    amplitude.add(step.log_factors[1]);
                 }
             }
+            observe(section_index, step)?;
         }
         let state = TransmittedState::from_pair(pressure, velocity, amplitude)?;
         let transmission = state.coefficient(C64::from_re(sign))?;
@@ -327,7 +460,7 @@ impl<'a> ElasticPlateStack<'a> {
             || absorbed < -tolerance
             || (reflected + transmitted + absorbed - 1.0).abs() > tolerance
         {
-            return Err(bad("elastic stack failed passive normal-power balance"));
+            return Err(bad("elastic stack failed passive normal-power balance").into());
         }
         Ok(LayeredTransmission {
             pressure_reflection: state.reflection,

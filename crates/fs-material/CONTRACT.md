@@ -11292,8 +11292,23 @@ lossless plate adds bounded work and no heat. `porous_elastic_plate` regressions
 compare independent six-wave boundary equations plus local spatial quadrature,
 the exact zero-thickness and normal longitudinal-fluid limits, quarter/half-wave
 changes in porous heating, sub-roundoff heat with evanescent plate transmission,
-and cancellation/budget refusals. Interleaved elastic plate stacks do not yet
-expose this layer-resolved heat account.
+and cancellation/budget refusals.
+
+`ElasticPlateStack::layer_absorption` extends this same positive work account
+to porous layers before, between and after multiple fluid-coupled elastic
+plates. Rows and the allowance count every original section, including lossless
+plates and zero-thickness identities; those rows have exactly zero heat. The
+original coherent P/S propagation retains each section's bounded face pair and
+logarithmic scale. Existing analytic pore-viscous and thermal integrals then
+resolve local heat without a second field solve, source query or spatial
+quadrature. Solid reactance, evanescent tunneling and outgoing transmission are
+never booked as heat. Allocation-free queries use fixed storage for at most 64
+sections, with cancellation in both linear passes and before publication.
+Regressions independently solve all twelve boundary conditions of a double-plate
+system and integrate local viscous/thermal work through the gap, check normal
+longitudinal limits before/between/after plates, retain heat below reflection
+roundoff, shield downstream layers behind opaque plates, and exercise budgets,
+identities, zero watts and atomic cancellation.
 
 The mechanism split does not assign mean heat separately to the pore fluid and
 solid frame or evolve their temperatures. Original linear, rigid-frame,

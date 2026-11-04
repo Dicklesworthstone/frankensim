@@ -7,7 +7,8 @@ use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::porous::layers::{
     ElasticPlateLayers, ElasticPlateStack, ElasticPlateStackLayer as Section,
-    ElasticTransmittingLayers, Layer, MAX_LAYERS, TransmittingLayers,
+    ElasticTransmittingLayers, Layer, LayerAbsorptionBudget, LayerAbsorptionError, MAX_LAYERS,
+    TransmittingLayers,
 };
 use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_math::c64::C64;
@@ -73,6 +74,31 @@ fn double_plate_oracle(
 ) -> (C64, C64) {
     let [rho, ci] = incident;
     let sine = ((1.0 - cosine) * (1.0 + cosine)).sqrt();
+    let qg = outgoing((ci / gap[1]).powi(2) - sine * sine);
+    let solution = double_plate_gap_solution(
+        incident,
+        plates,
+        (qg.scale(omega / ci), qg.scale(rho / gap[0]), gap[2]),
+        receiver,
+        omega,
+        cosine,
+    );
+    (solution[0], solution[11])
+}
+
+// The same independent twelve equations admit a complex equivalent-fluid gap;
+// its returned amplitudes also determine local heat by spatial quadrature.
+// Gap data: normal wavenumber, normal admittance times rho_inc*c_inc, thickness.
+fn double_plate_gap_solution(
+    incident: [f64; 2],
+    plates: [[f64; 4]; 2],
+    gap: (C64, C64, f64),
+    receiver: [f64; 2],
+    omega: f64,
+    cosine: f64,
+) -> [C64; 12] {
+    let [rho, ci] = incident;
+    let sine = ((1.0 - cosine) * (1.0 + cosine)).sqrt();
     let face = |[rs, cp, cs, thickness]: [f64; 4]| {
         let p = outgoing(1.0 - (cp * sine / ci).powi(2));
         let s = outgoing(1.0 - (cs * sine / ci).powi(2));
@@ -109,9 +135,8 @@ fn double_plate_oracle(
     };
     let (front_a, back_a) = face(plates[0]);
     let (front_b, back_b) = face(plates[1]);
-    let qg = outgoing((ci / gap[1]).powi(2) - sine * sine);
-    let eg = phase(qg.scale(omega / ci), gap[2]);
-    let yg = qg.scale(rho / gap[0]);
+    let eg = phase(gap.0, gap.2);
+    let yg = gap.1;
     let yr = outgoing((ci / receiver[1]).powi(2) - sine * sine).scale(rho / receiver[0]);
     let mut matrix = [[C64::ZERO; 13]; 12];
     for column in 0..4 {
@@ -164,7 +189,7 @@ fn double_plate_oracle(
             }
         }
     }
-    (matrix[0][12], matrix[11][12])
+    std::array::from_fn(|i| matrix[i][12])
 }
 
 #[test]
@@ -616,4 +641,320 @@ fn unseparated_solids_and_unsupported_sources_are_refused() {
     for cosine in [0.0, -0.1, 1.001, f64::NAN] {
         assert!(stack.scattering(cosine).is_err());
     }
+}
+
+#[test]
+fn interleaved_heat_matches_independent_plate_boundary_fields_and_spatial_integrals() {
+    // Liquid/solid contrast keeps the independent twelve-amplitude system
+    // well conditioned even across P/S critical angles. The separate air/metal
+    // controls below exercise thin plates and strongly mismatched impedances.
+    let outside = ThermoviscousFluidState::from_heat_capacity_ratio(
+        FluidAcousticState::try_new(1000.0, 1500.0).unwrap(),
+        FluidTransportState::try_new(1000.0, 4180.0, 0.6, 1e-3).unwrap(),
+        1.01,
+    )
+    .unwrap();
+    let first = solid(2700.0, 6000.0, 3000.0);
+    let second = solid(3600.0, 5100.0, 2700.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let omega = 8000.0;
+    let thickness = 0.025;
+    let sections = [
+        Section::Plate {
+            state: &first,
+            thickness_m: 0.007,
+        },
+        Section::Fluid(Layer::Porous {
+            law: &foam,
+            thickness_m: thickness,
+        }),
+        Section::Plate {
+            state: &second,
+            thickness_m: 0.013,
+        },
+    ];
+    let stack = ElasticPlateStack::new(&outside, &outside, omega, &sections).unwrap();
+    let material = foam.effective_fluid(&outside, omega).unwrap();
+    let rho = material.dynamic_density_kg_m3();
+    let compliance = material.dynamic_bulk_modulus_pa().recip();
+    let k = material.characteristic().1;
+    let z0 = 1000.0 * 1500.0;
+    for cosine in [1.0_f64, 0.99, 0.97, 0.9, 0.8, 0.4] {
+        let kt = omega / 1500.0 * ((1.0 - cosine) * (1.0 + cosine)).sqrt();
+        let kn = (k * k - C64::from_re(kt * kt)).sqrt();
+        let normal_admittance = kn / rho.scale(omega);
+        let oracle = double_plate_gap_solution(
+            [1000.0, 1500.0],
+            [
+                [2700.0, 6000.0, 3000.0, 0.007],
+                [3600.0, 5100.0, 2700.0, 0.013],
+            ],
+            (kn, normal_admittance.scale(z0), thickness),
+            [1000.0, 1500.0],
+            omega,
+            cosine,
+        );
+        let mut integrals = [0.0; 2];
+        let cells = 2048;
+        for i in 0..=cells {
+            let x = thickness * i as f64 / cells as f64;
+            let forward = oracle[5] * phase(kn, x);
+            let backward = oracle[6] * phase(kn, thickness - x);
+            let pressure = forward + backward;
+            let normal_velocity = (forward - backward) * normal_admittance;
+            let tangential_velocity = pressure * (C64::from_re(kt / omega) / rho);
+            let weight = if i == 0 || i == cells {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            integrals[0] += weight * (normal_velocity.norm_sq() + tangential_velocity.norm_sq());
+            integrals[1] += weight * pressure.norm_sq();
+        }
+        let scale = omega * z0 / cosine * thickness / (3.0 * cells as f64);
+        let expected = [
+            -rho.im * scale * integrals[0],
+            -compliance.im * scale * integrals[1],
+        ];
+        let scattering = stack.scattering(cosine).unwrap();
+        let report = stack
+            .layer_absorption(cosine, 2.3, LayerAbsorptionBudget { max_layers: 3 }, || {
+                false
+            })
+            .unwrap();
+        assert_eq!(report.layers().len(), 3);
+        assert_eq!(report.layers()[0].absorbed_fraction(), 0.0);
+        assert_eq!(report.layers()[2].absorbed_fraction(), 0.0);
+        let porous = report.layers()[1];
+        near_real(
+            porous.viscous_absorbed_fraction,
+            expected[0],
+            3e-9 * expected[0],
+        );
+        near_real(
+            porous.thermal_absorbed_fraction,
+            expected[1],
+            3e-9 * expected[1],
+        );
+        near(scattering.pressure_reflection, oracle[0], 2e-9);
+        near(scattering.pressure_transmission, oracle[11], 2e-9);
+        near_real(
+            report.absorbed_fraction,
+            1.0 - oracle[0].norm_sq() - oracle[11].norm_sq(),
+            3e-10,
+        );
+        assert_eq!(report.reflected_fraction, scattering.reflected_fraction);
+        assert_eq!(report.transmitted_fraction, scattering.transmitted_fraction);
+        near_real(
+            report.absorbed_power_w,
+            2.3 * porous.absorbed_fraction(),
+            1e-14,
+        );
+        assert!(report.balance_residual_w.abs() < 2e-13);
+    }
+}
+
+#[test]
+fn porous_heat_before_between_and_after_plates_retains_the_normal_longitudinal_limit() {
+    let outside = fluid(1.2, 343.0);
+    let first = solid(7800.0, 5900.0, 3200.0);
+    let second = solid(2700.0, 6000.0, 3000.0);
+    let first_fluid = FluidAcousticState::try_new(7800.0, 5900.0).unwrap();
+    let second_fluid = FluidAcousticState::try_new(2700.0, 6000.0).unwrap();
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let fleece = PorousFluidLaw::try_new(PorousCard::pinta_fleece_foam02(), 1.81e-5).unwrap();
+    let a = Layer::Porous {
+        law: &foam,
+        thickness_m: 0.01,
+    };
+    let b = Layer::Porous {
+        law: &fleece,
+        thickness_m: 0.025,
+    };
+    let c = Layer::Porous {
+        law: &foam,
+        thickness_m: 0.007,
+    };
+    let sections = [
+        Section::Fluid(a),
+        Section::Plate {
+            state: &first,
+            thickness_m: 0.00015,
+        },
+        Section::Fluid(b),
+        Section::Plate {
+            state: &second,
+            thickness_m: 0.0002,
+        },
+        Section::Fluid(c),
+    ];
+    let reference_layers = [
+        a,
+        Layer::FluidLayer {
+            fluid: &first_fluid,
+            thickness_m: 0.00015,
+        },
+        b,
+        Layer::FluidLayer {
+            fluid: &second_fluid,
+            thickness_m: 0.0002,
+        },
+        c,
+    ];
+    let stack = ElasticPlateStack::new(&outside, &outside, 8000.0, &sections).unwrap();
+    let reference = TransmittingLayers::new(&outside, &outside, 8000.0, &reference_layers).unwrap();
+    let budget = LayerAbsorptionBudget { max_layers: 5 };
+    let report = stack.layer_absorption(1.0, 1.7, budget, || false).unwrap();
+    let expected = reference
+        .layer_absorption(1.0, 1.7, budget, || false)
+        .unwrap();
+    assert_eq!(stack.layer_count(), 5);
+    for (i, (actual, expected)) in report.layers().iter().zip(expected.layers()).enumerate() {
+        near_real(
+            actual.viscous_absorbed_fraction,
+            expected.viscous_absorbed_fraction,
+            3e-13,
+        );
+        near_real(
+            actual.thermal_absorbed_fraction,
+            expected.thermal_absorbed_fraction,
+            3e-13,
+        );
+        near_real(actual.absorbed_power_w, expected.absorbed_power_w, 5e-13);
+        if i % 2 == 0 {
+            assert!(actual.absorbed_power_w > 0.0);
+        } else {
+            assert_eq!(actual.absorbed_power_w, 0.0);
+        }
+    }
+    let zero = stack.layer_absorption(1.0, 0.0, budget, || false).unwrap();
+    assert_eq!(zero.absorbed_fraction, report.absorbed_fraction);
+    assert_eq!(zero.absorbed_power_w, 0.0);
+    assert!(zero.layers().iter().all(|row| row.absorbed_power_w == 0.0));
+}
+
+#[test]
+fn interleaved_heat_keeps_weak_loss_and_opaque_plate_shielding() {
+    let outside = fluid(1.2, 343.0);
+    let matched = solid(1.2, 343.0, 150.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let thickness = 1e-22;
+    let sections = [
+        Section::Fluid(Layer::Porous {
+            law: &foam,
+            thickness_m: thickness,
+        }),
+        Section::Plate {
+            state: &matched,
+            thickness_m: 0.01,
+        },
+        Section::Fluid(Layer::Porous {
+            law: &foam,
+            thickness_m: 2.0 * thickness,
+        }),
+    ];
+    let omega = 8000.0;
+    let stack = ElasticPlateStack::new(&outside, &outside, omega, &sections).unwrap();
+    let budget = LayerAbsorptionBudget { max_layers: 3 };
+    let report = stack.layer_absorption(1.0, 1.0, budget, || false).unwrap();
+    let material = foam.effective_fluid(&outside, omega).unwrap();
+    let z0 = outside.acoustic().characteristic_impedance_pa_s_m();
+    let viscous_per_m = -omega * material.dynamic_density_kg_m3().im / z0;
+    let thermal_per_m = -omega * material.dynamic_bulk_modulus_pa().recip().im * z0;
+    for (i, d) in [(0, thickness), (2, 2.0 * thickness)] {
+        let row = report.layers()[i];
+        near_real(
+            row.viscous_absorbed_fraction,
+            viscous_per_m * d,
+            2e-13 * viscous_per_m * d,
+        );
+        near_real(
+            row.thermal_absorbed_fraction,
+            thermal_per_m * d,
+            2e-13 * thermal_per_m * d,
+        );
+    }
+    assert!(report.absorbed_fraction > 0.0 && report.absorbed_fraction < f64::EPSILON);
+    let opaque = solid(7800.0, 5900.0, 3200.0);
+    let sections = [
+        Section::Fluid(Layer::Porous {
+            law: &foam,
+            thickness_m: 0.01,
+        }),
+        Section::Plate {
+            state: &opaque,
+            thickness_m: 100.0,
+        },
+        Section::Fluid(Layer::Porous {
+            law: &foam,
+            thickness_m: 0.01,
+        }),
+    ];
+    let stack = ElasticPlateStack::new(&outside, &outside, omega, &sections).unwrap();
+    let report = stack.layer_absorption(0.7, 1.0, budget, || false).unwrap();
+    assert!(report.layers()[0].absorbed_power_w > 0.0);
+    assert_eq!(report.layers()[1].absorbed_power_w, 0.0);
+    assert_eq!(report.layers()[2].absorbed_power_w, 0.0);
+    assert_eq!(report.transmitted_power_w, 0.0);
+}
+
+#[test]
+fn interleaved_absorption_counts_lossless_sections_and_cancels_both_passes() {
+    let outside = fluid(1.2, 343.0);
+    let plate = solid(2700.0, 6000.0, 3000.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let sections = [
+        Section::Plate {
+            state: &plate,
+            thickness_m: 0.002,
+        },
+        Section::Fluid(Layer::Porous {
+            law: &foam,
+            thickness_m: 0.015,
+        }),
+        Section::Fluid(Layer::FluidGap { thickness_m: 0.0 }),
+        Section::Plate {
+            state: &plate,
+            thickness_m: 0.001,
+        },
+    ];
+    let stack = ElasticPlateStack::new(&outside, &outside, 8000.0, &sections).unwrap();
+    let budget = LayerAbsorptionBudget { max_layers: 4 };
+    let report = stack.layer_absorption(0.8, 1.0, budget, || false).unwrap();
+    assert_eq!(report.layers()[2].absorbed_power_w, 0.0);
+    assert!(
+        stack
+            .layer_absorption(0.8, 1.0, LayerAbsorptionBudget { max_layers: 3 }, || false)
+            .is_err()
+    );
+    for stop in 1..=2 * sections.len() + 2 {
+        let mut polls = 0;
+        assert!(matches!(
+            stack.layer_absorption(0.8, 1.0, budget, || {
+                polls += 1;
+                polls == stop
+            }),
+            Err(LayerAbsorptionError::Cancelled)
+        ));
+    }
+    assert_eq!(
+        stack.layer_absorption(0.8, 1.0, budget, || false).unwrap(),
+        report
+    );
+    for watts in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            stack
+                .layer_absorption(0.8, watts, budget, || false)
+                .is_err()
+        );
+    }
+    let empty = ElasticPlateStack::new(&outside, &outside, 8000.0, &[]).unwrap();
+    let empty = empty
+        .layer_absorption(0.8, 1.0, LayerAbsorptionBudget { max_layers: 0 }, || false)
+        .unwrap();
+    assert!(empty.layers().is_empty());
+    assert_eq!(empty.absorbed_power_w, 0.0);
+    assert_eq!(empty.transmitted_power_w, 1.0);
 }

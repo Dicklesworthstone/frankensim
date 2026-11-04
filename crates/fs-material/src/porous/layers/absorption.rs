@@ -90,7 +90,7 @@ impl core::fmt::Display for LayerAbsorptionError {
 }
 impl std::error::Error for LayerAbsorptionError {}
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), LayerAbsorptionError> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), LayerAbsorptionError> {
     if cancelled() {
         Err(LayerAbsorptionError::Cancelled)
     } else {
@@ -98,7 +98,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), LayerAbsorptionError
     }
 }
 
-fn admit(
+pub(super) fn admit(
     layers: usize,
     cosine: f64,
     incident_power_w: f64,
@@ -341,13 +341,33 @@ fn partition(
             total = total + Dd::from_f64(viscous) + Dd::from_f64(thermal);
         }
     }
+    finish_partition(
+        incident_power_w,
+        outgoing,
+        layers,
+        stack.layer_count(),
+        total,
+        cancelled,
+    )
+}
+
+// All supported stacks close the same independent R/T and positive local-work
+// account. Interleaved lossless plates occupy rows but contribute no heat.
+pub(super) fn finish_partition(
+    incident_power_w: f64,
+    outgoing: [f64; 2],
+    layers: [LayerAbsorbedPower; MAX_LAYERS],
+    layer_count: usize,
+    total: Dd,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<LayerAbsorption, LayerAbsorptionError> {
     let absorbed = total.to_f64();
     let [reflected, transmitted] = outgoing;
     let fraction_residual =
         (Dd::from_f64(1.0) - Dd::from_f64(reflected) - Dd::from_f64(transmitted) - total).to_f64();
     if !absorbed.is_finite()
         || !fraction_residual.is_finite()
-        || fraction_residual.abs() > 1024.0 * f64::EPSILON * (stack.layer_count() as f64 + 1.0)
+        || fraction_residual.abs() > 1024.0 * f64::EPSILON * (layer_count as f64 + 1.0)
     {
         return Err(LayerAbsorptionError::Invalid(
             "local absorption disagrees with boundary power",
@@ -375,11 +395,11 @@ fn partition(
         absorbed_fraction: absorbed,
         balance_residual_w: residual,
         layers,
-        layer_count: stack.layer_count(),
+        layer_count,
     })
 }
 
-fn layer_loss(
+pub(super) fn layer_loss(
     stack: &RigidBackedLayers<'_>,
     cosine: f64,
     thickness: f64,
