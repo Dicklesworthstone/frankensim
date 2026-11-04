@@ -359,6 +359,13 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         })
     }
 
+    /// Original anchor stack. Every admitted frequency retains these same
+    /// material owners, film order and geometry; no detached effective medium
+    /// is substituted when a downstream volume owner checks its binding.
+    pub fn source(&self) -> &'s PlanarDielectricLayers<'m> {
+        self.anchor.source()
+    }
+
     pub fn layer_index(&self) -> usize {
         self.layer_index
     }

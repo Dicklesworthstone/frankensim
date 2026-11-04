@@ -30327,3 +30327,58 @@ execute graph/material/BEM assembly or establish mesh convergence. Two additiona
 repository regression tests exercise the original loaded graph and exterior
 preparation when the complete constellation is available. Full Cargo/DSR was not
 run here because seven required sibling repositories are absent.
+
+### Coherent finite-footprint heat on original spatial thermal cells
+
+`layered_wave_heating::spatial_interference::SpatialInterferenceHeating` binds
+one original angular-spectrum exposure ensemble to `LayeredWaveHeating`'s
+existing cell-split optical stack. Every native depth cell is prepared from
+that same ensemble; the anchor stack must be the exact original object. The
+original optical/thermal owner retains material cards, fixed source conditions,
+native cell IDs and equal-medium cell faces. No independent geometry or
+material-law mapper is introduced.
+
+The declared continuous rectangle must match the original planar thermal area.
+Every original cell integrates its complete thickness with its own authored
+positive depth quadrature. Actual continuous cross-mode, sum/difference and
+reservoir-filter interference is retained by the original electromagnetic heat
+owner. Actual weights are not renormalized. This is a through-thickness thermal
+column of the selected footprint; it does not spread patch watts over a larger
+body. The optical field still observes the original periodic continuation.
+Lateral temperature gradients, lateral heat transfer and patch-edge scattering
+are not resolved. The native one-temperature cross section requires its own
+physical justification; area matching alone does not establish equilibration.
+
+Prepared cell spectra are already watts. The actual native thermal interval
+and retained DD source clock determine analytic per-cell joules. Accepted
+continuation advances that clock without resetting source phase. A separately
+bounded positive sum of local primitive-ripple bounds prevents opposite cell
+beats from hiding temporal forcing. Maximum thermal step, source ripple and
+native nonlinear/energy tolerances remain separate controls. No carrier or beat
+is dropped because it is faster than the thermal time step.
+
+Each source credit enters once through the original
+`LayeredThermalStep::with_cell_energy_j`. The existing thermal residual, sparse
+solve, material-domain admission, nonlinear conductivity/capacity, contacts,
+baths, authored sources and energy acceptance remain authoritative. The native
+audit includes other authored heat and rounding in its mean-power conversion.
+Negative or unrepresentable irreversible heat refuses rather than being clipped.
+All candidate source/thermal data are withheld on cancellation or any refusal;
+the accepted input state is immutable. Original source and solve work bounds
+remain enforced, and cumulative preparation storage is conservatively bounded.
+
+Optical coefficients and geometry remain frozen. This does not add a lateral
+temperature law, thermo-optical refresh, phase-change chart, transient
+polarization history or reversible parameter-work transfer. Statistical inputs
+drive the native nonlinear thermal problem with expected heat, not an
+ensemble-mean temperature. Callers must not separately credit these same optical
+loss joules. The existing uniform-body complete-volume guard is unchanged.
+
+Five exact-source native source-integration/ripple/clock tests passed. They run
+the production cell-integration helpers with the original native `fs_fft`
+spectral engine. The full adapter also passed a Rust type/lifetime check with
+signature-only external-owner stubs; that check supplies no physical-owner
+validation. The authored public Maxwell/material/thermal integration test was
+not run: the full Cargo/DSR workspace remains unavailable with missing sibling
+checkouts. These limits do not establish full optical-depth, thermal-time or
+material-data convergence.

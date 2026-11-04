@@ -41,6 +41,7 @@ use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 
 /// Explicit accepted-temperature feedback for multi-frequency Debye/Ohmic film heat.
 pub mod interference;
+pub mod spatial_interference;
 
 /// Accepted-temperature optical refresh on the same spatial thermal timeline.
 pub mod thermo_optical;
