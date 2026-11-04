@@ -2,6 +2,7 @@
 //! No power-law fit is made to a finite-gap table, and no authority is upgraded.
 use super::{
     FiniteGapResponseCurve, FiniteGapResponseCurveError, NormalPatchError,
+    adhesive::{JkrError, SourceJkrSphereContact},
     dmt::{DmtError, SourceDmtSphereContact},
     maugis::{
         MaugisError, continuation::MaugisContinuationError, mechanical::MaugisAttachedPotential,
@@ -24,6 +25,9 @@ pub enum NormalLawSource {
     /// Explicit attached Maugis branch. Its limit refuses; no snap or detached
     /// branch is silently substituted by a mechanical solver.
     MaugisAttached(Box<MaugisAttachedPotential>),
+    /// Explicit stable attached JKR branch, including negative approach and
+    /// tensile force. Crossing its fold refuses instead of choosing a snap.
+    JkrAttached(Box<SourceJkrSphereContact>),
 }
 
 /// Original source-owner refusal, preserved across the potential view.
@@ -37,6 +41,8 @@ pub enum NormalLawSourceError {
     Dmt(DmtError),
     /// Original finite-zone branch, quadrature or independent energy refusal.
     Maugis(MaugisContinuationError),
+    /// Original short-range adhesive source, branch or tangent refused.
+    Jkr(JkrError),
 }
 
 impl core::fmt::Display for NormalLawSourceError {
@@ -46,6 +52,7 @@ impl core::fmt::Display for NormalLawSourceError {
             Self::FiniteGap(e) => core::fmt::Display::fmt(e, f),
             Self::Dmt(e) => core::fmt::Display::fmt(e, f),
             Self::Maugis(e) => core::fmt::Display::fmt(e, f),
+            Self::Jkr(e) => core::fmt::Display::fmt(e, f),
         }
     }
 }
@@ -72,6 +79,12 @@ impl From<MaugisAttachedPotential> for NormalLawSource {
         Self::MaugisAttached(Box::new(source))
     }
 }
+impl From<SourceJkrSphereContact> for NormalLawSource {
+    /// Select the attached branch explicitly; no history or snap is inferred.
+    fn from(source: SourceJkrSphereContact) -> Self {
+        Self::JkrAttached(Box::new(source))
+    }
+}
 
 impl NormalLawSource {
     /// Original point limiting-response receipt (including geometry/envelope),
@@ -83,6 +96,7 @@ impl NormalLawSource {
             Self::FiniteGap(s) => s.identity,
             Self::DmtSphere(s) => s.identity(),
             Self::MaugisAttached(s) => s.identity(),
+            Self::JkrAttached(s) => s.identity(),
         }
     }
 
@@ -91,7 +105,10 @@ impl NormalLawSource {
     /// Unilateral Hertz/finite-gap owners retain their existing clipping policy.
     #[must_use]
     pub const fn supports_signed_approach(&self) -> bool {
-        matches!(self, Self::DmtSphere(_) | Self::MaugisAttached(_))
+        matches!(
+            self,
+            Self::DmtSphere(_) | Self::MaugisAttached(_) | Self::JkrAttached(_)
+        )
     }
 
     /// Continuous energy and force, including adhesive touch/range corners.
@@ -107,6 +124,11 @@ impl NormalLawSource {
             let r = source
                 .evaluate(delta_m)
                 .map_err(NormalLawSourceError::Dmt)?;
+            Ok((r.reversible_energy_j, r.normal_force_n))
+        } else if let Self::JkrAttached(source) = self {
+            let r = source
+                .evaluate_attached(delta_m)
+                .map_err(NormalLawSourceError::Jkr)?;
             Ok((r.reversible_energy_j, r.normal_force_n))
         } else {
             self.potential(delta_m).map(|(u, f, _)| (u, f))
@@ -146,6 +168,10 @@ impl NormalLawSource {
         to_m: f64,
     ) -> Result<Option<f64>, NormalLawSourceError> {
         match self {
+            Self::JkrAttached(source) => source
+                .attached_path_average(from_m, to_m)
+                .map(Some)
+                .map_err(NormalLawSourceError::Jkr),
             Self::MaugisAttached(source) => source
                 .path(from_m, to_m)
                 .map(|p| Some(p.mean_force_n))
@@ -219,6 +245,15 @@ impl NormalLawSource {
     /// interpolation segment, so its derivative and energy cannot drift apart.
     pub fn potential(&self, delta_m: f64) -> Result<(f64, f64, f64), NormalLawSourceError> {
         match self {
+            Self::JkrAttached(source) => {
+                let r = source
+                    .evaluate_attached(delta_m)
+                    .map_err(NormalLawSourceError::Jkr)?;
+                let tangent = r
+                    .tangent_n_per_m
+                    .ok_or(NormalLawSourceError::Jkr(JkrError::SingularTangent))?;
+                Ok((r.reversible_energy_j, r.normal_force_n, tangent))
+            }
             Self::MaugisAttached(source) => {
                 let r = source
                     .evaluate(delta_m)

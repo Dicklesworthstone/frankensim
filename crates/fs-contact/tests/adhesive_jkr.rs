@@ -203,6 +203,90 @@ fn branch_jumps_preserve_closed_cycle_energy_and_do_not_repeat() {
 }
 
 #[test]
+fn attached_path_work_matches_dimensional_force_integral_and_subdivision() {
+    let law = model();
+    let (e, w, r, a_s) = quantities(&law);
+    let c = (2.0 * PI * w / e).sqrt();
+    let minimum = law.minimum_attached_indentation_m();
+    for (from, to) in [(minimum, 0.0), (0.8 * minimum, 8e-6), (7e-6, 1e-5)] {
+        // Independent dimensional F(a) d(delta(a))/dx, x=sqrt(a/a_s).
+        // Simpson integration does not use the new polynomial moments or U.
+        let left = (law.evaluate_attached(from).unwrap().contact_radius_m / a_s).sqrt();
+        let right = (law.evaluate_attached(to).unwrap().contact_radius_m / a_s).sqrt();
+        let integrand = |x: f64| {
+            let a = a_s * x * x;
+            let force = 4.0 * e * a.powi(3) / (3.0 * r) - (8.0 * PI * w * e * a.powi(3)).sqrt();
+            force * (4.0 * a_s * a_s * x.powi(3) / r - c * a_s.sqrt())
+        };
+        let h = (right - left) / 2048.0;
+        let mut integral = integrand(left) + integrand(right);
+        for i in 1..2048 {
+            integral += if i % 2 == 0 { 2.0 } else { 4.0 } * integrand(left + f64::from(i) * h);
+        }
+        integral *= h / 3.0;
+        let work = law.reversible_work_between(from, to).unwrap();
+        close(work, integral, 3e-11);
+        close(
+            work,
+            law.evaluate_attached(to).unwrap().reversible_energy_j
+                - law.evaluate_attached(from).unwrap().reversible_energy_j,
+            2e-13,
+        );
+        assert_eq!(law.reversible_work_between(to, from).unwrap(), -work);
+        assert_eq!(
+            law.attached_path_average(to, from).unwrap(),
+            law.attached_path_average(from, to).unwrap()
+        );
+        let middle = from.midpoint(to);
+        close(
+            law.reversible_work_between(from, middle).unwrap()
+                + law.reversible_work_between(middle, to).unwrap(),
+            work,
+            2e-13,
+        );
+    }
+}
+
+#[test]
+fn tiny_attached_motion_resolves_signed_work_without_subtracting_storage() {
+    let law = model();
+    let minimum = law.minimum_attached_indentation_m();
+    for (from, to, tolerance) in [
+        (minimum, minimum.next_up(), 1e-7),
+        (minimum.next_up(), minimum.next_up().next_up(), 1e-7),
+        (0.0, 1e-12 * law.indentation_scale_m(), 2e-12),
+        (4e-6_f64, 4e-6_f64.next_up(), 2e-14),
+        (1e-5_f64.next_down(), 1e-5_f64, 2e-14),
+    ] {
+        let force = law
+            .evaluate_attached(from.midpoint(to))
+            .unwrap()
+            .normal_force_n;
+        let mean = law.attached_path_average(from, to).unwrap();
+        close(mean, force, tolerance);
+        let work = law.reversible_work_between(from, to).unwrap();
+        assert_ne!(work, 0.0);
+        close(work / (to - from), force, tolerance);
+        let previous = law.evaluate_attached(from).unwrap().state();
+        let transition = law.advance_monotone(previous, to).unwrap();
+        assert_eq!(transition.prescribed_work_j, work);
+        assert_eq!(transition.irreversible_work_j, 0.0);
+        assert_eq!(transition.jump, None);
+    }
+    for point in [minimum, 0.0, 1e-5] {
+        assert_eq!(law.reversible_work_between(point, point).unwrap(), 0.0);
+        assert_eq!(
+            law.attached_path_average(point, point).unwrap(),
+            law.evaluate_attached(point).unwrap().normal_force_n
+        );
+    }
+    for outside in [minimum.next_down(), 1e-5_f64.next_up(), f64::NAN] {
+        assert!(law.attached_path_average(0.0, outside).is_err());
+        assert!(law.reversible_work_between(outside, 0.0).is_err());
+    }
+}
+
+#[test]
 fn zero_net_load_and_tensile_junctions_have_real_area_and_friction() {
     let law = model();
     let (e, w, r, _) = quantities(&law);
@@ -341,4 +425,84 @@ fn approximation_bounds_and_singular_inputs_refuse_without_mutating_history() {
     assert!(law.detached_state(1e-6).is_err());
     let r = law.evaluate_attached(0.0).unwrap();
     assert!(r.point_port([0.0, 0.0, 2.0], [0.0; 3]).is_err());
+}
+
+#[test]
+fn attached_path_end_derivative_matches_independent_oracles_in_both_directions() {
+    let law = model();
+    let (_, w, r, _) = quantities(&law);
+    let scale = law.indentation_scale_m();
+    let minimum = law.minimum_attached_indentation_m();
+    let indentation = |t: f64| minimum + scale * t * t * (t * t + 4.0 * t + 6.0);
+    let stiffness_scale = (PI / 6.0) * w * r / scale;
+    // 80-decimal independent quadrature/differentiation of the original JKR
+    // force and displacement equations, normalized by force/displacement scale.
+    for (from_t, to_t, expected) in [
+        (0.02, 1.2, 2.155_298_948_197_909_6),
+        (1.2, 0.02, 0.950_441_749_368_754_2),
+    ] {
+        let from = indentation(from_t);
+        let to = indentation(to_t);
+        let derivative = law.attached_path_end_derivative(from, to).unwrap();
+        close(derivative, expected * stiffness_scale, 3e-12);
+        let step = 1e-5 * scale;
+        let difference = (law.attached_path_average(from, to + step).unwrap()
+            - law.attached_path_average(from, to - step).unwrap())
+            / (2.0 * step);
+        close(derivative, difference, 3e-8);
+    }
+}
+
+#[test]
+fn attached_path_end_derivative_retains_fold_limit_and_endpoint_admission() {
+    let law = model();
+    let minimum = law.minimum_attached_indentation_m();
+    let adjacent = minimum.next_up();
+    for point in [adjacent, 0.0, 4e-6, 1e-5] {
+        let half_tangent = 0.5
+            * law
+                .evaluate_attached(point)
+                .unwrap()
+                .tangent_n_per_m
+                .unwrap();
+        assert_eq!(
+            law.attached_path_end_derivative(point, point).unwrap(),
+            half_tangent
+        );
+    }
+    close(
+        law.attached_path_end_derivative(4e-6, 4e-6_f64.next_up())
+            .unwrap(),
+        0.5 * law
+            .evaluate_attached(4e-6)
+            .unwrap()
+            .tangent_n_per_m
+            .unwrap(),
+        2e-13,
+    );
+    assert!(matches!(
+        law.attached_path_end_derivative(minimum, minimum),
+        Err(JkrError::SingularTangent)
+    ));
+
+    // Independently, delta-delta_s ~ 6 h t^2 and F-F_s ~ -12 s t.
+    // The two orientations have different finite endpoint derivatives.
+    let (_, w, r, _) = quantities(&law);
+    let scale = law.indentation_scale_m();
+    let t = ((adjacent - minimum) / scale / 6.0).sqrt();
+    let stiffness_scale = (PI / 6.0) * w * r / scale;
+    close(
+        law.attached_path_end_derivative(minimum, adjacent).unwrap(),
+        -(2.0 / 3.0) * stiffness_scale / t,
+        1e-7,
+    );
+    close(
+        law.attached_path_end_derivative(adjacent, minimum).unwrap(),
+        -(4.0 / 3.0) * stiffness_scale / t,
+        1e-7,
+    );
+    for outside in [minimum.next_down(), 1e-5_f64.next_up(), f64::NAN] {
+        assert!(law.attached_path_end_derivative(0.0, outside).is_err());
+        assert!(law.attached_path_end_derivative(outside, 0.0).is_err());
+    }
 }

@@ -22,6 +22,7 @@ pub mod fixture;
 pub mod mixed_mode;
 /// Same-source thermal changes at an explicitly retained normal control.
 pub mod temperature;
+mod work;
 
 use core::f64::consts::PI;
 
@@ -444,6 +445,11 @@ impl SourceJkrSphereContact {
     pub const fn tabor_parameter(&self) -> f64 {
         self.tabor_parameter
     }
+    /// Original displacement scale a_s^2/R, m, for numerical mechanical probes.
+    #[must_use]
+    pub const fn indentation_scale_m(&self) -> f64 {
+        self.displacement_scale_m
+    }
     /// Displacement-controlled spinodal, delta_s = -3 a_s^2/R, m.
     #[must_use]
     pub fn minimum_attached_indentation_m(&self) -> f64 {
@@ -473,6 +479,10 @@ impl SourceJkrSphereContact {
     /// (delta-delta_s)/h = t^2 (t^2+4t+6), which avoids subtractive cancellation
     /// close to pull-off. The safeguarded solve is bounded by 64 iterations.
     pub fn evaluate_attached(&self, indentation_m: f64) -> Result<JkrResponse, JkrError> {
+        self.response_at_offset(self.attached_offset(indentation_m)?, indentation_m)
+    }
+
+    fn attached_offset(&self, indentation_m: f64) -> Result<f64, JkrError> {
         self.validate_indentation(indentation_m)?;
         let minimum = self.minimum_attached_indentation_m();
         if indentation_m < minimum {
@@ -487,7 +497,12 @@ impl SourceJkrSphereContact {
                 field: "dimensionless approach",
             });
         }
-        self.response_at_offset(root_offset(q), indentation_m)
+        Ok(root_offset(q))
+    }
+
+    // x = sqrt(a/a_s). Shared by the original response and its path integral.
+    fn force_from_cubed_radius_parameter(&self, x3: f64) -> f64 {
+        self.force_scale_n * x3 * (x3 - 6.0)
     }
 
     // Shared radius-coordinate evaluation for displacement, force and fixture
@@ -499,7 +514,7 @@ impl SourceJkrSphereContact {
         let a = self.spinodal_radius_m * x2;
         let area = PI * a * a;
         let repulsive = self.force_scale_n * x3 * x3;
-        let force = self.force_scale_n * x3 * (x3 - 6.0);
+        let force = self.force_from_cubed_radius_parameter(x3);
         let energy = self.energy_scale_j * x2 * x2 * ((0.4 * x3 - 4.0) * x3 + 6.0);
         let tangent = if t == 0.0 {
             None
@@ -552,13 +567,6 @@ impl SourceJkrSphereContact {
             return Err(JkrError::StateMismatch);
         }
         self.validate_indentation(indentation_m)?;
-        let start_energy = match previous.branch {
-            JkrBranch::Detached => 0.0,
-            JkrBranch::Attached => {
-                self.evaluate_attached(previous.indentation_m)?
-                    .reversible_energy_j
-            }
-        };
         let (branch, jump) = match previous.branch {
             JkrBranch::Detached if indentation_m >= 0.0 => {
                 let released = -self.evaluate_attached(0.0)?.reversible_energy_j;
@@ -586,7 +594,21 @@ impl SourceJkrSphereContact {
             JkrBranch::Detached => self.detached_response(indentation_m),
         };
         let irreversible_work_j = jump.map_or(0.0, |event| event.released_energy_j);
-        let prescribed_work_j = response.reversible_energy_j - start_energy + irreversible_work_j;
+        // Integrate only the smooth attached part. Endpoint energy subtraction
+        // loses micro-motion work, while a jump at fixed approach does no work.
+        let prescribed_work_j = match (previous.branch, branch) {
+            (JkrBranch::Detached, JkrBranch::Detached) => 0.0,
+            (JkrBranch::Detached, JkrBranch::Attached) => {
+                self.reversible_work_between(0.0, indentation_m)?
+            }
+            (JkrBranch::Attached, JkrBranch::Attached) => {
+                self.reversible_work_between(previous.indentation_m, indentation_m)?
+            }
+            (JkrBranch::Attached, JkrBranch::Detached) => self.reversible_work_between(
+                previous.indentation_m,
+                self.minimum_attached_indentation_m(),
+            )?,
+        };
         if !irreversible_work_j.is_finite()
             || irreversible_work_j < 0.0
             || !prescribed_work_j.is_finite()

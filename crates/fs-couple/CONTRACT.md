@@ -18244,10 +18244,42 @@ continuation refuse without publishing a native state. Additional focused
 regressions check independent disk integrals, path reversal/subdivision, tiny
 paths at the fold, and inertial gap/contact/gap motion with unequal body masses.
 
+### Explicit attached JKR branch on native mechanical coordinates
+
+`NormalLawSource::JkrAttached` also drives the existing `BoundNormalStorage`
+through the complete native contact-wise discrete gradient. Its original
+high-Tabor source supplies signed tensile/compressive force, absolute
+elastic/surface storage and an allocation-free polynomial path mean. The
+original displacement scale sets numerical coordinate probes. Each effort
+scatters only through its physical contact row; unequal-mass action/reaction
+and inner kinetic/modal work are retained. Missing complete inner work refuses.
+
+The original JKR source admits every endpoint and retains finite force/energy
+at its fold without a smooth tangent. Fold crossing and source-envelope escape
+refuse without publishing a prepared state. Local contact is quasistatic and
+the caller owns body inertia; snap kinetics, branch selection, elastic waves,
+evolving material state and jump heat require separate owners. Focused
+`adhesive_jkr_storage` regressions cover original-source identity/work, tiny
+paths, tensile acceleration and reversal, unequal-body energy/momentum,
+prepared/reference agreement, cancellation/retry and atomic branch refusal.
+
+Assemblies consisting entirely of JKR contacts supply an allocation-free
+analytic derivative of this same path effort when the complete inner native
+rule supplies its derivative, or when that inner rule is the exact quadratic
+energy. Each scalar endpoint derivative projects through its contact row's
+outer product. Valid near-fold motion therefore does not require central
+numerical probes outside the attached domain. The coincident fold retains its
+singular derivative and refuses; no finite tangent is invented. A native inner
+rule without a derivative is never replaced by its quadratic view. Mixed
+contact assemblies retain their existing numerical derivative route, including
+its possible probe refusal near a branch boundary. Focused checks compare the
+complete analytic action with directional work differences and advance a
+strictly attached near-fold state through both native and prepared execution.
+
 ### Mixed adhesive and unilateral assemblies
 
 The same complete native rule admits all existing `NormalLawSource` owners in
-one assembly: Maugis, DMT, Hertz/Hunt--Crossley reversible storage and retained
+one assembly: JKR, Maugis, DMT, Hertz/Hunt--Crossley reversible storage and retained
 finite-gap response curves. The inner mechanical owner still supplies its own
 complete rule or exact quadratic energy. Each footprint scatters its original
 scalar path force only through its declared physical row; no common power-law
@@ -18264,8 +18296,8 @@ cover coordinates connected only to Hertz, DMT or finite-gap footprints.
 
 Hunt--Crossley loss remains on the original separate dissipative port, which
 checks the actual rate and step. A conservative path mean supplies no physical
-duration and cannot waive those checks. Non-Maugis composites retain their
-existing stepping behavior. The `adhesive_mixed_storage` regressions exercise
+duration and cannot waive those checks. Composites without attached JKR/Maugis
+retain their existing stepping behavior. The `adhesive_mixed_storage` regressions exercise
 all four owners together on three unequal bodies, independent onset work,
 retained BEM source/authority, tiny and reversing paths, native Hertz/table
 closure and reopening, original rate/step refusals and atomic failed-step retry.

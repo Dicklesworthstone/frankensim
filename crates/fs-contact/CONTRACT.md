@@ -643,6 +643,18 @@ zero approach and detachment at the displacement-controlled spinodal localize
 each jump and report its released energy separately from smooth elastic work.
 A prescribed-displacement segment satisfies `work = delta(stored energy) +
 jump loss`; accepting the returned token prevents repeated detachment losses.
+Smooth work uses `reversible_work_between` and `attached_path_average` on the
+original radius parametrization. Five fixed Gauss--Legendre nodes exactly
+integrate its degree-nine force/displacement polynomial in real arithmetic.
+Scaled displacement moments avoid energy/radius subtraction, including tiny
+motions and the fold. Original source admission remains active at both ends;
+work crossing a snap belongs only to the explicit history owner. The bounded,
+allocation-free calculation is a floating-point estimate, not a certificate.
+`attached_path_end_derivative` differentiates that same mean force with the
+start held fixed. Factored force differences and analytic interval-width
+cancellation retain near-fold precision. Coincidence uses half the original
+force tangent; the coincident fold is singular, while unequal admitted paths
+ending there retain their finite mean-force derivative.
 Load-controlled pull-off is exposed separately and is not used as a displacement
 event. Finite machine stiffness, roughness, precontact finite-range attraction,
 rate-dependent adhesion, viscoelasticity, mixed-mode peeling and experimental
@@ -654,6 +666,15 @@ integrates cycle work, checks potential/force/tangent derivatives, distinguishes
 force and displacement pull-off, exercises attachment and repeated separation,
 checks zero-load/tensile friction and port signs, and verifies source scaling,
 the weak-adhesion Hertz limit and applicability/history refusals.
+Additional physical regressions compare smooth path work with dimensional
+force integration, reversal/subdivision and one-ulp tensile/compressive motion.
+
+`NormalLawSource::JkrAttached` explicitly selects this original stable attached
+branch for native mechanical storage. Identity, signed approach, detached
+energy reference and source applicability are unchanged. The fold supplies
+finite energy and force while refusing a smooth tangent; crossing the fold or
+maximum approach refuses. No phase switch, snap impulse or heat is inferred.
+The original path-mean force supplies reciprocal contact work to `fs-couple`.
 
 `interface_binding::adhesive_shear::SourceAdhesiveShear` selects constant
 junction shear from explicit `adhesive_static_shear_strength` and
