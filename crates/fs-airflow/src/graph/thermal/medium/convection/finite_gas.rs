@@ -57,8 +57,25 @@ pub struct ForcedGasSurface {
 #[derive(Debug)]
 pub struct GasConvectionEvaluation {
     pub transport: FluidTransportState,
+    /// Original mean evaluation. For a strip this is the downstream cumulative
+    /// mean; use effective_nusselt() for the coefficient's actual strip Nu.
     pub nusselt: NusseltEvaluation,
     pub coefficient: Evidence<HeatTransferCoefficient>,
+    pub section: Option<super::PlateSectionDetails>,
+}
+
+impl GasConvectionEvaluation {
+    /// Actual Nu used by the heat coefficient, based on the declared length.
+    pub fn effective_nusselt(&self) -> f64 {
+        self.section.as_ref().map_or(self.nusselt.evidence().value, |section| section.nusselt)
+    }
+
+    fn from_material<F: fs_material::fluid_transport::FluidTransport + ?Sized>(
+        evaluation: super::MaterialConvection<'_, F>,
+    ) -> Self {
+        let (transport, nusselt, coefficient) = evaluation.into_parts();
+        Self { transport, nusselt, coefficient, section: None }
+    }
 }
 
 /// Complete accepted interface sample; gas sources are not reduced to a tuple.
@@ -127,7 +144,7 @@ impl ForcedGasSurface {
         }
         Ok(ConductanceSample { conductance_w_k: conductance,
             source: FiniteGasConvectionSample { gas: gas.clone(), body, area_m2: self.area_m2,
-                evaluation: Some(GasConvectionEvaluation { transport, nusselt, coefficient }) } })
+                evaluation: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None }) } })
     }
 
     /// Couple a finite source-backed gas, inertial piston and finite enthalpy body.
@@ -227,7 +244,7 @@ impl ForcedGasSurface {
             let (transport, nusselt, coefficient) = evaluated.into_parts();
             Ok(ConvectionCoefficient {
                 coefficient_w_per_m2_k: coefficient.value.value(),
-                source: Some(GasConvectionEvaluation { transport, nusselt, coefficient }),
+                source: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None }),
             })
         })
     }

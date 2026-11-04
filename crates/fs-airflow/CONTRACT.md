@@ -1210,6 +1210,40 @@ mass defect and a common-reference whole-system energy balance. Synthetic
 sources, homogeneous branches, an isothermal solid body, prescribed relative
 flow and first-order splitting remain explicit; timestep refinement is needed.
 
+### Finite-gas streamwise plate sections
+
+`FilmGasHeatLaw::ForcedPlateSection(ForcedPlateGasSurface)` applies the shared
+laminar or leading-edge-corrected turbulent strip relation to the original
+finite-body/piston, fixed-volume wall-feedback and coupled heat-network paths.
+`start` and `end` are physical downstream distances from one leading edge;
+a numerical thermal patch does not restart the boundary layer. The caller
+retains the real patch area and must rebind distances after flow reversal.
+Both positive endpoints must remain inside the selected original card's
+domain; unsupported geometry, cross-regime strips and underflowed positive
+starts refuse.
+
+Each trial queries the existing source owner once at the actual wall/bulk mean
+and bulk pressure, preserving actual composition and material claims. Bulk gas
+still owns energy, mass and acoustic state; the film is a property evaluation.
+The original thermal owner applies one signed heat exchange and retains latent
+heat, pressure work, area/Biot gates, cancellation and atomic publication.
+Zero area remains explicit insulation without a film query.
+
+`GasConvectionEvaluation::effective_nusselt()` returns the strip value. Its
+`nusselt` field remains the original downstream mean; `section` retains the
+upstream mean, physical distances and actual strip Nu. Moving these evaluations
+into the coupled report avoids recomputation or metadata clones. Positive-start
+coefficient evidence keeps an explicitly unbounded model discrepancy rather
+than inheriting the mean card's uncertainty as a local error estimate.
+At common isothermal wall/film states, the area-weighted strip heat equals
+whole-plate heat. Local property refresh is a held-property approximation;
+spatially non-isothermal boundary-layer history remains outside this model.
+
+Focused `finite_gas_convection/plate_sections` regressions cover an independent
+equal-half-plate integral, source/pressure/composition retention, both heat
+directions, latent heat and gas/body/motion conservation, fixed-volume wall
+feedback, insulation and transactional geometry/domain/cancellation refusal.
+
 ### Bulk and surface properties for forced spheres
 
 `medium::convection::evaluate_sphere_from_material` retains both supplied fluid

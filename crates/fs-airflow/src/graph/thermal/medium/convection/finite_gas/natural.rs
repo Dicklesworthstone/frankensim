@@ -125,6 +125,7 @@ impl NaturalGasSurface {
                     transport,
                     nusselt,
                     coefficient,
+                    section: None,
                 }),
             },
         })

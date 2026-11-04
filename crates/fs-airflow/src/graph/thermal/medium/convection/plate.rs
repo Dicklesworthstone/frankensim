@@ -27,6 +27,21 @@ impl fmt::Display for MaterialFlatPlateSectionError {
 }
 impl std::error::Error for MaterialFlatPlateSectionError {}
 
+/// Retained strip geometry, upstream mean and actual section Nusselt number.
+///
+/// The containing thermal evaluation retains the ORIGINAL downstream mean in
+/// its `nusselt` field. Both cumulative sources are preserved without cloning
+/// metadata or repeating a material query; the section coefficient retains
+/// its own explicitly unbounded local model discrepancy for positive starts.
+#[derive(Debug)]
+pub struct PlateSectionDetails {
+    pub start: Length,
+    pub end: Length,
+    pub upstream: Option<NusseltEvaluation>,
+    /// Actual strip-average h * end / k, distinct from the downstream mean.
+    pub nusselt: f64,
+}
+
 /// A strip's actual source, cumulative endpoint evaluations and coefficient.
 #[derive(Debug)]
 pub struct MaterialFlatPlateSection<'a, F: FluidTransport + ?Sized> {
@@ -77,6 +92,21 @@ impl<F: FluidTransport + ?Sized> MaterialFlatPlateSection<'_, F> {
 
     pub(super) fn into_coefficient(self) -> Evidence<HeatTransferCoefficient> {
         self.coefficient
+    }
+
+    pub(super) fn into_parts(self) -> (
+        FluidTransportState,
+        NusseltEvaluation,
+        Evidence<HeatTransferCoefficient>,
+        PlateSectionDetails,
+    ) {
+        let (_, upstream, downstream, nusselt) = self.section.into_parts();
+        (
+            self.transport,
+            downstream,
+            self.coefficient,
+            PlateSectionDetails { start: self.start, end: self.end, upstream, nusselt },
+        )
     }
 }
 

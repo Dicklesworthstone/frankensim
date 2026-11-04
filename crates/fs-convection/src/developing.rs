@@ -201,6 +201,17 @@ impl FlatPlateSection {
     /// Strip-average `h b/k`, retaining `b` as its characteristic length.
     pub const fn nusselt(&self) -> f64 { self.nusselt }
 
+    /// Move out the original cumulative evaluations and derived section value.
+    ///
+    /// Returns (start fraction, upstream mean, downstream mean, section Nu).
+    /// The downstream mean remains an original mean-card evaluation; it is
+    /// never relabeled as the strip value. Compute the section coefficient
+    /// before consuming this owner to retain its complete model/error evidence.
+    #[must_use]
+    pub fn into_parts(self) -> (f64, Option<NusseltEvaluation>, NusseltEvaluation, f64) {
+        (self.start_fraction, self.upstream, self.downstream, self.nusselt)
+    }
+
     /// Convert with the SAME fluid conductivity and physical downstream distance.
     ///
     /// A leading-edge strip delegates exactly to the original mean conversion.

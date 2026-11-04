@@ -32,7 +32,7 @@ pub use sphere::{MaterialSphereConvection, evaluate_sphere_from_material};
 /// Streamwise sections retain the physical external plate's leading edge.
 pub mod plate;
 pub use plate::{
-    MaterialFlatPlateSection, MaterialFlatPlateSectionError,
+    MaterialFlatPlateSection, MaterialFlatPlateSectionError, PlateSectionDetails,
     evaluate_flat_plate_section_from_material,
 };
 
@@ -80,6 +80,23 @@ impl From<MaterialError> for MaterialConvectionError {
 }
 impl From<CorrelationError> for MaterialConvectionError {
     fn from(error: CorrelationError) -> Self { Self::Correlation(error) }
+}
+impl From<MaterialFlatPlateSectionError> for MaterialConvectionError {
+    fn from(error: MaterialFlatPlateSectionError) -> Self {
+        use fs_convection::developing::FlatPlateSectionError;
+        match error {
+            MaterialFlatPlateSectionError::Material(error) => Self::Material(error),
+            MaterialFlatPlateSectionError::Correlation(error)
+            | MaterialFlatPlateSectionError::Section(FlatPlateSectionError::Correlation(error)) => {
+                Self::Correlation(error)
+            }
+            MaterialFlatPlateSectionError::Section(
+                FlatPlateSectionError::UnsupportedCorrelation(id),
+            ) => Self::Material(MaterialError::Parameters {
+                what: format!("flat-plate sections require a flat-plate mean correlation, got {}", id.name()),
+            }),
+        }
+    }
 }
 
 /// One evaluated material, its exact snapshot, and its existing correlation.

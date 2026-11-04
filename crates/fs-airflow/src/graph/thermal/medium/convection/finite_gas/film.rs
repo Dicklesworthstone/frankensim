@@ -5,7 +5,7 @@ pub use source::{FilmGasSource, PengRobinsonFilmSource};
 
 use super::super::{
     AidingVerticalPlateSettings, evaluate_aiding_vertical_plate_from_material,
-    evaluate_natural_from_material, mixed,
+    evaluate_natural_from_material, evaluate_flat_plate_section_from_material, mixed,
 };
 use super::*;
 use fs_material::fluid_transport::{FluidTransport, ThermalFluidTransport};
@@ -16,9 +16,52 @@ use fs_qty::Temperature;
 #[derive(Clone, Copy, Debug)]
 pub enum FilmGasHeatLaw {
     Forced(ForcedGasSurface),
+    /// A physical streamwise strip; its boundary layer begins at the original
+    /// upstream edge, not at this thermal patch's start.
+    ForcedPlateSection(ForcedPlateGasSurface),
     Natural(NaturalGasSurface),
     /// Laminar aiding mixed convection with explicitly bounded density departure.
     AidingVerticalPlate(AidingVerticalPlateGasSurface),
+}
+
+/// One flat-plate strip on the original finite gas/body heat residual.
+///
+/// Both distances are measured downstream from the physical leading edge.
+/// Reversing the stream requires rebinding them from the opposite edge.
+/// Geometry and area describe a real exposed patch; they are not inferred from
+/// a cell centre. At common wall/film states adjacent strips recover the same
+/// whole-plate heat. Local property refresh is a held-property approximation,
+/// not a solution of a spatially non-isothermal boundary layer.
+#[derive(Clone, Copy, Debug)]
+pub struct ForcedPlateGasSurface {
+    pub area_m2: f64,
+    pub start: Length,
+    pub end: Length,
+    pub speed_m_s: f64,
+    pub correlation: CorrelationId,
+}
+
+impl ForcedPlateGasSurface {
+    fn validate(self) -> Result<(), MaterialConvectionError> {
+        let start = self.start.value();
+        let end = self.end.value();
+        if !self.area_m2.is_finite() || self.area_m2 < 0.0
+            || !self.speed_m_s.is_finite() || self.speed_m_s < 0.0
+            || !start.is_finite() || start < 0.0
+            || !end.is_finite() || end <= start
+            || (start > 0.0 && start / end == 0.0)
+        {
+            return Err(invalid(
+                "finite gas plate sections need nonnegative area/speed and finite 0 <= start < end from one leading edge",
+            ));
+        }
+        if !matches!(self.correlation,
+            CorrelationId::FlatPlateLaminarAverage | CorrelationId::FlatPlateTurbulentAverage)
+        {
+            return Err(invalid("finite gas plate sections require an original flat-plate mean correlation"));
+        }
+        Ok(())
+    }
 }
 
 /// One isothermal vertical plate patch in a prescribed aiding free stream.
@@ -73,6 +116,10 @@ impl FilmGasHeatLaw {
     pub(super) fn area(self) -> Result<f64, MaterialConvectionError> {
         match self {
             Self::Forced(surface) => {
+                surface.validate()?;
+                Ok(surface.area_m2)
+            }
+            Self::ForcedPlateSection(surface) => {
                 surface.validate()?;
                 Ok(surface.area_m2)
             }
@@ -144,7 +191,16 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             thermal.volumetric_expansion_per_k()
                 .ok_or_else(|| invalid("film buoyancy requires source-owned volumetric expansion"))
         };
-        let evaluated = match self.law {
+        let evaluation = match self.law {
+            FilmGasHeatLaw::ForcedPlateSection(surface) => {
+                let evaluated = evaluate_flat_plate_section_from_material(
+                    surface.correlation, &film, surface.speed_m_s, surface.start, surface.end,
+                ).map_err(MaterialConvectionError::from)?;
+                let (transport, nusselt, coefficient, section) = evaluated.into_parts();
+                Some(GasConvectionEvaluation {
+                    transport, nusselt, coefficient, section: Some(section),
+                })
+            }
             FilmGasHeatLaw::Forced(surface) => {
                 let mut settings = surface.settings;
                 if wall > bulk {
@@ -152,27 +208,31 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                 } else if wall < bulk {
                     settings.direction = ThermalDirection::CoolingFluid;
                 }
-                Some(evaluate_forced_from_material(
-                    surface.correlation,
-                    &film,
-                    surface.speed_m_s,
-                    surface.characteristic_length,
-                    settings,
-                )?)
+                Some(GasConvectionEvaluation::from_material(
+                    evaluate_forced_from_material(
+                        surface.correlation,
+                        &film,
+                        surface.speed_m_s,
+                        surface.characteristic_length,
+                        settings,
+                    )?,
+                ))
             }
             FilmGasHeatLaw::Natural(surface) => {
                 if wall == bulk {
                     None
                 } else {
-                    Some(evaluate_natural_from_material(
-                        surface.geometry,
-                        &film,
-                        surface.gravity_m_s2,
-                        expansion()?,
-                        Temperature::new(wall),
-                        Temperature::new(bulk),
-                        surface.characteristic_length,
-                    )?)
+                    Some(GasConvectionEvaluation::from_material(
+                        evaluate_natural_from_material(
+                            surface.geometry,
+                            &film,
+                            surface.gravity_m_s2,
+                            expansion()?,
+                            Temperature::new(wall),
+                            Temperature::new(bulk),
+                            surface.characteristic_length,
+                        )?,
+                    ))
                 }
             }
             FilmGasHeatLaw::AidingVerticalPlate(surface) => {
@@ -182,22 +242,16 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                         Temperature::new(bulk), surface.characteristic_length)?;
                     None
                 } else {
-                    Some(evaluate_aiding_vertical_plate_from_material(
-                        &film, surface.settings, expansion()?,
-                        Temperature::new(wall), Temperature::new(bulk),
-                        surface.characteristic_length,
-                    )?)
+                    Some(GasConvectionEvaluation::from_material(
+                        evaluate_aiding_vertical_plate_from_material(
+                            &film, surface.settings, expansion()?,
+                            Temperature::new(wall), Temperature::new(bulk),
+                            surface.characteristic_length,
+                        )?,
+                    ))
                 }
             }
         };
-        let evaluation = evaluated.map(|value| {
-            let (transport, nusselt, coefficient) = value.into_parts();
-            GasConvectionEvaluation {
-                transport,
-                nusselt,
-                coefficient,
-            }
-        });
         let conductance_w_k = match &evaluation {
             None => 0.0,
             Some(value) => {
