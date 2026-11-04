@@ -7,7 +7,10 @@
 use super::{AssemblyVibration, checkpoint};
 use fs_exec::Cx;
 use fs_math::c64::C64;
-use fs_modal::harmonic::{HarmonicResponse, HarmonicResponseControls, PreparedHarmonicResponse};
+use fs_modal::harmonic::{
+    HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicResponse,
+    HarmonicResponseControls, PreparedHarmonicResponse,
+};
 
 /// Frequency-dependent loads at original work-conjugate physical attachments.
 pub mod ports;
@@ -55,6 +58,26 @@ pub struct AssemblyHarmonicResponse {
     /// Independent cycle-mean input power from physical component loads [W].
     /// At DC this is zero; a static load is not treated as an oscillation.
     pub average_component_power_w: f64,
+}
+
+/// The same physical assembled response and its exact frequency tangent.
+/// Geometry, equilibrium, support/tie maps and the retained basis stay fixed.
+#[derive(Debug)]
+pub struct AssemblyHarmonicFrequencyResponse {
+    /// Complete retained response/tangent, residuals and physical power slopes.
+    pub modal: HarmonicFrequencyResponse,
+    /// Physical displacement perturbation amplitudes, excluding static preload.
+    pub perturbation_displacements: Vec<Vec<C64>>,
+    /// Physical velocity amplitudes.
+    pub velocities: Vec<Vec<C64>>,
+    /// Physical displacement derivatives per rad/s, with the original tie map.
+    pub displacement_derivatives: Vec<Vec<C64>>,
+    /// Physical velocity derivatives per rad/s, including the kinematic term.
+    pub velocity_derivatives: Vec<Vec<C64>>,
+    /// Independently accumulated original physical source work [W].
+    pub average_component_power_w: f64,
+    /// Independently accumulated source-work derivative [W per rad/s].
+    pub average_component_power_derivative: f64,
 }
 
 impl<'v, 'body> AssemblyHarmonicModel<'v, 'body> {
@@ -138,6 +161,85 @@ impl PreparedAssemblyHarmonicResponse<'_, '_, '_> {
         component_loads: &[&[C64]],
         cx: &Cx<'_>,
     ) -> Result<AssemblyHarmonicResponse, String> {
+        let force = self.project_loads(component_loads, cx)?;
+        let modal = self.response.solve(&force, cx).map_err(|e| e.to_string())?;
+        let perturbation_displacements = self.expand(&modal.displacement, cx)?;
+        let velocities = self.expand(&modal.velocity, cx)?;
+        let (power, scale) = component_power(component_loads, &velocities, cx)?;
+        self.check_power(power, modal.average_input_power_w, scale)?;
+        checkpoint(cx)?;
+        Ok(AssemblyHarmonicResponse {
+            perturbation_displacements,
+            velocities,
+            modal,
+            average_component_power_w: power,
+        })
+    }
+
+    /// Differentiate this frequency's physical forced response using the same
+    /// cached full M/K/C factor. Optional source slopes use the same original
+    /// component force/moment coordinates; None holds their phasors fixed.
+    /// The full nonproportional glue loss and support/tie projection remain.
+    /// This supplies actual physical receivers to resonance refinement without
+    /// a frequency finite difference, extra factorization or modal decoupling.
+    pub fn solve_with_frequency_derivative(
+        &self,
+        component_loads: &[&[C64]],
+        component_load_derivatives: Option<&[&[C64]]>,
+        controls: HarmonicFrequencyControls,
+        cx: &Cx<'_>,
+    ) -> Result<AssemblyHarmonicFrequencyResponse, String> {
+        let force = self.project_loads(component_loads, cx)?;
+        let force_derivative = component_load_derivatives
+            .map(|loads| self.project_loads(loads, cx))
+            .transpose()?;
+        let modal = self
+            .response
+            .solve_with_frequency_derivative(
+                &force,
+                force_derivative.as_deref(),
+                None,
+                controls,
+                cx,
+            )
+            .map_err(|e| e.to_string())?;
+        let perturbation_displacements = self.expand(&modal.response.displacement, cx)?;
+        let velocities = self.expand(&modal.response.velocity, cx)?;
+        let displacement_derivatives = self.expand(&modal.displacement_derivative, cx)?;
+        let velocity_derivatives = self.expand(&modal.velocity_derivative, cx)?;
+        let (power, scale) = component_power(component_loads, &velocities, cx)?;
+        self.check_power(power, modal.response.average_input_power_w, scale)?;
+        let (mut slope, mut slope_scale) =
+            component_power(component_loads, &velocity_derivatives, cx)?;
+        if let Some(loads) = component_load_derivatives {
+            let (source, source_scale) = component_power(loads, &velocities, cx)?;
+            slope += source;
+            slope_scale += source_scale;
+        }
+        self.check_power(slope, modal.average_input_power_derivative, slope_scale)?;
+        checkpoint(cx)?;
+        Ok(AssemblyHarmonicFrequencyResponse {
+            modal,
+            perturbation_displacements,
+            velocities,
+            displacement_derivatives,
+            velocity_derivatives,
+            average_component_power_w: power,
+            average_component_power_derivative: slope,
+        })
+    }
+
+    fn check_power(&self, physical: f64, modal: f64, scale: f64) -> Result<(), String> {
+        if !physical.is_finite()
+            || !scale.is_finite()
+            || (physical - modal).abs() > self.relative_tolerance * scale.max(f64::MIN_POSITIVE)
+        {
+            return Err("assembled harmonic physical/modal cycle power disagrees".into());
+        }
+        Ok(())
+    }
+
+    fn project_loads(&self, component_loads: &[&[C64]], cx: &Cx<'_>) -> Result<Vec<C64>, String> {
         checkpoint(cx)?;
         let components = &self.model.vibration.equilibrium.displacements;
         if component_loads.len() != components.len()
@@ -174,31 +276,8 @@ impl PreparedAssemblyHarmonicResponse<'_, '_, '_> {
             .zip(imaginary)
             .map(|(re, im)| C64::new(re, im))
             .collect();
-        let modal = self.response.solve(&force, cx).map_err(|e| e.to_string())?;
-        let perturbation_displacements = self.expand(&modal.displacement, cx)?;
-        let velocities = self.expand(&modal.velocity, cx)?;
-        let (mut power, mut scale) = (0.0_f64, 0.0_f64);
-        for (force, velocity) in component_loads.iter().zip(&velocities) {
-            checkpoint(cx)?;
-            for (&f, &v) in force.iter().zip(velocity) {
-                power += 0.5 * (f.conj() * v).re;
-                scale += 0.5 * f.abs() * v.abs();
-            }
-        }
-        if !power.is_finite()
-            || !scale.is_finite()
-            || (power - modal.average_input_power_w).abs()
-                > self.relative_tolerance * scale.max(f64::MIN_POSITIVE)
-        {
-            return Err("assembled harmonic physical/modal cycle power disagrees".into());
-        }
         checkpoint(cx)?;
-        Ok(AssemblyHarmonicResponse {
-            perturbation_displacements,
-            velocities,
-            modal,
-            average_component_power_w: power,
-        })
+        Ok(force)
     }
 
     fn expand(&self, coordinates: &[C64], cx: &Cx<'_>) -> Result<Vec<Vec<C64>>, String> {
@@ -229,6 +308,22 @@ impl PreparedAssemblyHarmonicResponse<'_, '_, '_> {
         checkpoint(cx)?;
         Ok(result)
     }
+}
+
+fn component_power(
+    loads: &[&[C64]],
+    velocities: &[Vec<C64>],
+    cx: &Cx<'_>,
+) -> Result<(f64, f64), String> {
+    let (mut power, mut scale) = (0.0_f64, 0.0_f64);
+    for (force, velocity) in loads.iter().zip(velocities) {
+        checkpoint(cx)?;
+        for (&f, &v) in force.iter().zip(velocity) {
+            power += 0.5 * (f.conj() * v).re;
+            scale += 0.5 * f.abs() * v.abs();
+        }
+    }
+    Ok((power, scale))
 }
 
 #[cfg(test)]

@@ -55,6 +55,18 @@ perturbation. Physical component cycle power is recomputed independently and
 must agree with retained-coordinate input power. The reported viscous power
 is glue loss only; material/radiation loss is not inferred.
 
+`PreparedAssemblyHarmonicResponse::solve_with_frequency_derivative` reuses the
+same full factor for the exact source/response frequency tangent. Optional
+physical force/moment slopes pass through the same support/tie map; both motion
+and its derivative expand to original component coordinates. The original
+source power and its derivative are independently recomputed there and checked
+against the modal owner. No frequency perturbation or new factorization is
+needed. Geometry, loaded equilibrium and the retained basis stay fixed. This
+gives physical shell receivers the amplitude/slope pair used by fs-modal's
+local driven-resonance refinement. The one-mode loaded-shell test checks full
+physical displacement/velocity slopes, including a phased source derivative,
+at DC and on both sides of resonance; malformed slopes and cancellation refuse.
+
 Mode, projection-work and projection-payload limits are explicit, followed by
 the shared frequency solver's separate factor limits and residual threshold.
 No mode is silently removed. Cancelled or refused calls publish no result and

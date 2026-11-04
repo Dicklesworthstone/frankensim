@@ -36,6 +36,8 @@ mod frequency;
 pub use frequency::{
     HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicPortFrequencyResponse,
 };
+/// Local driven-response extrema and half-magnitude-squared linewidths.
+pub mod resonance;
 
 /// Explicit size, numerical payload and solve-residual limits.
 #[derive(Clone, Copy, Debug)]

@@ -138,6 +138,36 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   window-unresolved (the count-certificate mutation gate), unrepresentable
   mass-coordinate equilibration, quadratic-eig failure.
 
+### `harmonic::resonance`: actual driven peaks, notches and linewidths
+
+`refine_transfer_extremum` accepts the actual complex transfer `H(omega)` and
+its complete frequency derivative. `HarmonicFrequencyResponse` supplies fixed
+real displacement/velocity receiver projections, retaining signed modal
+interference and the full existing forced-response tangent. The stationary
+condition is `Re(conj(H) H_omega) = 0`; strictly oriented endpoint slopes
+distinguish a local maximum from a minimum. Source phase, off-diagonal
+damping and frequency-dependent loading are not replaced by pole locations.
+
+`refine_half_power_bandwidth` refines separately bracketed rising/falling
+crossings of half the same peak's `|H|^2`. Its reported quality factor is the
+actual peak frequency divided by that measured width, not an inferred modal
+damping ratio or a statement about total absorbed mechanical power.
+Normalized signs avoid overflowing/underflowing amplitude squares. Explicit
+absolute/relative frequency resolution and one callback-evaluation ceiling
+bound each query; refinement also stops at irreducible floating-point spacing,
+visible in the returned brackets. Cancellation or a physical evaluator's
+refusal publishes no partial result and preserves the original error.
+
+These are local numerical queries. The caller isolates one continuous
+extremum/crossing per bracket and retains the same physical source, receiver
+and model. Opposite signs do not certify uniqueness, spectral completeness,
+the nearest crossing, source forward error or absence of an unresolved pole.
+Zero-slope endpoints and flat/unresolved interiors refuse. No damping floor,
+grid, Lorentzian fit or new eigensolver is introduced. G1/G3 tests cover
+displacement/velocity/pole-frequency differences, high-Q linewidths, exact
+two-mode antiresonance, full nonproportional damping, extreme response units,
+singular evaluator refusal, budgets and cancellation.
+
 ### `harmonic`: full forced response and resonance
 
 `harmonic::PreparedHarmonicResponse` prepares the complete retained mechanical

@@ -23,6 +23,13 @@ fn controls() -> HarmonicResponseControls {
     }
 }
 
+fn tangent_controls() -> HarmonicFrequencyControls {
+    HarmonicFrequencyControls {
+        maximum_additional_payload_bytes: 2 * 1024 * 1024,
+        maximum_work: 1_000_000,
+    }
+}
+
 fn relative(a: f64, b: f64, scale: f64, tolerance: f64) {
     assert!(a.is_finite() && b.is_finite());
     assert!(
@@ -61,6 +68,9 @@ fn g1_loaded_shell_resonance_matches_analytic_one_mode_and_keeps_its_mean_shape(
         let mut loads = vec![C64::ZERO; part.loads.len()];
         loads[6 * 8 + 2] = C64::new(0.02, -0.003);
         let force = loads[6 * 8 + 2].scale(shape[0][6 * 8 + 2]);
+        let mut load_derivatives = vec![C64::ZERO; loads.len()];
+        load_derivatives[6 * 8 + 2] = C64::new(0.0003, 0.0002);
+        let force_derivative = load_derivatives[6 * 8 + 2].scale(shape[0][6 * 8 + 2]);
         let mut below = C64::ZERO;
         for ratio in [0., 0.8, 0.999, 1.001, 1.2] {
             let w = natural * ratio;
@@ -68,6 +78,22 @@ fn g1_loaded_shell_resonance_matches_analytic_one_mode_and_keeps_its_mean_shape(
             let actual = prepared.solve(&[&loads], cx).unwrap();
             let expected = force.scale(1. / (k - w * w * m));
             let velocity = C64::new(0., -w) * expected;
+            let tangent = prepared
+                .solve_with_frequency_derivative(
+                    &[&loads],
+                    Some(&[&load_derivatives]),
+                    tangent_controls(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                tangent.modal.response.displacement,
+                actual.modal.displacement
+            );
+            let displacement_derivative =
+                (force_derivative + expected.scale(2. * w * m)).scale(1. / (k - w * w * m));
+            let velocity_derivative =
+                C64::new(0., -1.) * (expected + displacement_derivative.scale(w));
             relative(
                 (actual.modal.displacement[0] - expected).abs(),
                 0.,
@@ -75,6 +101,21 @@ fn g1_loaded_shell_resonance_matches_analytic_one_mode_and_keeps_its_mean_shape(
                 2e-10,
             );
             for j in 0..loads.len() {
+                relative(
+                    (tangent.displacement_derivatives[0][j]
+                        - displacement_derivative.scale(shape[0][j]))
+                    .abs(),
+                    0.,
+                    displacement_derivative.abs() * shape[0][j].abs(),
+                    3e-10,
+                );
+                relative(
+                    (tangent.velocity_derivatives[0][j] - velocity_derivative.scale(shape[0][j]))
+                        .abs(),
+                    0.,
+                    velocity_derivative.abs() * shape[0][j].abs(),
+                    3e-10,
+                );
                 relative(
                     (actual.perturbation_displacements[0][j] - expected.scale(shape[0][j])).abs(),
                     0.,
@@ -313,6 +354,16 @@ fn g0_caps_and_g4_cancellation_preserve_the_loaded_body_and_prepared_factor() {
                 .any(|z| z.abs() > 0.)
         );
         assert!(prepared.solve(&[&zero], cx).is_err());
+        assert!(
+            prepared
+                .solve_with_frequency_derivative(
+                    &[&zero, &slave],
+                    Some(&[&zero]),
+                    tangent_controls(),
+                    cx,
+                )
+                .is_err()
+        );
         slave[0] = C64::new(f64::NAN, 0.);
         assert!(prepared.solve(&[&zero, &slave], cx).is_err());
         slave[0] = C64::ZERO;
@@ -328,6 +379,16 @@ fn g0_caps_and_g4_cancellation_preserve_the_loaded_body_and_prepared_factor() {
         cancelled.request();
         with_cx(&cancelled, |other| {
             assert!(prepared.solve(&[&zero, &slave], other).is_err());
+            assert!(
+                prepared
+                    .solve_with_frequency_derivative(
+                        &[&zero, &slave],
+                        None,
+                        tangent_controls(),
+                        other,
+                    )
+                    .is_err()
+            );
             assert!(model.prepare(w, controls(), other).is_err());
         });
         assert_eq!(body.displacements, before);
