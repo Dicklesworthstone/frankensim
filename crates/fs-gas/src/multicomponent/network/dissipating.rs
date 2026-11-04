@@ -8,15 +8,21 @@ use super::super::{
     Cell, Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, StepControl, StepReport,
     allocated, positive, sum,
 };
-use super::coupled::{SourceError, checked_totals, duplicate, initial_duration, reset};
 pub use super::coupled::NetworkSources;
+use super::coupled::molecular::{MolecularMethod, split_halves};
+use super::coupled::{SourceError, checked_totals, duplicate, initial_duration, reset};
 use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationReport};
-use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
 use super::valve::{SplitNetworkValveReport, ValveError};
-use super::{MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange};
+use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
+use super::{
+    MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange,
+};
 use fs_qty::{Length, Time};
 
+mod stabilized;
 mod step;
+pub use super::coupled::molecular::SplitStabilizedNetworkDissipationReport;
+pub use stabilized::{StabilizedDissipatingNetworkReport, StabilizedDissipatingStepControl};
 
 /// Explicit hyperbolic, molecular and complete-composition work limits.
 #[derive(Clone, Copy, Debug, PartialEq)]

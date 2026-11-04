@@ -1,6 +1,7 @@
 //! Independent coupled chemistry, physical-energy and network-owner checks.
 mod molecular;
 mod moving;
+mod stabilized;
 use super::{ReactingNetwork1d, ReactiveNetworkError, ReactiveNetworkReport};
 use crate::chemistry::{IsochoricKineticsSolve, advance_adiabatic};
 use crate::multicomponent::network::{

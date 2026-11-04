@@ -1,5 +1,7 @@
 //! Shared physical-state transactions and optional conservative source halves.
 
+pub(super) mod molecular;
+
 use super::super::evolve::totals;
 use super::super::{Conserved, Error, allocated, poll, positive};
 use super::{Accumulator, BranchEnd, MixtureNetwork1d, NetworkTotals, Plenum};

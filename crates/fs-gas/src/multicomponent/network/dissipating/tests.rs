@@ -3,6 +3,8 @@ use super::super::dissipation::tests::{close, fields, gas, law, owned};
 use super::*;
 use crate::multicomponent::{Boundaries, Boundary, Conserved};
 
+mod stabilized;
+
 fn walls() -> Boundaries {
     Boundaries::Ends {
         left: Boundary::Reflecting,

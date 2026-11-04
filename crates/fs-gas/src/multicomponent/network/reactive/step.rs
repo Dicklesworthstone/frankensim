@@ -13,11 +13,42 @@ impl ReactingNetwork1d {
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_method(
+            maximum_duration,
+            controls,
+            operator,
+            MolecularMethod::Explicit(dissipation_controls),
+            sources,
+            volume_rates,
+            reservoirs,
+            cancelled,
+        )
+        .map(|(report, _)| report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_method<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        operator: Option<&mut NetworkDissipationOperator<L>>,
+        molecular_method: MolecularMethod<'_>,
+        sources: NetworkSources<'_, '_>,
+        volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        (
+            ReactiveNetworkReport,
+            Option<SplitStabilizedNetworkDissipationReport>,
+        ),
+        ReactiveNetworkError,
+    > {
         let result = self.step_trial(
             maximum_duration,
             controls,
             operator,
-            dissipation_controls,
+            molecular_method,
             sources,
             volume_rates,
             reservoirs,
@@ -38,12 +69,18 @@ impl ReactingNetwork1d {
         maximum_duration: Time,
         controls: ReactiveStepControl,
         mut operator: Option<&mut NetworkDissipationOperator<L>>,
-        dissipation_controls: DissipationControl,
+        mut molecular_method: MolecularMethod<'_>,
         mut sources: NetworkSources<'_, '_>,
         volume_rates: Option<&[f64]>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+    ) -> Result<
+        (
+            ReactiveNetworkReport,
+            Option<SplitStabilizedNetworkDissipationReport>,
+        ),
+        ReactiveNetworkError,
+    > {
         poll(&mut cancelled)?;
         if !positive(maximum_duration.value()) || controls.maximum_coupling_retries > 32
             || !positive(controls.transport.cfl) || controls.transport.cfl > 0.45
@@ -112,13 +149,8 @@ impl ReactingNetwork1d {
                 };
                 let first = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = if volume_rates.is_some() {
-                            operator.advance_for_moving_trial(&mut self.trial, half,
-                                dissipation_controls, reservoirs, &mut cancelled)?
-                        } else {
-                            operator.advance_for_trial(&mut self.trial, half,
-                                dissipation_controls, reservoirs, &mut cancelled)?
-                        };
+                        let report = molecular_method.advance(operator, &mut self.trial,
+                            half, reservoirs, volume_rates.is_some(), &mut cancelled)?;
                         for (destination, source) in self.trial_molecular_ports.iter_mut()
                             .zip(operator.trial_port_exchanges())
                         {
@@ -142,19 +174,14 @@ impl ReactingNetwork1d {
                         Time::new(duration), controls.transport, &mut cancelled)?,
                 };
                 if transport.elapsed.value() != duration {
-                    return Ok((transport, false, None, None, None));
+                    return Ok((transport, false, None, None, None, None));
                 }
                 react_network(&mut self.trial, &mut self.reactor, &mut self.amounts,
                     half.value(), &mut chemistry, &mut cancelled)?;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = if volume_rates.is_some() {
-                            operator.advance_for_moving_trial(&mut self.trial, half,
-                                dissipation_controls, reservoirs, &mut cancelled)?
-                        } else {
-                            operator.advance_for_trial(&mut self.trial, half,
-                                dissipation_controls, reservoirs, &mut cancelled)?
-                        };
+                        let report = molecular_method.advance(operator, &mut self.trial,
+                            half, reservoirs, volume_rates.is_some(), &mut cancelled)?;
                         for (destination, source) in self.trial_molecular_ports.iter_mut()
                             .zip(operator.trial_port_exchanges())
                         {
@@ -193,16 +220,22 @@ impl ReactingNetwork1d {
                             ChemistryLocation::Plenum { plenum }, &mut cancelled)?;
                     }
                 }
-                let dissipation = first.zip(second).map(|(first, second)| SplitNetworkDissipationReport { first, second });
+                let (dissipation, stabilized) = match first.zip(second) {
+                    Some((first, second)) => {
+                        let (physical, stabilized) = split_halves(first, second);
+                        (Some(physical), stabilized)
+                    }
+                    None => (None, None),
+                };
                 let (wall, valves) = first_sources.pair(second_sources);
-                Ok::<_, ReactiveNetworkError>((transport, true, dissipation, wall, valves))
+                Ok::<_, ReactiveNetworkError>((transport, true, dissipation, stabilized, wall, valves))
             })();
             match attempt {
-                Ok((transport, false, _, _, _)) => {
+                Ok((transport, false, _, _, _, _)) => {
                     duration = transport.elapsed.value();
                     last = ReactiveNetworkError::Invalid("network transport shortened the coupled duration");
                 }
-                Ok((transport, true, dissipation, wall_report, valve_report)) => {
+                Ok((transport, true, dissipation, stabilized, wall_report, valve_report)) => {
                     let after = checked_totals(&self.trial, &mut cancelled)?;
                     let n = self.gas().species_count();
                     let mut boundary_change = transport.boundary_change;
@@ -251,9 +284,10 @@ impl ReactingNetwork1d {
                     }
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     self.last_report = Some(report);
-                    return Ok(report);
+                    return Ok((report, stabilized));
                 }
                 Err(ReactiveNetworkError::Cancelled) => return Err(ReactiveNetworkError::Cancelled),
+                Err(error @ ReactiveNetworkError::Dissipation(DissipationError::OperatorWorkLimit { .. })) => return Err(error),
                 Err(error) => { last = error; duration *= 0.5; }
             }
         }

@@ -135,6 +135,117 @@ fn inventory(flow: &ReactingNetwork1d, wall: &NetworkWallOperator) -> (f64, f64)
 }
 
 #[test]
+fn stabilized_diffusion_composes_actual_moving_volumes_and_finite_wall_storage() {
+    use crate::multicomponent::dissipation::StabilizedDissipationControl;
+    let (mut flow, mut molecular, mut wall) = fixture(false);
+    let before = inventory(&flow, &wall);
+    let original_volume = flow.plenums()[0].volume_m3();
+    let controls = StabilizedDissipationControl::default();
+    let mut work = 0.0;
+    for _ in 0..4 {
+        let report = flow
+            .step_with_stabilized_dissipation_and_sources(
+                &mut molecular,
+                Time::new(0.003),
+                ReactiveStepControl::default(),
+                controls,
+                sources(&mut wall),
+                None,
+                Some(&[-0.2]),
+                || false,
+            )
+            .unwrap();
+        let r = report.coupled;
+        work += r.boundary_work_on_gas_j;
+        assert!(r.boundary_work_on_gas_j > 0.0);
+        assert_eq!(
+            report.dissipation.first.transport.elapsed.value(),
+            0.5 * r.elapsed.value()
+        );
+        assert_eq!(
+            report.dissipation.second.transport.elapsed,
+            report.dissipation.first.transport.elapsed
+        );
+        assert_eq!(
+            report.dissipation.first.transport,
+            r.dissipation.unwrap().first
+        );
+        assert_eq!(
+            report.dissipation.second.transport,
+            r.dissipation.unwrap().second
+        );
+        assert_eq!(
+            r.wall.unwrap().second.elapsed,
+            report.dissipation.second.transport.elapsed
+        );
+        close(r.mass_residual_kg, 0.0, 3e-11);
+        close(r.absolute_energy_residual_j, 0.0, 3e-10);
+    }
+    close(
+        flow.plenums()[0].volume_m3(),
+        original_volume - 0.2 * flow.time().value(),
+        3e-14,
+    );
+    let after = inventory(&flow, &wall);
+    close(after.0, before.0, 3e-11);
+    close(after.1 - before.1, work, 3e-10);
+
+    // Allow the first molecular half but force exhaustion before completion.
+    // Neither the temporary expanded/compressed geometry nor finite-wall heat
+    // may replace the accepted original storage after that late refusal.
+    let accepted_fields = fields(&flow);
+    let accepted_volumes: Vec<_> = flow.plenums().iter().map(|p| p.volume_m3()).collect();
+    let accepted_walls = wall_contacts(&flow, &wall);
+    let accepted_time = flow.time();
+    let accepted_report = flow.last_report();
+    let accepted_molecular = molecular.last_report();
+    let error = flow
+        .step_with_stabilized_dissipation_and_sources(
+            &mut molecular,
+            Time::new(0.003),
+            ReactiveStepControl::default(),
+            StabilizedDissipationControl {
+                maximum_operator_evaluations: 3,
+                ..controls
+            },
+            sources(&mut wall),
+            None,
+            Some(&[-0.2]),
+            || false,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ReactiveNetworkError::Dissipation(
+            crate::multicomponent::dissipation::DissipationError::OperatorWorkLimit { .. }
+        )
+    ));
+    assert_eq!(fields(&flow), accepted_fields);
+    assert_eq!(
+        flow.plenums()
+            .iter()
+            .map(|p| p.volume_m3())
+            .collect::<Vec<_>>(),
+        accepted_volumes
+    );
+    assert_eq!(wall_contacts(&flow, &wall), accepted_walls);
+    assert_eq!(flow.time(), accepted_time);
+    assert_eq!(flow.last_report(), accepted_report);
+    assert_eq!(molecular.last_report(), accepted_molecular);
+    flow.step_with_stabilized_dissipation_and_sources(
+        &mut molecular,
+        Time::new(0.003),
+        ReactiveStepControl::default(),
+        controls,
+        sources(&mut wall),
+        None,
+        Some(&[-0.2]),
+        || false,
+    )
+    .unwrap();
+}
+
+#[test]
 fn reacting_compression_closes_physical_gas_wall_energy_with_live_molecular_and_heat_paths() {
     let (mut flow, mut molecular, mut wall) = fixture(false);
     let initial = inventory(&flow, &wall);

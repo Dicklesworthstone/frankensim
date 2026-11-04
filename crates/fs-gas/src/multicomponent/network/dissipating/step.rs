@@ -3,11 +3,39 @@ use super::*;
 
 impl<L: TransportLaw> DissipatingNetwork1d<L> {
     pub(super) fn step_impl(
-        &mut self, maximum_duration: Time, controls: DissipatingStepControl,
+        &mut self,
+        maximum_duration: Time,
+        controls: DissipatingStepControl,
+        sources: NetworkSources<'_, '_>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
+        self.step_method(
+            maximum_duration,
+            controls,
+            sources,
+            reservoirs,
+            MolecularMethod::Explicit(controls.molecular),
+            cancelled,
+        )
+        .map(|(report, _)| report)
+    }
+
+    pub(super) fn step_method(
+        &mut self,
+        maximum_duration: Time,
+        controls: DissipatingStepControl,
         mut sources: NetworkSources<'_, '_>,
         reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        mut molecular_method: MolecularMethod<'_>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
+    ) -> Result<
+        (
+            DissipatingNetworkReport,
+            Option<SplitStabilizedNetworkDissipationReport>,
+        ),
+        DissipatingNetworkError,
+    > {
         poll(&mut cancelled)?;
         if !positive(maximum_duration.value()) || controls.maximum_coupling_retries > 32
             || !positive(controls.transport.cfl) || controls.transport.cfl > 0.45
@@ -28,7 +56,8 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
             let attempt = (|| {
                 let half = Time::new(0.5 * duration);
                 let first_sources = sources.first_half(&mut self.trial, half, &mut cancelled)?;
-                let first = self.molecular.advance_for_trial(&mut self.trial, half, controls.molecular, reservoirs, &mut cancelled)?;
+                let first = molecular_method.advance(&mut self.molecular, &mut self.trial,
+                    half, reservoirs, false, &mut cancelled)?;
                 for (destination, source) in self.trial_molecular_ports.iter_mut().zip(self.molecular.trial_port_exchanges()) {
                     poll(&mut cancelled)?;
                     *destination = *source;
@@ -40,7 +69,8 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                         Time::new(duration), controls.transport, &mut cancelled)?,
                 };
                 if transport.elapsed.value() != duration { return Ok((transport, None)); }
-                let second = self.molecular.advance_for_trial(&mut self.trial, half, controls.molecular, reservoirs, &mut cancelled)?;
+                let second = molecular_method.advance(&mut self.molecular, &mut self.trial,
+                    half, reservoirs, false, &mut cancelled)?;
                 for (total, second) in self.trial_molecular_ports.iter_mut().zip(self.molecular.trial_port_exchanges()) {
                     poll(&mut cancelled)?;
                     total.momentum_to_plenum += second.momentum_to_plenum;
@@ -54,15 +84,16 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                 }
                 let second_sources = sources.second_half(&mut self.trial, half, &mut cancelled)?;
                 let (wall, valves) = first_sources.pair(second_sources);
+                let (physical, stabilized) = split_halves(first, second);
                 Ok::<_, DissipatingNetworkError>((transport,
-                    Some((SplitNetworkDissipationReport { first, second }, wall, valves))))
+                    Some((physical, stabilized, wall, valves))))
             })();
             match attempt {
                 Ok((transport, None)) => {
                     duration = transport.elapsed.value();
                     last = DissipatingNetworkError::Invalid("network transport shortened the molecular composition");
                 }
-                Ok((transport, Some((molecular, wall_report, valve_report)))) => {
+                Ok((transport, Some((molecular, stabilized, wall_report, valve_report)))) => {
                     let after = checked_totals(&self.trial, &mut cancelled)?;
                     let n = self.gas().species_count();
                     let mut boundary_change = NetworkTotals { species_masses: [0.0; MAX_SPECIES], species_count: n,
@@ -100,9 +131,10 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     core::mem::swap(&mut self.molecular_ports, &mut self.trial_molecular_ports);
                     self.last_report = Some(report);
-                    return Ok(report);
+                    return Ok((report, stabilized));
                 }
                 Err(DissipatingNetworkError::Cancelled) => return Err(DissipatingNetworkError::Cancelled),
+                Err(error @ DissipatingNetworkError::Molecular(DissipationError::OperatorWorkLimit { .. })) => return Err(error),
                 Err(error) => { last = error; duration *= 0.5; }
             }
         }

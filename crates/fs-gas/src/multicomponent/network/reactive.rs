@@ -16,6 +16,7 @@ use super::super::{
     allocated, positive, sum,
 };
 pub use super::coupled::NetworkSources;
+use super::coupled::molecular::{MolecularMethod, split_halves};
 use super::coupled::{SourceError, checked_totals, duplicate, initial_duration, reset};
 use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationReport};
 use super::valve::{SplitNetworkValveReport, ValveError};
@@ -28,7 +29,10 @@ use crate::chemistry::{IsochoricKineticsError, IsochoricKineticsSolve, Isochoric
 use fs_qty::{Amount, Time};
 use fs_thermochem::kinetics::IdealGasKineticsV1;
 
+mod stabilized;
 mod step;
+pub use super::coupled::molecular::SplitStabilizedNetworkDissipationReport;
+pub use stabilized::StabilizedReactiveNetworkReport;
 
 /// Physical owner of one local chemistry or caloric reconstruction refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

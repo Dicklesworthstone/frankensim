@@ -2410,6 +2410,40 @@ isobaric D/A/D diffusion and complete rollback, bath replenishment of a species
 consumed by reversible chemistry, and absent-bath/refusal/reuse behavior. They
 are authored physical tests; native execution is not implied by this contract.
 
+### Stabilized molecular transport in complete network steps
+
+`DissipatingNetwork1d::step_stabilized[_with_sources]` and
+`ReactingNetwork1d::step_with_stabilized_dissipation[_and_sources]` select the
+same prepared network RKL2 operator for both molecular halves. One internal
+dispatch serves the original D/A/D and D/C/A/C/D transactions, preserving
+characteristic advection, chemistry, source ordering and physical accounting.
+The nonreacting controls explicitly select RKL2; no unused explicit molecular
+control silently overrides its macrostep or work limit.
+
+Each complete step borrows one molecular RHS counter across both halves and
+all discarded acoustic/heat-release retries. Exhausting that allowance is a
+terminal original `OperatorWorkLimit`, never a fresh retry budget. Successful
+reports retain both accepted RKL2 reports and the complete actual RHS count,
+including work from rejected compositions. Original accepted molecular port
+receipts sum both halves; exterior diffusion, advected donor enthalpy, wall heat
+and prescribed chamber pressure work remain distinct physical accounts.
+
+The source-aware entries admit optional prescribed baths and finite wall/valve
+sources. The reacting entry also admits original prescribed plenum volume
+rates, so each molecular half evaluates its actual storage volume. The original
+moving-advection owner supplies mechanical pressure work once. Any failure
+preserves accepted gas, clocks, geometry, finite walls and separately owned
+source/operator reports; only private numerical work may change.
+
+Five focused regression groups cover the independent three-storage bath ODE,
+finite-plenum uptake and complete balances, both-half RHS exhaustion and late
+cancellation/replay, continuous two-pool reaction/diffusion decay, heat-release
+retries with one work allowance, and moving chamber/finite-wall energy closure.
+These are authored numerical tests, not measured-material qualification.
+RKL2's extended estimated stability interval does not certify the complete
+composition's time accuracy, positivity or entropy; caller-selected maximum
+macrosteps, original stage admission and refinement remain necessary.
+
 ## Reacting networks with molecular transport
 
 `ReactingNetwork1d::step_with_dissipation` composes
