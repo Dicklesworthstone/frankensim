@@ -19,7 +19,7 @@ pub struct WallAcceleration3d {
 }
 
 /// Bounded immutable history shared by both halves and every shortening retry.
-pub(super) struct WallDrive3d {
+pub(in crate::compressible::spatial::mixture) struct WallDrive3d {
     initial: [MolecularWall3d; 6],
     rates: [[f64; 3]; 6],
 }
@@ -70,7 +70,10 @@ impl WallDrive3d {
         Ok(active.then_some(Self { initial, rates }))
     }
 
-    pub(super) fn at(&self, elapsed: f64) -> Result<[MolecularWall3d; 6], DissipationError> {
+    pub(in crate::compressible::spatial::mixture) fn at(
+        &self,
+        elapsed: f64,
+    ) -> Result<[MolecularWall3d; 6], DissipationError> {
         if !elapsed.is_finite() || elapsed < 0.0 {
             return Err(DissipationError::Invalid("molecular wall stage time"));
         }

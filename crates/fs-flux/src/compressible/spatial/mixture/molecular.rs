@@ -24,7 +24,7 @@ mod coupled;
 mod driving;
 pub use coupled::{MolecularEuler3d, MolecularStepControl, MolecularStepReport3d};
 pub use driving::WallAcceleration3d;
-use driving::WallDrive3d;
+pub(super) use driving::WallDrive3d;
 
 #[cfg(feature = "experimental-sgs")]
 pub mod sgs;
@@ -317,7 +317,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             self.maximum_workspace_bytes,
             &mut cancelled,
         )?;
-        self.publish(report);
+        self.publish(report, None);
         Ok(report)
     }
 
@@ -336,7 +336,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularReport, DissipationError> {
         poll(&mut cancelled)?;
-        let drive = WallDrive3d::new(self.walls, self.boundaries, accelerations, &mut cancelled)?;
+        let drive = self.prepare_wall_drive(accelerations, &mut cancelled)?;
         let endpoint = drive.as_ref().map(|d| d.at(duration.value())).transpose()?;
         let report = self.advance_driven_unpublished(
             flow,
@@ -346,17 +346,29 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             drive.as_ref().map(|d| (d, 0.0)),
             &mut cancelled,
         )?;
-        if let Some(walls) = endpoint {
-            self.walls = walls;
-        }
-        self.publish(report);
+        self.publish(report, endpoint);
         Ok(report)
+    }
+
+    pub(super) fn prepare_wall_drive(
+        &self,
+        accelerations: &[WallAcceleration3d],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<WallDrive3d>, DissipationError> {
+        WallDrive3d::new(self.walls, self.boundaries, accelerations, cancelled)
     }
 
     pub(super) fn trial_impulses(&self) -> &[f64] {
         &self.work.boundary_trial
     }
-    pub(super) fn publish(&mut self, report: MolecularReport) {
+    pub(super) fn publish(
+        &mut self,
+        report: MolecularReport,
+        endpoint_walls: Option<[MolecularWall3d; 6]>,
+    ) {
+        if let Some(walls) = endpoint_walls {
+            self.walls = walls;
+        }
         std::mem::swap(&mut self.boundary_impulses, &mut self.work.boundary_trial);
         self.last_step = Some(report);
     }
@@ -379,7 +391,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_driven_unpublished(
+    pub(super) fn advance_driven_unpublished(
         &mut self,
         flow: &mut MixtureEuler3d,
         duration: Time,

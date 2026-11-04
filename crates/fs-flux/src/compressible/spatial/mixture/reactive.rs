@@ -9,8 +9,10 @@
 //! remain separate capabilities.
 
 use super::super::{BoundarySide, StepControl};
-use super::molecular::{DissipationControl, MolecularReport, MolecularTransport3d, TransportLaw};
 use super::forcing::{self, ForcingWorkspace3d};
+use super::molecular::{
+    DissipationControl, MolecularReport, MolecularTransport3d, TransportLaw, WallAcceleration3d,
+};
 use super::{BodyForce3d, ForceChange3d, ForceControl3d};
 use super::{
     BoundaryImpulse, MixtureEuler3d, StepReport, Totals, allocated, boundary_view, cell,
@@ -284,6 +286,7 @@ impl ReactingEuler3d {
             DissipationControl::default(),
             super::MAX_MIXTURE_WORKSPACE_BYTES,
             None,
+            &[],
             cancelled,
         )
     }
@@ -313,6 +316,7 @@ impl ReactingEuler3d {
             dissipation_controls,
             maximum_workspace_bytes,
             None,
+            &[],
             cancelled,
         )
     }
@@ -330,9 +334,14 @@ impl ReactingEuler3d {
         cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport3d, ReactiveError> {
         self.step_impl::<ConstantTransport>(
-            maximum_duration, controls, None, DissipationControl::default(),
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
             super::MAX_MIXTURE_WORKSPACE_BYTES,
-            Some((force, force_controls, workspace)), cancelled,
+            Some((force, force_controls, workspace)),
+            &[],
+            cancelled,
         )
     }
 
@@ -353,8 +362,73 @@ impl ReactingEuler3d {
         cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport3d, ReactiveError> {
         self.step_impl(
-            maximum_duration, controls, Some(operator), dissipation_controls,
-            maximum_workspace_bytes, Some((force, force_controls, workspace)), cancelled,
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            maximum_workspace_bytes,
+            Some((force, force_controls, workspace)),
+            &[],
+            cancelled,
+        )
+    }
+
+    /// Drive existing no-slip walls through the original D/C/A/C/D split.
+    ///
+    /// The molecular stages sample the prescribed tangential acceleration at
+    /// their actual stage times. Chemical heat and evolving species still reach
+    /// the original gas, transport and reaction laws. Accepted endpoint wall
+    /// velocities publish with the complete reacting field and both owners'
+    /// reports/loads; a shortened or refused trial publishes none of them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_and_wall_acceleration<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport3d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        accelerations: &[WallAcceleration3d],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport3d, ReactiveError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            maximum_workspace_bytes,
+            None,
+            accelerations,
+            cancelled,
+        )
+    }
+
+    /// Compose accelerating walls with held body forcing and finite-rate chemistry.
+    /// Wall exchange, body work and chemical reference-energy change retain their
+    /// separate original ledgers. The complete byte budget includes force scratch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_forcing_and_wall_acceleration<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport3d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        accelerations: &[WallAcceleration3d],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport3d, ReactiveError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            maximum_workspace_bytes,
+            Some((force, force_controls, workspace)),
+            accelerations,
+            cancelled,
         )
     }
 
@@ -367,10 +441,13 @@ impl ReactingEuler3d {
         dissipation_controls: DissipationControl,
         maximum_workspace_bytes: usize,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        accelerations: &[WallAcceleration3d],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport3d, ReactiveError> {
         poll(&mut cancelled)?;
-        let forcing_bytes = forcing.as_ref().map_or(0, |(_, _, work)| work.workspace_bytes());
+        let forcing_bytes = forcing
+            .as_ref()
+            .map_or(0, |(_, _, work)| work.workspace_bytes());
         let active_force = if let Some((force, control, workspace)) = forcing.as_mut() {
             control.admit::<super::Error>()?;
             workspace.admit(&self.accepted)?;
@@ -393,9 +470,12 @@ impl ReactingEuler3d {
                 "reacting spatial molecular total workspace budget",
             ));
         }
-        if operator.is_some() {
+        let drive = if let Some(operator) = operator.as_deref() {
             dissipation_controls.validate()?;
-        }
+            operator.prepare_wall_drive(accelerations, &mut cancelled)?
+        } else {
+            None
+        };
         if !positive(maximum_duration.value())
             || controls.maximum_coupling_retries > 32
             || !positive(controls.transport.cfl)
@@ -444,14 +524,17 @@ impl ReactingEuler3d {
             copy_physical(&self.accepted, &mut self.trial, &mut cancelled)?;
             let mut chemistry = ChemistryAccumulator::default();
             let mut shortened = None;
+            let mut endpoint_walls = None;
             let attempt = (|| {
+                endpoint_walls = drive.as_ref().map(|d| d.at(dt)).transpose()?;
                 let first = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_unpublished(
+                        let report = operator.advance_driven_unpublished(
                             &mut self.trial,
                             Time::new(0.5 * dt),
                             dissipation_controls,
                             maximum_workspace_bytes,
+                            drive.as_ref().map(|d| (d, 0.0)),
                             &mut cancelled,
                         )?;
                         copy_field(
@@ -474,11 +557,14 @@ impl ReactingEuler3d {
                     // This owner already admitted the immutable source and
                     // scratch geometry before entering the split retry loop.
                     self.trial.step_impl(
-                        Time::new(dt), controls.transport,
-                        Some((*force, *control, &mut **workspace)), &mut cancelled,
+                        Time::new(dt),
+                        controls.transport,
+                        Some((*force, *control, &mut **workspace)),
+                        &mut cancelled,
                     )?
                 } else {
-                    self.trial.step(Time::new(dt), controls.transport, &mut cancelled)?
+                    self.trial
+                        .step(Time::new(dt), controls.transport, &mut cancelled)?
                 };
                 if transport.elapsed.value() != dt {
                     shortened = Some(transport.elapsed.value());
@@ -509,11 +595,14 @@ impl ReactingEuler3d {
                 let mut endpoint_rate: f64 = 0.0;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_unpublished(
+                        let report = operator.advance_driven_unpublished(
                             &mut self.trial,
                             Time::new(0.5 * dt),
                             dissipation_controls,
                             maximum_workspace_bytes,
+                            // The molecular clock covers [0,h/2] then [h/2,h].
+                            // Chemistry retains its original two half durations.
+                            drive.as_ref().map(|d| (d, 0.5 * dt)),
                             &mut cancelled,
                         )?;
                         add_impulses(
@@ -527,12 +616,10 @@ impl ReactingEuler3d {
                         for q in self.trial.states.chunks_exact(width) {
                             let p = cell(q, n).primitive(&self.trial.gas, &mut cancelled)?;
                             if let Some((_, force_control, _)) = forcing.as_ref() {
-                                force_control.admit_velocity::<super::Error>(
-                                    p.velocity, p.sound_speed,
-                                )?;
-                                endpoint_rate = endpoint_rate.max(forcing::acoustic_rate(
-                                    p, &self.trial.grid,
-                                )?);
+                                force_control
+                                    .admit_velocity::<super::Error>(p.velocity, p.sound_speed)?;
+                                endpoint_rate =
+                                    endpoint_rate.max(forcing::acoustic_rate(p, &self.trial.grid)?);
                             }
                             if !(control.minimum_temperature_k..=control.maximum_temperature_k)
                                 .contains(&p.temperature)
@@ -551,12 +638,16 @@ impl ReactingEuler3d {
                     // for its chemical temperature-domain admission above.
                     if second.is_none() {
                         endpoint_rate = forcing::admit_field(
-                            &self.trial.gas, &self.trial.grid, &self.trial.states,
-                            *control, &mut cancelled,
+                            &self.trial.gas,
+                            &self.trial.grid,
+                            &self.trial.states,
+                            *control,
+                            &mut cancelled,
                         )?;
                     }
                     super::stepping::check_cfl::<super::Error>(
-                        endpoint_rate * dt, controls.transport.cfl,
+                        endpoint_rate * dt,
+                        controls.transport.cfl,
                     )?;
                 }
                 let dissipation = first
@@ -619,7 +710,7 @@ impl ReactingEuler3d {
                     if let (Some(operator), Some(dissipation)) =
                         (operator.as_deref_mut(), report.dissipation)
                     {
-                        operator.publish(dissipation.second);
+                        operator.publish(dissipation.second, endpoint_walls);
                     }
                     self.last_step = Some(report);
                     return Ok(report);

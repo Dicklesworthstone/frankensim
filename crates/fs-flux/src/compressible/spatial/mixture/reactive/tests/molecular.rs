@@ -1,4 +1,6 @@
 use super::*;
+
+mod driving;
 use crate::compressible::spatial::mixture::molecular::{
     DissipationControl, MolecularTransport3d, SpatialTransport,
 };

@@ -245,12 +245,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
         poll(&mut cancelled)?;
-        let drive = WallDrive3d::new(
-            self.molecular.walls,
-            self.molecular.boundaries,
-            accelerations,
-            &mut cancelled,
-        )?;
+        let drive = self
+            .molecular
+            .prepare_wall_drive(accelerations, &mut cancelled)?;
         let forcing_bytes = forcing
             .as_ref()
             .map_or(0, |(_, _, work)| work.workspace_bytes());
@@ -423,10 +420,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 Ok(report) => {
                     std::mem::swap(&mut self.accepted, &mut self.trial);
                     std::mem::swap(&mut self.boundary_impulses, &mut self.boundary_trial);
-                    if let Some(walls) = endpoint_walls {
-                        self.molecular.walls = walls;
-                    }
-                    self.molecular.publish(report.second);
+                    self.molecular.publish(report.second, endpoint_walls);
                     self.last_step = Some(report);
                     return Ok(report);
                 }

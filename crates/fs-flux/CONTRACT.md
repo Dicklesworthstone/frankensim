@@ -2410,8 +2410,48 @@ They also cover simultaneous three-axis body/wall transfer, shortened-step
 replay, cancellation/work-limit rollback, and zero-acceleration state bits.
 This time-integration check is not continuum shear-profile accuracy on a
 one-cell grid. Geometry, wall temperature and transport law remain unchanged;
-normal motion, moving-volume work, finite wall inertia, time-varying thermal
-data and reacting-owner wall driving are outside this addition.
+normal motion, moving-volume work, finite wall inertia and time-varying thermal
+data are outside this addition.
+
+### Accelerating walls coupled to finite-rate chemistry
+
+`spatial::mixture::reactive::ReactingEuler3d` accepts the same
+`WallAcceleration3d` history through
+`step_with_dissipation_and_wall_acceleration` and
+`step_with_dissipation_forcing_and_wall_acceleration`. These extend the
+existing `D(h/2)-C(h/2)-A(h)-C(h/2)-D(h/2)` transaction, with held body
+forcing inside its original central mechanical step. The original molecular
+operator supplies every wall ghost, shear and stage wall-work flux; the
+original cell reactor supplies evolving species, referenced chemical energy,
+temperature and pressure. No separate wall impulse, reaction heating term or
+frozen-composition substitute is introduced.
+
+One immutable wall history is prepared from accepted wall velocities before
+the whole-interval retry loop. Molecular SSP stages sample physical wall-time
+ranges `[0,h/2]` and `[h/2,h]`; the two chemistry half durations are not
+added to that wall clock. Heat-driven acoustic shortening, force admission or
+molecular refusal restarts the complete composition and resamples the same
+history at the new duration. The final molecular state must still satisfy the
+original chemistry temperature interval, including when wall work heats it
+after the last chemical solve.
+
+Wall exchange, body impulse/work and chemical reference-energy change remain
+separate in the existing complete report. The chemical-plus-kinetic absolute
+energy residual includes boundary transfer and body work exactly once.
+Endpoint wall velocities publish together with accepted fluid time, both
+owners' reports and all face loads after the final cancellation checkpoint.
+The added history is bounded stack data; existing numerical capacities and
+the complete forcing-workspace budget are retained. Zero wall acceleration
+recovers both original held-wall reacting paths without changing state bits.
+
+Focused regressions exercise a reacting accelerating-Couette temporal ladder
+against independent momentum, wall-work, heating and reversible-species
+solutions; activated exothermic feedback from actual wall work; heat-driven
+retry replay; late cancellation and work refusal; final chemical-temperature
+refusal; and zero-drive/storage behavior. The Couette oracle is an exact
+one-cell semidiscrete time check, not continuum spatial or experimental
+validation. Normal wall motion, wall inertia and time-varying thermal boundary
+data retain their existing exclusions.
 
 ## Two-fluid capillary displacement
 
