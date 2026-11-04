@@ -65,6 +65,15 @@ impl std::error::Error for CrystallizationError {}
 /// inferred from material names or endpoint samples. No extrapolation is allowed.
 pub trait CrystallizationCaloric {
     fn specific_enthalpy_j_kg(&self, temperature_k: f64) -> Result<f64, CrystallizationError>;
+    /// Identity of this immutable ORIGINAL caloric chart, including its energy
+    /// datum, complete state domain and constitutive data. Thermal adapters use
+    /// this same identity to bind their registered law to this actual branch;
+    /// agreement at one temperature is not a source-identity check. A material
+    /// name or the combined kinetic-law identity is not a substitute. Generic
+    /// closures remain unidentified and cannot claim such a thermal binding.
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        None
+    }
     /// Optional positive lower bound on Cp throughout the ENTIRE admitted
     /// domain, J/(kg K). The original source owner proves this bound, never
     /// this solver's endpoint samples. It permits fast inverse interpolation;
@@ -238,6 +247,13 @@ impl<'a> CrystallizationLaw<'a> {
     }
     pub const fn identity(&self) -> [u8; 32] {
         self.config.identity
+    }
+
+    /// Identity of the original borrowed parent caloric branch, independently
+    /// of the combined kinetic-law identity. `None` forbids source-bound thermal
+    /// attachment; it does not prevent standalone authored constitutive queries.
+    pub fn parent_caloric_identity(&self) -> Option<[u8; 32]> {
+        self.amorphous.caloric_identity()
     }
 
     /// Recheck a state against the original law and an explicit caloric budget.

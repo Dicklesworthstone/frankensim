@@ -56,6 +56,10 @@ pub mod evaporation;
 #[path = "enthalpy/pyrolysis.rs"]
 pub mod pyrolysis;
 
+/// History-dependent crystallization on these same cells and heat links.
+#[path = "enthalpy/crystallization.rs"]
+pub mod crystallization;
+
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CellId(pub u64);

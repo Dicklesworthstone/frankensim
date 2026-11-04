@@ -1,5 +1,35 @@
 # fs-thermal contract
 
+## Crystallization in spatial heat exchange and finite molds
+
+`enthalpy::crystallization::CrystallizationSimulation` adopts activated cells
+from the original `DepositionSimulation`. Bound materials receive a private
+kinetic exposure; unbound molds/substrates keep their original caloric laws,
+storage basis and thermal slope bounds. All cells exchange heat through the
+existing link, boundary and CFL operator. Mass, geometry, cell/material IDs and
+the original extensive thermal-storage account remain with that owner.
+Attachment requires the original thermal law and kinetic parent branch to
+carry the same complete caloric identity. Agreement at one starting state is
+insufficient; unidentified or crossing-but-different caloric curves refuse.
+
+Each candidate resolves crystallinity and temperature together through the
+shared constitutive core. Crystal mass is part of the existing specimen mass,
+and latent release is part of the existing enthalpy. Compensated audits count
+both signed global residuals and cumulative absolute local caloric/roundoff
+defects. Late material failures, cancellation and exhausted budgets return no
+accepted history. Cloning checkpoints time, enthalpy and exposure; identical
+time partitions replay bitwise. Endpoint boundary/conductance changes use the
+original physical ownership and coverage checks.
+
+The eleven focused regressions cover adiabatic and spatial calorimetry,
+recalescence while cooling, different-Cp finite-mold exchange, timestep
+refinement, source/identity/budget refusal, initial-chart roundoff, ordinary-cell
+domain failures and atomic cancellation/restart. This fixed-reference-geometry,
+uniform-cell reduction has first-order heat transport and explicit kinetic
+timestep limits. Conductivity evolution requires a declared supplied law;
+front morphology, remelting, moving geometry and mechanical work feedback are
+outside this transport model.
+
 ## Finite-rate crystallization and latent thermal feedback
 
 `crystallization::CrystallizationLaw` retains an independent Nakamura exposure
