@@ -192,7 +192,10 @@ fn native_wall_steps_keep_uniform_force_parity_and_trapezoidal_momentum() {
             for _ in 0..2 {
                 let expected = native
                     .step_serial_with_moving_wall_momentum(
-                        cx, &probe, &velocities, Some(&collisions),
+                        cx,
+                        &probe,
+                        &velocities,
+                        Some(&collisions),
                     )
                     .unwrap();
                 let observed = spatial
@@ -211,7 +214,9 @@ fn native_wall_steps_keep_uniform_force_parity_and_trapezoidal_momentum() {
         },
         equilibrium3,
     );
-    uniform::<D3q27, 27>(law(), |rho, u| equilibrium27(rho, u, Equilibrium27::Factorized));
+    uniform::<D3q27, 27>(law(), |rho, u| {
+        equilibrium27(rho, u, Equilibrium27::Factorized)
+    });
 
     with_cx(|cx| {
         let mut driven = forced(cx, forces(1.0));
@@ -225,11 +230,20 @@ fn native_wall_steps_keep_uniform_force_parity_and_trapezoidal_momentum() {
             let next = forces(epoch);
             let before = momentum(&driven);
             let body: [f64; 3] = core::array::from_fn(|a| {
-                driven.forces().iter().zip(&next).map(|(a0, a1)| 0.5 * (a0[a] + a1[a])).sum()
+                driven
+                    .forces()
+                    .iter()
+                    .zip(&next)
+                    .map(|(a0, a1)| 0.5 * (a0[a] + a1[a]))
+                    .sum()
             });
             let receipt = driven
                 .advance_serial_with_moving_wall_momentum(
-                    cx, &probe, &velocities, &collisions, next.clone(),
+                    cx,
+                    &probe,
+                    &velocities,
+                    &collisions,
+                    next.clone(),
                 )
                 .unwrap();
             let after = momentum(&driven);
@@ -243,7 +257,11 @@ fn native_wall_steps_keep_uniform_force_parity_and_trapezoidal_momentum() {
             old.advance_serial(cx, &collisions, next.clone()).unwrap();
             stationary
                 .advance_serial_with_moving_wall_momentum(
-                    cx, &probe, &zeros, &collisions, next.clone(),
+                    cx,
+                    &probe,
+                    &zeros,
+                    &collisions,
+                    next.clone(),
                 )
                 .unwrap();
             assert_eq!(bits(stationary.populations()), bits(old.populations()));
@@ -271,12 +289,22 @@ fn moving_wall_sgs_uses_the_incoming_force_frame_and_zero_drives_keep_old_bits()
         ] {
             let expected = reference
                 .prepare_channel_sgs_with_moving_walls(
-                    cx, local(model), None, &probe, &velocities, &mut a,
+                    cx,
+                    local(model),
+                    None,
+                    &probe,
+                    &velocities,
+                    &mut a,
                 )
                 .unwrap();
             let observed = shifted
                 .prepare_channel_sgs_with_moving_walls(
-                    cx, local(model), None, &probe, &velocities, &mut b,
+                    cx,
+                    local(model),
+                    None,
+                    &probe,
+                    &velocities,
+                    &mut b,
                 )
                 .unwrap();
             assert!(expected.maximum_eddy_viscosity_lu > 0.0);
@@ -286,7 +314,12 @@ fn moving_wall_sgs_uses_the_incoming_force_frame_and_zero_drives_keep_old_bits()
             let stationary = shifted.prepare_sgs(cx, local(model), None, &mut a).unwrap();
             let moving_zero = shifted
                 .prepare_channel_sgs_with_moving_walls(
-                    cx, local(model), None, &probe, &zeros, &mut b,
+                    cx,
+                    local(model),
+                    None,
+                    &probe,
+                    &zeros,
+                    &mut b,
                 )
                 .unwrap();
             assert_eq!(stationary, moving_zero);
@@ -296,18 +329,29 @@ fn moving_wall_sgs_uses_the_incoming_force_frame_and_zero_drives_keep_old_bits()
         let mut b = shifted.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
         let expected = reference
             .prepare_channel_dynamic_sgs_with_moving_walls(
-                cx, dynamic(), None, &probe, &velocities, &mut a,
+                cx,
+                dynamic(),
+                None,
+                &probe,
+                &velocities,
+                &mut a,
             )
             .unwrap();
         let observed = shifted
             .prepare_channel_dynamic_sgs_with_moving_walls(
-                cx, dynamic(), None, &probe, &velocities, &mut b,
+                cx,
+                dynamic(),
+                None,
+                &probe,
+                &velocities,
+                &mut b,
             )
             .unwrap();
         assert!(expected.fit.maximum_eddy_viscosity > 0.0);
         near_collisions(a.collisions(), b.collisions());
         assert!(
-            (expected.dissipation.sgs_dissipation_lu - observed.dissipation.sgs_dissipation_lu).abs()
+            (expected.dissipation.sgs_dissipation_lu - observed.dissipation.sgs_dissipation_lu)
+                .abs()
                 < 3e-13
         );
         let stationary = shifted
@@ -315,7 +359,12 @@ fn moving_wall_sgs_uses_the_incoming_force_frame_and_zero_drives_keep_old_bits()
             .unwrap();
         let moving_zero = shifted
             .prepare_channel_dynamic_sgs_with_moving_walls(
-                cx, dynamic(), None, &probe, &zeros, &mut b,
+                cx,
+                dynamic(),
+                None,
+                &probe,
+                &zeros,
+                &mut b,
             )
             .unwrap();
         assert_eq!(stationary, moving_zero);
@@ -327,12 +376,24 @@ fn moving_wall_sgs_uses_the_incoming_force_frame_and_zero_drives_keep_old_bits()
         let mut second = forced(cx, forces(1.0));
         let first_report = first
             .advance_serial_with_channel_dynamic_sgs_and_moving_walls(
-                cx, dynamic(), None, &probe, &velocities, &mut a, forces(-4.0),
+                cx,
+                dynamic(),
+                None,
+                &probe,
+                &velocities,
+                &mut a,
+                forces(-4.0),
             )
             .unwrap();
         let second_report = second
             .advance_serial_with_channel_dynamic_sgs_and_moving_walls(
-                cx, dynamic(), None, &probe, &velocities, &mut b, forces(7.0),
+                cx,
+                dynamic(),
+                None,
+                &probe,
+                &velocities,
+                &mut b,
+                forces(7.0),
             )
             .unwrap();
         assert_eq!(first_report, second_report);
@@ -436,7 +497,9 @@ fn local_and_dynamic_sgs_match_native_moving_steps_and_all_worker_counts() {
             (SgsModel::Vreman { cv: 0.07 }, true),
         ] {
             compare!(
-                local(model), active, sgs_workspace(),
+                local(model),
+                active,
+                sgs_workspace(),
                 prepare_channel_sgs_with_moving_walls,
                 step_serial_with_channel_sgs_and_moving_walls,
                 step_pooled_with_channel_sgs_and_moving_walls,
@@ -445,7 +508,9 @@ fn local_and_dynamic_sgs_match_native_moving_steps_and_all_worker_counts() {
             );
         }
         compare!(
-            dynamic(), true, channel_dynamic_sgs_workspace(usize::MAX),
+            dynamic(),
+            true,
+            channel_dynamic_sgs_workspace(usize::MAX),
             prepare_channel_dynamic_sgs_with_moving_walls,
             step_serial_with_channel_dynamic_sgs_and_moving_walls,
             step_pooled_with_channel_dynamic_sgs_and_moving_walls,
@@ -490,8 +555,15 @@ fn refused_endpoints_and_post_stream_cancellation_keep_the_whole_force_epoch() {
         for next in [vec![[0.0; 3]; N - 1], nonfinite, vec![[1.0, 0.0, 0.0]; N]] {
             assert!(
                 flow.advance_serial_with_channel_dynamic_sgs_and_moving_walls(
-                    cx, dynamic(), Some(&molecular), &probe, &velocities, &mut workspace, next,
-                ).is_err()
+                    cx,
+                    dynamic(),
+                    Some(&molecular),
+                    &probe,
+                    &velocities,
+                    &mut workspace,
+                    next,
+                )
+                .is_err()
             );
             assert_eq!(bits(flow.populations()), before);
             assert_eq!(flow.forces(), current);
@@ -505,8 +577,14 @@ fn refused_endpoints_and_post_stream_cancellation_keep_the_whole_force_epoch() {
         let next = forces(-2.0);
         assert!(matches!(
             flow.advance_pooled_with_channel_dynamic_sgs_and_moving_walls(
-                &runner, &gate, dynamic(), Some(&molecular),
-                &probe, &velocities, &mut workspace, next.clone(),
+                &runner,
+                &gate,
+                dynamic(),
+                Some(&molecular),
+                &probe,
+                &velocities,
+                &mut workspace,
+                next.clone(),
             ),
             Err(SgsStepError::Grid(GridError3::Cancelled))
         ));
@@ -516,15 +594,27 @@ fn refused_endpoints_and_post_stream_cancellation_keep_the_whole_force_epoch() {
         assert_eq!(flow.completed_steps(), 0);
         let observed = flow
             .advance_pooled_with_channel_dynamic_sgs_and_moving_walls(
-                &runner.pool, &CancelGate::new_clock_free(), dynamic(), Some(&molecular),
-                &probe, &velocities, &mut workspace, next.clone(),
+                &runner.pool,
+                &CancelGate::new_clock_free(),
+                dynamic(),
+                Some(&molecular),
+                &probe,
+                &velocities,
+                &mut workspace,
+                next.clone(),
             )
             .unwrap();
         let mut clean = forced(cx, current);
         let mut clean_workspace = clean.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
         let expected = clean
             .advance_serial_with_channel_dynamic_sgs_and_moving_walls(
-                cx, dynamic(), Some(&molecular), &probe, &velocities, &mut clean_workspace, next.clone(),
+                cx,
+                dynamic(),
+                Some(&molecular),
+                &probe,
+                &velocities,
+                &mut clean_workspace,
+                next.clone(),
             )
             .unwrap();
         assert_eq!(observed, expected);

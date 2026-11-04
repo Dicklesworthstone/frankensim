@@ -23,7 +23,10 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         workspace: &mut SgsWorkspace3<L::Collision>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
         self.grid.prepare_channel_sgs_with_motion(
-            config, molecular, workspace, Some(self.forces()),
+            config,
+            molecular,
+            workspace,
+            Some(self.forces()),
             WallMotion3 { probe, velocities },
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )
@@ -43,7 +46,10 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             cx, config, molecular, probe, velocities, workspace,
         )?;
         let walls = self.step_serial_with_moving_wall_momentum(
-            cx, probe, velocities, workspace.collisions(),
+            cx,
+            probe,
+            velocities,
+            workspace.collisions(),
         )?;
         Ok((report, walls))
     }
@@ -65,7 +71,11 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             cx, config, molecular, probe, velocities, workspace,
         )?;
         let walls = self.advance_serial_with_moving_wall_momentum(
-            cx, probe, velocities, workspace.collisions(), forces_at_end,
+            cx,
+            probe,
+            velocities,
+            workspace.collisions(),
+            forces_at_end,
         )?;
         Ok((report, walls))
     }
@@ -83,11 +93,19 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         workspace: &mut SgsWorkspace3<L::Collision>,
     ) -> Result<(SgsReport, MovingWallMomentum3), SgsStepError<L::Error>> {
         let report = self.grid.prepare_channel_sgs_with_motion(
-            config, molecular, workspace, Some(self.forces()),
-            WallMotion3 { probe, velocities }, || gate_checkpoint(gate),
+            config,
+            molecular,
+            workspace,
+            Some(self.forces()),
+            WallMotion3 { probe, velocities },
+            || gate_checkpoint(gate),
         )?;
         let walls = self.step_pooled_with_moving_wall_momentum(
-            pool, gate, probe, velocities, workspace.collisions(),
+            pool,
+            gate,
+            probe,
+            velocities,
+            workspace.collisions(),
         )?;
         Ok((report, walls))
     }
@@ -106,11 +124,20 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         forces_at_end: Vec<[f64; 3]>,
     ) -> Result<(SgsReport, MovingWallMomentum3), SgsStepError<L::Error>> {
         let report = self.grid.prepare_channel_sgs_with_motion(
-            config, molecular, workspace, Some(self.forces()),
-            WallMotion3 { probe, velocities }, || gate_checkpoint(gate),
+            config,
+            molecular,
+            workspace,
+            Some(self.forces()),
+            WallMotion3 { probe, velocities },
+            || gate_checkpoint(gate),
         )?;
         let walls = self.advance_pooled_with_moving_wall_momentum(
-            pool, gate, probe, velocities, workspace.collisions(), forces_at_end,
+            pool,
+            gate,
+            probe,
+            velocities,
+            workspace.collisions(),
+            forces_at_end,
         )?;
         Ok((report, walls))
     }
@@ -127,7 +154,10 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         workspace: &mut ChannelDynamicSgsWorkspace3<L::Collision>,
     ) -> Result<DynamicSgsStepReport, SgsStepError<L::Error>> {
         self.grid.prepare_channel_dynamic_sgs_with_motion(
-            config, molecular, workspace, Some(self.forces()),
+            config,
+            molecular,
+            workspace,
+            Some(self.forces()),
             Some(WallMotion3 { probe, velocities }),
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )
@@ -147,7 +177,10 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             cx, config, molecular, probe, velocities, workspace,
         )?;
         let walls = self.step_serial_with_moving_wall_momentum(
-            cx, probe, velocities, workspace.collisions(),
+            cx,
+            probe,
+            velocities,
+            workspace.collisions(),
         )?;
         Ok((report, walls))
     }
@@ -168,7 +201,11 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             cx, config, molecular, probe, velocities, workspace,
         )?;
         let walls = self.advance_serial_with_moving_wall_momentum(
-            cx, probe, velocities, workspace.collisions(), forces_at_end,
+            cx,
+            probe,
+            velocities,
+            workspace.collisions(),
+            forces_at_end,
         )?;
         Ok((report, walls))
     }
@@ -186,11 +223,19 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         workspace: &mut ChannelDynamicSgsWorkspace3<L::Collision>,
     ) -> Result<(DynamicSgsStepReport, MovingWallMomentum3), SgsStepError<L::Error>> {
         let report = self.grid.prepare_channel_dynamic_sgs_with_motion(
-            config, molecular, workspace, Some(self.forces()),
-            Some(WallMotion3 { probe, velocities }), || gate_checkpoint(gate),
+            config,
+            molecular,
+            workspace,
+            Some(self.forces()),
+            Some(WallMotion3 { probe, velocities }),
+            || gate_checkpoint(gate),
         )?;
         let walls = self.step_pooled_with_moving_wall_momentum(
-            pool, gate, probe, velocities, workspace.collisions(),
+            pool,
+            gate,
+            probe,
+            velocities,
+            workspace.collisions(),
         )?;
         Ok((report, walls))
     }
@@ -209,11 +254,20 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         forces_at_end: Vec<[f64; 3]>,
     ) -> Result<(DynamicSgsStepReport, MovingWallMomentum3), SgsStepError<L::Error>> {
         let report = self.grid.prepare_channel_dynamic_sgs_with_motion(
-            config, molecular, workspace, Some(self.forces()),
-            Some(WallMotion3 { probe, velocities }), || gate_checkpoint(gate),
+            config,
+            molecular,
+            workspace,
+            Some(self.forces()),
+            Some(WallMotion3 { probe, velocities }),
+            || gate_checkpoint(gate),
         )?;
         let walls = self.advance_pooled_with_moving_wall_momentum(
-            pool, gate, probe, velocities, workspace.collisions(), forces_at_end,
+            pool,
+            gate,
+            probe,
+            velocities,
+            workspace.collisions(),
+            forces_at_end,
         )?;
         Ok((report, walls))
     }

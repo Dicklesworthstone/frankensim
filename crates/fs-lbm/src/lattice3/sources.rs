@@ -9,7 +9,9 @@
 //! velocity-dependent force solve, a heat solver, or a total-energy model.
 
 use super::moving_walls::WallMotion3;
-use super::{Grid3, GridError3, Lattice3, StepData, macro_cell, run_pass, run_pass_with_wall_motion};
+use super::{
+    Grid3, GridError3, Lattice3, StepData, macro_cell, run_pass, run_pass_with_wall_motion,
+};
 use core::marker::PhantomData;
 use fs_exec::{CancelGate, Cx, KernelRunner};
 

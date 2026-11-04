@@ -35,7 +35,13 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         collisions: &[L::Collision],
     ) -> Result<MovingWallMomentum3, GridError3<L::Error>> {
         serial(
-            &mut self.grid, &self.forces, &self.forces, collisions, cx, probe, velocities,
+            &mut self.grid,
+            &self.forces,
+            &self.forces,
+            collisions,
+            cx,
+            probe,
+            velocities,
         )
     }
 
@@ -51,7 +57,13 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         forces_at_end: Vec<[f64; 3]>,
     ) -> Result<MovingWallMomentum3, GridError3<L::Error>> {
         let receipt = serial(
-            &mut self.grid, &self.forces, &forces_at_end, collisions, cx, probe, velocities,
+            &mut self.grid,
+            &self.forces,
+            &forces_at_end,
+            collisions,
+            cx,
+            probe,
+            velocities,
         )?;
         self.forces = forces_at_end;
         Ok(receipt)
@@ -67,7 +79,14 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         collisions: &[L::Collision],
     ) -> Result<MovingWallMomentum3, GridError3<L::Error>> {
         pooled(
-            &mut self.grid, &self.forces, &self.forces, collisions, pool, gate, probe, velocities,
+            &mut self.grid,
+            &self.forces,
+            &self.forces,
+            collisions,
+            pool,
+            gate,
+            probe,
+            velocities,
         )
     }
 
@@ -83,7 +102,14 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         forces_at_end: Vec<[f64; 3]>,
     ) -> Result<MovingWallMomentum3, GridError3<L::Error>> {
         let receipt = pooled(
-            &mut self.grid, &self.forces, &forces_at_end, collisions, pool, gate, probe, velocities,
+            &mut self.grid,
+            &self.forces,
+            &forces_at_end,
+            collisions,
+            pool,
+            gate,
+            probe,
+            velocities,
         )?;
         self.forces = forces_at_end;
         Ok(receipt)
@@ -103,7 +129,12 @@ fn serial<L: ForcedLattice3<Q>, const Q: usize>(
     let motion = WallMotion3 { probe, velocities };
     let moving = motion.admit(grid, poll)?;
     super::serial_with_wall_motion(
-        grid, start, end, collisions, cx, moving.then_some(&motion),
+        grid,
+        start,
+        end,
+        collisions,
+        cx,
+        moving.then_some(&motion),
         |candidate| motion.measure(candidate, poll),
     )
 }
@@ -129,7 +160,13 @@ fn pooled<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner>(
     let motion = WallMotion3 { probe, velocities };
     let moving = motion.admit(grid, poll)?;
     super::pooled_with_wall_motion(
-        grid, start, end, collisions, pool, gate, moving.then_some(&motion),
+        grid,
+        start,
+        end,
+        collisions,
+        pool,
+        gate,
+        moving.then_some(&motion),
         |candidate| motion.measure(candidate, poll),
     )
 }

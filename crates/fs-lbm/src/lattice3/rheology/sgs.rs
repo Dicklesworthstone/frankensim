@@ -92,19 +92,31 @@ fn prepare_sgs<'a, L: SgsLattice3<Q>, const Q: usize>(
     let (report, applied) = match sgs {
         RheologySgs3::Local { config, workspace } => {
             let report = grid.prepare_sgs_with_forces(
-                config, Some(&*collisions), workspace, forces, &mut checkpoint,
+                config,
+                Some(&*collisions),
+                workspace,
+                forces,
+                &mut checkpoint,
             )?;
             (RheologySgsReport3::Local(report), workspace.collisions())
         }
         RheologySgs3::PeriodicDynamic { config, workspace } => {
             let report = grid.prepare_dynamic_sgs_with_forces(
-                config, Some(&*collisions), workspace, forces, &mut checkpoint,
+                config,
+                Some(&*collisions),
+                workspace,
+                forces,
+                &mut checkpoint,
             )?;
             (RheologySgsReport3::Dynamic(report), workspace.collisions())
         }
         RheologySgs3::ChannelDynamic { config, workspace } => {
             let report = grid.prepare_channel_dynamic_sgs_with_forces(
-                config, Some(&*collisions), workspace, forces, &mut checkpoint,
+                config,
+                Some(&*collisions),
+                workspace,
+                forces,
+                &mut checkpoint,
             )?;
             (RheologySgsReport3::Dynamic(report), workspace.collisions())
         }
@@ -161,10 +173,10 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         prepare_workspace(self, reference, None, workspace, resolve, || {
             cx.checkpoint().map_err(|_| GridError3::Cancelled)
         })?;
-        let (report, applied) = prepare_sgs(
-            self, None, &mut workspace.trial.collisions, sgs,
-            || cx.checkpoint().map_err(|_| GridError3::Cancelled),
-        )?;
+        let (report, applied) =
+            prepare_sgs(self, None, &mut workspace.trial.collisions, sgs, || {
+                cx.checkpoint().map_err(|_| GridError3::Cancelled)
+            })?;
         self.step_serial_with_collisions(cx, applied)?;
         Ok(publish(workspace, report))
     }
@@ -185,10 +197,13 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         sgs: RheologySgs3<'_, L::Collision>,
         resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
     ) -> Result<RheologySgsStep3<'w, L::Collision, F>, RheologySgsError3<L::Error>> {
-        prepare_workspace(self, reference, None, workspace, resolve, || gate_poll(gate))?;
-        let (report, applied) = prepare_sgs(
-            self, None, &mut workspace.trial.collisions, sgs, || gate_poll(gate),
-        )?;
+        prepare_workspace(self, reference, None, workspace, resolve, || {
+            gate_poll(gate)
+        })?;
+        let (report, applied) =
+            prepare_sgs(self, None, &mut workspace.trial.collisions, sgs, || {
+                gate_poll(gate)
+            })?;
         self.step_pooled_with_collisions(pool, gate, applied)?;
         Ok(publish(workspace, report))
     }
@@ -210,11 +225,18 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
     ) -> Result<RheologySgsStep3<'w, L::Collision, F>, RheologySgsError3<L::Error>> {
         prepare_workspace(
-            &self.grid, reference, Some(self.forces()), workspace, resolve,
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            workspace,
+            resolve,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
         let (report, applied) = prepare_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs,
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
         self.step_serial(cx, applied)?;
@@ -238,11 +260,18 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
     ) -> Result<RheologySgsStep3<'w, L::Collision, F>, RheologySgsError3<L::Error>> {
         prepare_workspace(
-            &self.grid, reference, Some(self.forces()), workspace, resolve,
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            workspace,
+            resolve,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
         let (report, applied) = prepare_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs,
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
         self.advance_serial(cx, applied, forces_at_end)?;
@@ -265,10 +294,19 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
     ) -> Result<RheologySgsStep3<'w, L::Collision, F>, RheologySgsError3<L::Error>> {
         prepare_workspace(
-            &self.grid, reference, Some(self.forces()), workspace, resolve, || gate_poll(gate),
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            workspace,
+            resolve,
+            || gate_poll(gate),
         )?;
         let (report, applied) = prepare_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs, || gate_poll(gate),
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
+            || gate_poll(gate),
         )?;
         self.step_pooled(pool, gate, applied)?;
         Ok(publish(workspace, report))
@@ -292,10 +330,19 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
     ) -> Result<RheologySgsStep3<'w, L::Collision, F>, RheologySgsError3<L::Error>> {
         prepare_workspace(
-            &self.grid, reference, Some(self.forces()), workspace, resolve, || gate_poll(gate),
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            workspace,
+            resolve,
+            || gate_poll(gate),
         )?;
         let (report, applied) = prepare_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs, || gate_poll(gate),
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
+            || gate_poll(gate),
         )?;
         self.advance_pooled(pool, gate, applied, forces_at_end)?;
         Ok(publish(workspace, report))
