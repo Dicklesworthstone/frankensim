@@ -7,7 +7,9 @@
 //! Straight Euler-Bernoulli segments, Saint-Venant GJ torsion, perfect bonds,
 //! small motions about the supplied geometry. The piano-compatible entry points
 //! retain lumped inertia; the explicit mass variants also admit consistent inertia.
-//! No shear deformation, glue slip, stress stiffening or preload equilibrium.
+//! This ordinary pencil has no shear deformation, glue slip or prestress.
+//! `shell::preload` uses these same beam fields for nonlinear axial stretch,
+//! coupled static equilibrium and the resulting stress-stiffened tangent.
 
 /// Tapered round-beam flexure with consistent rotary inertia.
 pub mod beam;
@@ -165,21 +167,7 @@ fn element(mesh: &ShellMesh, beam: &ShellBeam)
 }
 fn element_with_mass(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass)
     -> Result<([f64;144],[f64;144]),PlateError> {
-    beam.section.validate()?;
-    if beam.nodes[0] == beam.nodes[1]
-        || beam.nodes.iter().any(|&i| i >= mesh.nodes.len())
-        || beam.offsets_m.iter().flatten().chain(beam.section_z.iter()).any(|x| !x.is_finite()) {
-        return Err(bad("invalid beam nodes, offsets or orientation"));
-    }
-    let p: [[f64;3];2] = std::array::from_fn(|i|
-        std::array::from_fn(|j| mesh.nodes[beam.nodes[i]][j]+beam.offsets_m[i][j]));
-    let chord = std::array::from_fn(|i| p[1][i]-p[0][i]);
-    let length = dot(chord,chord).sqrt();
-    let x = unit(chord)?;
-    let hint = unit(beam.section_z)?;
-    let projection = dot(hint,x);
-    let z = unit(std::array::from_fn(|i| hint[i]-projection*x[i]))?;
-    let axes = [x,cross(z,x),z];
+    let (length, transform) = element_kinematics(mesh, beam)?;
     let s = beam.section;
     let mut k = [0.0;144];
     for (a,b,coefficient) in [(0,6,s.young_pa*s.area_m2/length),
@@ -200,6 +188,33 @@ fn element_with_mass(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass)
         }}
     }
     let m = inertia::local_mass(s, l, [0.0; 2], mass)?;
+    let k = congruence(&k,&transform);
+    let m = congruence(&m,&transform);
+    if k.iter().chain(m.iter()).any(|x| !x.is_finite()) {
+        return Err(bad("beam stiffness/inertia overflow"));
+    }
+    Ok((k,m))
+}
+
+// The preload owner uses exactly this original centroidal frame and reciprocal
+// rigid-arm map when differentiating the beam's nonlinear axial storage.
+pub(super) fn element_kinematics(mesh: &ShellMesh, beam: &ShellBeam)
+    -> Result<(f64,[f64;144]),PlateError> {
+    beam.section.validate()?;
+    if beam.nodes[0] == beam.nodes[1]
+        || beam.nodes.iter().any(|&i| i >= mesh.nodes.len())
+        || beam.offsets_m.iter().flatten().chain(beam.section_z.iter()).any(|x| !x.is_finite()) {
+        return Err(bad("invalid beam nodes, offsets or orientation"));
+    }
+    let p: [[f64;3];2] = std::array::from_fn(|i|
+        std::array::from_fn(|j| mesh.nodes[beam.nodes[i]][j]+beam.offsets_m[i][j]));
+    let chord = std::array::from_fn(|i| p[1][i]-p[0][i]);
+    let length = dot(chord,chord).sqrt();
+    let x = unit(chord)?;
+    let hint = unit(beam.section_z)?;
+    let projection = dot(hint,x);
+    let z = unit(std::array::from_fn(|i| hint[i]-projection*x[i]))?;
+    let axes = [x,cross(z,x),z];
     let mut transform=[0.0;144];
     for node in 0..2 {
         let base=6*node;
@@ -212,12 +227,7 @@ fn element_with_mass(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass)
             }
         }
     }
-    let k = congruence(&k,&transform);
-    let m = congruence(&m,&transform);
-    if k.iter().chain(m.iter()).any(|x| !x.is_finite()) {
-        return Err(bad("beam stiffness/inertia overflow"));
-    }
-    Ok((k,m))
+    Ok((length,transform))
 }
 fn congruence(a: &[f64;144], t: &[f64;144]) -> [f64;144] {
     let mut at=[0.0;144]; let mut out=[0.0;144];

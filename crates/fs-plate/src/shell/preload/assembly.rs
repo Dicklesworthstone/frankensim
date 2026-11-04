@@ -7,7 +7,7 @@
 
 use super::tethers::{PreparedPoint, PreparedTether, StrutResponse, TetherResponse};
 use super::{
-    ComponentTransform, CoordinateRows, Element, Equilibrium, PreloadOptions, PreloadProblem,
+    BeamStretch, ComponentTransform, CoordinateRows, Element, Equilibrium, MAX_BONDED_BEAMS, PreloadOptions, PreloadProblem,
     positive_factor, solve_problem_from, validate_options,
 };
 use crate::shell::arching::ReferenceLoadState;
@@ -35,7 +35,7 @@ pub struct ShellPreloadComponent<'a> {
     pub boundary: &'a [usize],
     /// Unrestrained components may obtain all their support through the ties.
     pub support: ShellSupport,
-    /// Existing reference-frame linear bonded beams.
+    /// Bonded beams with the original bending/torsion and nonlinear axial stretch.
     pub beams: &'a [ShellBeam],
     /// Full `6 * node_count` world forces [N] and moments [N m].
     /// Loads at eliminated seam nodes are transferred through the same `T^T`.
@@ -155,8 +155,9 @@ pub struct PreloadedConnectedShellAssembly {
 ///
 /// Uses [`super::equilibrate_shell_materials`]'s Green--Lagrange membrane force,
 /// analytic tangent, moderate-rotation limits, continuation and independent
-/// physical-force acceptance. The bending, drilling, beams, glue and offsets
-/// retain their existing reference-frame linear laws. This is the CST/DKT
+/// physical-force acceptance. Bonded beams use their original cubic fields for
+/// nonlinear axial stretch and its consistent force/tangent. Bending, drilling,
+/// glue and offsets retain their reference-frame linear laws. This is the CST/DKT
 /// shell path; it does not silently replace a caller's shear-shell element.
 ///
 /// All component geometries must explicitly be unloaded. This entry point
@@ -164,7 +165,7 @@ pub struct PreloadedConnectedShellAssembly {
 /// conservative, direction-updating tensile connections, and
 /// [`equilibrate_connected_shell_assembly`] includes elastic compressive posts.
 /// Nonconservative follower loads and footprint contact need their own laws.
-/// At most 64 components, 10,000 total nodes and 40,000 total triangles are
+/// At most 64 components, 10,000 total nodes, 40,000 triangles and 40,000 beams are
 /// admitted. Tie work uses the caller's existing `TieBudget`; nonlinear work
 /// uses `PreloadOptions`. Cancellation is checked during component/tie assembly
 /// and before and after each injected solve. The solver may check it internally.
@@ -297,6 +298,7 @@ pub fn equilibrate_connected_shell_assembly(
 struct PreparedAssembly {
     assembly: TiedShellModel,
     elements: Vec<Element>,
+    beams: Vec<BeamStretch>,
     transforms: Vec<ComponentTransform>,
     tethers: Vec<PreparedTether>,
     tether_count: usize,
@@ -327,6 +329,7 @@ fn prepare_assembly(
     }
     let mut node_count = 0usize;
     let mut triangle_count = 0usize;
+    let mut beam_count = 0usize;
     for component in components {
         if cancelled() {
             return Err("assembled shell preload cancelled".into());
@@ -337,7 +340,9 @@ fn prepare_assembly(
         triangle_count = triangle_count
             .checked_add(component.mesh.tris.len())
             .ok_or("assembled preload triangle budget overflow")?;
-        if node_count > 10_000 || triangle_count > 40_000 {
+        beam_count = beam_count.checked_add(component.beams.len())
+            .ok_or("assembled preload beam budget overflow")?;
+        if node_count > 10_000 || triangle_count > 40_000 || beam_count > MAX_BONDED_BEAMS {
             return Err("assembled preload exceeds aggregate shell geometry budget".into());
         }
         if component.reference_state != ReferenceLoadState::Unloaded {
@@ -426,6 +431,7 @@ fn prepare_assembly(
     }
     let mut transforms = Vec::with_capacity(components.len());
     let mut elements = Vec::with_capacity(triangle_count);
+    let mut beams = Vec::with_capacity(beam_count);
     for (c, (component, model)) in components.iter().zip(&models).enumerate() {
         // Read the junction owner's exact retained/slave rows. No interpolation
         // or alternate constraint elimination is reconstructed here.
@@ -450,6 +456,12 @@ fn prepare_assembly(
             }
             elements.push(element);
         }
+        for beam in component.beams {
+            if cancelled() { return Err("assembled shell preload cancelled".into()); }
+            let mut stretch = BeamStretch::new(component.mesh, model, beam)?;
+            if !single { stretch.transform = Some(Arc::clone(&rows)); }
+            beams.push(stretch);
+        }
         transforms.push(ComponentTransform {
             dof_map: model.dof_map.clone(),
             rows,
@@ -467,6 +479,7 @@ fn prepare_assembly(
     Ok(PreparedAssembly {
         assembly,
         elements,
+        beams,
         transforms,
         tethers: prepared_tethers,
         tether_count: tethers.len(),
@@ -520,6 +533,7 @@ impl PreparedAssembly {
         let mut problem = PreloadProblem {
             model: &self.assembly.model,
             elements: &self.elements,
+            beams: &self.beams,
             transforms: &self.transforms,
             tethers: connections,
             base: &self.base,
@@ -723,3 +737,5 @@ mod strut_tests;
 mod tests;
 #[cfg(test)]
 mod tether_tests;
+#[cfg(test)]
+mod beam_tests;

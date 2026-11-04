@@ -1,17 +1,19 @@
 //! Full-coordinate static loading and small vibrations about equilibrium.
 //!
 //! Uses the SAME Green--Lagrange P1 membrane energy as `shell::reduction`,
-//! together with the existing linear DKT, drilling and bonded-beam stiffness.
-//! The original membrane is replaced, not counted twice. Newton/globalization
+//! together with the existing DKT/drilling stiffness and the bonded beams'
+//! Green--Lagrange centerline stretch. Original linear membrane/axial energies
+//! are replaced, not counted twice. Newton/globalization
 //! is injected by the caller (the piano uses fs-solver); factorization and
 //! stability checks belong to fs-sparse. This avoids a plate/FEEC dependency cycle.
 //! No reduced modal basis is used to find static equilibrium: in-plane response
 //! must not disappear merely because its modes lie above the audible band.
 //!
 //! Dead forces and optional conservative anchored tethers, fixed supports,
-//! moderate rotations. Beam bending/axial laws and offsets remain linear in
-//! their reference frames. No nonconservative follower loads, beam buckling,
-//! glue creep, manufacturing stress, large-rotation bending or unstable branch.
+//! moderate rotations. Beam bending/torsion and offsets retain their linear
+//! reference-frame laws; generated axial stress enters equilibrium and tangent.
+//! No nonconservative follower loads, glue creep, manufacturing stress,
+//! large-rotation bending, torsional buckling or unstable branch continuation.
 use super::{FacetGeometry, ShellMesh, ShellModel, ShellSupport, ShellSection};
 use super::section::Section;
 use super::stiffened::ShellBeam;
@@ -26,6 +28,8 @@ use std::sync::Arc;
 pub mod tethers;
 /// Full-coordinate equilibrium of shells joined by the original mortar ties.
 pub mod assembly;
+mod beams;
+use beams::{BeamStretch, MAX_BONDED_BEAMS};
 use tethers::{PreparedTether, ShellTether, TetherResponse};
 
 /// Explicit cold work and moderate-deformation admission limits.
@@ -189,6 +193,7 @@ impl Element {
 pub struct PreloadProblem<'a> {
     model: &'a ShellModel,
     elements: &'a [Element],
+    beams: &'a [BeamStretch],
     transforms: &'a [ComponentTransform],
     tethers: &'a [PreparedTether],
     base: &'a LdltFactor,
@@ -238,6 +243,9 @@ impl PreloadProblem<'_> {
             energy+=c.energy;
             for i in 0..9 {element.for_dof(i,|d,w|force[d]+=w*c.force[i]);}
         }
+        for beam in self.beams {
+            energy+=beam.add_force_energy(u,force,self.options.maximum_gradient)?;
+        }
         (energy.is_finite() && force.iter().all(|v|v.is_finite())).then_some(energy)
     }
     fn applied_load(&self,u:&[f64])->Result<Vec<f64>,String> {
@@ -283,6 +291,10 @@ impl PreloadProblem<'_> {
                 || c.tangent.iter().any(|v|!v.is_finite()) {return Err("invalid equilibrium tangent".into());}
             element.add_tangent(&c.tangent,&mut k);
         }
+        for beam in self.beams {
+            beam.add_tangent(u,&mut k,self.options.maximum_gradient)
+                .ok_or("invalid bonded-beam equilibrium tangent")?;
+        }
         for tether in self.tethers {tether.add_tangent_at(u,&mut k,self.connection_fraction(),self.fraction)?;}
         Ok(k.assemble())
     }
@@ -317,6 +329,11 @@ impl PreloadProblem<'_> {
                 element.for_dof(i,|a,wa|element.for_dof(j,|b,wb|
                     out[a]+=wa*c.tangent[9*i+j]*wb*v[b]));
             }}
+        }
+        for beam in self.beams {
+            if beam.add_action(&u,&v,out,self.options.maximum_gradient).is_none() {
+                out.fill(f64::NAN);return;
+            }
         }
         for tether in self.tethers {
             if tether.add_action_at(&u,&v,out,self.connection_fraction(),self.fraction).is_err() {out.fill(f64::NAN);return;}
@@ -450,7 +467,7 @@ fn equilibrate_sections<S: Section>(mesh:&ShellMesh,sections:&[S],
     solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize)->Result<(Vec<f64>,usize),String>)
     ->Result<PreloadedShell,String> {
     if mesh.nodes.len()>10_000 || mesh.tris.len()>40_000 || loads.len()!=6*mesh.nodes.len()
-        || tethers.len()>4096
+        || tethers.len()>4096 || beams.len()>MAX_BONDED_BEAMS
         || loads.iter().any(|v|!v.is_finite()) || support==ShellSupport::Free || boundary.is_empty() {
         return Err("invalid supported-shell preload, load cardinality or explicit budget".into());
     }
@@ -468,8 +485,10 @@ fn equilibrate_sections<S: Section>(mesh:&ShellMesh,sections:&[S],
     }}
     let elements=sections.iter().enumerate().map(|(e,s)|Element::new(mesh,&model,s,e))
         .collect::<Result<Vec<_>,_>>()?;
+    let beams=beams.iter().map(|beam|BeamStretch::new(mesh,&model,beam))
+        .collect::<Result<Vec<_>,_>>()?;
     let tethers=tethers.iter().map(|t|PreparedTether::new(t,mesh,&model)).collect::<Result<Vec<_>,_>>()?;
-    let mut problem=PreloadProblem {model:&model,elements:&elements,transforms:&[],tethers:&tethers,base:&base,scale:&scale,
+    let mut problem=PreloadProblem {model:&model,elements:&elements,beams:&beams,transforms:&[],tethers:&tethers,base:&base,scale:&scale,
         load:&load,load_origin:None,fraction:0.,options,evaluations:Cell::new(0)};
     let Equilibrium {u,k,energy,residual_force_n,iterations,evaluations}=solve_problem(&mut problem,solve)?;
     let tether_responses=problem.tethers.iter().map(|t|t.response(&u)).collect::<Result<Vec<_>,_>>()?;
