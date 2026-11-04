@@ -198,6 +198,54 @@ all six face normals with spatial traces and corrected stress, mixed wall/open
 edges on all three axes, mass/linear/angular closure, serial/pooled parity,
 weak drag, exact zero-drag reduction, and late refusal with atomic retry.
 
+## Implicit porous resistance on the shared D3Q19/D3Q27 grid
+
+`lattice3::sources::resistance::ResistanceGrid3<L,Q>` adds frozen spatial
+anisotropic Darcy/Brinkman and rotationally invariant vector-speed Forchheimer
+resistance to the original shared lattice grid. Both the D3Q19 adapter and
+D3Q27 quadratic/factorized BGK and TRT, central-moment and cumulant collisions
+reuse the existing `DarcyForchheimer3` admission, endpoint solve and local
+force/work arithmetic. Each collision keeps its own native source convention.
+
+Construction requires an unstepped, zero-uniform-force grid and explicitly
+declares its initial population frame. The initial force is solved from supplied
+raw moments; attachment does not preserve a previously read unforced velocity,
+reset populations or rebind an evolved state. Resistance, prescribed skeleton
+velocity and independent body force remain immutable. Read physical macros from
+the retained force-aware owner.
+
+Accepted force and separately retained constitutive drag remain at the same
+epoch as the populations. Native collision uses that force; the endpoint solve
+is fused into the original pull pass. Population, force/drag and completed-step
+buffers publish atomically. Fixed 64-cell arithmetic and ordered receipt
+reductions retain identical serial and pooled results across worker counts.
+The original wall probe measures every stationary exterior/voxel wall link.
+Periodic angular jumps are measured from actual fluid pulls, including D3Q27
+corner wraps and excluding reflected links. Neither boundary term is inferred
+from a global momentum residual.
+
+Initial and endpoint admission check that represented physical velocity recovers
+the solved drag within 4096 machine epsilons relative, without a unit-sized or
+body-force tolerance floor. Unresolved half-force cancellation refuses rather
+than reporting a recomputed source different from the retained collision force.
+Work uses actual retained endpoint drags and is independently checked against
+uncancelled endpoint work. Constitutive loss remains distinct from total fluid
+kinetic transport; no heat or finite skeleton inertia evolves here.
+
+Seven new native numerical cases cover all collision families, rotated anisotropy,
+nonlinear second-order decay, resolved stiff reversal, extreme resolved
+resistance contrast, unresolved cancellation refusal, an independent push
+transport oracle, complete wall/periodic exchange, exact zero-resistance native
+parity, worker bits and atomic refusal/retry. All 38 existing boundary-forcing
+cases also pass, preserving the specialized D3Q19 behavior.
+
+The original integration target also typechecks against the full actual
+production dependency graph.
+
+The original low-Mach/collision bounds and spatial/time refinement requirements
+remain. This frozen-law owner adds no moving/open boundaries, evolving skeleton
+motion, force-frame conversion or complete fluid-energy guarantee.
+
 ## D3Q27 TRT for wall-bounded laminar flow
 
 `CollisionModel27::Trt { tau, magic, equilibrium }` extends the original

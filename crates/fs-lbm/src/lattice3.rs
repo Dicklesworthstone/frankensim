@@ -140,18 +140,8 @@ fn macro_cell<L: Lattice3<Q>, const Q: usize>(
     cell: usize,
     maximum: f64,
 ) -> Result<(f64, [f64; 3]), GridError3<L::Error>> {
-    let rho: f64 = f.iter().sum();
-    if !rho.is_finite() || rho <= 0.0 || f.iter().any(|v| !v.is_finite()) {
-        return Err(GridError3::NonFiniteCell { cell });
-    }
-    let u: [f64; 3] = core::array::from_fn(|a| {
-        (f.iter()
-            .enumerate()
-            .map(|(q, p)| f64::from(L::E[q][a]) * p)
-            .sum::<f64>()
-            + 0.5 * force[a])
-            / rho
-    });
+    let (rho, momentum) = raw_moments_cell::<L, Q>(f, cell)?;
+    let u: [f64; 3] = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
     let mach = (u.iter().map(|v| v * v).sum::<f64>() / L::CS2).sqrt();
     if !mach.is_finite() || mach > maximum {
         return Err(GridError3::Mach {
@@ -161,6 +151,26 @@ fn macro_cell<L: Lattice3<Q>, const Q: usize>(
         });
     }
     Ok((rho, u))
+}
+
+// The implicit source owner must establish positive density before solving
+// its endpoint velocity. A provisional raw velocity is not a physical Mach
+// test while that endpoint force is still unknown.
+fn raw_moments_cell<L: Lattice3<Q>, const Q: usize>(
+    f: &[f64; Q],
+    cell: usize,
+) -> Result<(f64, [f64; 3]), GridError3<L::Error>> {
+    let rho: f64 = f.iter().sum();
+    if !rho.is_finite() || rho <= 0.0 || f.iter().any(|v| !v.is_finite()) {
+        return Err(GridError3::NonFiniteCell { cell });
+    }
+    let momentum = core::array::from_fn(|a| {
+        f.iter()
+            .enumerate()
+            .map(|(q, p)| f64::from(L::E[q][a]) * p)
+            .sum::<f64>()
+    });
+    Ok((rho, momentum))
 }
 
 impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
@@ -614,6 +624,17 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
         base: usize,
         stream: bool,
     ) -> Result<(), GridError3<L::Error>> {
+        if stream {
+            return self.process_stream_with_endpoint::<false>(
+                src,
+                dst,
+                base,
+                |cell, output, _| {
+                    let force = self.forces.map_or(self.force, |field| field[cell]);
+                    macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach).map(|_| ())
+                },
+            );
+        }
         let collide = L::collide_kernel();
         for (offset, output) in dst.iter_mut().enumerate() {
             let cell = base + offset;
@@ -622,15 +643,33 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
                 continue;
             }
             let force = self.forces.map_or(self.force, |field| field[cell]);
-            if !stream {
-                let collision = self.collisions.map_or(self.collision, |field| field[cell]);
-                *output = collide(src[cell], collision, force)
-                    .map_err(|source| GridError3::Collision { cell, source })?;
-                macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
-            } else {
-                self.pull_cell(src, output, cell);
-                macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
+            let collision = self.collisions.map_or(self.collision, |field| field[cell]);
+            *output = collide(src[cell], collision, force)
+                .map_err(|source| GridError3::Collision { cell, source })?;
+            macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
+        }
+        Ok(())
+    }
+
+    fn process_stream_with_endpoint<const MEASURE_PERIODIC: bool>(
+        &self,
+        src: &[[f64; Q]],
+        dst: &mut [[f64; Q]],
+        base: usize,
+        mut endpoint: impl FnMut(
+            usize,
+            &[f64; Q],
+            crate::d3q19::PeriodicMomentumTransport3,
+        ) -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(), GridError3<L::Error>> {
+        for (offset, output) in dst.iter_mut().enumerate() {
+            let cell = base + offset;
+            if self.solid[cell] {
+                *output = src[cell];
+                continue;
             }
+            let transport = self.pull_cell_with_periodic::<MEASURE_PERIODIC>(src, output, cell);
+            endpoint(cell, output, transport)?;
         }
         Ok(())
     }
@@ -640,6 +679,17 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
     // to an already published or provisionally admitted stationary endpoint.
     #[inline]
     fn pull_cell(&self, src: &[[f64; Q]], output: &mut [f64; Q], cell: usize) {
+        self.pull_cell_with_periodic::<false>(src, output, cell);
+    }
+
+    #[inline]
+    fn pull_cell_with_periodic<const MEASURE: bool>(
+        &self,
+        src: &[[f64; Q]],
+        output: &mut [f64; Q],
+        cell: usize,
+    ) -> crate::d3q19::PeriodicMomentumTransport3 {
+        let mut transport = crate::d3q19::PeriodicMomentumTransport3::default();
         let p = coordinates(cell, self.dims);
         for q in 0..Q {
             let mut from = [0; 3];
@@ -660,9 +710,27 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
             output[q] = if wall || self.solid[source] {
                 src[cell][L::OPP[q]]
             } else {
+                if MEASURE {
+                    // Count the actual fluid pull, including double/triple
+                    // wraps. Reflected links never carry periodic transport.
+                    let jump: [f64; 3] = core::array::from_fn(|a| {
+                        (p[a] as isize - from[a] as isize - L::E[q][a] as isize) as f64
+                    });
+                    let crossings = jump.iter().filter(|&&d| d != 0.0).count();
+                    if crossings != 0 {
+                        let momentum = L::E[q].map(|e| f64::from(e) * src[source][q]);
+                        for a in 0..3 {
+                            let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+                            transport.angular_momentum_change[a] +=
+                                jump[b] * momentum[c] - jump[c] * momentum[b];
+                        }
+                        transport.face_crossings += crossings;
+                    }
+                }
                 src[source][q]
             };
         }
+        transport
     }
 }
 

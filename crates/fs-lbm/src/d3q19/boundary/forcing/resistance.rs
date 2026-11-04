@@ -185,7 +185,7 @@ impl LinearResistance3 {
 }
 
 impl ResistanceMomentumExchange3 {
-    fn add(&mut self, other: Self) {
+    pub(crate) fn add(&mut self, other: Self) {
         for a in 0..3 {
             self.external_impulse[a] += other.external_impulse[a];
             self.external_angular_impulse[a] += other.external_angular_impulse[a];
@@ -198,7 +198,7 @@ impl ResistanceMomentumExchange3 {
         self.relative_dissipation += other.relative_dissipation;
     }
 
-    fn is_finite(self) -> bool {
+    pub(crate) fn is_finite(self) -> bool {
         [
             self.external_impulse,
             self.external_angular_impulse,
@@ -214,6 +214,26 @@ impl ResistanceMomentumExchange3 {
             self.relative_dissipation,
         ])
         .all(f64::is_finite)
+    }
+}
+
+impl DarcyForchheimer3 {
+    // The local force/work law has no lattice dependence. Both native grid
+    // owners call this unchanged receipt arithmetic with their actual macros.
+    pub(crate) fn momentum_exchange(
+        self,
+        initial_velocity: [f64; 3],
+        endpoint_velocity: [f64; 3],
+        initial_drag: [f64; 3],
+        endpoint_drag: [f64; 3],
+        cell: [usize; 3],
+        origin: [f64; 3],
+    ) -> Option<ResistanceMomentumExchange3> {
+        PreparedResistance3 {
+            law: self,
+            velocity: initial_velocity,
+        }
+        .exchange_with_drag(endpoint_velocity, initial_drag, endpoint_drag, cell, origin)
     }
 }
 
@@ -243,9 +263,25 @@ impl PreparedResistance3 {
         cell: [usize; 3],
         origin: [f64; 3],
     ) -> Option<ResistanceMomentumExchange3> {
+        self.exchange_with_drag(
+            velocity,
+            self.law.drag(self.velocity),
+            endpoint_drag,
+            cell,
+            origin,
+        )
+    }
+
+    fn exchange_with_drag(
+        self,
+        velocity: [f64; 3],
+        initial_drag: [f64; 3],
+        endpoint_drag: [f64; 3],
+        cell: [usize; 3],
+        origin: [f64; 3],
+    ) -> Option<ResistanceMomentumExchange3> {
         let law = self.law.linear;
         let midpoint = core::array::from_fn(|a| 0.5 * self.velocity[a] + 0.5 * velocity[a]);
-        let initial_drag = self.law.drag(self.velocity);
         // Retain the constitutive transfer independently of body-force scale.
         let reaction = core::array::from_fn(|a| -0.5 * initial_drag[a] - 0.5 * endpoint_drag[a]);
         let offset = core::array::from_fn(|a| cell[a] as f64 + 0.5 - origin[a]);

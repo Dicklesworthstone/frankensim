@@ -33,7 +33,7 @@ impl From<LinearResistance3> for DarcyForchheimer3 {
 }
 
 impl DarcyForchheimer3 {
-    pub(super) fn admit(self) -> Result<(), BoundaryStepError3> {
+    pub(crate) fn admit(self) -> Result<(), BoundaryStepError3> {
         self.linear.admit()?;
         if !self.quadratic.is_finite() || self.quadratic < 0.0 {
             return Err(BoundaryStepError3::EndpointForce {
@@ -43,7 +43,7 @@ impl DarcyForchheimer3 {
         Ok(())
     }
 
-    pub(super) fn drag(self, velocity: [f64; 3]) -> [f64; 3] {
+    pub(crate) fn drag(self, velocity: [f64; 3]) -> [f64; 3] {
         let linear = self.linear.drag(velocity);
         if self.quadratic == 0.0 {
             return linear;
@@ -61,7 +61,7 @@ impl DarcyForchheimer3 {
         core::array::from_fn(|a| self.linear.body_force[a] + drag[a])
     }
 
-    pub(super) fn endpoint_force(
+    pub(crate) fn endpoint_force(
         self,
         rho: f64,
         momentum: [f64; 3],

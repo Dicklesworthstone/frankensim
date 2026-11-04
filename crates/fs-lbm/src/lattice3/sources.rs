@@ -14,6 +14,8 @@ use fs_exec::{CancelGate, Cx, KernelRunner};
 
 /// Source-preserving material viscosity and density-driven buoyancy.
 pub mod material;
+/// Implicit anisotropic Darcy–Forchheimer sources with native momentum exchange.
+pub mod resistance;
 
 /// Native collision capability used before a force-bearing endpoint can be
 /// published. This is separate from coefficient validity: D3Q19 and D3Q27
@@ -105,7 +107,8 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         &self,
         gate: &CancelGate,
         workspace: &'a mut crate::kinematics::KinematicsWorkspace3,
-    ) -> Result<&'a [Option<crate::kinematics::FlowKinematics3>], crate::kinematics::KinematicsError> {
+    ) -> Result<&'a [Option<crate::kinematics::FlowKinematics3>], crate::kinematics::KinematicsError>
+    {
         self.grid
             .kinematics_with_forces(gate, workspace, Some(&self.forces))
     }
