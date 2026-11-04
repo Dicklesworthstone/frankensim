@@ -1267,3 +1267,33 @@ and original fluid snapshot; the unavailable molecular constructor is omitted
 from the leaf and no replacement material behavior is supplied. The seventh
 public regression covers original molecular relaxation and reflection but
 remains unrun without the constellation. This is not full workspace validation.
+
+### Spatial coherence and physical microphone-array readouts
+
+`observation::array::PreparedHarmonicArray<D>` binds borrowed original 2D/3D
+receiver ensembles to one caller-authored source clock and unique ordered
+physical fluctuation coordinates. Equal factor counts or laws alone do not
+establish correlation. Allocation-free bounded pair queries retain complete
+p/p, p/u, u/p and u/u finite-window second moments. Covariance of time-averaged
+signals is computed separately and directly from real/proper fluctuation
+factors, without subtracting a large deterministic mean.
+
+`prepare_readout` coherently projects actual pressure and velocity through
+ideal first-order microphones using each receiver's original fluid impedance.
+Signed gains and causal harmonic delays apply once; projection, phase and
+exact-frequency grouping retain double-double coefficients before products.
+Prepared observations delegate to the existing harmonic ensemble/window owner.
+Joint processed-channel statistics require matching clock/factor identities
+and explicit pair-work admission. No propagation law is duplicated.
+
+Cross-location p/u products are not local energy flux. Processed channels are
+pressure-equivalent signals, not new spatial receivers, loading ports,
+radiation estimates, measured microphone calibration or transient pulse
+filters. Harmonic continuation and the original source/propagation limits
+remain explicit. Five focused native public tests pass for independent
+time/ensemble quadrature, beamforming/directional nulls, velocity response at
+a pressure null, weak covariance beside large coherent terms, real/proper
+coordinates, resource admission and cancellation. They compile the production
+observation modules, shared harmonic/math algorithms and original fluid-state
+constructor/methods; only root error carriers are nominal. The numerical leaf
+also compiles with warnings denied. Full workspace integration remains unrun.

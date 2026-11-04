@@ -36,6 +36,9 @@ pub use ensemble::{
     PreparedHarmonicEnsemble, WindowedAcousticEnsemble,
 };
 
+/// Spatial correlations and physical readouts on one authored source clock.
+pub mod array;
+
 /// A spectral line of an already propagated acoustic field.
 ///
 /// Pressure and velocity share one physical clock and the same peak-amplitude,
