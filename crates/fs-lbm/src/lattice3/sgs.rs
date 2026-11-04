@@ -118,7 +118,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
 
     // A spatial force slice always belongs to the SAME accepted epoch as f.
     // None preserves the original uniform-force path and arithmetic.
-    fn prepare_sgs_with_forces(
+    pub(in crate::lattice3) fn prepare_sgs_with_forces(
         &self,
         config: SgsConfig,
         molecular: Option<&[L::Collision]>,

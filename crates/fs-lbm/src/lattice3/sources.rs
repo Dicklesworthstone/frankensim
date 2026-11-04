@@ -8,12 +8,14 @@
 //! Source evolution is prescribed by the caller; this is not an implicit
 //! velocity-dependent force solve, a heat solver, or a total-energy model.
 
-use super::{Grid3, GridError3, Lattice3, StepData, macro_cell, run_pass};
+use super::moving_walls::WallMotion3;
+use super::{Grid3, GridError3, Lattice3, StepData, macro_cell, run_pass, run_pass_with_wall_motion};
 use core::marker::PhantomData;
 use fs_exec::{CancelGate, Cx, KernelRunner};
 
 /// Source-preserving material viscosity and density-driven buoyancy.
 pub mod material;
+mod moving_walls;
 /// Implicit anisotropic Darcy–Forchheimer sources with native momentum exchange.
 pub mod resistance;
 
@@ -215,6 +217,20 @@ fn serial<L: ForcedLattice3<Q>, const Q: usize>(
     collisions: &[L::Collision],
     cx: &Cx<'_>,
 ) -> Result<(), GridError3<L::Error>> {
+    serial_with_wall_motion(grid, start, end, collisions, cx, None, |_| Ok(()))
+}
+
+// Source endpoints and optional wall corrections share the ORIGINAL native
+// transaction. Observe its candidate before publishing populations or forces.
+fn serial_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, R>(
+    grid: &mut Grid3<L, Q>,
+    start: &[[f64; 3]],
+    end: &[[f64; 3]],
+    collisions: &[L::Collision],
+    cx: &Cx<'_>,
+    motion: Option<&WallMotion3<'_, L, Q>>,
+    observe: impl FnOnce(&Grid3<L, Q>) -> Result<R, GridError3<L::Error>>,
+) -> Result<R, GridError3<L::Error>> {
     let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
     grid.admit_collisions(collisions, &mut poll)?;
     admit_forces(grid, end, Some(collisions), &mut poll)?;
@@ -243,12 +259,18 @@ fn serial<L: ForcedLattice3<Q>, const Q: usize>(
     };
     for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
         poll()?;
-        data.process(&grid.post, chunk, tile * 64, true)?;
+        if let Some(motion) = motion {
+            data.process_moving_walls(&grid.post, chunk, tile * 64, motion)?;
+        } else {
+            data.process(&grid.post, chunk, tile * 64, true)?;
+        }
     }
+    poll()?;
+    let result = observe(grid)?;
     poll()?;
     core::mem::swap(&mut grid.f, &mut grid.next);
     grid.completed_steps = step;
-    Ok(())
+    Ok(result)
 }
 
 fn pooled<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner>(
@@ -259,6 +281,20 @@ fn pooled<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner>(
     pool: &P,
     gate: &CancelGate,
 ) -> Result<(), GridError3<L::Error>> {
+    pooled_with_wall_motion(grid, start, end, collisions, pool, gate, None, |_| Ok(()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pooled_with_wall_motion<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner, R>(
+    grid: &mut Grid3<L, Q>,
+    start: &[[f64; 3]],
+    end: &[[f64; 3]],
+    collisions: &[L::Collision],
+    pool: &P,
+    gate: &CancelGate,
+    motion: Option<&WallMotion3<'_, L, Q>>,
+    observe: impl FnOnce(&Grid3<L, Q>) -> Result<R, GridError3<L::Error>>,
+) -> Result<R, GridError3<L::Error>> {
     let mut poll = || {
         if gate.is_requested() {
             Err(GridError3::Cancelled)
@@ -288,11 +324,13 @@ fn pooled<L: ForcedLattice3<Q>, const Q: usize, P: KernelRunner>(
         forces: Some(end),
         ..data
     };
-    run_pass(&data, &grid.post, &mut grid.next, true, pool, gate)?;
+    run_pass_with_wall_motion(&data, &grid.post, &mut grid.next, true, pool, gate, motion)?;
+    poll()?;
+    let result = observe(grid)?;
     poll()?;
     core::mem::swap(&mut grid.f, &mut grid.next);
     grid.completed_steps = step;
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]

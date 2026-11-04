@@ -118,7 +118,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         self.prepare_dynamic_sgs_with_forces(config, molecular, workspace, None, checkpoint)
     }
 
-    pub(super) fn prepare_dynamic_sgs_with_forces(
+    pub(in crate::lattice3) fn prepare_dynamic_sgs_with_forces(
         &self,
         config: DynamicSgsConfig,
         molecular: Option<&[L::Collision]>,

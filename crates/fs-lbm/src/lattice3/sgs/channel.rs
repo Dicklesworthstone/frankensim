@@ -121,6 +121,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             config,
             molecular,
             workspace,
+            None,
             WallMotion3 { probe, velocities },
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )
@@ -170,6 +171,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             config,
             molecular,
             workspace,
+            None,
             WallMotion3 { probe, velocities },
             || {
                 if gate.is_requested() {
@@ -189,11 +191,12 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         Ok((report, walls))
     }
 
-    fn prepare_channel_sgs_with_motion(
+    pub(super) fn prepare_channel_sgs_with_motion(
         &self,
         config: SgsConfig,
         molecular: Option<&[L::Collision]>,
         workspace: &mut SgsWorkspace3<L::Collision>,
+        forces: Option<&[[f64; 3]]>,
         motion: WallMotion3<'_, L, Q>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
@@ -205,7 +208,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             config,
             molecular,
             workspace,
-            None,
+            forces,
             |_, _, positive| walls[usize::from(positive)],
             checkpoint,
         )
@@ -414,7 +417,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         self.prepare_channel_dynamic_sgs_with_forces(config, molecular, workspace, None, checkpoint)
     }
 
-    pub(super) fn prepare_channel_dynamic_sgs_with_forces(
+    pub(in crate::lattice3) fn prepare_channel_dynamic_sgs_with_forces(
         &self,
         config: ChannelDynamicSgsConfig,
         molecular: Option<&[L::Collision]>,
@@ -427,7 +430,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         )
     }
 
-    fn prepare_channel_dynamic_sgs_with_motion(
+    pub(super) fn prepare_channel_dynamic_sgs_with_motion(
         &self,
         config: ChannelDynamicSgsConfig,
         molecular: Option<&[L::Collision]>,

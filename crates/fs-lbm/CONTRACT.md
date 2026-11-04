@@ -3060,8 +3060,33 @@ bounded workspaces and cancellation checkpoints. Ordinary `Grid3` paths keep
 their original uniform-force arithmetic. Local solid/stationary-halfway-wall
 stencils, all-fluid periodic/channel dynamic topology, independent nonshear
 rates, molecular-ratio limits, byte limits and exploratory-use admission stay
-in force. This adds no moving/open wall model, material-wrapper API, thermal
+in force.
+
+The moving-wall entries on `ForcedGrid3` now use the same native wall probe,
+correction and impulse/work receipt as `Grid3`, while retaining both body-force
+epochs. They offer held-force steps and endpoint-force advances in serial and
+pooled execution. Physical momentum changes by the trapezoidal body impulse
+plus the receipt's `fluid_population_impulse`; the original wall-relative
+mass terms and sign of wall work remain unchanged. The receipt is admitted
+from the actual candidate buffers before populations, clock or next forces
+publish. No second collision or population buffer is introduced.
+
+Local and dynamic channel SGS compose with these entries through
+`prepare_channel_sgs_with_moving_walls` and
+`prepare_channel_dynamic_sgs_with_moving_walls`, plus their combined
+`step_*`/`advance_*` methods. The current force frame, complete uniform
+tangential wall pair and original molecular field determine each incoming
+fit. A next force endpoint cannot alter that fit. The same prepared
+collisions and exact wall drive then enter the source-aware native stream.
+Existing channel topology, Mach, viscosity-ratio and exploration-only
+admission remain authoritative. This adds no open-boundary model, thermal
 energy owner or turbulent-DNS qualification.
+
+Focused regression definitions cover uniform-force native equivalence,
+changing-force momentum balance, force-frame and next-endpoint independence,
+local/dynamic prepared-step equivalence, worker identity and atomic
+refusal/cancellation/retry. Native compilation and execution were unavailable
+in this implementation session after the shared executor disconnected.
 
 ### Resolved vorticity on native three-dimensional flow owners
 
