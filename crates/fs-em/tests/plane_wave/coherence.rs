@@ -11,6 +11,8 @@ use fs_em::plane_wave::{
 };
 use fs_math::det;
 
+mod absorption;
+
 fn limits() -> AngularSpectrumLimits {
     AngularSpectrumLimits {
         maximum_grid_points: 128,

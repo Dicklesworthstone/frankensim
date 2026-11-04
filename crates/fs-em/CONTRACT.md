@@ -3943,3 +3943,30 @@ skin heating, weak absorption, lossless TIR and admission/cancellation.
 Four native arithmetic tests passed with actual fs-math before the final
 deep-tail/opacity fallback; its additional decimal-reference regression and
 the full integration tests remain unrun after execution-host failure.
+
+### Partially coherent illumination heats the same exit substrate
+
+`AngularSpectrumCoherence::transmitted_absorption_field` streams the original
+coherent factor fields through that same substrate-loss owner. Full vector and
+longitudinal interference remain inside each factor; mutually uncorrelated
+factors add only as heat and second moments. The returned
+`AngularSpectrumCoherenceLayerField` describes the queried exit half-space as
+well as finite-film observations. Its local W/m³ and transverse W/m values are
+not additional heat beside a volume's integrated watts.
+
+`transmitted_absorbed_power_w` adds the original factors' analytic depth
+integrals in double-double precision, including infinite absorbing tails and
+exactly zero lossless-evanescent heat. This whole-periodic-cell query allocates
+nothing and uses O(factors * grid points) work without FFT or depth quadrature.
+Local observations use the bank's already admitted whole-factor FFT/work and
+workspace bounds, which include the streamed and output heat planes. Material
+identity, finite-film heat, source coherence and temperature remain unchanged.
+Invalid depths refuse even for an empty ensemble; cancellation publishes no
+partial result and the original bank remains reusable.
+
+Five focused G0/G1/G3/G4 regression groups use original source/material/Maxwell
+owners: independent lossy-interface fringe formulas, one-factor parity and
+coherent versus independent cancellation, complex unitary factor mixing with
+volume/Poynting/film power balance, lossless TIR, and exact workspace admission,
+darkness and transactional refusal. These synthetic constitutive checks do not
+qualify a measured substrate or infer thermal evolution.

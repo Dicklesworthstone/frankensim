@@ -12,8 +12,9 @@ use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayer
 use fs_math::dd::Dd;
 
 /// Whole-factor-bank limits for one query. The conservative workspace includes
-/// one original beam's complete workspace, accumulation/output planes and,
-/// for an internal query, ONE shared layer cache. Other borrowed beam storage,
+/// one original beam's complete workspace and accumulation/output planes,
+/// including streamed and ensemble heat. Internal queries additionally admit
+/// ONE shared layer cache. Other borrowed beam storage,
 /// retained previous results and allocator overhead are outside this bound.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumCoherenceLimits {
@@ -54,9 +55,10 @@ impl AngularSpectrumCoherenceField {
     }
 }
 
-/// The same ensemble inside one authored film. Local positive heat is W/m³;
-/// its transverse integral is W/m of depth. Neither is an extra thermal debit
-/// in addition to the prepared layer's integrated absorbed watts.
+/// The same ensemble inside an authored finite film or the exit half-space.
+/// Local positive heat is W/m³; its transverse integral is W/m of depth.
+/// Neither is an extra thermal debit in addition to that region's integrated
+/// absorbed watts. The region and observation depth belong to the query.
 #[derive(Debug)]
 pub struct AngularSpectrumCoherenceLayerField {
     field: AngularSpectrumCoherenceField,
@@ -226,6 +228,86 @@ impl<'b, 's, 'm> AngularSpectrumCoherence<'b, 's, 'm> {
             accumulate(&mut sums, &field, None, &mut cancelled)?;
         }
         Ok(finish(self.grid(), sums, false, &mut cancelled)?.field)
+    }
+
+    /// Reconstruct ensemble dielectric/Joule heat in the original exit
+    /// half-space, measured inward from the final film face. Every original
+    /// factor keeps its vector interference and longitudinal electric field;
+    /// mutually uncorrelated factors add only after their heat and second
+    /// moments have been formed. Lossless evanescent decay creates no heat.
+    ///
+    /// The bank's admitted workspace already includes both scalar heat planes:
+    /// one streamed coherent factor and the ensemble output. Its original
+    /// whole-bank FFT/work limits remain authoritative. This needs no new
+    /// material solve, layer preparation or additional FFT.
+    pub fn transmitted_absorption_field(
+        &self,
+        depth_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumCoherenceLayerField, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        if !depth_m.is_finite() || depth_m < 0.0 {
+            return Err(bad("substrate depth must be finite and nonnegative"));
+        }
+        let factor_limits = AngularSpectrumLimits {
+            maximum_grid_points: self.anchor.modes.len(),
+            maximum_workspace_bytes: self.anchor.transmitted_absorption_workspace_bytes()?,
+            maximum_fft_work: self.anchor.field_fft_work(),
+        };
+        let mut sums = point_sums(self.anchor.modes.len(), &mut cancelled)?;
+        for factor in self.factors {
+            let field =
+                factor.transmitted_absorption_field(depth_m, factor_limits, &mut cancelled)?;
+            accumulate(
+                &mut sums,
+                field.field(),
+                Some(field.absorbed_power_density_w_m3()),
+                &mut cancelled,
+            )?;
+        }
+        finish(self.grid(), sums, true, &mut cancelled)
+    }
+
+    /// Ensemble watts absorbed between two depths in the original exit medium,
+    /// over the entire periodic transverse cell. The start is finite and
+    /// nonnegative; +infinity is admitted as the end of a substrate tail.
+    /// Finite-film heat remains separately reported by `power()`.
+    ///
+    /// Each original factor analytically integrates its coherent modal loss
+    /// before factor powers are added in double-double precision. This is
+    /// allocation-free O(factors * grid points) work, with no depth sampling or
+    /// FFT. It is not a finite-aperture result or a second thermal debit.
+    pub fn transmitted_absorbed_power_w(
+        &self,
+        depth_start_m: f64,
+        depth_end_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        // Validate even a rank-zero ensemble: darkness does not admit an
+        // invalid physical depth interval.
+        if !depth_start_m.is_finite()
+            || depth_start_m < 0.0
+            || depth_end_m.is_nan()
+            || depth_end_m < depth_start_m
+        {
+            return Err(bad(
+                "absorption depths must be ordered, nonnegative and start finite",
+            ));
+        }
+        let mut absorbed = Dd::ZERO;
+        for factor in self.factors {
+            add(
+                &mut absorbed,
+                factor.transmitted_absorbed_power_w(depth_start_m, depth_end_m, &mut cancelled)?,
+            )?;
+        }
+        let watts = absorbed.to_f64();
+        if !watts.is_finite() || watts < 0.0 {
+            return Err(bad("ensemble substrate heat is unrepresentable"));
+        }
+        poll(&mut cancelled)?;
+        Ok(watts)
     }
 
     /// Prepare identical TE/TM layer responses ONCE for the entire bank. The
