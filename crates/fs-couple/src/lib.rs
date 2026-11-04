@@ -171,6 +171,8 @@ pub mod laminate_thermal;
 pub mod layered_wave_heating;
 /// Analytic porous acoustic absorption deposited once into existing thermal cells.
 pub mod porous_heating;
+/// Finite dry-skeleton recoil under native periodic Darcy--Forchheimer resistance.
+pub mod porous_momentum;
 pub mod tract;
 /// Seeded turbulence noise: shared generator and filter, and the voice's opt-in glottal aspiration source.
 pub mod turbulence_noise;

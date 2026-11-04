@@ -30423,3 +30423,44 @@ validation. The authored public Maxwell/material/thermal integration test was
 not run: the full Cargo/DSR workspace remains unavailable with missing sibling
 checkouts. These limits do not establish full optical-depth, thermal-time or
 material-data convergence.
+
+## Finite periodic porous-skeleton recoil
+
+`porous_momentum::PeriodicPorousSkeleton` couples the original fully periodic
+D3Q19 Darcy–Forchheimer flow to a native finite dry-skeleton mass per
+representative domain. Homogeneous resistance and fixed material axes make
+support invariant under translation; voxel solids, wall/open faces and initial
+spin refuse. `PorousLatticeUnits3` explicitly maps the existing cell size, tick
+and fluid mass at density one into SI. Dry mass excludes that represented fluid;
+no porosity factor, displaced-fluid correction or additional inertia is inferred.
+
+The three shared midpoint velocities are solved by native Newton–Krylov with
+fallible numerical Jacobian actions. Every residual resets one reusable native
+grid candidate to the accepted state and executes the original nonlinear
+resistance step. Native trial/cell ceilings include stencils and the final
+accepted replay. Original fluid populations, force fields, rigid momentum, COM
+position and one physical tick publish together after cancellation and physical
+balance gates.
+
+The nonrotating skeleton receives actual translational recoil. Its ideal
+rotational guide cancels the distributed native drag moment about the actual
+represented midpoint COM, separately from the held external COM drive. Actual
+fluid and body momentum changes are checked independently; angular balance
+includes that guide and the native periodic-cut transport receipt. Constitutive
+dissipation and rigid interface work close without cancelling participant
+defects. Remaining fluid kinetic change includes pressure, transport and
+collision; it is not automatically heat or numerical error.
+
+This is a homogeneous periodic representative-domain model, not motion of a
+finite bounded porous object or evolving occupancy/material axes. The held
+midpoint skeleton velocity retains the original endpoint fluid-force quadrature
+and its stiff-step reversal; spatial and time refinement remain required. No
+heat partition, complete energy-conservation claim or trajectory-error
+certificate is added.
+
+Four focused tests use independent two-mass linear relaxation and kinetic loss,
+quadratic continuous-relaxation refinement, anisotropic nonuniform native-flow
+replay, cross-axis external loading with independent physical guide moments and
+periodic angular balance, shifted reporting origins, and atomic trial-budget,
+cancellation and late-endpoint refusal. The original integration target also
+typechecks with the complete real dependency graph of these numerical owners.
