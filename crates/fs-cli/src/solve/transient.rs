@@ -479,6 +479,9 @@ fn march(
             nonlinear_updates += solved.nonlinear_updates;
             nonlinear_backtracks += solved.nonlinear_backtracks;
             contact_evidence = solved.receipt;
+            physical_target_j = Some(contact_config
+                .ok_or_else(|| bad("live capacity contact lost its physical target"))?
+                .residual_tolerance_j);
             (solved.conduction, "null".to_string(), solved.krylov_iterations)
         } else if !natural.is_empty() {
             let solved = natural::advance(
@@ -882,6 +885,12 @@ pub(super) fn solve(
                 spec, problem.mesh.vertex_count(), problem.mesh.element_count(),
             )?).ok_or_else(|| bad("combined material-control adjoint memory estimate overflows"))?;
         }
+        if temperature_contacts.is_some() {
+            additional = additional.checked_add(adjoint::contact_storage_bytes(
+                problem.mesh.vertex_count(), problem.mesh.element_count(), max_contact_pairs,
+                linear.restart,
+            )?).ok_or_else(|| bad("combined contact adjoint memory estimate overflows"))?;
+        }
         let ports = problem.boundary.conditions().iter()
             .filter(|condition| matches!(condition, fs_conduction::ThermalBc::Robin { .. }))
             .count();
@@ -1107,7 +1116,8 @@ pub(super) fn solve(
             let natural_coupling = natural_requested.then_some(adjoint::NaturalCoupling {
                 laws: natural, pressure_pa,
             });
-            let derivative = adjoint::finish(cx, spec, &engine, problem, interfaces, &grids.fine,
+            let derivative = adjoint::finish(cx, spec, &engine, problem, interfaces,
+                temperature_contacts, max_contact_pairs, &grids.fine,
                 workload.as_ref(), StepConfig { linear, energy_tolerance_j: policy.energy_tolerance.value },
                 nonlinear, labels, region_ids, goal_region.expect("admitted goal region"),
                 radiation, enclosure.as_ref(), natural_coupling.as_ref(), airflow, tape, objective, deadline)?;
@@ -1404,6 +1414,3 @@ pub(super) fn solve(
         endpoint_energy_residual_w,
     })
 }
-
-
-

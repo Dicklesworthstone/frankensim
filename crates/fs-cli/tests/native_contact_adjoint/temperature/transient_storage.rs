@@ -379,9 +379,9 @@ fn unequal_initial_enthalpy_exchanges_heat_through_the_same_source_contact() {
 }
 
 #[test]
-fn contact_trajectory_refuses_unimplemented_history_derivatives() {
+fn contact_trajectory_refuses_unimplemented_material_and_enthalpy_derivatives() {
     for (ordinal, enthalpy, output) in [
-        (42, false, "temperature-final-adjoint"),
+        (42, false, "temperature-final-material-adjoint"),
         (43, true, "temperature-sampled-peak-adjoint"),
     ] {
         let f = fixture(enthalpy, false);

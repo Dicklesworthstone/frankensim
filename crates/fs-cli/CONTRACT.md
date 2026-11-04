@@ -3592,3 +3592,31 @@ Focused native regressions cover two serial airflow segments and mixed natural
 convection with nonlinear conductivity and curve/surface contact sources.
 Radiation, transient history, prescribed-temperature controls and adaptive
 contact goals still require their own complete derivative compositions.
+
+### Live-contact capacity trajectory adjoints — driver 115
+
+`temperature-final-adjoint` and `temperature-sampled-peak-adjoint` now compose
+regional-capacity backward Euler with the original source-backed contact
+endpoint derivative. Every selected fine-grid endpoint retains its original
+absolute joule residual target. The native conduction owner re-queries its
+pinned laws at the unchanged independent traces, checks physical residual and
+energy closure, and supplies the complete capacity/bulk/contact transpose.
+There is no frozen-contact reconstruction or replacement forward solve.
+
+Source-power, original-temperature, capacity, prescribed-flux and Robin
+controls contract that same complete dual. Uniform prescribed-bath controls
+also include the full contact transpose at constrained vertices, including the
+direct objective term for a selected prescribed node. Thermal histories are
+sampled at the original interval starts and held fixed. An initial sampled
+peak requires no reverse solve; controls after an earlier selected peak have
+zero influence. Sparse contact assembly and bounded FGMRES workspace are
+charged before the forward history runs, with the same face cap retained by
+the numerical owner. The estimate is not a peak allocator/RSS guarantee.
+
+Imported-project regressions compare curve/surface source laws and nonlinear
+bulk transport against fresh full-history perturbations. They check exact
+forward-field and energy invariance, prescribed-bath and scheduled-reservoir
+controls, selected-prefix accounting and source-corner refusal. Source/material
+kinks still refuse classical derivatives. Contact with total enthalpy,
+radiation, natural convection or transported air and material/contact-scale
+trajectory controls remain outside this product composition.

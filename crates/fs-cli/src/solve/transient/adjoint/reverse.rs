@@ -1,26 +1,30 @@
 //! Reverse the actual fine-grid history with one complete endpoint transpose.
-use std::collections::BTreeMap;
-use std::time::Instant;
-use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, ThermalInterfaces};
+use super::super::boundary_history::BoundaryHistory;
+use super::super::{SolveRefusal, Workload, bad, lower, poll};
+use super::enthalpy::{material_controls, prescribed_controls};
+use super::{Objective, Selected, Tape, finite, flux_controls, select, storage_bytes};
+use crate::solve::conjugate::ConjugatePath;
+use crate::solve::natural::NaturalLaw;
+use crate::solve::radiation::LoweredRadiation;
 use fs_conduction::adjoint::robin::RobinResponse;
-use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
+use fs_conduction::interface::temperature::TemperatureContacts;
 use fs_conduction::radiation::{EnclosureRadiationLinearization, GrayDiffuseEnclosure};
+use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
+use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, ThermalInterfaces};
 use fs_exec::Cx;
 use fs_project::{ProjectSpec, TransientBoundaryTarget};
-use crate::solve::conjugate::ConjugatePath;
-use crate::solve::radiation::LoweredRadiation;
-use crate::solve::natural::NaturalLaw;
-use super::{Objective, Selected, Tape, finite, select, storage_bytes, flux_controls};
-use super::enthalpy::{material_controls, prescribed_controls};
-use super::super::{SolveRefusal, Workload, bad, lower, poll};
-use super::super::boundary_history::BoundaryHistory;
+use std::collections::BTreeMap;
+use std::time::Instant;
 
-mod report;
-mod radiation;
-mod enclosure;
-mod natural;
 mod air;
 mod air_controls;
+mod contact;
+mod enclosure;
+mod natural;
+mod radiation;
+mod report;
+
+pub(in crate::solve::transient) use contact::storage_bytes as contact_storage_bytes;
 
 pub(in crate::solve::transient) struct NaturalCoupling<'a> {
     pub(in crate::solve::transient) laws: &'a [NaturalLaw],
@@ -105,6 +109,7 @@ struct Derivatives {
     additional_storage_bytes: usize,
     radiation: String,
     convection: String,
+    contact: String,
     material_controls: String,
     prescribed_temperature: String,
     prescribed_heat_flux: String,
@@ -123,14 +128,27 @@ fn dot(cx: &Cx<'_>, a: &[f64], b: &[f64], deadline: Option<(Instant, f64)>)
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::solve::transient) fn finish(
-    cx: &Cx<'_>, spec: &ProjectSpec, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
-    interfaces: Option<&ThermalInterfaces>, ends_s: &[f64], workload: Option<&Workload<'_>>,
-    config: StepConfig, nonlinear: Option<NonlinearStepConfig>, labels: &[u32],
-    region_ids: &BTreeMap<String, u32>, goal_region: u32,
-    radiation: Option<&LoweredRadiation>, enclosure: Option<&GrayDiffuseEnclosure>,
+    cx: &Cx<'_>,
+    spec: &ProjectSpec,
+    engine: &BackwardEuler<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    max_contact_pairs: usize,
+    ends_s: &[f64],
+    workload: Option<&Workload<'_>>,
+    config: StepConfig,
+    nonlinear: Option<NonlinearStepConfig>,
+    labels: &[u32],
+    region_ids: &BTreeMap<String, u32>,
+    goal_region: u32,
+    radiation: Option<&LoweredRadiation>,
+    enclosure: Option<&GrayDiffuseEnclosure>,
     natural: Option<&NaturalCoupling<'_>>,
-    airflow: Option<&ConjugatePath>, tape: &Tape,
-    objective: Objective, deadline: Option<(Instant, f64)>,
+    airflow: Option<&ConjugatePath>,
+    tape: &Tape,
+    objective: Objective,
+    deadline: Option<(Instant, f64)>,
 ) -> Result<String, SolveRefusal> {
     poll(cx, deadline)?;
     let n = problem.mesh.vertex_count();
@@ -147,7 +165,21 @@ pub(in crate::solve::transient) fn finish(
     if radiation.is_some_and(LoweredRadiation::is_enclosure) != enclosure.is_some() {
         return Err(bad("capacity adjoint lost its exact bound enclosure model"));
     }
-    let coupled = radiation.is_some() || natural.is_some() || airflow.is_some();
+    if temperature_contacts.is_some()
+        && (interfaces.is_some()
+            || radiation.is_some()
+            || natural.is_some()
+            || airflow.is_some()
+            || objective.material_controls())
+    {
+        return Err(bad(
+            "capacity contact adjoints require their original live sources with prescribed or scheduled boundaries; derived boundary and material-control compositions are unsupported",
+        ));
+    }
+    let coupled = temperature_contacts.is_some()
+        || radiation.is_some()
+        || natural.is_some()
+        || airflow.is_some();
     if coupled && tape.physical_targets_j.len() != ends_s.len()
         || !coupled && !tape.physical_targets_j.is_empty()
     {
@@ -218,6 +250,17 @@ pub(in crate::solve::transient) fn finish(
         spec, n, problem.mesh.element_count(), problem.mesh.boundary().len(),
     )?;
     let flux_workspace = flux_controls::storage_bytes(spec, n)?;
+    let contact_workspace = temperature_contacts
+        .map(|_| {
+            contact_storage_bytes(
+                n,
+                problem.mesh.element_count(),
+                max_contact_pairs,
+                config.linear.restart,
+            )
+        })
+        .transpose()?
+        .unwrap_or(0);
     let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
         .checked_add(radiation_workspace)
         .and_then(|value| value.checked_add(natural_workspace))
@@ -225,6 +268,7 @@ pub(in crate::solve::transient) fn finish(
         .and_then(|value| value.checked_add(material_workspace))
         .and_then(|value| value.checked_add(prescribed_workspace))
         .and_then(|value| value.checked_add(flux_workspace))
+        .and_then(|value| value.checked_add(contact_workspace))
         .ok_or_else(|| bad("native capacity adjoint total workspace overflows"))?;
     let patch_count = radiation.map_or(0, LoweredRadiation::surface_count);
     let mut emissivities = vec![0.0; patch_count];
@@ -312,7 +356,7 @@ pub(in crate::solve::transient) fn finish(
         // A whole-body heat balance cannot detect cancelling nodal defects.
         // This single audit keeps original convection, gray radiation, and
         // actual transported air heat distinct; no primal solve is repeated.
-        let physical = if coupled {
+        let physical = if coupled && temperature_contacts.is_none() {
             let audit = if let Some(model) = enclosure {
                 let lowering = radiation.ok_or_else(|| bad("capacity enclosure lost its controls"))?;
                 engine.evaluate_prescribed_enclosure_endpoint(
@@ -363,7 +407,17 @@ pub(in crate::solve::transient) fn finish(
         } else {
             None
         };
-        let step = if coupled {
+        // The native contact owner re-queries the pinned law, checks the
+        // retained endpoint against its original target, and adds dR/dT to
+        // the same capacity/bulk tangent. It never reconstructs a primal.
+        let contact_step = temperature_contacts.map(|contacts|
+            engine.linearize_temperature_contact_endpoint(
+                cx, step_problem, contacts, &tape.states[index], expected, dt, config,
+                tape.physical_targets_j[index], &ports, max_contact_pairs,
+            ).map_err(lower)).transpose()?;
+        let ordinary_step = if contact_step.is_some() {
+            None
+        } else { Some(if coupled {
             let boundary = if let Some(bound) = &enclosure_bound {
                 bound.boundary()
             } else {
@@ -378,7 +432,9 @@ pub(in crate::solve::transient) fn finish(
             engine.linearize_prescribed_step(
                 cx, step_problem, interfaces, &tape.states[index], dt, config, nonlinear, &ports,
             )
-        }.map_err(lower)?;
+        }.map_err(lower)?) };
+        let step = contact_step.as_deref().or(ordinary_step.as_ref())
+            .ok_or_else(|| bad("capacity adjoint lost its complete endpoint response"))?;
         if step.temperature().len() != expected.len() { return Err(bad("adjoint reconstruction changed field shape")); }
         for (v, (&actual, &expected)) in step.temperature().iter().zip(expected).enumerate() {
             if v % 256 == 0 { poll(cx, deadline)?; }
@@ -458,11 +514,20 @@ pub(in crate::solve::transient) fn finish(
             // C is row-sum lumped: C_FD is zero, so the spatial lift is exactly
             // the endpoint lift. The complete physical dual already contains
             // C/dt and every feedback term; never multiply this partial by dt.
-            let bars = RobinResponse::prescribed_temperature_pullback_with_flux_feedback(
+            let mut bars = RobinResponse::prescribed_temperature_pullback_with_flux_feedback(
                 cx, ConductionProblem { boundary, ..convection_problem }, interfaces,
                 expected, &carry, &gradient.nodal_load, &ports, h_slopes,
                 reference_slopes, reference_feedback, flux_feedback, prescribed_entries,
             ).map_err(lower)?;
+            if let Some(response) = &contact_step {
+                // This bulk/Robin lift received no frozen interfaces. The
+                // original contact owner supplies its full K + K'(T)T action
+                // once, including fixed-node trace temperatures.
+                contact::add_prescribed_lift(
+                    cx, convection_problem, response.contact(), &gradient.nodal_load,
+                    &mut bars, deadline,
+                )?;
+            }
             prescribed_controls.add(cx, &bars, deadline)?;
         } else {
             // Retain the exact selected-prefix accounting for an empty set.
@@ -555,6 +620,11 @@ pub(in crate::solve::transient) fn finish(
         .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
     let prescribed_temperature = prescribed_controls.fragment_for_capacity(selected.state)?;
     let prescribed_heat_flux = flux_controls.fragment(selected.state)?;
+    let contact = if temperature_contacts.is_some() {
+        contact::fragment(selected.state, max_contact_pairs, contact_workspace)
+    } else {
+        String::new()
+    };
     let result = Derivatives {
         selected, initial: carry, region_names: names, source_controls, source_multipliers,
         capacity: capacities, ports: fixed_ports.iter().map(|&i| ports[i].to_owned()).collect(),
@@ -564,8 +634,7 @@ pub(in crate::solve::transient) fn finish(
         boundary_histories: boundary_history.is_some(),
         primal_iterations, dual_iterations, max_dual_solves_per_step, worst_dual,
         reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation, convection,
-        material_controls, prescribed_temperature, prescribed_heat_flux,
+        contact, material_controls, prescribed_temperature, prescribed_heat_flux,
     };
     report::render(cx, &result, ends_s, objective, config, deadline)
 }
-
