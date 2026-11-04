@@ -194,6 +194,29 @@ impl<'b, 'a, 'm> LayeredWaveHeating<'b, 'a, 'm> {
         responses: &[DielectricResponse<'m>],
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
+        Self::try_new_with_incident_response(
+            thermal,
+            DielectricResponse::Lossless(incident),
+            exit,
+            omega_rad_s,
+            responses,
+            cancelled,
+        )
+    }
+
+    /// Bind original layer laws with a source-backed dispersive incident
+    /// medium. Its original epsilon(omega) and same-state mu determine phase,
+    /// transverse wave number and physical port power at this frequency.
+    /// The native Maxwell owner requires positive, exactly lossless incidence;
+    /// no additional static epsilon, averaged index or exterior heat is inferred.
+    pub fn try_new_with_incident_response(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        incident: DielectricResponse<'m>,
+        exit: DielectricResponse<'m>,
+        omega_rad_s: f64,
+        responses: &[DielectricResponse<'m>],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
         Self::from_responses(
             thermal,
             incident,
@@ -217,6 +240,27 @@ impl<'b, 'a, 'm> LayeredWaveHeating<'b, 'a, 'm> {
         responses: &[DielectricResponse<'m>],
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
+        Self::try_new_cellwise_with_incident_response(
+            thermal,
+            DielectricResponse::Lossless(incident),
+            exit,
+            omega_rad_s,
+            responses,
+            cancelled,
+        )
+    }
+
+    /// Cellwise counterpart retaining the original incident constitutive law.
+    /// Every thermal cell remains its original homogeneous optical sublayer;
+    /// source support and lossless propagating-port admission are unchanged.
+    pub fn try_new_cellwise_with_incident_response(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        incident: DielectricResponse<'m>,
+        exit: DielectricResponse<'m>,
+        omega_rad_s: f64,
+        responses: &[DielectricResponse<'m>],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
         Self::from_responses(
             thermal,
             incident,
@@ -231,7 +275,7 @@ impl<'b, 'a, 'm> LayeredWaveHeating<'b, 'a, 'm> {
     #[allow(clippy::too_many_arguments)]
     fn from_responses(
         thermal: &'b BoundLayeredThermalBody<'a>,
-        incident: &'m ResolvedMaterialStatePoint,
+        incident: DielectricResponse<'m>,
         exit: DielectricResponse<'m>,
         omega_rad_s: f64,
         responses: &[DielectricResponse<'m>],
@@ -296,7 +340,12 @@ impl<'b, 'a, 'm> LayeredWaveHeating<'b, 'a, 'm> {
                 });
             }
         }
-        let optical = PlanarDielectricLayers::try_new(incident, exit, omega_rad_s, &films)?;
+        let optical = PlanarDielectricLayers::try_new_with_incident_response(
+            incident,
+            exit,
+            omega_rad_s,
+            &films,
+        )?;
         poll(&mut cancelled)?;
         Ok(Self {
             thermal,

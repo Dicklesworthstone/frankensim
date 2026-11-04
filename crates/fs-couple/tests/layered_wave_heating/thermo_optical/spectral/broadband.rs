@@ -1,5 +1,7 @@
 //! G3: original per-line Maxwell loads, one caloric solve, and atomic feedback.
 
+mod incident;
+
 use super::*;
 use fs_couple::layered_wave_heating::{
     BroadbandThermoOpticalLimits, BroadbandThermoOpticalWaveHeating, ThermoOpticalSpectralLine,

@@ -231,7 +231,7 @@ fn refresh_cell_sources<S: ThermoOpticalSource>(
 pub struct ThermoOpticalWaveHeating<'b, 'a, 'm, S: ThermoOpticalSource = VisibleConductorStatePoint>
 {
     thermal: &'b BoundLayeredThermalBody<'a>,
-    incident: &'m ResolvedMaterialStatePoint,
+    incident: DielectricResponse<'m>,
     exit: DielectricResponse<'m>,
     omega_rad_s: f64,
     incidence_cosine: f64,
@@ -263,6 +263,34 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
         incidence_cosine: f64,
         polarization: Polarization,
         sources: &[ThermoOpticalLayer<'m, S>],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
+        Self::try_new_with_incident_response(
+            thermal,
+            DielectricResponse::Lossless(incident),
+            exit,
+            omega_rad_s,
+            incidence_cosine,
+            polarization,
+            sources,
+            cancelled,
+        )
+    }
+
+    /// Retain a dispersive incident law through every cell-temperature rebuild.
+    /// The native Maxwell owner evaluates its actual phase/admittance at the
+    /// selected frequency and refuses absorbing or unsupported incident data.
+    /// Exterior source states are held; only the body's original cells receive
+    /// absorbed work and accepted-temperature optical refresh.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_incident_response(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        incident: DielectricResponse<'m>,
+        exit: DielectricResponse<'m>,
+        omega_rad_s: f64,
+        incidence_cosine: f64,
+        polarization: Polarization,
+        sources: &[ThermoOpticalLayer<'m, S>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
         admit_sources(thermal, sources, &mut cancelled)?;
@@ -272,7 +300,7 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
             responses.push(source.source.wave_response(omega_rad_s)?);
         }
         // Reuse the original geometry/source and propagating-port admission.
-        let original = LayeredWaveHeating::try_new(
+        let original = LayeredWaveHeating::try_new_with_incident_response(
             thermal,
             incident,
             exit,
@@ -294,6 +322,11 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
 
     pub const fn thermal_body(&self) -> &'b BoundLayeredThermalBody<'a> {
         self.thermal
+    }
+
+    /// Original held incident source, including its wavelength parameterization.
+    pub const fn incident_response(&self) -> DielectricResponse<'m> {
+        self.incident
     }
 
     pub fn sources(&self) -> &[ThermoOpticalLayer<'m, S>] {
@@ -337,7 +370,7 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
                 .iter()
                 .map(|state| state.wave_response(self.omega_rad_s))
                 .collect::<Result<Vec<_>, _>>()?;
-            let owner = LayeredWaveHeating::try_new_cellwise(
+            let owner = LayeredWaveHeating::try_new_cellwise_with_incident_response(
                 self.thermal,
                 self.incident,
                 self.exit,

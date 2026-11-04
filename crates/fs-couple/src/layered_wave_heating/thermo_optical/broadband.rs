@@ -44,7 +44,7 @@ pub struct BroadbandThermoOpticalWaveHeating<
     S: ThermoOpticalSource = VisibleConductorStatePoint,
 > {
     thermal: &'b BoundLayeredThermalBody<'a>,
-    incident: &'m ResolvedMaterialStatePoint,
+    incident: DielectricResponse<'m>,
     exit: DielectricResponse<'m>,
     sources: Vec<ThermoOpticalLayer<'m, S>>,
     lines: Vec<ThermoOpticalSpectralLine>,
@@ -75,6 +75,33 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> BroadbandThermoOpticalWaveHeating<'b, '
         lines: &[ThermoOpticalSpectralLine],
         sources: &[ThermoOpticalLayer<'m, S>],
         limits: BroadbandThermoOpticalLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
+        Self::try_new_with_incident_response(
+            thermal,
+            DielectricResponse::Lossless(incident),
+            exit,
+            lines,
+            sources,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Retain one original incident law across all authored spectral lines.
+    /// Every line resolves its own source epsilon(omega), conserved transverse
+    /// wave number and TE/TM port admittance. Its actual source band and exact
+    /// zero-loss requirement are admitted per line by the original wave owner.
+    /// The exterior material state is held during thermal feedback; no body
+    /// temperature, averaged refractive index or additional bath heat replaces it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_incident_response(
+        thermal: &'b BoundLayeredThermalBody<'a>,
+        incident: DielectricResponse<'m>,
+        exit: DielectricResponse<'m>,
+        lines: &[ThermoOpticalSpectralLine],
+        sources: &[ThermoOpticalLayer<'m, S>],
+        limits: BroadbandThermoOpticalLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
         poll(&mut cancelled)?;
@@ -99,7 +126,7 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> BroadbandThermoOpticalWaveHeating<'b, '
                 poll(&mut cancelled)?;
                 responses.push(source.source.wave_response(line.angular_frequency_rad_s)?);
             }
-            let owner = LayeredWaveHeating::try_new(
+            let owner = LayeredWaveHeating::try_new_with_incident_response(
                 thermal,
                 incident,
                 exit,
@@ -122,6 +149,10 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> BroadbandThermoOpticalWaveHeating<'b, '
 
     pub const fn thermal_body(&self) -> &'b BoundLayeredThermalBody<'a> {
         self.thermal
+    }
+    /// Original held incident source, evaluated independently at each line.
+    pub const fn incident_response(&self) -> DielectricResponse<'m> {
+        self.incident
     }
     pub fn sources(&self) -> &[ThermoOpticalLayer<'m, S>] {
         &self.sources
@@ -221,7 +252,7 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> BroadbandThermoOpticalWaveHeating<'b, '
                 poll(&mut cancelled)?;
                 responses.push(source.wave_response(line.angular_frequency_rad_s)?);
             }
-            let owner = LayeredWaveHeating::try_new_cellwise(
+            let owner = LayeredWaveHeating::try_new_cellwise_with_incident_response(
                 self.thermal,
                 self.incident,
                 self.exit,
