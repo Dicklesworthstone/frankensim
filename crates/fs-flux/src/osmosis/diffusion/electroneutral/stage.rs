@@ -5,7 +5,9 @@ use super::super::{
     poll, positive, source,
 };
 use super::{ElectroneutralDiffusion, ElectroneutralDiffusionControls};
-use fs_material::osmosis::diffusion::electrical::IonicDiffusionResponse;
+use fs_material::osmosis::diffusion::electrical::{
+    IonicDiffusionResponse, PrescribedPotentialDiffusionReport,
+};
 use fs_solver::{
     LinearOp,
     checked_cg::{CheckedCgConfig, CheckedCgError, checked_cg},
@@ -13,8 +15,10 @@ use fs_solver::{
 use fs_sparse::precond::Precond;
 
 struct Face<'a> {
+    link_index: usize,
     endpoints: [usize; 2],
     area_m2: f64,
+    distance_m: f64,
     weight: f64,
     response: IonicDiffusionResponse<'a>,
     workspace: &'a mut SolutionDiffusionWorkspace,
@@ -67,13 +71,88 @@ impl ElectroneutralDiffusion {
         evaluations: &mut usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), OsmoticNetworkError> {
+        self.evaluate_transfers(cells, links, dt, controls, evaluations, cancelled)?;
+        let n = cells[0].solution.solute_moles().len();
+        let mut proposed_change = false;
+        let mut actual_change = false;
+        for (node, cell) in cells.iter().enumerate() {
+            poll(cancelled)?;
+            for i in 0..n {
+                let index = node * n + i;
+                let old = cell.solution.solute_moles()[i];
+                proposed_change |= self.amounts[index] != 0.0;
+                self.amounts[index] = finite(old + self.amounts[index])?;
+                actual_change |= self.amounts[index] != old;
+            }
+        }
+        if proposed_change && !actual_change {
+            return Err(OsmoticNetworkError::StepUnderflow);
+        }
+        self.admit_and_publish(cells, links, n, controls, cancelled)
+    }
+
+    /// Original potential/current closure at one immutable physical candidate.
+    /// Retains paired net integrated transfers and gross donor withdrawals;
+    /// it does not advance an inventory or charge a finite-step energy account.
+    /// Every nonlinear/Jacobian probe shares the enclosing electrical budgets.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evaluate_transfers(
+        &mut self,
+        cells: &[OsmoticCompartment],
+        links: &mut [SolutionDiffusionLink],
+        dt: f64,
+        controls: SolutionDiffusionControls,
+        evaluations: &mut usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), OsmoticNetworkError> {
+        self.evaluate_transfers_observed(
+            cells,
+            links,
+            dt,
+            controls,
+            evaluations,
+            cancelled,
+            &mut |_, _, _, _, _, _| Ok(()),
+        )
+    }
+
+    /// The original constitutive replay optionally exposes each physical edge
+    /// to a readout owner. That owner must retain output privately until ALL
+    /// node-current gates and the final cancellation checkpoint have passed.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_transfers_observed(
+        &mut self,
+        cells: &[OsmoticCompartment],
+        links: &mut [SolutionDiffusionLink],
+        dt: f64,
+        controls: SolutionDiffusionControls,
+        evaluations: &mut usize,
+        cancelled: &mut impl FnMut() -> bool,
+        observer: &mut impl FnMut(
+            usize,
+            [usize; 2],
+            f64,
+            f64,
+            &[f64],
+            PrescribedPotentialDiffusionReport,
+        ) -> Result<(), OsmoticNetworkError>,
+    ) -> Result<(), OsmoticNetworkError> {
         poll(cancelled)?;
+        if !positive(dt) {
+            return Err(OsmoticNetworkError::Invalid(
+                "finite positive molecular exposure required",
+            ));
+        }
         let n = cells[0].solution.solute_moles().len();
         let mut faces = Vec::new();
         faces
             .try_reserve_exact(links.iter().filter(|link| link.area_m2 != 0.0).count())
             .map_err(|_| OsmoticNetworkError::Invalid("ionic face response allocation failed"))?;
-        for link in links.iter_mut().filter(|link| link.area_m2 != 0.0) {
+        for (link_index, link) in links
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, link)| link.area_m2 != 0.0)
+        {
             poll(cancelled)?;
             self.face_evaluation(evaluations)?;
             let ionic = link
@@ -117,8 +196,10 @@ impl ElectroneutralDiffusion {
                 ));
             }
             faces.push(Face {
+                link_index,
                 endpoints: [link.left, link.right],
                 area_m2: link.area_m2,
+                distance_m: link.distance_m,
                 weight,
                 response,
                 workspace: &mut link.workspace,
@@ -143,6 +224,14 @@ impl ElectroneutralDiffusion {
                 .response
                 .flux_at_potential_into(potential, face.workspace, &mut flux[..n], &mut *cancelled)
                 .map_err(diffusion_source)?;
+            observer(
+                face.link_index,
+                face.endpoints,
+                face.area_m2,
+                face.distance_m,
+                &flux[..n],
+                report,
+            )?;
             let current = finite(face.area_m2 * report.charge_flux_mol_m2_s)?;
             if report.charge_flux_mol_m2_s != 0.0 && current == 0.0 {
                 return Err(OsmoticNetworkError::Invalid(
@@ -199,7 +288,6 @@ impl ElectroneutralDiffusion {
             }
             maximum_node_rate = maximum_node_rate.max(rate.abs());
         }
-        self.admit_and_publish(cells, links, n, controls, cancelled)?;
         self.report.maximum_node_charge_rate_mol_s = self
             .report
             .maximum_node_charge_rate_mol_s
@@ -212,7 +300,34 @@ impl ElectroneutralDiffusion {
             .report
             .maximum_dimensionless_potential_difference
             .max(maximum_potential);
+        poll(cancelled)?;
         Ok(())
+    }
+
+    /// Net `dt * sum(area * flux)` entering each original cell/species slot.
+    pub(crate) fn transfers_mol(&self) -> &[f64] {
+        &self.amounts
+    }
+
+    /// Admit a converged implicit inventory using the LATEST original-law
+    /// replay's gross withdrawals. Candidate inventories are never replaced by
+    /// projected fluxes or a separately rounded explicit update.
+    pub(crate) fn publish_candidate(
+        &mut self,
+        cells: &mut [OsmoticCompartment],
+        links: &[SolutionDiffusionLink],
+        candidate_amounts: &[f64],
+        controls: SolutionDiffusionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), OsmoticNetworkError> {
+        if candidate_amounts.len() != self.amounts.len() {
+            return Err(OsmoticNetworkError::Invalid(
+                "complete original implicit ionic inventory layout required",
+            ));
+        }
+        self.amounts.copy_from_slice(candidate_amounts);
+        let n = cells[0].solution.solute_moles().len();
+        self.admit_and_publish(cells, links, n, controls, cancelled)
     }
 
     fn solve_potential(
@@ -368,8 +483,6 @@ impl ElectroneutralDiffusion {
         let mut corrections = [0.0; MAX_OSMOTIC_SPECIES];
         let mut energy = 0.0;
         let mut energy_correction = 0.0;
-        let mut proposed_change = false;
-        let mut actual_change = false;
         for (node, cell) in cells.iter().enumerate() {
             poll(cancelled)?;
             let old = &cell.solution;
@@ -392,14 +505,11 @@ impl ElectroneutralDiffusion {
                         },
                     ));
                 }
-                proposed_change |= next[i] != 0.0;
-                next[i] = finite(amount + next[i])?;
                 if !nonnegative(next[i]) {
                     return Err(OsmoticNetworkError::Invalid(
                         "nonnegative ionic endpoint is unrepresentable",
                     ));
                 }
-                actual_change |= next[i] != amount;
                 compensated_add(&mut balance[i], &mut corrections[i], next[i] - amount);
             }
             // Actual rounded inventories, including isolated nodes, are checked;
@@ -424,9 +534,6 @@ impl ElectroneutralDiffusion {
                 &mut energy_correction,
                 finite(volume * change)?,
             );
-        }
-        if proposed_change && !actual_change {
-            return Err(OsmoticNetworkError::StepUnderflow);
         }
         for (species, &residual_mol) in balance[..n].iter().enumerate() {
             if !residual_mol.is_finite()

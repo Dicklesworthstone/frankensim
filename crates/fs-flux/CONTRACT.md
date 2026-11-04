@@ -3320,6 +3320,31 @@ compatible loop potentials, per-species conservation and global energy decrease,
 isolated/carrier-free components, complete-window work and late-cancellation
 rollback, and explicit storage/integration-mode refusal.
 
+### Accepted-state ionic transport observations
+
+`OsmoticNetwork::ionic_diffusion_snapshot(byte_budget, cancelled)` solves the
+original global electrical closure at the CURRENT accepted inventories and
+time. It returns dimensionless node potentials, one reference node per
+conducting component, actual outgoing node charge rates, and each active
+connection's original species fluxes, current, voltage and native
+chemical/electrical entropy and friction diagnostics. Original connection
+indices and left-to-right orientations are retained; zero-area links are
+omitted. Potential differences between disconnected components have no
+physical meaning.
+
+The readout performs fresh source qualification and original combined-force
+replay, rather than exposing scratch from a prior coarse, fine or nonlinear
+probe. Its own face and potential work obey the prepared global controls.
+Accepted time, inventories, solvent volumes and advance work counters are
+unchanged on success or failure. Cancellation or any material/current refusal
+returns no partial observation. Additional retained output arrays have a
+separate caller-admitted payload budget; the existing network workspace and
+source-receipt/allocator exclusions retain their original scope.
+
+Focused regressions compare the accepted-state readout against direct native
+face replay, verify gauges and node-current closure, and cover storage/work
+refusal, late cancellation and deterministic subsequent evolution.
+
 ## Coupled nonideal water and molecular solution transport
 
 `OsmoticNetwork::with_coupled_solution_transport` composes the existing fully

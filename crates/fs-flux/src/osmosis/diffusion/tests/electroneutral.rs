@@ -18,7 +18,7 @@ fn selective_law(model: &Arc<VirialSolutionModel>, plus: f64, minus: f64) -> Sol
     .unwrap()
 }
 
-fn loop_network(controls: ElectroneutralDiffusionControls) -> OsmoticNetwork {
+pub(super) fn loop_network(controls: ElectroneutralDiffusionControls) -> OsmoticNetwork {
     let model = source(1.0, vec![0.0; 4], vec![200.0; 2]);
     let links = [
         (0, 1, 1e-4, 1e-9, 3e-9),

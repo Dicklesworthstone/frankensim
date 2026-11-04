@@ -13,6 +13,7 @@ mod electroneutral;
 mod implicit;
 mod implicit_salt;
 mod multicomponent;
+mod snapshot;
 mod source;
 
 const T: f64 = 298.15;

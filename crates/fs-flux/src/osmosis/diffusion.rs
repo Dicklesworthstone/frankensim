@@ -17,7 +17,10 @@ mod implicit;
 mod implicit_salt;
 mod multicomponent;
 pub(crate) use electroneutral::ElectroneutralDiffusion;
-pub use electroneutral::{ElectroneutralDiffusionControls, ElectroneutralDiffusionReport};
+pub use electroneutral::{
+    ElectroneutralDiffusionControls, ElectroneutralDiffusionReport, IonicDiffusionConnection,
+    IonicDiffusionSnapshot,
+};
 pub use fs_material::osmosis::diffusion::electrical::ZeroCurrentDiffusion;
 pub(crate) use implicit::ImplicitBinaryDiffusion;
 pub use implicit::ImplicitBinaryDiffusionControls;

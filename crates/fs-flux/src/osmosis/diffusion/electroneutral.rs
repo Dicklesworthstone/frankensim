@@ -15,7 +15,9 @@
 //! electrode, imposed-current or caloric energy model. The conjugate current
 //! and entropy structure follows <https://arxiv.org/abs/2211.13505>, section 6.
 
+mod snapshot;
 mod stage;
+pub use snapshot::{IonicDiffusionConnection, IonicDiffusionSnapshot};
 
 use super::{
     Arc, OsmoticCompartment, OsmoticNetwork, OsmoticNetworkError, SolutionDiffusionLink,
@@ -75,7 +77,8 @@ impl ElectroneutralDiffusionControls {
 }
 
 /// Work and physical diagnostics over all probes in a successful advance.
-/// Maxima include valid physical stages discarded by temporal error control;
+/// Maxima include original constitutive probes discarded by temporal or
+/// nonlinear control, including numerical Jacobian evaluations;
 /// they do not purport to be a final-state potential or edge-current snapshot.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ElectroneutralDiffusionReport {
