@@ -5,6 +5,8 @@ use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, det};
 
 pub mod dg;
+mod frequency;
+pub use frequency::ModalHarmonicFrequencyResponse;
 
 /// Dense response capacity; no retained mode or acoustic pole is truncated.
 pub const MAX_HARMONIC_UNKNOWNS: usize = 1024;
