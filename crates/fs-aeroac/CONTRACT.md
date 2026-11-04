@@ -232,6 +232,22 @@ material scaling and domain/representability refusals.
   molecular absorption/dispersion, finite-window beats, quiet cancellation
   residuals, cancellation and work/domain refusals. The `plane_interference`
   example prints physical pressure and energy flux through this same owner.
+- `PreparedCompactSourceObserver::with_orthogonal_planes` extends that original
+  transfer to one, two or three perpendicular ideal planes, including mixed
+  rigid/pressure-release conditions. The full finite group has 2^m paths per
+  source, including every multiple reflection. Preparation checks that physical
+  sources and receiver share all selected half-spaces, refuses nonperpendicular
+  normals (dot product above 64 machine epsilons), and bounds the full path count.
+  It never snaps geometry. It folds all sixteen coefficients with compensated
+  sums into each original source transfer, retaining O(N) allocation-free
+  application and original source coherence, gas, geometry and source clock.
+  Only O(N) image workspace is retained during preparation; the final cache does
+  not grow by 2^m. Direct-path delay queries remain direct-path quantities, not
+  an invented delay for the combined field. This is the finite ideal corner
+  Green function, with no general-wedge or enclosed-room reverberation claim.
+  `tests/compact_interference/corner.rs` checks independent image pressure and
+  momentum, all rigid/release wall conditions, edges/vertices, rotated frames,
+  source statistics, molecular propagation and bounded/cancelled admission.
 - `observation::PreparedHarmonicField` observes deterministic lines on a common
   receiver clock over an explicit rectangular interval. The existing 2D/3D
   prepared observers export `evaluate_harmonic_line` with the propagation delay

@@ -25,6 +25,16 @@ ideal rigid or pressure-release plane; direct and reflected fields interfere coh
 No shear/conduction boundary layers, finite source-size validation, finite wall impedance, \
 edge diffraction, motion, source feedback or measured-SPL qualification.";
 
+pub(super) const ORTHOGONAL_LOSSLESS_SCOPE: &str = "Prescribed compact 3D Q/F sources in a \
+homogeneous stationary lossless intersection of one to three perpendicular ideal rigid or \
+pressure-release half-spaces; all image paths interfere coherently. No finite wall impedance, \
+general wedge diffraction, enclosed-room reverberation, motion, source feedback or measured-SPL qualification.";
+pub(super) const ORTHOGONAL_MOLECULAR_SCOPE: &str = "Prescribed compact 3D Q/F sources with \
+material-owned molecular bulk relaxation and inviscid momentum in the intersection of one \
+to three perpendicular ideal rigid or pressure-release half-spaces; all image paths interfere \
+coherently. No wall boundary layers, finite wall impedance, general wedge diffraction, \
+enclosed-room reverberation, motion, source feedback or measured-SPL qualification.";
+
 /// Exact homogeneous boundary condition on an infinite stationary plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdealPlaneBoundary {
@@ -154,6 +164,9 @@ impl PreparedCompactSourceObserver {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedHalfSpaceObserver, AeroacError> {
         poll(&mut cancelled)?;
+        if !self.reflection_planes.is_empty() {
+            return Err(invalid("compact acoustic boundaries are already prepared"));
+        }
         if self
             .source_count()
             .checked_mul(2)
@@ -184,23 +197,7 @@ impl PreparedCompactSourceObserver {
         )?;
         for transfer in &mut reflected.transfers {
             poll(&mut cancelled)?;
-            for row in &mut transfer.field {
-                let original = *row;
-                row[0] = original[0].scale(plane.boundary.sign());
-                for col in 0..3 {
-                    let mut sum = ComplexSum::default();
-                    for axis in 0..3 {
-                        let identity = if axis == col { 1.0 } else { 0.0 };
-                        let coefficient = plane.boundary.sign()
-                            * (identity - 2.0 * plane.normal[axis] * plane.normal[col]);
-                        sum.add(original[axis + 1].scale(coefficient))?;
-                    }
-                    row[col + 1] = sum.value();
-                    if !finite(row[col + 1]) {
-                        return Err(nonfinite("reflected compact force transfer"));
-                    }
-                }
-            }
+            reflect_source_components(transfer, plane)?;
         }
         poll(&mut cancelled)?;
         Ok(PreparedHalfSpaceObserver {
@@ -209,6 +206,177 @@ impl PreparedCompactSourceObserver {
             plane,
         })
     }
+
+    /// Add the complete finite image group of one, two or three perpendicular
+    /// ideal planes to the ORIGINAL source transfers. With m planes there are
+    /// exactly 2^m paths per physical source, including the direct path and
+    /// every multiple reflection. Rigid and pressure-release walls may mix.
+    ///
+    /// Normals must be perpendicular within 64 machine epsilons; no angle or
+    /// point is snapped. Sources must be strictly inside EVERY half-space and
+    /// the receiver inside or on each boundary. General wedges, parallel walls
+    /// and closed rooms require different (or infinite) image constructions.
+    ///
+    /// `maximum_source_paths` bounds preparation work. Compensated sums fold
+    /// all 16 field coefficients per original source before publication, so
+    /// applications retain O(N) work and no additional allocation or path
+    /// trigonometry. Coherence budgets count the N folded physical-source
+    /// transfers, and each source remains coherent with all its own images.
+    pub fn with_orthogonal_planes(
+        self,
+        planes: &[IdealAcousticPlane],
+        maximum_source_paths: usize,
+    ) -> Result<Self, AeroacError> {
+        self.with_orthogonal_planes_cancellable(planes, maximum_source_paths, || false)
+    }
+
+    /// Poll at each source and image during bounded preparation. Failure or
+    /// cancellation publishes no partial transfer; material and clock survive.
+    pub fn with_orthogonal_planes_cancellable(
+        mut self,
+        planes: &[IdealAcousticPlane],
+        maximum_source_paths: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(&mut cancelled)?;
+        if !self.reflection_planes.is_empty() {
+            return Err(invalid("compact acoustic boundaries are already prepared"));
+        }
+        if !(1..=3).contains(&planes.len()) {
+            return Err(invalid(
+                "orthogonal acoustic boundaries need one to three planes",
+            ));
+        }
+        let path_count = 1usize << planes.len();
+        if self
+            .source_count()
+            .checked_mul(path_count)
+            .is_none_or(|count| count > maximum_source_paths)
+        {
+            return Err(invalid("orthogonal source paths exceed preparation budget"));
+        }
+        for (index, plane) in planes.iter().enumerate() {
+            poll(&mut cancelled)?;
+            for other in &planes[..index] {
+                let mut dot = Dd::ZERO;
+                for axis in 0..3 {
+                    dot = dot + Dd::from_f64(plane.normal[axis]) * Dd::from_f64(other.normal[axis]);
+                }
+                if dot.to_f64().abs() > 64.0 * f64::EPSILON {
+                    return Err(invalid(
+                        "finite acoustic image groups require perpendicular planes",
+                    ));
+                }
+            }
+            if plane.distance(self.observer_m)?.to_f64() < 0.0 {
+                return Err(invalid(
+                    "compact receiver is outside an acoustic half-space",
+                ));
+            }
+            for source in &self.transfers {
+                poll(&mut cancelled)?;
+                if plane.distance(source.source_m)?.to_f64() <= 0.0 {
+                    return Err(invalid(
+                        "compact sources must lie strictly inside every half-space",
+                    ));
+                }
+            }
+        }
+        self.reflection_planes
+            .try_reserve_exact(planes.len())
+            .map_err(|_| invalid("acoustic boundary allocation exceeds available memory"))?;
+        let mut sums = Vec::new();
+        sums.try_reserve_exact(self.source_count())
+            .map_err(|_| invalid("acoustic image sum allocation exceeds available memory"))?;
+        for transfer in &self.transfers {
+            poll(&mut cancelled)?;
+            let mut sum = [[ComplexSum::default(); 4]; 4];
+            for (row, field) in sum.iter_mut().zip(transfer.field) {
+                for (entry, value) in row.iter_mut().zip(field) {
+                    entry.add(value)?;
+                }
+            }
+            sums.push(sum);
+        }
+        let mut positions = Vec::new();
+        positions
+            .try_reserve_exact(self.source_count())
+            .map_err(|_| invalid("acoustic image geometry exceeds available memory"))?;
+        for mask in 1..path_count {
+            positions.clear();
+            for source in &self.transfers {
+                poll(&mut cancelled)?;
+                let mut position = source.source_m;
+                for (index, plane) in planes.iter().enumerate() {
+                    if mask & (1 << index) != 0 {
+                        position = plane.image(position)?;
+                    }
+                }
+                positions.push(position);
+            }
+            let mut image = Self::prepare_cancellable(
+                self.acoustic,
+                self.frequency_hz,
+                self.observer_m,
+                &positions,
+                self.source_count(),
+                self.wavenumber_per_m,
+                self.molecular.clone(),
+                &mut cancelled,
+            )?;
+            for (transfer, sum) in image.transfers.iter_mut().zip(&mut sums) {
+                poll(&mut cancelled)?;
+                // The force follows the same position composition R_last ...
+                // R_first. Its action on a transfer row therefore runs backward.
+                for (index, &plane) in planes.iter().enumerate().rev() {
+                    if mask & (1 << index) != 0 {
+                        reflect_source_components(transfer, plane)?;
+                    }
+                }
+                for (row, field) in sum.iter_mut().zip(transfer.field) {
+                    for (entry, value) in row.iter_mut().zip(field) {
+                        entry.add(value)?;
+                    }
+                }
+            }
+        }
+        for (transfer, sum) in self.transfers.iter_mut().zip(sums) {
+            poll(&mut cancelled)?;
+            transfer.field = sum.map(|row| row.map(ComplexSum::value));
+            if transfer.field.iter().flatten().any(|value| !finite(*value)) {
+                return Err(nonfinite("coherent acoustic image transfer"));
+            }
+        }
+        self.reflection_planes.extend_from_slice(planes);
+        poll(&mut cancelled)?;
+        Ok(self)
+    }
+}
+
+// Fold s Q and s R F into the same pressure/velocity transfer for every image.
+// Reflection acts on source components, not on the observer's vector axes.
+fn reflect_source_components(
+    transfer: &mut Transfer,
+    plane: IdealAcousticPlane,
+) -> Result<(), AeroacError> {
+    for row in &mut transfer.field {
+        let original = *row;
+        row[0] = original[0].scale(plane.boundary.sign());
+        for col in 0..3 {
+            let mut sum = ComplexSum::default();
+            for axis in 0..3 {
+                let identity = if axis == col { 1.0 } else { 0.0 };
+                let coefficient = plane.boundary.sign()
+                    * (identity - 2.0 * plane.normal[axis] * plane.normal[col]);
+                sum.add(original[axis + 1].scale(coefficient))?;
+            }
+            row[col + 1] = sum.value();
+            if !finite(row[col + 1]) {
+                return Err(nonfinite("reflected compact force transfer"));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl PreparedHalfSpaceObserver {

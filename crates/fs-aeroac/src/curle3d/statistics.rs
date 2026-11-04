@@ -10,6 +10,8 @@ pub struct CoherenceBudget {
     pub max_modes: usize,
     /// Maximum source-path/factor products; overflow refuses. Free-field
     /// observers count one path per source, ideal half-space observers two.
+    /// Orthogonal-plane observers fold their image kernels during preparation,
+    /// so their application counts one cached transfer per physical source.
     pub max_source_mode_pairs: usize,
 }
 

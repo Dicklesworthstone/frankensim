@@ -17,6 +17,9 @@ use std::f64::consts::{PI, TAU};
 #[path = "compact_interference/plane.rs"]
 mod plane;
 
+#[path = "compact_interference/corner.rs"]
+mod corner;
+
 fn medium(rho: f64, c: f64) -> FluidAcousticState {
     FluidAcousticState::try_new(rho, c).unwrap()
 }

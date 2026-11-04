@@ -22,8 +22,10 @@
 //! layers, as does the molecular exterior BEM owner. No extra attenuation
 //! coefficient or fitted absorption filter is introduced.
 //!
-//! Both paths are homogeneous, stationary, free-space point-source models.
-//! Source size, motion, scattering and mutual fluid loading are not resolved.
+//! Both constructors use homogeneous, stationary, free-space point sources.
+//! [`PreparedCompactSourceObserver::with_orthogonal_planes`] adds the finite
+//! image group of up to three ideal perpendicular boundaries to this same
+//! transfer. Source size, motion and mutual fluid loading are not resolved.
 //! In particular, an integrated force from a periodic flow cell is not
 //! automatically an isolated radiator. These SI transfers do not turn 2D
 //! force-per-span data into 3D sources or validate a physical source model.
@@ -130,6 +132,9 @@ pub struct PreparedCompactSourceObserver {
     wavenumber_per_m: C64,
     observer_m: [f64; 3],
     transfers: Vec<Transfer>,
+    // Empty for the original free field. Image coefficients are folded into
+    // each ORIGINAL source transfer; images never become statistical sources.
+    reflection_planes: Vec<IdealAcousticPlane>,
 }
 
 impl PreparedCompactSourceObserver {
@@ -325,6 +330,7 @@ impl PreparedCompactSourceObserver {
             wavenumber_per_m: k,
             observer_m,
             transfers,
+            reflection_planes: Vec::new(),
         })
     }
 
@@ -350,7 +356,13 @@ impl PreparedCompactSourceObserver {
     /// Physical propagation model and its explicit applicability boundary.
     #[must_use]
     pub const fn scope(&self) -> &'static str {
-        if self.molecular.is_some() {
+        if !self.reflection_planes.is_empty() {
+            if self.molecular.is_some() {
+                plane::ORTHOGONAL_MOLECULAR_SCOPE
+            } else {
+                plane::ORTHOGONAL_LOSSLESS_SCOPE
+            }
+        } else if self.molecular.is_some() {
             MOLECULAR_COMPACT_FIELD_SCOPE
         } else {
             COMPACT_FIELD_SCOPE
@@ -375,13 +387,20 @@ impl PreparedCompactSourceObserver {
         self.transfers.len()
     }
 
+    /// Original ideal boundaries, in the caller's preparation order.
+    /// An empty slice denotes free-space propagation.
+    #[must_use]
+    pub fn reflection_planes(&self) -> &[IdealAcousticPlane] {
+        &self.reflection_planes
+    }
+
     /// Original source position [m], or None for an index outside the array.
     #[must_use]
     pub fn source_position_m(&self, index: usize) -> Option<[f64; 3]> {
         self.transfers.get(index).map(|transfer| transfer.source_m)
     }
 
-    /// Equilibrium reference time r/c [s]. This is the path travel time for
+    /// Equilibrium reference time r/c [s] of the DIRECT path. This is its travel time for
     /// lossless propagation. With molecular dispersion it is only a reference;
     /// the transfer uses [`Self::source_phase_delay_s`] and is not a pure delay.
     #[must_use]
@@ -389,10 +408,12 @@ impl PreparedCompactSourceObserver {
         self.transfers.get(index).map(|transfer| transfer.delay_s)
     }
 
-    /// Phase delay r Re(k)/omega [s] at this frequency, already included in the
+    /// DIRECT-path phase delay r Re(k)/omega [s], already included in the
     /// outgoing transfer. It equals r/c for the lossless constructor. In a
     /// dispersive gas it is neither the group delay nor the signal-front time;
     /// broadband propagation requires the frequency-dependent transfer itself.
+    /// Reflected paths keep their own phases in the prepared coefficients;
+    /// this value must not be used as a single delay for their coherent sum.
     #[must_use]
     pub fn source_phase_delay_s(&self, index: usize) -> Option<f64> {
         self.transfers
