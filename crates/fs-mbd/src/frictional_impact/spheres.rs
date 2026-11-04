@@ -42,6 +42,8 @@ pub struct SpherePairLaw {
 /// retained. Their floating-point roundoff can differ; neither is projected,
 /// clamped or silently accepted by this geometry operation. Contact/path owners
 /// must admit both gaps before applying a law. The normal points second to first.
+/// The material gap retains the original local surface arms before rounding
+/// either absolute diagnostic point into its world position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpherePairWitness {
     pub first: RigidImpactPoint,
@@ -98,7 +100,13 @@ pub fn sphere_pair_witness(
     };
     let first_point_world = first.pose().point_world_from_body(a.arm_body)?;
     let second_point_world = second.pose().point_world_from_body(b.arm_body)?;
-    let material_gap_m = first_point_world.sub(second_point_world).dot(normal_world);
+    let material_gap_m = super::material_separation(
+        first.pose().position_world(),
+        first.pose().orientation().rotate_body_to_world(a.arm_body),
+        second.pose().position_world(),
+        second.pose().orientation().rotate_body_to_world(b.arm_body),
+    )
+    .dot(normal_world);
     if !centre_gap_m.is_finite() || !material_gap_m.is_finite() {
         return Err(SphereContactError::Unresolved("sphere witness range"));
     }

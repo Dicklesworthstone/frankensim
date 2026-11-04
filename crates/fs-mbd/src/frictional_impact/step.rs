@@ -473,18 +473,17 @@ fn gaps<F, E, R, I>(
         }
         let normal = contact.normal_world.normalized("step.contact.normal")?;
         let a = bodies[contact.point.body]
-            .point_kinematics(properties[contact.point.body], contact.point.arm_body)?
-            .point_world;
-        let b = match contact.other {
+            .point_kinematics(properties[contact.point.body], contact.point.arm_body)?;
+        let (centre_b, arm_b) = match contact.other {
             RigidImpactCounterpart::Body(point) => {
                 if point.body >= bodies.len() || point.body == contact.point.body {
                     return Err(RigidContactStepError::Invalid(
                         "invalid counterpart witness body",
                     ));
                 }
-                bodies[point.body]
-                    .point_kinematics(properties[point.body], point.arm_body)?
-                    .point_world
+                let b =
+                    bodies[point.body].point_kinematics(properties[point.body], point.arm_body)?;
+                (bodies[point.body].pose().position_world(), b.arm_world)
             }
             RigidImpactCounterpart::PrescribedPlane {
                 point_world,
@@ -495,10 +494,15 @@ fn gaps<F, E, R, I>(
                         "nonfinite prescribed plane path",
                     ));
                 }
-                point_world.add(velocity_world.scale(elapsed_s))
+                (point_world, velocity_world.scale(elapsed_s))
             }
         };
-        let gap = normal.dot(a.sub(b));
+        let gap = normal.dot(super::material_separation(
+            bodies[contact.point.body].pose().position_world(),
+            a.arm_world,
+            centre_b,
+            arm_b,
+        ));
         if !gap.is_finite() {
             return Err(RigidContactStepError::Invalid(
                 "nonfinite native contact gap",

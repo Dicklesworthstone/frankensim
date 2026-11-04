@@ -93,6 +93,77 @@ fn gravity(gx: f64) -> Gravity {
     Gravity::new(Vec3::new(gx, 0.0, -8.0)).unwrap()
 }
 
+#[test]
+fn material_gap_and_plane_motion_survive_a_distant_common_origin() {
+    for origin in [Vec3::ZERO, Vec3::new(0.0, 0.0, 2.0_f64.powi(54))] {
+        for dynamic in [false, true] {
+            let initial = [RigidBodyState::new(
+                Pose::new(origin, UnitQuaternion::IDENTITY).unwrap(),
+                Vec3::ZERO,
+                Vec3::ZERO,
+            )
+            .unwrap(); 2];
+            let mut bodies = initial;
+            let mut contact = plane(0.0);
+            contact.point.arm_body = Vec3::new(0.0, 0.0, 1.0);
+            contact.other = if dynamic {
+                RigidImpactCounterpart::Body(RigidImpactPoint {
+                    body: 1,
+                    arm_body: Vec3::ZERO,
+                })
+            } else {
+                RigidImpactCounterpart::PrescribedPlane {
+                    point_world: origin,
+                    velocity_world: Vec3::new(0.0, 0.0, 0.25),
+                }
+            };
+            let report = step_rigid_frictional_contacts(
+                &mut bodies,
+                &[property(); 2],
+                &[Wrench::ZERO; 2],
+                Gravity::ZERO,
+                &[contact],
+                0.125,
+                controls(),
+                // This fixture has stationary bodies and one fixed or
+                // uniformly translating witness: g(t) >= 1 - 0.25/8 > 0.
+                |_| Ok::<_, &'static str>(()),
+                &CancelGate::new(),
+            )
+            .unwrap();
+            assert_eq!(bodies, initial);
+            close(report.initial_gaps[0].signed_gap_m, 1.0, 0.0);
+            close(
+                report.endpoint_gaps[0].signed_gap_m,
+                if dynamic { 1.0 } else { 0.96875 },
+                0.0,
+            );
+
+            contact.point.arm_body.z = -1.0;
+            let refused = step_rigid_frictional_contacts(
+                &mut bodies,
+                &[property(); 2],
+                &[Wrench::ZERO; 2],
+                Gravity::ZERO,
+                &[contact],
+                0.125,
+                controls(),
+                |_| Ok::<_, &'static str>(()),
+                &CancelGate::new(),
+            );
+            assert!(matches!(
+                refused,
+                Err(RigidContactStepError::Penetration {
+                    endpoint: false,
+                    signed_gap_m: -1.0,
+                    ..
+                })
+            ));
+            assert_eq!(bodies, initial);
+        }
+    }
+}
+
 // This fixture's complete collision scene is one known cuboid and one infinite,
 // translating plane. The native spherical top follows an exact constant-spin
 // rotation. For EVERY time, each vertex's rotational displacement is bounded by

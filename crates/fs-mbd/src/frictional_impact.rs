@@ -137,11 +137,14 @@ pub struct RigidImpactKinematics {
     /// Exact normalized world axes used in the shared mobility assembly:
     /// [normal, tangent 1, tangent 2], with tangent 2 = normal cross tangent 1.
     pub axes_world: [Vec3; 3],
+    /// Rounded absolute material-point position for source queries.
     pub point_world: Vec3,
     /// Original dynamic witness, or the normal projection of `point_world`
     /// onto a prescribed plane. A plane's reference anchor is not its local
     /// contact point. This query metadata does not relocate either body arm.
     pub counterpart_point_world: Vec3,
+    /// Signed separation from original centres and local arms. This retains
+    /// geometry that subtraction of the rounded absolute witnesses can lose.
     pub gap_m: f64,
     /// [normal, tangent 1, tangent 2], with positive normal speed separating.
     pub relative_velocity_m_s: [f64; 3],
@@ -175,7 +178,6 @@ struct Influence {
 }
 struct PreparedContact {
     axes: [Vec3; 3],
-    positive_point_world: Vec3,
     influences: Vec<Influence>,
 }
 
@@ -188,13 +190,15 @@ struct ImpulseAccumulator {
     angular_body: [Dd; 3],
 }
 impl ImpulseAccumulator {
-    fn add(&mut self, body: RigidBodyState, arm_body: Vec3, impulse_world: Vec3) {
+    fn add(&mut self, body: RigidBodyState, arm_body: Vec3, impulse_world: Vec3) -> Vec3 {
         let impulse_body = body
             .pose()
             .orientation()
             .rotate_world_to_body(impulse_world);
+        let angular_body = arm_body.cross(impulse_body);
         add_vector(&mut self.linear_world, impulse_world);
-        add_vector(&mut self.angular_body, arm_body.cross(impulse_body));
+        add_vector(&mut self.angular_body, angular_body);
+        angular_body
     }
 }
 
@@ -205,6 +209,29 @@ fn add_vector(sum: &mut [Dd; 3], value: Vec3) {
 }
 fn rounded_vector(sum: [Dd; 3]) -> Vec3 {
     Vec3::new(sum[0].to_f64(), sum[1].to_f64(), sum[2].to_f64())
+}
+
+/// Subtract the original centres and retain both local material offsets before
+/// rounding. Subtracting absolute point positions can erase a real gap or
+/// tangential mismatch when a common world translation dwarfs the body arms.
+fn material_separation(centre_a: Vec3, arm_a: Vec3, centre_b: Vec3, arm_b: Vec3) -> Vec3 {
+    let a = components(centre_a);
+    let b = components(centre_b);
+    let ra = components(arm_a);
+    let rb = components(arm_b);
+    rounded_vector(std::array::from_fn(|i| {
+        Dd::from_f64(a[i]) - Dd::from_f64(b[i]) + Dd::from_f64(ra[i]) - Dd::from_f64(rb[i])
+    }))
+}
+
+/// Retain the small part of each orbital moment, including cancellation
+/// inside a cross product, until the complete scene balance is formed.
+fn add_cross(sum: &mut [Dd; 3], a: Vec3, b: Vec3) {
+    let a = components(a).map(Dd::from_f64);
+    let b = components(b).map(Dd::from_f64);
+    for i in 0..3 {
+        sum[i] = sum[i] + a[(i + 1) % 3] * b[(i + 2) % 3] - a[(i + 2) % 3] * b[(i + 1) % 3];
+    }
 }
 
 /// Apply one globally admitted normal/friction event to original body states.
@@ -220,6 +247,8 @@ fn rounded_vector(sum: [Dd; 3]) -> Vec3 {
 /// one native momentum update per body. Balance gates use the actual rounded
 /// increments and polarized kinetic changes, not differences of large scene
 /// totals. The diagnostic total energies remain available separately.
+/// Geometry retains the original local arms before any absolute-point rounding;
+/// prescribed-support moments and scene orbital balances do likewise.
 ///
 /// Redundant contact rows may be admitted when the original contact operator
 /// proves a unique body velocity. Their individual impulses then remain one
@@ -327,14 +356,19 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         let a =
             bodies[c.point.body].point_kinematics(properties[c.point.body], c.point.arm_body)?;
         let mut influences = vec![influence(bodies, properties, c.point, axes)];
-        let (other_point, other_velocity) = match c.other {
+        let (other_point, other_velocity, separation) = match c.other {
             RigidImpactCounterpart::Body(point) => {
                 if point.body >= bodies.len() || point.body == c.point.body {
                     return Err(invalid("counterpart must name another valid dynamic body"));
                 }
                 let b =
                     bodies[point.body].point_kinematics(properties[point.body], point.arm_body)?;
-                let separation = a.point_world.sub(b.point_world);
+                let separation = material_separation(
+                    bodies[c.point.body].pose().position_world(),
+                    a.arm_world,
+                    bodies[point.body].pose().position_world(),
+                    b.arm_world,
+                );
                 if magnitude(separation.sub(n.scale(n.dot(separation))))
                     > controls.geometry_tolerance_m
                 {
@@ -349,7 +383,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
                     }
                 }
                 influences.push(opposite);
-                (b.point_world, b.point_velocity_world)
+                (b.point_world, b.point_velocity_world, separation)
             }
             RigidImpactCounterpart::PrescribedPlane {
                 point_world,
@@ -360,11 +394,20 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
                         "prescribed support geometry and velocity must be finite",
                     ));
                 }
-                (point_world, velocity_world)
+                (
+                    point_world,
+                    velocity_world,
+                    material_separation(
+                        bodies[c.point.body].pose().position_world(),
+                        a.arm_world,
+                        point_world,
+                        Vec3::ZERO,
+                    ),
+                )
             }
         };
         let relative = a.point_velocity_world.sub(other_velocity);
-        let gap = n.dot(a.point_world.sub(other_point));
+        let gap = n.dot(separation);
         let counterpart_point_world = match c.other {
             RigidImpactCounterpart::Body(_) => other_point,
             RigidImpactCounterpart::PrescribedPlane { .. } => a.point_world.sub(n.scale(gap)),
@@ -378,11 +421,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
             gap_m: gap,
             relative_velocity_m_s: axes.map(|axis| relative.dot(axis)),
         });
-        prepared.push(PreparedContact {
-            axes,
-            positive_point_world: a.point_world,
-            influences,
-        });
+        prepared.push(PreparedContact { axes, influences });
     }
     let mut delassus = vec![0.0; entries];
     for i in 0..dimension {
@@ -419,7 +458,8 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         poll_with(gate)?;
         let c = contacts[index];
         let impulse = world_impulse(prepared[slot].axes, physical.impulses[slot]);
-        impulses[c.point.body].add(bodies[c.point.body], c.point.arm_body, impulse);
+        let angular_body =
+            impulses[c.point.body].add(bodies[c.point.body], c.point.arm_body, impulse);
         match c.other {
             RigidImpactCounterpart::Body(point) => {
                 impulses[point.body].add(bodies[point.body], point.arm_body, impulse.scale(-1.0));
@@ -427,9 +467,17 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
             RigidImpactCounterpart::PrescribedPlane { velocity_world, .. } => {
                 support_work = support_work + Dd::from_f64(impulse.dot(velocity_world));
                 add_vector(&mut support_impulse, impulse);
+                add_cross(
+                    &mut support_angular,
+                    bodies[c.point.body].pose().position_world(),
+                    impulse,
+                );
                 add_vector(
                     &mut support_angular,
-                    prepared[slot].positive_point_world.cross(impulse),
+                    bodies[c.point.body]
+                        .pose()
+                        .orientation()
+                        .rotate_body_to_world(angular_body),
                 );
             }
         }
@@ -455,11 +503,10 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         // The event fixes every pose. Evaluate delta(x cross p + R L)
         // directly, so an unchanged large orbital momentum cannot swallow
         // the contact's spin or angular impulse about the same world origin.
-        add_vector(
+        add_cross(
             &mut angular_change,
-            body.pose()
-                .position_world()
-                .cross(applied.linear_increment_world),
+            body.pose().position_world(),
+            applied.linear_increment_world,
         );
         add_vector(
             &mut angular_change,

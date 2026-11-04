@@ -85,6 +85,29 @@ fn spin_world(b: RigidBodyState) -> Vec3 {
 }
 
 #[test]
+fn g3_sphere_material_gap_retains_radii_at_a_distant_origin() {
+    for origin in [0.0, 2.0_f64.powi(54)] {
+        let first = body(Vec3::new(origin, 0.0, 0.0), Vec3::ZERO, 1.0, Vec3::ZERO);
+        let second = body(
+            Vec3::new(origin + 8.0, 0.0, 0.0),
+            Vec3::ZERO,
+            1.0,
+            Vec3::ZERO,
+        );
+        for radius in [3.5, 4.0, 4.5] {
+            let witness = sphere_pair_witness(0, first, radius, 1, second, radius).unwrap();
+            let gap = 8.0 - 2.0 * radius;
+            close(witness.centre_gap_m, gap);
+            close(witness.material_gap_m, gap);
+            // Both diagnostic absolute witnesses can round to the same world
+            // point. They must not replace the original local surface arms.
+            close(witness.first.arm_body.x, radius);
+            close(witness.second.arm_body.x, -radius);
+        }
+    }
+}
+
+#[test]
 fn g1_hidden_crossing_unequal_mass_collision_has_analytic_time_and_endpoint() {
     let spheres = [
         ContactSphere {

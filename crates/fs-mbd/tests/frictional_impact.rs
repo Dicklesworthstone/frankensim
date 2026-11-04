@@ -66,6 +66,185 @@ fn plane(point: RigidImpactPoint, friction: f64, restitution: f64) -> RigidFrict
 }
 
 #[test]
+fn g3_material_gap_survives_a_distant_common_origin() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0)); 2];
+    for origin in [Vec3::ZERO, Vec3::new(0.0, 0.0, 2.0_f64.powi(54))] {
+        for gap in [-1.0, 1.0] {
+            for dynamic in [false, true] {
+                let initial = [
+                    body(origin, UnitQuaternion::IDENTITY, Vec3::new(0.0, 0.0, -1.0)),
+                    body(origin, UnitQuaternion::IDENTITY, Vec3::ZERO),
+                ];
+                let mut bodies = initial;
+                let mut c = plane(
+                    RigidImpactPoint {
+                        body: 0,
+                        arm_body: Vec3::new(0.0, 0.0, gap),
+                    },
+                    0.0,
+                    0.0,
+                );
+                c.other = if dynamic {
+                    RigidImpactCounterpart::Body(RigidImpactPoint {
+                        body: 1,
+                        arm_body: Vec3::ZERO,
+                    })
+                } else {
+                    RigidImpactCounterpart::PrescribedPlane {
+                        point_world: origin,
+                        velocity_world: Vec3::ZERO,
+                    }
+                };
+                let result = apply_rigid_frictional_impacts(
+                    &mut bodies,
+                    &properties,
+                    &[c],
+                    controls(),
+                    &CancelGate::new(),
+                );
+                if gap < 0.0 {
+                    assert!(matches!(
+                        result,
+                        Err(RigidFrictionalImpactError::Contact(
+                            fs_contact::frictional_multicontact::FrictionalContactError::PenetratingContact { .. }
+                        ))
+                    ), "origin={origin:?}, dynamic={dynamic}: {result:?}");
+                } else {
+                    let report = result.unwrap();
+                    assert_eq!(report.contact.impulses, [[0.0; 3]]);
+                    assert_eq!(report.kinetic_change_j, 0.0);
+                }
+                // A real gap cannot become an impact, and genuine penetration
+                // must refuse, even when COM + arm rounds to the COM itself.
+                assert_eq!(bodies, initial);
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_distant_origin_cannot_hide_a_tangential_witness_mismatch() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0)); 2];
+    for origin in [Vec3::ZERO, Vec3::new(2.0_f64.powi(54), 0.0, 0.0)] {
+        let initial = [
+            body(origin, UnitQuaternion::IDENTITY, Vec3::new(0.0, 0.0, -1.0)),
+            body(origin, UnitQuaternion::IDENTITY, Vec3::ZERO),
+        ];
+        let mut bodies = initial;
+        let mut c = plane(
+            RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::new(1.0, 0.0, 0.0),
+            },
+            0.0,
+            0.0,
+        );
+        c.other = RigidImpactCounterpart::Body(RigidImpactPoint {
+            body: 1,
+            arm_body: Vec3::ZERO,
+        });
+        assert!(matches!(
+            apply_rigid_frictional_impacts(
+                &mut bodies,
+                &properties,
+                &[c],
+                controls(),
+                &CancelGate::new(),
+            ),
+            Err(RigidFrictionalImpactError::Invalid(
+                "dynamic contact witnesses do not share a normal line"
+            ))
+        ));
+        assert_eq!(bodies, initial);
+    }
+}
+
+#[test]
+fn g3_distant_origin_retains_the_original_support_lever_arm() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0))];
+    for origin in [Vec3::ZERO, Vec3::new(2.0_f64.powi(54), 0.0, 0.0)] {
+        let initial = body(origin, UnitQuaternion::IDENTITY, Vec3::new(0.0, 0.0, -1.0));
+        let mut bodies = [initial];
+        let mut c = plane(
+            RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::new(1.0, 0.0, 0.0),
+            },
+            0.0,
+            0.0,
+        );
+        c.other = RigidImpactCounterpart::PrescribedPlane {
+            point_world: origin,
+            velocity_world: Vec3::ZERO,
+        };
+        let report = apply_rigid_frictional_impacts(
+            &mut bodies,
+            &properties,
+            &[c],
+            controls(),
+            &CancelGate::new(),
+        )
+        .unwrap_or_else(|error| panic!("origin={origin:?}: {error:?}"));
+        // m = I_y = arm_x = 1 gives effective mass 1/2. Plastic impact
+        // transfers equal translational and rotational kinetic energy.
+        close(report.contact.impulses[0][0], 0.5);
+        close_vector(bodies[0].linear_momentum_world(), Vec3::new(0.0, 0.0, -0.5));
+        close_vector(bodies[0].angular_momentum_body(), Vec3::new(0.0, -0.5, 0.0));
+        close(report.contact.dissipated_energy, 0.25);
+        close_vector(report.angular_momentum_residual_nms, Vec3::ZERO);
+        assert_eq!(bodies[0].pose(), initial.pose());
+    }
+}
+
+#[test]
+fn g3_origin_shift_cannot_hide_an_unbalanced_friction_couple() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0)); 2];
+    for origin_x in [0.0, 2.0_f64.powi(54)] {
+        let initial = [
+            body(
+                Vec3::new(origin_x, 0.0, 1.0),
+                UnitQuaternion::IDENTITY,
+                Vec3::new(1.0, 0.0, -1.0),
+            ),
+            body(
+                Vec3::new(origin_x, 0.0, 0.0),
+                UnitQuaternion::IDENTITY,
+                Vec3::ZERO,
+            ),
+        ];
+        let mut bodies = initial;
+        let mut c = plane(
+            RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::ZERO,
+            },
+            0.5,
+            0.0,
+        );
+        c.other = RigidImpactCounterpart::Body(RigidImpactPoint {
+            body: 1,
+            arm_body: Vec3::ZERO,
+        });
+        c.activation_tolerance_m = 2.0;
+        let result = apply_rigid_frictional_impacts(
+            &mut bodies,
+            &properties,
+            &[c],
+            controls(),
+            &CancelGate::new(),
+        );
+        // Equal/opposite friction impulses at distinct normal-separated
+        // witnesses create a real -0.25 N m s couple. Translating their common
+        // origin cannot authorize this violation of angular momentum.
+        let Err(RigidFrictionalImpactError::Audit(report)) = result else {
+            panic!("origin_x={origin_x}: {result:?}");
+        };
+        close(report.angular_momentum_residual_nms.y, -0.25);
+        assert_eq!(bodies, initial);
+    }
+}
+
+#[test]
 fn g3_contact_balance_retains_small_normal_loss_under_boost_and_origin_shift() {
     let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0))];
     for boost in [0.0, 1e6] {
