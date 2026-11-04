@@ -1,3 +1,4 @@
+mod stabilized;
 use super::*;
 use crate::compressible::mixture::molecular::{
     DissipationControl, DissipationError, MolecularReport, MolecularTransport2d, PlanarTransport,

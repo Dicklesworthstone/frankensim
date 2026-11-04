@@ -9,11 +9,11 @@ use super::{
     Cell, DissipationError, MixtureNetwork1d, NetworkDissipationOperator, NetworkDissipationReport,
     Time, TransportLaw, allocated, poll, positive,
 };
-use crate::multicomponent::dissipation::StabilizedDissipationControl;
 use crate::multicomponent::dissipation::evolve::Stage;
 use crate::multicomponent::dissipation::stabilized::{
-    b, check_rate, extent, recurrence, reserve_evaluation,
+    check_rate, extent, recurrence, reserve_evaluation,
 };
+use crate::multicomponent::dissipation::{Rkl2Scheme, StabilizedDissipationControl};
 
 /// Complete network balances and measured RKL2 spatial work.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -328,10 +328,10 @@ pub(super) fn macrostep<L: TransportLaw>(
     } = trial;
     let base = controls.transport;
     let m = owner.gas.species_count() + 2;
-    let extension = extent(stages);
+    let scheme = Rkl2Scheme::new(stages)?;
+    let extension = scheme.stability_extent();
     let limit = base.parabolic_cfl * extension;
-    let w1 = 1.0 / extension;
-    let first_weight = b(1) * w1;
+    let first_weight = scheme.first_weight();
     let mut peak = anchor;
     check_rate(step, anchor.rate, limit)?;
     // A refused trial overwrote the spatial scratch. Restore its cached RHS.
@@ -371,12 +371,7 @@ pub(super) fn macrostep<L: TransportLaw>(
         if j > stages {
             break; // endpoint passed the full original spatial admission
         }
-        let jf = j as f64;
-        let mu = ((2.0 * jf - 1.0) / jf) * b(j) / b(j - 1);
-        let nu = -((jf - 1.0) / jf) * b(j) / b(j - 2);
-        let mu_tilde = mu * w1;
-        let gamma_tilde = -(1.0 - b(j - 1)) * mu_tilde;
-        stage_recurrence(owner, step, [mu, nu, mu_tilde, gamma_tilde], cancelled)?;
+        stage_recurrence(owner, step, scheme.coefficients(j)?, cancelled)?;
         core::mem::swap(&mut owner.work.stage, &mut owner.work.candidate);
     }
     Ok(peak)

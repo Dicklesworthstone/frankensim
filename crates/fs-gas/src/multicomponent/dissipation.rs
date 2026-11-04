@@ -21,7 +21,7 @@ pub use law::{
     ConstantTransport, KineticTransport, SoretDufourTransport, TransportCoefficients,
     TransportDomain, TransportLaw,
 };
-pub use stabilized::{StabilizedDissipationControl, StabilizedDissipationReport};
+pub use stabilized::{Rkl2Scheme, StabilizedDissipationControl, StabilizedDissipationReport};
 
 use super::{
     Boundaries, Boundary, Error as FlowError, MAX_COMPONENTS, Mesh1d, MixtureEuler1d, MixtureGas,

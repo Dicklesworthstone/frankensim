@@ -1,6 +1,7 @@
 use super::*;
 
 mod coupled;
+mod stabilized;
 use crate::compressible::mixture::molecular::{MolecularTransport2d, PlanarTransport};
 use crate::compressible::spatial::mixture::molecular::{
     DissipationControl, DissipationError, MolecularReport, MolecularTransport3d, MolecularWall3d,
@@ -595,15 +596,19 @@ fn g0_spatial_molecular_budget_capacity_and_boundary_ownership_are_explicit() {
     ));
 }
 
-
 #[test]
 fn g1_no_slip_isothermal_wall_transfers_shear_and_heat_conservatively() {
     let grid = CartesianGrid::new(3, 3, 3, 0.2, 0.2, 0.2).unwrap();
-    let mut flow = field(equal_mass_gas(), grid, Boundaries3d {
-        x: WALLS,
-        y: WALLS,
-        z: WALLS,
-    }, |_| ([1.0, 0.0, 0.0], [0.0, 0.2, -0.1], 1.0));
+    let mut flow = field(
+        equal_mass_gas(),
+        grid,
+        Boundaries3d {
+            x: WALLS,
+            y: WALLS,
+            z: WALLS,
+        },
+        |_| ([1.0, 0.0, 0.0], [0.0, 0.2, -0.1], 1.0),
+    );
     let source = SpatialTransport::new(
         flow.gas().clone(),
         law(flow.gas(), 0.01, 0.03, 0.01, 0.04),
@@ -645,24 +650,26 @@ fn g1_no_slip_isothermal_wall_transfers_shear_and_heat_conservatively() {
         0.0,
         3e-11,
     );
-    assert!(MolecularTransport3d::new(
-        &flow,
-        SpatialTransport::new(
-            flow.gas().clone(),
-            law(flow.gas(), 0.01, 0.03, 0.01, 0.04),
+    assert!(
+        MolecularTransport3d::new(
+            &flow,
+            SpatialTransport::new(
+                flow.gas().clone(),
+                law(flow.gas(), 0.01, 0.03, 0.01, 0.04),
+                || false,
+            )
+            .unwrap(),
+            bytes,
             || false,
         )
-        .unwrap(),
-        bytes,
-        || false,
-    )
-    .unwrap()
-    .with_wall(
-        BoundarySide::XMin,
-        MolecularWall3d::NoSlip {
-            velocity: [0.1, 0.0, 0.0],
-            thermal: WallThermalCondition::Adiabatic,
-        },
-    )
-    .is_err());
+        .unwrap()
+        .with_wall(
+            BoundarySide::XMin,
+            MolecularWall3d::NoSlip {
+                velocity: [0.1, 0.0, 0.0],
+                thermal: WallThermalCondition::Adiabatic,
+            },
+        )
+        .is_err()
+    );
 }

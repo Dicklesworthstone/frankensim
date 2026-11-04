@@ -1713,6 +1713,12 @@ validation or a global entropy/invariant-domain theorem.
 
 ### Stabilized molecular diffusion intervals
 
+`Rkl2Scheme` is the shared bounded Legendre coefficient owner for axial,
+network, planar and volumetric consumers. It admits 2–256 stages and exposes
+the stability extension, first weight and complete signed stage recurrence.
+All consumers retain their original spatial divergence and physical gates;
+the coefficient object supplies no substitute constitutive or boundary law.
+
 `DissipationOperator::advance_stabilized_for` optionally advances the same
 stationary constant-area field with second-order Runge–Kutta–Legendre (RKL2)
 super-time-stepping. Every intermediate and endpoint evaluation uses the

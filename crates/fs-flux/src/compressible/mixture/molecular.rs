@@ -12,12 +12,14 @@ use super::{
     boundary_view, cartesian, cell, checked_totals, copy_values, sum_rows, update,
 };
 pub(in crate::compressible) mod interval;
+pub(in crate::compressible) mod stabilized;
 pub use fs_gas::multicomponent::dissipation::{
     DissipationControl, DissipationError, PlanarTransport, TransportLaw,
 };
 use fs_gas::multicomponent::{MixtureGas, NormalPrimitive};
 use fs_qty::Time;
 use interval::{Action, Stage, parabolic};
+pub use stabilized::{StabilizedDissipationControl, StabilizedMolecularReport};
 
 mod coupled;
 pub use coupled::{MolecularEuler2d, MolecularStepControl, MolecularStepReport};
@@ -54,7 +56,7 @@ impl cartesian::Failure for DissipationError {
 pub struct MolecularReport {
     /// Complete represented physical duration; the Euler clock is unchanged.
     pub elapsed: Time,
-    /// Accepted SSP RK2 substeps.
+    /// Accepted SSP RK2 substeps or opt-in RKL2 macrosteps.
     pub accepted_steps: usize,
     /// Failed internal trials before eventual successful substeps.
     pub rejected_steps: usize,
@@ -85,6 +87,10 @@ struct Workspace {
     gradient: Vec<[f64; 4]>,
     x_flux: Vec<f64>,
     y_flux: Vec<f64>,
+    // Retained lazily by RKL2, never allocated per stage or retry.
+    stabilized_x_flux: Vec<f64>,
+    stabilized_y_flux: Vec<f64>,
+    stabilized_boundary: Vec<f64>,
     boundary_step: Vec<f64>,
     boundary_trial: Vec<f64>,
     boundary_correction: Vec<f64>,
@@ -191,6 +197,9 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 gradient: allocated(grid.len(), [0.0; 4])?,
                 x_flux: allocated((nx + 1) * ny * width, 0.0)?,
                 y_flux: allocated(nx * (ny + 1) * width, 0.0)?,
+                stabilized_x_flux: Vec::new(),
+                stabilized_y_flux: Vec::new(),
+                stabilized_boundary: Vec::new(),
                 boundary_step: allocated(boundary, 0.0)?,
                 boundary_trial: allocated(boundary, 0.0)?,
                 boundary_correction: allocated(boundary, 0.0)?,
@@ -217,6 +226,9 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 + self.work.candidate.capacity()
                 + self.work.x_flux.capacity()
                 + self.work.y_flux.capacity()
+                + self.work.stabilized_x_flux.capacity()
+                + self.work.stabilized_y_flux.capacity()
+                + self.work.stabilized_boundary.capacity()
                 + self.work.boundary_step.capacity()
                 + self.work.boundary_trial.capacity()
                 + self.work.boundary_correction.capacity())
@@ -278,41 +290,8 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
     ) -> Result<MolecularReport, DissipationError> {
         poll(cancelled)?;
         controls.validate()?;
-        if self.gas() != flow.gas() || self.grid != flow.grid || self.boundaries != flow.boundaries
-        {
-            return Err(DissipationError::Invalid(
-                "planar molecular field ownership differs",
-            ));
-        }
-        flow.reservoirs.admit_molecular(flow.boundaries)?;
-        let bytes = self
-            .workspace_bytes()
-            .checked_add(flow.workspace_bytes())
-            .ok_or(DissipationError::Invalid(
-                "planar molecular workspace size overflow",
-            ))?;
-        if bytes > maximum_workspace_bytes || bytes > MAX_MIXTURE_WORKSPACE_BYTES {
-            return Err(DissipationError::Invalid(
-                "planar molecular total workspace budget",
-            ));
-        }
-        if !duration.value().is_finite() || duration.value() < 0.0 {
-            return Err(DissipationError::Invalid(
-                "nonnegative finite molecular duration required",
-            ));
-        }
+        let before = self.prepare_interval(flow, duration, maximum_workspace_bytes, cancelled)?;
         let species = self.gas().species_count();
-        let before = checked_totals(&flow.states, &self.grid, species, cancelled)?;
-        copy_values(&flow.states, &mut self.work.current, cancelled)?;
-        for values in [
-            &mut self.work.boundary_trial,
-            &mut self.work.boundary_correction,
-        ] {
-            for tile in values.chunks_mut(4096) {
-                poll(cancelled)?;
-                tile.fill(0.0);
-            }
-        }
         let interval = interval::advance(
             duration.value(),
             controls,
@@ -434,6 +413,65 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 Ok(first.merge(second))
             },
         )?;
+        self.complete_interval(flow, duration, before, interval, cancelled)
+    }
+
+    // Both time integrators retain the original source/geometry admission,
+    // requested-duration state gathering and reset of unpublished transfers.
+    fn prepare_interval(
+        &mut self,
+        flow: &MixtureEuler2d,
+        duration: Time,
+        maximum_workspace_bytes: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Totals, DissipationError> {
+        if self.gas() != flow.gas() || self.grid != flow.grid || self.boundaries != flow.boundaries
+        {
+            return Err(DissipationError::Invalid(
+                "planar molecular field ownership differs",
+            ));
+        }
+        flow.reservoirs.admit_molecular(flow.boundaries)?;
+        let bytes = self
+            .workspace_bytes()
+            .checked_add(flow.workspace_bytes())
+            .ok_or(DissipationError::Invalid(
+                "planar molecular workspace size overflow",
+            ))?;
+        if bytes > maximum_workspace_bytes || bytes > MAX_MIXTURE_WORKSPACE_BYTES {
+            return Err(DissipationError::Invalid(
+                "planar molecular total workspace budget",
+            ));
+        }
+        if !duration.value().is_finite() || duration.value() < 0.0 {
+            return Err(DissipationError::Invalid(
+                "nonnegative finite molecular duration required",
+            ));
+        }
+        let species = self.gas().species_count();
+        let before = checked_totals(&flow.states, &self.grid, species, cancelled)?;
+        copy_values(&flow.states, &mut self.work.current, cancelled)?;
+        for values in [
+            &mut self.work.boundary_trial,
+            &mut self.work.boundary_correction,
+        ] {
+            for tile in values.chunks_mut(4096) {
+                poll(cancelled)?;
+                tile.fill(0.0);
+            }
+        }
+        Ok(before)
+    }
+
+    fn complete_interval(
+        &mut self,
+        flow: &mut MixtureEuler2d,
+        duration: Time,
+        before: Totals,
+        interval: interval::Interval,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularReport, DissipationError> {
+        let species = self.gas().species_count();
         let after = checked_totals(&self.work.current, &self.grid, species, cancelled)?;
         let outward = sum_rows(&self.work.boundary_trial, species + 3, 1.0, cancelled)?;
         let boundary_change = Totals::from_row(&outward.map(|value| -value), species);

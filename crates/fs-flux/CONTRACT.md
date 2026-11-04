@@ -2366,6 +2366,60 @@ The oblique diffusion L1 errors on 8³/16³ cells are 6.45856775e-4 and
 is checked against independent discrete longitudinal/transverse symbols, and
 the integrated thermal gain equals lost kinetic energy without a heat source.
 
+### Stabilized resolved multicomponent molecular diffusion
+
+`MolecularTransport2d::advance_stabilized` and
+`MolecularTransport3d::advance_stabilized` select bounded second-order
+Runge–Kutta–Legendre (RKL2) integration on the ORIGINAL resolved molecular
+operators. Both use the same requested-duration controller and the original
+`fs-gas::multicomponent::dissipation::Rkl2Scheme` coefficient owner shared with
+axial and network transport.
+The negative-real linear stability extension is `(s*s+s-2)/4`, for 2–256
+stages. `StabilizedDissipationControl` separately limits physical macrostep
+duration, attempts, halvings and actual spatial-operator evaluations.
+
+Every intermediate state and final endpoint evaluates the original face law
+at actual local temperature, pressure and composition. Maxwell–Stefan
+counterdiffusion, source-defined Soret/Dufour coupling, species-referenced
+enthalpy, Fourier heat, complete viscous stress and stress work stay in the
+same conservative face flux. The original Cartesian divergence uses one
+shared face for neighboring cells. Each signed boundary transfer follows the
+SAME Legendre recurrence, including its negative weights; it is not estimated
+from the final flux or from an unrelated positive-weight quadrature.
+
+The existing three field arrays are reused. One anchor-flux array per axis and
+one boundary-stage array are retained lazily and included in both the required
+stabilized workspace estimate and actual owned capacities. There are no
+per-stage field allocations. Source-provider allocations retain their original
+scope. `required_stabilized_workspace_bytes` admits the combined field/operator
+numerical buffers before allocation, subject to the existing 1 GiB ceiling.
+
+All original caloric, species, source-domain and stage-dependent parabolic
+checks remain mandatory. A refused physical trial can be halved within its
+declared budget. Work counts include failed prefixes, retry anchor evaluations
+and final endpoint qualification. Cancellation or exhausted work leaves the
+accepted field, physical clock, boundary loads and published reports unchanged.
+A successful requested duration publishes the original physical balances plus
+actual operator work, largest accepted stage count and the parabolic number
+scaled by the Legendre extension.
+
+The planar path retains periodic axes, reflecting slip walls and the existing
+source-owned held gas-reservoir faces. The volumetric path retains
+periodic axes and static prescribed molecular walls, including the original
+thermal and no-slip conditions. Its optional SGS law, when selected, is
+recomputed through the existing spatial owner at every stage. Finite wall
+inertia is explicitly incompatible with this stabilized path; prescribed
+wall-acceleration histories continue through their original SSP stage-time and
+mechanical-work owner. No accelerated-wall trajectory is silently held fixed.
+
+This opt-in path is an Estimated numerical capability. Its linear stability
+extension does not prove nonlinear positivity, entropy decay, unconditional
+stability or time accuracy. The caller supplies an accuracy-appropriate maximum
+macrostep. Focused regressions use independent multidimensional finite-volume
+decay symbols and Legendre stability polynomials, signed boundary/energy
+balances and whole-duration work/storage/cancellation refusals. These are
+implementation checks, not experimental material validation.
+
 ### Coupled nonreacting evolving-species molecular flow in three dimensions
 
 `spatial::mixture::molecular::MolecularEuler3d` owns a complete nonreacting

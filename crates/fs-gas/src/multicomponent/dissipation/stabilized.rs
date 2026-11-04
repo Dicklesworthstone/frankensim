@@ -16,6 +16,61 @@ use super::{
 };
 use fs_qty::Time;
 
+/// Shared second-order Legendre recurrence for original molecular operators.
+///
+/// The numerical coefficients are independent of dimension and geometry.
+/// Spatial divergence, physical/source admission and boundary quadrature remain
+/// with each original owner. A negative-real linear stability interval does not
+/// establish positivity, nonlinear stability or temporal accuracy for a gas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rkl2Scheme {
+    stages: usize,
+}
+
+impl Rkl2Scheme {
+    /// Admit the same bounded stage count used by the original axial owner.
+    pub fn new(stages: usize) -> Result<Self, DissipationError> {
+        if !(2..=256).contains(&stages) {
+            return Err(DissipationError::Invalid(
+                "RKL2 stage count must be in [2,256]",
+            ));
+        }
+        Ok(Self { stages })
+    }
+
+    pub const fn stage_count(self) -> usize {
+        self.stages
+    }
+
+    /// Extension relative to the original forward-Euler parabolic interval.
+    pub fn stability_extent(self) -> f64 {
+        extent(self.stages)
+    }
+
+    /// Initial stage is `Y1 = Y0 + first_weight * dt * L(Y0)`.
+    pub fn first_weight(self) -> f64 {
+        b(1) * (1.0 / self.stability_extent())
+    }
+
+    /// `[mu, nu, mu_tilde, gamma_tilde]` for each stage `j` in `2..=s`:
+    /// `Yj = Y0 + mu*(Yj-1-Y0) + nu*(Yj-2-Y0)`
+    /// `     + dt*(mu_tilde*L(Yj-1) + gamma_tilde*L(Y0))`.
+    /// Every extensive boundary transfer uses these same signed weights.
+    pub fn coefficients(self, stage: usize) -> Result<[f64; 4], DissipationError> {
+        if !(2..=self.stages).contains(&stage) {
+            return Err(DissipationError::Invalid(
+                "RKL2 recurrence stage outside prepared scheme",
+            ));
+        }
+        let j = stage as f64;
+        let mu = ((2.0 * j - 1.0) / j) * b(stage) / b(stage - 1);
+        let nu = -((j - 1.0) / j) * b(stage) / b(stage - 2);
+        let mu_tilde = mu * (1.0 / self.stability_extent());
+        let gamma_tilde = -(1.0 - b(stage - 1)) * mu_tilde;
+        Ok([mu, nu, mu_tilde, gamma_tilde])
+    }
+}
+
 /// Bounded RKL2 macrosteps on the existing stationary molecular operator.
 ///
 /// `transport.maximum_step_s` caps the physical macrostep for accuracy, not
@@ -342,10 +397,10 @@ pub(super) fn advance<L: TransportLaw>(
             let stages = (2..=controls.maximum_stages)
                 .find(|s| step * a.rate <= base.parabolic_cfl * extent(*s))
                 .unwrap_or(controls.maximum_stages);
-            let extension = extent(stages);
+            let scheme = Rkl2Scheme::new(stages)?;
+            let extension = scheme.stability_extent();
             let limit = base.parabolic_cfl * extension;
-            let w1 = 1.0 / extension;
-            let first_weight = b(1) * w1;
+            let first_weight = scheme.first_weight();
             let mut previous_ends = [[0.0; MAX_COMPONENTS]; 2];
             let mut older_ends = [[0.0; MAX_COMPONENTS]; 2];
             let mut peak = a;
@@ -402,11 +457,7 @@ pub(super) fn advance<L: TransportLaw>(
                     if j > stages {
                         break;
                     }
-                    let jf = j as f64;
-                    let mu = ((2.0 * jf - 1.0) / jf) * b(j) / b(j - 1);
-                    let nu = -((jf - 1.0) / jf) * b(j) / b(j - 2);
-                    let mu_tilde = mu * w1;
-                    let gamma_tilde = -(1.0 - b(j - 1)) * mu_tilde;
+                    let [mu, nu, mu_tilde, gamma_tilde] = scheme.coefficients(j)?;
                     recurrence(
                         gas,
                         mesh,

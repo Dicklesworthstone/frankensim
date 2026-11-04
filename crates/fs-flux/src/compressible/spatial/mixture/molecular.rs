@@ -15,7 +15,8 @@ use super::{
 use crate::compressible::AxisBoundaries;
 use crate::compressible::mixture::molecular::interval::{self, Action, Stage, parabolic};
 pub use fs_gas::multicomponent::dissipation::{
-    DissipationControl, DissipationError, SpatialTransport, TransportLaw, WallThermalCondition,
+    DissipationControl, DissipationError, SpatialTransport, StabilizedDissipationControl,
+    TransportLaw, WallThermalCondition,
 };
 use fs_gas::multicomponent::{MixtureGas, SpatialPrimitive};
 use fs_qty::Time;
@@ -23,6 +24,7 @@ use fs_qty::Time;
 mod coupled;
 mod driving;
 mod inertia;
+mod stabilized;
 pub use coupled::{MolecularEuler3d, MolecularStepControl, MolecularStepReport3d};
 pub use driving::WallAcceleration3d;
 pub(super) use driving::WallDrive3d;
@@ -31,6 +33,7 @@ pub(super) use inertia::WallWork;
 pub use inertia::{
     InertialWall3d, WallInertiaControl3d, WallInertiaExchange3d, WallInertiaReport3d,
 };
+pub use stabilized::StabilizedMolecularReport;
 
 #[cfg(feature = "experimental-sgs")]
 pub mod sgs;
@@ -46,7 +49,7 @@ pub type MolecularWall3d = crate::compressible::molecular::MolecularWall<3>;
 pub struct MolecularReport {
     /// Complete represented physical duration; the Euler clock is unchanged.
     pub elapsed: Time,
-    /// Accepted SSP RK2 substeps.
+    /// Accepted SSP RK2 substeps or opt-in RKL2 macrosteps.
     pub accepted_steps: usize,
     /// Rejected internal trials before successful substeps.
     pub rejected_steps: usize,
@@ -102,6 +105,7 @@ pub struct MolecularTransport3d<L: TransportLaw> {
     boundary_impulses: Vec<f64>,
     last_step: Option<MolecularReport>,
     work: Workspace,
+    stabilized: Option<stabilized::Workspace>,
     #[cfg(feature = "experimental-sgs")]
     sgs: Option<SubgridTransport>,
 }
@@ -192,6 +196,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             maximum_workspace_bytes,
             boundary_impulses: allocated(boundary, 0.0)?,
             last_step: None,
+            stabilized: None,
             #[cfg(feature = "experimental-sgs")]
             sgs: None,
             work: Workspace {
@@ -299,7 +304,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             + self.work.gradient.capacity() * size_of::<[[f64; 3]; 3]>()
             + self
                 .inertia
-                .map_or(0, |_| WallInertiaControl3d::solver_workspace_bytes());
+                .map_or(0, |_| WallInertiaControl3d::solver_workspace_bytes())
+            + self
+                .stabilized
+                .as_ref()
+                .map_or(0, stabilized::Workspace::workspace_bytes);
         #[cfg(feature = "experimental-sgs")]
         let bytes = bytes
             + self
@@ -446,37 +455,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     ) -> Result<MolecularReport, DissipationError> {
         poll(cancelled)?;
         controls.validate()?;
-        if self.gas() != flow.gas() || self.grid != flow.grid || self.boundaries != flow.boundaries
-        {
-            return Err(DissipationError::Invalid(
-                "volumetric molecular field ownership differs",
-            ));
-        }
-        let bytes = self
-            .workspace_bytes()
-            .checked_add(flow.workspace_bytes())
-            .ok_or(DissipationError::Invalid(
-                "volumetric molecular workspace size overflow",
-            ))?;
-        admit_workspace(bytes, maximum_workspace_bytes)?;
-        if !duration.value().is_finite() || duration.value() < 0.0 {
-            return Err(DissipationError::Invalid(
-                "nonnegative finite molecular duration required",
-            ));
-        }
-        let species = self.gas().species_count();
-        let width = species + 4;
-        let before = checked_totals(&flow.states, &self.grid, species, cancelled)?;
-        copy_values(&flow.states, &mut self.work.current, cancelled)?;
-        for values in [
-            &mut self.work.boundary_trial,
-            &mut self.work.boundary_correction,
-        ] {
-            for tile in values.chunks_mut(4096) {
-                poll(cancelled)?;
-                tile.fill(0.0);
-            }
-        }
+        let before = self.prepare_interval(flow, duration, maximum_workspace_bytes, cancelled)?;
         let mut current_walls = self.walls;
         if let Some(previous) = previous {
             previous.apply(&mut current_walls);
@@ -562,6 +541,64 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 Ok(stage)
             },
         )?;
+        let inertia =
+            self.inertia_report(&initial_walls, &current_walls, mechanical_work, wall_work)?;
+        self.complete_interval(flow, duration, before, interval, inertia, cancelled)
+    }
+
+    /// Original shared admission and private state/load initialization.
+    fn prepare_interval(
+        &mut self,
+        flow: &MixtureEuler3d,
+        duration: Time,
+        maximum_workspace_bytes: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Totals, DissipationError> {
+        if self.gas() != flow.gas() || self.grid != flow.grid || self.boundaries != flow.boundaries
+        {
+            return Err(DissipationError::Invalid(
+                "volumetric molecular field ownership differs",
+            ));
+        }
+        let bytes = self
+            .workspace_bytes()
+            .checked_add(flow.workspace_bytes())
+            .ok_or(DissipationError::Invalid(
+                "volumetric molecular workspace size overflow",
+            ))?;
+        admit_workspace(bytes, maximum_workspace_bytes)?;
+        if !duration.value().is_finite() || duration.value() < 0.0 {
+            return Err(DissipationError::Invalid(
+                "nonnegative finite molecular duration required",
+            ));
+        }
+        let species = self.gas().species_count();
+        let before = checked_totals(&flow.states, &self.grid, species, cancelled)?;
+        copy_values(&flow.states, &mut self.work.current, cancelled)?;
+        for values in [
+            &mut self.work.boundary_trial,
+            &mut self.work.boundary_correction,
+        ] {
+            for tile in values.chunks_mut(4096) {
+                poll(cancelled)?;
+                tile.fill(0.0);
+            }
+        }
+        Ok(before)
+    }
+
+    /// One original physical ledger and atomic field commit for both integrators.
+    fn complete_interval(
+        &mut self,
+        flow: &mut MixtureEuler3d,
+        duration: Time,
+        before: Totals,
+        interval: interval::Interval,
+        wall_inertia: Option<WallInertiaReport3d>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularReport, DissipationError> {
+        let species = self.gas().species_count();
+        let width = species + 4;
         let after = checked_totals(&self.work.current, &self.grid, species, cancelled)?;
         let outward = sum_rows(&self.work.boundary_trial, width, 1.0, cancelled)?;
         let boundary_change = Totals::from_row(&outward.map(|value| -value), species);
@@ -590,12 +627,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             boundary_change,
             conservation_residual,
             absolute_energy_residual_j: conservation_residual.absolute_energy(self.gas())?,
-            wall_inertia: self.inertia_report(
-                &initial_walls,
-                &current_walls,
-                mechanical_work,
-                wall_work,
-            )?,
+            wall_inertia,
         };
         // No copied prefix can escape a late cancellation. Excess input
         // capacity follows the actual allocation across this O(1) exchange.
