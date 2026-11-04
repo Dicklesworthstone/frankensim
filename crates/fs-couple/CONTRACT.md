@@ -2113,6 +2113,26 @@ cancellation. Regressions cover analytic complex-forced oscillators, all three
 Maxwell-memory multipliers, stable and unstable Duffing branches with an
 independent Liouville determinant, and unresolved/refusal boundaries.
 
+`analyze_forced_orbit_stability_variational` and its `_analytic` entry use the
+same candidate admission, physical seed-agreement checks and three-grid
+classifier, with the existing original-state variational shooting solver at
+each level. The automatic entry requires complete declared quadratic storage;
+the analytic entry takes the complete continuous Hessian action of nonlinear
+storage. Both retain material memory, physical source phases, the entire
+scaled monodromy, all multipliers, normalized residuals and evaluation counts.
+They never silently replace an unavailable or refused tangent with finite
+differences. Cancellation is checked before admission, between levels and at
+the shared solver's stage/product boundaries, with no partial assessment.
+
+Physical scales and numerical work/payload/map caps apply separately to each
+native solve. Exactly three solves run, and previously returned level data are
+retained outside the next solve's payload cap. This is a measured temporal
+ladder of exact discrete tangents, not an enclosure of continuous Floquet
+multipliers, an omitted-harmonic bound or a hybrid-event stability analysis.
+Focused regressions compare constant-system multipliers with an independent
+RK4 polynomial across excitation scales, retain all Maxwell poles, and check
+an exactly forced cubic cycle's parametric instability and Liouville determinant.
+
 ## Continuous physical impedance on accepted loaded assemblies
 
 `assembly_harmonic::PreparedAssemblyMimoHarmonicResponse` borrows the original

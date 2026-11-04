@@ -35,7 +35,9 @@ pub use continuation::{
 mod stability;
 pub use stability::{
     PhsFloquetControls, PhsFloquetLevel, PhsForcedStability, PhsNumericalStability,
-    analyze_forced_orbit_stability,
+    PhsVariationalFloquetLevel, PhsVariationalForcedStability,
+    analyze_forced_orbit_stability, analyze_forced_orbit_stability_variational,
+    analyze_forced_orbit_stability_variational_analytic,
 };
 mod shooting;
 pub use shooting::{

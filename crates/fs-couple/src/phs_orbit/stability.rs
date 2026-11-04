@@ -6,6 +6,12 @@ use fs_orbit::{HbOrbit, ShootBudget, ShootOrbit, solve_shooting};
 use fs_phs::PortHamiltonian;
 
 mod subharmonic;
+mod variational;
+pub use variational::{
+    PhsVariationalFloquetLevel, PhsVariationalForcedStability,
+    analyze_forced_orbit_stability_variational,
+    analyze_forced_orbit_stability_variational_analytic,
+};
 
 /// Explicit physical agreement and numerical resolution controls.
 #[derive(Debug, Clone)]
@@ -21,7 +27,7 @@ pub struct PhsFloquetControls {
     /// Positive finite maximum change of spectral radius between adjacent grids.
     pub spectral_radius_tolerance: f64,
     /// Dimensionless exclusion band around |multiplier|=1, strictly in (0,1).
-    /// This numerical margin is not an enclosure of finite-difference error.
+    /// This numerical margin is not an enclosure of integration or spectral error.
     pub unit_circle_guard: f64,
 }
 
@@ -92,6 +98,45 @@ pub fn analyze_forced_orbit_stability(
     candidate: &HbOrbit,
     controls: &PhsFloquetControls,
 ) -> Result<PhsForcedStability, PhsOrbitError> {
+    let (seed, period, grids) = admit_candidate(system, input, candidate, controls)?;
+    let problem = forced_problem(system, input)?;
+    let mut levels = Vec::with_capacity(3);
+    for steps_per_period in grids {
+        let budget = ShootBudget {
+            steps_per_period,
+            ..controls.shooting
+        };
+        let result = solve_shooting(&problem, &seed, period, &budget);
+        if problem.source_refused() {
+            return Err(PhsOrbitError::SourceRefused);
+        }
+        let orbit = result.map_err(PhsOrbitError::Orbit)?;
+        let spectral_radius = check_orbit(&orbit, &seed, period, controls)?;
+        levels.push(PhsFloquetLevel {
+            steps_per_period,
+            orbit,
+            spectral_radius,
+        });
+    }
+    let views = [
+        (&levels[0].orbit, levels[0].spectral_radius),
+        (&levels[1].orbit, levels[1].spectral_radius),
+        (&levels[2].orbit, levels[2].spectral_radius),
+    ];
+    let (classification, dominant_growth_rate_per_s) = classify(&views, period, controls);
+    Ok(PhsForcedStability {
+        classification,
+        levels,
+        dominant_growth_rate_per_s,
+    })
+}
+
+fn admit_candidate(
+    system: &PortHamiltonian,
+    input: &PeriodicPortInput,
+    candidate: &HbOrbit,
+    controls: &PhsFloquetControls,
+) -> Result<(Vec<f64>, f64, [usize; 3]), PhsOrbitError> {
     let n = system.state_dim();
     let width = candidate.coeffs.first().map_or(0, Vec::len);
     let period = core::f64::consts::TAU / candidate.omega;
@@ -145,103 +190,98 @@ pub fn analyze_forced_orbit_stability(
     if seed.iter().any(|value| !value.is_finite()) {
         return Err(bad("candidate phase-zero state overflow"));
     }
-    let problem = forced_problem(system, input)?;
-    let mut levels = Vec::with_capacity(3);
-    for steps_per_period in [steps, finest_steps / 2, finest_steps] {
-        let budget = ShootBudget {
-            steps_per_period,
-            ..controls.shooting
-        };
-        let result = solve_shooting(&problem, &seed, period, &budget);
-        if problem.source_refused() {
-            return Err(PhsOrbitError::SourceRefused);
-        }
-        let orbit = result.map_err(PhsOrbitError::Orbit)?;
-        if orbit.x0.len() != n
-            || orbit.multipliers.len() != n
-            || orbit.period.to_bits() != period.to_bits()
-            || orbit.x0.iter().any(|x| !x.is_finite())
-            || orbit.residual_trace.is_empty()
-            || orbit
-                .residual_trace
-                .iter()
-                .any(|r| !r.is_finite() || *r < 0.0)
-            || orbit
-                .multipliers
-                .iter()
-                .any(|(re, im)| !re.is_finite() || !im.is_finite())
-        {
-            return Err(bad(
-                "shooting returned an invalid physical orbit or Floquet spectrum",
-            ));
-        }
-        for (coordinate, ((x, original), &tolerance)) in orbit
-            .x0
+    Ok((seed, period, [steps, finest_steps / 2, finest_steps]))
+}
+
+fn check_orbit(
+    orbit: &ShootOrbit,
+    seed: &[f64],
+    period: f64,
+    controls: &PhsFloquetControls,
+) -> Result<f64, PhsOrbitError> {
+    let n = seed.len();
+    if orbit.x0.len() != n
+        || orbit.multipliers.len() != n
+        || orbit.period.to_bits() != period.to_bits()
+        || orbit.x0.iter().any(|x| !x.is_finite())
+        || orbit.residual_trace.is_empty()
+        || orbit
+            .residual_trace
             .iter()
-            .zip(&seed)
-            .zip(&controls.state_tolerances)
-            .enumerate()
-        {
-            let absolute_change = (x - original).abs();
-            if absolute_change > tolerance {
-                return Err(PhsOrbitError::SeedDisagreement {
-                    coordinate,
-                    absolute_change,
-                    tolerance,
-                });
-            }
-        }
-        let spectral_radius = orbit
+            .any(|r| !r.is_finite() || *r < 0.0)
+        || orbit
             .multipliers
             .iter()
-            .map(|&(re, im)| C64::new(re, im).abs())
-            .fold(0.0, f64::max);
-        if !spectral_radius.is_finite() {
-            return Err(bad("Floquet spectral radius overflow"));
-        }
-        levels.push(PhsFloquetLevel {
-            steps_per_period,
-            orbit,
-            spectral_radius,
-        });
+            .any(|(re, im)| !re.is_finite() || !im.is_finite())
+    {
+        return Err(bad(
+            "shooting returned an invalid physical orbit or Floquet spectrum",
+        ));
     }
+    for (coordinate, ((x, original), &tolerance)) in orbit
+        .x0
+        .iter()
+        .zip(seed)
+        .zip(&controls.state_tolerances)
+        .enumerate()
+    {
+        let absolute_change = (x - original).abs();
+        if absolute_change > tolerance {
+            return Err(PhsOrbitError::SeedDisagreement {
+                coordinate,
+                absolute_change,
+                tolerance,
+            });
+        }
+    }
+    let spectral_radius = orbit
+        .multipliers
+        .iter()
+        .map(|&(re, im)| C64::new(re, im).abs())
+        .fold(0.0, f64::max);
+    if !spectral_radius.is_finite() {
+        return Err(bad("Floquet spectral radius overflow"));
+    }
+    Ok(spectral_radius)
+}
+
+fn classify(
+    levels: &[(&ShootOrbit, f64); 3],
+    period: f64,
+    controls: &PhsFloquetControls,
+) -> (PhsNumericalStability, Option<f64>) {
     let resolved = levels.windows(2).all(|pair| {
-        (pair[1].spectral_radius - pair[0].spectral_radius).abs()
-            <= controls.spectral_radius_tolerance
+        (pair[1].1 - pair[0].1).abs() <= controls.spectral_radius_tolerance
             && pair[1]
-                .orbit
+                .0
                 .x0
                 .iter()
-                .zip(&pair[0].orbit.x0)
+                .zip(&pair[0].0.x0)
                 .zip(&controls.state_tolerances)
                 .all(|((a, b), tolerance)| (a - b).abs() <= *tolerance)
     });
     let classification = if resolved
         && levels
             .iter()
-            .all(|level| level.spectral_radius < 1.0 - controls.unit_circle_guard)
+            .all(|level| level.1 < 1.0 - controls.unit_circle_guard)
     {
         PhsNumericalStability::Stable
     } else if resolved
         && levels
             .iter()
-            .all(|level| level.spectral_radius > 1.0 + controls.unit_circle_guard)
+            .all(|level| level.1 > 1.0 + controls.unit_circle_guard)
     {
         PhsNumericalStability::Unstable
     } else {
         PhsNumericalStability::Unresolved
     };
-    let radius = levels[2].spectral_radius;
+    let radius = levels[2].1;
     let growth = if radius > 0.0 {
         det::ln(radius) / period
     } else {
         f64::NAN
     };
-    Ok(PhsForcedStability {
-        classification,
-        levels,
-        dominant_growth_rate_per_s: growth.is_finite().then_some(growth),
-    })
+    (classification, growth.is_finite().then_some(growth))
 }
 
 #[cfg(test)]
