@@ -75,6 +75,331 @@ fn tet_oracle(x: [[f64; 3]; 4], pressure: f64) -> (f64, [[f64; 3]; 4]) {
     (volume, force)
 }
 
+/// Integrate p(x) over the tet, then differentiate V * p(centroid).
+/// This uses volume moments, independently of the production surface quadrature.
+fn affine_oracle(
+    x: [[f64; 3]; 4],
+    origin: [f64; 3],
+    pressure: f64,
+    gradient: [f64; 3],
+) -> (f64, [[f64; 3]; 4]) {
+    let centroid = std::array::from_fn(|axis| x.iter().map(|p| p[axis]).sum::<f64>() / 4.0);
+    let pressure_at_centroid = pressure + dot(gradient, sub(centroid, origin));
+    let (volume, mut forces) = tet_oracle(x, pressure_at_centroid);
+    for force in &mut forces {
+        for axis in 0..3 {
+            force[axis] -= volume * gradient[axis] / 4.0;
+        }
+    }
+    (volume * pressure_at_centroid, forces)
+}
+
+#[test]
+fn affine_pressure_force_tangent_and_work_match_independent_volume_moments() {
+    with_cx(|_, cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let x = [
+            [0.1, -0.2, 0.3],
+            [1.4, -0.1, 0.35],
+            [0.25, 0.6, 0.25],
+            [0.15, -0.05, 1.4],
+        ];
+        let displacement = |points: [[f64; 3]; 4]| -> Vec<f64> {
+            points
+                .iter()
+                .zip(NODES)
+                .flat_map(|(point, reference)| {
+                    (0..3).map(move |axis| point[axis] - reference[axis])
+                })
+                .collect()
+        };
+        let u = displacement(x);
+        let origin = [0.25, -0.5, 0.75];
+        let gradient = [0.4, -0.7, 1.1];
+        let pressure = 3.7;
+        let field = TetPressure::Affine {
+            origin_m: origin,
+            pressure_pa: pressure,
+            gradient_pa_m: gradient,
+        };
+        let (potential, expected) = affine_oracle(x, origin, pressure, gradient);
+        let force = surface.force_n(&u, field, cx).unwrap();
+        for (actual, expected) in force.iter().zip(expected.iter().flatten()) {
+            near(*actual, *expected, 2.0e-14);
+        }
+        let volume = tet_oracle(x, 0.0).0;
+        let resultant: [f64; 3] =
+            std::array::from_fn(|axis| (0..4).map(|node| force[3 * node + axis]).sum());
+        for axis in 0..3 {
+            near(resultant[axis], -volume * gradient[axis], 2.0e-14);
+        }
+        let centroid: [f64; 3] =
+            std::array::from_fn(|axis| x.iter().map(|p| p[axis]).sum::<f64>() / 4.0);
+        let expected_torque = cross(centroid, resultant);
+        let mut torque = [0.0; 3];
+        for node in 0..4 {
+            let moment = cross(x[node], std::array::from_fn(|axis| force[3 * node + axis]));
+            for axis in 0..3 {
+                torque[axis] += moment[axis];
+            }
+        }
+        for axis in 0..3 {
+            near(torque[axis], expected_torque[axis], 2.0e-14);
+        }
+        let tangent = surface.force_tangent(&u, field, cx).unwrap();
+        let epsilon = 1.0e-6;
+        for column in 0..12 {
+            let mut plus = x;
+            let mut minus = x;
+            plus[column / 3][column % 3] += epsilon;
+            minus[column / 3][column % 3] -= epsilon;
+            let forward = affine_oracle(plus, origin, pressure, gradient).1;
+            let backward = affine_oracle(minus, origin, pressure, gradient).1;
+            for row in 0..12 {
+                near(
+                    tangent.get(row, column),
+                    (forward[row / 3][row % 3] - backward[row / 3][row % 3]) / (2.0 * epsilon),
+                    3.0e-9,
+                );
+                near(tangent.get(row, column), tangent.get(column, row), 2.0e-14);
+            }
+        }
+        let before = [0.0; 12];
+        let work = surface.work_j(&before, &u, field, cx).unwrap();
+        let reference_potential = affine_oracle(NODES, origin, pressure, gradient).0;
+        near(work, reference_potential - potential, 2.0e-14);
+        near(
+            surface.work_j(&u, &before, field, cx).unwrap(),
+            -work,
+            2.0e-14,
+        );
+        let intermediate: Vec<f64> = u
+            .iter()
+            .enumerate()
+            .map(|(i, value)| 0.4 * value + if i % 3 == 1 { 0.3 } else { 0.0 })
+            .collect();
+        near(
+            surface.work_j(&before, &intermediate, field, cx).unwrap()
+                + surface.work_j(&intermediate, &u, field, cx).unwrap(),
+            work,
+            2.0e-14,
+        );
+        // Translating a fully immersed body retains buoyancy and changes the
+        // applied pressure. Work is the buoyancy resultant dotted with drift.
+        let drift = [0.2, -0.4, 0.6];
+        let translated =
+            displacement(x.map(|point| std::array::from_fn(|axis| point[axis] + drift[axis])));
+        near(
+            surface.work_j(&u, &translated, field, cx).unwrap(),
+            dot(resultant, drift),
+            2.0e-14,
+        );
+        let moved_force = surface.force_n(&translated, field, cx).unwrap();
+        for axis in 0..3 {
+            near(
+                (0..4).map(|node| moved_force[3 * node + axis]).sum(),
+                resultant[axis],
+                2.0e-14,
+            );
+        }
+    });
+}
+
+#[test]
+fn affine_pressure_preserves_uniform_limit_world_anchor_and_refusals() {
+    with_cx(|gate, cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let u: Vec<f64> = (0..12).map(|i| 0.005 * i as f64).collect();
+        let pressure = 2.3;
+        let field = TetPressure::Affine {
+            origin_m: [0.25, -0.5, 0.75],
+            pressure_pa: pressure,
+            gradient_pa_m: [0.0; 3],
+        };
+        assert_eq!(
+            surface.force_n(&u, field, cx).unwrap(),
+            surface.force_n(&u, pressure, cx).unwrap()
+        );
+        let affine_tangent = surface.force_tangent(&u, field, cx).unwrap();
+        let uniform_tangent = surface.force_tangent(&u, pressure, cx).unwrap();
+        for row in 0..12 {
+            for column in 0..12 {
+                assert_eq!(
+                    affine_tangent.get(row, column),
+                    uniform_tangent.get(row, column)
+                );
+            }
+        }
+        assert_eq!(
+            surface.work_j(&[0.0; 12], &u, field, cx).unwrap(),
+            surface.work_j(&[0.0; 12], &u, pressure, cx).unwrap()
+        );
+        let gradient = [0.4, -0.7, 1.1];
+        let origin = [0.25, -0.5, 0.75];
+        let field = TetPressure::Affine {
+            origin_m: origin,
+            pressure_pa: pressure,
+            gradient_pa_m: gradient,
+        };
+        let shift = [1_073_741_824.0, -536_870_912.0, 268_435_456.0];
+        let shifted_nodes =
+            NODES.map(|point| std::array::from_fn(|axis| point[axis] + shift[axis]));
+        let shifted_surface = ClosedTetPressureSurface::new(
+            &shifted_nodes,
+            &TETS,
+            TetAssemblyBudget::standard(),
+            4,
+            cx,
+        )
+        .unwrap();
+        let shifted_field = TetPressure::Affine {
+            origin_m: std::array::from_fn(|axis| origin[axis] + shift[axis]),
+            pressure_pa: pressure,
+            gradient_pa_m: gradient,
+        };
+        assert_eq!(
+            surface.force_n(&u, field, cx).unwrap(),
+            shifted_surface.force_n(&u, shifted_field, cx).unwrap()
+        );
+        for bad in [
+            TetPressure::Affine {
+                origin_m: [f64::NAN, 0.0, 0.0],
+                pressure_pa: pressure,
+                gradient_pa_m: gradient,
+            },
+            TetPressure::Affine {
+                origin_m: origin,
+                pressure_pa: f64::INFINITY,
+                gradient_pa_m: gradient,
+            },
+            TetPressure::Affine {
+                origin_m: origin,
+                pressure_pa: pressure,
+                gradient_pa_m: [0.0, f64::NEG_INFINITY, 0.0],
+            },
+        ] {
+            assert!(matches!(
+                surface.force_n(&u, bad, cx),
+                Err(HyperTetError::InvalidInput { .. })
+            ));
+            assert!(matches!(
+                surface.force_tangent(&u, bad, cx),
+                Err(HyperTetError::InvalidInput { .. })
+            ));
+            assert!(matches!(
+                surface.work_j(&[0.0; 12], &u, bad, cx),
+                Err(HyperTetError::InvalidInput { .. })
+            ));
+        }
+        gate.request();
+        assert!(matches!(
+            surface.force_n(&u, field, cx),
+            Err(HyperTetError::Cancelled)
+        ));
+        assert!(matches!(
+            surface.force_tangent(&u, field, cx),
+            Err(HyperTetError::Cancelled)
+        ));
+        assert!(matches!(
+            surface.work_j(&[0.0; 12], &u, field, cx),
+            Err(HyperTetError::Cancelled)
+        ));
+    });
+}
+
+#[test]
+fn affine_pressure_native_equilibrium_and_reactions_match_piola_and_volume_moments() {
+    with_cx(|_, cx| {
+        let (mu, lambda) = (2.0, 3.0);
+        let material =
+            Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 4.0).unwrap();
+        let x = [
+            [0.0; 3],
+            [0.92, 0.0, 0.0],
+            [0.05, 0.95, 0.0],
+            [0.02, -0.03, 0.94],
+        ];
+        let fixed = [(0, 0.0), (1, 0.0), (2, 0.0), (4, 0.0), (5, 0.0), (8, 0.0)];
+        let free = [3, 6, 7, 9, 10, 11];
+        let jacobian = dot(x[1], cross(x[2], x[3]));
+        let coefficient = (lambda * jacobian.ln() - mu) / jacobian;
+        let cofactors = [cross(x[2], x[3]), cross(x[3], x[1]), cross(x[1], x[2])];
+        let mut internal = [0.0; 12];
+        for column in 0..3 {
+            for axis in 0..3 {
+                let force =
+                    (mu * x[column + 1][axis] + coefficient * cofactors[column][axis]) / 6.0;
+                internal[3 * (column + 1) + axis] = force;
+                internal[axis] -= force;
+            }
+        }
+        let origin = [0.1, -0.2, 0.3];
+        let gradient = [0.15, -0.2, 0.25];
+        let pressure = 0.3;
+        let applied = affine_oracle(x, origin, pressure, gradient).1;
+        let dead: Vec<(usize, f64)> = (0..12)
+            .map(|dof| {
+                (
+                    dof,
+                    if free.contains(&dof) {
+                        internal[dof] - applied[dof / 3][dof % 3]
+                    } else {
+                        0.13
+                    },
+                )
+            })
+            .collect();
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let problem = HyperTetProblem {
+            nodes_m: &NODES,
+            tetrahedra: &TETS,
+            material: HyperelasticLawField::Uniform(&material),
+            prescribed_m: &fixed,
+            nodal_forces_n: &dead,
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings {
+                load_steps: 4,
+                ..HyperTetSettings::default()
+            },
+        };
+        let solution = problem
+            .solve_with_pressure_field(
+                &surface,
+                TetPressure::Affine {
+                    origin_m: origin,
+                    pressure_pa: pressure,
+                    gradient_pa_m: gradient,
+                },
+                cx,
+            )
+            .unwrap();
+        for (node, displacement) in solution.displacement_m.iter().enumerate() {
+            for axis in 0..3 {
+                near(
+                    displacement[axis],
+                    x[node][axis] - NODES[node][axis],
+                    3.0e-9,
+                );
+            }
+        }
+        for (dof, reaction) in solution.reactions_n {
+            near(
+                reaction,
+                internal[dof] - applied[dof / 3][dof % 3] - dead[dof].1,
+                3.0e-9,
+            );
+        }
+        near(solution.min_det_f, jacobian, 3.0e-9);
+    });
+}
+
 #[test]
 fn g0_current_area_force_tangent_and_exact_work_match_volume_derivatives() {
     with_cx(|_, cx| {

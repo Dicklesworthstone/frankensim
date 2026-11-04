@@ -14,6 +14,10 @@
 //! its work is path-dependent. Held pressures have exact work along a straight
 //! nodal-displacement segment, because current face area is quadratic along
 //! that segment. This does not assert that a dynamic trajectory is straight.
+//! An affine Eulerian field instead follows each CURRENT point and is integrated
+//! exactly against the P1 surface basis. Its closed-surface potential is
+//! `integral_volume p(x) dV`; the pressure gradient therefore supplies buoyancy
+//! without replacing the physical surface traction by a separate body force.
 //! There is no global injectivity certificate, fluid equation of state, or
 //! time integrator in this module.
 
@@ -29,7 +33,7 @@ use crate::loads3::{LoadError3, TetLoadGeometry3};
 /// Enclosed void volume and work-conjugate pressure geometry for gas cavities.
 pub mod cavity;
 
-/// Signed differential pressure in Pa, held in material-face coordinates.
+/// Signed differential pressure in Pa, held over the declared load interval.
 /// Positive pressure acts inward; negative pressure prescribes outward traction.
 #[derive(Debug, Clone, Copy)]
 pub enum TetPressure<'a> {
@@ -38,6 +42,19 @@ pub enum TetPressure<'a> {
     /// One pressure per canonical [`ClosedTetPressureSurface::faces`] entry.
     /// Zero leaves a face unloaded. No conservative potential is assumed.
     PerFace(&'a [f64]),
+    /// Spatially fixed field `p(x) = pressure_pa + gradient_pa_m dot (x-origin_m)`.
+    /// Hydrostatics in a uniform fluid uses `gradient_pa_m = rho_fluid * gravity`.
+    /// This loads the complete closed boundary: no wet/dry clipping, free surface,
+    /// cavitation, or equation of state is inferred. Signed values are traction
+    /// data, so the caller remains responsible for the field's physical domain.
+    Affine {
+        /// World position at which `pressure_pa` is prescribed [m].
+        origin_m: [f64; 3],
+        /// Signed differential pressure at `origin_m` [Pa].
+        pressure_pa: f64,
+        /// World pressure gradient [Pa/m].
+        gradient_pa_m: [f64; 3],
+    },
 }
 
 impl From<f64> for TetPressure<'_> {
@@ -47,10 +64,16 @@ impl From<f64> for TetPressure<'_> {
 }
 
 impl TetPressure<'_> {
-    fn at(self, face: usize) -> f64 {
+    fn constant_at(self, face: usize) -> Option<f64> {
         match self {
-            Self::Uniform(value) => value,
-            Self::PerFace(values) => values[face],
+            Self::Uniform(value) => Some(value),
+            Self::PerFace(values) => Some(values[face]),
+            Self::Affine {
+                pressure_pa,
+                gradient_pa_m,
+                ..
+            } if gradient_pa_m == [0.0; 3] => Some(pressure_pa),
+            Self::Affine { .. } => None,
         }
     }
 }
@@ -188,6 +211,17 @@ impl ClosedTetPressureSurface {
                 }
                 unloaded
             }
+            TetPressure::Affine {
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
+            } => {
+                finite(pressure_pa)?;
+                for value in origin_m.into_iter().chain(gradient_pa_m) {
+                    finite(value)?;
+                }
+                pressure_pa == 0.0 && gradient_pa_m == [0.0; 3]
+            }
         };
         checkpoint(cx)?;
         Ok(unloaded)
@@ -247,12 +281,12 @@ impl ClosedTetPressureSurface {
         let mut force = vec![0.0; displacement_m.len()];
         for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
-            let pressure_pa = pressure.at(index);
+            let weights = self.face_pressure_weights(displacement_m, index, pressure)?;
             let [a, b, c] = face.map(|node| positions[node]);
             let area = area_vector(a, b, c)?;
-            for &node in face {
+            for (&node, weight) in face.iter().zip(weights) {
                 for axis in 0..3 {
-                    let load = finite((-pressure_pa / 3.0) * area[axis])?;
+                    let load = finite(-weight * area[axis])?;
                     force[3 * node + axis] = finite(force[3 * node + axis] + load)?;
                 }
             }
@@ -267,8 +301,10 @@ impl ClosedTetPressureSurface {
     /// (b-a) cross (c-a). Its variations are h cross (b-c), h cross
     /// (c-a), and h cross (a-b) for perturbations of a, b, and c.
     /// Uniform closed-boundary assembly is symmetric to rounding. Per-face
-    /// assembly is generally nonsymmetric and must not be symmetrized. This
-    /// is the EXTERNAL force Jacobian, which an internal residual subtracts.
+    /// assembly is generally nonsymmetric and must not be symmetrized. Affine
+    /// fields include both area and spatial-pressure derivatives; their complete
+    /// closed-boundary assembly is also symmetric. This is the EXTERNAL force
+    /// Jacobian, which an internal residual subtracts.
     pub fn force_tangent<'p>(
         &self,
         displacement_m: &[f64],
@@ -281,17 +317,29 @@ impl ClosedTetPressureSurface {
         let mut entries = Coo::new(displacement_m.len(), displacement_m.len());
         for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
-            let pressure_pa = pressure.at(index);
+            let weights = self.face_pressure_weights(displacement_m, index, pressure)?;
+            let constant_factor = pressure.constant_at(index).map(|value| -value / 6.0);
+            let gradient = match pressure {
+                TetPressure::Affine { gradient_pa_m, .. } => gradient_pa_m,
+                _ => [0.0; 3],
+            };
             let [a, b, c] = face.map(|node| positions[node]);
+            let area = area_vector(a, b, c)?;
             let variations = [difference(b, c)?, difference(c, a)?, difference(a, b)?];
             for (&column_node, edge) in face.iter().zip(variations) {
                 for column_axis in 0..3 {
                     let mut basis = [0.0; 3];
                     basis[column_axis] = 1.0;
                     let derivative = cross(basis, edge);
-                    for &row_node in face {
+                    for (&row_node, weight) in face.iter().zip(weights) {
                         for (row_axis, value) in derivative.into_iter().enumerate() {
-                            let value = finite((-pressure_pa / 6.0) * value)?;
+                            let factor = constant_factor.unwrap_or(-0.5 * weight);
+                            // Integral N_i N_j dA / A is 1/6 on the diagonal,
+                            // 1/12 otherwise. Pressure varies even under rigid
+                            // drift because the field is fixed in world space.
+                            let pressure_slope = gradient[column_axis]
+                                / if row_node == column_node { 6.0 } else { 12.0 };
+                            let value = finite(factor * value - pressure_slope * area[row_axis])?;
                             if value != 0.0 {
                                 entries.push(
                                     3 * row_node + row_axis,
@@ -317,8 +365,10 @@ impl ClosedTetPressureSurface {
     /// Work of held pressure over the declared displacement segment.
     ///
     /// Uniform pressure uses exact endpoint-volume work, independently of
-    /// the path. Per-face pressure integrates force along the straight segment
-    /// with Simpson's rule, exact for the quadratic P1 area vector to rounding.
+    /// the path. Other fields integrate force along the straight segment with
+    /// Simpson's rule: exact to rounding for a held face pressure (quadratic
+    /// force) and a fixed affine spatial field (cubic force). The affine field
+    /// is conservative on a closed surface, with potential `integral p(x) dV`.
     /// It retains common translation work on open patches. Subdividing a
     /// curved trajectory is necessary to resolve its physical path work.
     pub fn work_j<'p>(
@@ -330,7 +380,16 @@ impl ClosedTetPressureSurface {
     ) -> Result<f64, HyperTetError> {
         let pressure = pressure_pa.into();
         self.validate_pressure(pressure, cx)?;
-        if let TetPressure::Uniform(value) = pressure {
+        let uniform = match pressure {
+            TetPressure::Uniform(value) => Some(value),
+            TetPressure::Affine {
+                pressure_pa,
+                gradient_pa_m,
+                ..
+            } if gradient_pa_m == [0.0; 3] => Some(pressure_pa),
+            _ => None,
+        };
+        if let Some(value) = uniform {
             let before = self.volume_m3(before_m, cx)?;
             let after = self.volume_m3(after_m, cx)?;
             return finite(-value * finite(after - before)?);
@@ -364,6 +423,49 @@ impl ClosedTetPressureSurface {
         }
         checkpoint(cx)?;
         finite(work)
+    }
+
+    /// Exact integrals `integral N_i p dA / A` on one current P1 triangle.
+    /// The field is sampled in world coordinates; translated relative geometry
+    /// from `positions_and_volume` is deliberately not used as the field origin.
+    fn face_pressure_weights(
+        &self,
+        displacement_m: &[f64],
+        face_index: usize,
+        pressure: TetPressure<'_>,
+    ) -> Result<[f64; 3], HyperTetError> {
+        if let Some(value) = pressure.constant_at(face_index) {
+            return Ok([value / 3.0; 3]);
+        }
+        let TetPressure::Affine {
+            origin_m,
+            pressure_pa,
+            gradient_pa_m,
+        } = pressure
+        else {
+            unreachable!("constant pressure handled above")
+        };
+        let mut values = [0.0; 3];
+        for (local, &node) in self.faces[face_index].iter().enumerate() {
+            let mut value = pressure_pa;
+            for axis in 0..3 {
+                let offset = finite(
+                    finite(self.nodes_m[node][axis] - origin_m[axis])?
+                        + displacement_m[3 * node + axis],
+                )?;
+                value = finite(gradient_pa_m[axis].mul_add(offset, value))?;
+            }
+            values[local] = value;
+        }
+        let mut weights = [0.0; 3];
+        for local in 0..3 {
+            weights[local] = finite(
+                values[local] / 6.0
+                    + values[(local + 1) % 3] / 12.0
+                    + values[(local + 2) % 3] / 12.0,
+            )?;
+        }
+        Ok(weights)
     }
 
     fn positions_and_volume(

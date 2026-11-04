@@ -595,6 +595,38 @@ returning a load. G0/G1/G3/G4 tests check localized outward orientation, indepen
 finite-difference tangents, path-dependent analytic work, uniform compatibility
 and refusal. Dynamic consumption belongs to `fs-couple::finite_solid`.
 
+### Hydrostatic and affine Eulerian pressure
+
+`TetPressure::Affine` prescribes a stationary world-space field
+`p(x) = p_origin + gradient dot (x - origin)` on the complete exterior. A uniform
+fluid in uniform gravity uses `gradient = rho_fluid * gravity`; signed pressure
+is differential traction data. The original load owner samples CURRENT node
+positions and integrates `N_i p(x)` exactly on each P1 triangle. The resulting
+nodal force uses weights `(2 p_i + p_j + p_k)/12` multiplying the inward area
+vector, retaining both force and torque. The analytic Jacobian differentiates
+the current area and spatial pressure, and is symmetric on a closed surface.
+Its net force is `-current_volume * gradient`, so physical buoyancy follows
+directly from the surface traction.
+
+The potential is the volume integral of `p(x)`. Simpson integration of the
+cubic force along the declared straight nodal segment gives its exact work to
+rounding, including rigid translation through the field. A zero gradient uses
+the existing uniform-pressure arithmetic. `solve_with_pressure_field` scales
+both pressure and gradient with the native load factor and includes the same
+conservative work in Newton globalization and support reactions. The existing
+gravity-plus-pressure and ordinary finite-solid dynamic owners consume the
+same field. The specialized energy/momentum dynamic pressure algorithm remains
+limited to uniform pressure.
+
+`tests/hyper3_pressure.rs` compares forces and work against independently
+differentiated tetrahedral volume moments; checks buoyancy, torque, tangent
+symmetry and finite differences, path independence, reference-anchor covariance,
+uniform compatibility and refusal; and verifies a manufactured Neo-Hookean
+equilibrium and support reactions using independent Piola stress. This is a
+fully immersed affine field: free-surface clipping, varying fluid density,
+cavitation, fluid evolution and global self-intersection remain outside this
+load owner's contract.
+
 ## Finite-deformation static follower pressure
 
 `hyper3::HyperTetProblem::solve_with_pressure` couples dead referential loads

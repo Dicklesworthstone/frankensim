@@ -947,13 +947,37 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         pressures_pa: &[f64],
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
+        self.solve_with_pressure_field(surface, pressure::TetPressure::PerFace(pressures_pa), cx)
+    }
+
+    /// Solve dead loads and a current-area pressure field on the closed surface.
+    ///
+    /// An affine spatial field is sampled at CURRENT coordinates with exact P1
+    /// surface integration. Its gradient supplies the physical buoyancy force,
+    /// and both the field value and gradient ramp with the native load factor.
+    /// The consistent tangent and conservative work drive the original Newton
+    /// and Armijo solve. Support reactions retain all pressure components.
+    ///
+    /// Uniform and per-face fields retain their existing semantics. Per-face
+    /// fields use nonsymmetric residual globalization; affine fields on the
+    /// complete closed surface have a conservative volume-integral potential.
+    ///
+    /// # Errors
+    /// Invalid pressure data, a mismatched reference surface, or native solve
+    /// errors. No equilibrium branch or structural stability is guaranteed
+    /// beyond the reported force residual.
+    pub fn solve_with_pressure_field(
+        &self,
+        surface: &pressure::ClosedTetPressureSurface,
+        pressure: pressure::TetPressure<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
         checkpoint(cx)?;
         if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
             return Err(HyperTetError::InvalidInput {
                 what: "the exact reference pressure surface is required".into(),
             });
         }
-        let pressure = pressure::TetPressure::PerFace(pressures_pa);
         let unloaded = surface.validate_pressure(pressure, cx)?;
         self.solve_loaded((!unloaded).then_some((surface, pressure)), None, cx)
     }
@@ -1013,8 +1037,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     /// Combine conservative gravity with the existing current-area pressure.
     ///
     /// A face pressure field keeps its nonsymmetric tangent and residual
-    /// globalization. Uniform pressure and gravity share conservative Armijo
-    /// work increments. Neither load is converted into a frozen dead force.
+    /// globalization. Uniform or affine spatial pressure and gravity share
+    /// conservative Armijo work increments. Neither load is converted into a
+    /// frozen dead force.
     ///
     /// # Errors
     /// Invalid density/field/pressure binding, domain exit, or native solve errors.
@@ -1192,6 +1217,15 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     pressure::TetPressure::PerFace(_) => {
                         pressure::TetPressure::PerFace(&scaled_faces)
                     }
+                    pressure::TetPressure::Affine {
+                        origin_m,
+                        pressure_pa,
+                        gradient_pa_m,
+                    } => pressure::TetPressure::Affine {
+                        origin_m,
+                        pressure_pa: load * pressure_pa,
+                        gradient_pa_m: gradient_pa_m.map(|value| load * value),
+                    },
                 };
                 (surface, values)
             });
@@ -1447,6 +1481,19 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             let pressure_change = match applied_pressure {
                                 Some((_, pressure::TetPressure::Uniform(value))) => {
                                     value * (trial_volume - current_volume)
+                                }
+                                Some((surface, value @ pressure::TetPressure::Affine { .. })) => {
+                                    match surface.work_j(&u, &trial, value, cx) {
+                                        Ok(work) => -work,
+                                        Err(HyperTetError::Cancelled) => {
+                                            return Err(HyperTetError::Cancelled);
+                                        }
+                                        Err(_) => {
+                                            alpha *= 0.5;
+                                            record.backtracks += 1;
+                                            continue;
+                                        }
+                                    }
                                 }
                                 _ => 0.0,
                             };
