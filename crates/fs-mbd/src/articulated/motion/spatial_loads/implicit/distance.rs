@@ -349,6 +349,8 @@ pub enum BilateralLoopError {
     Invalid(&'static str),
     /// Original force/dynamics/nonlinear/budget/cancellation refusal.
     Motion(ImplicitSpatialError),
+    /// Original prescribed-base dynamics, path, forcing or midpoint refusal.
+    SupportedMotion(super::super::prescribed::implicit::ImplicitPrescribedSpatialError),
     /// Input or endpoint is outside the admitted constraint position tolerance.
     Position {
         /// `initial` or `endpoint`.
@@ -1368,44 +1370,9 @@ fn step_bilateral_forcing_evaluated<B: BushingLaw>(
             scales[dof] = config.nonlinear.linear_velocity_scale;
         }
     }
-    // A coefficient carries row-units / joint-units. Scaling by the native
-    // coordinate rates preserves these units and row-rescaling covariance.
-    let mut row_scales = vec![config.nonlinear.linear_velocity_scale; loop_count];
-    for row in joint_rows {
-        let mut scale = 0.0_f64;
-        for (&a, &v) in row.coefficients.iter().zip(&scales) {
-            let term = a.abs() * v;
-            if !term.is_finite() {
-                return Err(DistanceLoopError::Invalid(
-                    "unrepresentable joint row scaling",
-                ));
-            }
-            scale = scale.max(term);
-        }
-        row_scales.push(scale);
-    }
-    let impulse_scales: Vec<_> = initial_mobility
-        .diagonal
-        .iter()
-        .zip(&row_scales)
-        .map(|(d, scale)| scale / (d * d))
-        .collect();
-    let gap_scales: Vec<_> = row_scales.iter().map(|v| duration * v).collect();
-    let mut tolerances = vec![config.position_tolerance_m; loop_count];
-    tolerances.extend(joint_rows.iter().map(|row| row.position_tolerance));
-    let target = tolerances.iter().zip(&gap_scales).fold(
-        config.nonlinear.residual_tolerance,
-        |target, (tolerance, scale)| target.min(tolerance / scale),
-    );
-    if gap_scales.iter().any(|s| !s.is_finite() || *s <= 0.0)
-        || !target.is_finite()
-        || target <= 0.0
-        || impulse_scales.iter().any(|s| !s.is_finite() || *s <= 0.0)
-    {
-        return Err(DistanceLoopError::Invalid(
-            "unrepresentable constraint scaling",
-        ));
-    }
+    let (impulse_scales, gap_scales, target) = constraint_scales(
+        loop_count, joint_rows, &scales, &initial_mobility, duration, config,
+    )?;
     let gravity_only_external = loads.world_points.is_empty()
         && loads
             .held
@@ -1530,44 +1497,10 @@ fn step_bilateral_forcing_evaluated<B: BushingLaw>(
         poll(&mut *cancel)?;
         Ok(residual)
     };
-    let problem = FallibleFiniteDifference::new(
-        stage_dimension + count,
-        config.nonlinear.difference_step,
-        residual,
-    )
-    .map_err(difference_error)?;
-    let solver_config = NewtonKrylovConfig {
-        absolute_tolerance: target,
-        relative_tolerance: 0.,
-        linear_restart: config.nonlinear.krylov_restart.min(stage_dimension + count),
-        max_linear_cycles: 8,
-        forcing_minimum: 1e-3,
-        forcing_maximum: 0.1,
-        ..Default::default()
-    };
-    let created = NewtonKrylovState::new(&problem, guess, solver_config);
-    if let Some(error) = problem.take_failure() {
-        return Err(difference_error(error));
-    }
-    let mut solver = created.map_err(ImplicitSpatialError::Solver)?;
-    let run = solver.run_controlled(&problem, config.nonlinear.maximum_iterations, &mut || {
-        problem.has_failed() || (*cancelled.borrow_mut())()
-    });
-    if let Some(error) = problem.take_failure() {
-        return Err(difference_error(error));
-    }
-    match run.progress {
-        fs_solver::nonlinear::SolverRunProgress::Complete => {}
-        fs_solver::nonlinear::SolverRunProgress::Paused => {
-            return Err(FreeFloatingMotionError::Cancelled.into());
-        }
-        other => return Err(ImplicitSpatialError::SolverProgress(other).into()),
-    }
-    let mut report = run.report;
-    if !report.converged {
-        return Err(ImplicitSpatialError::Unresolved(report).into());
-    }
-    let initial_impulse: Vec<_> = solver.x[stage_dimension..]
+    let (solution, mut report) = solve_loop_equations(
+        guess, target, config.nonlinear, residual, &cancelled,
+    )?;
+    let initial_impulse: Vec<_> = solution[stage_dimension..]
         .iter()
         .zip(&impulse_scales)
         .map(|(x, s)| x * s)
@@ -1609,7 +1542,7 @@ fn step_bilateral_forcing_evaluated<B: BushingLaw>(
         let (law, values) = &mut *effort;
         if let (Some(law), (wrenches, efforts)) = &mut *forcing {
             equations.evaluate_with_forcing(
-                &solver.x[..stage_dimension],
+                &solution[..stage_dimension],
                 &mut **law,
                 wrenches,
                 efforts,
@@ -1618,12 +1551,12 @@ fn step_bilateral_forcing_evaluated<B: BushingLaw>(
             )?
         } else if let Some(law) = law.as_deref_mut() {
             equations.evaluate_with_effort(
-                &solver.x[..stage_dimension],
+                &solution[..stage_dimension],
                 Some((law, values.as_mut_slice())),
                 &mut *cancel,
             )?
         } else {
-            equations.evaluate(&solver.x[..stage_dimension], &mut *cancel)?
+            equations.evaluate(&solution[..stage_dimension], &mut *cancel)?
         }
     };
     let final_q = advance(
@@ -1828,6 +1761,91 @@ fn step_bilateral_forcing_evaluated<B: BushingLaw>(
         midpoint_state,
         com_velocity_residual_world,
     })
+}
+
+// Original physical scaling and nonlinear driver shared by both base boundaries.
+// The boundary-specific midpoint, mass actions and support accounting stay native.
+fn constraint_scales(
+    loop_count: usize,
+    joint_rows: &[JointConstraint],
+    velocity_scales: &[f64],
+    mobility: &Mobility,
+    duration: f64,
+    config: BilateralLoopConfig,
+) -> Result<(Vec<f64>, Vec<f64>, f64), BilateralLoopError> {
+    // A coefficient carries row-units / joint-units. Scaling by the native
+    // coordinate rates preserves these units and row-rescaling covariance.
+    let mut row_scales = vec![config.nonlinear.linear_velocity_scale; loop_count];
+    for row in joint_rows {
+        let mut scale = 0.0_f64;
+        for (&a, &v) in row.coefficients.iter().zip(velocity_scales) {
+            let term = a.abs() * v;
+            if !term.is_finite() {
+                return Err(DistanceLoopError::Invalid("unrepresentable joint row scaling"));
+            }
+            scale = scale.max(term);
+        }
+        row_scales.push(scale);
+    }
+    let impulse_scales: Vec<_> = mobility.diagonal.iter().zip(&row_scales)
+        .map(|(d, scale)| scale / (d * d)).collect();
+    let gap_scales: Vec<_> = row_scales.iter().map(|v| duration * v).collect();
+    let mut tolerances = vec![config.position_tolerance_m; loop_count];
+    tolerances.extend(joint_rows.iter().map(|row| row.position_tolerance));
+    let target = tolerances.iter().zip(&gap_scales).fold(
+        config.nonlinear.residual_tolerance,
+        |target, (tolerance, scale)| target.min(tolerance / scale),
+    );
+    if gap_scales.iter().any(|s| !s.is_finite() || *s <= 0.0)
+        || !target.is_finite() || target <= 0.0
+        || impulse_scales.iter().any(|s| !s.is_finite() || *s <= 0.0)
+    {
+        return Err(DistanceLoopError::Invalid("unrepresentable constraint scaling"));
+    }
+    Ok((impulse_scales, gap_scales, target))
+}
+
+fn solve_loop_equations(
+    guess: Vec<f64>,
+    target: f64,
+    config: ImplicitSpatialConfig,
+    residual: impl Fn(&[f64]) -> Result<Vec<f64>, BilateralLoopError>,
+    cancelled: &RefCell<impl FnMut() -> bool>,
+) -> Result<(Vec<f64>, NewtonReport), BilateralLoopError> {
+    let dimension = guess.len();
+    let problem = FallibleFiniteDifference::new(dimension, config.difference_step, residual)
+        .map_err(difference_error)?;
+    let solver_config = NewtonKrylovConfig {
+        absolute_tolerance: target,
+        relative_tolerance: 0.,
+        linear_restart: config.krylov_restart.min(dimension),
+        max_linear_cycles: 8,
+        forcing_minimum: 1e-3,
+        forcing_maximum: 0.1,
+        ..Default::default()
+    };
+    let created = NewtonKrylovState::new(&problem, guess, solver_config);
+    if let Some(error) = problem.take_failure() {
+        return Err(difference_error(error));
+    }
+    let mut solver = created.map_err(ImplicitSpatialError::Solver)?;
+    let run = solver.run_controlled(&problem, config.maximum_iterations, &mut || {
+        problem.has_failed() || (*cancelled.borrow_mut())()
+    });
+    if let Some(error) = problem.take_failure() {
+        return Err(difference_error(error));
+    }
+    match run.progress {
+        fs_solver::nonlinear::SolverRunProgress::Complete => {}
+        fs_solver::nonlinear::SolverRunProgress::Paused => {
+            return Err(FreeFloatingMotionError::Cancelled.into());
+        }
+        other => return Err(ImplicitSpatialError::SolverProgress(other).into()),
+    }
+    if !run.report.converged {
+        return Err(ImplicitSpatialError::Unresolved(run.report).into());
+    }
+    Ok((solver.x, run.report))
 }
 
 fn joint_gaps(

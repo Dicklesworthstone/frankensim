@@ -5,11 +5,28 @@
 //! and factorization are shared with the free mechanism. Scalar root joints are
 //! retained; no floating surrogate support or force-duration conversion is used.
 
+/// Continuous closed-mechanism motion, including the actual moving support.
+#[path = "prescribed/motion.rs"]
+pub mod motion;
+
 use super::*;
 use crate::articulated::motion::prescribed::PrescribedBaseMotionState;
 use crate::articulated::{
     PrescribedBaseImpulseResponse, apply_prescribed_base_impulses, prescribed_base_impulse_delta,
 };
+
+impl From<crate::articulated::motion::prescribed::PrescribedBaseMotionError> for BilateralLoopError {
+    fn from(value: crate::articulated::motion::prescribed::PrescribedBaseMotionError) -> Self {
+        Self::SupportedMotion(value.into())
+    }
+}
+impl From<crate::articulated::motion::spatial_loads::prescribed::implicit::ImplicitPrescribedSpatialError>
+    for BilateralLoopError
+{
+    fn from(value: crate::articulated::motion::spatial_loads::prescribed::implicit::ImplicitPrescribedSpatialError) -> Self {
+        Self::SupportedMotion(value)
+    }
+}
 
 /// One combined event with the complete native support impulse and signed work.
 ///
@@ -139,6 +156,7 @@ pub fn apply_impulses(
         &before,
         joint_rows,
         config,
+        "initial",
         &mut cancelled,
     )?;
     let reciprocal_condition = mobility.reciprocal_condition(&mut cancelled)?;
@@ -310,6 +328,7 @@ fn prescribed_mobility(
     geometry: &Geometry,
     joint_rows: &[JointConstraint],
     config: BilateralLoopConfig,
+    stage: &'static str,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Mobility, BilateralLoopError> {
     let loop_count = geometry.terms.len();
@@ -353,7 +372,7 @@ fn prescribed_mobility(
         model,
         geometry,
         config,
-        "initial",
+        stage,
         matrix,
         k,
         Vec::new(),

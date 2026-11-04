@@ -21,18 +21,28 @@ use super::super::implicit::config_error;
 use super::{PrescribedSpatialMotionStep, evaluate_shared, finish};
 use crate::articulated::motion::prescribed::{
     EffortLaw, PrescribedBaseMotionError, PrescribedBaseMotionState, PrescribedBasePath,
-    PrescribedMidpoint, admit_stage, advance, finish_step, poll, prepare_step,
+    PrescribedMidpoint, PrescribedStage, admit_stage, finish_step, poll, prepare_step,
 };
 use crate::articulated::motion::reconfigure::constraints::ConstraintError;
-use crate::articulated::motion::{FreeFloatingMotionError, sum_products};
+use crate::articulated::motion::{FreeFloatingMotionError, advance, sum_products};
 use crate::articulated::{
-    ArticulatedError, ArticulatedModel, JointKind, forward_dynamics, forward_kinematics,
-    validate_slice,
+    ArticulatedError, ArticulatedModel, JointKind, Kinematics, forward_dynamics,
+    forward_kinematics, validate_slice,
 };
+use fs_ga::Wrench;
 use fs_math::dd::Dd;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::nonlinear::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport};
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+
+pub(in crate::articulated::motion::spatial_loads) type ForcingLaw<'a> = dyn FnMut(
+        f64,
+        &PrescribedBaseMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), PrescribedBaseMotionError>
+    + 'a;
 
 /// An accepted supported trajectory and its actual implicit midpoint solve.
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +247,49 @@ pub fn step_prescribed_base_bushings_implicit_with_effort(
     )
 }
 
+/// Resolve environmental link wrenches and internal effort at the same actual
+/// implicit stage as the prescribed support, spatial loads and finite bushings.
+///
+/// The callback receives elapsed time h/2; the state carries the absolute time.
+/// Both output slices are reset from held loads at every numerical trial and
+/// independent final verification. Wrenches are about original link origins in
+/// their body axes. The last accepted sample supplies ABA, native support RNEA,
+/// momentum and work; it is not sampled again during finalization. Forces are
+/// finite and subject to native admission; no support reaction is inferred from
+/// a balance residual. Use a smooth repeatable law, stage callback-owned history
+/// until success, and resolve nonlinear motion and any load discontinuities.
+#[allow(clippy::too_many_arguments)]
+pub fn step_prescribed_base_bushings_implicit_with_forcing(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[SpatialBushing],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    mut forcing: impl FnMut(
+        f64,
+        &PrescribedBaseMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), PrescribedBaseMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitPrescribedSpatialStep, ImplicitPrescribedSpatialError> {
+    step_with_bushings_forcing_and_reaction(
+        model,
+        state,
+        path,
+        loads,
+        bushings,
+        duration,
+        config,
+        None,
+        Some(&mut forcing),
+        None,
+        cancelled,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::articulated::motion::spatial_loads) fn step_with_bushings_and_effort<
     B: BushingLaw,
@@ -258,7 +311,7 @@ pub(in crate::articulated::motion::spatial_loads) fn step_with_bushings_and_effo
 
 /// Additional native joint acceleration and its separately owned physical power.
 /// Caller efforts and their native effort admission are never replaced or widened.
-type ReactionLaw<'a> = dyn FnMut(
+pub(in crate::articulated::motion::spatial_loads) type ReactionLaw<'a> = dyn FnMut(
         &PrescribedBaseMotionState,
         &mut [f64],
         &mut dyn FnMut() -> bool,
@@ -275,6 +328,25 @@ fn step_with_bushings_effort_and_reaction<B: BushingLaw>(
     duration: f64,
     config: ImplicitSpatialConfig,
     effort: Option<&mut EffortLaw<'_>>,
+    reaction: Option<&mut ReactionLaw<'_>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitPrescribedSpatialStep, ImplicitPrescribedSpatialError> {
+    step_with_bushings_forcing_and_reaction(
+        model, state, path, loads, bushings, duration, config, effort, None, reaction, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_with_bushings_forcing_and_reaction<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    path: PrescribedBasePath,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    effort: Option<&mut EffortLaw<'_>>,
+    forcing: Option<&mut ForcingLaw<'_>>,
     reaction: Option<&mut ReactionLaw<'_>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitPrescribedSpatialStep, ImplicitPrescribedSpatialError> {
@@ -327,6 +399,15 @@ fn step_with_bushings_effort_and_reaction<B: BushingLaw>(
         Vec::new()
     };
     let effort = RefCell::new((effort, effort_values));
+    let forcing_values = if forcing.is_some() {
+        (
+            loads.held.external_body_wrench.to_vec(),
+            loads.held.generalized_force.to_vec(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let forcing = RefCell::new((forcing, forcing_values));
     let reaction = RefCell::new(reaction);
     let evaluate_stage = |x: &[f64]| {
         let mut cancel = cancelled.borrow_mut();
@@ -343,7 +424,19 @@ fn step_with_bushings_effort_and_reaction<B: BushingLaw>(
         let (law, values) = &mut *effort;
         let stage_effort = law.as_deref_mut().map(|law| (law, values.as_mut_slice()));
         let mut reaction = reaction.borrow_mut();
-        equations.evaluate(x, stage_effort, reaction.as_deref_mut(), &mut *cancel)
+        let mut forcing = forcing.borrow_mut();
+        if let (Some(law), (wrenches, efforts)) = &mut *forcing {
+            equations.evaluate_with_forcing(
+                x,
+                &mut **law,
+                wrenches,
+                efforts,
+                reaction.as_deref_mut(),
+                &mut *cancel,
+            )
+        } else {
+            equations.evaluate(x, stage_effort, reaction.as_deref_mut(), &mut *cancel)
+        }
     };
     let (solution, mut report) = if n == 0 {
         // All-fixed supported trees still evaluate the actual loads and native
@@ -433,47 +526,58 @@ fn step_with_bushings_effort_and_reaction<B: BushingLaw>(
     })
 }
 
-struct MidpointEquations<'a, B: BushingLaw> {
-    model: &'a ArticulatedModel,
-    state: &'a PrescribedBaseMotionState,
-    path: PrescribedBasePath,
-    loads: SpatialMotionLoads<'a>,
-    bushings: &'a [B],
-    duration: f64,
-    midpoint_time: f64,
-    scales: &'a [f64],
+pub(in crate::articulated::motion::spatial_loads) struct MidpointEquations<'a, B: BushingLaw> {
+    pub(in crate::articulated::motion::spatial_loads) model: &'a ArticulatedModel,
+    pub(in crate::articulated::motion::spatial_loads) state: &'a PrescribedBaseMotionState,
+    pub(in crate::articulated::motion::spatial_loads) path: PrescribedBasePath,
+    pub(in crate::articulated::motion::spatial_loads) loads: SpatialMotionLoads<'a>,
+    pub(in crate::articulated::motion::spatial_loads) bushings: &'a [B],
+    pub(in crate::articulated::motion::spatial_loads) duration: f64,
+    pub(in crate::articulated::motion::spatial_loads) midpoint_time: f64,
+    pub(in crate::articulated::motion::spatial_loads) scales: &'a [f64],
 }
 
-struct MidpointEvaluation<'a> {
-    stage: PrescribedMidpoint<'a>,
-    residual: Vec<f64>,
+pub(in crate::articulated::motion::spatial_loads) struct MidpointEvaluation<'a> {
+    pub(in crate::articulated::motion::spatial_loads) stage: PrescribedMidpoint<'a>,
+    pub(in crate::articulated::motion::spatial_loads) residual: Vec<f64>,
 }
 
 impl<'a, B: BushingLaw> MidpointEquations<'a, B> {
-    fn evaluate(
+    fn trial_state(
+        &self,
+        x: &[f64],
+    ) -> Result<PrescribedBaseMotionState, ImplicitPrescribedSpatialError> {
+        if x.len() != self.scales.len() {
+            return Err(ImplicitPrescribedSpatialError::Invalid(
+                "trial rate dimension",
+            ));
+        }
+        let velocity: Vec<_> = x
+            .iter()
+            .zip(self.scales)
+            .map(|(x, scale)| x * scale)
+            .collect();
+        Ok(PrescribedBaseMotionState {
+            time_s: self.midpoint_time,
+            base: self.path.midpoint,
+            // Numerical off-manifold probes near an exact lock may have a
+            // sub-ULP coordinate increment. They remain finite/FK-admitted chart
+            // samples, not published updates. finish_step still uses the native
+            // strict physical endpoint advance; no rate is clipped or projected.
+            joint_position: advance(&self.state.joint_position, &velocity, 0.5 * self.duration),
+            joint_velocity: velocity,
+        })
+    }
+
+    pub(in crate::articulated::motion::spatial_loads) fn evaluate(
         &self,
         x: &[f64],
         effort: Option<(&mut EffortLaw<'_>, &mut [f64])>,
         reaction: Option<&mut ReactionLaw<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MidpointEvaluation<'a>, ImplicitPrescribedSpatialError> {
-        if x.len() != self.scales.len() {
-            return Err(ImplicitPrescribedSpatialError::Invalid(
-                "trial rate dimension",
-            ));
-        }
         let half = 0.5 * self.duration;
-        let velocity: Vec<_> = x
-            .iter()
-            .zip(self.scales)
-            .map(|(x, scale)| x * scale)
-            .collect();
-        let state = PrescribedBaseMotionState {
-            time_s: self.midpoint_time,
-            base: self.path.midpoint,
-            joint_position: advance(&self.state.joint_position, &velocity, half)?,
-            joint_velocity: velocity,
-        };
+        let state = self.trial_state(x)?;
         poll(cancelled)?;
         let kinematics = forward_kinematics(
             self.model,
@@ -500,6 +604,78 @@ impl<'a, B: BushingLaw> MidpointEquations<'a, B> {
         } else {
             self.loads.held.generalized_force
         };
+        self.evaluate_dynamics(
+            state,
+            kinematics,
+            load,
+            generalized_force,
+            reaction,
+            cancelled,
+        )
+    }
+
+    pub(in crate::articulated::motion::spatial_loads) fn evaluate_with_forcing(
+        &self,
+        x: &[f64],
+        forcing: &mut ForcingLaw<'_>,
+        wrenches: &mut [Wrench],
+        efforts: &mut [f64],
+        reaction: Option<&mut ReactionLaw<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MidpointEvaluation<'a>, ImplicitPrescribedSpatialError> {
+        let state = self.trial_state(x)?;
+        poll(cancelled)?;
+        let kinematics = forward_kinematics(
+            self.model,
+            state.base,
+            &state.joint_position,
+            &state.joint_velocity,
+        )?;
+        wrenches.copy_from_slice(self.loads.held.external_body_wrench);
+        efforts.copy_from_slice(self.loads.held.generalized_force);
+        poll(cancelled)?;
+        forcing(0.5 * self.duration, &state, wrenches, efforts)?;
+        poll(cancelled)?;
+        let loads = SpatialMotionLoads {
+            held: crate::articulated::motion::FreeFloatingMotionLoads {
+                external_body_wrench: wrenches,
+                generalized_force: efforts,
+                ..self.loads.held
+            },
+            ..self.loads
+        };
+        let evaluated = evaluate_shared(
+            self.model,
+            &state,
+            &kinematics,
+            loads,
+            self.bushings,
+            cancelled,
+        )?;
+        // The accepted load must outlive the reusable callback buffers. Already
+        // owned spatial/bushing loads move directly; held-only loads copy once.
+        let load = PrescribedStage {
+            body_wrench: Cow::Owned(evaluated.body_wrench.into_owned()),
+            external: evaluated.external,
+            external_power: evaluated.external_power,
+            internal_power: evaluated.internal_power,
+            stored_energy: evaluated.stored_energy,
+            dissipation_power: evaluated.dissipation_power,
+        };
+        admit_stage(&load)?;
+        self.evaluate_dynamics(state, kinematics, load, efforts, reaction, cancelled)
+    }
+
+    fn evaluate_dynamics(
+        &self,
+        state: PrescribedBaseMotionState,
+        kinematics: Kinematics,
+        load: PrescribedStage<'a>,
+        generalized_force: &[f64],
+        reaction: Option<&mut ReactionLaw<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MidpointEvaluation<'a>, ImplicitPrescribedSpatialError> {
+        let half = 0.5 * self.duration;
         let mut dynamics = forward_dynamics(
             self.model,
             state.base,

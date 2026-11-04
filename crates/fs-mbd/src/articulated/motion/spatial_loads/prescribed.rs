@@ -186,7 +186,7 @@ pub(super) fn step_with_bushings_and_effort<B: BushingLaw>(
     finish(model, evaluated, loads, bushings, &mut cancelled)
 }
 
-fn evaluate_shared<'a, B: BushingLaw>(
+pub(in crate::articulated::motion::spatial_loads) fn evaluate_shared<'a, B: BushingLaw>(
     model: &ArticulatedModel,
     stage: &PrescribedBaseMotionState,
     kinematics: &Kinematics,
@@ -244,7 +244,7 @@ fn evaluate_shared<'a, B: BushingLaw>(
     })
 }
 
-fn finish<B: BushingLaw>(
+pub(in crate::articulated::motion::spatial_loads) fn finish<B: BushingLaw>(
     model: &ArticulatedModel,
     evaluated: EvaluatedPrescribedStep,
     loads: SpatialMotionLoads<'_>,

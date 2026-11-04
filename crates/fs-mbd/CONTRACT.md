@@ -6230,6 +6230,47 @@ partition, rotating contact frames or interacting sliding body-pair surfaces.
 belts, raising planes, accelerating prescribed supports, zero-force detachment
 and atomic path/impact/budget/cancellation/native-limit refusals.
 
+## Continuous closed mechanisms on prescribed moving supports
+
+`articulated::motion::spatial_loads::implicit::distance::prescribed::motion`
+continues distance and spherical material closures together with affine joint
+relations on the original prescribed base path. The initial constraint impulse,
+midpoint joint rates and endpoint position closure solve simultaneously. A
+second native impulse imposes endpoint tangency without changing position.
+The original ABA, FK, normalized row mobility and nonlinear driver are reused;
+only the at-most-32-row mobility is dense, with at most 4096 native links.
+A representable endpoint-position chart defines the secant midpoint rates for
+all trials and actual-impulse replay. Locked coordinates stay exact without a
+final velocity projection; physical endpoint updates retain strict native
+representability checks.
+
+Diagonal and full passive six-coordinate bushings retain their original law.
+The forcing entries resolve environmental link wrenches and actuator efforts at
+the actual implicit stage, including the prescribed pose, twist and acceleration.
+Callbacks receive elapsed h/2 and the absolute-clock state, with output buffers
+reset from held loads. They must be smooth and repeatable on off-manifold probes
+and stage their own history until success. Independent verification replays the
+actual summed initial impulse and retains its accepted force sample through
+native finalization. The open supported midpoint also exposes this same forcing
+entry; no second force or support model is introduced.
+
+`PrescribedBilateralLoopStep` retains both complete native impulse responses,
+the smooth RNEA support receipt and the accepted midpoint. Total support impulse
+and signed support work are compensated sums of these three independently
+computed contributions. Constraint-event work, actuator/environmental work,
+passive storage and damping remain separate. Actual per-link momentum and
+kinetic increments are summed without subtracting large endpoint totals.
+The smooth prescribed-path momentum and mechanical work defects remain visible;
+no support reaction is inferred from a balance residual or converted into heat.
+
+The caller owns a mutually consistent initial/midpoint/endpoint support path and
+must resolve its time variation and nonlinear geometry. Initial/endpoint
+position, endpoint tangency, native physical limits, row rank, nonlinear and
+evaluation budgets, representable clocks and cancellation are admitted before
+return. Borrowed inputs remain unchanged on every refusal. This adds continuous
+supported closed motion, not contact activation, general branch certification,
+or exact finite-step nonlinear energy/momentum conservation.
+
 ## Full passive bushings in rigid bilateral-loop motion
 
 `implicit::distance::step_free_floating_bilateral_loops_with_coupled_bushings`
