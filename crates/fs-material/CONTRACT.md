@@ -5945,6 +5945,29 @@ and do not differentiate the path average. Regressions compare vector means with
 independent traction quadrature, shear rotations, full rupture, reversals and
 straight-path subdivision.
 
+The optional `trial_with_mean_traction_tangent` and
+`trial_over_time_with_mean_traction_tangent` methods return that unchanged trial
+and vector mean together with `Option<[[f64; 3]; 3]>` for
+`d(mean traction)/d(endpoint jump)` [Pa/m], holding accepted history and the
+physical interval fixed. The existing `fs-ad::Real`/`Dual64<3>` owner differentiates
+the shared analytic path primitives and the implicit locations of damage,
+failure and normal-contact crossings. Common-mode evolution and previously
+selected frozen-BK histories include unloading, softening and rupture. Physical
+viscosity includes the derivative of the integrated surviving-bond fraction,
+not only its direct rate term. Original source, damage, work and dissipation
+accounts are unchanged; ordinary mean-only methods execute no tangent path.
+
+`None` explicitly leaves the consumer's numerical/semismooth fallback in charge
+for first mixed-mode initiation, an identically zero-normal path, a held
+onset/loading-unloading kink, or a degenerate/unrepresentable derivative. The
+endpoint tangent is never substituted, and a selected one-sided derivative is
+not represented as a classical one. Allocation and work remain bounded per
+point. G0/G1 regressions compare independent endpoint perturbations of the
+original mean and total work, retained-history symmetry, exact elastic/viscous
+slopes, coincident initiation/reclosure, tiny-onset rupture and short-softening
+limits. These are numerical constitutive tests, not adhesive calibration or
+wall-clock performance claims.
+
 `resolve_mixed_mode_bilinear_cohesive` requires eight explicit ordered-interface
 claims: normal/shear stiffness [Pa/m], normal/shear strength [Pa], mode-I/mode-II
 fracture energy [J/m2], dimensionless BK exponent, and compression stiffness. No

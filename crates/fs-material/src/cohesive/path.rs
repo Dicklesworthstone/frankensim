@@ -10,6 +10,9 @@ use super::{
 };
 
 mod friction;
+mod tangent;
+
+use fs_ad::Real;
 
 impl<'a> CohesivePoint<'a> {
     /// Return the original endpoint trial and the mean equilibrium traction
@@ -49,6 +52,18 @@ impl<'a> CohesivePoint<'a> {
         dt_s: f64,
         energy_tolerance_j_m2: f64,
     ) -> Result<(CohesiveRateStep<'a>, [f64; 3]), CohesiveError> {
+        self.trial_over_time_mean(jump_m, dt_s, energy_tolerance_j_m2)
+            .map(|(step, mean, _)| (step, mean))
+    }
+
+    // Keep the original rate owner's mean intact fraction for the optional
+    // path tangent, without replaying its physical trial or work calculation.
+    fn trial_over_time_mean(
+        &self,
+        jump_m: [f64; 3],
+        dt_s: f64,
+        energy_tolerance_j_m2: f64,
+    ) -> Result<(CohesiveRateStep<'a>, [f64; 3], f64), CohesiveError> {
         let (step, mean_intact) =
             self.trial_over_time_integrated(jump_m, dt_s, energy_tolerance_j_m2)?;
         let mut mean = mean_equilibrium(self, &step.equilibrium.point)?;
@@ -70,7 +85,7 @@ impl<'a> CohesivePoint<'a> {
             step.total_work_j_m2(),
             energy_tolerance_j_m2,
         )?;
-        Ok((step, mean))
+        Ok((step, mean, mean_intact))
     }
 }
 
@@ -177,56 +192,80 @@ fn mean_equilibrium(
     checked(mean)
 }
 
-fn checked(values: [f64; 3]) -> Result<[f64; 3], CohesiveError> {
+fn checked<S: Real>(values: [S; 3]) -> Result<[S; 3], CohesiveError> {
     for value in values {
-        finite(value)?;
+        finite(value.value())?;
     }
     Ok(values)
 }
 
+// These fixed-size primitives are shared by f64 path forces and their optional
+// forward derivatives. Primal arithmetic keeps its original ordering; no
+// derivative work is done by ordinary mean-traction callers.
+fn scalar_dot<S: Real>(a: [S; 3], b: [S; 3]) -> S {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn scalar_norm<S: Real>(value: [S; 3]) -> Result<S, CohesiveError> {
+    checked(value)?;
+    let scale = value.iter().fold(0.0_f64, |a, b| a.max(b.value().abs()));
+    if scale == 0.0 {
+        // The zero norm is used only for branch selection in the short-segment
+        // series. Its undefined derivative must never enter a nonzero formula.
+        return Ok(S::zero());
+    }
+    let scale = S::from_f64(scale);
+    let v = value.map(|x| x / scale);
+    let result = scale * scalar_dot(v, v).sqrt();
+    finite(result.value())?;
+    Ok(result)
+}
+
 // Fraction of a sign-changing affine normal jump. Scaling avoids overflow in
 // |a|+|b|. A same-sign segment has no internal tension/compression switch.
-fn normal_switch(a: f64, b: f64) -> f64 {
-    if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
-        let scale = a.abs().max(b.abs());
+fn normal_switch<S: Real>(a: S, b: S) -> S {
+    if (a.value() < 0.0 && b.value() > 0.0) || (a.value() > 0.0 && b.value() < 0.0) {
+        let scale = S::from_f64(a.value().abs().max(b.value().abs()));
         let x = a.abs() / scale;
         x / (x + b.abs() / scale)
     } else {
-        1.0
+        S::one()
     }
 }
 
-fn positive_mean(a: f64, b: f64) -> f64 {
-    if a >= 0.0 && b >= 0.0 {
-        0.5 * a + 0.5 * b
-    } else if a <= 0.0 && b <= 0.0 {
-        0.0
-    } else if a > 0.0 {
-        0.5 * a * normal_switch(a, b)
+fn positive_mean<S: Real>(a: S, b: S) -> S {
+    let half = S::from_f64(0.5);
+    if a.value() >= 0.0 && b.value() >= 0.0 {
+        half * a + half * b
+    } else if a.value() <= 0.0 && b.value() <= 0.0 {
+        S::zero()
+    } else if a.value() > 0.0 {
+        half * a * normal_switch(a, b)
     } else {
-        0.5 * b * normal_switch(b, a)
+        half * b * normal_switch(b, a)
     }
 }
 
-fn negative_mean(a: f64, b: f64) -> f64 {
+fn negative_mean<S: Real>(a: S, b: S) -> S {
     -positive_mean(-a, -b)
 }
 
-fn add_elastic(
-    mean: &mut [f64; 3],
+fn add_elastic<S: Real>(
+    mean: &mut [S; 3],
     stiffness: [f64; 3],
     intact: f64,
-    duration: f64,
-    a: [f64; 3],
-    b: [f64; 3],
+    duration: S,
+    a: [S; 3],
+    b: [S; 3],
 ) {
+    let half = S::from_f64(0.5);
     let jump = [
         positive_mean(a[0], b[0]),
-        0.5 * a[1] + 0.5 * b[1],
-        0.5 * a[2] + 0.5 * b[2],
+        half * a[1] + half * b[1],
+        half * a[2] + half * b[2],
     ];
     for i in 0..3 {
-        mean[i] += duration * ((intact * stiffness[i]) * jump[i]);
+        mean[i] = mean[i] + duration * (S::from_f64(intact * stiffness[i]) * jump[i]);
     }
 }
 
@@ -239,20 +278,34 @@ fn softening_mean(
     onset: f64,
     failure: f64,
 ) -> Result<[f64; 3], CohesiveError> {
-    let r0 = positive(norm(a)?)?;
+    softening_integrals::<f64, false>(a, b, onset, failure).map(|(mean, _)| mean)
+}
+
+// The derivative also needs the mean intact fraction for physical viscosity.
+// Computing it uses the SAME inverse-radius moments as vector traction. The
+// const parameter omits this output in the ordinary f64 vector-force path.
+fn softening_integrals<S: Real, const WITH_INTEGRITY: bool>(
+    a: [S; 3],
+    b: [S; 3],
+    onset: f64,
+    failure: f64,
+) -> Result<([S; 3], S), CohesiveError> {
+    let r0 = scalar_norm(a)?;
+    positive(r0.value())?;
     let u = a.map(|x| x / r0);
     let delta = core::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
     let d = delta.map(|x| x / r0);
-    let length = norm(d)?;
-    let ud = dot(u, d);
-    let dd = dot(d, d);
-    let average = core::array::from_fn::<_, 3, _>(|i| 0.5 * a[i] + 0.5 * b[i]);
-    let result = if 2.0 * ud.abs() + dd <= 0.001 {
+    let length = scalar_norm(d)?;
+    let ud = scalar_dot(u, d);
+    let dd = scalar_dot(d, d);
+    let half = S::from_f64(0.5);
+    let average = core::array::from_fn::<_, 3, _>(|i| half * a[i] + half * b[i]);
+    let (result, integrity) = if 2.0 * ud.value().abs() + dd.value() <= 0.001 {
         // Moments of (1 + 2 u.d t + d.d t^2)^(-1/2) - 1. Eight
         // binomial terms have < 2e-28 absolute truncation in this range.
         // Integrating both 1 and t retains the transverse traction. Keeping
         // the small difference explicitly avoids loss of traction near failure.
-        let mut moment = [0.0; 2];
+        let mut moment = [S::zero(); 2];
         let mut binomial = 1.0;
         for k in 1..=8 {
             binomial *= (-0.5 - f64::from(k - 1)) / f64::from(k);
@@ -261,41 +314,62 @@ fn softening_mean(
                 if j > 0 {
                     choose *= f64::from(k - j + 1) / f64::from(j);
                 }
-                let coefficient = choose * powi(2.0 * ud, k - j) * powi(dd, j);
-                moment[0] += binomial * coefficient / f64::from(k + j + 1);
-                moment[1] += binomial * coefficient / f64::from(k + j + 2);
+                let coefficient = S::from_f64(choose)
+                    * powi(S::from_f64(2.0) * ud, k - j)
+                    * powi(dd, j);
+                moment[0] = moment[0]
+                    + S::from_f64(binomial) * coefficient / S::from_f64(f64::from(k + j + 1));
+                moment[1] = moment[1]
+                    + S::from_f64(binomial) * coefficient / S::from_f64(f64::from(k + j + 2));
             }
         }
-        let base = (onset / r0) * ((failure - r0) / (failure - onset));
-        let correction = (onset / r0) * (failure / (failure - onset));
-        core::array::from_fn(|i| {
-            base * average[i] + correction * (a[i] * moment[0] + delta[i] * moment[1])
-        })
+        let base = (S::from_f64(onset) / r0)
+            * ((S::from_f64(failure) - r0) / S::from_f64(failure - onset));
+        let correction = (S::from_f64(onset) / r0) * S::from_f64(failure / (failure - onset));
+        (
+            core::array::from_fn(|i| {
+                base * average[i] + correction * (a[i] * moment[0] + delta[i] * moment[1])
+            }),
+            if WITH_INTEGRITY {
+                base + correction * moment[0]
+            } else {
+                S::zero()
+            },
+        )
     } else {
         let direction = d.map(|x| x / length);
-        let projection = dot(u, direction);
-        let end_radius = norm(core::array::from_fn(|i| u[i] + d[i]))?;
-        let radial_rate = (length + 2.0 * projection) / (end_radius + 1.0);
-        let logarithm = if length >= 1.0 {
-            det::ln(length) + det::ln(1.0 / length + (1.0 + radial_rate) / (1.0 + projection))
+        let projection = scalar_dot(u, direction);
+        let end_radius = scalar_norm(core::array::from_fn(|i| u[i] + d[i]))?;
+        let radial_rate = (length + S::from_f64(2.0) * projection) / (end_radius + S::one());
+        let logarithm = if length.value() >= 1.0 {
+            length.ln()
+                + (S::one() / length + (S::one() + radial_rate) / (S::one() + projection)).ln()
         } else {
-            det::ln(1.0 + length * (1.0 + radial_rate) / (1.0 + projection))
+            (S::one() + length * (S::one() + radial_rate) / (S::one() + projection)).ln()
         };
         let inverse_radius_mean = logarithm / length;
-        let factor = onset / (failure - onset);
-        core::array::from_fn(|i| {
-            let unit_mean = direction[i] * radial_rate
-                + (u[i] - projection * direction[i]) * inverse_radius_mean;
-            factor * (failure * unit_mean - average[i])
-        })
+        let factor = S::from_f64(onset / (failure - onset));
+        (
+            core::array::from_fn(|i| {
+                let unit_mean = direction[i] * radial_rate
+                    + (u[i] - projection * direction[i]) * inverse_radius_mean;
+                factor * (S::from_f64(failure) * unit_mean - average[i])
+            }),
+            if WITH_INTEGRITY {
+                factor * ((S::from_f64(failure) / r0) * inverse_radius_mean - S::one())
+            } else {
+                S::zero()
+            },
+        )
     };
-    checked(result)
+    finite(integrity.value())?;
+    Ok((checked(result)?, integrity))
 }
 
-fn powi(x: f64, n: i32) -> f64 {
-    let mut result = 1.0;
+fn powi<S: Real>(x: S, n: i32) -> S {
+    let mut result = S::one();
     for _ in 0..n {
-        result *= x;
+        result = result * x;
     }
     result
 }
