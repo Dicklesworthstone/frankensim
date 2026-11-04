@@ -18,14 +18,17 @@
 //! The existing rigid-body integrator owns momentum, gyroscopic rotation,
 //! position and attitude. A bounded load iteration closes rotary resistance
 //! against its actual midpoint angular velocity. Translation is eliminated
-//! algebraically in the ellipsoid axes at the native midpoint attitude. All
+//! algebraically in the ellipsoid axes at the native midpoint attitude. A
+//! prescribed rigid ambient flow includes the local COM velocity and half-curl;
+//! its spatial variation participates in the native midpoint position solve. All
 //! work is paired with actual endpoint-average velocities, with an independent
 //! storage/heat/drive/maintained-flow check before returning a candidate.
 //!
-//! Scope: frozen uniform Newtonian fluid, uniform rigid solid, full immersion,
+//! Scope: frozen uniform Newtonian material in a steady translating/rotating
+//! ambient flow, uniform rigid solid, full immersion,
 //! no slip, low Reynolds number and fast fluid diffusion relative to body
 //! relaxation. The longest semiaxis sets conservative Reynolds/diffusion scales.
-//! Finite-Re corrections, fluid memory/added mass, strain/vorticity in ambient
+//! Finite-Re corrections, fluid memory/added mass, ambient strain,
 //! flow, walls, free surfaces, rarefaction and interaction between particles
 //! need different models. Do not add an overlapping exterior or gap drag law.
 
@@ -43,6 +46,8 @@ use fs_mbd::{
     Vec3, Wrench,
 };
 
+mod ambient;
+pub use ambient::RigidAmbientFlow;
 mod resistance;
 pub use resistance::{EllipsoidQuadrature, EllipsoidResistance};
 
@@ -110,7 +115,8 @@ pub struct EllipsoidStepControls {
     pub maximum_coupling_iterations: usize,
     /// Scaled force/torque closure residual in [64*epsilon, 1e-8]. Work is gated separately.
     pub relative_wrench_tolerance: f64,
-    /// Maximum dt*|omega_mid|, in (0,0.5] rad; not a phase-error certificate.
+    /// Maximum dt*|omega_mid| and dt*|Omega_ambient|, in (0,0.5] rad.
+    /// This is not a phase-error certificate.
     pub maximum_rotation_increment_rad: f64,
 }
 
@@ -122,6 +128,7 @@ pub struct EllipsoidStep {
     pub rotational_iterations: usize,
     pub relative_wrench_residual: f64,
     pub rotation_increment_rad: f64,
+    pub ambient_rotation_increment_rad: f64,
 }
 
 /// An immutable exterior-fluid source and one declared ellipsoidal boundary.
@@ -136,7 +143,7 @@ pub struct CreepingEllipsoid<'a, F: FluidTransport + ?Sized> {
     fluid_mass_kg: f64,
     diffusion_time_s: f64,
     gravity: Gravity,
-    ambient_velocity_world: Vec3,
+    ambient: RigidAmbientFlow,
     limits: CreepingFlowLimits,
 }
 struct BodyFrame {
@@ -196,7 +203,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
             fluid_mass_kg,
             diffusion_time_s,
             gravity,
-            ambient_velocity_world,
+            ambient: RigidAmbientFlow::new(Vec3::ZERO, ambient_velocity_world, Vec3::ZERO)?,
             limits,
         })
     }
@@ -211,6 +218,32 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
     }
     pub const fn resistance(&self) -> &EllipsoidResistance {
         &self.resistance
+    }
+
+    /// Select a steady rigid ambient flow while retaining the original source,
+    /// geometry and prepared coefficients. The field must remain steady over
+    /// the trajectory; abrupt source/flow changes need a fluid-memory model.
+    /// Ambient strain and a finite rotating vessel are not represented.
+    pub fn with_rigid_ambient(mut self, ambient: RigidAmbientFlow) -> Result<Self, Error> {
+        let rotation = finite(ambient.angular_speed_rad_s() * self.diffusion_time_s)?;
+        if rotation > self.limits.maximum_reynolds {
+            return Err(Error::Regime(CreepingFlowError::Reynolds {
+                translation: 0.0,
+                rotation,
+                maximum: self.limits.maximum_reynolds,
+            }));
+        }
+        if rotation > self.limits.maximum_diffusion_ratio {
+            return Err(Error::Regime(CreepingFlowError::Unsteady {
+                diffusion_ratio: rotation,
+                maximum: self.limits.maximum_diffusion_ratio,
+            }));
+        }
+        self.ambient = ambient;
+        Ok(self)
+    }
+    pub const fn ambient_flow(&self) -> RigidAmbientFlow {
+        self.ambient
     }
 
     fn body_frame(&self, body: &PrincipalBody<'_>) -> Result<BodyFrame, Error> {
@@ -263,6 +296,9 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
         })
     }
     /// Actual force/torque and powers; body gravity remains in native dynamics.
+    /// Maintained-flow power is `F_drag·u(COM) + torque·Omega` in matching frames.
+    /// The reported rotational Reynolds number uses the sum of relative-spin
+    /// and ambient angular speeds, scaled by longest-semiaxis squared / nu.
     pub fn load(
         &self,
         body: &PrincipalBody<'_>,
@@ -279,6 +315,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
         self.load_at(
             frame,
             state.pose().orientation(),
+            state.pose().position_world(),
             state.center_of_mass_velocity_world(frame.properties)?,
             frame
                 .properties
@@ -289,14 +326,26 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
         &self,
         frame: &BodyFrame,
         attitude: UnitQuaternion,
+        position: Vec3,
         velocity: Vec3,
         omega: Vec3,
     ) -> Result<CreepingLoad, Error> {
-        let relative = vector(velocity.sub(self.ambient_velocity_world))?;
+        let ambient_velocity = self.ambient.velocity_at(position)?;
+        let relative = vector(velocity.sub(ambient_velocity))?;
+        let ambient_omega = self.ambient.angular_velocity_world_rad_s();
+        let (ambient_omega_body, relative_omega) = if ambient_omega == Vec3::ZERO {
+            (Vec3::ZERO, omega)
+        } else {
+            let background = vector(attitude.rotate_world_to_body(ambient_omega))?;
+            (background, vector(omega.sub(background))?)
+        };
         let translation_reynolds = self
             .transport
             .reynolds(norm(relative)?, 2.0 * self.longest_semiaxis_m)?;
-        let rotation_reynolds = finite(norm(omega)? * self.diffusion_time_s)?;
+        // Co-rotation must not bypass the ambient-flow inertia restriction.
+        let rotation_reynolds = finite(
+            (norm(relative_omega)? + self.ambient.angular_speed_rad_s()) * self.diffusion_time_s,
+        )?;
         if translation_reynolds > self.limits.maximum_reynolds
             || rotation_reynolds > self.limits.maximum_reynolds
         {
@@ -310,7 +359,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
             frame.ellipsoid_from_principal,
             attitude.rotate_world_to_body(relative),
         )?;
-        let omega_axes = apply(frame.ellipsoid_from_principal, omega)?;
+        let omega_axes = apply(frame.ellipsoid_from_principal, relative_omega)?;
         let force_axes = diagonal(self.resistance.translation_kg_s, relative_axes)?.scale(-1.0);
         let torque_axes = diagonal(self.resistance.rotation_kg_m2_s, omega_axes)?.scale(-1.0);
         let drag = vector(
@@ -321,7 +370,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
         let dissipated_power_w =
             finite(-force_axes.dot(relative_axes) - torque_axes.dot(omega_axes))?;
         if dissipated_power_w < 0.0
-            || (relative != Vec3::ZERO || omega != Vec3::ZERO) && dissipated_power_w == 0.0
+            || (relative != Vec3::ZERO || relative_omega != Vec3::ZERO) && dissipated_power_w == 0.0
         {
             return Err(Error::Invalid(
                 "nonzero ellipsoid slip/spin requires representable positive viscous power",
@@ -336,7 +385,11 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
             rotary_torque_body_nm: rotary,
             buoyancy_force_world_n: buoyancy,
             dissipated_power_w,
-            background_power_w: finite(drag.dot(self.ambient_velocity_world))?,
+            background_power_w: if ambient_omega == Vec3::ZERO {
+                finite(drag.dot(ambient_velocity))?
+            } else {
+                finite(drag.dot(ambient_velocity) + rotary.dot(ambient_omega_body))?
+            },
             translation_reynolds,
             rotation_reynolds,
         })
@@ -372,6 +425,13 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
         let p = frame.properties;
         let (shortest_time, diffusion_ratio) = self.timescales(&frame)?;
         let dt = controls.mechanical.duration_s;
+        let ambient_omega = self.ambient.angular_velocity_world_rad_s();
+        let ambient_rotation_increment_rad = finite(dt * self.ambient.angular_speed_rad_s())?;
+        if ambient_rotation_increment_rad > controls.maximum_rotation_increment_rad {
+            return Err(Error::Invalid(
+                "ambient flow turns beyond the declared midpoint increment; reduce dt",
+            ));
+        }
         if finite(dt / shortest_time)? > controls.mechanical.maximum_relaxation_fraction {
             return Err(Error::Invalid(
                 "ellipsoid step exceeds its body-relaxation fraction; reduce dt",
@@ -408,7 +468,16 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
                     "ellipsoid midpoint rotation exceeds its declared increment; reduce dt",
                 ));
             }
-            let desired = apply(frame.rotary_principal, angular_mid)?.scale(-1.0);
+            let relative_angular_mid = if ambient_omega == Vec3::ZERO {
+                angular_mid
+            } else {
+                let trial_attitude_mid = midpoint_attitude(
+                    state.pose().orientation(),
+                    trial.state_after.pose().orientation(),
+                )?;
+                vector(angular_mid.sub(trial_attitude_mid.rotate_world_to_body(ambient_omega)))?
+            };
+            let desired = apply(frame.rotary_principal, relative_angular_mid)?.scale(-1.0);
             residual = relative_residual(
                 desired,
                 torque,
@@ -437,26 +506,54 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
                 .scale(1.0 - self.fluid_mass_kg / p.mass())
                 .add(applied.force_world.scale(1.0 / p.mass())),
         )?;
-        let right = vector(
-            initial_velocity
-                .sub(self.ambient_velocity_world)
-                .add(acceleration.scale(half_dt)),
-        )?;
-        let right_axes = apply(
-            frame.ellipsoid_from_principal,
-            attitude_mid.rotate_world_to_body(right),
-        )?;
+        let initial_position = state.pose().position_world();
+        let ambient_before = self.ambient.velocity_at(initial_position)?;
         let c = self.resistance.translation_kg_s;
-        let axes_mid = vector(Vec3::new(
-            right_axes.x / positive(1.0 + half_dt * (c[0] / p.mass()))?,
-            right_axes.y / positive(1.0 + half_dt * (c[1] / p.mass()))?,
-            right_axes.z / positive(1.0 + half_dt * (c[2] / p.mass()))?,
-        ))?;
-        let relative_mid = vector(
-            attitude_mid.rotate_body_to_world(apply(frame.principal_from_ellipsoid, axes_mid)?),
+        let velocity_mid = if ambient_omega == Vec3::ZERO {
+            // Retain the original uniform-flow elimination and operation order.
+            let right = vector(
+                initial_velocity
+                    .sub(ambient_before)
+                    .add(acceleration.scale(half_dt)),
+            )?;
+            let right_axes = apply(
+                frame.ellipsoid_from_principal,
+                attitude_mid.rotate_world_to_body(right),
+            )?;
+            let axes_mid = vector(Vec3::new(
+                right_axes.x / positive(1.0 + half_dt * (c[0] / p.mass()))?,
+                right_axes.y / positive(1.0 + half_dt * (c[1] / p.mass()))?,
+                right_axes.z / positive(1.0 + half_dt * (c[2] / p.mass()))?,
+            ))?;
+            let relative_mid = vector(
+                attitude_mid.rotate_body_to_world(apply(frame.principal_from_ellipsoid, axes_mid)?),
+            )?;
+            vector(relative_mid.add(ambient_before))?
+        } else {
+            let to_axes = |value| {
+                apply(
+                    frame.ellipsoid_from_principal,
+                    attitude_mid.rotate_world_to_body(value),
+                )
+            };
+            let axes_mid = ambient::midpoint_velocity_axes(
+                c.map(|coefficient| half_dt * (coefficient / p.mass())),
+                to_axes(ambient_omega)?.scale(half_dt),
+                to_axes(vector(initial_velocity.add(acceleration.scale(half_dt)))?)?,
+                to_axes(ambient_before)?,
+            )?;
+            vector(
+                attitude_mid.rotate_body_to_world(apply(frame.principal_from_ellipsoid, axes_mid)?),
+            )?
+        };
+        let predicted_position_mid = vector(initial_position.add(velocity_mid.scale(half_dt)))?;
+        let predicted_load = self.load_at(
+            &frame,
+            attitude_mid,
+            predicted_position_mid,
+            velocity_mid,
+            angular_mid,
         )?;
-        let velocity_mid = vector(relative_mid.add(self.ambient_velocity_world))?;
-        let predicted_load = self.load_at(&frame, attitude_mid, velocity_mid, angular_mid)?;
         let dynamics = integrator.step(
             state,
             p,
@@ -481,8 +578,23 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
                     .scale(0.5),
             ),
         )?;
-        let load_midpoint =
-            self.load_at(&frame, attitude_mid, actual_velocity_mid, actual_omega_mid)?;
+        let actual_position_mid = vector(
+            initial_position.add(
+                dynamics
+                    .state_after
+                    .pose()
+                    .position_world()
+                    .sub(initial_position)
+                    .scale(0.5),
+            ),
+        )?;
+        let load_midpoint = self.load_at(
+            &frame,
+            attitude_mid,
+            actual_position_mid,
+            actual_velocity_mid,
+            actual_omega_mid,
+        )?;
         let force_residual = relative_residual(
             load_midpoint.drag_force_world_n,
             predicted_load.drag_force_world_n,
@@ -553,6 +665,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
             rotational_iterations,
             relative_wrench_residual: residual,
             rotation_increment_rad,
+            ambient_rotation_increment_rad,
         })
     }
     fn timescales(&self, frame: &BodyFrame) -> Result<(f64, f64), Error> {
@@ -575,6 +688,9 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
             }
             fastest = fastest.max(positive(rate)?);
         }
+        // The imposed fluid field must diffuse across the body faster than it
+        // turns, even when the body initially co-moves with it and has no slip.
+        fastest = fastest.max(self.ambient.angular_speed_rad_s());
         let shortest = positive(1.0 / fastest)?;
         let ratio = positive(self.diffusion_time_s * fastest)?;
         if ratio > self.limits.maximum_diffusion_ratio {

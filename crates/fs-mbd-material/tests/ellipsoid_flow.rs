@@ -1,6 +1,8 @@
 //! Independent exterior Stokes-law and actual native-motion regressions.
 //! Synthetic solid cards and declared fluid values are implementation fixtures,
 //! not measured properties of named materials.
+#[path = "ellipsoid_flow/ambient.rs"]
+mod ambient;
 mod common;
 
 use common::{density_card, point};

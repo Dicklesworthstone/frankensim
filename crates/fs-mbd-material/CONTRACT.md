@@ -1623,3 +1623,45 @@ The original rigid-body owner retains gyroscopic momentum and attitude updates. 
 Seven regressions cover reduction to the driven sphere, independent prolate/oblate formulas for all six coefficients, authored/native frame ordering and offset center of mass, driven trajectory refinement, rotating triaxial covariance and work, viscosity source swaps, and refusal/cancellation. The physical coefficients and independent spheroid formulas follow Anand and Narsimhan, Journal of Fluid Mechanics 983 (2024), Appendix B, DOI: https://doi.org/10.1017/jfm.2024.136.
 
 This owner excludes finite Reynolds number, fluid memory or added mass, ambient strain or vorticity, walls and gaps, free surfaces, rarefaction and particle interactions. Those effects cannot be inferred from a scalar drag multiplier.
+
+## Ellipsoid response in a rigid rotating ambient flow
+
+`CreepingEllipsoid::with_rigid_ambient` retains the source material and prepared
+shape resistances while selecting `RigidAmbientFlow`: a steady world-frame field
+`u(x) = u_ref + Omega × (x - x_ref)`. `Omega` is half the fluid-velocity curl.
+The actual native centre of mass supplies the sample position; authored geometry
+origins and principal-axis sorting do not replace that position or frame.
+
+Translation and rotation resist local relative velocity and relative spin.
+Heat is their positive quadratic slip loss. Maintained-flow power includes both
+`F_drag·u(COM)` and `torque·Omega`, with torque and angular velocity expressed in
+the same frame. This includes the orbital part of the rotating reservoir's work
+and is invariant to changing its reference point with the corresponding change
+in reference velocity. The maintained fluid has no finite thermal state here.
+
+Native midpoint position and velocity are coupled: the ambient sample moves
+with the body during the step. A fixed-size diagonal/skew elimination solves
+that coupling algebraically with a denominator at least one. Rotary load
+iteration samples ambient angular velocity at each native midpoint attitude.
+All work and final load residuals use actual endpoint-average states. The
+original rigid-body solver remains the only trajectory owner. No quadrature,
+allocation, general matrix factorization or added force-fit occurs in stepping.
+Uniform flow retains its existing numerical path.
+
+Ambient rotation participates in Reynolds, diffusion and angular-step admission;
+zero relative slip cannot admit arbitrarily rapid fluid rotation. The reported
+rotational Reynolds value conservatively uses
+`a_max²*(|omega_body-Omega_body|+|Omega|)/nu`. Existing source/body geometry,
+relaxation, iteration, work and cancellation gates remain in force.
+
+Four regression groups cover independent triaxial load/power formulas at an
+offset COM, co-moving and reference-change limits, second-order convergence to
+independent spherical translation/spin solutions, world-frame covariance and
+work closure, uniform-path equality, and refusal/cancellation/retry.
+The relative-vorticity construction follows Stokes linearity as described in
+JFM 949 (2022), A22, section 2.1, https://doi.org/10.1017/jfm.2022.704.
+
+The fluid material and ambient field are frozen. Ambient strain needs its
+stresslet and work channel and remains excluded, as do fluid inertia/memory,
+centrifugal pressure, finite rotating vessels, walls, finite-Re wakes and
+particle interactions. This is not a general affine-flow or finite-vessel solver.
