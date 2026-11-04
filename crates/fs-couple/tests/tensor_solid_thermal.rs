@@ -1,4 +1,5 @@
 //! Synthetic Kelvin/Maxwell self-heating; no empirical material qualification.
+mod spatial;
 use std::collections::BTreeMap;
 use fs_blake3::ContentHash;
 use fs_couple::tensor_material::{InitialMemory, TensorMaterialBudget, solid::TensorSolidBody};

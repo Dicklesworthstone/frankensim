@@ -11,6 +11,8 @@
 /// Closed source-backed relaxation/temperature feedback on the existing
 /// implicit thermal residual; stored elastic tensors remain constant.
 pub mod relaxation;
+/// Original sparse spatial dynamics and element heat, without modal projection.
+pub mod spatial;
 
 use super::{SolidError, SolidStep, TensorSolidHistory};
 use fs_exec::CancelGate;
@@ -47,6 +49,8 @@ pub struct SolidThermalConfig {
 pub enum SolidThermalError<E> {
     Invalid(&'static str),
     Solid(SolidError),
+    /// Original sparse spatial constitutive/dynamic owner refusal.
+    Spatial(fs_solid::linear3::visco::ViscoElementError),
     Thermal(DepositionError),
     Phase(PhaseStateError),
     Observer(E),

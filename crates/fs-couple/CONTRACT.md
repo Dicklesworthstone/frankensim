@@ -1,5 +1,21 @@
 # CONTRACT: fs-couple
 
+## Native sparse solid material heat into finite enthalpy cells
+
+`tensor_material::solid::thermal::spatial::step_thermal_candidate` advances the
+original fixed-duration sparse Kelvin/Maxwell trajectory and deposits its
+independently integrated element losses exactly once into complete reference-
+mass/volume caloric receivers. Original inertia, quadrature histories, moving
+support and imposed-eigenstrain work survive; work and solve error never become
+heat. The existing enthalpy owner retains all source/transport/event hooks and
+may subdivide the interval. Its thermal power is the mechanical interval mean;
+accuracy requires refining both intervals. Geometry/material coefficients stay
+frozen within explicitly admitted fully-solid temperature bounds. Mechanical,
+thermal and observer state publish atomically after their separate energy gates.
+The source API and four focused integration regressions are syntax/format
+checked; full Cargo execution remains blocked by unavailable sibling dependencies.
+
+
 ## Native duct outlet harmonics and coherent aperture radiation
 
 `acoustic_realize::duct_harmonic::observe_duct_harmonics` contracts the original
