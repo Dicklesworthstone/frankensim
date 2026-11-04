@@ -411,3 +411,229 @@ fn selected_fields_retain_source_critical_limits_opaque_limits_and_atomic_refusa
     assert!(field.absorbed_power_w_m2() > 0.0);
     assert_eq!(field.field(5e5).unwrap().electric_v_per_m, C64::ZERO);
 }
+
+/// G1: an original lossy exit eliminates the rear interface, giving an
+/// independent Beer-Lambert integral. An opaque finite film has the same
+/// shallow skin heating even when a midpoint depth rule would miss all of it.
+#[test]
+fn depth_interval_heat_matches_beer_lambert_and_resolves_opaque_skin_layers() {
+    let omega = 1e9;
+    let incident = material(E, M);
+    let film = finite_layers::debye(2.0 * E, 3.0 * E, 1.0, 1.0);
+    let response = DielectricResponse::Debye(&film);
+    let half_space = PlanarDielectricInterface::try_new(&incident, response).unwrap();
+    let k = omega * det::sqrt(E) * det::sqrt(M);
+    let thickness = 1e6 / k;
+    for cosine in [1.0, 0.63] {
+        for pol in [Polarization::Te, Polarization::Tm] {
+            let half = half_space.response(omega, cosine, pol).unwrap();
+            let kz = half.transmitted_normal_wavenumber_rad_m;
+            let alpha = -2.0 * kz.im;
+            let e = half.transmitted_tangential_e;
+            let ez = match pol {
+                Polarization::Te => C64::ZERO,
+                Polarization::Tm => -(e.scale(k * det::sqrt((1.0 - cosine) * (1.0 + cosine))) / kz),
+            };
+            let density_at_face =
+                -0.5 * omega * half.transmitted_permittivity_f_m.im * (e.norm_sq() + ez.norm_sq());
+            for exit in [response, DielectricResponse::Lossless(&incident)] {
+                let stack = PlanarDielectricLayers::try_new(
+                    &incident,
+                    exit,
+                    omega,
+                    &[DielectricLayer {
+                        response,
+                        thickness_m: thickness,
+                    }],
+                )
+                .unwrap();
+                let field = stack.prepare_layer_field(0, cosine, pol).unwrap();
+                let cuts = [
+                    0.0,
+                    0.2 / alpha,
+                    1.0 / alpha,
+                    5.0 / alpha,
+                    50.0 / alpha,
+                    thickness,
+                ];
+                let mut total = 0.0;
+                for endpoints in cuts.windows(2) {
+                    let [start, end] = [endpoints[0], endpoints[1]];
+                    let expected = density_at_face / alpha
+                        * det::exp(-alpha * start)
+                        * -det::expm1(-alpha * (end - start));
+                    let actual = field
+                        .absorbed_power_in_depth_interval_w_m2(start, end)
+                        .unwrap();
+                    relative(actual, expected, 3e-12);
+                    total += actual;
+                }
+                relative(total, field.absorbed_power_w_m2(), 3e-12);
+                assert_eq!(
+                    field
+                        .absorbed_power_in_depth_interval_w_m2(0.0, thickness)
+                        .unwrap(),
+                    field.absorbed_power_w_m2(),
+                );
+                assert_eq!(
+                    field.field(0.5 * thickness).unwrap().electric_v_per_m,
+                    C64::ZERO
+                );
+            }
+        }
+    }
+}
+
+/// G1/G3: absorption below the precision of a flux subtraction stays positive
+/// and additive. Lossless and empty cells have exact zero heat, while invalid
+/// coordinates are refused even for a lossless film.
+#[test]
+fn depth_interval_heat_preserves_sub_roundoff_loss_and_validates_cell_bounds() {
+    let omega = 1e9;
+    let incident = material(E, M);
+    let film = finite_layers::debye(E, 2e-18 * E, 1.0, 1.0);
+    let k = omega * det::sqrt(E) * det::sqrt(M);
+    let thickness = 0.8 / k;
+    let stack = PlanarDielectricLayers::try_new(
+        &incident,
+        DielectricResponse::Lossless(&incident),
+        omega,
+        &[
+            DielectricLayer {
+                response: DielectricResponse::Debye(&film),
+                thickness_m: thickness,
+            },
+            DielectricLayer {
+                response: DielectricResponse::Lossless(&incident),
+                thickness_m: thickness,
+            },
+            DielectricLayer {
+                response: DielectricResponse::Debye(&film),
+                thickness_m: 0.0,
+            },
+        ],
+    )
+    .unwrap();
+    for pol in [Polarization::Te, Polarization::Tm] {
+        let cosine = 0.71;
+        let field = stack.prepare_layer_field(0, cosine, pol).unwrap();
+        let density = -0.5 * omega * stack.layer_permittivity_f_m(0).unwrap().im
+            / if pol == Polarization::Tm {
+                cosine * cosine
+            } else {
+                1.0
+            };
+        let cut = 0.37 * thickness;
+        let first = field
+            .absorbed_power_in_depth_interval_w_m2(0.0, cut)
+            .unwrap();
+        let second = field
+            .absorbed_power_in_depth_interval_w_m2(cut, thickness)
+            .unwrap();
+        assert!(first > 0.0 && second > 0.0);
+        relative(first, density * cut, 2e-12);
+        relative(second, density * (thickness - cut), 2e-12);
+        relative(first + second, field.absorbed_power_w_m2(), 2e-12);
+        assert!(field.absorbed_power_w_m2() < f64::EPSILON * 0.5 * det::sqrt(E / M));
+        assert_eq!(
+            field
+                .absorbed_power_in_depth_interval_w_m2(cut, cut)
+                .unwrap(),
+            0.0
+        );
+        let lossless = stack.prepare_layer_field(1, cosine, pol).unwrap();
+        assert_eq!(
+            lossless
+                .absorbed_power_in_depth_interval_w_m2(cut, thickness)
+                .unwrap(),
+            0.0
+        );
+        let identity = stack.prepare_layer_field(2, cosine, pol).unwrap();
+        assert_eq!(
+            identity
+                .absorbed_power_in_depth_interval_w_m2(0.0, 0.0)
+                .unwrap(),
+            0.0
+        );
+        for endpoints in [
+            [-1.0, 0.0],
+            [0.0, thickness * 1.01],
+            [cut, 0.0],
+            [f64::NAN, cut],
+            [0.0, f64::INFINITY],
+        ] {
+            assert!(
+                field
+                    .absorbed_power_in_depth_interval_w_m2(endpoints[0], endpoints[1])
+                    .is_err()
+            );
+            assert!(
+                lossless
+                    .absorbed_power_in_depth_interval_w_m2(endpoints[0], endpoints[1])
+                    .is_err()
+            );
+        }
+    }
+}
+
+/// G1/G3: the difference of two authored binary64 depths need not fit in f64.
+/// Here its low part changes optical phase by nearly 1e-9 rad. Both the local
+/// backward wave and the restricted slab must retain it before phase reduction
+/// so a thermal-cell partition preserves the original coherent film heat.
+#[test]
+fn depth_interval_partition_preserves_unrounded_optical_depth_differences() {
+    let incident = material(E, M);
+    let film = finite_layers::debye(1.21 * E, 0.1 * E, 1.0, 1.0);
+    let thickness = 1.234_567_890_123_456_7;
+    let cut = 0.123_456_789_012_345_67;
+    let difference = fs_math::dd::Dd::from_f64(thickness) - fs_math::dd::Dd::from_f64(cut);
+    assert!(difference.lo != 0.0);
+    let stack = PlanarDielectricLayers::try_new(
+        &incident,
+        DielectricResponse::Lossless(&incident),
+        1e16,
+        &[DielectricLayer {
+            response: DielectricResponse::Debye(&film),
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    for pol in [Polarization::Te, Polarization::Tm] {
+        let single = stack.prepare_layer_field(0, 1.0, pol).unwrap();
+        let bank = stack.prepare_illumination(1.0, pol).unwrap();
+        let intervals = [
+            bank.prepare_depth_interval(0, 0.0, cut).unwrap(),
+            bank.prepare_depth_interval(0, cut, thickness).unwrap(),
+        ];
+        let single_sum = single
+            .absorbed_power_in_depth_interval_w_m2(0.0, cut)
+            .unwrap()
+            + single
+                .absorbed_power_in_depth_interval_w_m2(cut, thickness)
+                .unwrap();
+        relative(single_sum, single.absorbed_power_w_m2(), 2e-13);
+        let flux = |depth| {
+            let field = single.field(depth).unwrap();
+            0.5 * (field.electric_v_per_m * field.conjugate_magnetic_a_per_m.conj()).re
+        };
+        for (start, end) in [(0.0, cut), (cut, thickness)] {
+            near(
+                single
+                    .absorbed_power_in_depth_interval_w_m2(start, end)
+                    .unwrap(),
+                flux(start) - flux(end),
+                2e-13 * single.absorbed_power_w_m2(),
+            );
+        }
+        for input in [
+            [C64::ONE, C64::ZERO],
+            [C64::ZERO, C64::ONE],
+            [C64::new(0.7, -0.2), C64::new(-0.4, 0.3)],
+        ] {
+            let mut whole = [0.0];
+            bank.evaluate(input, &mut whole).unwrap();
+            let sum = intervals[0].evaluate(input).unwrap() + intervals[1].evaluate(input).unwrap();
+            relative(sum, whole[0], 2e-13);
+        }
+    }
+}

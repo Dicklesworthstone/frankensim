@@ -388,3 +388,256 @@ fn unsupported_external_modes_shapes_nonfinite_and_work_refuse() {
     assert_eq!(silent.absorbed_w_m2, 0.0);
     assert_eq!(heat, [0.0]);
 }
+
+/// G1/G3: independent characteristic matrices resolve the physical work in
+/// each cell of a standing-wave film. Repartitioning its depth does not alter
+/// whole-film heat, and the left-source restriction agrees with the existing
+/// one-sided field owner for TE and longitudinally lossy TM illumination.
+#[test]
+fn depth_intervals_preserve_coherent_interference_and_original_layer_heat() {
+    let left = material(E, M);
+    let right = material(4.0 * E, 1.2 * M);
+    let passive = debye(3.0 * E, 4.0 * E, 0.03, 0.001);
+    let transparent = material(2.0 * E, 0.7 * M);
+    let thickness = 0.7 / k();
+    let stack = PlanarDielectricLayers::try_new(
+        &left,
+        DielectricResponse::Lossless(&right),
+        OMEGA,
+        &[
+            DielectricLayer {
+                response: DielectricResponse::Debye(&passive),
+                thickness_m: thickness,
+            },
+            DielectricLayer {
+                response: DielectricResponse::Lossless(&transparent),
+                thickness_m: 0.3 / k(),
+            },
+        ],
+    )
+    .unwrap();
+    for cosine in [1.0, 0.72] {
+        for pol in [Polarization::Te, Polarization::Tm] {
+            let bank = stack.prepare_illumination(cosine, pol).unwrap();
+            let single = stack.prepare_layer_field(0, cosine, pol).unwrap();
+            let y = bank.port_admittance_s();
+            let ratio = y[1] / y[0];
+            let epsilon = C64::new(5.0, -2.0);
+            let m0 = matrix(epsilon, 1.0, 0.7, cosine, pol);
+            let m1 = matrix(C64::from_re(2.0), 0.7, 0.3, cosine, pol);
+            let all = product(m0, m1);
+            let plus = act(all, [C64::ONE, C64::from_re(ratio)]);
+            let minus = act(all, [C64::ONE, C64::from_re(-ratio)]);
+            for angle in [0.0, 0.6, 2.1, 3.14] {
+                let input = [C64::new(0.4, 0.7), phase(angle).scale(0.8)];
+                let transmitted =
+                    (input[0].scale(2.0) - (minus[0] + minus[1]) * input[1]) / (plus[0] + plus[1]);
+                let end_field = act(
+                    m1,
+                    [
+                        transmitted + input[1],
+                        (transmitted - input[1]).scale(ratio),
+                    ],
+                );
+                let mut heat = [0.0; 2];
+                bank.evaluate(input, &mut heat).unwrap();
+                let mut sum = 0.0;
+                let cuts = [0.0, 0.12, 0.51, 0.93, 1.0];
+                for cut in cuts.windows(2) {
+                    let start = cut[0] * thickness;
+                    let end = cut[1] * thickness;
+                    let interval = bank.prepare_depth_interval(0, start, end).unwrap();
+                    assert!(std::ptr::eq(interval.illumination(), &bank));
+                    assert_eq!(interval.layer_index(), 0);
+                    assert_eq!(interval.start_depth_m(), start);
+                    assert_eq!(interval.end_depth_m(), end);
+                    let before = act(
+                        matrix(epsilon, 1.0, 0.7 * (1.0 - cut[0]), cosine, pol),
+                        end_field,
+                    );
+                    let after = act(
+                        matrix(epsilon, 1.0, 0.7 * (1.0 - cut[1]), cosine, pol),
+                        end_field,
+                    );
+                    let expected = 0.5
+                        * y[0]
+                        * ((before[0] * before[1].conj()).re - (after[0] * after[1].conj()).re);
+                    let actual = interval.evaluate(input).unwrap();
+                    assert!(actual > 0.0);
+                    near(actual, expected, 3e-12 * heat[0]);
+                    sum += actual;
+                    near(
+                        interval.evaluate([C64::ONE, C64::ZERO]).unwrap(),
+                        single
+                            .absorbed_power_in_depth_interval_w_m2(start, end)
+                            .unwrap(),
+                        3e-12 * single.absorbed_power_w_m2(),
+                    );
+                }
+                near(sum, heat[0], 3e-12 * heat[0]);
+                assert_eq!(
+                    bank.prepare_depth_interval(0, 0.0, thickness)
+                        .unwrap()
+                        .evaluate(input)
+                        .unwrap(),
+                    heat[0]
+                );
+                assert_eq!(
+                    bank.prepare_depth_interval(1, 0.01 / k(), 0.2 / k())
+                        .unwrap()
+                        .evaluate(input)
+                        .unwrap(),
+                    0.0
+                );
+            }
+        }
+    }
+}
+
+/// G1: a coherent electric node has cubic, positive interval heat even when
+/// boundary-flux subtraction cannot resolve it. Independent face sources are
+/// the phase average; coherence factors add powers without losing cross terms
+/// inside each factor. Bounds and work admission happen before evaluation.
+#[test]
+fn depth_intervals_retain_thin_node_heat_partial_coherence_and_refusals() {
+    let outside = material(E, M);
+    let passive = debye(E, 2.0 * E, 0.03, 0.001);
+    let thickness = 1e-7 / k();
+    let stack = PlanarDielectricLayers::try_new(
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        OMEGA,
+        &[
+            DielectricLayer {
+                response: DielectricResponse::Debye(&passive),
+                thickness_m: thickness,
+            },
+            DielectricLayer {
+                response: DielectricResponse::Debye(&passive),
+                thickness_m: 0.0,
+            },
+        ],
+    )
+    .unwrap();
+    for pol in [Polarization::Te, Polarization::Tm] {
+        let bank = stack.prepare_illumination(1.0, pol).unwrap();
+        let mut whole = [0.0; 2];
+        bank.evaluate([C64::ONE, -C64::ONE], &mut whole).unwrap();
+        assert!(whole[0] > 0.0);
+        let mut sum = 0.0;
+        for (quarter, expected_fraction) in [7.0 / 16.0, 1.0 / 16.0, 1.0 / 16.0, 7.0 / 16.0]
+            .into_iter()
+            .enumerate()
+        {
+            let interval = bank
+                .prepare_depth_interval(
+                    0,
+                    quarter as f64 * thickness / 4.0,
+                    (quarter + 1) as f64 * thickness / 4.0,
+                )
+                .unwrap();
+            let heat = interval.evaluate([C64::ONE, -C64::ONE]).unwrap();
+            assert!(heat > 0.0);
+            near(heat, whole[0] * expected_fraction, 2e-8 * whole[0]);
+            sum += heat;
+        }
+        near(sum, whole[0], 2e-8 * whole[0]);
+        let interval = bank
+            .prepare_depth_interval(0, 0.0, 0.25 * thickness)
+            .unwrap();
+        let independent = interval
+            .evaluate_independent_sources([C64::ONE; 2])
+            .unwrap();
+        let phase_average = [C64::ONE, C64::new(0.0, 1.0), -C64::ONE, C64::new(0.0, -1.0)]
+            .into_iter()
+            .map(|source| interval.evaluate([C64::ONE, source]).unwrap())
+            .sum::<f64>()
+            / 4.0;
+        near(independent, phase_average, 3e-14 * independent);
+        let factors = [
+            [C64::new(0.7, -0.2), C64::new(0.3, 0.4)],
+            [C64::new(-0.1, 0.5), C64::new(0.2, -0.6)],
+        ];
+        let expected =
+            interval.evaluate(factors[0]).unwrap() + interval.evaluate(factors[1]).unwrap();
+        near(
+            interval
+                .evaluate_coherence_modes(&factors, BUDGET, || false)
+                .unwrap(),
+            expected,
+            1e-15 * expected,
+        );
+        assert_eq!(
+            interval
+                .evaluate_coherence_modes(&[], BUDGET, || false)
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            bank.prepare_depth_interval(0, thickness, thickness)
+                .unwrap()
+                .evaluate([C64::ONE; 2])
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            bank.prepare_depth_interval(1, 0.0, 0.0)
+                .unwrap()
+                .evaluate([C64::ONE; 2])
+                .unwrap(),
+            0.0
+        );
+        assert!(bank.prepare_depth_interval(2, 0.0, 0.0).is_err());
+        for bounds in [
+            [-1.0, 0.0],
+            [0.0, 2.0 * thickness],
+            [thickness, 0.0],
+            [f64::NAN, thickness],
+            [0.0, f64::INFINITY],
+        ] {
+            assert!(
+                bank.prepare_depth_interval(0, bounds[0], bounds[1])
+                    .is_err()
+            );
+        }
+        let mut calls = 0;
+        assert!(
+            interval
+                .evaluate_coherence_modes(
+                    &factors,
+                    IlluminationBudget {
+                        maximum_modes: 2,
+                        maximum_layer_mode_pairs: 1
+                    },
+                    || {
+                        calls += 1;
+                        false
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(calls, 0);
+        assert!(
+            interval
+                .evaluate_coherence_modes(&factors, BUDGET, || {
+                    calls += 1;
+                    calls == 2
+                })
+                .is_err()
+        );
+        assert!(
+            interval
+                .evaluate([C64::new(f64::NAN, 0.0), C64::ZERO])
+                .is_err()
+        );
+        assert!(
+            interval
+                .evaluate_coherence_modes(
+                    &[[C64::ZERO, C64::new(0.0, f64::INFINITY)]],
+                    BUDGET,
+                    || false
+                )
+                .is_err()
+        );
+    }
+}

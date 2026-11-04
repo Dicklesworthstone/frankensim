@@ -3011,6 +3011,21 @@ interference; mode/work budgets and cancellation apply. Local and integrated
 film heat are two descriptions of the same physical loss and must never be
 debited independently into a thermal state.
 
+`PreparedLayerField::absorbed_power_in_depth_interval_w_m2` returns unit-source
+heat between two original film depths; `prepare_depth_interval` on the
+two-source illumination prepares the corresponding coherent/partial-coherent
+transfer. Bounds obey `0 <= start <= end <= thickness`. These W/m² results
+integrate homogeneous-film loss analytically through the existing positive
+slab modes and endpoint fields, retaining skin-depth heating, standing-wave
+interference and longitudinal TM loss without depth quadrature or a flux
+subtraction. Preparation and coherent evaluation are allocation-free and O(1);
+factor evaluation has explicit work/cancellation bounds. Empty intervals and
+lossless cells return exact zero, and a whole-film interval reuses the original
+loss transfer. Optical phases retain low parts of endpoint differences as well
+as `q*k*d`; the existing rounded-distance attenuation safeguards remain.
+The caller converts area/time and deposits this heat once. These are stationary
+spectral-line averages, not finite-window heat for a transient reservoir.
+
 Focused regressions compare simultaneous-source interface continuity,
 admittance-weighted reciprocity, independent E/H boundary equations and
 per-layer Poynting work; phase-controlled thin-film heating; full complex

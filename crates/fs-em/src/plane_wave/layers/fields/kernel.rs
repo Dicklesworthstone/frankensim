@@ -107,8 +107,15 @@ impl LayerFieldKernel {
                 forward,
                 backward,
             } => {
-                let f = forward * decay(self.kz, self.phase_wavenumber, depth)?;
-                let b = backward * decay(self.kz, self.phase_wavenumber, self.thickness - depth)?;
+                let phase_depth = Dd::from_f64(depth);
+                let f = forward * decay(self.kz, self.phase_wavenumber, depth, phase_depth)?;
+                let b = backward
+                    * decay(
+                        self.kz,
+                        self.phase_wavenumber,
+                        self.thickness - depth,
+                        Dd::from_f64(self.thickness) - phase_depth,
+                    )?;
                 [f + b, admittance * (f - b)]
             }
         };
@@ -134,7 +141,7 @@ fn entire(z: C64) -> (C64, C64) {
     (cosine, sinc)
 }
 
-fn decay(kz: C64, phase_wavenumber: Dd, distance: f64) -> Option<C64> {
+fn decay(kz: C64, phase_wavenumber: Dd, distance: f64, phase_distance: Dd) -> Option<C64> {
     let amplitude = det::exp(kz.im * distance);
     if amplitude == 0.0 {
         return Some(C64::ZERO);
@@ -143,7 +150,9 @@ fn decay(kz: C64, phase_wavenumber: Dd, distance: f64) -> Option<C64> {
     if !phase.is_finite() {
         return None;
     }
-    let (sine, cosine) = det::sin_cos_dd(phase_wavenumber * Dd::from_f64(distance));
+    // Preserve an endpoint difference as well as q*k before reducing phase.
+    // The original rounded distance continues to own attenuation/admission.
+    let (sine, cosine) = det::sin_cos_dd(phase_wavenumber * phase_distance);
     Some(C64::new(cosine.to_f64(), -sine.to_f64()).scale(amplitude))
 }
 

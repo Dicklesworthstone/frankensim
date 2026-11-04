@@ -51,6 +51,7 @@ fn propagation(
     q: C64,
     wave_number: f64,
     distance_m: f64,
+    phase_distance_m: Dd,
 ) -> Result<(C64, C64), ReflectionError> {
     let distance = wave_number * distance_m;
     if !distance.is_finite() || distance < 0.0 {
@@ -66,9 +67,10 @@ fn propagation(
         return Err(bad("interior propagation is unrepresentable"));
     }
     // Use the same full product as the slab and its one-sided field owner.
-    // In particular, p and 1-p must not use differently rounded phases.
-    let phase_parts =
-        Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * Dd::from_f64(distance_m));
+    // In particular, p and 1-p must not use differently rounded phases. Keep
+    // exact differences of authored depths here; attenuation still uses the
+    // original rounded distance and all its admission/opaque safeguards.
+    let phase_parts = Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * phase_distance_m);
     let (sine, cosine) = det::sin_cos_dd(phase_parts);
     let (sine, cosine) = (sine.to_f64(), cosine.to_f64());
     let half_sine = det::sin_cos_dd(phase_parts * Dd::from_f64(0.5)).0.to_f64();
@@ -127,6 +129,13 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
         } else {
             (distance_m, thickness - distance_m)
         };
+        let distance_parts = Dd::from_f64(distance_m);
+        let opposite_parts = Dd::from_f64(thickness) - distance_parts;
+        let (depth_parts, right_parts) = if from_right {
+            (opposite_parts, distance_parts)
+        } else {
+            (distance_parts, opposite_parts)
+        };
         let c = self.incidence_cosine;
         let q = layer.wave.normal(c)?;
         let normal_squared = layer.wave.normal_squared(c);
@@ -146,9 +155,9 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
         }
         let k = self.stack.wave_number;
         let distance = positive(k * thickness)?;
-        let (p, difference) = propagation(q, k, thickness)?;
-        let (left, _) = propagation(q, k, depth_m)?;
-        let (right, _) = propagation(q, k, distance_from_right_m)?;
+        let (p, difference) = propagation(q, k, thickness, Dd::from_f64(thickness))?;
+        let (left, _) = propagation(q, k, depth_m, depth_parts)?;
+        let (right, _) = propagation(q, k, distance_from_right_m, right_parts)?;
         // [u,v] represents [1,(1-p)/q] up to a common scale, without
         // overflowing at a deep critical film or dividing a zero normal wave.
         let reciprocal = if q == C64::ZERO {
@@ -176,12 +185,22 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
                 C64::new(0.0, k * (distance_from_right_m - depth_m))
             }
         } else {
-            let (near, span, sign) = if depth_m <= distance_from_right_m {
-                (left, distance_from_right_m - depth_m, 1.0)
+            let (near, span, span_parts, sign) = if depth_m <= distance_from_right_m {
+                (
+                    left,
+                    distance_from_right_m - depth_m,
+                    right_parts - depth_parts,
+                    1.0,
+                )
             } else {
-                (right, depth_m - distance_from_right_m, -1.0)
+                (
+                    right,
+                    depth_m - distance_from_right_m,
+                    depth_parts - right_parts,
+                    -1.0,
+                )
             };
-            let (_, local) = propagation(q, k, span)?;
+            let (_, local) = propagation(q, k, span, span_parts)?;
             near * (local / if reciprocal { difference } else { q }).scale(sign)
         };
         let sum = left + right;
@@ -249,6 +268,13 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
 }
 
 impl<'p, 's, 'm> PreparedLayerPoint<'p, 's, 'm> {
+    pub(super) fn tangential_transfer(&self) -> [[C64; 2]; 2] {
+        match self.illumination.polarization {
+            Polarization::Te => [self.electric[1], self.magnetic[0].map(|h| -h)],
+            Polarization::Tm => [self.electric[0], self.magnetic[1]],
+        }
+    }
+
     pub fn illumination(&self) -> &'p PreparedLayerIllumination<'s, 'm> {
         self.illumination
     }

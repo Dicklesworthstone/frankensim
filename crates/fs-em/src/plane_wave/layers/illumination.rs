@@ -10,6 +10,8 @@
 //! field response. Slab absorption is contracted through the existing positive
 //! even/odd dissipative modes, retaining interference before taking powers.
 //! No total or layer heat is recovered by subtracting nearly equal fluxes.
+//! Prepared depth intervals restrict this same positive operator to thermal
+//! cells, with exact homogeneous-film integration instead of depth quadrature.
 
 use super::*;
 use fs_math::dd::Dd;
@@ -68,6 +70,19 @@ pub struct PreparedLayerIllumination<'s, 'm> {
     // Local left/right incoming reference waves, each with two physical source
     // columns. Retained from the original sweeps for O(1) interior queries.
     interior_inputs: Vec<[[C64; 2]; 2]>,
+}
+
+/// Positive dissipative source transfers for one finite depth interval in an
+/// original film. Preparation and coherent evaluation are allocation-free and
+/// O(1); repeated source/coherence evaluations reuse the same two loss modes.
+/// These cycle-mean spectral-line powers do not include a transient reservoir
+/// or transfer energy into a thermal state by themselves.
+pub struct PreparedLayerDepthInterval<'p, 's, 'm> {
+    illumination: &'p PreparedLayerIllumination<'s, 'm>,
+    layer_index: usize,
+    start_depth_m: f64,
+    end_depth_m: f64,
+    loss_modes: [[C64; 2]; 2],
 }
 
 fn reflection(state: [C64; 2]) -> C64 {
@@ -249,6 +264,72 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
     /// power reciprocity includes the two admittances, not ordinary symmetry.
     pub fn tangential_e_scattering(&self) -> [[C64; 2]; 2] {
         self.scattering
+    }
+
+    /// Prepare exact dielectric heat in a depth interval of one original film.
+    /// Depths are in metres from its left face, with
+    /// 0 <= start <= end <= thickness. Empty intervals (including a zero-
+    /// thickness identity) have exactly zero heat. The whole-film interval
+    /// reuses the original loss transfer without recomputing it.
+    ///
+    /// Boundary traces from the existing interior solution feed the same
+    /// positive even/odd slab dissipation modes over the selected width. This
+    /// retains standing-wave interference, longitudinal TM electric loss and
+    /// weak/opaque limits without subtracting boundary powers or sampling a
+    /// depth mesh. No source law is reevaluated and the stack is not solved
+    /// again. A thermal consumer applies area/time and transfers the heat once.
+    pub fn prepare_depth_interval(
+        &self,
+        layer_index: usize,
+        start_depth_m: f64,
+        end_depth_m: f64,
+    ) -> Result<PreparedLayerDepthInterval<'_, 's, 'm>, ReflectionError> {
+        let layer = self
+            .stack
+            .layers
+            .get(layer_index)
+            .ok_or_else(|| bad("depth-interval film index is out of range"))?;
+        let width =
+            fields::admit_depth_interval(layer.source.thickness_m, start_depth_m, end_depth_m)?;
+        let loss_modes = if width == 0.0 || layer.wave.epsilon_f_m.im == 0.0 {
+            [[C64::ZERO; 2]; 2]
+        } else if start_depth_m == 0.0 && end_depth_m == layer.source.thickness_m {
+            self.loss_modes[layer_index]
+        } else {
+            let slab = Slab::new_with_phase_thickness(
+                layer.wave,
+                self.stack.wave_number,
+                self.incidence_cosine,
+                self.polarization,
+                width,
+                Dd::from_f64(end_depth_m) - Dd::from_f64(start_depth_m),
+            )?;
+            let left = self
+                .prepare_point(layer_index, start_depth_m)?
+                .tangential_transfer();
+            let right = self
+                .prepare_point(layer_index, end_depth_m)?
+                .tangential_transfer();
+            let mut modes = [[C64::ZERO; 2]; 2];
+            for source in 0..2 {
+                let transfer = fields::interval_loss_transfer(
+                    slab,
+                    self.admittance_s[0],
+                    [left[0][source], left[1][source]],
+                    [right[0][source], right[1][source]],
+                )?;
+                modes[0][source] = transfer[0];
+                modes[1][source] = transfer[1];
+            }
+            modes
+        };
+        Ok(PreparedLayerDepthInterval {
+            illumination: self,
+            layer_index,
+            start_depth_m,
+            end_depth_m,
+            loss_modes,
+        })
     }
 
     /// Cycle-mean stack/interface Maxwell stress resultant [Pa] under simultaneous
@@ -464,6 +545,86 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
                 maximum_layer_mode_pairs: 2 * MAX_LAYERS,
             },
             layer_heat_w_m2,
+            || false,
+        )
+    }
+}
+
+impl<'p, 's, 'm> PreparedLayerDepthInterval<'p, 's, 'm> {
+    pub fn illumination(&self) -> &'p PreparedLayerIllumination<'s, 'm> {
+        self.illumination
+    }
+    pub fn layer_index(&self) -> usize {
+        self.layer_index
+    }
+    pub fn start_depth_m(&self) -> f64 {
+        self.start_depth_m
+    }
+    pub fn end_depth_m(&self) -> f64 {
+        self.end_depth_m
+    }
+
+    /// Cycle-mean absorbed power per transverse area [W/m²] for simultaneous
+    /// coherent peak tangential E sources [V/m], left then right. Interference
+    /// is retained before squaring. The result is nonnegative and contains
+    /// only dissipation within this interval of the original film.
+    pub fn evaluate(&self, input: [C64; 2]) -> Result<f64, ReflectionError> {
+        if input.iter().any(|&z| !finite(z)) {
+            return Err(bad("nonfinite depth-interval illumination source"));
+        }
+        let heat =
+            dot(self.loss_modes[0], input).norm_sq() + dot(self.loss_modes[1], input).norm_sq();
+        if !heat.is_finite() {
+            return Err(bad("depth-interval absorbed power overflow"));
+        }
+        Ok(heat)
+    }
+
+    /// Explicit peak-E second-moment factors C=B B*, each in V/m. Independent
+    /// factors add heat, never phasors. This interval counts as one layer in
+    /// maximum_layer_mode_pairs. Allocation-free and transactional; empty
+    /// factors mean exact silence. These powers are spectral-line averages,
+    /// not PSD/Hz or finite-window beating between different frequencies.
+    pub fn evaluate_coherence_modes(
+        &self,
+        factors: &[[C64; 2]],
+        budget: IlluminationBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, ReflectionError> {
+        if factors.len() > 4096
+            || factors.len() > budget.maximum_modes
+            || factors.len() > budget.maximum_layer_mode_pairs
+        {
+            return Err(bad("depth-interval coherence exceeds work budget"));
+        }
+        if factors.iter().flatten().any(|&z| !finite(z)) {
+            return Err(bad("nonfinite depth-interval illumination factor"));
+        }
+        if cancelled() {
+            return Err(bad("illumination cancelled"));
+        }
+        let mut heat = Dd::ZERO;
+        for &factor in factors {
+            if cancelled() {
+                return Err(bad("illumination cancelled"));
+            }
+            heat = heat + Dd::from_f64(self.evaluate(factor)?);
+        }
+        let heat = heat.to_f64();
+        if !heat.is_finite() {
+            return Err(bad("depth-interval statistical power overflow"));
+        }
+        Ok(heat)
+    }
+
+    /// Independent face illumination is an explicit diagonal source covariance.
+    pub fn evaluate_independent_sources(&self, input: [C64; 2]) -> Result<f64, ReflectionError> {
+        self.evaluate_coherence_modes(
+            &[[input[0], C64::ZERO], [C64::ZERO, input[1]]],
+            IlluminationBudget {
+                maximum_modes: 2,
+                maximum_layer_mode_pairs: 2,
+            },
             || false,
         )
     }

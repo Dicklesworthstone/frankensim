@@ -34,7 +34,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 mod illumination;
 pub use illumination::{
     CoherentLayerIllumination, IlluminationBudget, LayerIlluminationPower, LayerPointField,
-    LayerPointStatistics, PreparedLayerIllumination, PreparedLayerPoint,
+    LayerPointStatistics, PreparedLayerDepthInterval, PreparedLayerIllumination,
+    PreparedLayerPoint,
 };
 
 mod fields;
@@ -501,6 +502,28 @@ impl Slab {
         polarization: Polarization,
         thickness: f64,
     ) -> Result<Self, ReflectionError> {
+        Self::new_with_phase_thickness(
+            medium,
+            wave_number,
+            cosine,
+            polarization,
+            thickness,
+            Dd::from_f64(thickness),
+        )
+    }
+
+    // A restricted interval can have an exactly known endpoint difference
+    // whose low part does not fit in f64. As for the original slab product,
+    // only phase reduction uses that part; attenuation and admission retain
+    // their existing rounded-thickness safeguards.
+    fn new_with_phase_thickness(
+        medium: WaveMedium,
+        wave_number: f64,
+        cosine: f64,
+        polarization: Polarization,
+        thickness: f64,
+        phase_thickness: Dd,
+    ) -> Result<Self, ReflectionError> {
         if thickness == 0.0 {
             return Ok(Self::IDENTITY);
         }
@@ -531,8 +554,7 @@ impl Slab {
         // Preserve both products of the authored q, k and thickness. The
         // original rounded depth still owns attenuation and admission; phase
         // reduction alone uses DD. This does not refine the material law or q.
-        let phase_parts =
-            Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * Dd::from_f64(thickness));
+        let phase_parts = Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * phase_thickness);
         let (sine, cos_phase) = det::sin_cos_dd(phase_parts);
         let (sine, cos_phase) = (sine.to_f64(), cos_phase.to_f64());
         let p = C64::new(attenuation * cos_phase, -attenuation * sine);
