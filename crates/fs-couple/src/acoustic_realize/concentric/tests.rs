@@ -2,20 +2,26 @@
 //! These deliberately simple material sources are synthetic, not instrument data.
 use super::*;
 use fs_evidence::ValidityDomain;
-use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
-    SelectionPolicy, UncertaintyModel};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+};
+use fs_material::conductor::{ELECTRICAL_RESISTIVITY_DIMS, ELECTRICAL_RESISTIVITY_PROPERTY};
 use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section_temperature::ConcentricSectionTemperatureLaw;
-use fs_material::state_point::{INVERSE_TEMPERATURE_DIMS,
-    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as ALPHA, MaterialPropertySelection,
-    ScalarAdmissibility, ScalarPropertyRequirement, SPECIFIC_HEAT_CAPACITY_DIMS,
-    THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point};
-use fs_material::conductor::{ELECTRICAL_RESISTIVITY_PROPERTY, ELECTRICAL_RESISTIVITY_DIMS};
+use fs_material::state_point::DENSITY_PROPERTY;
+use fs_material::state_point::{
+    INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as ALPHA,
+    MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility,
+    ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
+    resolve_material_state_point,
+};
 use fs_qty::{Density, Dims, DynViscosity, Pressure, Temperature};
-use fs_thermal::enthalpy::{Boundary, CellGeometry, DepositedCell, DepositionBudget,
-    Event, MaterialId, StepConfig, ThermalLaw, ThermalLink, TimedEvent};
+use fs_thermal::enthalpy::{
+    Boundary, CellGeometry, DepositedCell, DepositionBudget, Event, MaterialId, StepConfig,
+    ThermalLaw, ThermalLink, TimedEvent,
+};
 
 const LENGTH: f64 = 0.502;
 const REFERENCE: f64 = 0.5;

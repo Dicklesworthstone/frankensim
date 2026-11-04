@@ -8,11 +8,12 @@
 //! Fixed material states and small-strain circular torsion only: no winding,
 //! interlayer slip, warping of noncircular sections or rotational fluid loading.
 
-use super::{ConcentricShearSection, MaterialStatePointError, positive, invalid};
-use fs_qty::{Density, DynViscosity, QuantitySpec};
-use super::relaxation::{LayerRelaxationProperties, LayerRelaxationBranch,
-    SectionPronySpectrum, SectionRelaxationAxis};
+use super::relaxation::{
+    LayerRelaxationBranch, LayerRelaxationProperties, SectionPronySpectrum, SectionRelaxationAxis,
+};
+use super::{ConcentricShearSection, MaterialStatePointError, invalid, positive};
 use crate::visco::GeneralizedMaxwell;
+use fs_qty::{DynViscosity, QuantitySpec};
 
 /// Original source section with rotary mass and a separately selected shear law.
 #[derive(Clone, Debug, PartialEq)]
@@ -40,19 +41,23 @@ impl ConcentricShearSection {
     /// Missing/ambiguous/wrong-quantity coefficients, nonconstant laws, invalid
     /// or disjoint source bands, and unrepresentable section integrals refuse.
     pub fn with_torsional_viscosity(
-        self, property_name: &str,
+        self,
+        property_name: &str,
     ) -> Result<ConcentricTorsionalSection, MaterialStatePointError> {
         let mut inertia = 0.0;
         let mut viscous = 0.0;
         let mut layer_viscous_stiffness_n_m2_s = Vec::with_capacity(self.elastic().layers().len());
         let mut band = (0.0_f64, f64::MAX);
-        for (layer, geometry) in self.elastic().layers().iter().zip(self.elastic().layer_integrals()) {
-            let rho = layer.material.property(crate::state_point::DENSITY_PROPERTY)
-                .ok_or_else(|| invalid("torsion requires the original density"))?;
+        for (index, (layer, geometry)) in self
+            .elastic()
+            .layers()
+            .iter()
+            .zip(self.elastic().layer_integrals())
+            .enumerate()
+        {
             let eta = layer.material.property(property_name)
                 .ok_or_else(|| invalid("each torsional layer needs an explicit shear viscosity"))?;
-            if rho.requirement().quantity() != QuantitySpec::dimensional(Density::DIMS)
-                || eta.requirement().quantity() != QuantitySpec::dimensional(DynViscosity::DIMS)
+            if eta.requirement().quantity() != QuantitySpec::dimensional(DynViscosity::DIMS)
                 || !eta.value_si().is_finite() || eta.value_si() < 0.0 {
                 return Err(invalid("torsion needs positive density and nonnegative dimension-only shear viscosity"));
             }
@@ -60,9 +65,7 @@ impl ConcentricShearSection {
                 .map_err(|_| invalid("invalid shear-viscosity frequency semantics"))?
                 .ok_or_else(|| invalid("torsional viscosity needs an explicit frequency validity band"))?;
             band = (band.0.max(interval.0), band.1.min(interval.1));
-            for key in [crate::state_point::DENSITY_PROPERTY, self.shear_property(), property_name] {
-                let property = layer.material.property(key)
-                    .ok_or_else(|| invalid("torsion lost an original coefficient"))?;
+            for property in self.source_properties(index)?.into_iter().chain([eta]) {
                 if !property.is_constant_at_fixed_environment() {
                     return Err(invalid("torsion requires fixed-state constant density, shear modulus and viscosity"));
                 }
@@ -72,7 +75,10 @@ impl ConcentricShearSection {
                 }
             }
             let polar = positive(2.0 * geometry.second_moment_m4(), "polar area moment")?;
-            let mass = positive(rho.value_si() * polar, "layer rotary inertia per length")?;
+            let mass = positive(
+                geometry.density_kg_m3() * polar,
+                "layer rotary inertia per length",
+            )?;
             inertia = positive(inertia + mass, "summed rotary inertia per length")?;
             let loss = eta.value_si() * polar;
             if !loss.is_finite() || (eta.value_si() > 0.0 && loss == 0.0) {
@@ -146,7 +152,7 @@ impl ConcentricTorsionalSection {
         properties: &[LayerRelaxationProperties],
     ) -> Result<ConcentricPronyTorsionalSection, MaterialStatePointError> {
         let mut spectrum = SectionPronySpectrum::resolve(self.shear.elastic(),
-            self.shear.shear_property(), self.stiffness_n_m2(),
+            Some(&self.shear), self.stiffness_n_m2(),
             SectionRelaxationAxis::Torsion, properties)?;
         spectrum.omega_band_rad_s = (
             spectrum.omega_band_rad_s.0.max(self.omega_band_rad_s.0),

@@ -1,15 +1,23 @@
 //! Original source curves, independent layer temperatures and continuing histories.
 use super::*;
-use crate::air_path::cylinder::{CylinderFlowResolution, frame::{FrameFluidBinding, FrameFluidBudget}};
+use crate::air_path::cylinder::{
+    CylinderFlowResolution,
+    frame::{FrameFluidBinding, FrameFluidBudget},
+};
 use crate::frame_vibration::FrameVibrationBudget;
 use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeBudget};
 use crate::render::schedule::force::coupled::ModalCouplingConfig;
 use fs_evidence::ValidityDomain;
-use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, UncertaintyModel};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim, PropertyKey, PropertyValue,
+    Provenance, UncertaintyModel,
+};
 use fs_material::fluid_transport::FluidTransportState;
-use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_material_state_point};
+use fs_material::section::{ConcentricElasticSection, LayerIsotropicParameters};
+use fs_material::state_point::{
+    IsotropicElasticParameters, MaterialPropertySelection, ScalarAdmissibility,
+    ScalarPropertyRequirement, resolve_material_state_point,
+};
 use fs_qty::{Density, Pressure, Time};
 use fs_solid::frame2d::{Frame2d, FrameMassFormulation, Geometry};
 
@@ -21,32 +29,102 @@ fn query(t: f64) -> QueryPoint {
         .with("omega", 1.0).unwrap()
 }
 fn card(layer: usize, constant_time: bool, curved_storage: bool, foreign: bool) -> MaterialCard {
+    source_card(layer, constant_time, curved_storage, foreign, false)
+}
+fn bulk_shear_card(layer: usize, curved_bulk: bool) -> MaterialCard {
+    source_card(layer, false, curved_bulk, false, true)
+}
+fn source_card(
+    layer: usize,
+    constant_time: bool,
+    curved_storage: bool,
+    foreign: bool,
+    bulk_shear: bool,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
-    for (name, dims, value) in [
+    let equilibrium = [1000.0, 1500.0][layer];
+    let elastic = if bulk_shear {
+        // K = E and G = 3E/8 give E = 9KG/(3K+G), exactly representable
+        // here. The source card contains no Young's-modulus claim.
+        vec![
+            ("source_bulk", Pressure::DIMS, equilibrium),
+            ("source_shear", Pressure::DIMS, 0.375 * equilibrium),
+        ]
+    } else {
+        vec![("young_modulus", Pressure::DIMS, equilibrium)]
+    };
+    for (name, dims, value) in elastic.into_iter().chain([
         ("density", Density::DIMS, [3.0, 5.0][layer]),
-        ("young_modulus", Pressure::DIMS, [1000.0, 1500.0][layer]),
-        ("equilibrium", Pressure::DIMS, [1000.0, 1500.0][layer]),
+        ("equilibrium", Pressure::DIMS, equilibrium),
         ("increment", Pressure::DIMS, [600.0, 900.0][layer]),
         ("time", Time::DIMS, TIMES[layer]),
-    ] {
-        let curve = name == "time" && !constant_time || name == "increment" && curved_storage;
-        let values = if name == "time" { [value*1.2, value, value*0.2] }
-            else { [value, value, value] };
-        let mut validity = ValidityDomain::unconstrained().with_quantity("T",
-            QuantitySpec::dimensional(Temperature::DIMS), 290.0, 340.0);
-        if name == "time" { validity = validity.with("omega", 0.0, 10_000.0); }
-        claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
-            value: if curve { PropertyValue::Curve { abscissa: "T".into(),
-                abscissa_dims: Temperature::DIMS, knots: vec![(290.0,values[0]),(300.0,values[1]),(340.0,values[2])], dims }
-                } else { PropertyValue::Scalar { value, dims } },
-            validity, uncertainty: UncertaintyModel::Unstated,
-            interpolation: if curve { InterpolationPolicy::LinearInside }
-                else { InterpolationPolicy::ConstantWithinValidity },
-            observations: vec![], provenance: Provenance { source: "manufactured thermal mobility".into(),
-                license: "test-only".into(), artifact: None } }).unwrap();
+    ]) {
+        let curve = name == "time" && !constant_time
+            || name
+                == (if bulk_shear {
+                    "source_bulk"
+                } else {
+                    "increment"
+                })
+                && curved_storage;
+        let values = if name == "time" {
+            [value * 1.2, value, value * 0.2]
+        } else {
+            [value, value, value]
+        };
+        let mut validity = ValidityDomain::unconstrained().with_quantity(
+            "T",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            290.0,
+            340.0,
+        );
+        if name == "time" {
+            validity = validity.with("omega", 0.0, 10_000.0);
+        }
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: if curve {
+                    PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: vec![(290.0, values[0]), (300.0, values[1]), (340.0, values[2])],
+                        dims,
+                    }
+                } else {
+                    PropertyValue::Scalar { value, dims }
+                },
+                validity,
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: if curve {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
+                observations: vec![],
+                provenance: Provenance {
+                    source: "manufactured thermal mobility".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
     }
-    MaterialCard::assemble(MaterialStateId { chemistry: format!("layer {layer}"),
-        phase: "solid".into(), process: String::from(if foreign {"foreign reference"} else {"synthetic reference"}), revision: 0 }, claims, vec![]).unwrap()
+    MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: format!("layer {layer}"),
+            phase: "solid".into(),
+            process: String::from(if foreign {
+                "foreign reference"
+            } else {
+                "synthetic reference"
+            }),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap()
 }
 fn make_frame(cards: &[MaterialCard; 2]) -> Frame2d {
     let requirements = [("density",Density::DIMS),("young_modulus",Pressure::DIMS),
@@ -56,6 +134,51 @@ fn make_frame(cards: &[MaterialCard; 2]) -> Frame2d {
         outer_radius_m: RADII[layer], material: resolve_material_state_point(card,&query(300.0),
             &requirements,MaterialPropertySelection::SingleClaimOnly).unwrap() }).collect();
     let section = ConcentricElasticSection::try_new(0.0,layers).unwrap();
+    frame_with_section(section)
+}
+fn make_bulk_shear_frame(cards: &[MaterialCard; 2]) -> Frame2d {
+    let requirements = [
+        ("density", Density::DIMS),
+        ("source_bulk", Pressure::DIMS),
+        ("source_shear", Pressure::DIMS),
+        ("equilibrium", Pressure::DIMS),
+        ("increment", Pressure::DIMS),
+        ("time", Time::DIMS),
+    ]
+    .map(|(name, dims)| {
+        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap()
+    });
+    let layers = cards
+        .iter()
+        .enumerate()
+        .map(|(layer, card)| ConcentricMaterialLayer {
+            outer_radius_m: RADII[layer],
+            material: resolve_material_state_point(
+                card,
+                &query(300.0),
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+        })
+        .collect();
+    let binding = LayerIsotropicParameters {
+        density: requirements[0].clone(),
+        parameters: IsotropicElasticParameters::BulkShear {
+            bulk_modulus: requirements[1].clone(),
+            shear_modulus: requirements[2].clone(),
+        },
+    };
+    frame_with_section(
+        ConcentricElasticSection::try_new_with_isotropic_parameters(
+            0.0,
+            layers,
+            &[binding.clone(), binding],
+        )
+        .unwrap(),
+    )
+}
+fn frame_with_section(section: ConcentricElasticSection) -> Frame2d {
     let mut frame = Frame2d::with_mass_formulation(Geometry::Linear,FrameMassFormulation::ConsistentReference);
     frame.add_node(0.0,0.0); frame.add_node(1.0,0.0);
     frame.fix(0,[true;3]); frame.fix(1,[true,false,true]);
@@ -145,6 +268,144 @@ fn independent_layer_temperatures_preserve_complete_history_and_change_continuin
     assert!((changed[0]-unchanged[0]).abs()>1e-10);
     assert!(changed[2..].iter().any(|p|*p!=0.0));
     assert_eq!(model.frame().material_section(0).unwrap().layers()[0].material.query(),query(300.0));
+}
+
+#[test]
+fn bulk_shear_sources_survive_live_rate_refresh_and_continue_fluid_coupled_motion() {
+    let cards = [bulk_shear_card(0, false), bulk_shear_card(1, false)];
+    let frame = make_bulk_shear_frame(&cards);
+    let model = make_model(&frame);
+    let gate = CancelGate::new_clock_free();
+    let (placement, mut binding, mut system) = native(&model);
+    let (_, _, mut control) = native(&model);
+    let mut force = placement
+        .project_nodal_force(&[0.0, 0.0, 0.0, 0.0, 0.002, 0.0], &gate)
+        .unwrap();
+    force.resize(system.mode_count(), 0.0);
+    for _ in 0..5 {
+        system.step_under_gate(&force, &gate).unwrap();
+        control.step_under_gate(&force, &gate).unwrap();
+    }
+    let before = snapshot(&binding);
+    let physical = placement
+        .physical_state(system.components(), &gate)
+        .unwrap();
+    let memory = system.material_memory().to_vec();
+    let energy = system.total_energy_j().unwrap();
+    let clock = system.samples_rendered();
+    let report = binding
+        .set_layer_temperatures(&mut system, &temperatures(&cards, [320.0, 330.0]), &gate)
+        .unwrap();
+    assert_eq!(report.changes.len(), 6);
+    assert_eq!(
+        placement
+            .physical_state(system.components(), &gate)
+            .unwrap(),
+        physical
+    );
+    assert_eq!(system.material_memory(), memory);
+    assert_eq!(system.total_energy_j().unwrap(), energy);
+    assert_eq!(system.samples_rendered(), clock);
+    assert_eq!(
+        system.material_relaxation_branches()[0].relaxation_time_s,
+        0.7
+    );
+    let old = before[0].elastic();
+    let source = &binding.members()[0].source;
+    let current = source.elastic();
+    assert_eq!(current.isotropic_parameters(), old.isotropic_parameters());
+    assert_eq!(current.layer_integrals(), old.layer_integrals());
+    for (layer, factor) in [0.6, 0.4].into_iter().enumerate() {
+        let material = &current.layers()[layer].material;
+        assert!(matches!(
+            current.isotropic_parameters().unwrap()[layer].parameters,
+            IsotropicElasticParameters::BulkShear { .. }
+        ));
+        assert!(material.property("young_modulus").is_none());
+        assert!(
+            current
+                .young_modulus_source_property(layer)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            current.layer_integrals()[layer].young_modulus_pa(),
+            [1000.0, 1500.0][layer]
+        );
+        assert_eq!(material.query(), query([320.0, 330.0][layer]));
+        assert_eq!(
+            material.card_identity(),
+            old.layers()[layer].material.card_identity()
+        );
+        for property in old.elastic_source_properties(layer).unwrap() {
+            assert_eq!(
+                property.answer().receipt.selected,
+                material
+                    .property(property.requirement().name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected
+            );
+        }
+        near(source.spectra()[layer].terms[0].1, TIMES[layer] * factor);
+    }
+    binding.states(&system, &gate).unwrap();
+    let mut work = 0.0;
+    let mut loss = 0.0;
+    for _ in 0..20 {
+        let step = system.step_under_gate(&force, &gate).unwrap().clone();
+        work += step.external_work_j;
+        loss += step.total_dissipation_j();
+        control.step_under_gate(&force, &gate).unwrap();
+        near(system.total_energy_j().unwrap() - energy + loss, work);
+    }
+    let changed = placement
+        .physical_state(system.components(), &gate)
+        .unwrap();
+    let unchanged = placement
+        .physical_state(control.components(), &gate)
+        .unwrap();
+    assert!((changed[0] - unchanged[0]).abs() > 1e-10);
+    assert!(changed[2..].iter().any(|value| *value != 0.0));
+    assert_eq!(
+        model.frame().material_section(0).unwrap().layers()[0]
+            .material
+            .query(),
+        query(300.0)
+    );
+
+    // A flat bulk-modulus curve still declares a temperature-dependent parent.
+    // The rate-only owner cannot infer reversible thermal storage from samples.
+    let curved_cards = [bulk_shear_card(0, true), bulk_shear_card(1, false)];
+    let curved_frame = make_bulk_shear_frame(&curved_cards);
+    let curved_model = make_model(&curved_frame);
+    let (curved_placement, mut curved_binding, mut curved_system) = native(&curved_model);
+    let original = snapshot(&curved_binding);
+    let physical = curved_placement
+        .physical_state(curved_system.components(), &gate)
+        .unwrap();
+    let memory = curved_system.material_memory().to_vec();
+    let energy = curved_system.total_energy_j().unwrap();
+    assert!(
+        curved_binding
+            .set_layer_temperatures(
+                &mut curved_system,
+                &temperatures(&curved_cards, [300.0, 300.0]),
+                &gate
+            )
+            .is_err()
+    );
+    assert_eq!(snapshot(&curved_binding), original);
+    assert_eq!(
+        curved_placement
+            .physical_state(curved_system.components(), &gate)
+            .unwrap(),
+        physical
+    );
+    assert_eq!(curved_system.material_memory(), memory);
+    assert_eq!(curved_system.total_energy_j().unwrap(), energy);
+    assert_eq!(curved_system.samples_rendered(), 0);
 }
 
 #[test]

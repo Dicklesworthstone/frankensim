@@ -10,10 +10,13 @@
 //! The section is frozen at the resolved material states. Axial creep, thermal
 //! history, interlayer slip and helical winding are not modeled by this binding.
 
-use super::{ConcentricElasticSection, MaterialStatePointError, invalid};
+use super::{ConcentricElasticSection, ConcentricShearSection, MaterialStatePointError, invalid};
+#[cfg(test)]
 use crate::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
 use crate::visco::GeneralizedMaxwell;
-use fs_qty::{Density, Pressure, QuantitySpec, Time};
+#[cfg(test)]
+use fs_qty::Density;
+use fs_qty::{Pressure, QuantitySpec, Time};
 
 /// Cold-path bound on the total declared arms across all layers.
 pub const MAX_SECTION_RELAXATION_BRANCHES: usize = 128;
@@ -84,7 +87,7 @@ impl ConcentricElasticSection {
         self,
         properties: &[LayerRelaxationProperties],
     ) -> Result<ConcentricPronySection, MaterialStatePointError> {
-        let spectrum = SectionPronySpectrum::resolve(&self, YOUNG_MODULUS_PROPERTY,
+        let spectrum = SectionPronySpectrum::resolve(&self, None,
             self.bending_stiffness_n_m2(), SectionRelaxationAxis::Bending, properties)?;
         Ok(ConcentricPronySection { elastic: self, spectrum })
     }
@@ -93,7 +96,7 @@ impl ConcentricElasticSection {
 impl SectionPronySpectrum {
     pub(super) fn resolve(
         elastic: &ConcentricElasticSection,
-        elastic_modulus_property: &str,
+        shear: Option<&ConcentricShearSection>,
         equilibrium_stiffness_n_m2: f64,
         axis: SectionRelaxationAxis,
         properties: &[LayerRelaxationProperties],
@@ -115,6 +118,22 @@ impl SectionPronySpectrum {
         for (layer_index, ((layer, geometry), binding)) in elastic.layers().iter()
             .zip(elastic.layer_integrals()).zip(properties).enumerate()
         {
+            let parents = match shear {
+                Some(shear) => shear.source_properties(layer_index)?,
+                None => elastic.elastic_source_properties(layer_index)?,
+            };
+            for property in parents {
+                if !property.is_constant_at_fixed_environment() {
+                    return Err(invalid("section relaxation requires its original held-environment elastic parents"));
+                }
+                if let Some((lo, hi)) = property.angular_frequency_band_rad_s()? {
+                    band = (band.0.max(lo), band.1.min(hi));
+                }
+            }
+            let elastic_modulus = match shear {
+                Some(shear) => shear.layer_shear_modulus_pa(layer_index)?,
+                None => geometry.young_modulus_pa(),
+            };
             let mut coefficient = |key: &str, quantity: QuantitySpec, needs_band: bool| {
                 let property = layer.material.property(key)
                     .ok_or_else(|| invalid("section relaxation is missing an unambiguous source coefficient"))?;
@@ -130,9 +149,6 @@ impl SectionPronySpectrum {
                 }
                 Ok(property.value_si())
             };
-            coefficient(DENSITY_PROPERTY, QuantitySpec::dimensional(Density::DIMS), false)?;
-            let elastic_modulus = coefficient(elastic_modulus_property,
-                QuantitySpec::dimensional(Pressure::DIMS), false)?;
             let equilibrium = coefficient(&binding.equilibrium_modulus,
                 QuantitySpec::dimensional(Pressure::DIMS), binding.branches.is_empty())?;
             if !equilibrium.is_finite() || equilibrium <= 0.0

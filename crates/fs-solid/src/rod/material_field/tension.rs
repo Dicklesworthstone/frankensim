@@ -11,7 +11,6 @@
 use fs_exec::CancelGate;
 use fs_ga::{So3, Vec3};
 use fs_material::section::ConcentricElasticSection;
-use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
 use fs_math::det;
 
 use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
@@ -106,14 +105,8 @@ impl MaterialTensionLink {
         }
         // The same resolved-property admission as the static rod: constants or
         // fixed-temperature curves, with zero included in any frequency band.
-        for layer in section.layers() {
-            for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
-                let property = layer
-                    .material
-                    .property(name)
-                    .ok_or(SpatialRodError::Invalid(
-                        "tension link lacks a required material property",
-                    ))?;
+        for index in 0..section.layers().len() {
+            for property in section.elastic_source_properties(index)? {
                 if !property.is_constant_at_fixed_temperature()
                     || property
                         .angular_frequency_band_rad_s()?

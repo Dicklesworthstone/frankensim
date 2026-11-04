@@ -7,13 +7,13 @@
 //! [`SpatialMaterialRod::into_spatial_motion_model`] retains that mass's centroid
 //! and complete central tensor instead of discarding translation/rotation coupling.
 
-use std::sync::Arc;
+use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
+use crate::rod::{Rod, derivatives::RodEnergy};
 use fs_exec::CancelGate;
 use fs_ga::So3;
 use fs_material::section::ConcentricShearSection;
-use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
-use crate::rod::{Rod, derivatives::RodEnergy};
-use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
+use fs_material::state_point::ResolvedScalarProperty;
+use std::sync::Arc;
 
 /// Conservative ambient body loads and fluid-state refresh on the same model.
 pub mod environment;
@@ -234,9 +234,12 @@ impl SpatialMaterialRod {
     }
 
     // One cold-path source/reference/support owner for both inertia views.
-    fn prepare_motion<I>(self, root: RodRootBoundary, gate: &CancelGate,
-        inventory: impl FnOnce(&Self, Vec<RodNodalInertia>) -> Result<Vec<I>, SpatialRodError>)
-        -> Result<PreparedRodMotion<I>, SpatialRodError> {
+    fn prepare_motion<I>(
+        self,
+        root: RodRootBoundary,
+        gate: &CancelGate,
+        inventory: impl FnOnce(&Self, Vec<RodNodalInertia>) -> Result<Vec<I>, SpatialRodError>,
+    ) -> Result<PreparedRodMotion<I>, SpatialRodError> {
         checkpoint(gate)?;
         for section in &self.sections { admit_section(section)?; checkpoint(gate)?; }
         let reference = self.reference_mass();
@@ -247,11 +250,8 @@ impl SpatialMaterialRod {
             checkpoint(gate)?;
             admit_section(section)?;
             let mut diameter = 0.0;
-            for (layer, geometry) in section.elastic().layers().iter()
-                .zip(section.elastic().layer_integrals()) {
-                let rho = layer.material.property(DENSITY_PROPERTY)
-                    .ok_or(SpatialRodError::Invalid("reference inertia lost its original density"))?;
-                let value = half_length * (rho.value_si() * geometry.second_moment_m4());
+            for geometry in section.elastic().layer_integrals() {
+                let value = half_length * (geometry.density_kg_m3() * geometry.second_moment_m4());
                 if !value.is_finite() || value <= 0.0 {
                     return Err(SpatialRodError::Invalid("reference rotary inertia is unrepresentable"));
                 }
@@ -264,9 +264,9 @@ impl SpatialMaterialRod {
         }
         for link in &self.tension_links {
             checkpoint(gate)?;
-            for layer in link.section().layers() {
-                for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
-                    admit_property(&layer.material, name)?;
+            for index in 0..link.section().layers().len() {
+                for property in link.section().elastic_source_properties(index)? {
+                    admit_property(property)?;
                 }
             }
         }
@@ -290,17 +290,19 @@ impl SpatialMaterialRod {
 }
 
 fn admit_section(section: &ConcentricShearSection) -> Result<(), SpatialRodError> {
-    for layer in section.elastic().layers() {
-        for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, section.shear_property()] {
-            admit_property(&layer.material, name)?;
+    for index in 0..section.elastic().layers().len() {
+        for property in section
+            .elastic()
+            .elastic_source_properties(index)?
+            .into_iter()
+            .chain(section.source_properties(index)?)
+        {
+            admit_property(property)?;
         }
     }
     Ok(())
 }
-fn admit_property(material: &fs_material::state_point::ResolvedMaterialStatePoint, name: &str)
-    -> Result<(), SpatialRodError> {
-    let property = material.property(name)
-        .ok_or(SpatialRodError::Invalid("dynamic rod lost an original section property"))?;
+fn admit_property(property: &ResolvedScalarProperty) -> Result<(), SpatialRodError> {
     if !property.is_constant_at_fixed_temperature()
         || property.angular_frequency_band_rad_s()?.is_some_and(|(lo, hi)| lo > 0.0 || hi < f64::MAX) {
         return Err(SpatialRodError::Invalid(

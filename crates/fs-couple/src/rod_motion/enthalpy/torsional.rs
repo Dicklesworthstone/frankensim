@@ -6,9 +6,7 @@
 //! neither rerun mechanics nor change that partition. Final source support is
 //! checked again at the accepted endpoint before either history is published.
 
-use fs_material::section::{
-    ConcentricElasticSection, ConcentricMaterialLayer, torsion::ConcentricTorsionalSection,
-};
+use fs_material::section::{ConcentricMaterialLayer, torsion::ConcentricTorsionalSection};
 use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
 };
@@ -136,9 +134,9 @@ pub(super) fn prepare<I>(
             });
         }
         resolved.push(
-            ConcentricElasticSection::try_new(current.elastic().inner_radius_m(), enriched)
-                .map_err(material)?
-                .with_shear_modulus(current.shear_property(), current.shear_correction())
+            current.with_material_section(
+                current.elastic().with_material_layers(enriched).map_err(material)?
+            )
                 .map_err(material)?
                 .with_torsional_viscosity(viscosity.property)
                 .map_err(material)?,

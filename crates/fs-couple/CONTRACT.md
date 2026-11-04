@@ -1,5 +1,23 @@
 # CONTRACT: fs-couple
 
+## Original elastic sources across live material coupling
+
+Modal wet-frame temperature refresh and native rod enthalpy/viscosity preparation
+retain each layer's explicit density and elastic source roles (`E/nu`, `E/G` or
+`K/G`), original claim selections, geometry and sourced-or-derived shear binding.
+Section enrichment and refresh use the original section constructors' retained
+roles; derived Young/shear moduli do not become measured claims or canonical-name
+substitutes. Rate-only Maxwell updates require constant density and every actual
+elastic storage parent, including both K and G when they determine E, and preserve
+native history, storage, fluid state and clock at the accepted boundary. Rod
+viscosity preparation retains these same mechanical sources while adding only the
+selected loss property and depositing its independently accounted heat. Concentric
+string caloric admission joins the section's selected density receipt to the
+original caloric source, mass, volume and fixed query conditions, including when
+the density property has an explicitly selected noncanonical name. Existing
+source-support, affine thermoelastic, caloric and energy limits remain binding;
+refused source changes publish no coupled state.
+
 ## Loaded quadratic Maxwell scenes through native force, contact and drift
 
 `trajectory::quadratic::sustained::mixed_visco_sustained_sphere_trajectory_candidate`

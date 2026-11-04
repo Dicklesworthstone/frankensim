@@ -393,6 +393,7 @@ pub(super) fn same_elastic_source(
     enriched: &ConcentricElasticSection,
 ) -> bool {
     original.inner_radius_m() == enriched.inner_radius_m()
+        && original.isotropic_parameters() == enriched.isotropic_parameters()
         && original.layers().len() == enriched.layers().len()
         && original
             .layers()
@@ -406,7 +407,7 @@ pub(super) fn same_elastic_source(
                     && a.material
                         .properties()
                         .iter()
-                        .all(|p| b.material.property(p.requirement().name()) == Some(p))
+                        .all(|p| b.material.properties().contains(p))
             })
 }
 

@@ -5576,6 +5576,38 @@ multiaxis refresh and atomic auxiliary-property refusal, and the actual tetrahed
 mass/strain-energy and thermal-expansion identity path. This is a bounded MR11/MR08
 parameter-conversion slice, not complete derived-property or material validation.
 
+### Shared isotropic parameters in concentric sections
+
+`ConcentricElasticSection::try_new_with_isotropic_parameters` consumes one
+`LayerIsotropicParameters` binding per layer through the existing isotropic
+projector. Density and E/nu, E/G or K/G may use arbitrary source keys; each layer
+retains its complete original bundle and auxiliary properties. Derived E and G
+remain nominal model consequences, never inserted measured claims. Section
+mass, axial/bending stiffness, transport, strength and loss adapters consume
+those same coefficients and their actual source dependencies.
+
+`with_isotropic_shear` uses G from the original pair. `shear_property()` returns
+None when shear follows that pair and Some for an explicitly named G source.
+On an explicitly isotropic section, named G must select the original G requirement
+of E/G or K/G; E/nu must use `with_isotropic_shear`. A separate, numerically equal
+G claim cannot replace original source support or thermal derivatives. Legacy
+density/E sections still accept independently named G. Source-aware accessors
+retain the parent receipts and frequency/constancy restrictions.
+`with_material_layers` and shear `with_material_section` preserve exact layer
+geometry and parameter roles, rejecting incomplete or inadmissible candidates.
+They do not perform mass transfer, history integration or geometry evolution.
+
+Ordinary section temperature refresh re-evaluates every retained property with
+its original claim pins, including nonlinear E derived from varying K/G. The
+existing affine thermoelastic potential admits scalar K/G only; varying K/G
+refuses because its derived E generally has additional thermal derivatives.
+`ConcentricRodThermoelasticLaw::try_new_with_isotropic_shear` also admits scalar
+or affine E/G, and scalar or affine E with scalar nu. Scalar reference density,
+expansion, source-path support and the original strain limits remain required.
+Focused G0/G1/G3 regressions specify mixed-parameter layer integrals, coupled
+transport/loss response, refresh refusal and potential derivatives. They do not
+establish measured-material validation or propagated joint uncertainty.
+
 ### Reversible adhesion driving equilibrium liquid wetting
 
 `liquid::surface::adhesion::resolve_young_dupre_wetting` derives the existing

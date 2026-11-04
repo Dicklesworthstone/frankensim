@@ -10,23 +10,26 @@ use fs_material::state_point::INVERSE_TEMPERATURE_DIMS;
 impl<'a> RodMaterialSource<'a> {
     /// Prepare complete source-derived axial/bending/shear/torsion potentials.
     /// The thermal owner admits affine elastic moduli and scalar rho/alpha;
-    /// unsupported tables remain supported by prescribed mechanics only.
+    /// unsupported non-affine derived moduli and tables remain supported by
+    /// prescribed mechanics only. Isotropic roles and source pins are retained.
     pub fn thermoelastic_laws(
         &self,
         gate: &CancelGate,
     ) -> Result<Vec<ConcentricRodThermoelasticLaw<'a>>, SpatialRodError> {
         checkpoint(gate)?;
-        let mut requirements = self.requirements.clone();
-        requirements.push(ScalarPropertyRequirement::try_new(
+        let expansion_requirement = ScalarPropertyRequirement::try_new(
             LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
             INVERSE_TEMPERATURE_DIMS,
             ScalarAdmissibility::Finite,
-        )?);
+        )?;
         let mut laws = Vec::with_capacity(self.segments.len());
         for (segment, reference) in self.segments.iter().zip(self.reference.sections()) {
             let mut layers = Vec::with_capacity(segment.layers.len());
             for (source, original) in segment.layers.iter().zip(reference.elastic().layers()) {
                 checkpoint(gate)?;
+                let mut requirements = original.material.properties().iter()
+                    .map(|property| property.requirement().clone()).collect::<Vec<_>>();
+                requirements.push(expansion_requirement.clone());
                 let mut pins = original
                     .material
                     .properties()
@@ -57,15 +60,16 @@ impl<'a> RodMaterialSource<'a> {
                     material,
                 });
             }
-            let section = ConcentricElasticSection::try_new(segment.inner_radius_m, layers)?;
+            let section = reference.elastic().with_material_layers(layers)?;
             let cards = segment.layers.iter().map(|s| s.card).collect::<Vec<_>>();
             let temperature =
                 ConcentricSectionTemperatureLaw::try_new(section, &cards, &vec!["T"; cards.len()])?;
-            laws.push(ConcentricRodThermoelasticLaw::try_new(
-                temperature,
-                &self.shear_property,
-                segment.shear_correction,
-            )?);
+            laws.push(match reference.shear_property() {
+                Some(property) => ConcentricRodThermoelasticLaw::try_new(
+                    temperature, property, reference.shear_correction())?,
+                None => ConcentricRodThermoelasticLaw::try_new_with_isotropic_shear(
+                    temperature, reference.shear_correction())?,
+            });
         }
         checkpoint(gate)?;
         Ok(laws)

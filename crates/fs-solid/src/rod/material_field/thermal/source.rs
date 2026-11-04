@@ -1,13 +1,15 @@
 //! Re-evaluate one spatial rod description from actual material-card data.
 //!
 //! Reference geometry, source selection and support conditions are independent.
-//! Each refresh evaluates E/rho/G at the new local temperature and integrates
-//! the SAME alpha claim from the original stress-free temperature. It does not
-//! add successive endpoint-alpha increments or select another fit on heating.
+//! Each refresh evaluates the original elastic sources at the new local
+//! temperature and integrates the SAME alpha claim from the original
+//! stress-free temperature. It does not add successive endpoint-alpha
+//! increments or select another fit on heating.
 
 use fs_exec::CancelGate;
 use fs_matdb::{MaterialCard, QueryPoint};
-use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer, MAX_CONCENTRIC_LAYERS};
+use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer,
+    LayerIsotropicParameters, MAX_CONCENTRIC_LAYERS};
 use fs_material::section::thermal::ConcentricThermoelasticSection;
 use fs_material::state_point::{
     DENSITY_PROPERTY, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
@@ -33,7 +35,8 @@ pub struct RodLayerSource<'a> {
     /// Complete reference coordinates, including positive absolute `T` in K.
     /// Nonthermal coordinates and their quantity conventions remain unchanged.
     pub reference_point: QueryPoint,
-    /// Selection for exactly density, Young's modulus and the named shear modulus.
+    /// Selection for the mechanical source requirements chosen by the constructor.
+    /// Explicit isotropic layers retain their own density and independent pair.
     pub mechanical_selection: MaterialPropertySelection,
     /// Selection for the canonical linear-expansion coefficient alone.
     pub expansion_selection: MaterialPropertySelection,
@@ -60,15 +63,20 @@ pub struct RodSegmentSource<'a> {
 pub struct RodMaterialSource<'a> {
     segments: Vec<RodSegmentSource<'a>>,
     reference: SpatialMaterialRod,
-    requirements: Vec<ScalarPropertyRequirement>,
-    shear_property: String,
     linear_strain_limit: f64,
     reference_temperatures_k: Vec<f64>,
     reference_mass_kg: f64,
 }
 
+enum ElasticSources<'b> {
+    NamedShear(&'b str),
+    Isotropic(&'b [Vec<LayerIsotropicParameters>]),
+}
+
 impl<'a> RodMaterialSource<'a> {
-    /// Admit geometry and reference sources, then pin every selected claim.
+    /// Admit canonical density/Young's modulus and one named shear modulus,
+    /// then pin every selected claim. E and G define the original rod response;
+    /// no additional three-dimensional isotropy assumption is introduced.
     /// The existing section and rod owners check geometry and static support.
     ///
     /// # Errors
@@ -76,8 +84,39 @@ impl<'a> RodMaterialSource<'a> {
     /// selections, unsupported reference conditions and cancellation refuse.
     pub fn try_new(
         length_m: f64,
-        mut segments: Vec<RodSegmentSource<'a>>,
+        segments: Vec<RodSegmentSource<'a>>,
         shear_property: &str,
+        linear_strain_limit: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, SpatialRodError> {
+        Self::build(length_m, segments, ElasticSources::NamedShear(shear_property),
+            linear_strain_limit, gate)
+    }
+
+    /// Admit one explicit density source and isotropic elastic pair per layer.
+    /// Parameter groups follow segment/layer order exactly; source names and
+    /// E/nu, E/G or K/G choices may differ between layers. The existing material
+    /// projector derives E/G without adding fictitious claims to the cards.
+    /// Heating preserves these roles, original claims and reference inventory.
+    ///
+    /// # Errors
+    /// Refuses incomplete parameter groups, unsupported or inadmissible source
+    /// data, invalid geometry, reference conditions or cancellation.
+    pub fn try_new_with_isotropic_parameters(
+        length_m: f64,
+        segments: Vec<RodSegmentSource<'a>>,
+        parameters: &[Vec<LayerIsotropicParameters>],
+        linear_strain_limit: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, SpatialRodError> {
+        Self::build(length_m, segments, ElasticSources::Isotropic(parameters),
+            linear_strain_limit, gate)
+    }
+
+    fn build(
+        length_m: f64,
+        mut segments: Vec<RodSegmentSource<'a>>,
+        sources: ElasticSources<'_>,
         linear_strain_limit: f64,
         gate: &CancelGate,
     ) -> Result<Self, SpatialRodError> {
@@ -89,25 +128,43 @@ impl<'a> RodMaterialSource<'a> {
         {
             return Err(SpatialRodError::Invalid("bounded nonempty rod/layers and a linear strain limit in (0,1) are required"));
         }
-        if shear_property == DENSITY_PROPERTY || shear_property == YOUNG_MODULUS_PROPERTY
-            || shear_property == LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY
-        {
-            return Err(SpatialRodError::Invalid("shear modulus must have its own property key"));
+        match &sources {
+            ElasticSources::NamedShear(shear_property) => {
+                if *shear_property == DENSITY_PROPERTY || *shear_property == YOUNG_MODULUS_PROPERTY
+                    || *shear_property == LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY
+                {
+                    return Err(SpatialRodError::Invalid("shear modulus must have its own property key"));
+                }
+            }
+            ElasticSources::Isotropic(parameters) => {
+                if parameters.len() != segments.len() || parameters.iter().zip(&segments)
+                    .any(|(bindings, segment)| bindings.len() != segment.layers.len())
+                {
+                    return Err(SpatialRodError::Invalid("one isotropic parameterization per segment/layer is required"));
+                }
+            }
         }
-        let requirements = [
-            (DENSITY_PROPERTY, Density::DIMS),
-            (YOUNG_MODULUS_PROPERTY, Pressure::DIMS),
-            (shear_property, Pressure::DIMS),
-        ].into_iter().map(|(name, dims)| {
-            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
-        }).collect::<Result<Vec<_>, _>>()?;
         let mut reference_sections = Vec::with_capacity(segments.len());
         let mut reference_temperatures_k = Vec::new();
-        for segment in &mut segments {
+        for (segment_index, segment) in segments.iter_mut().enumerate() {
             let mut layers = Vec::with_capacity(segment.layers.len());
             let mut expansions = Vec::with_capacity(segment.layers.len());
-            for layer in &mut segment.layers {
+            for (layer_index, layer) in segment.layers.iter_mut().enumerate() {
                 checkpoint(gate)?;
+                let requirements = match &sources {
+                    ElasticSources::NamedShear(shear_property) => [
+                        (DENSITY_PROPERTY, Density::DIMS),
+                        (YOUNG_MODULUS_PROPERTY, Pressure::DIMS),
+                        (*shear_property, Pressure::DIMS),
+                    ].into_iter().map(|(name, dims)| {
+                        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+                    }).collect::<Result<Vec<_>, _>>()?,
+                    ElasticSources::Isotropic(parameters) => {
+                        let binding = &parameters[segment_index][layer_index];
+                        std::iter::once(&binding.density).chain(binding.parameters.requirements())
+                            .cloned().collect()
+                    }
+                };
                 let material = resolve_material_state_point(layer.card, &layer.reference_point,
                     &requirements, layer.mechanical_selection.clone())?;
                 let expansion = integrate_isotropic_thermal_expansion(layer.card,
@@ -124,10 +181,20 @@ impl<'a> RodMaterialSource<'a> {
                 layers.push(ConcentricMaterialLayer { outer_radius_m: layer.outer_radius_m, material });
                 expansions.push(expansion);
             }
-            let elastic = ConcentricElasticSection::try_new(segment.inner_radius_m, layers)?;
+            let elastic = match &sources {
+                ElasticSources::NamedShear(_) =>
+                    ConcentricElasticSection::try_new(segment.inner_radius_m, layers)?,
+                ElasticSources::Isotropic(parameters) =>
+                    ConcentricElasticSection::try_new_with_isotropic_parameters(
+                        segment.inner_radius_m, layers, &parameters[segment_index])?,
+            };
             // Admit the common stress-free reference before accepting the source.
             ConcentricThermoelasticSection::try_new(elastic.clone(), expansions)?;
-            reference_sections.push(elastic.with_shear_modulus(shear_property, segment.shear_correction)?);
+            reference_sections.push(match &sources {
+                ElasticSources::NamedShear(shear_property) =>
+                    elastic.with_shear_modulus(shear_property, segment.shear_correction)?,
+                ElasticSources::Isotropic(_) => elastic.with_isotropic_shear(segment.shear_correction)?,
+            });
         }
         let reference = SpatialMaterialRod::try_straight(length_m, reference_sections)?;
         let reference_mass_kg = reference.reference_mass().total_mass_kg();
@@ -135,7 +202,7 @@ impl<'a> RodMaterialSource<'a> {
             return Err(SpatialRodError::Invalid("reference rod mass is unrepresentable"));
         }
         checkpoint(gate)?;
-        Ok(Self { segments, reference, requirements, shear_property: shear_property.into(),
+        Ok(Self { segments, reference,
             linear_strain_limit, reference_temperatures_k, reference_mass_kg })
     }
 
@@ -157,22 +224,21 @@ impl<'a> RodMaterialSource<'a> {
         let mut mechanical = Vec::with_capacity(self.segments.len());
         let mut thermal = Vec::with_capacity(self.segments.len());
         let mut temperatures = temperatures_k.iter();
-        for segment in &self.segments {
+        for (segment, reference) in self.segments.iter().zip(self.reference.sections()) {
             let mut layers = Vec::with_capacity(segment.layers.len());
             let mut expansions = Vec::with_capacity(segment.layers.len());
-            for layer in &segment.layers {
+            for (layer, original) in segment.layers.iter().zip(reference.elastic().layers()) {
                 checkpoint(gate)?;
                 let temperature = *temperatures.next().expect("complete temperature count admitted");
                 let current = point_at_temperature(&layer.reference_point, temperature)?;
-                let material = resolve_material_state_point(layer.card, &current,
-                    &self.requirements, layer.mechanical_selection.clone())?;
+                let material = original.material.at_query_point(layer.card, &current)?;
                 expansions.push(integrate_isotropic_thermal_expansion(layer.card,
                     &layer.reference_point, &current, layer.expansion_selection.clone())?);
                 layers.push(ConcentricMaterialLayer { outer_radius_m: layer.outer_radius_m, material });
             }
-            let elastic = ConcentricElasticSection::try_new(segment.inner_radius_m, layers)?;
+            let elastic = reference.elastic().with_material_layers(layers)?;
             thermal.push(ConcentricThermoelasticSection::try_new(elastic.clone(), expansions)?);
-            mechanical.push(elastic.with_shear_modulus(&self.shear_property, segment.shear_correction)?);
+            mechanical.push(reference.with_material_section(elastic)?);
         }
         // Retain the original per-segment inventory and its density receipts.
         // Current rho(T) must not redefine weight on frozen reference geometry.

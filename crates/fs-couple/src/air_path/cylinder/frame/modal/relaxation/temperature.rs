@@ -7,10 +7,10 @@ use crate::render::schedule::force::coupled::coefficients::rates::{
     MaterialRelaxationTime, MaterialRelaxationTimeReport,
 };
 use fs_matdb::{EvaluationDecision, MaterialCard, QueryPoint};
-use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
-use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, ResolvedMaterialStatePoint};
-use fs_qty::{QuantitySpec, Temperature};
+use fs_material::section::ConcentricMaterialLayer;
+use fs_material::state_point::{ResolvedMaterialStatePoint, ResolvedScalarProperty};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{QuantitySpec, Temperature};
 
 /// One original layer's prescribed temperature at an accepted sample boundary.
 /// Supply every bound layer in `members()` order, then spatial layer order.
@@ -67,8 +67,10 @@ impl<F> FrameRelaxationBinding<'_, '_, F> {
     }
 
     pub(super) fn prepare_layer_temperatures(
-        &self, mechanical: &CoupledModalSystem,
-        layers: &[FrameRelaxationLayerTemperature<'_>], gate: &CancelGate,
+        &self,
+        mechanical: &CoupledModalSystem,
+        layers: &[FrameRelaxationLayerTemperature<'_>],
+        gate: &CancelGate,
     ) -> Result<PreparedLayerTemperatures> {
         poll(gate)?;
         let count = self.members.iter().try_fold(0usize, |n, member|
@@ -106,13 +108,14 @@ impl<F> FrameRelaxationBinding<'_, '_, F> {
                 if input.element != member.element || input.layer != layer_index {
                     return Err(invalid("temperature inputs must preserve original member and spatial layer order"));
                 }
-                require_constant_storage(&layer.material, roles)?;
+                let elastic_sources = section.elastic_source_properties(layer_index)?;
+                require_constant_storage(&layer.material, &elastic_sources, roles)?;
                 let point = temperature_query(&layer.material, input.temperature_axis, input.temperature_k)?;
                 let material = layer.material.at_query_point(input.card, &point)?;
-                require_constant_storage(&material, roles)?;
+                require_constant_storage(&material, &elastic_sources, roles)?;
                 next.push(ConcentricMaterialLayer { outer_radius_m: layer.outer_radius_m, material });
             }
-            let source = ConcentricElasticSection::try_new(section.inner_radius_m(), next)?
+            let source = section.with_material_layers(next)?
                 .with_prony_bending(member.source.properties())?;
             let band = source.omega_band_rad_s();
             if band.0 != 0.0 || band.1 < nyquist {
@@ -169,16 +172,29 @@ impl<F> FrameRelaxationBinding<'_, '_, F> {
     }
 }
 
-fn require_constant_storage(material: &ResolvedMaterialStatePoint,
-    roles: &LayerRelaxationProperties) -> Result<()> {
-    for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, roles.equilibrium_modulus.as_str()]
-        .into_iter().chain(roles.branches.iter().map(|pair| pair.0.as_str())) {
-        let property = material.property(name)
-            .ok_or_else(|| invalid("temperature refresh lacks an original storage coefficient"))?;
+fn require_constant_storage(
+    material: &ResolvedMaterialStatePoint,
+    elastic_sources: &[&ResolvedScalarProperty],
+    roles: &LayerRelaxationProperties,
+) -> Result<()> {
+    let require_constant = |property: &ResolvedScalarProperty| {
         if !property.source_axes().is_empty()
             || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity {
             return Err(invalid("rate-only temperature feedback requires source-declared constant density and storage moduli"));
         }
+        Ok(())
+    };
+    for source in elastic_sources {
+        let property = material.properties().iter()
+            .find(|property| property.requirement() == source.requirement())
+            .ok_or_else(|| invalid("temperature refresh lacks an original elastic source requirement"))?;
+        require_constant(property)?;
+    }
+    for name in std::iter::once(roles.equilibrium_modulus.as_str())
+        .chain(roles.branches.iter().map(|pair| pair.0.as_str())) {
+        let property = material.property(name)
+            .ok_or_else(|| invalid("temperature refresh lacks an original storage coefficient"))?;
+        require_constant(property)?;
     }
     Ok(())
 }

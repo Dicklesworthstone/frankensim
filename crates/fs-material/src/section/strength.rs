@@ -17,7 +17,7 @@
 //! thermal eigenstrain, the bending stress of vibration and fatigue are absent.
 
 use super::{ConcentricElasticSection, MaterialStatePointError, invalid, positive};
-use crate::state_point::{ResolvedScalarProperty, YOUNG_MODULUS_PROPERTY};
+use crate::state_point::ResolvedScalarProperty;
 use fs_qty::{Pressure, QuantitySpec};
 
 /// Sourced limits of every layer of one bonded section under axial force.
@@ -103,11 +103,9 @@ impl ConcentricElasticSection {
         let mut layer_limits_pa = Vec::with_capacity(self.layers().len());
         let mut capacity_n = f64::INFINITY;
         let mut governing_layer = 0;
-        for (index, (layer, source)) in self.layers().iter().zip(&sources).enumerate() {
+        for (index, (geometry, source)) in self.layer_integrals().iter().zip(&sources).enumerate() {
             let limit = positive(source.value_si(), "positive finite tensile limit")?;
-            let modulus = layer.material.property(YOUNG_MODULUS_PROPERTY)
-                .ok_or_else(|| invalid("tensile check lost a layer modulus"))?.value_si();
-            let modulus = positive(modulus, "positive finite layer modulus")?;
+            let modulus = geometry.young_modulus_pa();
             let layer_capacity = positive(limit * axial / modulus, "layer axial-force capacity")?;
             if layer_capacity < capacity_n {
                 capacity_n = layer_capacity;

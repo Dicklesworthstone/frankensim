@@ -17,16 +17,21 @@
 pub mod axial;
 pub use axial::SectionAxialState;
 
-use std::collections::BTreeMap;
-use fs_thermal::enthalpy::{Boundary, CellGeometry, CellId, DepositedCell,
-    DepositionBudget, DepositionError, DepositionObserver, DepositionSimulation,
-    EnergyAudit, Event, MaterialId, StepConfig, ThermalLaw, ThermalLink, TimedEvent};
+use super::ConcentricSectionTemperatureLaw;
 use crate::conductor::{ConductorError, OhmicDrive};
 use crate::phase::{PhaseStateError, ResolvedHeatCapacityCurve};
 use crate::section::{ConcentricElasticSection, transport::ElectrothermalSectionResponse};
-use crate::state_point::{DENSITY_PROPERTY, MaterialStatePointError,
-    SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_PROPERTY};
-use super::ConcentricSectionTemperatureLaw;
+#[cfg(test)]
+use crate::state_point::DENSITY_PROPERTY;
+use crate::state_point::{
+    MaterialStatePointError, SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_PROPERTY,
+};
+use fs_thermal::enthalpy::{
+    Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
+    DepositionObserver, DepositionSimulation, EnergyAudit, Event, MaterialId, StepConfig,
+    ThermalLaw, ThermalLink, TimedEvent,
+};
+use std::collections::BTreeMap;
 
 /// Explicit resistance geometry for adjacent annuli `i` and `i + 1`.
 /// The total resistance is `shape[0]/k_i + contact + shape[1]/k_(i+1)`.
@@ -148,17 +153,17 @@ impl<'a> HeatedConcentricSection<'a> {
             if caloric.curve().material_card_identity() != layer.material.card_identity() {
                 return Err(SectionHeatingError::Invalid("caloric and section layer cards differ"));
             }
-            let rho = layer.material.property(DENSITY_PROPERTY)
-                .ok_or(SectionHeatingError::Invalid("layer lacks density"))?.value_si();
+            let density = reference.density_source_property(index)?;
+            let rho = integrals.density_kg_m3();
             if caloric.curve().knots().iter()
                 .any(|k| k.liquid_mass_fraction != 0.0 || k.bulk_density_kg_m3 != rho)
             {
                 return Err(SectionHeatingError::Invalid("fixed section heating requires a solid constant-density caloric span"));
             }
+            let heat_capacity = layer.material.property(SPECIFIC_HEAT_CAPACITY_PROPERTY)
+                .ok_or(SectionHeatingError::Invalid("layer lacks a caloric property"))?;
             for pair in caloric.receipts().chunks_exact(2) {
-                for (receipt, name) in pair.iter().zip([SPECIFIC_HEAT_CAPACITY_PROPERTY, DENSITY_PROPERTY]) {
-                    let property = layer.material.property(name)
-                        .ok_or(SectionHeatingError::Invalid("layer lacks a caloric property"))?;
+                for (receipt, property) in pair.iter().zip([heat_capacity, density]) {
                     if receipt.selected != property.answer().receipt.selected
                         || receipt.axis_quantities != *layer.material.axis_quantities()
                         || !receipt.query_point.iter().filter(|(key, _)| key != &binding.axis)

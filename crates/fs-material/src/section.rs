@@ -35,11 +35,16 @@ pub mod wound;
 /// Rotary inertia and explicitly sourced torsional shear loss.
 pub mod torsion;
 
-use fs_qty::{Density, DynViscosity, Pressure, QuantitySpec};
+#[cfg(test)]
+mod parameter_tests;
+
 use crate::state_point::{
-    DENSITY_PROPERTY, MaterialStatePointError, ResolvedMaterialStatePoint,
-    YOUNG_MODULUS_PROPERTY,
+    DENSITY_PROPERTY, IsotropicElasticParameters, IsotropicElasticStatePoint,
+    MaterialStatePointError, ResolvedMaterialStatePoint, ResolvedScalarProperty,
+    ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY,
 };
+use fs_matdb::PropertyKey;
+use fs_qty::{Density, DynViscosity, Pressure, QuantitySpec};
 
 /// Hard cold-path bound; no work proportional to an unbounded layer count.
 pub const MAX_CONCENTRIC_LAYERS: usize = 128;
@@ -54,10 +59,24 @@ pub struct ConcentricMaterialLayer {
     pub material: ResolvedMaterialStatePoint,
 }
 
+/// Explicit independent elastic source roles for one isotropic section layer.
+/// Derived E/G remain model consequences; no property is added to the source
+/// bundle. Different layers may select different parameterizations and names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerIsotropicParameters {
+    /// Original density requirement, including its consumer admissibility.
+    pub density: ScalarPropertyRequirement,
+    /// Original E/nu, E/G or K/G pair consumed by the shared isotropic projector.
+    pub parameters: IsotropicElasticParameters,
+}
+
 /// The same per-layer integrals used in every aggregate section coefficient.
 /// Their source is the corresponding entry in `ConcentricElasticSection::layers`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElasticLayerIntegrals {
+    density_kg_m3: f64,
+    young_modulus_pa: f64,
+    isotropic_shear_modulus_pa: Option<f64>,
     area_m2: f64,
     second_moment_m4: f64,
     line_density_kg_m: f64,
@@ -65,6 +84,22 @@ pub struct ElasticLayerIntegrals {
     bending_stiffness_n_m2: f64,
 }
 impl ElasticLayerIntegrals {
+    /// Density from this layer's original selected source [kg/m3].
+    #[must_use]
+    pub const fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+    /// Young's modulus [Pa], sourced directly or derived by the explicitly
+    /// selected isotropic law. It is not an additional measured property.
+    #[must_use]
+    pub const fn young_modulus_pa(&self) -> f64 {
+        self.young_modulus_pa
+    }
+    /// G [Pa] from the same explicit isotropic projection, when one was selected.
+    #[must_use]
+    pub const fn isotropic_shear_modulus_pa(&self) -> Option<f64> {
+        self.isotropic_shear_modulus_pa
+    }
     /// Layer cross-sectional area [m2].
     #[must_use]
     pub const fn area_m2(&self) -> f64 { self.area_m2 }
@@ -87,6 +122,7 @@ impl ElasticLayerIntegrals {
 pub struct ConcentricElasticSection {
     inner_radius_m: f64,
     layers: Vec<ConcentricMaterialLayer>,
+    isotropic_parameters: Option<Vec<LayerIsotropicParameters>>,
     layer_integrals: Vec<ElasticLayerIntegrals>,
     area_m2: f64,
     second_moment_m4: f64,
@@ -114,6 +150,31 @@ impl ConcentricElasticSection {
         inner_radius_m: f64,
         layers: Vec<ConcentricMaterialLayer>,
     ) -> Result<Self, MaterialStatePointError> {
+        Self::build(inner_radius_m, layers, None)
+    }
+
+    /// Build the SAME section using explicit per-layer density and isotropic
+    /// source roles. The existing material projector owns E/nu/E/G/K/G algebra,
+    /// stability and quantity checks; all auxiliary source properties survive.
+    /// No pair is guessed and no derived value becomes a measured claim.
+    pub fn try_new_with_isotropic_parameters(
+        inner_radius_m: f64,
+        layers: Vec<ConcentricMaterialLayer>,
+        parameters: &[LayerIsotropicParameters],
+    ) -> Result<Self, MaterialStatePointError> {
+        if parameters.len() != layers.len() {
+            return Err(invalid(
+                "section needs one explicit isotropic binding per layer",
+            ));
+        }
+        Self::build(inner_radius_m, layers, Some(parameters.to_vec()))
+    }
+
+    fn build(
+        inner_radius_m: f64,
+        layers: Vec<ConcentricMaterialLayer>,
+        isotropic_parameters: Option<Vec<LayerIsotropicParameters>>,
+    ) -> Result<Self, MaterialStatePointError> {
         if !inner_radius_m.is_finite() || inner_radius_m < 0.0 {
             return Err(invalid("finite nonnegative section bore radius"));
         }
@@ -127,7 +188,7 @@ impl ConcentricElasticSection {
         let mut axial = 0.0;
         let mut bending = 0.0;
         let mut layer_integrals = Vec::with_capacity(layers.len());
-        for layer in &layers {
+        for (index, layer) in layers.iter().enumerate() {
             let outer = layer.outer_radius_m;
             if !outer.is_finite() || outer <= inner {
                 return Err(invalid("section radii must be finite and strictly increasing"));
@@ -140,8 +201,33 @@ impl ConcentricElasticSection {
                 }
                 positive(resolved.value_si(), "positive finite section layer property")
             };
-            let rho = property(DENSITY_PROPERTY, QuantitySpec::dimensional(Density::DIMS))?;
-            let young = property(YOUNG_MODULUS_PROPERTY, QuantitySpec::dimensional(Pressure::DIMS))?;
+            let (rho, young, shear) = if let Some(bindings) = &isotropic_parameters {
+                let binding = &bindings[index];
+                let state = IsotropicElasticStatePoint::try_from_resolved_with_parameters(
+                    layer.material.clone(),
+                    &binding.density,
+                    &binding.parameters,
+                )?;
+                (
+                    state.density_kg_m3(),
+                    state.young_modulus_pa(),
+                    Some(
+                        state
+                            .derivation()
+                            .expect("explicit parameter projection")
+                            .shear_modulus_pa(),
+                    ),
+                )
+            } else {
+                (
+                    property(DENSITY_PROPERTY, QuantitySpec::dimensional(Density::DIMS))?,
+                    property(
+                        YOUNG_MODULUS_PROPERTY,
+                        QuantitySpec::dimensional(Pressure::DIMS),
+                    )?,
+                    None,
+                )
+            };
             // Factored annular differences avoid cancellation of nearly equal
             // squared/fourth powers when a thin layer is still representable.
             let a = positive(core::f64::consts::PI * (outer - inner) * (outer + inner), "annular area")?;
@@ -155,13 +241,157 @@ impl ConcentricElasticSection {
             axial = positive(axial + layer_axial, "section axial stiffness")?;
             bending = positive(bending + layer_bending, "section bending stiffness")?;
             layer_integrals.push(ElasticLayerIntegrals {
+                density_kg_m3: rho, young_modulus_pa: young, isotropic_shear_modulus_pa: shear,
                 area_m2: a, second_moment_m4: i, line_density_kg_m: layer_mass,
                 axial_stiffness_n: layer_axial, bending_stiffness_n_m2: layer_bending,
             });
             inner = outer;
         }
-        Ok(Self { inner_radius_m, layers, layer_integrals, area_m2: area, second_moment_m4: inertia,
+        Ok(Self { inner_radius_m, layers, isotropic_parameters, layer_integrals, area_m2: area, second_moment_m4: inertia,
             line_density_kg_m: line_density, axial_stiffness_n: axial, bending_stiffness_n_m2: bending })
+    }
+
+    /// Explicit layer parameterizations, or None for the original density/E
+    /// source binding. This distinction survives every ordinary material update.
+    #[must_use]
+    pub fn isotropic_parameters(&self) -> Option<&[LayerIsotropicParameters]> {
+        self.isotropic_parameters.as_deref()
+    }
+
+    /// Rebuild all coefficients from replacement complete source bundles while
+    /// retaining exact geometry and physical source roles. Material substitutions
+    /// are explicit in `layers`; this does not itself query cards or evolve mass.
+    /// A changed layer count/radius or unsupported parameter set refuses before
+    /// any candidate is published.
+    pub fn with_material_layers(
+        &self,
+        layers: Vec<ConcentricMaterialLayer>,
+    ) -> Result<Self, MaterialStatePointError> {
+        if layers.len() != self.layers.len()
+            || layers
+                .iter()
+                .zip(&self.layers)
+                .any(|(a, b)| a.outer_radius_m.to_bits() != b.outer_radius_m.to_bits())
+        {
+            return Err(invalid(
+                "section material refresh must retain its exact layer geometry",
+            ));
+        }
+        Self::build(
+            self.inner_radius_m,
+            layers,
+            self.isotropic_parameters.clone(),
+        )
+    }
+
+    /// Original density source for a layer, using its exact admitted key.
+    pub fn density_source_property(
+        &self,
+        layer: usize,
+    ) -> Result<&ResolvedScalarProperty, MaterialStatePointError> {
+        let source = self
+            .layers
+            .get(layer)
+            .ok_or_else(|| invalid("section layer index is out of range"))?;
+        let key = if let Some(bindings) = &self.isotropic_parameters {
+            PropertyKey::new(bindings[layer].density.name(), Density::DIMS)
+        } else {
+            PropertyKey::new(DENSITY_PROPERTY, Density::DIMS)
+        };
+        source
+            .material
+            .property_by_key(&key)
+            .ok_or_else(|| invalid("section lost its original density source"))
+    }
+
+    /// Original properties actually consumed by this layer's mass and Young's
+    /// response. K/G contributes both parents; E/nu and E/G contribute E only.
+    /// Constancy, frequency and source-path consumers use these receipts rather
+    /// than looking for a fictitious derived Young's-modulus claim.
+    pub fn elastic_source_properties(
+        &self,
+        layer: usize,
+    ) -> Result<Vec<&ResolvedScalarProperty>, MaterialStatePointError> {
+        let mut result = vec![self.density_source_property(layer)?];
+        if let Some(bindings) = &self.isotropic_parameters {
+            let parameters = &bindings[layer].parameters;
+            let requirements: Vec<_> = match parameters {
+                IsotropicElasticParameters::YoungPoisson { young_modulus, .. }
+                | IsotropicElasticParameters::YoungShear { young_modulus, .. } => {
+                    vec![young_modulus]
+                }
+                IsotropicElasticParameters::BulkShear { .. } => parameters.requirements().to_vec(),
+            };
+            for requirement in requirements {
+                result.push(
+                    self.layers[layer]
+                        .material
+                        .property_by_key(&PropertyKey::new(requirement.name(), requirement.dims()))
+                        .ok_or_else(|| invalid("section lost an original elastic source"))?,
+                );
+            }
+        } else {
+            result.push(
+                self.layers[layer]
+                    .material
+                    .property(YOUNG_MODULUS_PROPERTY)
+                    .ok_or_else(|| invalid("section lost its original Young's modulus"))?,
+            );
+        }
+        Ok(result)
+    }
+
+    /// A directly sourced E response, when the selected parameterization has
+    /// one. A K/G response returns None: its generally nonlinear thermal
+    /// derivative must not be mistaken for a measured affine E curve.
+    pub fn young_modulus_source_property(
+        &self,
+        layer: usize,
+    ) -> Result<Option<&ResolvedScalarProperty>, MaterialStatePointError> {
+        let properties = self.elastic_source_properties(layer)?;
+        if self.isotropic_parameters.as_ref().is_some_and(|bindings| {
+            matches!(
+                bindings[layer].parameters,
+                IsotropicElasticParameters::BulkShear { .. }
+            )
+        }) {
+            Ok(None)
+        } else {
+            Ok(Some(properties[1]))
+        }
+    }
+
+    fn named_shear_source_property(
+        &self,
+        layer: usize,
+        property_name: &str,
+    ) -> Result<&ResolvedScalarProperty, MaterialStatePointError> {
+        let source = self
+            .layers
+            .get(layer)
+            .ok_or_else(|| invalid("section layer index is out of range"))?;
+        let property = if let Some(bindings) = &self.isotropic_parameters {
+            let requirement = match &bindings[layer].parameters {
+                IsotropicElasticParameters::YoungShear { shear_modulus, .. }
+                | IsotropicElasticParameters::BulkShear { shear_modulus, .. } => shear_modulus,
+                IsotropicElasticParameters::YoungPoisson { .. } => {
+                    return Err(invalid(
+                        "E/nu sections must use their original derived isotropic shear",
+                    ));
+                }
+            };
+            if property_name != requirement.name() {
+                return Err(invalid(
+                    "named shear must be the original G source of the isotropic parameter pair",
+                ));
+            }
+            source
+                .material
+                .property_by_key(&PropertyKey::new(requirement.name(), requirement.dims()))
+        } else {
+            source.material.property(property_name)
+        };
+        property.ok_or_else(|| invalid("every layer needs its unambiguous selected shear source"))
     }
 
     /// Original ordered material assignments; no averaged material receipt.
@@ -197,6 +427,10 @@ impl ConcentricElasticSection {
     /// rod reduction; `GJ = sum(G * 2I)` is circular Saint-Venant torsion.
     /// The correction is authored geometry/model data, not a material property.
     /// No Poisson ratio, shear correction, or material-name preset is inferred.
+    /// For an explicit E/G or K/G binding, the name must select its original G
+    /// requirement. E/nu bindings instead use `with_isotropic_shear`. A separate
+    /// G with the same sampled value cannot replace the original source support
+    /// or thermal derivatives. Legacy density/E sections can bind independent G.
     ///
     /// # Errors
     /// Missing, ambiguous, nonpositive or wrong-quantity shear data, correction
@@ -210,9 +444,8 @@ impl ConcentricElasticSection {
         if shear_correction > 1.0 { return Err(invalid("shear correction must not exceed one")); }
         let mut shear = 0.0;
         let mut torsion = 0.0;
-        for (layer, geometry) in self.layers.iter().zip(&self.layer_integrals) {
-            let property = layer.material.property(property_name)
-                .ok_or_else(|| invalid("every layer needs an unambiguous shear modulus"))?;
+        for (index, geometry) in self.layer_integrals.iter().enumerate() {
+            let property = self.named_shear_source_property(index, property_name)?;
             if property.requirement().quantity() != QuantitySpec::dimensional(Pressure::DIMS) {
                 return Err(invalid("section shear modulus must be dimension-only Pa"));
             }
@@ -224,8 +457,47 @@ impl ConcentricElasticSection {
         }
         let shear_stiffness_n = positive(shear_correction * shear, "corrected shear stiffness")?;
         Ok(ConcentricShearSection {
-            elastic: self, shear_property: property_name.into(), shear_correction,
+            elastic: self, shear_property: Some(property_name.into()), shear_correction,
             shear_stiffness_n, torsional_stiffness_n_m2: torsion,
+        })
+    }
+
+    /// Use G from each layer's SAME explicit isotropic parameterization. This
+    /// consumes no separate shear claim and preserves original K/G exactly.
+    /// E-only sections refuse because they do not determine shear response.
+    pub fn with_isotropic_shear(
+        self,
+        shear_correction: f64,
+    ) -> Result<ConcentricShearSection, MaterialStatePointError> {
+        positive(shear_correction, "finite positive shear correction")?;
+        if shear_correction > 1.0 {
+            return Err(invalid("shear correction must not exceed one"));
+        }
+        let mut shear = 0.0;
+        let mut torsion = 0.0;
+        for layer in &self.layer_integrals {
+            let modulus = layer.isotropic_shear_modulus_pa.ok_or_else(|| {
+                invalid("derived shear requires an explicit isotropic binding on every layer")
+            })?;
+            shear = positive(
+                shear + positive(modulus * layer.area_m2, "layer shear stiffness")?,
+                "summed shear stiffness",
+            )?;
+            torsion = positive(
+                torsion
+                    + positive(
+                        2.0 * (modulus * layer.second_moment_m4),
+                        "layer torsional stiffness",
+                    )?,
+                "summed torsional stiffness",
+            )?;
+        }
+        Ok(ConcentricShearSection {
+            elastic: self,
+            shear_property: None,
+            shear_correction,
+            shear_stiffness_n: positive(shear_correction * shear, "corrected shear stiffness")?,
+            torsional_stiffness_n_m2: torsion,
         })
     }
 
@@ -251,7 +523,8 @@ impl ConcentricElasticSection {
         let mut band = (0.0_f64, f64::MAX);
         let mut viscous_stiffness_n_m2_s = 0.0;
         let mut layer_viscous_stiffness_n_m2_s = Vec::with_capacity(self.layers.len());
-        for (layer, geometry) in self.layers.iter().zip(&self.layer_integrals) {
+        for (index, (layer, geometry)) in self.layers.iter().zip(&self.layer_integrals).enumerate()
+        {
             let viscosity = layer.material.property(viscosity_property)
                 .ok_or_else(|| invalid("every layer needs an unambiguous bending viscosity"))?;
             let eta = viscosity.value_si();
@@ -264,9 +537,11 @@ impl ConcentricElasticSection {
                 .map_err(|_| invalid("invalid bending-viscosity frequency semantics"))?
                 .ok_or_else(|| invalid("each bending viscosity needs an explicit frequency validity band"))?;
             band = (band.0.max(eta_band.0), band.1.min(eta_band.1));
-            for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, viscosity_property] {
-                let coefficient = layer.material.property(key)
-                    .ok_or_else(|| invalid("layer bending law needs density, modulus and viscosity"))?;
+            for coefficient in self
+                .elastic_source_properties(index)?
+                .into_iter()
+                .chain([viscosity])
+            {
                 if !coefficient.is_constant_at_fixed_environment() {
                     return Err(invalid("layer bending coefficients need a held, explicitly typed environment and no unowned response dependence"));
                 }
@@ -302,7 +577,7 @@ impl ConcentricElasticSection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConcentricShearSection {
     elastic: ConcentricElasticSection,
-    shear_property: String,
+    shear_property: Option<String>,
     shear_correction: f64,
     shear_stiffness_n: f64,
     torsional_stiffness_n_m2: f64,
@@ -311,9 +586,88 @@ impl ConcentricShearSection {
     /// Common geometry and every original material bundle.
     #[must_use]
     pub const fn elastic(&self) -> &ConcentricElasticSection { &self.elastic }
-    /// Explicitly selected shear-modulus property name.
+    /// Explicitly selected shear-modulus property, or None when the original
+    /// isotropic pair determines G. Derived G is not a measured property name.
     #[must_use]
-    pub fn shear_property(&self) -> &str { &self.shear_property }
+    pub fn shear_property(&self) -> Option<&str> {
+        self.shear_property.as_deref()
+    }
+    /// Rebuild the original shear binding over the same section geometry and
+    /// elastic parameter roles. No switch between sourced and derived G occurs.
+    pub fn with_material_section(
+        &self,
+        elastic: ConcentricElasticSection,
+    ) -> Result<Self, MaterialStatePointError> {
+        if elastic.inner_radius_m.to_bits() != self.elastic.inner_radius_m.to_bits()
+            || elastic.isotropic_parameters != self.elastic.isotropic_parameters
+            || elastic.layers.len() != self.elastic.layers.len()
+            || elastic
+                .layers
+                .iter()
+                .zip(&self.elastic.layers)
+                .any(|(a, b)| a.outer_radius_m.to_bits() != b.outer_radius_m.to_bits())
+        {
+            return Err(invalid(
+                "shear refresh must retain original geometry and elastic source roles",
+            ));
+        }
+        match self.shear_property() {
+            Some(property) => elastic.with_shear_modulus(property, self.shear_correction),
+            None => elastic.with_isotropic_shear(self.shear_correction),
+        }
+    }
+    /// Original mass and shear parents for constant-law/source-support checks.
+    pub fn source_properties(
+        &self,
+        layer: usize,
+    ) -> Result<Vec<&ResolvedScalarProperty>, MaterialStatePointError> {
+        let mut result = vec![self.elastic.density_source_property(layer)?];
+        let material = &self.elastic.layers[layer].material;
+        if let Some(property) = self.shear_property() {
+            result.push(self.elastic.named_shear_source_property(layer, property)?);
+        } else {
+            let parameters = &self
+                .elastic
+                .isotropic_parameters
+                .as_ref()
+                .ok_or_else(|| invalid("section lost its isotropic shear binding"))?[layer]
+                .parameters;
+            let requirements: Vec<_> = match parameters {
+                IsotropicElasticParameters::YoungShear { shear_modulus, .. }
+                | IsotropicElasticParameters::BulkShear { shear_modulus, .. } => {
+                    vec![shear_modulus]
+                }
+                IsotropicElasticParameters::YoungPoisson { .. } => {
+                    parameters.requirements().to_vec()
+                }
+            };
+            for requirement in requirements {
+                result.push(
+                    material
+                        .property_by_key(&PropertyKey::new(requirement.name(), requirement.dims()))
+                        .ok_or_else(|| invalid("section lost an isotropic shear parent"))?,
+                );
+            }
+        }
+        Ok(result)
+    }
+    /// Original per-layer G [Pa], without recovering it from rounded GJ/A/I.
+    pub fn layer_shear_modulus_pa(&self, layer: usize) -> Result<f64, MaterialStatePointError> {
+        let geometry = self
+            .elastic
+            .layer_integrals
+            .get(layer)
+            .ok_or_else(|| invalid("section layer index is out of range"))?;
+        match self.shear_property() {
+            Some(property) => self
+                .elastic
+                .named_shear_source_property(layer, property)
+                .map(ResolvedScalarProperty::value_si),
+            None => geometry
+                .isotropic_shear_modulus_pa
+                .ok_or_else(|| invalid("section lost its derived shear modulus")),
+        }
+    }
     /// Authored uniform-shear correction.
     #[must_use]
     pub const fn shear_correction(&self) -> f64 { self.shear_correction }

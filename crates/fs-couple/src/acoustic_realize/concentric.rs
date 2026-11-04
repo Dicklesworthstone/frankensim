@@ -22,29 +22,36 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
-use super::{AcousticRealizeError, LinearMember, MaterialStringFrame, ModalAcousticMode,
-    ModalAcousticState, Pluck, PrestressedString, StringDissipation, StringPointForce,
-    StringPointMotion, linear_accelerations, linear_string_member, next_string_epoch,
-    partition_string_dissipation, validate_external_gas, validate_incremental_string,
-    validate_string, validate_string_station, string_point_participation};
+use super::{
+    AcousticRealizeError, LinearMember, MaterialStringFrame, ModalAcousticMode, ModalAcousticState,
+    Pluck, PrestressedString, StringDissipation, StringPointForce, StringPointMotion,
+    linear_accelerations, linear_string_member, next_string_epoch, partition_string_dissipation,
+    string_point_participation, validate_external_gas, validate_incremental_string,
+    validate_string, validate_string_station,
+};
 use crate::material_assembly::concentric::with_concentric_kelvin_voigt_section;
 use crate::string_specimen::{KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, StringPrestress};
 use fs_exec::Cx;
 use fs_material::conductor::{ConductorError, OhmicDrive};
 use fs_material::gas::GasState;
-use fs_material::phase::{MAX_HEAT_CAPACITY_ENTHALPY_KNOTS, PhaseStateError, ResolvedHeatCapacityCurve};
-use fs_material::thermochemical_gas::energy::GasEnergyError;
+use fs_material::phase::{
+    MAX_HEAT_CAPACITY_ENTHALPY_KNOTS, PhaseStateError, ResolvedHeatCapacityCurve,
+};
 use fs_material::section::ConcentricKelvinVoigtSection;
 use fs_material::section::transport::ElectrothermalSectionResponse;
-use fs_material::section_temperature::thermoelastic::{ConcentricThermoelasticLaw,
-    ConcentricThermoelasticState};
-use fs_material::state_point::{DENSITY_PROPERTY, MaterialStatePointError,
-    SPECIFIC_HEAT_CAPACITY_PROPERTY};
+use fs_material::section_temperature::thermoelastic::{
+    ConcentricThermoelasticLaw, ConcentricThermoelasticState,
+};
+use fs_material::state_point::{MaterialStatePointError, SPECIFIC_HEAT_CAPACITY_PROPERTY};
+use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
-use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport,
-    SolverRunProgress};
-use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit,
-    backward_euler::{BackwardEulerStep, StepCoefficients}};
+use fs_solver::{
+    NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
+};
+use fs_thermal::enthalpy::{
+    CellId, DepositionError, DepositionSimulation, EnergyAudit,
+    backward_euler::{BackwardEulerStep, StepCoefficients},
+};
 
 /// One original source-backed caloric cell for one annulus, in spatial order.
 #[derive(Clone, Copy)]
@@ -502,10 +509,19 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
             roundoff_tolerance_j: roundoff })
     }
 
-    fn admit_cells<E>(&self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>) -> Result<(), ConcentricStringError<E>> {
+    fn admit_cells<E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<(), ConcentricStringError<E>> {
         let mut ids = BTreeSet::new();
-        for ((binding, layer), geometry) in self.bindings.iter()
-            .zip(self.source.section.section().layers()).zip(self.source.section.section().layer_integrals()) {
+        for (index, ((binding, layer), geometry)) in self
+            .bindings
+            .iter()
+            .zip(self.source.section.section().layers())
+            .zip(self.source.section.section().layer_integrals())
+            .enumerate()
+        {
             checkpoint(cx)?;
             if !ids.insert(binding.cell) { return Err(invalid("layer thermal cells must be distinct")); }
             let cell = thermal.cells().get(&binding.cell).ok_or(invalid("missing layer thermal cell"))?;
@@ -519,9 +535,17 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
             let actual = layer.material.query_point().iter().find(|(key, _)| key == "T")
                 .ok_or(invalid("layer source lacks canonical absolute temperature"))?.1;
             if temperature.to_bits() != actual.to_bits() { return Err(invalid("thermal and mechanical layer temperatures differ")); }
+            let density = self
+                .source
+                .section
+                .section()
+                .density_source_property(index)?;
+            let heat_capacity = layer
+                .material
+                .property(SPECIFIC_HEAT_CAPACITY_PROPERTY)
+                .ok_or(invalid("layer lacks its original caloric property"))?;
             for pair in binding.caloric.receipts().chunks_exact(2) {
-                for (receipt, name) in pair.iter().zip([SPECIFIC_HEAT_CAPACITY_PROPERTY, DENSITY_PROPERTY]) {
-                    let property = layer.material.property(name).ok_or(invalid("layer lacks its original caloric property"))?;
+                for (receipt, property) in pair.iter().zip([heat_capacity, density]) {
                     if receipt.selected != property.answer().receipt.selected
                         || receipt.axis_quantities != *layer.material.axis_quantities()
                         || !receipt.query_point.iter().filter(|(key, _)| key != "T")

@@ -21,15 +21,14 @@
 /// Complete axial, bending, shear and torsional potentials of the same layers.
 pub mod rod;
 
-use fs_matdb::{InterpolationPolicy, PropertyValue};
+use fs_matdb::{InterpolationPolicy, MaterialCard, PropertyValue};
 
 use super::{ConcentricSectionTemperatureLaw, invalid};
 use crate::phase::MAX_HEAT_CAPACITY_ENTHALPY_KNOTS;
 use crate::section::{ConcentricElasticSection, thermal::ConcentricThermoelasticSection};
 use crate::state_point::{
-    DENSITY_PROPERTY, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as ALPHA,
-    MaterialStatePointError, YOUNG_MODULUS_PROPERTY,
-    affine_temperature_slope, pinned_temperature_line,
+    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as ALPHA, MaterialStatePointError,
+    ResolvedScalarProperty, affine_temperature_slope, pinned_temperature_line,
 };
 
 /// Original section/card bindings and admitted constitutive derivatives.
@@ -98,33 +97,43 @@ impl<'a> ConcentricThermoelasticLaw<'a> {
         // requirement of the existing thermal-section owner, even at zero span.
         temperature.thermoelastic_at_temperatures_k(&temperatures)?;
         let mut slopes = Vec::with_capacity(temperature.bindings.len());
-        for ((binding, layer), &reference_k) in temperature.bindings.iter()
-            .zip(temperature.reference.layers()).zip(&temperatures)
+        for (index, ((binding, layer), &reference_k)) in temperature
+            .bindings
+            .iter()
+            .zip(temperature.reference.layers())
+            .zip(&temperatures)
+            .enumerate()
         {
-            for name in [DENSITY_PROPERTY, ALPHA] {
-                let property = layer.material.property(name)
-                    .ok_or_else(|| invalid("thermoelastic layer lacks density or explicit expansion"))?;
-                let claim = binding.card.claims().claim(property.answer().receipt.selected)
-                    .ok_or_else(|| invalid("thermoelastic layer source claim is absent"))?;
-                if !matches!(claim.value, PropertyValue::Scalar { .. }) {
+            let density = temperature.reference.density_source_property(index)?;
+            let alpha = layer
+                .material
+                .property(ALPHA)
+                .ok_or_else(|| invalid("thermoelastic layer lacks explicit expansion"))?;
+            for property in [density, alpha] {
+                if !scalar_source(binding.card, property)? {
                     return Err(invalid("live section thermodynamics requires scalar reference density and scalar expansion"));
                 }
             }
-            let modulus = layer.material.property(YOUNG_MODULUS_PROPERTY)
-                .ok_or_else(|| invalid("thermoelastic layer lacks Young's modulus"))?;
-            let claim = binding.card.claims().claim(modulus.answer().receipt.selected)
-                .ok_or_else(|| invalid("thermoelastic elastic source claim is absent"))?;
-            let slope = match &claim.value {
-                PropertyValue::Scalar { .. } => 0.0,
-                PropertyValue::Curve { abscissa, abscissa_dims, knots, .. }
-                    if abscissa == "T" && *abscissa_dims == fs_qty::Temperature::DIMS
-                        && claim.interpolation == InterpolationPolicy::LinearInside
-                        && knots.len() <= MAX_HEAT_CAPACITY_ENTHALPY_KNOTS =>
-                {
-                    affine_temperature_slope(knots, reference_k, modulus.value_si())
-                        .map_err(invalid)?
+            let slope = match temperature.reference.young_modulus_source_property(index)? {
+                Some(modulus) => affine_modulus_slope(binding.card, reference_k, modulus)?,
+                None => {
+                    // Even affine K(T)/G(T) generally produce nonlinear E(T).
+                    // This affine potential admits their scalar special case;
+                    // ordinary section refresh retains the full varying model.
+                    for parent in temperature
+                        .reference
+                        .elastic_source_properties(index)?
+                        .into_iter()
+                        .skip(1)
+                    {
+                        if !scalar_source(binding.card, parent)? {
+                            return Err(invalid(
+                                "live section thermodynamics requires scalar K/G; derived nonlinear E needs its own thermal derivatives",
+                            ));
+                        }
+                    }
+                    0.0
                 }
-                _ => return Err(invalid("live section modulus must be scalar or one bounded globally affine temperature curve")),
             };
             slopes.push(slope);
         }
@@ -147,7 +156,10 @@ impl<'a> ConcentricThermoelasticLaw<'a> {
     /// Invalid source support, excessive total/thermal/elastic strain or
     /// unrepresentable arithmetic returns no partially resolved state.
     pub fn at_temperatures_k(
-        &self, temperatures_k: &[f64], total_axial_strain: f64, linear_strain_limit: f64,
+        &self,
+        temperatures_k: &[f64],
+        total_axial_strain: f64,
+        linear_strain_limit: f64,
     ) -> Result<ConcentricThermoelasticState, MaterialStatePointError> {
         let section = self.temperature.thermoelastic_at_temperatures_k(temperatures_k)?;
         let response = section.response_at_axial_strain(total_axial_strain, linear_strain_limit)?;
@@ -159,9 +171,7 @@ impl<'a> ConcentricThermoelasticLaw<'a> {
             let point = layer.material.query();
             // Endpoint resolution alone cannot cross an unsupported source cell.
             // Alpha's complete path was already checked by the expansion owner.
-            for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
-                let property = layer.material.property(name)
-                    .ok_or_else(|| invalid("resolved thermoelastic layer lost its original property"))?;
+            for property in section.section().elastic_source_properties(index)? {
                 let claim = binding.card.claims().claim(property.answer().receipt.selected)
                     .ok_or_else(|| invalid("resolved thermoelastic layer lost its source claim"))?;
                 pinned_temperature_line(binding.card, &claim.key, "T", &binding.point,
@@ -169,9 +179,9 @@ impl<'a> ConcentricThermoelasticLaw<'a> {
             }
             let value = |name| layer.material.property(name).map(|property| property.value_si())
                 .ok_or_else(|| invalid("resolved thermoelastic layer is missing a coefficient"));
-            let young = value(YOUNG_MODULUS_PROPERTY)?;
+            let young = integral.young_modulus_pa();
             let alpha = value(ALPHA)?;
-            let rho = value(DENSITY_PROPERTY)?;
+            let rho = integral.density_kg_m3();
             let slope = self.modulus_slopes_pa_k[index];
             let area = integral.area_m2();
             let strain = axial.elastic_strain();
@@ -190,6 +200,46 @@ impl<'a> ConcentricThermoelasticLaw<'a> {
             });
         }
         Ok(ConcentricThermoelasticState { section, layers })
+    }
+}
+
+fn scalar_source(
+    card: &MaterialCard,
+    property: &ResolvedScalarProperty,
+) -> Result<bool, MaterialStatePointError> {
+    let claim = card
+        .claims()
+        .claim(property.answer().receipt.selected)
+        .ok_or_else(|| invalid("thermoelastic source claim is absent"))?;
+    Ok(matches!(claim.value, PropertyValue::Scalar { .. }))
+}
+
+fn affine_modulus_slope(
+    card: &MaterialCard,
+    reference_k: f64,
+    property: &ResolvedScalarProperty,
+) -> Result<f64, MaterialStatePointError> {
+    let claim = card
+        .claims()
+        .claim(property.answer().receipt.selected)
+        .ok_or_else(|| invalid("thermoelastic elastic source claim is absent"))?;
+    match &claim.value {
+        PropertyValue::Scalar { .. } => Ok(0.0),
+        PropertyValue::Curve {
+            abscissa,
+            abscissa_dims,
+            knots,
+            ..
+        } if abscissa == "T"
+            && *abscissa_dims == fs_qty::Temperature::DIMS
+            && claim.interpolation == InterpolationPolicy::LinearInside
+            && knots.len() <= MAX_HEAT_CAPACITY_ENTHALPY_KNOTS =>
+        {
+            affine_temperature_slope(knots, reference_k, property.value_si()).map_err(invalid)
+        }
+        _ => Err(invalid(
+            "live section modulus must be scalar or one bounded globally affine temperature curve",
+        )),
     }
 }
 

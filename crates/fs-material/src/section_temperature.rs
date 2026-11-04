@@ -108,7 +108,7 @@ impl<'a> ConcentricSectionTemperatureLaw<'a> {
             let material = geometry.material.at_query_point(binding.card, &point)?;
             layers.push(ConcentricMaterialLayer { outer_radius_m: geometry.outer_radius_m, material });
         }
-        ConcentricElasticSection::try_new(self.reference.inner_radius_m(), layers)
+        self.reference.with_material_layers(layers)
     }
 }
 

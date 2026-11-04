@@ -4171,6 +4171,23 @@ their original ownership independently of a consumer's contact-face selection.
 
 `PreparedRodMotion::rebind_material_temperatures` refreshes section response through the original `RodMaterialSource`, retaining reference inventory, intrinsic geometry, supports, attached links, gravity and hydrostatic displacement. It admits the exact reference material description and verifies replay of current section claims, expansion paths and strain bounds before resolving a new temperature field. Original unheated reference sections may acquire their explicit thermal binding. The source owner re-evaluates E/rho/G and integrates expansion from the original stress-free reference; current density does not redefine closed-body mass or rotary inertia. `strain_energy_j` evaluates the original conservative strain-storage owner at an admitted dynamic pose. Section geometry, reference displaced volume and separately bound tension-link material states remain fixed.
 
+`LayerIsotropicParameters` explicitly selects each layer's density key and E/nu,
+E/G or K/G source pair. Material frames, spatial rods, tension links and prepared
+rod motion consume the shared section integrals and check the original source
+parents, preserving their state and frequency restrictions without requiring
+canonical density/E/G names. `RodMaterialSource::try_new_with_isotropic_parameters`
+accepts these bindings in segment/layer order. Temperature refresh retains their
+roles, complete pinned requirements, geometry and reference mass/rotary inertia,
+and integrates the same expansion source from the original stress-free reference.
+`thermoelastic_laws` preserves those bindings through the existing potential:
+scalar reference density and expansion, with affine direct E/G, affine E and
+scalar nu, or scalar K/G. K/G with non-scalar parents, or E/nu with non-scalar
+nu, refuses this thermal potential; prescribed-temperature section refresh
+still evaluates supported source curves through the shared projector.
+`tests/isotropic_sections.rs` and `tests/rod_material_source.rs` cover source-role
+continuity, native mechanical response, reference inventory and these thermal
+admission boundaries using synthetic data.
+
 ## Native rod strains and source thermoelastic lowering
 
 `RodMaterialSource::thermoelastic_laws` lowers each original concentric segment/layer through the same pinned mechanical and thermal-expansion data into the complete material thermoelastic law. `PreparedRodMotion::segment_strain_states` returns the actual-pose axial, bending, shear and torsional strains and section energy through the existing native kinematic and energy owners. Neither path introduces a replacement rod model, effective material, or extra trajectory.

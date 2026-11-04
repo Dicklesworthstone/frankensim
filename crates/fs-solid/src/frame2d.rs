@@ -829,16 +829,20 @@ impl Frame2d {
         np: usize,
         section: ConcentricElasticSection,
     ) -> Result<usize, SolidError> {
-        use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
         let mut rotary_inertia_per_length = 0.0;
-        for (index, layer) in section.layers().iter().enumerate() {
-            for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
+        for (index, geometry) in section.layer_integrals().iter().enumerate() {
+            let properties = section.elastic_source_properties(index).map_err(|error| {
+                SolidError::MaterialRefused {
+                    what: error.to_string(),
+                }
+            })?;
+            for property in properties {
+                let name = property.requirement().name();
                 let refused = || SolidError::MaterialRefused {
                     what: format!(
                         "frame layer {index} property {name} needs a frozen elastic coefficient without a frequency restriction"
                     ),
                 };
-                let property = layer.material.property(name).ok_or_else(refused)?;
                 if !property.is_constant_at_fixed_temperature()
                     || property
                         .angular_frequency_band_rad_s()
@@ -847,21 +851,18 @@ impl Frame2d {
                 {
                     return Err(refused());
                 }
-                if name == DENSITY_PROPERTY {
-                    let contribution =
-                        property.value_si() * section.layer_integrals()[index].second_moment_m4();
-                    rotary_inertia_per_length += contribution;
-                    if !contribution.is_finite()
-                        || contribution <= 0.0
-                        || !rotary_inertia_per_length.is_finite()
-                    {
-                        return Err(SolidError::MaterialRefused {
-                            what: format!(
-                                "frame layer {index} has unrepresentable sectional rotary inertia"
-                            ),
-                        });
-                    }
-                }
+            }
+            let contribution = geometry.density_kg_m3() * geometry.second_moment_m4();
+            rotary_inertia_per_length += contribution;
+            if !contribution.is_finite()
+                || contribution <= 0.0
+                || !rotary_inertia_per_length.is_finite()
+            {
+                return Err(SolidError::MaterialRefused {
+                    what: format!(
+                        "frame layer {index} has unrepresentable sectional rotary inertia"
+                    ),
+                });
             }
         }
         // Check the values before the original mutating constructor. It keeps
@@ -1780,4 +1781,3 @@ mod damping_admission_tests {
         }
     }
 }
-

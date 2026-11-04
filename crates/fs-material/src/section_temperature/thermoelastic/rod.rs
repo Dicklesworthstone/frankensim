@@ -7,20 +7,19 @@
 //! strain heat-capacity correction is zero. No thermal/motion integrator lives
 //! here; geometry, source pins and physical shear correction remain unchanged.
 
-use super::{ConcentricThermoelasticLaw, ConcentricThermoelasticState, finite, invalid};
+use super::{
+    ConcentricThermoelasticLaw, ConcentricThermoelasticState, affine_modulus_slope, finite,
+    invalid, scalar_source,
+};
 use crate::section::ConcentricShearSection;
 use crate::section_temperature::ConcentricSectionTemperatureLaw;
-use crate::state_point::{
-    MaterialStatePointError, affine_temperature_slope, pinned_temperature_line,
-};
-use fs_matdb::{InterpolationPolicy, PropertyValue};
+use crate::state_point::{MaterialStatePointError, pinned_temperature_line};
 
 /// Same concentric layer sources, with an admitted affine shear response.
 #[derive(Clone, Debug)]
 pub struct ConcentricRodThermoelasticLaw<'a> {
     axial: ConcentricThermoelasticLaw<'a>,
-    shear_property: String,
-    shear_correction: f64,
+    reference: ConcentricShearSection,
     shear_slopes_pa_k: Vec<f64>,
 }
 
@@ -55,54 +54,54 @@ impl<'a> ConcentricRodThermoelasticLaw<'a> {
         shear_property: &str,
         shear_correction: f64,
     ) -> Result<Self, MaterialStatePointError> {
-        temperature
+        let reference = temperature
             .reference()
             .clone()
             .with_shear_modulus(shear_property, shear_correction)?;
+        Self::admit(temperature, reference)
+    }
+
+    /// Use shear from the original explicit isotropic parameter pair. E/G
+    /// supplies the original G curve; E/nu requires scalar nu so affine E
+    /// remains affine G. Scalar K/G is supported, while a varying K/G-derived
+    /// E refuses the axial affine-potential rung instead of losing curvature.
+    pub fn try_new_with_isotropic_shear(
+        temperature: ConcentricSectionTemperatureLaw<'a>,
+        shear_correction: f64,
+    ) -> Result<Self, MaterialStatePointError> {
+        let reference = temperature
+            .reference()
+            .clone()
+            .with_isotropic_shear(shear_correction)?;
+        Self::admit(temperature, reference)
+    }
+
+    fn admit(
+        temperature: ConcentricSectionTemperatureLaw<'a>,
+        reference: ConcentricShearSection,
+    ) -> Result<Self, MaterialStatePointError> {
         let axial = ConcentricThermoelasticLaw::try_new(temperature)?;
         let mut shear_slopes_pa_k = Vec::with_capacity(axial.reference().layers().len());
-        for (binding, layer) in axial
-            .temperature
-            .bindings
-            .iter()
-            .zip(axial.reference().layers())
-        {
-            let value = layer
-                .material
-                .property(shear_property)
-                .ok_or_else(|| invalid("rod thermodynamics requires its original shear modulus"))?;
-            let claim = binding
-                .card
-                .claims()
-                .claim(value.answer().receipt.selected)
-                .ok_or_else(|| invalid("rod shear source claim is absent"))?;
-            let slope = match &claim.value {
-                PropertyValue::Scalar { .. } => 0.0,
-                PropertyValue::Curve {
-                    abscissa,
-                    abscissa_dims,
-                    knots,
-                    ..
-                } if abscissa == "T"
-                    && *abscissa_dims == fs_qty::Temperature::DIMS
-                    && claim.interpolation == InterpolationPolicy::LinearInside
-                    && knots.len() <= crate::phase::MAX_HEAT_CAPACITY_ENTHALPY_KNOTS =>
-                {
-                    affine_temperature_slope(knots, binding.point.axes()["T"], value.value_si())
-                        .map_err(invalid)?
-                }
-                _ => {
+        for (index, binding) in axial.temperature.bindings.iter().enumerate() {
+            let parents = reference.source_properties(index)?;
+            let slope = affine_modulus_slope(binding.card, binding.point.axes()["T"], parents[1])?;
+            // source_properties = rho + G for directly sourced G (including
+            // E/G and K/G), or rho + E + nu for the explicit E/nu derivation.
+            let slope = if parents.len() == 3 {
+                if !scalar_source(binding.card, parents[2])? {
                     return Err(invalid(
-                        "rod shear modulus must be scalar or one globally affine T curve",
+                        "derived shear thermodynamics requires scalar Poisson ratio",
                     ));
                 }
+                finite((0.5 * slope) / (1.0 + parents[2].value_si()))?
+            } else {
+                slope
             };
             shear_slopes_pa_k.push(slope);
         }
         Ok(Self {
             axial,
-            shear_property: shear_property.into(),
-            shear_correction,
+            reference,
             shear_slopes_pa_k,
         })
     }
@@ -127,34 +126,22 @@ impl<'a> ConcentricRodThermoelasticLaw<'a> {
         let axial = self
             .axial
             .at_temperatures_k(temperatures_k, gamma[0], linear_strain_limit)?;
-        let section = axial
-            .section
-            .section()
-            .clone()
-            .with_shear_modulus(&self.shear_property, self.shear_correction)?;
+        let section = self
+            .reference
+            .with_material_section(axial.section.section().clone())?;
         let bend_square = finite(curvature[1].powi(2) + curvature[2].powi(2))?;
         let shear_square = finite(gamma[1].powi(2) + gamma[2].powi(2))?;
         let mut layers = Vec::with_capacity(axial.layers.len());
         for (i, layer) in axial.layers.iter().enumerate() {
             let original = &section.elastic().layers()[i];
             let binding = &self.axial.temperature.bindings[i];
-            let value = original
-                .material
-                .property(&self.shear_property)
-                .ok_or_else(|| invalid("resolved rod lost its original shear modulus"))?;
-            let claim = binding
-                .card
-                .claims()
-                .claim(value.answer().receipt.selected)
-                .ok_or_else(|| invalid("resolved rod lost its selected shear source"))?;
-            pinned_temperature_line(
-                binding.card,
-                &claim.key,
-                "T",
-                &binding.point,
-                &original.material.query(),
-                value.answer().receipt.selected,
-            )?;
+            let shear_modulus = section.layer_shear_modulus_pa(i)?;
+            for value in section.source_properties(i)?.into_iter().skip(1) {
+                let claim = binding.card.claims().claim(value.answer().receipt.selected)
+                    .ok_or_else(|| invalid("resolved rod lost its selected shear source"))?;
+                pinned_temperature_line(binding.card, &claim.key, "T", &binding.point,
+                    &original.material.query(), value.answer().receipt.selected)?;
+            }
             let maximum_absolute_strain = finite(
                 (gamma[0].abs().max(layer.elastic_strain.abs())
                     + original.outer_radius_m * bend_square.sqrt())
@@ -167,14 +154,14 @@ impl<'a> ConcentricRodThermoelasticLaw<'a> {
             }
             let bending_geometry = finite(layer.second_moment_m4 * bend_square)?;
             let shear_geometry = finite(
-                self.shear_correction * layer.area_m2 * shear_square
+                self.reference.shear_correction() * layer.area_m2 * shear_square
                     + 2.0 * layer.second_moment_m4 * curvature[0].powi(2),
             )?;
             let free_energy_j_m = finite(
                 layer.axial_free_energy_per_reference_length_j_m
                     + 0.5
                         * (layer.young_modulus_pa * bending_geometry
-                            + value.value_si() * shear_geometry),
+                            + shear_modulus * shear_geometry),
             )?;
             let entropy_j_m_k = finite(
                 layer.entropy_per_reference_length_j_m_k
@@ -184,7 +171,7 @@ impl<'a> ConcentricRodThermoelasticLaw<'a> {
             )?;
             layers.push(RodLayerThermoelasticState {
                 temperature_k: layer.temperature_k,
-                shear_modulus_pa: value.value_si(),
+                shear_modulus_pa: shear_modulus,
                 shear_modulus_derivative_pa_k: self.shear_slopes_pa_k[i],
                 free_energy_j_m,
                 entropy_j_m_k,

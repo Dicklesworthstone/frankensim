@@ -10,6 +10,7 @@
 //! finite-slope rate y_x*y_xt, creep, heating, slip or evolving material memory.
 
 use super::{ConcentricElasticSection, MaterialStatePointError, invalid};
+#[cfg(test)]
 use crate::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
 use fs_qty::{DynViscosity, QuantitySpec};
 
@@ -45,7 +46,9 @@ impl ConcentricElasticSection {
         let mut band = (0.0_f64, f64::MAX);
         let mut total = 0.0;
         let mut layers = Vec::with_capacity(self.layers().len());
-        for (layer, geometry) in self.layers().iter().zip(self.layer_integrals()) {
+        for (index, (layer, geometry)) in
+            self.layers().iter().zip(self.layer_integrals()).enumerate()
+        {
             let eta = layer.material.property(property_name)
                 .ok_or_else(|| invalid("every axial layer needs an explicit uniaxial viscosity"))?;
             if eta.requirement().quantity() != QuantitySpec::dimensional(DynViscosity::DIMS)
@@ -55,9 +58,11 @@ impl ConcentricElasticSection {
             let interval = eta.angular_frequency_band_rad_s()?
                 .ok_or_else(|| invalid("axial viscosity needs an explicit frequency validity band"))?;
             band = (band.0.max(interval.0), band.1.min(interval.1));
-            for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, property_name] {
-                let coefficient = layer.material.property(key)
-                    .ok_or_else(|| invalid("axial loss lost an original section coefficient"))?;
+            for coefficient in self
+                .elastic_source_properties(index)?
+                .into_iter()
+                .chain([eta])
+            {
                 if !coefficient.is_constant_at_fixed_environment() {
                     return Err(invalid("axial loss requires fixed-state constant density, modulus and viscosity"));
                 }

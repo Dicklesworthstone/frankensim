@@ -529,13 +529,24 @@ impl RodSection {
     pub fn try_from_concentric_material(
         section: &fs_material::section::ConcentricShearSection,
     ) -> Result<Self, SolidError> {
-        use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
-        for (index, layer) in section.elastic().layers().iter().enumerate() {
-            for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, section.shear_property()] {
+        for index in 0..section.elastic().layers().len() {
+            let elastic = section
+                .elastic()
+                .elastic_source_properties(index)
+                .map_err(|error| SolidError::MaterialRefused {
+                    what: error.to_string(),
+                })?;
+            let shear =
+                section
+                    .source_properties(index)
+                    .map_err(|error| SolidError::MaterialRefused {
+                        what: error.to_string(),
+                    })?;
+            for property in elastic.into_iter().chain(shear) {
+                let name = property.requirement().name();
                 let refuse = || SolidError::MaterialRefused {
                     what: format!("rod layer {index} property {name} must support a frozen static elastic law"),
                 };
-                let property = layer.material.property(name).ok_or_else(refuse)?;
                 if !property.is_constant_at_fixed_temperature() {
                     return Err(refuse());
                 }

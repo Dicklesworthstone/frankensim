@@ -16,12 +16,15 @@
 
 use super::{ConcentricElasticSection, MaterialStatePointError, invalid, positive};
 use crate::state_point::{
-    DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+    INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
     SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS,
-    THERMAL_CONDUCTIVITY_PROPERTY, YOUNG_MODULUS_PROPERTY,
+    THERMAL_CONDUCTIVITY_PROPERTY,
 };
 use crate::visco::{ThermoelasticZener, circular_ted::circular_relaxation_shape};
-use fs_qty::{QuantitySpec, semantic::{QuantityKind, SemanticType, ValueForm}};
+use fs_qty::{
+    QuantitySpec,
+    semantic::{QuantityKind, SemanticType, ValueForm},
+};
 
 /// A homogeneous solid circular section with its computed Zener bending loss.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,15 +44,34 @@ impl ConcentricElasticSection {
     /// Hollow or layered sections, missing/wrong-quantity/state-varying thermal
     /// coefficients, a missing or ambiguous positive absolute temperature axis,
     /// and unrepresentable derived values refuse atomically.
-    pub fn with_thermoelastic_bending(self) -> Result<ConcentricThermoelasticBending, MaterialStatePointError> {
+    pub fn with_thermoelastic_bending(
+        self,
+    ) -> Result<ConcentricThermoelasticBending, MaterialStatePointError> {
         if self.inner_radius_m() != 0.0 {
             return Err(invalid("thermoelastic bending needs a solid circular section"));
         }
         let state = &self.layers()[0].material;
-        if self.layers().iter().any(|layer| layer.material.identity() != state.identity()) {
+        if self
+            .layers()
+            .iter()
+            .any(|layer| layer.material.identity() != state.identity())
+            || self
+                .isotropic_parameters()
+                .is_some_and(|p| p.iter().any(|binding| binding != &p[0]))
+        {
             return Err(invalid("thermoelastic bending needs one homogeneous material; layered heat flow is not modelled"));
         }
         let mut band = (0.0_f64, f64::MAX);
+        for property in self.elastic_source_properties(0)? {
+            if !property.is_constant_at_fixed_environment() {
+                return Err(invalid(
+                    "thermoelastic bending requires held elastic source parents",
+                ));
+            }
+            if let Some((lo, hi)) = property.angular_frequency_band_rad_s()? {
+                band = (band.0.max(lo), band.1.min(hi));
+            }
+        }
         let mut coefficient = |name: &str, dims| -> Result<f64, MaterialStatePointError> {
             let property = state.property(name)
                 .ok_or_else(|| invalid("thermoelastic bending needs density, modulus, expansion, heat capacity and conductivity"))?;
@@ -72,8 +94,8 @@ impl ConcentricElasticSection {
             _ => return Err(invalid("thermoelastic bending needs exactly one typed absolute-temperature axis")),
         };
         let law = ThermoelasticZener {
-            e: positive(coefficient(YOUNG_MODULUS_PROPERTY, fs_qty::Pressure::DIMS)?, "positive modulus")?,
-            rho: positive(coefficient(DENSITY_PROPERTY, fs_qty::Density::DIMS)?, "positive density")?,
+            e: self.layer_integrals()[0].young_modulus_pa(),
+            rho: self.layer_integrals()[0].density_kg_m3(),
             alpha_t: coefficient(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, INVERSE_TEMPERATURE_DIMS)?,
             cp: positive(coefficient(SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS)?, "positive heat capacity")?,
             conductivity: positive(coefficient(THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS)?, "positive conductivity")?,

@@ -7,9 +7,7 @@
 //! The selected source claims must also support the accepted endpoint state.
 
 use fs_exec::CancelGate;
-use fs_material::section::{
-    ConcentricElasticSection, ConcentricKelvinVoigtSection, ConcentricMaterialLayer,
-};
+use fs_material::section::{ConcentricKelvinVoigtSection, ConcentricMaterialLayer};
 use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
 };
@@ -131,7 +129,7 @@ pub(super) fn prepare<I>(
             });
         }
         resolved.push(
-            ConcentricElasticSection::try_new(current.elastic().inner_radius_m(), enriched)
+            current.elastic().with_material_layers(enriched)
                 .map_err(material)?
                 .with_kelvin_voigt_bending(viscosity.property)
                 .map_err(material)?,

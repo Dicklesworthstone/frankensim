@@ -15,7 +15,6 @@
 //! bending loss, not thermoelastic relaxation computed from thermal data.
 
 use super::{ConcentricElasticSection, MaterialStatePointError, invalid};
-use crate::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
 use fs_qty::{Dims, QuantitySpec};
 
 /// Bonded section with per-layer sourced loss tangents in bending.
@@ -49,7 +48,9 @@ impl ConcentricElasticSection {
         let mut band = (0.0_f64, f64::MAX);
         let mut total = 0.0;
         let mut layers = Vec::with_capacity(self.layers().len());
-        for (layer, geometry) in self.layers().iter().zip(self.layer_integrals()) {
+        for (index, (layer, geometry)) in
+            self.layers().iter().zip(self.layer_integrals()).enumerate()
+        {
             let loss = layer.material.property(loss_property)
                 .ok_or_else(|| invalid("every layer needs an unambiguous bending loss tangent"))?;
             let tangent = loss.value_si();
@@ -60,9 +61,11 @@ impl ConcentricElasticSection {
             let interval = loss.angular_frequency_band_rad_s()?
                 .ok_or_else(|| invalid("each loss tangent needs an explicit frequency validity band"))?;
             band = (band.0.max(interval.0), band.1.min(interval.1));
-            for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, loss_property] {
-                let coefficient = layer.material.property(key)
-                    .ok_or_else(|| invalid("layer bending law needs density, modulus and loss tangent"))?;
+            for coefficient in self
+                .elastic_source_properties(index)?
+                .into_iter()
+                .chain([loss])
+            {
                 if !coefficient.is_constant_at_fixed_environment() {
                     return Err(invalid("layer bending coefficients require the original held material environment"));
                 }
