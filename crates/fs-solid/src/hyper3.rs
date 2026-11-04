@@ -40,11 +40,14 @@
 //! pending the first admissible step is taken; once the boundary data are
 //! fully applied an Armijo condition on the potential is enforced (or, on a
 //! non-descent direction near a limit point, a decrease of the residual
-//! norm). Convergence: `||r_f|| <= relative_tolerance * max(||f_int||,
-//! ||f_ext||, max|K_dd| max|u_node - u_0|)` with the full internal-force vector
-//! (reactions included) and no pending boundary increment; the stiffness
-//! term keeps the gate meaningful at stress-free states such as a rigid
-//! rotation, where every force vanishes.
+//! norm). Static convergence uses `||r_f|| <= relative_tolerance *
+//! max(||f_int,f||, ||f_ext,f||, ||s_f||)`, with all norms restricted to free
+//! equations and no pending boundary increment. The connected deformation
+//! force scale is `s_i = sum_j |K_ij| |u_j - u_(3 floor(i/3) + j%3)|`.
+//! It remains meaningful near stress-free rotations or thermal expansion,
+//! while common translation, prescribed reactions and disconnected constrained
+//! stiffness cannot loosen the equilibrium gate. An exactly zero residual
+//! passes even when every force scale is zero.
 //!
 //! The tangent is SPD for stable states and is solved with ILU(0)-PCG; an
 //! indefinite tangent (detected by a stalled CG) falls back to PMINRES with
@@ -342,7 +345,24 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 }
 
 fn norm(a: &[f64]) -> f64 {
-    fs_math::det::sqrt(dot(a, a))
+    // Squaring dimensional forces directly can underflow to a false zero or
+    // overflow even when their norm is representable. Preserve nonfinite input
+    // as a refused norm rather than letting f64::max ignore a NaN.
+    let scale = a.iter().fold(0.0_f64, |scale, &value| {
+        if value.is_finite() {
+            scale.max(value.abs())
+        } else {
+            f64::INFINITY
+        }
+    });
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
+    }
+    let squared = a.iter().fold(0.0, |sum, &value| {
+        let normalized = value / scale;
+        normalized.mul_add(normalized, sum)
+    });
+    scale * fs_math::det::sqrt(squared)
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), HyperTetError> {
@@ -359,6 +379,53 @@ fn inertia_error(error: crate::inertia::InertiaError) -> HyperTetError {
 fn free_force_norm(force: &[f64], free: &[usize]) -> f64 {
     free.iter()
         .fold(0.0_f64, |value, &dof| value.hypot(force[dof]))
+}
+
+/// Force normalization on the actual unconstrained equations.
+///
+/// Each free row uses only displacement differences of its coupled nodes.
+/// Prescribed reactions and unrelated stiff regions must not hide a free
+/// force imbalance; a common translation must not create a deformation scale.
+fn static_force_scale(
+    tangent: &Csr,
+    displacement: &[f64],
+    internal: &[f64],
+    external: &[f64],
+    free: &[usize],
+    cx: &Cx<'_>,
+) -> Result<f64, HyperTetError> {
+    let mut deformation_norm = 0.0_f64;
+    for (row, &dof) in free.iter().enumerate() {
+        if row % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        let origin = 3 * (dof / 3);
+        let (columns, coefficients) = tangent.row(dof);
+        let mut row_scale = 0.0;
+        for (&column, &coefficient) in columns.iter().zip(coefficients) {
+            if coefficient != 0.0 {
+                let difference = displacement[column] - displacement[origin + column % 3];
+                row_scale = coefficient.abs().mul_add(difference.abs(), row_scale);
+            }
+        }
+        if !row_scale.is_finite() {
+            return Err(HyperTetError::InvalidInput {
+                what: "connected deformation force scale is not representable".into(),
+            });
+        }
+        deformation_norm = deformation_norm.hypot(row_scale);
+    }
+    let scales = [
+        free_force_norm(internal, free),
+        free_force_norm(external, free),
+        deformation_norm,
+    ];
+    if scales.iter().any(|value| !value.is_finite()) {
+        return Err(HyperTetError::InvalidInput {
+            what: "free force equilibrium normalization is not representable".into(),
+        });
+    }
+    Ok(scales.into_iter().fold(0.0, f64::max))
 }
 
 /// `(a, b, c) -> (a x b) . c`.
@@ -1305,8 +1372,8 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     .map(|&(dof, value)| (dof, value - u[dof]))
                     .collect();
                 let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
-                // The diagonal times displacement provides a force scale even
-                // at stress-free states where internal force vanishes.
+                // The connected free-row tangent also provides a force scale
+                // near stress-free states where internal forces vanish.
                 let mut full = self.tangent(elements, &u, cx)?.map_err(refused)?;
                 let pressure_tangent = applied_pressure
                     .map(|(surface, value)| surface.force_tangent(&u, value, cx))
@@ -1372,26 +1439,26 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         )
                         .map_err(inertia_error)?
                 } else {
-                    let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
-                    // Common translation is not a deformation scale: it must not
-                    // loosen the force-equilibrium gate.
-                    let origin = [u[0], u[1], u[2]];
-                    let reach = u
-                        .chunks_exact(3)
-                        .flat_map(|node| {
-                            [
-                                (node[0] - origin[0]).abs(),
-                                (node[1] - origin[1]).abs(),
-                                (node[2] - origin[2]).abs(),
-                            ]
-                        })
-                        .fold(0.0, f64::max);
-                    norm(&state.internal)
-                        .max(norm(&f_ext))
-                        .max(stiffness * reach)
-                        .max(f64::MIN_POSITIVE)
+                    static_force_scale(&full, &u, &state.internal, &f_ext, &free, cx)?
                 };
-                let relative = norm(&residual) / scale;
+                let residual_norm = norm(&residual);
+                if !(scale.is_finite() && scale >= 0.0 && residual_norm.is_finite()) {
+                    return Err(HyperTetError::InvalidInput {
+                        what: "force residual or equilibrium normalization is not representable"
+                            .into(),
+                    });
+                }
+                let relative = if residual_norm == 0.0 {
+                    0.0
+                } else {
+                    residual_norm / scale
+                };
+                if !relative.is_finite() {
+                    return Err(HyperTetError::InvalidInput {
+                        what: "nonzero force residual requires a representable positive equilibrium scale"
+                            .into(),
+                    });
+                }
                 record.residual_history.push(relative);
                 if !pending_any && relative <= self.settings.relative_tolerance {
                     converged = true;
@@ -1426,7 +1493,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 record.indefinite_fallbacks += usize::from(fallback);
                 // Line search on the joint (free, prescribed) update.
                 let slope = dot(&residual, &direction);
-                let residual_norm = norm(&residual);
                 let mut alpha = 1.0f64;
                 let mut accepted = None;
                 for _ in 0..=self.settings.max_backtracks {
@@ -1841,6 +1907,24 @@ impl Precond for AbsJacobi {
     fn apply(&self, r: &[f64], z: &mut [f64]) {
         for (zi, (ri, di)) in z.iter_mut().zip(r.iter().zip(&self.inv)) {
             *zi = ri * di;
+        }
+    }
+}
+
+#[cfg(test)]
+mod force_norm_tests {
+    use super::norm;
+
+    #[test]
+    fn force_norm_preserves_representable_extremes_and_refuses_nonfinite_input() {
+        for scale in [1e-300, 1.0, 1e300] {
+            let actual = norm(&[3.0 * scale, 4.0 * scale]);
+            assert!((actual / (5.0 * scale) - 1.0).abs() <= 4.0 * f64::EPSILON);
+        }
+        assert_eq!(norm(&[]), 0.0);
+        assert_eq!(norm(&[0.0, -0.0]), 0.0);
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!norm(&[0.0, value]).is_finite());
         }
     }
 }
