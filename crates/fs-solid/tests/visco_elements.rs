@@ -119,7 +119,7 @@ fn g0_high_order_tensor_dynamics_close_original_mass_material_energy() {
         ] {
             let coordinates = match mesh {
                 SolidMeshRef::Tet10 { nodes_m, .. } | SolidMeshRef::Hex { nodes_m, .. } => nodes_m,
-                SolidMeshRef::Tet4 { .. } => unreachable!(),
+                SolidMeshRef::Tet4 { .. } | SolidMeshRef::Hex8 { .. } => unreachable!(),
             };
             let solid = system(mesh, &material, cx);
             let prepared = solid.dynamic_operator(2e-6, ViscoDynamicConfig {

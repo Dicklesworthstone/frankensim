@@ -173,14 +173,21 @@ impl ViscoElements {
     /// finite basis. Full branch factors and Kelvin cross terms survive.
     ///
     /// The source's original B matrices, physical quadrature volumes and free
-    /// DOF map are reused for both Tet4 and Tet10. A dynamic consumer must admit
-    /// positive-definite projected inertia; dependent columns are not repaired.
+    /// DOF map are reused for every compatible element family. A dynamic consumer
+    /// must admit positive-definite projected inertia; dependent columns are not repaired.
     /// Spatial/modal convergence and source frequency applicability remain
     /// explicit obligations, as with the original time-domain history owner.
+    /// B-bar basis projection is refused: standalone material projections do
+    /// not yet carry its independent compatible-strain admission map. Native
+    /// B-bar histories, dynamics and harmonic response remain available.
     pub fn project_basis(
         &self, columns: &[Vec<f64>], budget: SolidProjectionBudget, cx: &Cx<'_>,
     ) -> Result<ProjectedViscoSolid<'_>, ViscoElementError> {
         checkpoint(cx)?;
+        if self.elements.iter().any(|element| element.points.iter()
+            .any(|point| point.compatible_gradients.is_some())) {
+            return Err(invalid("B-bar basis projection requires independent compatible-strain admission; use native viscoelastic operators"));
+        }
         let n = columns.len();
         let free = self.equilibrium.free_dofs.len();
         if !(1..=256).contains(&budget.max_coordinates) || n == 0 || n > budget.max_coordinates

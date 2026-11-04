@@ -311,39 +311,61 @@ impl ViscoElements {
                         }
                     }
                 }
-                // Maximize ||re*cos(theta)+im*sin(theta)|| via the largest
-                // eigenvector of its 2x2 Gram matrix. Scaling prevents overflow
-                // in the phase calculation and preserves very small strains.
-                let scale = re
-                    .iter()
-                    .chain(&im)
-                    .map(|v| v.abs())
-                    .fold(0.0_f64, f64::max);
-                if re.iter().chain(&im).any(|v| !v.is_finite()) {
-                    return Err(ViscoElementError::NonFiniteResult);
+                validate_harmonic_strain(&element.law, re, im)?;
+                if let Some(gradients) = &point.compatible_gradients {
+                    // B-bar preserves the shear rows. Recover raw normal
+                    // strains directly from gradients, without subtracting
+                    // nearly equal projected terms in a high-bulk material.
+                    re[..3].fill(0.0);
+                    im[..3].fill(0.0);
+                    for (g, dofs) in gradients.iter().zip(element.dofs.chunks_exact(3)) {
+                        for i in 0..3 {
+                            if let Ok(row) = self.equilibrium.free_dofs.binary_search(&dofs[i]) {
+                                let u = displacement[row];
+                                re[i] = g[i].mul_add(u.re, re[i]);
+                                im[i] = g[i].mul_add(u.im, im[i]);
+                            }
+                        }
+                    }
+                    validate_harmonic_strain(&element.law, re, im)?;
                 }
-                if scale == 0.0 {
-                    continue;
-                }
-                let (mut a, mut b, mut c) = (0.0, 0.0, 0.0);
-                for i in 0..6 {
-                    let (r, s) = (re[i] / scale, im[i] / scale);
-                    a += r * r;
-                    b += s * s;
-                    c += r * s;
-                }
-                let angle = 0.5 * det::atan2(2.0 * c, a - b);
-                let (sin, cos) = det::sin_cos(angle);
-                let peak = core::array::from_fn(|i| cos.mul_add(re[i], sin * im[i]));
-                element
-                    .law
-                    .validate_mandel_strain(&peak)
-                    .map_err(ViscoElementError::Material)?;
             }
         }
         checkpoint(cx)?;
         Ok(())
     }
+}
+
+fn validate_harmonic_strain(
+    law: &fs_material::visco::tensor::TensorProny,
+    re: [f64; 6],
+    im: [f64; 6],
+) -> Result<(), ViscoElementError> {
+    // Maximize ||re*cos(theta)+im*sin(theta)|| via the largest eigenvector
+    // of its 2x2 Gram matrix. Scaling preserves the original phase arithmetic.
+    let scale = re
+        .iter()
+        .chain(&im)
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max);
+    if re.iter().chain(&im).any(|v| !v.is_finite()) {
+        return Err(ViscoElementError::NonFiniteResult);
+    }
+    if scale == 0.0 {
+        return Ok(());
+    }
+    let (mut a, mut b, mut c) = (0.0, 0.0, 0.0);
+    for i in 0..6 {
+        let (r, s) = (re[i] / scale, im[i] / scale);
+        a += r * r;
+        b += s * s;
+        c += r * s;
+    }
+    let angle = 0.5 * det::atan2(2.0 * c, a - b);
+    let (sin, cos) = det::sin_cos(angle);
+    let peak = core::array::from_fn(|i| cos.mul_add(re[i], sin * im[i]));
+    law.validate_mandel_strain(&peak)
+        .map_err(ViscoElementError::Material)
 }
 
 fn dense(matrix: &Csr, n: usize, cx: &Cx<'_>) -> Result<Vec<f64>, ViscoElementError> {

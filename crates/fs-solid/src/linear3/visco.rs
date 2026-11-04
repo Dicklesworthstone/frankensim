@@ -15,22 +15,32 @@
 //! histories and load-controlled quasistatic creep share the same material
 //! histories. Dynamics couples their exact work-mean force to consistent-mass
 //! midpoint inertia on the original spatial operators.
+//!
+//! HEX8 also admits the existing volumetric B-bar strain projection. Every
+//! equilibrium, memory, Kelvin, mean-force and harmonic operator uses those
+//! same columns, while compatible strain independently respects the source
+//! domain. Inertia keeps the elastic owner's consistent reference quadrature.
+//! This is small-strain, elementwise-material B-bar, not exact incompressibility
+//! or an evolving-temperature constitutive model.
 
 use super::hex::{
     HexConnectivity, HexElasticProblem, HexFamily, HexPoint, HexQuadrature, hex20_point,
     hex27_point,
 };
+use super::hex8::Hex8ElasticProblem;
 use super::tet10::{QuadraticTetProblem, TetQuadrature, tet10_point};
 use super::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetElasticMaterial, TetGeometry,
     TetLinearElasticProblem, TetMaterialField,
 };
+use crate::linear::Formulation;
 use fs_exec::Cx;
 use fs_feec::highorder::simplex::duffy_quadrature;
 use fs_material::visco::ViscoError;
 use fs_material::visco::tensor::{Mandel6, TensorProny, TensorPronyState};
 use fs_sparse::{Coo, Csr};
 
+mod hex8;
 mod project;
 pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
 mod quasistatic;
@@ -67,6 +77,18 @@ pub enum SolidMeshRef<'a> {
         elements: &'a [[usize; 10]],
         /// Required positive-weight stiffness and consistent-mass rules.
         quadrature: TetQuadrature,
+    },
+    /// Trilinear eight-node bricks using the native elastic B-bar owner.
+    Hex8 {
+        /// Complete corner positions [m].
+        nodes_m: &'a [[f64; 3]],
+        /// Canonical corners: four around z-, then corresponding corners at z+.
+        elements: &'a [[usize; 8]],
+        /// Compatible strain or reference-volume-mean volumetric B-bar.
+        formulation: Formulation,
+        /// Positive tensor Gauss rule, in 2..=12. Inertia uses at least three
+        /// points per axis; every stiffness point retains its own history.
+        stiffness_points_per_dir: usize,
     },
     /// Fully integrated isoparametric HEX20 or HEX27, in canonical node order.
     /// The original elastic owner admits topology and sampled Jacobians.
@@ -209,7 +231,42 @@ impl From<ViscoError> for ViscoElementError {
 
 struct IntegrationPoint {
     b: Vec<[f64; 6]>,
+    // B-bar changes only the normal rows. Retain 3N raw gradient scalars,
+    // instead of a second 6-by-3N matrix, for independent strain admission.
+    compatible_gradients: Option<Vec<[f64; 3]>>,
     volume_m3: f64,
+}
+
+impl IntegrationPoint {
+    fn strain(&self, dofs: &[usize], displacement: &[f64]) -> [f64; 6] {
+        core::array::from_fn(|i| {
+            self.b
+                .iter()
+                .zip(dofs)
+                .map(|(b, &d)| b[i] * displacement[d])
+                .sum()
+        })
+    }
+
+    fn validate_compatible_strain(
+        &self,
+        law: &TensorProny,
+        dofs: &[usize],
+        displacement: &[f64],
+        mut strain: [f64; 6],
+    ) -> Result<(), ViscoElementError> {
+        if let Some(gradients) = &self.compatible_gradients {
+            for i in 0..3 {
+                strain[i] = gradients
+                    .iter()
+                    .zip(dofs.chunks_exact(3))
+                    .map(|(g, d)| g[i] * displacement[d[i]])
+                    .sum();
+            }
+            law.validate_mandel_strain(&strain)?;
+        }
+        Ok(())
+    }
 }
 struct Element {
     dofs: Vec<usize>,
@@ -441,6 +498,7 @@ fn prepare_hex<const N: usize, const D: usize>(
                 b: (0..D)
                     .map(|column| core::array::from_fn(|row| b[row][column]))
                     .collect(),
+                compatible_gradients: None,
                 volume_m3: weight * geometry.determinant_m3,
             });
         }
@@ -459,7 +517,7 @@ fn prepare_hex<const N: usize, const D: usize>(
 }
 
 impl ViscoElements {
-    /// Prepare P1/TET10/HEX20/HEX27 using existing elastic admission/assembly.
+    /// Prepare P1/TET10/HEX8/HEX20/HEX27 using existing elastic admission/assembly.
     /// Caps are checked before allocating per-element laws or histories.
     pub fn new(
         mesh: SolidMeshRef<'_>,
@@ -483,6 +541,15 @@ impl ViscoElements {
                     elements.len(),
                     quadrature.stiffness_points_per_dir.pow(3),
                 )
+            }
+            SolidMeshRef::Hex8 {
+                nodes_m,
+                elements,
+                stiffness_points_per_dir,
+                ..
+            } => {
+                super::hex8::validate_stiffness_order(stiffness_points_per_dir)?;
+                (nodes_m, elements.len(), stiffness_points_per_dir.pow(3))
             }
             SolidMeshRef::Hex {
                 nodes_m,
@@ -573,6 +640,21 @@ impl ViscoElements {
                 quadrature,
             }
             .assemble(cx)?,
+            SolidMeshRef::Hex8 {
+                nodes_m,
+                elements,
+                formulation,
+                stiffness_points_per_dir,
+            } => Hex8ElasticProblem {
+                nodes_m,
+                hexahedra: elements,
+                materials: TetMaterialField::PerElement(&materials),
+                formulation,
+                fixed_dofs: fixed,
+                budget,
+                stiffness_points_per_dir,
+            }
+            .assemble(cx)?,
             SolidMeshRef::Hex {
                 nodes_m,
                 elements,
@@ -612,6 +694,7 @@ impl ViscoElements {
                         material_state_identity: field.at(e).material_state_identity,
                         points: vec![IntegrationPoint {
                             b: (0..12).map(|j| core::array::from_fn(|i| b[i][j])).collect(),
+                            compatible_gradients: None,
                             volume_m3: g.volume,
                         }],
                     });
@@ -638,6 +721,7 @@ impl ViscoElements {
                         let b = super::isoparametric::mandel_b::<10, 30>(g.gradients);
                         p.push(IntegrationPoint {
                             b: (0..30).map(|j| core::array::from_fn(|i| b[i][j])).collect(),
+                            compatible_gradients: None,
                             volume_m3: weight * g.determinant_m3,
                         });
                     }
@@ -653,6 +737,25 @@ impl ViscoElements {
                     });
                 }
             }
+            SolidMeshRef::Hex8 {
+                nodes_m,
+                elements,
+                formulation,
+                stiffness_points_per_dir,
+            } => hex8::prepare(
+                &mut prepared,
+                &Hex8ElasticProblem {
+                    nodes_m,
+                    hexahedra: elements,
+                    materials: TetMaterialField::PerElement(&materials),
+                    formulation,
+                    fixed_dofs: fixed,
+                    budget,
+                    stiffness_points_per_dir,
+                },
+                field,
+                cx,
+            )?,
             SolidMeshRef::Hex {
                 elements,
                 quadrature,
@@ -688,6 +791,9 @@ impl ViscoElements {
                 super::validate_rigid_mode_constraints(nodes, elements, fixed)
             }
             SolidMeshRef::Tet10 { elements, .. } => {
+                super::validate_rigid_mode_constraints(nodes, elements, fixed)
+            }
+            SolidMeshRef::Hex8 { elements, .. } => {
                 super::validate_rigid_mode_constraints(nodes, elements, fixed)
             }
             SolidMeshRef::Hex {
@@ -812,6 +918,7 @@ impl ViscoElements {
     /// This reuses the element's exact Mandel strain map and source domain;
     /// it evolves no history and introduces no alternate stiffness or stress.
     /// High-order elements check declared quadrature points, not unsampled extrema.
+    /// B-bar checks both assumed and raw compatible strain at those points.
     pub fn validate_displacement(
         &self,
         displacement_m: &[f64],
@@ -832,15 +939,14 @@ impl ViscoElements {
                 if cancelled() {
                     return Err(TetElasticError::Cancelled.into());
                 }
-                let strain = core::array::from_fn(|i| {
-                    point
-                        .b
-                        .iter()
-                        .zip(&element.dofs)
-                        .map(|(b, &dof)| b[i] * displacement_m[dof])
-                        .sum()
-                });
+                let strain = point.strain(&element.dofs, displacement_m);
                 element.law.validate_mandel_strain(&strain)?;
+                point.validate_compatible_strain(
+                    &element.law,
+                    &element.dofs,
+                    displacement_m,
+                    strain,
+                )?;
             }
         }
         if cancelled() {
@@ -964,9 +1070,8 @@ impl ViscoElementState<'_> {
         for (e, states) in self.system.elements.iter().zip(&mut histories) {
             for (p, state) in e.points.iter().zip(states) {
                 checkpoint(cx)?;
-                let strain = core::array::from_fn(|i| {
-                    p.b.iter().zip(&e.dofs).map(|(b, &d)| b[i] * u_new[d]).sum()
-                });
+                let strain = p.strain(&e.dofs, u_new);
+                p.validate_compatible_strain(&e.law, &e.dofs, u_new, strain)?;
                 let response = e.law.step_with_mean(state, strain, dt_s)?;
                 let stress = response.stress;
                 if stress

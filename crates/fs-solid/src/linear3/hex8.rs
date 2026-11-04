@@ -92,7 +92,7 @@ impl Hex8ElasticProblem<'_> {
         Ok(assembly)
     }
 
-    fn point(
+    pub(super) fn point(
         &self,
         nodes: [[f64; 3]; 8],
         reference: [f64; 3],
@@ -119,16 +119,7 @@ impl Hex8ElasticProblem<'_> {
         if self.nodes_m.is_empty() || self.hexahedra.is_empty() {
             return Err(TetElasticError::EmptyMesh);
         }
-        if self.stiffness_points_per_dir < 2 {
-            return Err(TetElasticError::UnderIntegrated {
-                points_per_dir: self.stiffness_points_per_dir,
-            });
-        }
-        if self.stiffness_points_per_dir > 12 {
-            return Err(TetElasticError::QuadratureInadmissible {
-                what: "HEX8 stiffness Gauss points per direction must be in 2..=12",
-            });
-        }
+        validate_stiffness_order(self.stiffness_points_per_dir)?;
         for (what, requested, maximum) in [
             ("nodes", self.nodes_m.len(), self.budget.maximum_nodes),
             (
@@ -234,7 +225,21 @@ impl Hex8ElasticProblem<'_> {
     }
 }
 
-fn tensor_rule(order: usize) -> Vec<([f64; 3], f64)> {
+pub(super) fn validate_stiffness_order(order: usize) -> Result<(), TetElasticError> {
+    if order < 2 {
+        return Err(TetElasticError::UnderIntegrated {
+            points_per_dir: order,
+        });
+    }
+    if order > 12 {
+        return Err(TetElasticError::QuadratureInadmissible {
+            what: "HEX8 stiffness Gauss points per direction must be in 2..=12",
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn tensor_rule(order: usize) -> Vec<([f64; 3], f64)> {
     let (points, weights) = gauss_legendre(order);
     let mut rule = Vec::with_capacity(order * order * order);
     for i in 0..order {
