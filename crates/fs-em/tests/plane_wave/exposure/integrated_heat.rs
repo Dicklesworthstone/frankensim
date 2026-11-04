@@ -40,6 +40,110 @@ fn simpson(thickness: f64, intervals: usize) -> Vec<DepthSample> {
 }
 
 #[test]
+fn g1_continuous_cell_heat_retains_beats_without_aliased_nyquist_carriers_or_ffts() {
+    let medium = material(1.0, 1.0);
+    let (dielectric, conductor) = heat_material();
+    let stacks = [2.0, 2.3].map(|omega| {
+        PlanarDielectricLayers::try_new(
+            &medium,
+            DielectricResponse::Lossless(&medium),
+            omega,
+            &[DielectricLayer {
+                response: DielectricResponse::DebyeWithOhmic {
+                    dielectric: &dielectric,
+                    conductor: &conductor,
+                },
+                thickness_m: 0.31,
+            }],
+        )
+        .unwrap()
+    });
+    let samples: Vec<_> = (0..4)
+        .map(|x| [C64::ZERO, C64::from_re(if x % 2 == 0 { 1.0 } else { -1.0 })])
+        .collect();
+    let lines = [prepare(&stacks[0], &samples), prepare(&stacks[1], &samples)];
+    let banks = [AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap()];
+    let deterministic = banks[0].prepare_layer(0, heat_limits(), || false).unwrap();
+    // For this one signed spatial mode, continuous integration removes sum
+    // terms exactly. An authored proper factor provides an independent owner
+    // relation while retaining the SAME cross-frequency beat and pole phases.
+    let proper = AngularSpectrumExposureEnsemble::try_new(
+        &lines[0],
+        None,
+        &banks,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    let proper_layer = proper.prepare_layer(0, heat_limits(), || false).unwrap();
+    let depth = simpson(0.31, 8);
+    let sampled_volume = Volume {
+        depth_span_m: [0.0, 0.31],
+        depth_samples: &depth,
+        transverse: Areas::PeriodicCell,
+    };
+    let continuous_volume = Volume {
+        transverse: Areas::ContinuousPeriodicCell,
+        ..sampled_volume
+    };
+    let zero_fft = AngularSpectrumIntegratedHeatLimits {
+        maximum_fft_work: 0,
+        ..integrated_limits()
+    };
+    let continuous = deterministic
+        .integrated_heat_spectrum(continuous_volume, Channel::Total, zero_fft, || false)
+        .unwrap();
+    assert!(
+        deterministic
+            .integrated_heat_spectrum(sampled_volume, Channel::Total, zero_fft, || false,)
+            .is_err()
+    );
+    let reference = proper_layer
+        .integrated_heat_spectrum(sampled_volume, Channel::Total, integrated_limits(), || {
+            false
+        })
+        .unwrap();
+    let aliased = deterministic
+        .integrated_heat_spectrum(sampled_volume, Channel::Total, integrated_limits(), || {
+            false
+        })
+        .unwrap();
+    let mut range = [f64::INFINITY, f64::NEG_INFINITY];
+    let mut alias_difference = 0.0_f64;
+    for time in [0.0, 1.0, 2.0, 3.0, 4.0] {
+        let value = continuous.evaluate(time).unwrap();
+        near(value, reference.evaluate(time).unwrap(), 3e-11);
+        range[0] = range[0].min(value);
+        range[1] = range[1].max(value);
+        alias_difference = alias_difference.max((aliased.evaluate(time).unwrap() - value).abs());
+    }
+    assert!(
+        range[1] - range[0] > 1e-3,
+        "physical beat was averaged away"
+    );
+    assert!(
+        alias_difference > 1e-3,
+        "Nyquist falsifier did not distinguish sampled support"
+    );
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let window = HarmonicWindow::with_profile(0.17, 0.43, profile).unwrap();
+        near(
+            continuous.observe_window(window).unwrap(),
+            reference.observe_window(window).unwrap(),
+            3e-11,
+        );
+    }
+    near(
+        continuous.represented_volume_m3_dd().to_f64(),
+        96.0 * 0.31,
+        2e-13,
+    );
+}
+
+#[test]
 fn g1_physical_mask_retains_beats_that_cancel_over_the_original_periodic_cell() {
     let medium = material(1.0, 1.0);
     let (dielectric, conductor) = heat_material();
@@ -224,6 +328,29 @@ fn g3_depth_refinement_matches_original_absorbed_watts_and_owner_survives_refusa
         .integrated_heat_spectrum(quadrature, Channel::Total, integrated_limits(), || false)
         .unwrap();
     let value = heat.evaluate(0.17).unwrap();
+    // The zero spatial mode does retain its real carrier terms under
+    // continuous integration, with no additional field synthesis required.
+    let continuous = layer
+        .integrated_heat_spectrum(
+            Volume {
+                transverse: Areas::ContinuousPeriodicCell,
+                ..quadrature
+            },
+            Channel::Total,
+            AngularSpectrumIntegratedHeatLimits {
+                maximum_fft_work: 0,
+                ..integrated_limits()
+            },
+            || false,
+        )
+        .unwrap();
+    for time in [0.0, 0.17, 0.83] {
+        near(
+            continuous.evaluate(time).unwrap(),
+            heat.evaluate(time).unwrap(),
+            3e-11,
+        );
+    }
     let exact = AngularSpectrumIntegratedHeatLimits {
         maximum_depth_samples: samples.len(),
         maximum_point_line_pairs: layer.point_line_pairs() * samples.len(),

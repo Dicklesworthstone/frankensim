@@ -1,9 +1,10 @@
 //! Spatially integrated irreversible film heat with explicit physical support.
 //!
-//! The quadrature acts on actual coherent internal fields, before quadratic
-//! tones are emitted. Increasing depth/grid resolution does not multiply the
-//! retained spectral term count. Material reservoirs and source clocks remain
-//! those of the original prepared layer.
+//! Transverse integration acts on actual coherent internal fields, before
+//! quadratic tones are emitted. The complete periodic cell can be integrated
+//! continuously in the original Fourier basis without synthesizing samples.
+//! Increasing depth/grid resolution does not multiply the retained spectral
+//! term count. Material reservoirs and clocks remain those of the prepared layer.
 
 use super::heat_spectrum::{nonnegative_heat, reservoir_range, spectrum_error};
 use super::*;
@@ -22,8 +23,15 @@ pub struct AngularSpectrumHeatDepthSample {
 /// Physical transverse support on the ORIGINAL row-major periodic grid.
 #[derive(Clone, Copy, Debug)]
 pub enum AngularSpectrumHeatAreaQuadrature<'q> {
-    /// Every original cell contributes its full dx*dy area.
+    /// Every original FIELD SAMPLE contributes its full dx*dy area. Quadratic
+    /// products can alias even when the represented electric field is resolved.
     PeriodicCell,
+    /// Continuous integral over the full original periodic cell. Difference
+    /// products pair equal signed Fourier modes; sum products pair opposite
+    /// modes. A negative Nyquist mode has no positive partner. This avoids
+    /// transverse product aliasing and requires no spatial synthesis FFTs.
+    /// Depth integration still uses the explicitly authored quadrature below.
+    ContinuousPeriodicCell,
     /// Per-cell areas [m²], each in [0,dx*dy]. Zero masks a cell; positive
     /// fractions describe partial cells without relocating field samples.
     CellAreasM2(&'q [f64]),
@@ -48,9 +56,12 @@ pub struct AngularSpectrumIntegratedHeatLimits {
     pub maximum_depth_samples: usize,
     /// Depth samples times the original owner's point/source-line work.
     pub maximum_point_line_pairs: usize,
+    /// Repeated field synthesis; zero for ContinuousPeriodicCell. Original
+    /// beam analysis and layer preparation retain their own admission bounds.
     pub maximum_fft_work: u64,
     /// Depths * original grid points * sum F_r*(F_r+1)/2. Each visits three
     /// vector components, with conjugate and (for real banks) plain products.
+    /// ContinuousPeriodicCell visits Fourier modes instead of field samples.
     pub maximum_spatial_point_frequency_pairs: usize,
     /// Selected reservoirs * sum F_r*(F_r+1)/2, cached once for all depths.
     pub maximum_reservoir_frequency_pairs: usize,
@@ -65,10 +76,11 @@ pub struct AngularSpectrumIntegratedHeatLimits {
 /// Expected irreversible thermal load [W] from an explicit film volume.
 ///
 /// This retains original material/field ownership, physical support and actual
-/// quadrature weights. The result is a numerical volume quadrature, not an
-/// exact continuous aperture/depth integral or a convergence certificate.
-/// Spatial products may need a finer grid than field reconstruction, and
-/// depth quadrature must resolve standing waves and attenuation independently.
+/// quadrature weights. ContinuousPeriodicCell integrates the represented
+/// transverse Fourier field exactly; the other area options use the authored
+/// field samples and can alias spatial products. Depth quadrature must resolve
+/// standing waves and attenuation independently. No physical field/depth
+/// convergence certificate or isolated finite-aperture model is inferred.
 /// Reversible field/polarization storage and boundary momentum work are absent.
 /// Do not also debit this same loss via local heat or integrated absorption.
 pub struct AngularSpectrumExposureLayerHeatLoadSpectrum<'p, 'q, 'e, 'b, 's, 'm> {
@@ -95,7 +107,7 @@ impl<'p, 'q, 'e, 'b, 's, 'm> AngularSpectrumExposureLayerHeatLoadSpectrum<'p, 'q
     pub fn channel(&self) -> AngularSpectrumExposureHeatChannel {
         self.channel
     }
-    /// Actual sum of the authored transverse cell areas [m²].
+    /// Physical full-cell area or actual sum of authored partial-cell areas [m²].
     pub fn represented_area_m2_dd(&self) -> Dd {
         self.area_m2
     }
@@ -151,6 +163,7 @@ impl<'p, 'q, 'e, 'b, 's, 'm> AngularSpectrumExposureLayerHeatLoadSpectrum<'p, 'q
 
 #[derive(Clone, Copy)]
 struct VolumeAdmission {
+    grid: AngularSpectrumGrid,
     cell_area_m2: Dd,
     area_m2: Dd,
     depth_weight_m: Dd,
@@ -175,6 +188,8 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
     /// Integrate actual internal heat over a declared subslab/full film and
     /// full/partial original cells. One bank-frequency plane is reconstructed
     /// once per depth, independent of the number of selected reservoirs.
+    /// ContinuousPeriodicCell retains its modal vectors and integrates signed
+    /// Fourier products directly; sampled supports additionally synthesize them.
     ///
     /// Reservoir transfer products are cached per frequency pair; spatial
     /// E_f dot conj(E_g) and E_f dot E_g are contracted once and then weighted
@@ -235,10 +250,18 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             .point_line_pairs
             .checked_mul(depths)
             .ok_or_else(|| bad("integrated heat original field work overflows"))?;
-        let original_fft_work = u64::try_from(depths)
-            .ok()
-            .and_then(|d| self.field_fft_work.checked_mul(d))
-            .ok_or_else(|| bad("integrated heat FFT work overflows"))?;
+        let continuous = matches!(
+            quadrature.transverse,
+            AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
+        );
+        let original_fft_work = if continuous {
+            0
+        } else {
+            u64::try_from(depths)
+                .ok()
+                .and_then(|d| self.field_fft_work.checked_mul(d))
+                .ok_or_else(|| bad("integrated heat FFT work overflows"))?
+        };
         let spatial_work = pair_count
             .checked_mul(volume.points)
             .and_then(|v| v.checked_mul(depths))
@@ -316,14 +339,22 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                     },
                     |group, depth, cancelled| {
                         let layer = &self.frequencies[mapping[group]].layer;
-                        bank.frequency_field_with(group, cancelled, |line, cancelled| {
-                            line.modal_layer_field(
-                                layer.as_ref(),
-                                self.layer_index,
-                                depth,
-                                cancelled,
-                            )
-                        })
+                        let mut field = bank.frequency_modal_field_with(
+                            group,
+                            cancelled,
+                            |line, cancelled| {
+                                line.modal_layer_field(
+                                    layer.as_ref(),
+                                    self.layer_index,
+                                    depth,
+                                    cancelled,
+                                )
+                            },
+                        )?;
+                        if !continuous {
+                            bank.synthesize_frequency_field(group, &mut field, cancelled)?;
+                        }
+                        Ok(field)
                     },
                     &mut terms,
                     &mut cancelled,
@@ -410,7 +441,8 @@ fn admit_volume(
         return Err(bad("integrated heat original cell area is unrepresentable"));
     }
     let area_m2 = match quadrature.transverse {
-        AngularSpectrumHeatAreaQuadrature::PeriodicCell => {
+        AngularSpectrumHeatAreaQuadrature::PeriodicCell
+        | AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell => {
             cell_area_m2 * Dd::from_f64(points as f64)
         }
         AngularSpectrumHeatAreaQuadrature::CellAreasM2(areas) => {
@@ -442,6 +474,7 @@ fn admit_volume(
     }
     poll(cancelled)?;
     Ok(VolumeAdmission {
+        grid,
         cell_area_m2,
         area_m2,
         depth_weight_m,
@@ -452,11 +485,12 @@ fn admit_volume(
 
 fn area_weight(
     transverse: AngularSpectrumHeatAreaQuadrature<'_>,
-    default_area: Dd,
+    volume: VolumeAdmission,
     point: usize,
 ) -> Dd {
     match transverse {
-        AngularSpectrumHeatAreaQuadrature::PeriodicCell => default_area,
+        AngularSpectrumHeatAreaQuadrature::PeriodicCell => volume.cell_area_m2,
+        AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell => volume.area_m2,
         AngularSpectrumHeatAreaQuadrature::CellAreasM2(areas) => Dd::from_f64(areas[point]),
     }
 }
@@ -508,6 +542,10 @@ fn contract_bank<F: FnMut() -> bool>(
     if frequencies.is_empty() {
         return Ok(());
     }
+    let continuous = matches!(
+        quadrature.transverse,
+        AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
+    );
     let mut pairs = Vec::new();
     pairs
         .try_reserve_exact(upper_pairs(frequencies.len())?)
@@ -547,19 +585,21 @@ fn contract_bank<F: FnMut() -> bool>(
                 if point % 64 == 0 {
                     poll(cancelled)?;
                 }
-                let area = area_weight(quadrature.transverse, volume.cell_area_m2, point);
+                let area = area_weight(quadrature.transverse, volume, point);
                 if area.to_f64() == 0.0 {
                     continue;
                 }
-                let mut dot = PairIntegral::default();
-                for axis in 0..3 {
-                    let a = parts(fields[pair.left][point][axis]);
-                    let b = parts(fields[pair.right][point][axis]);
-                    add_parts(&mut dot.difference, multiply_conjugate(a, b));
-                    if !proper {
-                        add_parts(&mut dot.sum, multiply(a, b));
-                    }
-                }
+                // This is continuous Fourier orthogonality, not modular DFT
+                // index addition. In particular an unpaired negative Nyquist
+                // bin cannot create a spatially constant sum-frequency tone.
+                let partner = if proper {
+                    None
+                } else if continuous {
+                    opposite_mode(volume.grid, point)
+                } else {
+                    Some(point)
+                };
+                let dot = spatial_pair(&fields[pair.left], &fields[pair.right], point, partner);
                 add_scaled(&mut spatial.difference, dot.difference, area);
                 if !proper {
                     add_scaled(&mut spatial.sum, dot.sum, area);
@@ -595,6 +635,29 @@ fn contract_bank<F: FnMut() -> bool>(
         }
     }
     poll(cancelled)
+}
+
+// Sampled products use the same point for both terms. Continuous cell products
+// use equal modes for differences and a genuine opposite for sums. None also
+// represents the absence of pseudocovariance in an authored proper factor.
+fn spatial_pair(
+    left: &[[C64; 6]],
+    right: &[[C64; 6]],
+    point: usize,
+    partner: Option<usize>,
+) -> PairIntegral {
+    let mut dot = PairIntegral::default();
+    for axis in 0..3 {
+        let a = parts(left[point][axis]);
+        add_parts(
+            &mut dot.difference,
+            multiply_conjugate(a, parts(right[point][axis])),
+        );
+        if let Some(partner) = partner {
+            add_parts(&mut dot.sum, multiply(a, parts(right[partner][axis])));
+        }
+    }
+    dot
 }
 
 fn parts(a: C64) -> [ScaledDd; 2] {

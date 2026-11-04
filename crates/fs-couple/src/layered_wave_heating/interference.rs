@@ -371,6 +371,7 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
             || !matches!(
                 quadrature.transverse,
                 AngularSpectrumHeatAreaQuadrature::PeriodicCell
+                    | AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
             )
         {
             return Err(bad(

@@ -122,6 +122,9 @@ fn reference(quadrature: AngularSpectrumHeatVolumeQuadrature<'_>, time: f64) -> 
         for point in 0..4 {
             let area = match quadrature.transverse {
                 AngularSpectrumHeatAreaQuadrature::PeriodicCell => 0.25 * 0.4,
+                AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell => {
+                    unreachable!("this oracle integrates authored field samples")
+                }
                 AngularSpectrumHeatAreaQuadrature::CellAreasM2(areas) => areas[point],
             };
             for sign in [-1.0, 1.0] {
@@ -169,6 +172,247 @@ fn reference(quadrature: AngularSpectrumHeatVolumeQuadrature<'_>, time: f64) -> 
 }
 fn close(a: f64, b: f64) {
     assert!((a - b).abs() <= 4e-12 * (1.0 + b.abs()), "{a:e} != {b:e}");
+}
+
+// Authored Fourier coefficients enter the actual spatial/reservoir contraction.
+// The alternate sampled path below receives independently evaluated fields,
+// not coefficients relabelled as samples.
+fn spatial_spectrum(
+    grid: AngularSpectrumGrid,
+    fields: &[Vec<[C64; 6]>],
+    proper: bool,
+    channel: AngularSpectrumExposureHeatChannel,
+    transverse: AngularSpectrumHeatAreaQuadrature<'_>,
+) -> PreparedHarmonicProductSpectrum {
+    let depth = [AngularSpectrumHeatDepthSample {
+        depth_m: 0.5,
+        weight_m: 1.0,
+    }];
+    let quadrature = AngularSpectrumHeatVolumeQuadrature {
+        depth_span_m: [0.0, 1.0],
+        depth_samples: &depth,
+        transverse,
+    };
+    let volume = admit_volume(grid, 1.0, quadrature, &mut || false).unwrap();
+    let frequencies = &OMEGA[..fields.len()];
+    let cache: Vec<Vec<_>> = frequencies
+        .iter()
+        .map(|&omega| {
+            poles()
+                .into_iter()
+                .map(|pole| PoleTransfer::new(pole, omega).unwrap())
+                .collect()
+        })
+        .collect();
+    let (first, count) = reservoir_range(channel, SIGMA, 2).unwrap();
+    let mut terms = Vec::new();
+    contract_bank(
+        frequencies,
+        proper,
+        quadrature,
+        volume,
+        |i, j, cancelled| {
+            reservoir_pair(SIGMA, &cache[i], &cache[j], first, count, proper, cancelled)
+        },
+        |group, _, _| Ok(fields[group].clone()),
+        &mut terms,
+        &mut || false,
+    )
+    .unwrap();
+    let count = terms.len();
+    PreparedHarmonicProductSpectrum::from_angular_terms(
+        terms,
+        HarmonicSpectrumTermLimits {
+            maximum_terms: count,
+            maximum_workspace_bytes: count * core::mem::size_of::<HarmonicProductTone>(),
+        },
+    )
+    .unwrap()
+}
+
+fn sample_modes(
+    grid: AngularSpectrumGrid,
+    modes: &[[C64; 6]],
+    fractional_position: [f64; 2],
+) -> [C64; 6] {
+    let signed = |bin: usize, count: usize| {
+        if 2 * bin < count {
+            bin as f64
+        } else {
+            bin as f64 - count as f64
+        }
+    };
+    let mut field = [C64::ZERO; 6];
+    for (index, mode) in modes.iter().enumerate() {
+        let phase = -core::f64::consts::TAU
+            * (signed(index % grid.width, grid.width) * fractional_position[0]
+                + signed(index / grid.width, grid.height) * fractional_position[1]);
+        let (s, c) = phase.sin_cos();
+        for axis in 0..6 {
+            field[axis] = field[axis] + mode[axis] * C64::new(c, s);
+        }
+    }
+    field
+}
+
+#[test]
+fn g1_continuous_cell_removes_nyquist_alias_without_removing_real_standing_heat() {
+    use AngularSpectrumExposureHeatChannel::Ohmic;
+    use AngularSpectrumHeatAreaQuadrature::{ContinuousPeriodicCell, PeriodicCell};
+    let grid = AngularSpectrumGrid {
+        width: 4,
+        height: 4,
+        spacing_m: [0.25, 0.25],
+    };
+    // Negative Nyquist in x, y, or both: none has a genuine opposite mode.
+    for mode in [2, 8, 10] {
+        let mut fields = vec![vec![[C64::ZERO; 6]; 16]];
+        fields[0][mode][0] = C64::ONE;
+        let continuous = spatial_spectrum(grid, &fields, false, Ohmic, ContinuousPeriodicCell);
+        let samples = vec![
+            (0..16)
+                .map(|i| {
+                    sample_modes(
+                        grid,
+                        &fields[0],
+                        [(i % 4) as f64 / 4.0, (i / 4) as f64 / 4.0],
+                    )
+                })
+                .collect(),
+        ];
+        let sampled = spatial_spectrum(grid, &samples, false, Ohmic, PeriodicCell);
+        for time in [0.0, 0.17, 0.61, 1.3] {
+            close(continuous.evaluate(time).unwrap(), SIGMA * 0.5);
+            close(
+                sampled.evaluate(time).unwrap(),
+                SIGMA * (OMEGA[0] * time).cos().powi(2),
+            );
+        }
+        assert!((sampled.evaluate(0.0).unwrap() - continuous.evaluate(0.0).unwrap()).abs() > 0.1);
+    }
+    // A true +/- pair has E_real = cos(k.x) cos(omega.t). Its temporal
+    // modulation is physical; only authored proper statistics remove it.
+    let mut standing = vec![vec![[C64::ZERO; 6]; 16]];
+    standing[0][1][0] = C64::from_re(0.5);
+    standing[0][3][0] = C64::from_re(0.5);
+    let real = spatial_spectrum(grid, &standing, false, Ohmic, ContinuousPeriodicCell);
+    let proper = spatial_spectrum(grid, &standing, true, Ohmic, ContinuousPeriodicCell);
+    for time in [0.0, 0.17, 0.61, 1.3] {
+        close(
+            real.evaluate(time).unwrap(),
+            SIGMA * 0.5 * (OMEGA[0] * time).cos().powi(2),
+        );
+        close(proper.evaluate(time).unwrap(), SIGMA * 0.25);
+    }
+}
+
+#[test]
+fn g1_continuous_cell_keeps_multifrequency_reservoir_phase_and_mixed_statistics() {
+    use AngularSpectrumExposureHeatChannel::Total;
+    use AngularSpectrumHeatAreaQuadrature::{ContinuousPeriodicCell, PeriodicCell};
+    let grid = AngularSpectrumGrid {
+        width: 4,
+        height: 2,
+        spacing_m: [0.25, 0.4],
+    };
+    let refined = AngularSpectrumGrid {
+        width: 8,
+        height: 4,
+        spacing_m: [0.125, 0.2],
+    };
+    let banks: Vec<Vec<Vec<_>>> = (0..3)
+        .map(|bank| {
+            (0..2)
+                .map(|group| {
+                    (0..8)
+                        .map(|mode| {
+                            let e = electric(bank, group, mode, 0.3);
+                            [e[0], e[1], e[2], C64::ZERO, C64::ZERO, C64::ZERO]
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let sampled: Vec<Vec<Vec<_>>> = banks
+        .iter()
+        .map(|bank| {
+            bank.iter()
+                .map(|modes| {
+                    (0..32)
+                        .map(|i| {
+                            sample_modes(grid, modes, [(i % 8) as f64 / 8.0, (i / 8) as f64 / 4.0])
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let continuous: Vec<_> = banks
+        .iter()
+        .enumerate()
+        .map(|(bank, fields)| {
+            spatial_spectrum(grid, fields, bank == 2, Total, ContinuousPeriodicCell)
+        })
+        .collect();
+    let dense: Vec<_> = sampled
+        .iter()
+        .enumerate()
+        .map(|(bank, fields)| spatial_spectrum(refined, fields, bank == 2, Total, PeriodicCell))
+        .collect();
+    for time in [-0.4, 0.0, 0.17, 0.83] {
+        // Independent positive-time real electric fields and ORIGINAL Debye
+        // ODE currents on a product-resolving spatial grid. Real factors need
+        // one sign for their square; the two proper phases realize E[z²]=0.
+        let mut expected = 0.0;
+        for (bank, fields) in sampled.iter().enumerate() {
+            let states = if bank == 2 { 2 } else { 1 };
+            for coefficient in [C64::ONE, C64::new(0.0, 1.0)].into_iter().take(states) {
+                for point in 0..32 {
+                    let mut e = [0.0; 3];
+                    let mut current = [[0.0; 3]; 2];
+                    for (group, omega) in OMEGA.into_iter().enumerate() {
+                        let (s, c) = (omega * time).sin_cos();
+                        for axis in 0..3 {
+                            let amplitude =
+                                fields[group][point][axis] * coefficient * C64::new(c, s);
+                            e[axis] += amplitude.re;
+                            for (p, pole) in poles().into_iter().enumerate() {
+                                let filter = C64::new(0.0, omega * pole.permittivity_increment_f_m)
+                                    / C64::new(1.0, omega * pole.relaxation_time_s);
+                                current[p][axis] += (filter * amplitude).re;
+                            }
+                        }
+                    }
+                    let mut heat = SIGMA * e.into_iter().map(|v| v * v).sum::<f64>();
+                    for (p, pole) in poles().into_iter().enumerate() {
+                        heat += pole.relaxation_time_s / pole.permittivity_increment_f_m
+                            * current[p].into_iter().map(|v| v * v).sum::<f64>();
+                    }
+                    expected +=
+                        heat * (refined.spacing_m[0] * refined.spacing_m[1]) / states as f64;
+                }
+            }
+        }
+        close(
+            continuous.iter().map(|s| s.evaluate(time).unwrap()).sum(),
+            expected,
+        );
+        close(
+            dense.iter().map(|s| s.evaluate(time).unwrap()).sum(),
+            expected,
+        );
+    }
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let window = HarmonicWindow::with_profile(0.17, 0.43, profile).unwrap();
+        close(
+            continuous.iter().map(|s| s.mean(window).unwrap()).sum(),
+            dense.iter().map(|s| s.mean(window).unwrap()).sum(),
+        );
+    }
 }
 
 #[test]

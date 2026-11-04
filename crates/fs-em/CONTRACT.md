@@ -3341,14 +3341,24 @@ Every node lies in the declared span. The weight sum must match its length
 within 32*f64::EPSILON relative allowance. Actual authored weights are retained
 and used unchanged; no normalization forces agreement.
 `AngularSpectrumHeatAreaQuadrature::PeriodicCell` uses original dx*dy for each
-row-major cell. `CellAreasM2` supplies one finite area in [0,dx*dy] per original
+row-major field sample. `CellAreasM2` supplies one finite area in [0,dx*dy] per original
 cell; zero masks a cell and positive fractions describe partial cells without
 relocating field samples. An all-zero mask is an explicitly empty support.
+`ContinuousPeriodicCell` instead integrates the represented transverse Fourier
+fields continuously across the full cell. Equal signed modes contribute to
+difference products; genuinely opposite modes contribute to sum products.
+The unpaired negative Nyquist mode is never its own opposite. Real carrier
+terms remain for the zero mode and true counterpropagating pairs; only authored
+proper factors remove all sum terms. Original source coherence, pole phases,
+depth weights and native angular clocks remain unchanged.
 
 For every source bank, each original frequency plane is reconstructed once
 per depth through the existing coherent field owner and retained only for that
 depth. The spatial DD contractions are the volume quadratures of
-E_f dot conj(E_g) and E_f dot E_g. Original cached reservoir-transfer products
+E_f dot conj(E_g) and E_f dot E_g. Continuous full-cell support contracts the
+original modal vectors before synthesis, using the physical complete cell area
+once per admitted mode pair. Sampled supports synthesize the original fields.
+Original cached reservoir-transfer products
 are summed once per frequency pair, outside the spatial/depth loops:
 sigma plus sum H_rf*conj(H_rg), or sigma plus sum H_rf*H_rg.
 This avoids repeating spatial work for every selected Debye pole.
@@ -3384,16 +3394,20 @@ generated terms, added work is O(Z*N*sum F_r^2 + R*sum F_r^2 + K log K), besides
 Z original field reconstructions. Additional retained storage is
 O(max_r(N*F_r + F_r^2) + K), including both contracted raw terms and shared
 tone preparation. The conservative bound also includes the original complete
-prepared-layer workspace. Borrowed inputs and allocator overhead are excluded.
+prepared-layer workspace. Continuous full-cell support needs zero additional
+synthesis FFT work and accepts `maximum_fft_work=0` for this query; its spatial
+pair budget counts modes instead of samples. Original beam analysis and layer
+preparation keep their own work bounds. Borrowed inputs and allocator overhead are excluded.
 Cancellation/refusal publishes no partial load and leaves the original owner
 reusable. Scalar/window observations allocate nothing; negative rounded heat
 refuses rather than being clipped.
 
-This is an explicit physical-volume numerical quadrature. It is not an
-arbitrary point-density times a free volume parameter, nor an exact continuous
-aperture/depth integral. Original transverse sampling can alias field PRODUCTS
-even when fields are resolved; depth samples must resolve interference,
-standing waves and attenuation. The caller owns support and refinement.
+This retains explicit physical-volume support. Continuous full-cell integration
+removes transverse product aliasing for the represented Fourier field; it does
+not certify that the physical field is spatially converged. Sampled area options
+can still alias field PRODUCTS even when fields are resolved. All options use
+numerical depth quadrature, whose samples must resolve standing waves and
+attenuation. The caller owns support and refinement.
 No quadrature error enclosure, isolated-aperture convergence, switch-on state
 or material-temperature feedback is inferred.
 
@@ -3424,6 +3438,17 @@ typechecked against the complete EM dependency graph here. An independent
 normal-incidence film reference confirms the latter fixture's 19.7507815275 W
 absorption and Simpson errors 2.89e-3, 1.02e-5 and 6.34e-7 W for 8,32,64
 intervals; this separate reference is not execution of the Rust film owner.
+
+Continuous-cell regressions add signed Nyquist falsifiers, true standing-wave
+and zero-mode controls, mixed real/proper two-frequency original-reservoir
+comparisons against refined spatial integration, and zero-synthesis-budget
+admission. The native thermal feedback test uses continuous support while
+checking enthalpy deposition and its late DD clock. Three bounded native tests
+execute the verbatim spatial-pair kernel, signed-mode mapping and scaled DD
+arithmetic with real fs_math, including refined vector-field products and
+extreme balanced scales. These checks exclude material/FFT orchestration;
+the new full-owner EM and thermal integration tests are authored, not executed
+against the unavailable complete dependency graph in this environment.
 
 ## Tetrahedral dielectric and polarization weak forms
 

@@ -543,6 +543,12 @@ fn g3_native_heat_feedback_rebuilds_next_interval_and_preserves_late_dd_phase_cl
         factors: &factors,
     };
     let nodes = depth();
+    let continuous_volume = AngularSpectrumHeatVolumeQuadrature {
+        transverse: AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell,
+        ..volume(&nodes)
+    };
+    let mut continuous_limits = limits();
+    continuous_limits.heat.maximum_fft_work = 0;
     let owner = QuasiSteadyFilmHeating::try_new(
         &stack,
         0,
@@ -551,8 +557,8 @@ fn g3_native_heat_feedback_rebuilds_next_interval_and_preserves_late_dd_phase_cl
         &body,
         GRID,
         drive,
-        volume(&nodes),
-        limits(),
+        continuous_volume,
+        continuous_limits,
         || false,
     )
     .unwrap();
