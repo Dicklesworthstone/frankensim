@@ -5614,7 +5614,8 @@ band refuses with a typed `TimeResolution` error; nothing is retuned.
 
 | Current path | Linear owner | Current band / audit boundary |
 | --- | --- | --- |
-| KC string (`realize_coupled_kc`) and nonlinear plate (`thin_plate::VkBody`) through fs-phs `step_render` | Exact ZOH when the storage is exactly quadratic, otherwise Gonzalez midpoint | Midpoint admits only the one-cent band on the split's pole-rate bound and refuses with `TimeResolution` |
+| Fixed-end KC strings (`realize_kc_string`, `realize_coupled_kc`, `realize_coupled_ode`) | Prepared exact quadratic propagation with the complete nonlinear discrete-gradient endpoint when the existing shadow/heat capacity admits it; otherwise the original `step_render` | Retained bare/bending modes fit the observer Nyquist guard; nonlinear/contact motion requires time refinement. The oversized model's nonlinear midpoint fallback retains the one-cent pole-rate bound and `TimeResolution` refusal |
+| Nonlinear plate (`thin_plate::VkBody`) through fs-phs `step_render` | Exact ZOH when the storage is exactly quadratic, otherwise Gonzalez midpoint | Midpoint admits only the one-cent band on the split's pole-rate bound and refuses with `TimeResolution` |
 | Dirac joins (`realize_dirac_join` / `step_descriptor`) | Gonzalez midpoint | One-cent band on the descriptor pole-rate bound; typed `TimeResolution` refusal |
 | Glottis fold island, coupled ODE chains, blown and reed ODEs, brass lip held-force island, plate-cavity transformer | Exact ZOH (fs-phs `linear_exact`) | No warping; nonlinear forces are held over the step |
 | PlateBank complete body/material/cavity/exterior state | Prepared full exact ZOH for quadratic storage, otherwise Gonzalez midpoint | Reciprocal loads share one accepted solve; the original nonlinear pole-rate band and complete-state capacity apply |
@@ -7529,10 +7530,35 @@ clarinet is one filling of those objects.
   eigenpairs), not caller Hertz. Mouth pressure × area drives the
   plate; plate volume velocity returns to the waveguide
   (structure–bore).
+- Fixed-end Kirchhoff–Carrier members prepare the complete original
+  contact-wrapped, bending-memory system at the render clock. When
+  `2 * (2 * state_dim + port_dim + 1)` fits the existing exact owner's
+  preparation capacity, `PreparedNonlinearZoh` advances its quadratic
+  part exactly and solves the original nonlinear discrete-gradient endpoint.
+  The native account retains original Hamiltonian change, independently
+  integrated physical resistance heat and same-window held-force work.
+  Candidate state, force and mean-output buffers are reused.
+  The dimension check includes the exact owner's shadow/heat reservation;
+  an unexpected preparation failure propagates rather than changing schemes.
+  Larger complete systems retain `step_render`; its nonlinear midpoint
+  fallback still requires the original `omega * dt <= 0.04` pole-rate bound.
+  Every selected mode, conservative obstacle and memory arm remains present.
+  Retained bare/bending frequencies must also fit the linear modal observer's
+  Nyquist guard. This guard does not certify nonlinear or contact harmonics:
+  time, modal and contact refinement remain separate accuracy obligations.
+  A changed clock refuses before advancing any history. Failed KC trials
+  restore the driven texture path and retain accepted mechanics/observer
+  history; the surrounding multi-member render is not a joint transaction.
+  Bridge-force outputs and compact pressure use the same accepted coordinates
+  and actual force/acceleration maps. Fixed-end support coupling remains the
+  original one-way force path; moving-end descriptor stepping is separate.
+  Focused `acoustic_realize::kc_step_tests` exercise the high-frequency
+  quadratic limit, nonlinear period refinement, complete contact/memory work,
+  sampled-band refusal and rejected trials.
 - String obstacles are `fs-dcontact` power-law potentials on sine
   collocation. On the Kirchhoff–Carrier path the conservative
   potential is `ContactStorage` wrapping the KC Hamiltonian, so
-  Gonzalez sees the contact energy. Optional `mu_kinetic` adds
+  both stepping images retain its contact energy. Optional `mu_kinetic` adds
   `fs-tribo` Coulomb traction as a modal port force (not a gradient
   of `H`). The linear modal path still applies both as a force.
   Hunt–Crossley `χ` is a scenario field on the obstacle and a

@@ -22,6 +22,8 @@ mod polarization_tests;
 #[cfg(test)]
 mod moving_contact_tests;
 #[cfg(test)]
+mod kc_step_tests;
+#[cfg(test)]
 #[path = "acoustic_realize/string_observer_tests.rs"]
 mod moving_string_observer_tests;
 
@@ -837,7 +839,7 @@ fn realize_coupled_ode(
             &assembly.obstacles,
             gas,
             listener_m,
-            1.0,
+            1.0, dt,
         )?];
         if string.polarization_detune > 0.0 {
             members.push(kc_string_member(
@@ -847,7 +849,7 @@ fn realize_coupled_ode(
                 &assembly.obstacles,
                 gas,
                 listener_m,
-                0.85,
+                0.85, dt,
             )?);
         }
         for i in 0..n {
@@ -1329,6 +1331,7 @@ fn realize_coupled_kc(
     let string = assembly.string.as_ref().expect("checked");
     let twin = secondary_string(string, (1.0 + string.polarization_detune).powi(2));
     let listener_m = assembly.listener.distance_m;
+    let dt = 1.0 / f64::from(assembly.sample_rate_hz);
     let mut members = vec![kc_string_member(
         string,
         assembly.pluck,
@@ -1336,7 +1339,7 @@ fn realize_coupled_kc(
         &assembly.obstacles,
         gas,
         listener_m,
-        1.0,
+        1.0, dt,
     )?];
     if string.polarization_detune > 0.0 {
         members.push(kc_string_member(
@@ -1346,10 +1349,9 @@ fn realize_coupled_kc(
             &assembly.obstacles,
             gas,
             listener_m,
-            0.85,
+            0.85, dt,
         )?);
     }
-    let dt = 1.0 / f64::from(assembly.sample_rate_hz);
     let mut p_plus_prev = 5.0;
     let mut out = vec![0.0; n];
     #[allow(clippy::needless_range_loop)] // the sample index is the time axis
@@ -4599,15 +4601,15 @@ fn realize_kc_string(
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let twin = secondary_string(string, twin_tension.unwrap_or(1.0));
     let mut texture = TextureDrive::try_new(texture)?;
+    let dt = 1.0 / f64::from(sample_rate_hz);
     let mut members = vec![kc_string_member(
-        string, pluck, bow, obstacles, gas, listener_m, 1.0,
+        string, pluck, bow, obstacles, gas, listener_m, 1.0, dt,
     )?];
     if twin_tension.is_some() {
         members.push(kc_string_member(
-            &twin, pluck, bow, obstacles, gas, listener_m, 0.85,
+            &twin, pluck, bow, obstacles, gas, listener_m, 0.85, dt,
         )?);
     }
-    let dt = 1.0 / f64::from(sample_rate_hz);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let mut p = 0.0;
@@ -4629,13 +4631,129 @@ fn realize_kc_string(
     Ok(out)
 }
 
-struct KcMember {
-    sys: fs_phs::PortHamiltonian,
+// Preserve the complete original storage in either numerical image. The exact
+// owner includes conservative contact and quadratic material histories; it does
+// not replace the model by a contact-free or memory-free SOS approximation.
+enum KcFlow {
+    Exact(Box<fs_phs::linear_exact::PreparedNonlinearZoh>),
+    ResolvedMidpoint(Box<ResolvedKcFlow>),
+}
+
+struct ResolvedKcFlow {
+    system: fs_phs::PortHamiltonian,
     linear: fs_phs::linear_exact::LinearSplit,
+    dt: f64,
+}
+
+impl KcFlow {
+    fn new(system: fs_phs::PortHamiltonian, dt: f64) -> Result<Self, AcousticRealizeError> {
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "KC propagation requires a positive finite fixed clock",
+            });
+        }
+        let budget = fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: system.state_dim(),
+            max_omega_dt: core::f64::consts::PI,
+        };
+        // The nonlinear trajectory uses 2*n + m + 1 coordinates. Its shadow
+        // split also reserves the doubled block used by the exact heat owner.
+        // Match BOTH existing admissions; never try-and-catch a physical or
+        // numerical preparation failure as permission to change integrators.
+        let preparation_dimension = system.state_dim()
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(system.port_dim()))
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_mul(2))
+            .ok_or(AcousticRealizeError::InvalidDescription {
+                what: "complete KC propagation dimension overflow",
+            })?;
+        if preparation_dimension <= fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
+            fs_phs::linear_exact::PreparedNonlinearZoh::new_owned(system, dt, budget)
+                .map(|flow| Self::Exact(Box::new(flow)))
+                .map_err(render_phs_error)
+        } else {
+            let linear = fs_phs::linear_exact::split_quadratic(&system, budget)
+                .map_err(render_phs_error)?;
+            Ok(Self::ResolvedMidpoint(Box::new(ResolvedKcFlow { system, linear, dt })))
+        }
+    }
+
+    fn system(&self) -> &fs_phs::PortHamiltonian {
+        match self {
+            Self::Exact(flow) => flow.system(),
+            Self::ResolvedMidpoint(flow) => &flow.system,
+        }
+    }
+
+    fn duration(&self) -> f64 {
+        match self {
+            Self::Exact(flow) => flow.duration(),
+            Self::ResolvedMidpoint(flow) => flow.dt,
+        }
+    }
+
+    fn admit_clock(&self, dt: f64) -> Result<(), AcousticRealizeError> {
+        if dt != self.duration() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "KC step must retain its prepared physical clock",
+            });
+        }
+        Ok(())
+    }
+
+    fn step_into(
+        &mut self,
+        initial: &[f64],
+        input: &[f64],
+        dt: f64,
+        next: &mut [f64],
+        average_output: &mut [f64],
+    ) -> Result<fs_phs::PreparedStepRecord, AcousticRealizeError> {
+        self.admit_clock(dt)?;
+        if next.len() != self.system().state_dim()
+            || average_output.len() != self.system().port_dim()
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "KC propagation needs complete state and port output buffers",
+            });
+        }
+        match self {
+            Self::Exact(flow) => flow.step_into(initial, input, next, average_output)
+                .map_err(render_phs_error),
+            Self::ResolvedMidpoint(flow) => {
+                // Larger complete models keep the original render path. Only its
+                // nonlinear midpoint branch uses <=1-cent admission; exact
+                // quadratic storage keeps that owner's exact propagation.
+                // No mode, contact or memory arm is removed.
+                let record = fs_phs::linear_exact::step_render(
+                    &flow.system, &flow.linear, initial, input, dt,
+                ).map_err(render_phs_error)?;
+                next.copy_from_slice(&record.x);
+                average_output.copy_from_slice(&record.y);
+                Ok(fs_phs::PreparedStepRecord {
+                    delta_h: record.delta_h,
+                    dissipated: record.dissipated,
+                    supplied: record.supplied,
+                    newton_iters: record.newton_iters,
+                    solver_residual: record.solver_residual,
+                    solver_certificate: record.solver_certificate,
+                })
+            }
+        }
+    }
+}
+
+struct KcMember {
+    flow: KcFlow,
     x: Vec<f64>,
+    next: Vec<f64>,
+    input: Vec<f64>,
+    average_output: Vec<f64>,
     observer: StringObserver,
 }
 
+#[allow(clippy::too_many_arguments)] // the fixed physical clock accompanies one string image
 fn kc_string_member(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -4644,6 +4762,7 @@ fn kc_string_member(
     gas: &GasState,
     listener_m: f64,
     radiation_scale: f64,
+    dt: f64,
 ) -> Result<KcMember, AcousticRealizeError> {
     let mut storage = kirchhoff_carrier_string(
         &KcStringParams {
@@ -4660,6 +4779,19 @@ fn kc_string_member(
             *w = string_mode_omega(string, k + 1);
         }
     }
+    // Exact propagation removes midpoint's incidental anti-aliasing guard.
+    // Keep every retained bending-adjusted frequency inside the SAME sampled
+    // observer band as the linear modal path. This is not a bound on nonlinear
+    // or contact-generated harmonics, which still require clock refinement.
+    let nyquist_guard = core::f64::consts::PI
+        * ModalAcousticTimeBudget::audible_reference().nyquist_guard_fraction;
+    if !dt.is_finite() || dt <= 0.0
+        || storage.omegas.iter().any(|&omega| !omega.is_finite() || omega * dt > nyquist_guard)
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "complete KC modal frequencies must fit the prepared observer Nyquist guard",
+        });
+    }
     let zetas: Result<Vec<f64>, _> = storage
         .omegas
         .iter()
@@ -4672,14 +4804,6 @@ fn kc_string_member(
     let zetas = zetas?;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
     let sys = with_bending_relaxation(string, assemble_kc(string, storage, &zetas, obstacles)?)?;
-    let linear = fs_phs::linear_exact::split_quadratic(
-        &sys,
-        fs_phs::linear_exact::LinearSplitBudget {
-            max_modes: sys.state_dim(),
-            max_omega_dt: core::f64::consts::PI,
-        },
-    )
-    .map_err(render_phs_error)?;
     let mut x = vec![0.0; sys.state_dim()];
     if let Some(pluck) = pluck {
         for k in 1..=string.n_modes {
@@ -4687,10 +4811,15 @@ fn kc_string_member(
         }
     }
     initialize_relaxed_bending(string, &mut x);
+    let next = vec![0.0; x.len()];
+    let input = vec![0.0; sys.port_dim()];
+    let average_output = vec![0.0; sys.port_dim()];
     Ok(KcMember {
-        sys,
-        linear,
+        flow: KcFlow::new(sys, dt)?,
         x,
+        next,
+        input,
+        average_output,
         observer: StringObserver::new(string, gas, listener_m, radiation_scale),
     })
 }
@@ -4729,9 +4858,30 @@ fn step_kc_member(
     _gas: &GasState,
     dt: f64,
 ) -> Result<(f64, Vec<f64>), AcousticRealizeError> {
+    // A rejected trial must not publish the prescribed texture's path while
+    // leaving the mechanical and observer histories at the previous endpoint.
+    member.flow.admit_clock(dt)?;
+    let texture_path = texture.inner.as_ref().map(|inner| inner.path_m);
+    let result = advance_kc_member(member, bow, texture, obstacles, string, dt);
+    if result.is_err() {
+        if let (Some(path), Some(inner)) = (texture_path, texture.inner.as_mut()) {
+            inner.path_m = path;
+        }
+    }
+    result
+}
+
+fn advance_kc_member(
+    member: &mut KcMember,
+    bow: Option<BowStroke>,
+    texture: &mut TextureDrive,
+    obstacles: &[UnilateralObstacle],
+    string: &PrestressedString,
+    dt: f64,
+) -> Result<(f64, Vec<f64>), AcousticRealizeError> {
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
     let pi = core::f64::consts::PI;
-    let mut u = vec![0.0; string.n_modes];
+    member.input.fill(0.0);
     if let Some(bow) = bow {
         let v_string: f64 = (0..string.n_modes)
             .map(|k| {
@@ -4748,20 +4898,20 @@ fn step_kc_member(
         #[allow(clippy::needless_range_loop)] // the modal index spans u and shapes
         for k in 0..string.n_modes {
             let phi = det::sin((k + 1) as f64 * pi * bow.station_frac) / mass_scale;
-            u[k] = f_bow * phi;
+            member.input[k] = f_bow * phi;
         }
     }
     if obstacles.iter().any(|o| o.mu_kinetic > 0.0) {
         let extra = modal_friction_forces(string, obstacles, &member.x[..2 * string.n_modes])
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        for (uk, fk) in u.iter_mut().zip(extra) {
+        for (uk, fk) in member.input.iter_mut().zip(extra) {
             *uk += fk;
         }
     }
     if obstacles.iter().any(|o| o.internal_loss > 0.0) {
         let extra = modal_hunt_crossley_forces(string, obstacles, &member.x[..2 * string.n_modes])
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        for (uk, fk) in u.iter_mut().zip(extra) {
+        for (uk, fk) in member.input.iter_mut().zip(extra) {
             *uk += fk;
         }
     }
@@ -4769,13 +4919,14 @@ fn step_kc_member(
         .observer
         .previous_acceleration
         .is_none()
-        .then(|| kc_accelerations(&member.sys, &member.x, &u));
-    let rec = fs_phs::linear_exact::step_render(&member.sys, &member.linear, &member.x, &u, dt)
-        .map_err(render_phs_error)?;
-    let p = member
-        .observer
-        .observe(kc_accelerations(&member.sys, &rec.x, &u), initial, dt)?;
-    member.x = rec.x;
+        .then(|| kc_accelerations(member.flow.system(), &member.x, &member.input));
+    member.flow.step_into(
+        &member.x, &member.input, dt, &mut member.next, &mut member.average_output,
+    )?;
+    let p = member.observer.observe(
+        kc_accelerations(member.flow.system(), &member.next, &member.input), initial, dt,
+    )?;
+    core::mem::swap(&mut member.x, &mut member.next);
     let mut q_phys = vec![0.0; string.n_modes];
     #[allow(clippy::needless_range_loop)] // the modal index spans state and outputs
     for k in 0..string.n_modes {
@@ -5929,7 +6080,7 @@ mod string_observer_tests {
             lin_density_kg_m: 0.006,
             axial_stiffness_n: 1000.0,
             width_m: 0.001,
-            n_modes: 2,
+            n_modes: 26,
             damping_ratio: 0.0,
             rayleigh: None,
             bending_stiffness_n_m2: 0.0,
@@ -5941,20 +6092,38 @@ mod string_observer_tests {
             bending_loss_factor: None,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let mut member = kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0).unwrap();
+        let probe = kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0, 1e-6).unwrap();
+        let KcFlow::ResolvedMidpoint(probe) = &probe.flow else {
+            panic!("the complete 26-mode shadow exceeds the existing exponential capacity");
+        };
+        assert_eq!(probe.system.state_dim(), 2 * string.n_modes);
+        let dt = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP
+            / probe.linear.pole_rate_bound_rad_s();
+        let resolved_dt = dt * (1.0 - 1e-12);
+        let mut member = kc_string_member(
+            &string, None, None, &[], &gas, 1.0, 1.0, resolved_dt,
+        ).unwrap();
         let mut texture = TextureDrive::try_new(None).unwrap();
-        let cap = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
-        let dt = cap / member.linear.pole_rate_bound_rad_s();
-        assert!(
-            step_kc_member(&mut member, None, &mut texture, &[], &string, &gas, dt * (1.0 - 1e-12))
-                .is_ok()
-        );
+        member.x[2 * (string.n_modes - 1)] = 1e-9;
+        step_kc_member(
+            &mut member, None, &mut texture, &[], &string, &gas, resolved_dt,
+        ).unwrap();
+        assert_eq!(member.x.len(), 2 * string.n_modes);
+        assert!(member.x[2 * (string.n_modes - 1)] != 0.0);
+
+        let unresolved_dt = dt * (1.0 + 1e-10);
+        let mut member = kc_string_member(
+            &string, None, None, &[], &gas, 1.0, 1.0, unresolved_dt,
+        ).unwrap();
         let before = member.x.clone();
         assert!(matches!(
-            step_kc_member(&mut member, None, &mut texture, &[], &string, &gas, dt * (1.0 + 1e-10)),
+            step_kc_member(
+                &mut member, None, &mut texture, &[], &string, &gas, unresolved_dt,
+            ),
             Err(AcousticRealizeError::TimeResolution(_))
         ));
         assert_eq!(member.x, before);
+        assert!(member.observer.previous_acceleration.is_none());
     }
 
     #[test]
