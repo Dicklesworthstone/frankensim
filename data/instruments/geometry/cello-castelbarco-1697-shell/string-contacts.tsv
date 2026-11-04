@@ -1,0 +1,6 @@
+frankensim.specimen-string-contacts.v1
+string	contact	z_mm	x_mm	y_mm	slope_dy_dz_before	slope_dy_dz_after
+c	bridge	-224.20	-23.500	-111.250	0.0	0.0
+g	bridge	-224.20	-7.833	-112.750	0.0	0.0
+d	bridge	-224.20	7.833	-112.000	0.0	0.0
+a	bridge	-224.20	23.500	-107.500	0.0	0.0

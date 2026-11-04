@@ -7,6 +7,8 @@ Every choice that is not a number of the specimen tables is written into the out
 x across (bass bar at negative x), y vertical (top plate at negative y, back at positive y), z along the body (tail at negative z). The output is in metres in the same frame.
 Plate thickness comes from the normal-thickness maps in uniform-thickness zones (the shell owner needs one thickness per shared node, so a thickness step is a separate component
 tied to its neighbour along the shared edge chain); the attachment bands of the ribs, bar, post and bridge are zones of their own so that every tie chain lies inside one component.
+With instrument=cello and the cello mesh options below it builds the cello body of data/instruments/geometry/cello-castelbarco-1697-shell from that
+directory's specimen tables, which are laid out like il Cannone's; every option is off by default, so a violin table is unchanged.
 """
 import math
 import sys
@@ -39,6 +41,20 @@ ZSTEP = dict(top=float(opts.get("zone_step_top_mm", "0.2")), back=float(opts.get
 # "ellipse" is the estimate of the tables before 2026-11-01 (each hole's equivalent ellipse in series with t/A at the top
 # thickness, summed). The conductance table is computed at plan scale 1 and the measured bore, so a scaled or thickness-
 # shifted sensitivity table must say neck=ellipse.
+# A cello specimen (each option off by default):
+# instrument=cello drives the bridge at the cello's outer strings (C and A), puts the centre drive 2 mm below the mean string
+# contact height (the violin's is fixed at -52 mm), names the endpin instead of the chinrest in `omitted` and adds a `specimen` row;
+# foot_band_mm is the band of silhouette rows read as the bridge feet (3 mm on the violin's 35 mm bridge);
+# crossing_snap_mm moves an interior vertex nearer than this to the bass-bar / bass-foot crossing onto the crossing (mesh only);
+# rib_layers sets the layers across the rib height instead of ceil(max height / 0.9 H) (mesh only);
+# bridge_dp_mm is the Douglas-Peucker tolerance of the bridge outline and its cut-outs (0.3 mm).
+INSTRUMENT = opts.get("instrument", "violin")
+if INSTRUMENT not in ("violin", "cello"):
+    raise SystemExit("instrument must be violin or cello")
+CELLO = INSTRUMENT == "cello"
+FOOT_BAND = float(opts.get("foot_band_mm", "3.0"))
+FOOT_BAND_TEXT = "%.1f" % FOOT_BAND if "foot_band_mm" in opts else "3"  # the violin tables print the default as "3"
+BDP = float(opts.get("bridge_dp_mm", "0.3"))
 NECK = opts.get("neck", "bem")
 if NECK not in ("bem", "ellipse"):
     raise SystemExit("neck must be bem or ellipse")
@@ -138,18 +154,32 @@ def seg_cross(a, b, c, d):
     return (t, u) if 1e-6 < t < 1 - 1e-6 and 1e-6 < u < 1 - 1e-6 else None
 
 
-def insert_crossings(A, B):
-    """Insert the crossing points of two open polylines into both."""
+def insert_crossings(A, B, snap=0.0):
+    """Insert the crossing points of two open polylines into both. With snap > 0 an interior vertex of either line nearer than snap to the crossing is moved
+    onto the crossing instead of a second vertex being inserted beside it (mesh only: the crossing lies on both lines); each move is recorded in SNAPS."""
     A, B = [np.array(p) for p in A], [np.array(p) for p in B]
     for i in range(len(A) - 1):
         for j in range(len(B) - 1):
             c = seg_cross(A[i], A[i + 1], B[j], B[j + 1])
             if c:
                 p = A[i] + c[0] * (A[i + 1] - A[i])
-                A.insert(i + 1, p)
-                B.insert(j + 1, p.copy())
-                return insert_crossings(A, B)
+                ia = next((k for k in (i, i + 1) if 0 < k < len(A) - 1 and np.hypot(*(A[k] - p)) < snap), None)
+                jb = next((k for k in (j, j + 1) if 0 < k < len(B) - 1 and np.hypot(*(B[k] - p)) < snap), None)
+                if ia is None:
+                    A.insert(i + 1, p)
+                else:
+                    SNAPS.append(("first line", float(np.hypot(*(A[ia] - p)))))
+                    A[ia] = p
+                if jb is None:
+                    B.insert(j + 1, p.copy())
+                else:
+                    SNAPS.append(("second line", float(np.hypot(*(B[jb] - p)))))
+                    B[jb] = p.copy()
+                return insert_crossings(A, B, snap)
     return np.array(A), np.array(B)
+
+
+SNAPS = []
 
 
 def trace_loops(occ, cell, x0, y0):
@@ -883,7 +913,7 @@ def main():
         vol_bridge = [float(r[1]) for r in pv if r[0] == "bridge"][0]
         zc = float(np.average(bsec[:, 3], weights=bsec[:, 1]))
         ybot = sil[:, 0].max()
-        bottom = sil[sil[:, 0] > ybot - 3.0]  # the two legs: the bottom 3 mm of rows
+        bottom = sil[sil[:, 0] > ybot - FOOT_BAND]  # the two legs: the bottom FOOT_BAND mm of rows
         # two feet: the x runs of the bottom rows, merged
         runs = sorted((float(r[1]), float(r[2])) for r in bottom)
         feet = []
@@ -897,13 +927,16 @@ def main():
         area_sil = float(np.sum(sil[:, 2] - sil[:, 1]) * 0.25)
         t_bridge = vol_bridge / area_sil
         bridge = dict(sil=sil, zc=zc, feet=feet, t=t_bridge, ybot=ybot)
-        meta("bridge", "silhouette from the 0.25 mm raster rows (bridge-silhouette.tsv), plane z = %.2f mm (area-weighted mid plane of the sections), uniform thickness = mesh volume %.0f mm3 / silhouette area %.0f mm2 = %.2f mm, feet = the two legs in the bottom 3 mm of rows (x %.1f to %.1f and %.1f to %.1f mm), grain across x, string notches and the heart cut-out as in the silhouette" % (zc, vol_bridge, area_sil, t_bridge, feet[0][0], feet[0][1], feet[1][0], feet[1][1]))
+        meta("bridge", "silhouette from the 0.25 mm raster rows (bridge-silhouette.tsv), plane z = %.2f mm (area-weighted mid plane of the sections), uniform thickness = mesh volume %.0f mm3 / silhouette area %.0f mm2 = %.2f mm, feet = the two legs in the bottom %s mm of rows (x %.1f to %.1f and %.1f to %.1f mm), grain across x, string notches and the heart cut-out as in the silhouette" % (zc, vol_bridge, area_sil, t_bridge, FOOT_BAND_TEXT, feet[0][0], feet[0][1], feet[1][0], feet[1][1]))
         foot_pts = []
         for k, (xa, xb) in enumerate(feet):
             pts = to_plan(np.c_[np.linspace(xa, xb, max(3, int(round((xb - xa) / (0.6 * H))) + 1)), np.full(max(3, int(round((xb - xa) / (0.6 * H))) + 1), zc)])
             foot_pts.append(pts)
         if bar_pts is not None:
-            bar_pts, foot_pts[0] = insert_crossings(bar_pts, foot_pts[0])
+            snap = float(opts.get("crossing_snap_mm", "0"))
+            bar_pts, foot_pts[0] = insert_crossings(bar_pts, foot_pts[0], snap)
+            if "crossing_snap_mm" in opts:
+                meta("bar_foot_crossing", "crossing of the bass-bar line and the bass-foot line inserted into both; snap radius %.2f mm (an interior vertex nearer than this is moved onto the crossing, mesh only); moved: %s" % (snap, ", ".join("%s %.3f mm" % kv for kv in SNAPS) or "none"))
         extra_top["foot1"] = (foot_pts[0], False, None)
         extra_top["foot2"] = (foot_pts[1], False, None)
         feature_top += ["foot1", "foot2"]
@@ -966,6 +999,9 @@ def main():
         bot_end = np.array([Pb[v] - 0.5 * cback.t * Nb[v] for v in ids_b])
         height = np.linalg.norm(bot_end - top_end, axis=1)
         K = max(2, int(math.ceil(height.max() / (0.9 * H))))
+        if "rib_layers" in opts:  # the shell profile admits 3072 nodes and 6144 triangles per component; the cello's taller rib needs fewer layers at its H
+            meta("rib_layers", "%s layers across the rib height instead of %d (ceil(max height %.1f mm / 0.9 H)), mesh only, to keep the rib under the per-component caps of the v4 profile" % (opts["rib_layers"], K, height.max()))
+            K = int(opts["rib_layers"])
         rib = Comp("rib", PACKS["rib"], t_rib, True, True)
         ccw = poly_area(ring) > 0
         rows = [[] for _ in range(K + 1)]
@@ -1085,7 +1121,7 @@ def main():
                 out_ += [a_ + (b_ - a_) * q / n_ for q in range(n_)]
             return np.array(out_)
 
-        outer = subdivide(douglas_peucker(outer, 0.3), hs)
+        outer = subdivide(douglas_peucker(outer, BDP), hs)
         # replace the bottom run of each foot by the exact slave positions (outer skin of the top at the foot chain)
         foot_nodes = []
         for k, name in enumerate(("foot1", "foot2")):
@@ -1096,7 +1132,7 @@ def main():
         bridge_poly = outer.copy()
 
         def leg_bottom(x):  # lowest silhouette point (largest y) of the legs at x
-            ys = [r[0] for r in sil if r[0] > bridge["ybot"] - 3.0 and r[1] - 0.13 <= x <= r[2] + 0.13]
+            ys = [r[0] for r in sil if r[0] > bridge["ybot"] - FOOT_BAND and r[1] - 0.13 <= x <= r[2] + 0.13]
             return max(ys) if ys else None
 
         for (cf, ids, pos), (xa, xb) in zip(foot_nodes, bridge["feet"]):
@@ -1130,7 +1166,7 @@ def main():
         segs = [(i, (i + 1) % nv) for i in range(nv)]
         hole_pts_b = []
         for L in holes_:
-            Ls = subdivide(douglas_peucker(L, 0.3), hs)
+            Ls = subdivide(douglas_peucker(L, BDP), hs)
             o = len(verts)
             verts += [tuple(p) for p in Ls]
             segs += [(o + i, o + (i + 1) % len(Ls)) for i in range(len(Ls))]
@@ -1258,7 +1294,9 @@ def main():
         how, r_eq, math.pi * r_eq ** 2, hole_area, "= the top thickness" if NECK == "ellipse" else "%.3f mm (the bore)" % neck_len, f_rigid, caveat))
     meta("scale_and_shift", "plan-view scale %.4f (declared sensitivity u-inplane-scale), thickness shift %.3f mm (declared sensitivity u-segmentation-error)" % (SC, T_SHIFT))
     meta("packs", ", ".join("%s=%s" % kv for kv in sorted(PACKS.items())))
-    meta("omitted", "neck and upper block, tail block, tailpiece, strings, chinrest, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)")
+    if CELLO:
+        meta("specimen", "CELLO from published maker values mapped onto the il Cannone tables (MaroonOak, MB 15931): every mapped value, its source and every ASSUMPTION in PROVENANCE.tsv of the specimen directory; not a scanned instrument")
+    meta("omitted", "neck and upper block, tail block, tailpiece, strings, %s, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)" % ("endpin" if CELLO else "chinrest"))
     write(vol_inner, r_eq, neck_len)
 
 
@@ -1290,12 +1328,15 @@ def write(vol_inner_mm3, r_eq_mm, neck_len_mm):
             f.write("drive\tdiagnostic centre, along the director\t%s\t0.0\t%.6f\t-0.1\t0\t1\t0\n" % (first.name, first.nodes[0][1]))
         if BRIDGE_ON:
             contact = {(r[0], r[1]): r for r in table("string-contacts.tsv")[1]}  # string, contact, z, x, y, slopes
-            for label, key in (("bass string (G) at the bridge, along x", ("g", "bridge")), ("treble string (E) at the bridge, along x", ("e", "bridge"))):
+            ends = (("C", "c"), ("A", "a")) if CELLO else (("G", "g"), ("E", "e"))  # the outer strings
+            for label, key in (("bass string (%s) at the bridge, along x" % ends[0][0], (ends[0][1], "bridge")), ("treble string (%s) at the bridge, along x" % ends[1][0], (ends[1][1], "bridge"))):
                 r = contact[key]
                 p = to_plan(np.array([[float(r[3]), float(r[2])]]))[0]
                 f.write("drive\t%s\tbridge\t%.6f\t%.6f\t%.6f\t1\t0\t0\n" % (label, p[0] / 1000.0, float(r[4]) / 1000.0, p[1] / 1000.0))
-            gz = to_plan(np.array([[0.0, float(contact[("g", "bridge")][2])]]))[0]
-            f.write("drive\tbridge centre, along y (into the top)\tbridge\t%.6f\t%.6f\t%.6f\t0\t1\t0\n" % (0.0, -0.0520, gz[1] / 1000.0))
+            gz = to_plan(np.array([[0.0, float(contact[(ends[0][1], "bridge")][2])]]))[0]
+            # the centre drive: the violin's fixed height; the cello's 2 mm below the mean string contact height
+            y_centre = np.mean([float(contact[(s, "bridge")][4]) for s in "cgda"]) + 2.0 if CELLO else -52.0
+            f.write("drive\tbridge centre, along y (into the top)\tbridge\t%.6f\t%.6f\t%.6f\t0\t1\t0\n" % (0.0, y_centre / 1000.0, gz[1] / 1000.0))
     for k, v in META:
         print(k, "=", v)
 

@@ -1,0 +1,3 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+soundpost	section	equivalent-diameter-mean	0.011000	m	unstated	published-maker-table	johannsson-cello-1-1	soundpost thickness 11 mm (hansjohannsson.com/resources/mescello.html, 1/1 column)

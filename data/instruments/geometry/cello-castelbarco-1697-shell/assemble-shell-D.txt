@@ -1,0 +1,7 @@
+body-length-m 0.441002842
+body-width-m 0.25990072399999997
+reference-thickness-m 0.003
+bridge-snap-m 0 0.0005989899832217594
+cavity-volume-m3 0.031720641
+cavity-neck-radius-m 0.056029302
+cavity-neck-length-m 0.004413644

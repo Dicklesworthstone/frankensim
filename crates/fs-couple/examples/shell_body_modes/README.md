@@ -56,7 +56,14 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
   air volume enclosed by the inner skins, 2.0610 L for the base table, and `cavity_volume=facet` the facet sum of the earlier
   tables, 1.9653 L, which is origin dependent for open surfaces; `uniform_t_mm` gives every plate zone one thickness, a weld
   diagnostic; `neck=bem`, the default, or `neck=ellipse`, see `--fholes` above). With every option at its default the output is byte-identical to the committed `shell-assembly-h8.tsv`. Every
-  choice that is not a table number is a `meta` row of the output.
+  choice that is not a table number is a `meta` row of the output. `instrument=cello`, with the mesh options `foot_band_mm`,
+  `crossing_snap_mm`, `rib_layers` and `bridge_dp_mm`, builds the cello body from a cello specimen directory laid out like
+  il Cannone's (`data/instruments/geometry/cello-castelbarco-1697-shell/README.md`); each is off by default.
+- `cello_specimen.py CANNONE_DIR OUT_DIR` maps the il Cannone tables to the cello's printed dimensions (every mapping and
+  ASSUMPTION is a `PROVENANCE.tsv` row), `cello_bridge_19g.py SPECIMEN_DIR NEW_DIR` sets its bridge to the published 19 g,
+  `cello_fhole_ring_check.py SPECIMEN_DIR` prints each f-hole's clearance from the rib ring, and `cello_shell_card.py CARD
+  ASSEMBLE_SHELL_OUTPUT OUT_CARD` rebuilds a card's body and cavity records from `assemble-shell`'s output.
+  `check_cello_shell.py WORK_DIR` reproduces the cello directory byte for byte from them.
 - `check_shell_assembly.py TABLE name=kg/m3 ...` prints per component the facet-against-director alignment,
   triangle quality and mass, every tie's gap (about 1e-9 m when the generator is right) and the cavity volume, and
   refuses (as the owner's code does) a component that is not edge-connected, a vertex with several fans, or neighbouring
