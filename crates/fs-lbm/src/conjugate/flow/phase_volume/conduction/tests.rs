@@ -1,4 +1,6 @@
 //! Manufactured original sources and independent conservative physical limits.
+mod momentum;
+
 use super::*;
 use crate::conjugate::domain::Voxel;
 use crate::conjugate::flow::{

@@ -2,7 +2,8 @@
 
 mod conduction;
 pub use conduction::{
-    ConductiveThermalVolumeControls, ConductiveThermalVolumeReport,
+    ConductiveThermalVolumeControls, ConductiveThermalVolumeMomentumControls,
+    ConductiveThermalVolumeMomentumStep, ConductiveThermalVolumeReport,
     ConductiveThermalVolumeStep,
 };
 mod momentum;

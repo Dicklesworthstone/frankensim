@@ -9866,6 +9866,36 @@ Analytic regression sources cover sealed expansion/contraction on all axes,
 continued evolution from actual endpoint momentum, reservoir gauge invariance
 and atomic late refusal. Compiler checks do not constitute numerical execution.
 
+## Source conductivity driving thermal-density momentum
+
+`FlowField::advance_isotropic_conductive_thermal_volume_momentum` and its
+pressure-profile variant carry original-source heat through the same accepted
+thermal-volume and material-momentum step. They reuse the existing conductivity
+owner and its borrowed original caloric chart; source identity, density,
+temperature and phase share that chart throughout the endpoint.
+
+Original-state source samples and harmonic physical half-cell resistances
+produce paired face heat once. The original enthalpy-secant monotonicity gate
+also covers latent plateaus without an invented heat capacity. Those increments
+are added once to authored net heat, and the same shared enthalpy-defect budget
+covers assembly, caloric representation and accepted native transport. The
+accepted pressure impulse reaches cells once before their original mass routes
+carry momentum; thermal trials do not repeat conduction or body forcing.
+
+The source is explicitly isotropic; exterior and fixed-solid thermal faces
+remain insulated. Source-pressure work and numerical mechanical losses are
+reported separately and never deposited as heat. Existing first-order split
+and refinement requirements, phase mobility and caller-owned thermodynamic
+work convention remain. Source, heat, chart, volume or momentum refusal exposes
+no partial candidate. The original conduction-only API retains its behavior
+through the same private heat-preparation and acceptance runner.
+
+Independent analytic regression sources cover sensible-expansion heat transfer
+and exact cell impulse on all axes and enthalpy datums, latent heat without
+spurious plateau conduction, and bidirectional reservoir transport under large
+ambient references with missing-inflow-velocity refusal and exact retry.
+These are compiler-checked regression sources; they have not been executed here.
+
 ## Evolving material momentum on one native pressure and transport step
 
 `FlowField::advance_material_momentum` composes the existing current-mass

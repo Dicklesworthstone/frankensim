@@ -44,6 +44,7 @@ mod phase_volume;
 pub use phase_volume::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveThermalVolumeControls,
+    ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep, PiecewiseThermalVolumeControls,
     ThermalVolumeControls, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,
     ThermalVolumeMomentumStep, ThermalVolumeStep,

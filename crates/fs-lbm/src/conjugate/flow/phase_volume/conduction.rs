@@ -9,6 +9,9 @@ use super::{
     poll, poll_every,
 };
 
+mod momentum;
+pub use momentum::{ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep};
+
 /// The existing full-chart budgets and an explicit bound on conductive work.
 #[derive(Clone, Copy, Debug)]
 pub struct ConductiveThermalVolumeControls {
@@ -52,6 +55,14 @@ pub struct ConductiveThermalVolumeStep {
     /// Solid entries are zero. Numerical pressure loss is never placed here.
     pub conductive_enthalpy_increment_j: Vec<f64>,
     pub report: ConductiveThermalVolumeReport,
+}
+
+// Both public consumers retain the same original heat preparation and final
+// source/enthalpy gates. The evolution value owns its one accepted transport.
+struct ConductiveAdvance<T> {
+    evolution: T,
+    increments: Vec<f64>,
+    report: ConductiveThermalVolumeReport,
 }
 
 impl FlowField {
@@ -98,6 +109,42 @@ impl FlowField {
         controls: ConductiveThermalVolumeControls,
         gate: &CancelGate,
     ) -> Result<ConductiveThermalVolumeStep, ChtError> {
+        let accepted = self.conduct_then_advance(
+            domain,
+            conductivity,
+            input,
+            controls,
+            gate,
+            |heated| {
+                self.advance_piecewise_thermal_volume(
+                    domain,
+                    faces,
+                    conductivity.caloric_curve(),
+                    heated,
+                    controls.volume,
+                    gate,
+                )
+            },
+            |thermal| thermal,
+        )?;
+        Ok(ConductiveThermalVolumeStep {
+            thermal: accepted.evolution,
+            conductive_enthalpy_increment_j: accepted.increments,
+            report: accepted.report,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn conduct_then_advance<T>(
+        &self,
+        domain: &VoxelDomain,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        input: CoexistenceVolumeInput<'_>,
+        controls: ConductiveThermalVolumeControls,
+        gate: &CancelGate,
+        advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
+        thermal: impl Fn(&T) -> &ThermalVolumeStep,
+    ) -> Result<ConductiveAdvance<T>, ChtError> {
         poll(gate)?;
         let n = domain.cell_count();
         let transport = controls.volume.thermal.volume.transport;
@@ -261,17 +308,11 @@ impl FlowField {
             ));
         }
         poll(gate)?;
-        let thermal = self.advance_piecewise_thermal_volume(
-            domain,
-            faces,
-            curve,
-            CoexistenceVolumeInput {
-                net_enthalpy_increment_j: &combined,
-                ..input
-            },
-            controls.volume,
-            gate,
-        )?;
+        let evolution = advance(CoexistenceVolumeInput {
+            net_enthalpy_increment_j: &combined,
+            ..input
+        })?;
+        let thermal = thermal(&evolution);
         let absolute_enthalpy_defect_j =
             extra_defect + thermal.volume.report.absolute_enthalpy_defect_j;
         finite(
@@ -290,9 +331,9 @@ impl FlowField {
             }
         }
         poll(gate)?;
-        Ok(ConductiveThermalVolumeStep {
-            thermal,
-            conductive_enthalpy_increment_j: increments,
+        Ok(ConductiveAdvance {
+            evolution,
+            increments,
             report: ConductiveThermalVolumeReport {
                 conductivity_source_identity: conductivity.identity(),
                 conductive_faces,
