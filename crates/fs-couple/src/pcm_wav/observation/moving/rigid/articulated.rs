@@ -27,6 +27,10 @@ use super::{
 use fs_ga::Vec3;
 use fs_mbd::articulated::{ArticulatedError, ArticulatedPointMotion, PreparedLinkPointMotion};
 
+/// Coherent, allocation-free publication of a complete accepted link frame.
+pub mod frame;
+pub use frame::{LinkAcousticUpdate, append_link_frame};
+
 /// Preserve the original articulated refusal without changing the existing
 /// standalone-rigid error API or replacing native failures with generic text.
 #[derive(Debug, Clone, PartialEq)]

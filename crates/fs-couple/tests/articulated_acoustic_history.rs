@@ -181,3 +181,6 @@ fn overflowing_rotating_source_refuses_before_either_history_is_published() {
     assert!(h.is_empty());
     assert!(h.kinematics().is_empty());
 }
+
+#[path = "articulated_acoustic_history/render.rs"]
+mod render;
