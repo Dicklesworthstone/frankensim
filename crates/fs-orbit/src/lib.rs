@@ -88,14 +88,15 @@ pub enum OrbitError {
         /// Per-iteration residual norms.
         trace: Vec<f64>,
     },
-    /// The retained nonlinear Fourier balance remains sampling-dependent
-    /// after the bounded AFT refinement ladder.
+    /// The nonlinear Fourier balance or adaptive full-equation RMS remains
+    /// sampling-dependent after the bounded AFT refinement ladder.
     SamplingUnresolved {
         /// Samples on the finest evaluated grid.
         samples: usize,
         /// Residual norm on that grid.
         residual: f64,
-        /// Norm of the change in retained balance coefficients.
+        /// Norm of the change in balance coefficients, or the larger sampled
+        /// RMS change when assessing adaptive harmonic order.
         defect: f64,
     },
     /// Measured harmonic resolution failed: either the physical retained-row
@@ -600,9 +601,10 @@ fn hb_residual<P: OrbitProblem>(
             let mut ac = AftSum::new(0.0);
             for n in 1..=n_harm {
                 let i = j * n_harm + n - 1;
-                ac.add(2.0
-                    * (u[pack.re_index(n, k)] * aft.cosine[i]
-                        - u[pack.im_index(n, k)] * aft.sine[i]));
+                ac.add(
+                    2.0 * (u[pack.re_index(n, k)] * aft.cosine[i]
+                        - u[pack.im_index(n, k)] * aft.sine[i]),
+                );
             }
             aft.xs[j * d + k] = u[pack.re_index(0, k)] + ac.total();
         }

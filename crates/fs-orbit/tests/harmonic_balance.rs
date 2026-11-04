@@ -457,6 +457,110 @@ fn adaptive_order_cap_checks_beyond_the_cap_without_dc_or_unit_masking() {
     }
 }
 
+// x' + x = cos(t + phase) - sin(t + phase), y' + y = T_9(x).
+// The only authored forcing is the fundamental. The original polynomial
+// island generates a ninth harmonic: X_1=e^(i phase)/2 and
+// Y_9=e^(9i phase)/(2(1+9i)). Orders 1 and 3 have the same retained solution,
+// and projecting only through 2N+1 misses that unresolved physical response.
+struct NinthHarmonicCascade {
+    phase: f64,
+    maximum_port_harmonic: f64,
+}
+
+impl OrbitProblem for NinthHarmonicCascade {
+    fn dim(&self) -> usize {
+        2
+    }
+
+    fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        let angle = t + self.phase;
+        out[0] = fs_math::det::cos(angle) - fs_math::det::sin(angle) - x[0];
+        let (mut previous, mut current) = (1.0, x[0]);
+        for _ in 2..=9 {
+            let next = 2.0 * x[0] * current - previous;
+            previous = current;
+            current = next;
+        }
+        out[1] = current - x[1];
+    }
+
+    fn port(&self, s: C64) -> Vec<C64> {
+        assert!(s.im <= self.maximum_port_harmonic);
+        vec![s, C64::ZERO, C64::ZERO, s]
+    }
+
+    fn autonomous(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn adaptive_order_detects_nonlinear_harmonics_beyond_its_projected_band() {
+    let result = fs_orbit::solve_hb_adaptive(
+        &NinthHarmonicCascade {
+            phase: 0.37,
+            maximum_port_harmonic: 3.0,
+        },
+        HbAnchor::Forced { omega: 1.0 },
+        0.5,
+        &HbBudget {
+            harmonics: 1,
+            tolerance: 1.0e-12,
+            ..HbBudget::default()
+        },
+        &order_budget(3),
+    );
+    match result {
+        Err(OrbitError::HarmonicsUnresolved { check }) => {
+            assert_eq!(check.harmonics, 3);
+            assert_eq!(check.checked_harmonics, 7);
+            assert!(check.retained_residual_ratio < 1.0);
+            assert!(check.state_change_ratio.unwrap() < 1.0);
+            let expected = 1.0 / fs_math::det::sqrt(2.0);
+            assert!((check.total_residual_ratio * 1.0e-9 - expected).abs() < 1.0e-10);
+            assert!((check.omitted_residual_ratio * 1.0e-9 - expected).abs() < 1.0e-10);
+        }
+        other => panic!("unresolved ninth-harmonic mixing must not disappear: {other:?}"),
+    }
+}
+
+#[test]
+fn adaptive_order_resolves_far_generated_harmonic_with_physical_phase() {
+    let phase = 0.37;
+    let result = fs_orbit::solve_hb_adaptive(
+        &NinthHarmonicCascade {
+            phase,
+            maximum_port_harmonic: 31.0,
+        },
+        HbAnchor::Forced { omega: 1.0 },
+        0.5,
+        &HbBudget {
+            harmonics: 1,
+            tolerance: 1.0e-12,
+            ..HbBudget::default()
+        },
+        &order_budget(31),
+    )
+    .expect("the original nonlinear source resolves when its ninth harmonic is retained");
+    let orders: Vec<_> = result
+        .refinement_trace
+        .iter()
+        .map(|check| check.harmonics)
+        .collect();
+    assert_eq!(orders, [1, 3, 7, 15, 31]);
+    let (s, c) = fs_math::det::sin_cos(9.0 * phase);
+    let expected = C64::new(0.5 * c, 0.5 * s) / C64::new(1.0, 9.0);
+    assert_complex(result.orbit.coeffs[1][9], expected, 1.0e-10);
+    for n in 0..=31 {
+        if n != 9 {
+            assert!(result.orbit.coeffs[1][n].abs() < 1.0e-10);
+        }
+    }
+    let last = result.refinement_trace.last().unwrap();
+    assert!(last.total_residual_ratio <= 1.0);
+    assert!(last.sampling_defect_ratio <= 1.0);
+}
+
 struct LinearBackbone;
 impl OrbitProblem for LinearBackbone {
     fn dim(&self) -> usize {

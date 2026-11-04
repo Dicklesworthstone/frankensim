@@ -1,8 +1,8 @@
 //! Bounded, measured refinement of retained harmonic order.
 
 use super::{
-    AftSum, AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError, OrbitProblem, Packing, TAU,
-    solve_hb, solve_hb_scaled_seeded, solve_hb_seeded,
+    AftSum, AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError, OrbitProblem, Packing,
+    TAU, solve_hb, solve_hb_scaled_seeded, solve_hb_seeded,
 };
 use fs_math::{c64::C64, det};
 
@@ -21,23 +21,27 @@ pub struct HbRefinementBudget {
     pub frequency_tolerance: f64,
 }
 
-/// Measured finite-band evidence at one solved harmonic order.
+/// Measured spectral and sampled-equation evidence at one solved harmonic order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HbRefinementCheck {
     /// Retained order of the solved candidate.
     pub harmonics: usize,
-    /// Largest assessed equation harmonic, always 2 * harmonics + 1.
+    /// Largest explicitly projected equation harmonic, always 2 * harmonics + 1.
+    /// The sampled full-equation check also detects energy outside this band.
     pub checked_harmonics: usize,
     /// Samples in the independent finer assessment quadrature.
     pub aft_samples: usize,
-    /// Largest per-equation total RMS defect across the full checked band /
-    /// caller tolerance. Retained and omitted bands share this one budget.
+    /// Largest per-equation RMS defect / caller tolerance, taking the larger
+    /// of the projected-band and full sampled-equation measurements. Retained
+    /// and omitted harmonics share this one budget.
     pub total_residual_ratio: f64,
     /// Largest per-equation retained RMS defect / caller tolerance.
     pub retained_residual_ratio: f64,
-    /// Largest per-equation omitted-band RMS defect / caller tolerance.
+    /// Largest per-equation omitted RMS defect / caller tolerance, including
+    /// the sampled remainder after removing the retained Fourier projection.
     pub omitted_residual_ratio: f64,
-    /// Largest per-equation RMS change between assessment grids / tolerance.
+    /// Largest normalized change between assessment grids: projected Fourier
+    /// coefficients and full/omitted sampled RMS measurements are all checked.
     pub sampling_defect_ratio: f64,
     /// Largest per-state RMS waveform change / caller tolerance.
     /// Absent until two distinct retained orders have actually been solved.
@@ -113,15 +117,17 @@ fn admit(
 /// Refine retained order, warm-starting each larger solve from the last orbit.
 ///
 /// Orders grow as min(2N+1, max_harmonics). Each candidate's original equation
-/// is independently assessed through 2N+1; no port is evaluated above N,
-/// because the omitted state coefficients are exactly zero. Acceptance requires
+/// is independently projected through 2N+1 and its full time-domain defect is
+/// sampled on the same independent grids. This catches nonlinear energy beyond
+/// the projected band; no port is evaluated above N, because the omitted state
+/// coefficients are exactly zero. Acceptance requires
 /// resolved quadrature, a combined retained/omitted equation defect within each
 /// row's single RMS budget, and waveform
 /// and frequency agreement between two actual solves. Backbone shape comparison
 /// aligns its free phase; forced and autonomous warm-start gauges are preserved.
 ///
-/// Finite-band agreement is measured evidence only. It cannot discover arbitrary
-/// forcing outside the checked band, establish a forward-error bound near an
+/// Finite-grid agreement is measured evidence only. It cannot discover arbitrary
+/// forcing above the sampling resolution, establish a forward-error bound near an
 /// ill-conditioned response, or certify an infinite Fourier tail. Owners of
 /// explicit forcing must include its support in the starting order.
 ///
@@ -235,12 +241,19 @@ fn row_ratio(values: &[f64], pack: &Packing, first: usize, tolerances: &[f64]) -
 
 // Assess the same original island. A missing state mode contributes -G_n;
 // calling an unspecified P(in*omega) for that exact zero would add no evidence.
+struct SampledResidual {
+    coefficients: Vec<f64>,
+    total_ratios: Vec<f64>,
+    omitted_ratios: Vec<f64>,
+}
+
 fn projected_residual<P: OrbitProblem>(
     problem: &P,
     orbit: &HbOrbit,
     pack: &Packing,
     aft: &mut AftWorkspace,
-) -> Vec<f64> {
+    tolerances: &[f64],
+) -> SampledResidual {
     let retained = orbit.coeffs[0].len() - 1;
     for j in 0..aft.samples {
         for k in 0..pack.d {
@@ -260,25 +273,85 @@ fn projected_residual<P: OrbitProblem>(
         );
         aft.gs[j * pack.d..(j + 1) * pack.d].copy_from_slice(&aft.island);
     }
+    let mut linear = vec![C64::ZERO; (retained + 1) * pack.d];
+    for n in 0..=retained {
+        let port = problem.port(C64::new(0.0, n as f64 * orbit.omega));
+        for k in 0..pack.d {
+            let mut value = C64::ZERO;
+            for kk in 0..pack.d {
+                value = value + port[k * pack.d + kk] * orbit.coeffs[kk][n];
+            }
+            linear[n * pack.d + k] = value;
+        }
+    }
+    // Preserve the complete equation defect before centering overwrites the
+    // original island samples. All source calls are complete, so the state
+    // buffer can be reused without allocating another sample array. Cancel
+    // static terms before adding AC so a large preload cannot erase it.
+    for j in 0..aft.samples {
+        for k in 0..pack.d {
+            let mut ac = AftSum::new(0.0);
+            for n in 1..=retained {
+                let i = j * pack.n_harm + n - 1;
+                let z = linear[n * pack.d + k];
+                ac.add(2.0 * (z.re * aft.cosine[i] - z.im * aft.sine[i]));
+            }
+            aft.xs[j * pack.d + k] = (linear[k].re - aft.gs[j * pack.d + k]) + ac.total();
+        }
+    }
     aft.center_island(pack.d);
     let mut residual = vec![0.0; pack.coeff_len()];
     for n in 0..=pack.n_harm {
-        let port = (n <= retained).then(|| problem.port(C64::new(0.0, n as f64 * orbit.omega)));
         for k in 0..pack.d {
             let g = aft.island_coefficient(pack, n, k);
-            let mut r = C64::new(0.0, 0.0) - g;
-            if let Some(p) = &port {
-                for kk in 0..pack.d {
-                    r = r + p[k * pack.d + kk] * orbit.coeffs[kk][n];
-                }
-            }
+            let r = if n <= retained {
+                linear[n * pack.d + k] - g
+            } else {
+                C64::ZERO - g
+            };
             residual[pack.re_index(n, k)] = r.re;
             if n > 0 {
                 residual[pack.im_index(n, k)] = r.im;
             }
         }
     }
-    residual
+    // A polynomial or other nonlinear island can generate harmonics far above
+    // 2N+1. Merely projecting that finite band can report zero defect for an
+    // unresolved orbit. Reconstruct only the original retained linear action,
+    // subtract the complete sampled island, and measure its RMS directly.
+    // Remove the retained residual projection to measure omitted energy; this
+    // avoids subtracting nearly equal squared norms when the tail is small.
+    let mut total_ratios = vec![0.0; pack.d];
+    let mut omitted_ratios = vec![0.0; pack.d];
+    let sample_scale = 1.0 / det::sqrt(aft.samples as f64);
+    for j in 0..aft.samples {
+        for k in 0..pack.d {
+            let mut retained_ac = AftSum::new(0.0);
+            for n in 1..=retained {
+                let i = j * pack.n_harm + n - 1;
+                let c = aft.cosine[i];
+                let s = aft.sine[i];
+                retained_ac.add(
+                    2.0 * (residual[pack.re_index(n, k)] * c - residual[pack.im_index(n, k)] * s),
+                );
+            }
+            let defect = aft.xs[j * pack.d + k];
+            let omitted = (defect - residual[pack.re_index(0, k)]) - retained_ac.total();
+            for (ratios, value) in [(&mut total_ratios, defect), (&mut omitted_ratios, omitted)] {
+                let normalized = value / tolerances[k] * sample_scale;
+                ratios[k] = if normalized.is_finite() {
+                    det::hypot(ratios[k], normalized)
+                } else {
+                    f64::INFINITY
+                };
+            }
+        }
+    }
+    SampledResidual {
+        coefficients: residual,
+        total_ratios,
+        omitted_ratios,
+    }
 }
 
 fn assess<P: OrbitProblem>(
@@ -296,16 +369,51 @@ fn assess<P: OrbitProblem>(
     if aft.samples < orbit.aft_samples {
         aft = AftWorkspace::with_samples(&pack, orbit.aft_samples, 0)?;
     }
-    let mut coarse = projected_residual(problem, orbit, &pack, &mut aft);
+    let mut coarse =
+        projected_residual(problem, orbit, &pack, &mut aft, &budget.residual_tolerances);
     loop {
         let mut finer = aft.finer(&pack)?;
-        let fine = projected_residual(problem, orbit, &pack, &mut finer);
-        let difference: Vec<_> = fine.iter().zip(&coarse).map(|(a, b)| a - b).collect();
-        let sampling = row_ratio(&difference, &pack, 0, &budget.residual_tolerances);
+        let fine = projected_residual(
+            problem,
+            orbit,
+            &pack,
+            &mut finer,
+            &budget.residual_tolerances,
+        );
+        let difference: Vec<_> = fine
+            .coefficients
+            .iter()
+            .zip(&coarse.coefficients)
+            .map(|(a, b)| a - b)
+            .collect();
+        let mut sampling = row_ratio(&difference, &pack, 0, &budget.residual_tolerances);
+        for (a, b) in fine
+            .total_ratios
+            .iter()
+            .chain(&fine.omitted_ratios)
+            .zip(coarse.total_ratios.iter().chain(&coarse.omitted_ratios))
+        {
+            sampling = if a.is_finite() && b.is_finite() {
+                sampling.max((a - b).abs())
+            } else {
+                f64::INFINITY
+            };
+        }
         if sampling <= 1.0 {
-            let total = row_ratio(&fine, &pack, 0, &budget.residual_tolerances);
-            let omitted = row_ratio(&fine, &pack, n + 1, &budget.residual_tolerances);
-            let mut retained = fine;
+            let total = fine.total_ratios.iter().copied().fold(
+                row_ratio(&fine.coefficients, &pack, 0, &budget.residual_tolerances),
+                f64::max,
+            );
+            let omitted = fine.omitted_ratios.iter().copied().fold(
+                row_ratio(
+                    &fine.coefficients,
+                    &pack,
+                    n + 1,
+                    &budget.residual_tolerances,
+                ),
+                f64::max,
+            );
+            let mut retained = fine.coefficients;
             for mode in n + 1..=pack.n_harm {
                 for k in 0..pack.d {
                     retained[pack.re_index(mode, k)] = 0.0;
@@ -330,10 +438,30 @@ fn assess<P: OrbitProblem>(
             });
         }
         if finer.refinement >= super::MAX_AFT_REFINEMENTS {
+            let full_residual = fine
+                .total_ratios
+                .iter()
+                .zip(&budget.residual_tolerances)
+                .fold(0.0, |norm, (ratio, tolerance)| {
+                    det::hypot(norm, ratio * tolerance)
+                });
+            let full_defect = fine
+                .total_ratios
+                .iter()
+                .chain(&fine.omitted_ratios)
+                .zip(coarse.total_ratios.iter().chain(&coarse.omitted_ratios))
+                .zip(budget.residual_tolerances.iter().cycle())
+                .fold(0.0, |norm, ((a, b), tolerance)| {
+                    if a.is_finite() && b.is_finite() {
+                        det::hypot(norm, (a - b) * tolerance)
+                    } else {
+                        f64::INFINITY
+                    }
+                });
             return Err(OrbitError::SamplingUnresolved {
                 samples: finer.samples,
-                residual: super::norm(&fine),
-                defect: super::norm(&difference),
+                residual: super::norm(&fine.coefficients).max(full_residual),
+                defect: super::norm(&difference).max(full_defect),
             });
         }
         aft = finer;

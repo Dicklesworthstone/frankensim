@@ -53,7 +53,7 @@ API — never instrument-shaped.
   and warm-start successively larger orders up to an explicit maximum.
   Per-equation residual tolerances and per-state waveform-change tolerances
   have the corresponding physical units; frequency-change tolerance is relative.
-  `HbRefinementCheck` records each solved order, assessed band and sample
+  `HbRefinementCheck` records each solved order, projected band and sample
   count, total/retained/omitted/sampling ratios, and actual inter-order changes.
   `solve_hb_adaptive_scaled_seeded` carries explicit `HbScales` through every
   larger solve without altering the original physical refinement tolerances
@@ -243,14 +243,25 @@ conservative families and hybrid cycles remain outside this entry's claim.
   `aft_samples` records the final verification grid and
   `sampling_defect` records the measured retained-coefficient change.
 - The adaptive entry points grow solved orders as `min(2N+1, max_harmonics)`.
-  Each candidate is independently assessed through harmonic `2N+1`, including
-  harmonics above the maximum solved order when the cap is reached. Omitted
-  state coefficients are exactly zero, so their equation defect is `-G_n`;
-  no undefined or unnecessary higher-frequency port is evaluated.
+  Each candidate's original equation is independently projected through
+  harmonic `2N+1`, including harmonics above the maximum solved order when the
+  cap is reached. Its complete sampled equation defect is also measured, so
+  nonlinear harmonics outside the projected band cannot escape assessment
+  merely because of that cutoff. The linear action is reconstructed from its
+  retained coefficients; omitted state coefficients are exactly zero, so their
+  equation defect is `-G_n`. No undefined or unnecessary higher-frequency port
+  is evaluated, and the sampled check reuses the original island evaluations.
+  The original sampled defects are saved in the no-longer-needed state buffer
+  before island centering. Static linear/source terms cancel before AC is added,
+  so this check preserves the constant-load and weak-harmonic arithmetic above.
   Assessment quadrature uses the same bounded finer-grid policy, starting no
-  coarser than the candidate's verified sampling.
+  coarser than the candidate's verified sampling. Both projected coefficients
+  and full/omitted sampled RMS measurements must agree between the grids.
 - Adaptive acceptance requires each full measured per-equation RMS defect,
-  combining retained and omitted bands, to fit its single physical tolerance.
+  taking the larger of its projected-band and complete sampled measurements,
+  to fit its single physical tolerance. Sampled omitted energy is measured
+  after subtracting the retained Fourier residual from the full equation
+  defect, avoiding cancellation between nearly equal squared norms.
   Separate band diagnostics do not each receive the whole error budget.
   Quadrature disagreements must also fit the physical tolerances,
   plus waveform and frequency agreement between two actually solved orders.
@@ -483,6 +494,15 @@ a deliberately loose Newton tolerance, admission before model callbacks, and
 refusal when separately sub-budget retained/omitted bands exceed the single
 combined physical RMS budget.
 
+The ninth-harmonic cascade `x' + x = cos(t+phase) - sin(t+phase),
+y' + y = T_9(x)` supplies only fundamental forcing and generates its ninth
+harmonic through the Chebyshev polynomial. Orders 1 and 3 agree while their
+projected residuals through 7 are zero. Independent full-equation RMS still
+detects the missing ninth harmonic and refuses a cap of 3 without evaluating
+an out-of-domain port. With a sufficient cap, orders 1, 3, 7, 15 and 31 recover
+the exact amplitude and phase `Y_9 = exp(9i*phase)/(2*(1+9i))`, with no invented
+lower output harmonics.
+
 The scaled adaptive cubic-cascade regression changes state and equation units
 independently, retains a large unrelated preload, and actually solves orders
 1, 3 and 7. A cap at order 2 still checks through order 5 and refuses the
@@ -508,12 +528,13 @@ claims; source-call counts are not wall-clock performance measurements.
   shooting is the second method.
 - No a-priori truncation-error bound: the returned `N` remains disclosed
   structure. Fixed-order sampling refinement improves quadrature; the
-  optional adaptive-order entry points also compare finite omitted bands
-  and successive solved waveforms. Neither supplies a rigorous infinite-tail
+  optional adaptive-order entry points also compare finite omitted bands,
+  complete sampled equation defects and successive solved waveforms. Neither
+  supplies a rigorous infinite-tail
   bound, an existence proof, or a conditioning-dependent forward-error bound.
   Agreement between finite grids is a measured convergence check, not a
   universal aliasing bound: sufficiently high frequencies can alias on both
-  grids or lie outside the checked spectral band. Explicit input bandwidth
+  grids or exceed their sampling resolution. Explicit input bandwidth
   must be admitted by domain adapters. Continuation remains fixed-order;
   adaptive order does not add relative-periodic, hybrid, matrix-free, or
   resume capabilities. Shooting is an independent cross-check
