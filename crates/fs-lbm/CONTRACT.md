@@ -10474,3 +10474,47 @@ stiff coupled endpoint with an independent caloric/series-resistance equation,
 check large formation-reference invariance and evolving gas/film source states,
 close the radiating liquid-plus-gas union, and verify late-domain, cancellation
 and work-budget refusal with an identical accepted retry.
+
+
+### Shared finite translating film carriers in D2Q9
+
+TranslatingFilmCarrier2, CarrierLubricationPatch2 and
+DryDisk2::step_with_lubrication_carriers attach several original cylinder/
+plane films to one positive finite mass. Each stable carrier index owns
+one center, velocity, authored WORLD impulse and kinetic store, independent
+of its patch count. Patches retain immutable COM-relative points and fixed
+world normals; the orientation guide supplies only a zero-work couple.
+
+For a carrier, R sums every attached normal/tangent resistance tensor.
+Its midpoint solves (2m I+R) u_mid = 2m u_before + J_authored + R u_disk,mid.
+The shared response retains off-diagonal coupling between oblique faces;
+independent mass elimination per patch would produce different forces.
+Original native normal resistance supplies its cutoff/floor. Cylinder
+tangent/spin coefficients and viscosity semantics remain unchanged.
+
+One scaled native 2x2 Cholesky response is prepared per carrier. The
+existing maximum_condition_number also admits this response. Every
+retained-fluid Newton candidate evaluates all carrier midpoints once in
+bounded stack storage; no carrier vector or factorization is allocated
+there. Each patch uses the common motion for its force, couple and work.
+Aggregate carrier momentum/kinetic storage is counted exactly once.
+
+Midpoint and endpoint patches are reconstructed from the actual common
+carrier COM. Both relative-gap half-drifts are admitted. COM/local
+cancellation that prevents a patch from following its shared translation
+at the local lattice geometry scale refuses before publication. All
+carrier trajectories, aggregate guide torques and independent momentum/
+work checks finish before the original sole native disk/fluid commit,
+followed only by infallible carrier assignments.
+
+Focused tests independently assemble/invert the unscaled coupled matrix
+for unequal oblique faces across three moving steps, demonstrate failure
+of independent per-face masses, and reconstruct actual system momentum,
+guide torque and unique kinetic work. Single-face equivalence, inactive/
+empty bit parity, one authored impulse per carrier, conditioning/index/
+unused-carrier/speed/gap/representability refusals and exact retry pass.
+At most 64 carriers and 64 patches are admitted, with every carrier used.
+These remain local infinite missing-film patches: no resolved moving wall,
+finite extent, contact, GCL, rotation or thermal destination is inferred.
+The inherited midpoint method is not L-stable; stiff relaxation still
+requires adequate time resolution.

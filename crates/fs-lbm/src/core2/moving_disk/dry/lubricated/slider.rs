@@ -163,7 +163,7 @@ impl DryDisk2 {
         let descriptors: Vec<_> = sliders.iter().map(|slider| slider.plane).collect();
         let mut prepared = PreparedPlanes2::new(self, dynamic_viscosity, &descriptors, cancel)?;
         for ((plane, &slider), &authored) in prepared
-            .0
+            .planes
             .iter_mut()
             .zip(sliders.iter())
             .zip(slider_external_impulses)
@@ -393,7 +393,7 @@ impl PreparedPlanes2 {
         cancel: &CancelGate,
     ) -> Result<DryLubricatedSlidersExchange2, DryDiskError2> {
         let mut sliders = Vec::new();
-        for (plane, &film) in self.0.iter().zip(&motion.planes) {
+        for (plane, &film) in self.planes.iter().zip(&motion.planes) {
             if let Some(slider) = &plane.slider {
                 checkpoint(cancel)?;
                 sliders.push(slider.finish(

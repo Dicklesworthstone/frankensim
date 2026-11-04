@@ -11,6 +11,13 @@ pub use slider::{
     DryLubricatedSlidersExchange2, FiniteLubricationSlider2, SliderLubricationExchange2,
 };
 use translating::PreparedTranslation2;
+
+mod shared;
+pub use shared::{
+    CarrierLubricationExchange2, CarrierLubricationPatch2, DryLubricatedCarriersExchange2,
+    TranslatingFilmCarrier2,
+};
+use shared::{PreparedCarrierPatch2, PreparedCarriers2};
 pub use translating::{
     DryTranslatingPlanesExchange2, FiniteLubricationPlane2, TranslatingPlaneExchange2,
 };
@@ -310,11 +317,16 @@ struct PreparedPlane2 {
     tangent: [f64; 2],
     tangential_resistance: f64,
     footpoint: [f64; 2],
-    endpoint: LubricationPlane2,
+    midpoint_point: [f64; 2],
+    endpoint: Option<LubricationPlane2>,
     slider: Option<PreparedSlider2>,
     translation: Option<PreparedTranslation2>,
+    carrier: Option<PreparedCarrierPatch2>,
 }
-pub(super) struct PreparedPlanes2(Vec<PreparedPlane2>);
+pub(super) struct PreparedPlanes2 {
+    planes: Vec<PreparedPlane2>,
+    shared: Option<PreparedCarriers2>,
+}
 impl PreparedPlanes2 {
     fn new(
         disk: &DryDisk2,
@@ -328,18 +340,32 @@ impl PreparedPlanes2 {
         let mut prepared = Vec::with_capacity(planes.len());
         for (i, &plane) in planes.iter().enumerate() {
             checkpoint(cancel)?;
-            if planes[..i].iter().any(|other| {
-                other.normal == plane.normal
-                    && dot(subtract(other.point, plane.point), plane.normal) == 0.0
-            }) {
-                return Err(DryDiskError2::Invalid(
-                    "duplicate dry-disk lubrication plane",
-                ));
-            }
-            positive_gap(body.center, plane, radius)?;
+            Self::admit_initial_plane(planes, i, body.center, radius)?;
             prepared.push(PreparedPlane2::new(plane, center, radius, viscosity)?);
         }
-        Ok(Self(prepared))
+        Ok(Self {
+            planes: prepared,
+            shared: None,
+        })
+    }
+
+    fn admit_initial_plane(
+        planes: &[LubricationPlane2],
+        index: usize,
+        center: [f64; 2],
+        radius: f64,
+    ) -> Result<(), DryDiskError2> {
+        let plane = planes[index];
+        if planes[..index].iter().any(|other| {
+            other.normal == plane.normal
+                && dot(subtract(other.point, plane.point), plane.normal) == 0.0
+        }) {
+            return Err(DryDiskError2::Invalid(
+                "duplicate dry-disk lubrication plane",
+            ));
+        }
+        positive_gap(center, plane, radius)?;
+        Ok(())
     }
 
     pub(super) fn evaluate(
@@ -351,9 +377,16 @@ impl PreparedPlanes2 {
     ) -> Result<FilmTotals2, DryDiskError2> {
         let mut sums = [Dd::ZERO; 7];
         let mut active = 0;
-        for plane in &self.0 {
+        let responses = self.shared_responses(velocity, cancel)?;
+        for (index, plane) in self.planes.iter().enumerate() {
             checkpoint(cancel)?;
-            let receipt = plane.exchange(velocity, angular_velocity, origin)?;
+            let receipt = self.exchange_at(
+                index,
+                velocity,
+                angular_velocity,
+                origin,
+                responses.as_ref(),
+            )?;
             let native = receipt.native;
             if native.resistance_increment != 0.0 || plane.tangential_resistance != 0.0 {
                 active += 1;
@@ -392,14 +425,19 @@ impl PreparedPlanes2 {
         radius: f64,
         cancel: &CancelGate,
     ) -> Result<(), DryDiskError2> {
-        for plane in &self.0 {
+        let responses = self.shared_responses(velocity_midpoint, cancel)?;
+        for plane in &self.planes {
             checkpoint(cancel)?;
-            let endpoint = if let Some(translation) = &plane.translation {
+            let endpoint = if let Some(response) = &responses {
+                self.shared_endpoint(plane, response)?
+            } else if let Some(translation) = &plane.translation {
                 // The finite plane's second half-drift uses its SOLVED
                 // endpoint velocity, never the held-wall extrapolation.
                 translation.endpoint(velocity_midpoint)?.0.plane()
             } else {
-                plane.endpoint
+                plane
+                    .endpoint
+                    .ok_or(DryDiskError2::Invalid("missing finite plane endpoint"))?
             };
             positive_gap(center, endpoint, radius)?;
         }
@@ -413,11 +451,19 @@ impl PreparedPlanes2 {
         origin: [f64; 2],
         cancel: &CancelGate,
     ) -> Result<Vec<PlaneLubricationExchange2>, DryDiskError2> {
-        self.0
+        let responses = self.shared_responses(velocity, cancel)?;
+        self.planes
             .iter()
-            .map(|plane| {
+            .enumerate()
+            .map(|(index, _)| {
                 checkpoint(cancel)?;
-                plane.exchange(velocity, angular_velocity, origin)
+                self.exchange_at(
+                    index,
+                    velocity,
+                    angular_velocity,
+                    origin,
+                    responses.as_ref(),
+                )
             })
             .collect()
     }
@@ -429,7 +475,23 @@ impl PreparedPlane2 {
         radius: f64,
         viscosity: f64,
     ) -> Result<Self, DryDiskError2> {
-        let gap = positive_gap(center, plane.translated(0.5)?, radius)?;
+        Self::at_midpoint(
+            plane.translated(0.5)?,
+            center,
+            radius,
+            viscosity,
+            Some(plane.translated(1.0)?),
+        )
+    }
+
+    fn at_midpoint(
+        plane: LubricationPlane2,
+        center: [f64; 2],
+        radius: f64,
+        viscosity: f64,
+        endpoint: Option<LubricationPlane2>,
+    ) -> Result<Self, DryDiskError2> {
+        let gap = positive_gap(center, plane, radius)?;
         let tangential_resistance = plane.tangential_resistance(radius, gap, viscosity)?;
         let footpoint = core::array::from_fn(|a| center[a] - (radius + gap) * plane.normal[a]);
         if !footpoint.into_iter().all(f64::is_finite) {
@@ -449,9 +511,11 @@ impl PreparedPlane2 {
             tangent: [-plane.normal[1], plane.normal[0]],
             tangential_resistance,
             footpoint,
-            endpoint: plane.translated(1.0)?,
+            midpoint_point: plane.point,
+            endpoint,
             slider: None,
             translation: None,
+            carrier: None,
         })
     }
 
@@ -460,6 +524,19 @@ impl PreparedPlane2 {
         velocity: [f64; 2],
         angular_velocity: f64,
         origin: [f64; 2],
+    ) -> Result<PlaneLubricationExchange2, DryDiskError2> {
+        self.exchange_with_response(velocity, angular_velocity, origin, None)
+    }
+
+    fn exchange_with_response(
+        &self,
+        velocity: [f64; 2],
+        angular_velocity: f64,
+        origin: [f64; 2],
+        shared: Option<(
+            translating::TranslationResponse2,
+            UnderResolvedLubricationExchange2,
+        )>,
     ) -> Result<PlaneLubricationExchange2, DryDiskError2> {
         if !velocity
             .into_iter()
@@ -470,12 +547,16 @@ impl PreparedPlane2 {
         }
         let mut pair = self.pair;
         pair.surface_velocities[0] = velocity;
-        let (translation, native) = match &self.translation {
-            Some(plane) => {
-                let response = plane.response(velocity);
-                (Some(response), plane.normal_exchange(response, origin)?)
+        let (translation, native) = if let Some((response, normal)) = shared {
+            (Some(response), normal)
+        } else {
+            match &self.translation {
+                Some(plane) => {
+                    let response = plane.response(velocity);
+                    (Some(response), plane.normal_exchange(response, origin)?)
+                }
+                None => (None, pair.correction(origin)),
             }
-            None => (None, pair.correction(origin)),
         };
         let wall_velocity = translation.map_or(pair.surface_velocities[1], |r| r.velocity_midpoint);
         let mut body_work = dot(native.first_solid_impulse, velocity);

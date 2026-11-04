@@ -149,7 +149,7 @@ impl DryDisk2 {
         let descriptors: Vec<_> = planes.iter().map(|plane| plane.plane).collect();
         let mut prepared = PreparedPlanes2::new(self, dynamic_viscosity, &descriptors, cancel)?;
         for ((film, &plane), &authored) in prepared
-            .0
+            .planes
             .iter_mut()
             .zip(planes.iter())
             .zip(plane_external_impulses)
@@ -194,8 +194,8 @@ pub(super) struct PreparedTranslation2 {
 #[derive(Clone, Copy)]
 pub(super) struct TranslationResponse2 {
     pub(super) velocity_midpoint: [f64; 2],
-    normal_impulse: f64,
-    normal_rate: f64,
+    pub(super) normal_impulse: f64,
+    pub(super) normal_rate: f64,
     pub(super) tangent_impulse: f64,
     pub(super) tangent_rate: f64,
     pub(super) tangent_midpoint: f64,
@@ -274,35 +274,13 @@ impl PreparedTranslation2 {
         response: TranslationResponse2,
         origin: [f64; 2],
     ) -> Result<UnderResolvedLubricationExchange2, DryDiskError2> {
-        let impulse = if response.normal_impulse == 0.0 {
-            [0.0; 2]
-        } else {
-            self.initial
-                .plane
-                .normal
-                .map(|n| response.normal_impulse * n)
-        };
-        let angular = cross(subtract(self.disk_center, origin), impulse);
-        let work = response.normal_impulse * response.normal_rate;
-        if !impulse
-            .into_iter()
-            .chain([angular, work, response.normal_rate])
-            .all(f64::is_finite)
-            || work > 0.0
-        {
-            return Err(DryDiskError2::Invalid(
-                "finite-plane normal response overflowed",
-            ));
-        }
-        Ok(UnderResolvedLubricationExchange2 {
-            first_solid_impulse: impulse,
-            second_solid_impulse: impulse.map(|j| if j == 0.0 { 0.0 } else { -j }),
-            first_solid_angular_impulse: angular,
-            second_solid_angular_impulse: if angular == 0.0 { 0.0 } else { -angular },
-            normal_gap_velocity: response.normal_rate,
-            solid_pair_work: work,
-            ..self.normal_reference
-        })
+        normal_exchange(
+            self.initial.plane.normal,
+            self.disk_center,
+            self.normal_reference,
+            response,
+            origin,
+        )
     }
 
     pub(super) fn endpoint(
@@ -422,8 +400,8 @@ impl PreparedPlanes2 {
         origin: [f64; 2],
         cancel: &CancelGate,
     ) -> Result<DryTranslatingPlanesExchange2, DryDiskError2> {
-        let mut planes = Vec::with_capacity(self.0.len());
-        for (plane, &film) in self.0.iter().zip(&motion.planes) {
+        let mut planes = Vec::with_capacity(self.planes.len());
+        for (plane, &film) in self.planes.iter().zip(&motion.planes) {
             checkpoint(cancel)?;
             let Some(translation) = &plane.translation else {
                 return Err(DryDiskError2::Invalid("missing finite-plane response"));
@@ -457,6 +435,41 @@ impl PreparedPlanes2 {
     }
 }
 
-fn admitted_velocity(velocity: [f64; 2]) -> bool {
+pub(super) fn admitted_velocity(velocity: [f64; 2]) -> bool {
     velocity.into_iter().all(f64::is_finite) && dot(velocity, velocity) < 0.03
+}
+
+pub(super) fn normal_exchange(
+    normal: [f64; 2],
+    disk_center: [f64; 2],
+    reference: UnderResolvedLubricationExchange2,
+    response: TranslationResponse2,
+    origin: [f64; 2],
+) -> Result<UnderResolvedLubricationExchange2, DryDiskError2> {
+    let impulse = if response.normal_impulse == 0.0 {
+        [0.0; 2]
+    } else {
+        normal.map(|n| response.normal_impulse * n)
+    };
+    let angular = cross(subtract(disk_center, origin), impulse);
+    let work = response.normal_impulse * response.normal_rate;
+    if !impulse
+        .into_iter()
+        .chain([angular, work, response.normal_rate])
+        .all(f64::is_finite)
+        || work > 0.0
+    {
+        return Err(DryDiskError2::Invalid(
+            "finite-plane normal response overflowed",
+        ));
+    }
+    Ok(UnderResolvedLubricationExchange2 {
+        first_solid_impulse: impulse,
+        second_solid_impulse: impulse.map(|j| if j == 0.0 { 0.0 } else { -j }),
+        first_solid_angular_impulse: angular,
+        second_solid_angular_impulse: if angular == 0.0 { 0.0 } else { -angular },
+        normal_gap_velocity: response.normal_rate,
+        solid_pair_work: work,
+        ..reference
+    })
 }

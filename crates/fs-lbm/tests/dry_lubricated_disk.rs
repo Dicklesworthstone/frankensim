@@ -1613,3 +1613,626 @@ fn translating_plane_crossing_speed_and_cancellation_refuse_atomically_then_retr
     assert_eq!(disk.body(), fresh_disk.body());
     assert_eq!(planes, fresh_planes);
 }
+
+use fs_lbm::core2::moving_disk::{CarrierLubricationPatch2, TranslatingFilmCarrier2};
+
+fn carrier_momentum(carrier: TranslatingFilmCarrier2, origin: [f64; 2]) -> [f64; 3] {
+    let p = carrier.velocity().map(|v| carrier.mass() * v);
+    [
+        p[0],
+        p[1],
+        cross(
+            [
+                carrier.center()[0] - origin[0],
+                carrier.center()[1] - origin[1],
+            ],
+            p,
+        ),
+    ]
+}
+
+fn attached_patch(
+    disk: &DryDisk2,
+    carrier: TranslatingFilmCarrier2,
+    owner: usize,
+    normal: [f64; 2],
+    gap: f64,
+    normal_cutoff: f64,
+    tangent_cutoff: f64,
+) -> CarrierLubricationPatch2 {
+    let relative = core::array::from_fn(|a| {
+        disk.body().center[a] - (disk.radius() + gap) * normal[a] - carrier.center()[a]
+    });
+    CarrierLubricationPatch2::new(owner, relative, normal, normal_cutoff, 0.003)
+        .unwrap()
+        .with_tangential(tangent_cutoff, 0.001)
+        .unwrap()
+}
+
+fn independent_patch_resistance(
+    surface: LubricationPlane2,
+    gap: f64,
+    radius: f64,
+    mu: f64,
+) -> (f64, f64) {
+    let normal = if gap < surface.cutoff_gap() {
+        3.0 * std::f64::consts::PI
+            * std::f64::consts::SQRT_2
+            * mu
+            * radius.powf(1.5)
+            * (gap.max(surface.minimum_gap()).powf(-1.5) - surface.cutoff_gap().powf(-1.5))
+    } else {
+        0.0
+    };
+    let tangent = match surface.tangential_scales() {
+        Some((cutoff, floor)) if gap < cutoff => {
+            std::f64::consts::PI
+                * mu
+                * (8.0 * radius).sqrt()
+                * (gap.max(floor).powf(-0.5) - cutoff.powf(-0.5))
+        }
+        _ => 0.0,
+    };
+    (normal, tangent)
+}
+
+#[test]
+fn shared_oblique_patches_use_one_coupled_mass_and_one_kinetic_store() {
+    let origin = [-7.0, 26.0];
+    let mu = 0.001;
+    let (mut grid, mut disk) = fixture(0.4);
+    grid.rebind_gravity([1e-6, -2e-6], &mut Vec::new()).unwrap();
+    let mut carriers = [
+        TranslatingFilmCarrier2::new(0.06, [8.1, 6.3], [-0.002, 0.001]).unwrap(),
+        TranslatingFilmCarrier2::new(0.5, [15.1, 6.3], [0.001, -0.001]).unwrap(),
+    ];
+    let patches = [
+        attached_patch(&disk, carriers[0], 0, [0.0, 1.0], 0.021, 0.18, 0.029),
+        attached_patch(&disk, carriers[0], 0, [0.6, 0.8], 0.027, 0.24, 0.031),
+        attached_patch(&disk, carriers[1], 1, [-0.8, 0.6], 0.025, 0.14, 0.028),
+    ];
+    let authored = [[0.0004, -0.0003], [-0.0002, 0.0001]];
+    let radius = disk.radius();
+    let mut differs_from_independent = 0.0_f64;
+    for _ in 0..3 {
+        let initial = carriers;
+        let mut before = joint(&grid, &disk, origin);
+        for carrier in carriers {
+            let p = carrier_momentum(carrier, origin);
+            for a in 0..3 {
+                before[a] += p[a];
+            }
+        }
+        let report = disk
+            .step_with_lubrication_carriers(
+                &mut grid,
+                [0.0005, -0.0002],
+                0.0003,
+                origin,
+                mu,
+                &mut carriers,
+                &authored,
+                &patches,
+                Default::default(),
+                &gate(),
+            )
+            .unwrap();
+        assert_eq!(report.carriers.len(), 2);
+        assert_eq!(report.motion.planes.len(), 3);
+        let native = &report.motion.motion;
+        let vd = native.native.velocity_midpoint;
+        let mut resistance = [[0.0; 4]; 2];
+        let mut coefficients = [(0.0, 0.0); 3];
+        for (j, patch) in patches.iter().enumerate() {
+            let owner = patch.carrier();
+            let surface = patch.geometry(&initial).unwrap();
+            let n = surface.normal();
+            let t = [-n[1], n[0]];
+            let center = core::array::from_fn::<_, 2, _>(|a| {
+                initial[owner].center()[a] + 0.5 * initial[owner].velocity()[a]
+            });
+            let point = core::array::from_fn::<_, 2, _>(|a| center[a] + patch.point_relative()[a]);
+            let gap = dot(
+                [
+                    native.collision_center[0] - point[0],
+                    native.collision_center[1] - point[1],
+                ],
+                n,
+            ) - radius;
+            coefficients[j] = independent_patch_resistance(surface, gap, radius, mu);
+            let (kn, kt) = coefficients[j];
+            close(
+                report.motion.planes[j].native.resistance_increment,
+                kn,
+                3e-12,
+            );
+            close(
+                report.motion.planes[j].tangential_resistance_increment,
+                kt,
+                4e-15,
+            );
+            for a in 0..2 {
+                for b in 0..2 {
+                    resistance[owner][2 * a + b] += kn * n[a] * n[b] + kt * t[a] * t[b];
+                }
+            }
+        }
+        assert!(
+            resistance[0][1].abs() > 1.0,
+            "oracle must exercise off-diagonal coupling"
+        );
+        assert!((coefficients[0].0 - coefficients[1].0).abs() > 1.0);
+        let mut expected_midpoint = [[0.0; 2]; 2];
+        for owner in 0..2 {
+            let r = resistance[owner];
+            let mass = initial[owner].mass();
+            let a = [2.0 * mass + r[0], r[1], r[2], 2.0 * mass + r[3]];
+            let rhs = [
+                2.0 * mass * initial[owner].velocity()[0]
+                    + authored[owner][0]
+                    + r[0] * vd[0]
+                    + r[1] * vd[1],
+                2.0 * mass * initial[owner].velocity()[1]
+                    + authored[owner][1]
+                    + r[2] * vd[0]
+                    + r[3] * vd[1],
+            ];
+            // Independent two-by-two inverse, without production scaling,
+            // Cholesky, response matrices or per-face elimination.
+            let determinant = a[0] * a[3] - a[1] * a[2];
+            expected_midpoint[owner] = [
+                (a[3] * rhs[0] - a[1] * rhs[1]) / determinant,
+                (a[0] * rhs[1] - a[2] * rhs[0]) / determinant,
+            ];
+            for axis in 0..2 {
+                close(
+                    report.carriers[owner].velocity_midpoint[axis],
+                    expected_midpoint[owner][axis],
+                    4e-15,
+                );
+                close(
+                    carriers[owner].velocity()[axis],
+                    2.0 * expected_midpoint[owner][axis] - initial[owner].velocity()[axis],
+                    8e-15,
+                );
+            }
+        }
+        let mut sums = [[0.0; 5]; 2];
+        for (j, patch) in patches.iter().enumerate() {
+            let owner = patch.carrier();
+            let surface = patch.geometry(&initial).unwrap();
+            let after_surface = patch.geometry(&carriers).unwrap();
+            let n = surface.normal();
+            let t = [-n[1], n[0]];
+            let u = expected_midpoint[owner];
+            let relative = [vd[0] - u[0], vd[1] - u[1]];
+            let (kn, kt) = coefficients[j];
+            let normal_force = -kn * dot(relative, n);
+            let tangent_force = -kt * dot(relative, t);
+            let expected_force =
+                core::array::from_fn::<_, 2, _>(|a| normal_force * n[a] + tangent_force * t[a]);
+            let film = report.motion.planes[j];
+            for a in 0..2 {
+                close(film.body_impulse[a], expected_force[a], 3e-13);
+                close(after_surface.point()[a] - surface.point()[a], u[a], 4e-15);
+            }
+            close(film.plane_work, -dot(expected_force, u), 3e-16);
+            close(
+                film.body_center_couple,
+                -kt * radius * radius * native.native.angular_velocity_midpoint,
+                3e-15,
+            );
+            let mass = initial[owner].mass();
+            let free = core::array::from_fn::<_, 2, _>(|a| {
+                initial[owner].velocity()[a] + authored[owner][a] / (2.0 * mass)
+            });
+            let independent_n =
+                -kn / (1.0 + kn / (2.0 * mass)) * dot([vd[0] - free[0], vd[1] - free[1]], n);
+            let independent_t =
+                -kt / (1.0 + kt / (2.0 * mass)) * dot([vd[0] - free[0], vd[1] - free[1]], t);
+            for a in 0..2 {
+                differs_from_independent = differs_from_independent.max(
+                    (film.body_impulse[a] - independent_n * n[a] - independent_t * t[a]).abs(),
+                );
+            }
+            let center = report.carriers[owner].collision_center;
+            let arm = [center[0] - origin[0], center[1] - origin[1]];
+            for a in 0..3 {
+                sums[owner][a] += film.plane_impulse[a];
+            }
+            sums[owner][3] += film.plane_work;
+            sums[owner][4] +=
+                -film.plane_impulse[2] + cross(arm, [film.plane_impulse[0], film.plane_impulse[1]]);
+        }
+        let mut actual = joint(&grid, &disk, origin);
+        let mut expected = core::array::from_fn::<_, 3, _>(|a| {
+            native.physical_external_impulse[a]
+                + native.represented_fluid_forcing_impulse[a]
+                + native.boundary_fluid_impulse[a]
+                + if a == 2 {
+                    native.periodic_angular_impulse
+                } else {
+                    0.0
+                }
+        });
+        for owner in 0..2 {
+            let receipt = report.carriers[owner];
+            vector(
+                receipt.film_impulse,
+                [sums[owner][0], sums[owner][1], sums[owner][2]],
+                4e-15,
+            );
+            close(receipt.film_work, sums[owner][3], 3e-18);
+            close(receipt.guide_couple, sums[owner][4], 4e-15);
+            let before_v = initial[owner].velocity();
+            let after_v = carriers[owner].velocity();
+            let kinetic =
+                0.5 * initial[owner].mass() * (dot(after_v, after_v) - dot(before_v, before_v));
+            close(
+                kinetic,
+                dot(authored[owner], receipt.velocity_midpoint) + sums[owner][3],
+                4e-18,
+            );
+            close(receipt.kinetic_energy_change, kinetic, 3e-18);
+            vector(receipt.momentum_residual, [0.0; 3], 4e-15);
+            let p = carrier_momentum(carriers[owner], origin);
+            for a in 0..3 {
+                actual[a] += p[a];
+                expected[a] +=
+                    receipt.external_impulse[a] + if a == 2 { receipt.guide_couple } else { 0.0 };
+            }
+        }
+        for a in 0..3 {
+            close(actual[a] - before[a], expected[a], 3e-11);
+        }
+        vector(report.combined_momentum_residual, [0.0; 3], 3e-11);
+        close(
+            report.motion.body_work + report.motion.plane_work + report.motion.dissipated_energy,
+            0.0,
+            3e-17,
+        );
+    }
+    assert!(
+        differs_from_independent > 1e-5,
+        "independent per-patch masses must fail this oracle"
+    );
+}
+
+#[test]
+fn one_shared_patch_matches_the_original_finite_translating_plane_owner() {
+    let (mut shared_grid, mut shared_disk) = fixture(0.4);
+    let mut original_grid = shared_grid.clone();
+    let mut original_disk = shared_disk.clone();
+    let mut carriers = [TranslatingFilmCarrier2::new(0.4, [8.1, 6.3], [-0.002, 0.001]).unwrap()];
+    let patches = [attached_patch(
+        &shared_disk,
+        carriers[0],
+        0,
+        [0.6, 0.8],
+        0.025,
+        0.2,
+        0.03,
+    )];
+    let mut planes = [FiniteLubricationPlane2::new(
+        patches[0].geometry(&carriers).unwrap(),
+        carriers[0].mass(),
+        carriers[0].center(),
+    )
+    .unwrap()];
+    let authored = [[0.0004, -0.0003]];
+    let shared = shared_disk
+        .step_with_lubrication_carriers(
+            &mut shared_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut carriers,
+            &authored,
+            &patches,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let original = original_disk
+        .step_with_translating_lubrication_planes(
+            &mut original_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut planes,
+            &authored,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    for a in 0..2 {
+        close(carriers[0].velocity()[a], planes[0].velocity()[a], 2e-13);
+        close(carriers[0].center()[a], planes[0].center()[a], 2e-13);
+        close(
+            shared_disk.body().velocity[a],
+            original_disk.body().velocity[a],
+            2e-13,
+        );
+    }
+    close(
+        shared_disk.body().angular_velocity,
+        original_disk.body().angular_velocity,
+        2e-13,
+    );
+    for (left, right) in shared_grid
+        .f
+        .iter()
+        .flatten()
+        .zip(original_grid.f.iter().flatten())
+    {
+        close(*left, *right, 2e-13);
+    }
+    vector(
+        shared.motion.planes[0].body_impulse,
+        original.motion.planes[0].body_impulse,
+        2e-13,
+    );
+    close(
+        shared.carriers[0].kinetic_energy_change,
+        original.planes[0].kinetic_energy_change,
+        2e-16,
+    );
+}
+
+#[test]
+fn inactive_shared_faces_apply_authored_impulse_once_and_preserve_native_bits() {
+    let (mut grid, mut disk) = fixture(0.4);
+    let mut expected_grid = grid.clone();
+    let mut expected_disk = disk.clone();
+    let expected = expected_disk
+        .step(
+            &mut expected_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let mut empty_grid = grid.clone();
+    let mut empty_disk = disk.clone();
+    let empty = empty_disk
+        .step_with_lubrication_carriers(
+            &mut empty_grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut [],
+            &[],
+            &[],
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(empty.motion.motion, expected);
+    assert_eq!(empty_grid.f, expected_grid.f);
+    let mut carriers = [TranslatingFilmCarrier2::new(2.0, [8.0, 5.0], [0.003, -0.002]).unwrap()];
+    let initial = carriers;
+    let patches = [
+        attached_patch(&disk, carriers[0], 0, [0.0, 1.0], 0.8, 0.2, 0.03),
+        attached_patch(&disk, carriers[0], 0, [0.6, 0.8], 0.8, 0.2, 0.03),
+    ];
+    let authored = [[0.004, -0.006]];
+    let report = disk
+        .step_with_lubrication_carriers(
+            &mut grid,
+            [0.0005, -0.0002],
+            0.0003,
+            [-7.0, 26.0],
+            0.001,
+            &mut carriers,
+            &authored,
+            &patches,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(report.motion.motion, expected);
+    assert_eq!(grid.f, expected_grid.f);
+    assert_eq!(disk.body(), expected_disk.body());
+    assert_eq!(report.carriers.len(), 1);
+    for a in 0..2 {
+        close(
+            carriers[0].velocity()[a],
+            initial[0].velocity()[a] + authored[0][a] / 2.0,
+            1e-18,
+        );
+    }
+    assert_eq!(report.carriers[0].film_impulse, [0.0; 3]);
+    assert_eq!(report.carriers[0].guide_couple, 0.0);
+    close(
+        report.carriers[0].kinetic_energy_change,
+        report.carriers[0].external_work,
+        2e-20,
+    );
+}
+
+#[test]
+fn shared_patch_refusals_leave_all_state_and_exact_retry_intact() {
+    let (mut grid, disk) = fixture(0.4);
+    let mut body = disk.body();
+    body.velocity = [0.0; 2];
+    body.angular_velocity = 0.0;
+    let mut disk = DryDisk2::new(&grid, disk.radius(), body, disk.angle()).unwrap();
+    let mut carriers = [TranslatingFilmCarrier2::new(1.0, [8.0, 5.0], [0.0; 2]).unwrap()];
+    let patch = |owner, n: [f64; 2], gap: f64, cutoff| {
+        CarrierLubricationPatch2::new(
+            owner,
+            core::array::from_fn(|a| {
+                body.center[a] - (disk.radius() + gap) * n[a] - carriers[0].center()[a]
+            }),
+            n,
+            cutoff,
+            0.001,
+        )
+        .unwrap()
+    };
+    let patches = [
+        patch(0, [0.0, 1.0], 0.012, 0.005),
+        patch(0, [1.0, 0.0], 0.3, 0.005),
+    ];
+    let bad_index = [patch(2, [0.0, 1.0], 0.012, 0.005)];
+    let active = [
+        patch(0, [0.0, 1.0], 0.025, 0.2),
+        patch(0, [0.6, 0.8], 0.025, 0.2),
+    ];
+    let initial_grid = grid.clone();
+    let initial_disk = disk.clone();
+    let initial_carriers = carriers;
+    for authored in [[0.0, 0.04], [0.13, -0.13]] {
+        assert!(
+            disk.step_with_lubrication_carriers(
+                &mut grid,
+                [0.0; 2],
+                0.0,
+                [0.0; 2],
+                0.001,
+                &mut carriers,
+                &[authored],
+                &patches,
+                Default::default(),
+                &gate(),
+            )
+            .is_err()
+        );
+        assert_eq!(grid.f, initial_grid.f);
+        assert_eq!(disk.body(), initial_disk.body());
+        assert_eq!(carriers, initial_carriers);
+    }
+    assert!(
+        disk.step_with_lubrication_carriers(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut carriers,
+            &[[0.0; 2]],
+            &bad_index,
+            Default::default(),
+            &gate(),
+        )
+        .is_err()
+    );
+    let mut unused = [carriers[0], carriers[0]];
+    assert!(
+        disk.step_with_lubrication_carriers(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut unused,
+            &[[0.0; 2]; 2],
+            &patches,
+            Default::default(),
+            &gate(),
+        )
+        .is_err()
+    );
+    let mut controls = DryDiskCouplingConfig2::default();
+    controls.maximum_condition_number = 1.01;
+    assert_eq!(
+        disk.step_with_lubrication_carriers(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut carriers,
+            &[[0.0; 2]],
+            &active,
+            controls,
+            &gate(),
+        )
+        .unwrap_err(),
+        DryDiskError2::Invalid("shared carrier response is ill-conditioned")
+    );
+    // A body-relative face near the disk cannot silently lose its motion
+    // when a huge COM and local offset cancel. Refuse before any publication.
+    let mut remote = [TranslatingFilmCarrier2::new(1.0, [8.0, 1e16], [0.0, 0.004]).unwrap()];
+    let remote_before = remote;
+    let remote_patch =
+        [CarrierLubricationPatch2::new(0, [4.2, -1e16 + 10.0], [0.0, 1.0], 0.2, 0.001).unwrap()];
+    assert_eq!(
+        disk.step_with_lubrication_carriers(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut remote,
+            &[[0.0; 2]],
+            &remote_patch,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap_err(),
+        DryDiskError2::Invalid("shared patch translation is unrepresentable")
+    );
+    assert_eq!(remote, remote_before);
+    let cancelled = gate();
+    cancelled.request();
+    assert_eq!(
+        disk.step_with_lubrication_carriers(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut carriers,
+            &[[0.0; 2]],
+            &patches,
+            Default::default(),
+            &cancelled,
+        )
+        .unwrap_err(),
+        DryDiskError2::Cancelled
+    );
+    assert_eq!(grid.f, initial_grid.f);
+    assert_eq!(disk.body(), initial_disk.body());
+    assert_eq!(carriers, initial_carriers);
+    let mut fresh_grid = initial_grid;
+    let mut fresh_disk = initial_disk;
+    let mut fresh_carriers = initial_carriers;
+    let actual = disk
+        .step_with_lubrication_carriers(
+            &mut grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut carriers,
+            &[[0.0, -0.004]],
+            &patches,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    let expected = fresh_disk
+        .step_with_lubrication_carriers(
+            &mut fresh_grid,
+            [0.0; 2],
+            0.0,
+            [0.0; 2],
+            0.001,
+            &mut fresh_carriers,
+            &[[0.0, -0.004]],
+            &patches,
+            Default::default(),
+            &gate(),
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(grid.f, fresh_grid.f);
+    assert_eq!(disk.body(), fresh_disk.body());
+    assert_eq!(carriers, fresh_carriers);
+}

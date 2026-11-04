@@ -27,9 +27,11 @@ use fs_math::dd::Dd;
 
 mod lubricated;
 pub use lubricated::{
+    CarrierLubricationExchange2, CarrierLubricationPatch2, DryLubricatedCarriersExchange2,
     DryLubricatedDiskExchange2, DryLubricatedSlidersExchange2, DryTranslatingPlanesExchange2,
     FiniteLubricationPlane2, FiniteLubricationSlider2, LubricationPlane2,
-    PlaneLubricationExchange2, SliderLubricationExchange2, TranslatingPlaneExchange2,
+    PlaneLubricationExchange2, SliderLubricationExchange2, TranslatingFilmCarrier2,
+    TranslatingPlaneExchange2,
 };
 use lubricated::{FilmTotals2, PreparedPlanes2};
 
@@ -49,7 +51,8 @@ pub struct DryDiskCouplingConfig2 {
     pub relative_tolerance: f64,
     /// Relative forward difference step, in [1e-8, 1e-2].
     pub jacobian_step: f64,
-    /// Maximum estimated 1-norm condition number of the scaled Jacobian.
+    /// Maximum estimated 1-norm condition number of the scaled Jacobian and
+    /// any shared finite-carrier response prepared for the same step.
     pub maximum_condition_number: f64,
 }
 
