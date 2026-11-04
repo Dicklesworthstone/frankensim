@@ -19,7 +19,9 @@ use crate::render::{RenderError, schedule::ScheduledRenderer};
 
 /// Bounded per-part alignment storage, in final output samples. Source receiver
 /// latency plus the outer decimator must fit this domain without rounding.
-pub const MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES: usize = 4096;
+/// 8192 is the n/4 pre-arrival latency of a 32768-point baffled reed outlet
+/// grid, the largest a site card converges on: at most 64 KiB of history per part.
+pub const MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES: usize = 8192;
 
 /// Finite output and storage limits, independent of each source's own budgets.
 #[derive(Clone, Copy, Debug)]

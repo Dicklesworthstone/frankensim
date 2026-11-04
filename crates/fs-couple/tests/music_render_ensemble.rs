@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fs_couple::pcm_wav::{decimate::Decimator, encode_pcm16_wav};
 use fs_couple::render::plate::file::PlatePerformance;
 use fs_couple::render::schedule::force::file::ModalPerformance;
+use fs_couple::render::schedule::reed::ReedPerformance;
 use fs_material::gas::GasState;
 use fs_couple::brass_loop::performance::LipDescription;
 use fs_couple::voice_performance::VoiceDescription;
@@ -169,6 +170,45 @@ fn a_part_heard_in_another_gas_refuses_before_either_output_exists() {
     assert!(!out.exists()); assert!(!out.with_extension("provenance.json").exists());
     // Either reed alone, or twice, is one listener gas.
     succeeded(run(&dir.join("one-gas.wav"), &[("--reed", &b), ("--reed", &b)], 37, false));
+}
+
+#[test]
+fn a_baffled_reed_reports_its_outlet_grid_latency_and_a_dry_part_waits_for_it() {
+    // q15xc: the outlet observer's pressure is n/4 grid samples late in its own
+    // trace. The ensemble delays a part without receiver latency by exactly
+    // that, as it does for a microphone filter's delay; nothing is removed.
+    let dir = directory(); let reed = dir.join("reed.performance"); let dry = dir.join("dry.performance");
+    std::fs::write(&reed, REED_OUTLET).unwrap();
+    let mut source = ReedPerformance::from_bytes(REED_OUTLET.as_bytes(), 37).unwrap();
+    let samples = source.info().samples;
+    let latency = source.outlet_receiver().unwrap().pre_arrival_latency_samples;
+    assert!(latency > 0 && (latency as u64) < samples, "latency {latency} of {samples}");
+    let mut reed_pressure = vec![0.0; samples as usize];
+    for block in reed_pressure.chunks_mut(37) { source.pressure_block(block).unwrap(); }
+    let dry_text = modal(48_000, samples, 1.0);
+    std::fs::write(&dry, &dry_text).unwrap();
+    let mut renderer = ModalPerformance::from_bytes(dry_text.as_bytes(), 37).unwrap().into_renderer();
+    let mut dry_pressure = vec![0.0; samples as usize];
+    for block in dry_pressure.chunks_mut(37) { renderer.block(block).unwrap(); }
+    let mut aligned = reed_pressure.clone();
+    for (p, q) in aligned.iter_mut().skip(latency).zip(&dry_pressure) { *p += q; }
+    let mut unaligned = reed_pressure;
+    for (p, q) in unaligned.iter_mut().zip(&dry_pressure) { *p += q; }
+    let expected = encode_pcm16_wav(&aligned, 48_000, 2.0).unwrap().0;
+    assert_ne!(expected, encode_pcm16_wav(&unaligned, 48_000, 2.0).unwrap().0, "the latency must reach this mix");
+    let out = dir.join("reed-dry.wav");
+    succeeded(Command::new(env!("CARGO_BIN_EXE_music_render")).arg("ensemble").arg(&out)
+        .args(["--full-scale-pa", "2", "--block", "37"]).arg("--reed").arg(&reed).arg("--modal").arg(&dry)
+        .output().unwrap());
+    assert_eq!(std::fs::read(&out).unwrap(), expected);
+    let receipt = std::fs::read_to_string(out.with_extension("provenance.json")).unwrap();
+    for field in [
+        format!("\"alignment_delay_samples\":0,\"source_filter_delay_output_samples\":{latency},\"total_filter_delay_output_samples\":{latency},"),
+        format!("\"alignment_delay_samples\":{latency},\"source_filter_delay_output_samples\":0,\"total_filter_delay_output_samples\":0,"),
+        format!("\"common_delay_output_samples\":{latency},"),
+    ] {
+        assert!(receipt.contains(&field), "{field}: {receipt}");
+    }
 }
 
 #[test]

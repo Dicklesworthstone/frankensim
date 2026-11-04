@@ -22,7 +22,9 @@ use fs_couple::flue_loop::network::performance::file::{
     FlueFilePerformance, FLUE_PERFORMANCE_SCHEMA, MAX_FLUE_PERFORMANCE_BYTES,
 };
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
-use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
+use fs_couple::pcm_wav::observation::ensemble::{
+    MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES, PressureEnsemble, PressureEnsembleConfig,
+};
 use fs_couple::nsf_dg::performance::file::{
     ResolvedDgFilePerformance, RESOLVED_DG_PERFORMANCE_SCHEMA, MAX_RESOLVED_PERFORMANCE_BYTES,
 };
@@ -473,10 +475,15 @@ fn load_with_gas_sources(
             // The baffled outlet's one bound exterior; the legacy proxy has none.
             let listener = p.outlet_receiver().map_or(Listener::Unconstrained("legacy listener_m bore/jet proxy"),
                 |o| Listener::Gas(ListenerMedium::of(&o.gas)));
+            // Every baffled-outlet observer emits its pressure n/4 grid samples
+            // late (outlet_pre_arrival_latency): a receiver latency already in its
+            // trace, like a microphone filter's. The legacy proxy has no grid.
+            let source_filter_delay_samples = p.outlet_receiver()
+                .map_or(0.0, |o| o.pre_arrival_latency_samples as f64);
             (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
+                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples,
                 components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
             })
         }
@@ -515,6 +522,26 @@ fn load_with_gas_sources(
         }
     };
     Ok(result)
+}
+
+/// One part's already-present receiver latency on the output clock. The same
+/// admission as `PressureEnsemble::new_with_source_delays`, refused here first so
+/// the message names the part: an integral delay whose total with the part's own
+/// decimator fits the ensemble's alignment storage, 8192 output samples, the n/4
+/// latency of a 32768-point reed outlet grid.
+fn aligned_source_delay(index: usize, kind: Kind, source_delay_samples: f64, ratio: usize,
+    decimator_delay: f64) -> Result<f64, String>
+{
+    let delay = source_delay_samples / ratio as f64;
+    let total = delay + decimator_delay;
+    if !delay.is_finite() || delay < 0.0 || delay.fract() != 0.0
+        || total > MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES as f64
+    {
+        return Err(format!(
+            "ensemble part {index} ({}) carries a receiver latency of {delay} output samples ({total} with its decimator); the ensemble aligns only integral totals up to {MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES} output samples, the n/4 latency of a 32768-point reed outlet grid",
+            kind.label()));
+    }
+    Ok(delay)
 }
 
 fn prepare(options: &Options) -> Result<(DynamicEnsemble, Vec<SourceInfo>, u64), String> {
@@ -560,7 +587,8 @@ fn prepare_with_gas_sources(
         // Receiver latency is already present in its pressure trace. Convert
         // only its units; the shared ensemble owner validates exact integrality
         // and adds the remaining pure delay. Physical r/c stays untouched.
-        source_delays.push(info.source_filter_delay_samples / observed.info().ratio as f64);
+        source_delays.push(aligned_source_delay(index, info.kind, info.source_filter_delay_samples,
+            observed.info().ratio, observed.info().delay_output_samples)?);
         let samples = observed.output_samples_for(info.samples).map_err(|e| e.to_string())?;
         if samples == 0 || samples > MAX_SAMPLES { return Err("ensemble duration must be in (0,600] seconds".into()); }
         if let Some(expected) = horizon {
@@ -725,5 +753,44 @@ mod tests {
         for value in ["0", "-1", "NaN", "inf"] {
             assert!(options(&args(&["out.wav", "--modal", "a", "--full-scale-pa", value])).is_err());
         }
+    }
+
+    #[test]
+    fn a_part_latency_beyond_the_alignment_bound_or_off_the_output_clock_refuses_by_name() {
+        // A 32768-point outlet grid's n/4 fits, natively or decimated by an exact factor.
+        assert_eq!(aligned_source_delay(1, Kind::Reed, 8192.0, 1, 0.0), Ok(8192.0));
+        assert_eq!(aligned_source_delay(1, Kind::Reed, 16384.0, 2, 0.0), Ok(8192.0));
+        assert_eq!(aligned_source_delay(0, Kind::Lip, 0.0, 2, 40.0), Ok(0.0));
+        for (delay, ratio, decimator) in [(16384.0, 1, 0.0), (8192.0, 1, 1.0), (4096.0, 3, 0.0),
+            (-1.0, 1, 0.0), (f64::NAN, 1, 0.0)]
+        {
+            let error = aligned_source_delay(1, Kind::Reed, delay, ratio, decimator).unwrap_err();
+            assert!(error.starts_with("ensemble part 1 (reed) carries a receiver latency of ")
+                && error.contains("up to 8192 output samples"), "{error}");
+        }
+    }
+
+    /// q15xc: the largest repo site grid, BbClar.mf.A4 on 32768 points, reports
+    /// its n/4 = 8192 and the ensemble delays a dry part by it rather than refusing.
+    #[test]
+    fn a_32768_grid_site_reed_part_aligns_a_dry_part_by_its_outlet_latency() {
+        let a4 = concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../data/instruments/descriptions/clarinet/performances/BbClar.mf.A4.performance");
+        let text = std::fs::read_to_string(a4).unwrap();
+        assert!(text.contains("\naudio 48000 127200 "), "the A4 card's clock changed");
+        let dry = std::env::temp_dir().join(format!("q15xc-a4-dry-{}.performance", std::process::id()));
+        std::fs::write(&dry, "frankensim-modal-performance-v1\nsample_rate_hz 48000\nsamples 127200\n\
+            full_scale_pa 1\nlimits 0.9 1 1000 1000 1000\ncompile_limits 10 20\nvoices 1\n\
+            voice retain-state 1 1\nmode 1000 0.01 1 0.1 0.0001 0\nport 1 1\nevents 1\nforce 37 0 0 0\n").unwrap();
+        let o = options(&args(&["out.wav", "--reed", a4, "--modal", &dry.display().to_string(),
+            "--full-scale-pa", "20"])).unwrap();
+        let (ensemble, sources, samples) = prepare(&o).unwrap();
+        assert_eq!(samples, 127_200);
+        assert_eq!(sources.iter().map(|s| s.kind).collect::<Vec<_>>(), vec![Kind::Reed, Kind::Modal]);
+        let parts = ensemble.part_info();
+        assert_eq!((parts[0].source_filter_delay_output_samples, parts[0].alignment_delay_samples), (8192, 0));
+        assert_eq!((parts[1].source_filter_delay_output_samples, parts[1].alignment_delay_samples), (0, 8192));
+        assert_eq!(ensemble.delay_output_samples(), 8192);
+        assert_eq!(ensemble.samples_rendered(), 0);
     }
 }
