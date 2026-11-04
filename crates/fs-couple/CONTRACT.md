@@ -2882,9 +2882,32 @@ native `fs-tribo` cavitating Reynolds graph. Candidate states, pressure forces,
 transport and liquid-mass diagnostics come from that original solver. The
 surrounding mechanical owner must admit the pressure force in its own solve;
 prescribed-configuration endpoint forces do not establish integrated work or
-passivity. Material coefficients are frozen. Updating temperature/density needs
-a conservative transfer; re-creating a model is not that transfer. Neglected
-void mass is not a latent-heat source.
+passivity. Material coefficients remain frozen within each advance. For a
+`ResolvedCavitationState`, `advance_with_temperature_source` adopts a refreshed
+temperature through the SAME native conservative solve. The new snapshot must
+retain the original immutable card, every selected claim and property
+requirement, the original temperature axis, and all nonthermal coordinates and
+quantity conventions. Dynamic viscosity, density and saturation pressure refresh
+together; kinematic-source conversion uses the new density. The original
+dilute-vapor cap is checked again.
+
+The returned `MaterialCavitationContinuation` contains the new source binding
+and matching candidate inventory for joint acceptance. Its mass balance retains
+`rho_old*V_old*theta_old` and uses the new density for candidate storage and face
+transport; no existing cavity is reinitialized. Geometry, ambient boundary and
+numerical limits remain original. Source, native domain/mass or late cancellation
+refusals leave the accepted binding and liquid state untouched. This is
+first-order endpoint constitutive splitting with caller-owned temperature,
+energy and time refinement. It does not integrate heat, supply vapor/latent-heat
+inventory, or certify time-integrated work from endpoint pressure forces.
+
+Focused integration regressions cover source-backed drained heating/cooling
+with dynamic and kinematic viscosity, cavity refill at refreshed saturation
+pressure, constant-coefficient native identity, original card/claim/context and
+vapor-density refusal, and late-cancellation retry. Native film continuation
+passed all 80 tests in the actual film-module harness, including its six new
+regressions; coupled regression execution remains unverified.
+
 When saturated vapor density is supplied, its ratio to liquid density must fit
 the explicitly declared dilute-vapor cap; a dense vapor state is refused.
 Missing vapor density retains an explicit caller applicability assumption.

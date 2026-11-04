@@ -385,6 +385,10 @@ impl ResolvedCavitationState {
     pub const fn requirements(&self) -> &CavitationPropertyRequirements {
         &self.requirements
     }
+    /// Original absolute-temperature coordinate, retained by every refresh.
+    pub fn temperature_axis(&self) -> &str {
+        &self.temperature_axis
+    }
     /// Checked numerical snapshot derived from this source bundle.
     pub const fn state(&self) -> CavitationState {
         self.state
