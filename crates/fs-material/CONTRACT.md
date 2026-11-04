@@ -13985,6 +13985,34 @@ correlations for non-Newtonian fluids. G0/G3 controls check mixed-temperature
 and incoherent-source refusals, retained owners, one-time queries, and the
 coherent change of Prandtl/Rayleigh groups under viscosity replacement.
 
+`fluid_transport::rheology::pipe::LaminarCarreauPipe` resolves fully developed,
+no-slip circular-pipe flow of that original law at one frozen temperature.
+Both rest and the explicit physical wall-rate ceiling must lie inside source
+support, including the original reduced-rate shift. A bounded bracketed Newton
+solve inverts the positive stress law `tau=mu(g)*g`. Total volume flow uses a
+positive shear-rate-coordinate integral of the canonical stress tangent, so it
+needs one wall inversion rather than an inverse at every integration node.
+Constant-viscosity declarations recover Poiseuille flow directly. Nested
+positive Simpson quadrature splits at the original transition rate and requires
+two consecutive refinements to agree within the declared tolerance; exhausted
+inverse or quadrature budgets refuse. Observed quadrature changes are numerical
+estimates, not certified error bounds or material uncertainty.
+
+The prepared radial profile retains the original pipe/law and controls. It
+resolves axial velocity, outward-face radial shear stress, physical velocity
+gradient, local viscosity and nonnegative `tau*g` heating. Factored wall distance
+preserves small positive velocities near the no-slip wall. Accepted pressure is
+derived from the actual wall constitutive response; the requested pressure and
+signed inversion residual remain explicit. Consequently the integrated flow and
+`accepted_pressure*flow` dissipation describe the same accepted state. Heat is
+reported for a thermal owner, not deposited or used to change the frozen law.
+No density, Reynolds-number criterion, turbulence qualification, entrance loss,
+wall slip, elastic memory or pressure-dependent source response is inferred from
+the caller's laminar rate ceiling. Focused regressions cover independent radial
+velocity/heat integration, both Newtonian plateaus and constant-law limits,
+pressure reversal/rest, singular scalar zero-rate slopes, shifted source limits,
+near-wall velocities, finite work budgets and extreme intermediate products.
+
 Existing LBM callbacks consume the bound state through their native nonlinear
 collision and viscous-heating path; the broader legacy lattice Carreau domain,
 units and prepared relaxation-time policy remain intact. Constitutive regressions

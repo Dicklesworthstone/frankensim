@@ -23,6 +23,8 @@ use crate::MaterialError;
 use crate::visco::temperature::{TemperatureShift, TemperatureShiftState};
 use fs_math::det;
 
+pub mod pipe;
+
 #[cfg(test)]
 mod tests;
 
