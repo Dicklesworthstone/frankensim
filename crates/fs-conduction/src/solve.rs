@@ -8,19 +8,24 @@
 //! An iterate is accepted when
 //!
 //! ```text
-//!   ‖R(T)‖₂ ≤ residual_rtol · ‖b_f(T)‖₂ + residual_atol
+//!   ‖R(T)‖₂ ≤ max(residual_rtol · ‖R(T_anchor; A(T))‖₂ + residual_atol,
+//!                 residual_roundoff_floor)
 //! ```
 //!
-//! or when the accepted step satisfies `‖ΔT‖∞ ≤ step_atol` — the second
-//! clause exists so a problem whose residual scale is degenerate still
-//! terminates on a reason, never on the iteration budget alone.
-//! Exhausting `max_iterations` is [`crate::ConductionError::NotConverged`],
-//! never a quiet "here is your answer".
+//! The reference field uses the midpoint of prescribed temperatures on free
+//! vertices and the original Dirichlet values on fixed vertices. With no fixed
+//! vertices, it uses the Robin reservoirs' conductance-weighted temperature.
+//! Its imbalance measures heat sources and imposed temperature differences,
+//! without scaling the tolerance by a large absolute-temperature lift. The
+//! explicit rowwise floating-point allowance is included in the reported
+//! threshold; it is not a spatial or continuum error certificate. A small
+//! accepted step with an unresolved residual, or an exhausted iteration budget,
+//! is [`crate::ConductionError::NotConverged`], never a converged field.
 //!
 //! # The globalization (declared per nonlinearity)
 //!
 //! - [`Nonlinearity::FixedPoint`]: Picard with a FIXED relaxation `ω`,
-//!   `T ← T + ω(y − T)` where `A(T)y = b(T)`. The only backtracking is
+//!   `T ← T + ωδ` where `A_ff(T)δ = −R(T)`. The only backtracking is
 //!   the ADMISSIBILITY guard: a trial iterate that leaves the material's
 //!   sampled temperature span halves the step rather than extrapolating.
 //! - [`Nonlinearity::Newton`]: Armijo backtracking on `‖R‖₂` with the
@@ -51,8 +56,7 @@ use fs_sparse::precond::{Ilu0, Precond, ilu0};
 use crate::ConductionError;
 use crate::assemble::{
     AssembledSystem, DofMap, assemble_jacobian_with_optional_interfaces,
-    assemble_operator_scaled_with_interfaces, full_residual, reduce, reduce_matrix_and_lift,
-    residual,
+    assemble_operator_scaled_with_interfaces, full_residual, reduce_matrix_and_lift, residual,
 };
 use crate::bc::{ThermalBc, ThermalBoundary};
 use crate::field::ScalarField;
@@ -109,7 +113,7 @@ impl Default for LineSearch {
 /// How the `k(T)` nonlinearity is driven, with its globalization.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Nonlinearity {
-    /// Damped Picard: `T ← T + ω(y − T)`, `A(T)y = b(T)`, SPD, CG.
+    /// Damped Picard: `T ← T + ωδ`, `A_ff(T)δ = −R(T)`, SPD, CG.
     FixedPoint {
         /// Relaxation `ω ∈ (0, 1]`.
         relaxation: f64,
@@ -139,11 +143,14 @@ impl Default for Nonlinearity {
 /// The declared stop rule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StopRule {
-    /// Relative residual tolerance against `‖b_f‖₂`.
+    /// Relative residual tolerance against the heat imbalance of the
+    /// boundary-anchored reference field, using the current material operator.
+    /// Absolute-temperature Dirichlet and Robin lifts do not set this scale.
     pub residual_rtol: f64,
     /// Absolute residual floor (W, in the assembled load's units).
     pub residual_atol: f64,
-    /// Accepted-step infinity-norm tolerance, K.
+    /// Accepted-step infinity-norm stagnation tolerance, K. A step this small
+    /// refuses convergence unless the heat residual also passes its threshold.
     pub step_atol: f64,
     /// Iteration budget; exhausting it is a refusal.
     pub max_iterations: usize,
@@ -275,7 +282,8 @@ impl SolveConfig {
 pub enum StopReason {
     /// `‖R‖₂` met the residual clause of the stop rule.
     ResidualTolerance,
-    /// The accepted step met the step clause of the stop rule.
+    /// Historical step-only stop, retained for consumers of older reports.
+    /// New solves require the heat residual to pass and never emit this reason.
     StepTolerance,
 }
 
@@ -389,7 +397,9 @@ pub struct ConductionReport {
     pub residual_history: Vec<f64>,
     /// `‖R‖₂` at the accepted solution.
     pub final_residual: f64,
-    /// The stop rule's residual threshold at the accepted solution.
+    /// The stop rule's heat-residual target, raised when necessary to the
+    /// rowwise floating-point evaluation allowance at the accepted solution.
+    /// This actual acceptance threshold is not a continuum-error bound.
     pub residual_threshold: f64,
     /// Why it stopped.
     pub stop_reason: StopReason,
@@ -452,7 +462,7 @@ pub struct ConductionState {
     /// `‖R‖₂` observed at the start of every completed iteration.
     pub residual_history: Vec<f64>,
     /// Infinity norm of the last accepted step, K (`f64::INFINITY`
-    /// before the first step, so the step clause cannot fire early).
+    /// before the first step, so stagnation cannot be reported early).
     pub last_step_norm: f64,
 }
 
@@ -555,7 +565,6 @@ fn true_relative_residual(a: &Csr, b: &[f64], x: &[f64]) -> f64 {
 struct Evaluated {
     system: AssembledSystem,
     a_ff: Csr,
-    b_f: Vec<f64>,
     r: Vec<f64>,
     rnorm: f64,
     threshold: f64,
@@ -596,12 +605,98 @@ fn physical_report(
     })
 }
 
+// This is an algebraic reference, not a trial material state: conductivity is
+// always evaluated at the actual iterate. Fixed temperatures take precedence:
+// a weak Robin reservoir must not move the reference far from a prescribed wall
+// and create an artificial bulk heat scale. Without fixed nodes, weight Robin
+// reservoirs by their actual assembled conductance. Fixed values stay imposed,
+// so source-free unequal Dirichlet data retain their physical driving scale.
+// The reference depends only on the problem, not on legacy snapshot state.
+fn heat_balance_reference(problem: &ConductionProblem<'_>, dofs: &DofMap) -> Vec<f64> {
+    let reference = if dofs.fixed().is_empty() {
+        robin_reference_temperature(problem)
+    } else {
+        let (low, high) = dofs.fixed().iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(low, high), &vertex| {
+                let value = dofs.prescribed()[vertex];
+                (low.min(value), high.max(value))
+            },
+        );
+        low.midpoint(high)
+    };
+    let mut full = vec![reference; problem.mesh.vertex_count()];
+    for &vertex in dofs.fixed() {
+        full[vertex] = dofs.prescribed()[vertex];
+    }
+    full
+}
+
+fn robin_reference_temperature(problem: &ConductionProblem<'_>) -> f64 {
+    let mut reference = 0.0;
+    let mut conductance_scale = 0.0;
+    let mut scaled_conductance = 0.0;
+    for (slot, face) in problem.mesh.boundary().iter().enumerate() {
+        let Some(ThermalBc::Robin { htc, t_ref }) = problem.boundary.condition_for(slot) else {
+            continue;
+        };
+        let vertices = face.vertices.map(|vertex| vertex as usize);
+        let block = crate::assemble::robin_face_matrix(face.area, vertices.map(|v| htc.at(v)));
+        for (column, &vertex) in vertices.iter().enumerate() {
+            // sum_a R_ab = integral h*lambda_b: summing the same cubic
+            // moments as assembly retains P1 h/T_ref correlation and area.
+            let weight: f64 = block.iter().map(|row| row[column]).sum();
+            if weight == 0.0 {
+                continue;
+            }
+            // Normalize weights before accumulating, avoiding both sum(h*T)
+            // and a potentially overflowing total physical conductance.
+            if weight > conductance_scale {
+                scaled_conductance *= conductance_scale / weight;
+                conductance_scale = weight;
+            }
+            let scaled_weight = weight / conductance_scale;
+            scaled_conductance += scaled_weight;
+            reference = (scaled_weight / scaled_conductance)
+                .mul_add(t_ref.at(vertex) - reference, reference);
+        }
+    }
+    reference
+}
+
+// The public residual and physical reports use the original assembled A*T-b.
+// Near an isothermal state those large terms cancel, and storing T + delta_T
+// can itself round away part of a small correction. A relative heat criterion
+// must not demand residuals below that representation's floating-point scale.
+// For m row entries use gamma = (2m+2)*eps/(1-(2m+2)*eps), conservatively allowing
+// products, sums, subtraction and temperature rounding. This is a numerical
+// allowance on the assembled equations, not a certified assembly/error bound.
+fn residual_roundoff_floor(system: &AssembledSystem, dofs: &DofMap, temperature: &[f64]) -> f64 {
+    let rows: Vec<f64> = dofs
+        .free()
+        .iter()
+        .map(|&row| {
+            let (columns, values) = system.operator.row(row);
+            let magnitude = columns
+                .iter()
+                .zip(values)
+                .fold(system.load[row].abs(), |sum, (&column, &value)| {
+                    value.abs().mul_add(temperature[column].abs(), sum)
+                });
+            let scaled_epsilon = (2.0 * columns.len() as f64 + 2.0) * f64::EPSILON;
+            scaled_epsilon / (1.0 - scaled_epsilon) * magnitude
+        })
+        .collect();
+    norm2(&rows)
+}
+
 /// The resumable steady-conduction solver.
 pub struct ConductionSolver<'m> {
     problem: ConductionProblem<'m>,
     interfaces: Option<&'m ThermalInterfaces>,
     element_materials: Option<&'m ElementMaterials>,
     dofs: DofMap,
+    reference_temperature: Vec<f64>,
     config: SolveConfig,
     state: ConductionState,
     linear: Vec<LinearSolveEvidence>,
@@ -657,7 +752,9 @@ impl<'m> ConductionSolver<'m> {
         config: &SolveConfig,
     ) -> Result<Vec<f64>, ConductionError> {
         config.validate()?;
-        problem.source.validate("volumetric source", problem.mesh.vertex_count())?;
+        problem
+            .source
+            .validate("volumetric source", problem.mesh.vertex_count())?;
         if let Some(assigned) = problem.element_materials {
             assigned.validate_for(problem.mesh)?;
         }
@@ -698,11 +795,13 @@ impl<'m> ConductionSolver<'m> {
             return Err(ConductionError::SingularPureNeumann);
         }
         let free_temperature = initial_free(&problem, &dofs, &config.initial)?;
+        let reference_temperature = heat_balance_reference(&problem, &dofs);
         Ok(ConductionSolver {
             problem,
             interfaces,
             element_materials: problem.element_materials,
             dofs,
+            reference_temperature,
             config,
             state: ConductionState {
                 iteration: 0,
@@ -807,18 +906,20 @@ impl<'m> ConductionSolver<'m> {
             self.interfaces,
             self.element_materials,
         )?;
-        let (a_ff, b_f) = reduce(&system, &self.dofs);
+        let (a_ff, _) = reduce_matrix_and_lift(&system.operator, &self.dofs);
         let r = residual(&system, &self.dofs, &full);
         let rnorm = norm2(&r);
+        let heat_scale = norm2(&residual(&system, &self.dofs, &self.reference_temperature));
+        let roundoff_floor = residual_roundoff_floor(&system, &self.dofs, &full);
         let threshold = self
             .config
             .stop
             .residual_rtol
-            .mul_add(norm2(&b_f), self.config.stop.residual_atol);
+            .mul_add(heat_scale, self.config.stop.residual_atol)
+            .max(roundoff_floor);
         Ok(Evaluated {
             system,
             a_ff,
-            b_f,
             r,
             rnorm,
             threshold,
@@ -830,7 +931,8 @@ impl<'m> ConductionSolver<'m> {
     /// when the stop rule already holds.
     ///
     /// # Errors
-    /// Cancellation, material, line-search, and linear-solve refusals.
+    /// Cancellation, material, line-search, and linear-solve refusals;
+    /// [`ConductionError::NotConverged`] for a small step with unresolved heat.
     pub fn step(&mut self, cx: &Cx<'_>) -> Result<StepReport, ConductionError> {
         let ev = self.evaluate(cx)?;
         let rnorm = ev.rnorm;
@@ -850,15 +952,10 @@ impl<'m> ConductionSolver<'m> {
             });
         }
         if self.state.last_step_norm <= self.config.stop.step_atol {
-            self.stop_reason = Some(StopReason::StepTolerance);
-            self.last_system = Some(ev.system);
-            return Ok(StepReport {
+            return Err(ConductionError::NotConverged {
+                iterations: self.state.iteration,
                 residual: rnorm,
                 threshold,
-                converged: true,
-                step_length: 0.0,
-                backtracks: 0,
-                step_norm: self.state.last_step_norm,
             });
         }
 
@@ -888,13 +985,17 @@ impl<'m> ConductionSolver<'m> {
     /// The search direction for one iteration: the damped Picard update
     /// or the Newton step, each through its own Krylov method.
     fn direction(&mut self, cx: &Cx<'_>, ev: &Evaluated) -> Result<Vec<f64>, ConductionError> {
+        let rhs: Vec<f64> = ev.r.iter().map(|v| -v).collect();
         match self.config.nonlinearity {
             Nonlinearity::FixedPoint { relaxation, .. } => {
-                let y = self.solve_spd(&ev.a_ff, &ev.b_f)?;
-                Ok(y.iter()
-                    .zip(&self.state.free_temperature)
-                    .map(|(yi, xi)| relaxation * (yi - xi))
-                    .collect())
+                // Solve the heat imbalance directly. Solving A*y = b and
+                // subtracting the absolute temperature would let the Krylov
+                // tolerance hide a small but resolvable temperature change.
+                let mut direction = self.solve_spd(&ev.a_ff, &rhs)?;
+                for delta in &mut direction {
+                    *delta *= relaxation;
+                }
+                Ok(direction)
             }
             Nonlinearity::Newton { .. } => {
                 let jacobian = assemble_jacobian_with_optional_interfaces(
@@ -907,7 +1008,6 @@ impl<'m> ConductionSolver<'m> {
                     self.element_materials,
                 )?;
                 let (j_ff, _) = reduce_matrix_and_lift(&jacobian, &self.dofs);
-                let rhs: Vec<f64> = ev.r.iter().map(|v| -v).collect();
                 self.solve_general(&j_ff, &rhs)
             }
         }

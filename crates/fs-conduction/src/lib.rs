@@ -331,8 +331,8 @@ pub enum ConductionError {
         /// Why it is inadmissible.
         what: String,
     },
-    /// The nonlinear iteration exhausted its budget without meeting the
-    /// declared stop rule.
+    /// The nonlinear iteration exhausted its budget or stagnated at the
+    /// declared step tolerance without meeting the heat-residual criterion.
     NotConverged {
         /// Iterations performed.
         iterations: usize,

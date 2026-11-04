@@ -1860,21 +1860,50 @@ not a general transient frontend (see the no-claim section).
 
 ### The nonlinear driver: globalization and stop rule, both declared
 
-Stop rule (`StopRule`), accepted when either clause holds:
+Stop rule (`StopRule`), accepted only when the heat-residual criterion holds:
 
 ```text
-  ‖R(T)‖₂ ≤ residual_rtol · ‖b_f(T)‖₂ + residual_atol      (residual clause)
-  ‖ΔT‖∞  ≤ step_atol on the last accepted step             (step clause)
+  heat_target = residual_rtol · ‖A(T) T_anchor − b‖_free,2 + residual_atol
+  ‖R(T)‖₂ ≤ max(heat_target, residual_roundoff_floor)
 ```
 
-Exhausting `max_iterations` is `ConductionError::NotConverged`, never a quiet
-answer. The reason a run stopped is in `ConductionReport::stop_reason`.
+`T_anchor` takes the midpoint of the original prescribed temperature range on
+free vertices, retaining the original fixed temperatures. Robin reservoirs do
+not move that reference when Dirichlet anchors exist. Without fixed vertices,
+the reference is `integral(h*T_ref)/integral(h)` over the Robin boundary, using
+the same exact P1 face moments as assembly. Weak remote reservoirs therefore
+cannot create an artificial temperature difference against stronger anchors.
+The current iterate still owns every conductivity query. The reference therefore
+measures source/flux loads and imposed temperature differences without making
+the relative tolerance depend on a common absolute-temperature baseline or on
+the caller's initial guess. Source-free unequal Dirichlet values retain a
+nonzero physical driving scale. The reference is derived from the problem and
+does not change the resumable state or legacy snapshot format.
+
+The public residual and physical reports retain the assembled `A*T-b`. To avoid
+chasing cancellation and temperature-representation roundoff near isothermal
+states, each free row with `m` entries contributes
+`gamma_(2m+2) * (|b_i| + sum_j |A_ij*T_j|)`, where
+`gamma_n = n*EPSILON/(1-n*EPSILON)`; their Euclidean norm is the numerical floor.
+`ConductionReport::residual_threshold` records the actual maximum used for
+acceptance. This floating-point allowance is not an interval enclosure, an
+assembly-error certificate, or a bound on spatial discretization error.
+
+An accepted step with `‖ΔT‖∞ ≤ step_atol` and an unresolved heat residual returns
+`ConductionError::NotConverged`, as does exhaustion of `max_iterations`. A small
+temperature update alone never publishes a converged field. The legacy
+`StopReason::StepTolerance` tag remains readable but is no longer emitted.
+`tests/steady_heat_imbalance.rs` checks weak generated and prescribed heat at
+large temperature baselines, strongly unequal Robin conductances with/without
+Dirichlet anchoring, anisotropic isothermal equilibrium, and the small-step
+refusal against independent slab solutions.
 
 Globalization (`Nonlinearity`):
 
 - `FixedPoint { relaxation ω, max_backtracks }` — damped Picard,
-  `T ← T + ω(y − T)` with `A(T)y = b(T)`. `A(T)` is SPD, so this path runs
-  preconditioned CG.
+  `T ← T + ωδ` with `A_ff(T)δ = −R(T)`. The Krylov tolerance applies to the
+  physical heat imbalance and the solved temperature increment. `A(T)` is SPD,
+  so this path runs preconditioned CG.
 - `Newton { line_search }` — Armijo sufficient decrease on `‖R‖₂`:
   accept when `‖R(T + αδ)‖ ≤ (1 − c α)‖R(T)‖`, shrink by `shrink` per
   backtrack, at most `max_backtracks`. The Jacobian carries the
