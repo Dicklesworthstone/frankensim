@@ -281,3 +281,126 @@ fn source_and_tangent_refusals_stop_newton_without_altering_history() {
     ));
     assert!(previous.iter().all(|value| *value == 0.0));
 }
+
+#[test]
+fn newton_endpoint_tolerance_is_independent_of_the_tight_linear_correction() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let params = fs_flux::FluxParams {
+        tol: 1e-12,
+        sigma: 15.0,
+        ..fs_flux::FluxParams::default()
+    };
+    let previous = vec![0.0; system.n_u];
+    let initial = vec![0.0; system.n];
+    let timestep = 0.1;
+    let acceleration = |p: [f64; 2]| [p[1] - 0.5, -(p[0] - 0.5)];
+    let law = |_: usize, _: [f64; 2], rate: f64| FluxViscosityTangent {
+        nu: 0.2 * (1.0 + rate * rate),
+        derivative: 0.4 * rate,
+    };
+    // Independently solve the original first Newton correction at the tight
+    // linear tolerance. Its actual nonlinear endpoint has a larger defect.
+    let first = system
+        .linearize_rheology(
+            params,
+            &law,
+            &acceleration,
+            &no_slip,
+            &initial,
+            true,
+            1.0 / timestep,
+            Some(&previous),
+        )
+        .unwrap();
+    let rhs: Vec<_> = first.residual.iter().map(|r| -r).collect();
+    let correction = system.solve_linear(&first.jacobian, &rhs, params);
+    assert!(correction.converged(params.tol));
+    let endpoint = system
+        .linearize_rheology(
+            params,
+            &law,
+            &acceleration,
+            &no_slip,
+            &correction.x,
+            true,
+            1.0 / timestep,
+            Some(&previous),
+        )
+        .unwrap();
+    let defect = endpoint
+        .relative_residual
+        .max(endpoint.scaled_relative_residual);
+    assert!(defect > 100.0 * params.tol);
+    let controls = FluxNewtonControls {
+        maximum_iterations: 1,
+        maximum_backtracks: 0,
+        residual_tolerance: 2.0 * defect,
+    };
+    assert!(
+        controls.residual_tolerance < first.relative_residual.max(first.scaled_relative_residual),
+        "the initial state must require a real Newton correction"
+    );
+    let reference = transport(2.0, 0.4);
+    let owner = MaterialFluxSystem::new(
+        &system,
+        &reference,
+        MaterialFluxNumerics {
+            penalty: params.sigma,
+            linear_tolerance: params.tol,
+            max_linear_iterations: params.max_iters,
+        },
+    )
+    .unwrap();
+    let force = |point| {
+        let a = acceleration(point);
+        [2.0 * a[0], 2.0 * a[1]]
+    };
+    let result = owner
+        .bdf1_rheology_newton_step(
+            &force,
+            &no_slip,
+            &previous,
+            timestep,
+            controls,
+            |point, _| {
+                let value = law(point.cell, point.position_m, point.shear_rate_per_s);
+                Ok(MaterialFluxViscosityTangent {
+                    material: transport(2.0, 2.0 * value.nu),
+                    derivative_pa_s2: 2.0 * value.derivative,
+                })
+            },
+        )
+        .unwrap();
+    assert_eq!(result.step.iterations, 1);
+    assert_eq!(result.backtracks, 0);
+    let accepted = result.step.discrete();
+    assert!(accepted.converged(controls.residual_tolerance));
+    assert!(!accepted.converged(params.tol));
+    for (actual, expected) in accepted.x.iter().zip(&correction.x) {
+        near(*actual, *expected, 2e-13);
+    }
+    // The accepted state still solves that first linear correction to the
+    // original tight tolerance; nonlinear acceptance did not relax the solve.
+    let mut product = vec![0.0; system.n];
+    first.jacobian.spmv(&accepted.x, &mut product);
+    let linear_defect = product
+        .iter()
+        .zip(&rhs)
+        .fold(0.0_f64, |norm, (value, load)| norm.hypot(value - load));
+    let load_norm = rhs.iter().fold(0.0_f64, |norm, value| norm.hypot(*value));
+    assert!(linear_defect / load_norm <= params.tol);
+    // Preserve both measured nonlinear residuals instead of disguising them
+    // as linear defects or reducing them to pass physical output conversion.
+    near(accepted.rel_residual, endpoint.relative_residual, 2e-13);
+    near(
+        accepted.scaled_rel_residual,
+        endpoint.scaled_relative_residual,
+        2e-13,
+    );
+    assert_eq!(
+        result.step.nonlinear_residual,
+        accepted.rel_residual.max(accepted.scaled_rel_residual)
+    );
+    assert!(previous.iter().all(|value| *value == 0.0));
+}

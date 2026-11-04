@@ -133,9 +133,11 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         );
         let (step, samples) =
             field.finish(result.and_then(|step| step.map_err(MaterialFluxError::Newton)))?;
-        let flow = self.physical_solution_with_viscosity(step.solution, &|cell| {
-            samples[cell].transport().dynamic_viscosity_pa_s()
-        })?;
+        let flow = self.physical_solution_with_viscosity_tolerance(
+            step.solution,
+            &|cell| samples[cell].transport().dynamic_viscosity_pa_s(),
+            controls.residual_tolerance,
+        )?;
         Ok(MaterialFluxNewtonStep {
             step: MaterialFluxRheologyStep {
                 flow,

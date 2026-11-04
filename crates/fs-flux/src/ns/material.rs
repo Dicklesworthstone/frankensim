@@ -633,10 +633,21 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         discrete: FluxSolution,
         viscosity_pa_s: &dyn Fn(usize) -> f64,
     ) -> Result<MaterialFluxSolution, MaterialFluxError> {
-        if !discrete.converged(self.params.tol) {
+        self.physical_solution_with_viscosity_tolerance(discrete, viscosity_pa_s, self.params.tol)
+    }
+
+    // A Newton result records nonlinear endpoint residuals. Its acceptance
+    // tolerance is independent of the unchanged linear-correction tolerance.
+    fn physical_solution_with_viscosity_tolerance(
+        &self,
+        discrete: FluxSolution,
+        viscosity_pa_s: &dyn Fn(usize) -> f64,
+        residual_tolerance: f64,
+    ) -> Result<MaterialFluxSolution, MaterialFluxError> {
+        if !discrete.converged(residual_tolerance) {
             return Err(MaterialFluxError::LinearConvergence {
                 residual: discrete.rel_residual.max(discrete.scaled_rel_residual),
-                tolerance: self.params.tol,
+                tolerance: residual_tolerance,
             });
         }
         if discrete.x.len() != self.system.n || !discrete.x.iter().all(|value| value.is_finite()) {
