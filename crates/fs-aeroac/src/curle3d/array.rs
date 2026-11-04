@@ -39,6 +39,7 @@ use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
 mod plane;
+mod welch;
 pub use plane::{IdealAcousticPlane, IdealPlaneBoundary, PreparedHalfSpaceObserver};
 /// Coherent volume injection into an explicitly uniform subsonic mean flow.
 pub mod convected;

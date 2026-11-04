@@ -485,6 +485,54 @@ impl PreparedHalfSpaceObserver {
         statistics.finish(self.scope())
     }
 
+    /// Measured source-major `[Q, Fx, Fy, Fz]` channels in m³/s and N, sharing
+    /// one clock. Direct and reflected pressure/velocity interfere inside each
+    /// Welch factor before forming bin-integrated moments. The source record
+    /// has no image channels. `max_source_mode_pairs` counts BOTH paths.
+    ///
+    /// Normalization, window limitations and mixed source units are exactly
+    /// those of [`PreparedCompactSourceObserver::evaluate_welch_bin`]. This
+    /// allocation-free path reuses the original material and reflected dipole
+    /// orientation, with cancellation at every physical source boundary.
+    pub fn evaluate_welch_bin(
+        &self,
+        spectrum: &fs_fft::welch::WelchCrossSpectrum,
+        bin: usize,
+        budget: CoherenceBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CompactFieldStatistics, AeroacError> {
+        poll(&mut cancelled)?;
+        let measured = super::welch::admit(
+            spectrum,
+            bin,
+            self.direct.frequency_hz,
+            self.source_count(),
+            4,
+            2,
+            budget,
+        )?;
+        let mut statistics = StatisticsSum::default();
+        for factor in measured.factors() {
+            poll(&mut cancelled)?;
+            let mut sums = [ComplexSum::default(); 4];
+            for ((direct, image), channels) in self
+                .direct
+                .transfers
+                .iter()
+                .zip(&self.reflected.transfers)
+                .zip(factor.chunks_exact(4))
+            {
+                poll(&mut cancelled)?;
+                let source = super::welch::source(channels, measured)?;
+                direct.accumulate(source, &mut sums)?;
+                image.accumulate(source, &mut sums)?;
+            }
+            statistics.add(sums.map(ComplexSum::value))?;
+        }
+        poll(&mut cancelled)?;
+        statistics.finish(self.scope())
+    }
+
     /// Mutually independent PHYSICAL sources, with each source's direct/image
     /// interference retained before adding its power. Allocation-free O(N).
     pub fn evaluate_independent_sources(

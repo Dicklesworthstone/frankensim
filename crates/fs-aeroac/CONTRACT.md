@@ -1141,3 +1141,34 @@ manufactured accepted-run adapter regression additionally checks original
 medium/clock provenance and the public path, but requires the missing
 constellation dependencies to run. The native probe uses only a nominal
 outer error carrier and is not a full-crate integration gate.
+
+## Measured three-dimensional compact-source interference
+
+`PreparedCompactSourceObserver`, `PreparedHalfSpaceObserver`, and
+`PreparedConvectedMonopoleObserver` now accept interior bins from the shared
+`WelchCrossSpectrum`. Compact channels are source-major `[Q, Fx, Fy, Fz]` in
+m³/s and N; uniform-flow channels contain one physical Q per original source.
+The shared admitted-bin view supplies exact-frequency checking and checked
+`sqrt(2 df)` conversion from one-sided density factors to peak bin factors.
+
+Original pressure/velocity transfers propagate every measured factor
+coherently before forming second moments, preserving cross-source, cross-axis,
+volume/force, direct/image, molecular-dispersion and convective interference.
+Images never become independent recorded source coordinates. Both direct and
+image paths count toward work admission in the separate half-space owner;
+folded orthogonal-plane paths keep the original prepared transfer cost.
+Queries allocate nothing, enforce source-factor work budgets and poll
+cancellation at source boundaries. Uniform-flow pressure work and transported
+perturbation energy remain separately reported.
+
+Results integrate one resolved bin. Welch leakage and resolution remain;
+cross-frequency covariance, overlapping-segment independence, confidence
+intervals and additional source-model authority are not inferred. Six native
+public-consumer regressions pass for complex partial coherence, mixed-mechanism
+cancellation, center/adjacent Hann bins, rigid/release reflection, uniform-flow
+energy, refusal and replay. The nine original convected regressions also pass.
+These runs use the actual production compact/image/flow/statistics algorithms
+and original fluid snapshot; the unavailable molecular constructor is omitted
+from the leaf and no replacement material behavior is supplied. The seventh
+public regression covers original molecular relaxation and reflection but
+remains unrun without the constellation. This is not full workspace validation.

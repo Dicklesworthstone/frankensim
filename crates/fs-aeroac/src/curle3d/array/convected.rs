@@ -306,6 +306,55 @@ impl PreparedConvectedMonopoleObserver {
         self.finish(sum)
     }
 
+    /// Propagate one measured interior Welch bin of physical volume flows.
+    /// There is exactly one Q channel [m³/s] per original source, in prepared
+    /// position order; synchronized recorded phases are preserved. No force
+    /// dipole, mass-flow conversion or unmeasured source correlation is added.
+    ///
+    /// The original uniform-flow p/u paths propagate every factor coherently.
+    /// One-sided /Hz factors become peak bin factors through sqrt(2 df), then
+    /// the existing statistics and perturbation-energy owner form the results.
+    /// Pressure work remains distinct from flow-transported energy. Outputs
+    /// integrate one bin; they are neither PSD/Hz nor coherent-gain tone fits.
+    /// Welch leakage/resolution remain, and no cross-frequency coherence,
+    /// segment independence or statistical confidence is inferred.
+    ///
+    /// Allocation-free O(sources * segments), with bounded cancellation and
+    /// no repeated propagation kernels or dense covariance construction.
+    pub fn evaluate_welch_bin(
+        &self,
+        spectrum: &fs_fft::welch::WelchCrossSpectrum,
+        bin: usize,
+        budget: CoherenceBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ConvectedMonopoleStatistics, AeroacError> {
+        poll(&mut cancelled)?;
+        let measured = super::welch::admit(
+            spectrum,
+            bin,
+            self.frequency_hz,
+            self.source_count(),
+            1,
+            1,
+            budget,
+        )?;
+        let mut sum = StatisticsSum::default();
+        for factor in measured.factors() {
+            poll(&mut cancelled)?;
+            let mut sums = [ComplexSum::default(); 4];
+            for (path, flow) in self.paths.iter().zip(factor) {
+                poll(&mut cancelled)?;
+                let peak = measured
+                    .peak_factor(*flow)
+                    .map_err(|_| invalid("recorded volume-flow peak factor is unrepresentable"))?;
+                path.accumulate(C64::new(peak.re, peak.im), &mut sums)?;
+            }
+            sum.add(sums.map(ComplexSum::value))?;
+        }
+        poll(&mut cancelled)?;
+        self.finish(sum)
+    }
+
     /// Feed original propagated p/u into the existing finite-window observer.
     /// Its reported <p u> remains pressure work; flow-carried energy is separate.
     pub fn evaluate_harmonic_line(
@@ -332,12 +381,7 @@ impl PreparedConvectedMonopoleObserver {
         let mut sums = [ComplexSum::default(); 4];
         for (path, &flow) in self.paths.iter().zip(flows) {
             poll(cancelled)?;
-            if !finite(flow) {
-                return Err(nonfinite("convected volume flow"));
-            }
-            for (sum, &transfer) in sums.iter_mut().zip(&path.field) {
-                sum.add(transfer * flow)?;
-            }
+            path.accumulate(flow, &mut sums)?;
         }
         let values = sums.map(ComplexSum::value);
         if values.iter().any(|&value| !finite(value)) {
@@ -375,6 +419,18 @@ impl PreparedConvectedMonopoleObserver {
             mean_perturbation_energy_density_j_m3,
             mean_perturbation_energy_flux_w_m2,
         })
+    }
+}
+
+impl Path {
+    fn accumulate(&self, flow: C64, sums: &mut [ComplexSum; 4]) -> Result<(), AeroacError> {
+        if !finite(flow) {
+            return Err(nonfinite("convected volume flow"));
+        }
+        for (sum, &transfer) in sums.iter_mut().zip(&self.field) {
+            sum.add(transfer * flow)?;
+        }
+        Ok(())
     }
 }
 
