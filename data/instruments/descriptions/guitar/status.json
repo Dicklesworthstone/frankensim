@@ -20,7 +20,7 @@
   "physics_missing": [
     "The other strings: one sounds at a time, so nothing rings in sympathy, and A2 and D3 aren't rendered. The arpeggio and chord add posted clips, with no coupling through the bridge or body and a balance taken from each page's recording",
     "The string modes above the kept set: partials stop at the 24th on the nylon strings and at the 96th on E2, which takes the top of the attack with them. On G3, B3 and E4 a faint line above the last partial isn't a partial: the kept modes move together on the bridge's flexibility, an artefact of the cut",
-    "Body modes above the 128 kept, and a converged body mesh",
+    "Body modes above the 128 kept, and a converged body mesh. The body's resonances stop near 1770 Hz, and 2 kHz is the most the wood packs allow: their moduli come from the Wood Handbook's static values. A no-skin test with 148 modes moved the partials near the cut in both directions, and on Gb4 brought the octave closer through a partial the recording barely has, so more modes alone isn't a fix",
     "The air tone's loss: the body's low air resonance dies away more slowly than the recording's on G3, B3, E4, Gb4 and F5. The hole's edge loss isn't on these cards, and it wouldn't close the gap by itself. The rest is unexplained",
     "G3's string: the recording's string is far less stiff than the printed nylon of this gauge, which suggests a different string; we have no print for it",
     "E2 is one measured set's whole-string coefficients, not its construction: the core and winding are unknown, and its diameter, which sets only its air drag, is a stand-in from another gauge. Its level falls far more slowly than the Iowa E2's on the posted clips",
