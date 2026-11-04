@@ -1546,3 +1546,27 @@ or a validity claim across evolving material conditions.
 `tests/material_diffusion.rs` exercises dry-air temperature/pressure changes
 against the exact two-site diffusion ODE, circulation conservation, compact
 support, native viscous-advection parity, single sampling and source refusals.
+
+## Reusing compact diffusion graphs across material states
+
+`PreparedPse::rebind_law` admits a freshly evaluated material PSE law only
+when its kernel family and support-radius bits match the graph's existing law.
+`rebind_viscosity` instead uses the original checked PSE admission for a raw,
+finite nonnegative kinematic viscosity. Both update only the stored law in
+constant time, without allocation, neighbor search or source evaluation.
+Positions, quadrature areas, canonical edges and their preparation report remain
+unchanged. Every check precedes mutation; any refusal retains the previous law
+and complete graph. Changed geometry, kernel or support requires preparation.
+
+The original fixed-step and adaptive owners obtain their fractions from the
+current law at each run, so both consume the rebound viscosity with unchanged
+conservation, cancellation and budget accounting. Zero viscosity keeps the
+neighbor graph and exact identity behavior, allowing later positive diffusion
+without rebuilding. Material receipts remain on the caller-retained original
+binding. Each run still assumes homogeneous, constant viscosity; this operation
+does not integrate a continuous thermal history or variable-viscosity stress.
+
+The three G0/G3 tests in `tests/material_prepared_diffusion.rs` cover real gas
+state changes, allocation/edge reuse, complete fixed/adaptive parity against
+fresh preparation, zero-viscosity recovery, native invalid-viscosity refusals
+and atomic rejection of changed kernels or one-ULP support changes.

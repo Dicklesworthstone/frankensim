@@ -9,8 +9,10 @@
 //!
 //! Preparation uses O(N log N + C + E log E) work, with C the nearby candidate
 //! visits and E the supported edges. Dense clusters can still have quadratic
-//! C and E; independent limits refuse that workload. Positions, areas and law
-//! are pinned. A moved/remeshed cloud needs another preparation.
+//! C and E; independent limits refuse that workload. Positions, areas, kernel
+//! and support radius are pinned. Viscosity can be rebound between runs without
+//! rebuilding the graph; moved/remeshed sites or a changed kernel/support need
+//! another preparation.
 //!
 //! Each run evaluates the E half-step relaxation fractions once and reuses
 //! them across all steps. There are no per-step allocations or repeated
@@ -268,10 +270,68 @@ impl PreparedPse {
         &self.areas
     }
 
-    /// Original constant-viscosity compact law.
+    /// Current constant-viscosity compact law.
     #[must_use]
     pub const fn law(&self) -> PseDiffusion {
         self.law
+    }
+
+    /// Rebind homogeneous kinematic viscosity [m²/s] on this exact graph.
+    ///
+    /// This constant-time update performs no allocation, neighbor search or
+    /// pair work. Positions, areas, edges and their preparation receipt remain
+    /// unchanged. Both fixed-step and adaptive runs prepare new relaxation
+    /// fractions from the rebound law; no old coefficient cache survives a run.
+    /// Zero viscosity keeps the graph available for a later positive value.
+    ///
+    /// A raw coefficient acquires no material-source authority. For a newly
+    /// evaluated material snapshot, use [Self::rebind_law] and retain that
+    /// original material binding alongside its run.
+    ///
+    /// # Errors
+    /// Returns the original PSE refusal for negative or nonfinite viscosity.
+    /// A refusal leaves the previous law and complete graph unchanged.
+    pub fn rebind_viscosity(&mut self, kinematic_viscosity_m2_s: f64) -> Result<(), VpmError> {
+        let law = PseDiffusion::with_kernel(
+            kinematic_viscosity_m2_s,
+            self.law.kernel_width_m(),
+            self.law.kernel(),
+        )?;
+        self.rebind_law(law)
+    }
+
+    /// Reuse the graph with an admitted law having the SAME kernel and support.
+    ///
+    /// A fresh [super::MaterialPseDiffusion] snapshot supplies this law through
+    /// its `law()` accessor. Only viscosity may change: the support-radius bits
+    /// and kernel family must equal those used to discover the retained edges.
+    /// Geometry, areas, edge order and the preparation report are untouched.
+    /// The update is constant-time and does not evaluate the material again.
+    ///
+    /// Each subsequent run treats the rebound viscosity as homogeneous and
+    /// constant over that run. This does not integrate continuously varying
+    /// viscosity or provide thermal feedback.
+    ///
+    /// # Errors
+    /// Returns [VpmError::InvalidScalar] for a different kernel or support
+    /// radius, without changing any part of the prepared object.
+    pub fn rebind_law(&mut self, law: PseDiffusion) -> Result<(), VpmError> {
+        if law.kernel() != self.law.kernel() {
+            return Err(invalid_scalar(
+                "prepared diffusion kernel",
+                law.kernel_width_m(),
+                None,
+            ));
+        }
+        if law.kernel_width_m().to_bits() != self.law.kernel_width_m().to_bits() {
+            return Err(invalid_scalar(
+                "prepared diffusion support radius",
+                law.kernel_width_m(),
+                None,
+            ));
+        }
+        self.law = law;
+        Ok(())
     }
 
     /// Exactly supported unordered pairs, in lexicographic original-index order.
