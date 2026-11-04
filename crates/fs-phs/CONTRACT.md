@@ -242,6 +242,33 @@ antiresonance, physical scaling, and cancellation/replay. These are continuous
 linear/local tangents; a backward residual is not a near-pole forward-error,
 physical uncertainty, peak uniqueness, or nonlinear response certificate.
 
+### Driven resonance peaks and half-power bandwidth
+
+`HarmonicModel::driven_resonance` resolves a caller-bracketed local maximum of
+one fixed real observation of original states, efforts or port outputs, under
+fixed complex input phasors. It uses the analytic continuous response derivative
+and bounded sign-bracket bisection. Every trial retains the same complete
+descriptor equations, mutual storage, physical dissipation and material memory.
+The observation weights are never normalized, and their interference is retained.
+A stationary candidate is reused while its actual numerical sign bracket shrinks.
+
+The optional conventional half-power bandwidth resolves both squared-amplitude
+half-height crossings inside the supplied interval and reports peak/width as a
+response quality factor. This measures the selected observable; it does not
+assign it units of watts, infer material heat, or replace a free-pole decay rate.
+Driven displacement peaks, velocity peaks and free-decay frequencies can differ.
+Cancellation, native residual refusal, an exact lossless pole, silent observation,
+missing peak/crossing brackets, unresolvable frequency spacing and exhausted
+evaluation capacity return no partial result. Frequency widths and total queries
+are explicitly bounded; no fixed frequency grid or fitted linewidth is used.
+
+G1/G3 native regressions cover independent damped-displacement peak/width formulas,
+a velocity peak with response Q=200,000, original Kirchhoff-constrained RLC
+linewidth, complex excitation/observation scaling, replay and refusals. Numerical
+brackets are not interval-arithmetic certificates. The caller must isolate the
+desired peak; this query does not enumerate all peaks or prove uniqueness in a
+multimode interval, validate a continuum model, or establish nonlinear resonance.
+
 ### Finite resonance poles of the complete continuous model
 
 `HarmonicModel::resonance_pole` refines one caller-seeded finite free mode of

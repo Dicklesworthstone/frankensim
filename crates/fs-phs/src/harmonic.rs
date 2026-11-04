@@ -21,6 +21,8 @@ use fs_math::c64::C64;
 pub mod equilibrium;
 mod frequency;
 mod poles;
+/// Bracketed driven-output peaks and half-power bandwidth from the original system.
+pub mod resonance;
 /// Continuous wave feedback, closed before factorization with physical power accounts.
 pub mod scattering;
 pub use frequency::HarmonicFrequencyResponse;
