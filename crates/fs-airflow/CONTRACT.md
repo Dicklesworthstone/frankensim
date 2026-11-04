@@ -884,6 +884,34 @@ the original observer clone contract governs rollback of callback history.
 Pressure and composition remain with the original gas resolver, and numerical
 and physical refinement are still required for the declared approximation.
 
+`source::enclosure::heat::SourceEnclosedGasHeatAssembly` carries those same gas
+layers through the complete native `HeatAssembly` interface. Evaluate the gap
+bindings at the accepted state, pass their conductance map to
+`MaterialHeatNetwork::prepare_with_link_conductances`, then retain that prepared
+owner and the same resolver in the assembly. Every trial re-evaluates the gas
+from both actual wall temperatures before the prepared network resolves its
+original material resistance, contacts, conduction and closed radiation. The
+accepted `EnclosedGasHeatSample` retains the complete `HeatNetworkSample` and
+all gas-source/correlation samples. No gas store, extra source pair or second
+integration is introduced.
+
+The original link partition refuses missing or overlapping Fourier ownership,
+and a gas-gap link cannot also carry material contact resistance. Current
+contact pressures and disjoint path metrics reach their original owners; a
+metric affecting either gap wall refuses without explicitly updated gap,
+plate spans and orientation. Native link conductances already enter the
+thermal timestep bound. Additional explicit-source bounds delegate to the
+original radiation owner, so the gas contribution is not counted twice.
+
+Wrap the assembly in `SourceConvectionHeatLayer` to add outside prescribed
+reservoirs on the remaining exposed wall area. The original circuit/field
+residuals and `observe_heat_assembly` consume the complete assembly and retain
+its nested samples. Gas-gap transfer and closed radiation remain internal to
+the two-wall system; native circuit loss heats its declared material cells,
+and only prescribed reservoirs or other authored supplies contribute external
+heat. Existing source, work-budget, energy and cancellation gates retain their
+original ownership and transaction boundaries.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `FrozenFlowMedium::bind_fan_bank` connects the same original reference/inlet

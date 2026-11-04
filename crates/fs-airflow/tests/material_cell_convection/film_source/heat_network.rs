@@ -5,6 +5,8 @@ use super::*;
 mod finite_links;
 #[path = "heat_network/composition.rs"]
 mod composition;
+#[path = "heat_network/enclosure.rs"]
+mod enclosure;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::heat::{
     ConvectionHeatError, SourceConvectionHeatNetwork,
 };

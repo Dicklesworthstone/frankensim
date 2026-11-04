@@ -7,6 +7,8 @@
 
 /// Reevaluate the original material at each accepted explicit thermal substep.
 pub mod observer;
+/// Gas gaps in complete native heat, radiation and circuit assemblies.
+pub mod heat;
 
 use super::super::CellConvectionEvaluation;
 use super::*;
