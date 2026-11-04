@@ -101,7 +101,10 @@ pub struct ConductionResponseSample {
 /// sources below agree to the declared gates, without post-solve substitution.
 #[derive(Clone, Debug)]
 pub struct ConductionResponseReport {
+    /// Absolute reporting view; physical fields use the retained differences.
     pub voltage_v: Vec<f64>,
+    pub relative_voltage_v: Vec<f64>,
+    pub reference_voltage_v: Vec<f64>,
     pub electric_field_v_m: Vec<[f64; 2]>,
     pub current_density_a_m2: Vec<[f64; 2]>,
     pub cell_power_w: Vec<f64>,
@@ -669,6 +672,8 @@ impl PlanarConductionResponse {
             if converged && absolute_power <= field_controls.power_tolerance_w {
                 let report = ConductionResponseReport {
                     voltage_v: field.voltage_v().to_vec(),
+                    relative_voltage_v: field.relative_voltage_v().to_vec(),
+                    reference_voltage_v: field.reference_voltage_v().to_vec(),
                     electric_field_v_m: field.electric_field_v_m().to_vec(),
                     current_density_a_m2: field.current_density_a_m2().to_vec(),
                     cell_power_w: field.cell_power_w().to_vec(),

@@ -157,6 +157,41 @@ fn specimen(
 }
 
 #[test]
+fn current_driven_contact_keeps_voltage_jump_and_heat_below_absolute_voltage_spacing() {
+    let problem = specimen(2.0, 4.0, 1e5, 1.0, 0.2);
+    for bias in [0.0, 2.0_f64.powi(56), -2.0_f64.powi(56)] {
+        let field = problem
+            .solve_with_current_traces(
+                &[(0, bias), (3, bias)],
+                &[ConductionCurrentTrace {
+                    vertices: [5, 6],
+                    inward_current_density_a_m2: 3.0,
+                }],
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        // J=3 A/m² through lengths 1 m and 1 m, with R''=0.5 ohm m².
+        // The contact has its own 1.5 V jump and 0.9 W heat, not bulk loss.
+        near(field.relative_voltage_v()[1], 1.5);
+        near(field.relative_voltage_v()[4], 3.0);
+        near(field.relative_voltage_v()[5], 3.75);
+        let contact = &field.contact_response()[0];
+        near(contact.current_a, -0.6);
+        for jump in contact.voltage_jump_v {
+            near(jump, -1.5);
+        }
+        near(contact.power_w, 0.9);
+        near(field.cell_power_w().iter().sum(), 1.35);
+        near(field.power_w(), 2.25);
+        near(field.maximum_free_current_residual_a(), 0.0);
+        near(field.power_balance_residual_w(), 0.0);
+        assert_eq!(field.voltage_v()[0], bias);
+        assert_eq!(field.voltage_v()[3], bias);
+    }
+}
+
+#[test]
 fn source_pressure_and_bulk_substitutions_reach_field_current_heat_and_circuit() {
     for (left, right, pressure, scale, depth) in [
         (2.0, 4.0, 1e5, 1.0, 0.2),

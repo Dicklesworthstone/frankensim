@@ -1,5 +1,29 @@
 # fs-em contract
 
+## Conduction at independent common-voltage references
+
+The planar static, material-response and prescribed-motion current paths retain
+the existing scalar owner's relative potentials through E/J recovery, contact
+jumps, boundary reactions and terminal work. Each electrically disconnected
+component uses its own prescribed reference; finite conducting contacts join
+those references through the original operator. A large common voltage cannot
+erase a physically solved resistive or motional drop before Joule heat or
+Lorentz work is evaluated.
+
+`ConductionField`, `MovingConductionField` and `ConductionResponseReport`
+retain both relative potentials and their component references. Absolute
+`voltage_v` is a reporting view, reconstructed only after physical admission,
+with authored voltage traces preserved exactly. It can round away differences
+smaller than its own floating-point spacing. Two-terminal circuit recovery
+scales the retained relative solution and reference separately, then rechecks
+the original field/current/heat laws at the actual drive.
+
+G1/G3 tests cover analytical series current and heat, independent disconnected
+references, finite-contact jumps and losses, actual nonlinear material queries,
+open motional screening, and the signed electrical/mechanical/Joule split under
+common biases larger than the physical drops. This changes numerical gauge
+handling, not the admitted fixed-geometry Ohmic/material/motion models.
+
 ## Resolved electrostatic forces, motion and floating electrodes
 
 The native planar and spatial electric fields now expose `virtual_work` for a

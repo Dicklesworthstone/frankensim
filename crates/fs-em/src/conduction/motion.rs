@@ -110,14 +110,14 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 *right = finite(*right + motional)?;
             }
         }
-        let (voltage, report) = scalar_potential::solve(
+        let solved = scalar_potential::solve_relative(
             &self.stiffness,
             &rhs,
             &prescribed,
             controls.linear,
             cancelled,
         )?;
-        let response = self.cell_response_with_motion(&voltage, motion_field, cancelled)?;
+        let response = self.cell_response_with_motion(&solved.relative, motion_field, cancelled)?;
         let mut conductor_field_v_m = Vec::with_capacity(cells);
         let mut lorentz_force_density_n_m3 = Vec::with_capacity(cells);
         let mut cell_mechanical_power_w = Vec::with_capacity(cells);
@@ -147,7 +147,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             cell_mechanical_power_w.push(mechanical);
         }
         let boundary = self.boundary_response(
-            &voltage,
+            &solved.relative,
             &prescribed,
             &applied,
             motion_load,
@@ -171,10 +171,20 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 },
             });
         }
+        let mut voltage = Vec::with_capacity(solved.relative.len());
+        for v in 0..solved.relative.len() {
+            poll(cancelled)?;
+            voltage.push(match prescribed[v] {
+                Some(value) => value,
+                None => finite(solved.references[v] + solved.relative[v])?,
+            });
+        }
         poll(cancelled)?;
         Ok(MovingConductionField {
             problem: self,
             voltage_v: voltage,
+            relative_voltage_v: solved.relative,
+            reference_voltage_v: solved.references,
             velocity_m_s: motion.velocity_m_s.to_vec(),
             normal_flux_density_t: motion.normal_flux_density_t.to_vec(),
             response,
@@ -187,7 +197,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             nodal_applied_current_a: applied,
             work_pairing_residual_w,
             power_balance_residual_w,
-            report,
+            report: solved.report,
         })
     }
 }
@@ -199,6 +209,8 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
 pub struct MovingConductionField<'a, C = ResolvedConductorState> {
     problem: &'a PlanarConduction<C>,
     voltage_v: Vec<f64>,
+    relative_voltage_v: Vec<f64>,
+    reference_voltage_v: Vec<f64>,
     velocity_m_s: Vec<[f64; 2]>,
     normal_flux_density_t: Vec<f64>,
     response: ConductionCellResponse,
@@ -218,8 +230,17 @@ impl<C: PlanarConductorMaterial> MovingConductionField<'_, C> {
     pub fn problem(&self) -> &PlanarConduction<C> {
         self.problem
     }
+    /// Absolute reporting view, with authored voltage traces preserved exactly.
+    /// Current, heat and force use the retained relative solution, since a
+    /// large common voltage can round away a small motional or resistive drop.
     pub fn voltage_v(&self) -> &[f64] {
         &self.voltage_v
+    }
+    pub fn relative_voltage_v(&self) -> &[f64] {
+        &self.relative_voltage_v
+    }
+    pub fn reference_voltage_v(&self) -> &[f64] {
+        &self.reference_voltage_v
     }
     pub fn velocity_m_s(&self) -> &[[f64; 2]] {
         &self.velocity_m_s

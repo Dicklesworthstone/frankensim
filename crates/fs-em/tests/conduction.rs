@@ -187,6 +187,93 @@ fn prescribed_current_uses_actual_edge_area_and_material_field() {
 }
 
 #[test]
+fn current_and_joule_heat_survive_sub_ulp_drops_under_a_common_voltage() {
+    let problem = slab(
+        conductor(4.0, ElectricalPropertyBasis::Conductivity),
+        conductor(2.0, ElectricalPropertyBasis::Resistivity),
+        0.2,
+    );
+    let current = [ConductionCurrentTrace {
+        vertices: [2, 5],
+        inward_current_density_a_m2: 3.0,
+    }];
+    // A common voltage is a gauge, including when the physical drop of 1.125 V
+    // is smaller than one spacing in the absolute-voltage reporting format.
+    for bias in [0.0, 2.0_f64.powi(54), -2.0_f64.powi(54)] {
+        let field = problem
+            .solve_with_current_traces(&[(0, bias), (3, bias)], &current, controls(), &mut || false)
+            .unwrap();
+        assert_eq!(field.voltage_v()[0], bias);
+        assert_eq!(field.voltage_v()[3], bias);
+        assert_eq!(field.reference_voltage_v(), &[bias; 6]);
+        near(field.relative_voltage_v()[1], 0.375);
+        near(field.relative_voltage_v()[2], 1.125);
+        for cell in 0..4 {
+            let sigma = if cell < 2 { 4.0 } else { 2.0 };
+            near(field.electric_field_v_m()[cell][0], -3.0 / sigma);
+            near(field.current_density_a_m2()[cell][0], -3.0);
+            near(field.current_density_a_m2()[cell][1], 0.0);
+            near(field.cell_power_w()[cell], 0.05 * 9.0 / sigma);
+        }
+        near(field.power_w(), 0.675);
+        near(field.maximum_free_current_residual_a(), 0.0);
+        near(field.power_balance_residual_w(), 0.0);
+    }
+}
+
+#[test]
+fn separate_current_paths_retain_independent_component_references() {
+    let first = layered(0.5, 1.0, 0.2);
+    let mut positions = first.vertices().to_vec();
+    positions.extend(first.vertices().iter().map(|p| [p[0] + 2.0, p[1]]));
+    let mut faces = first.faces().to_vec();
+    faces.extend(first.faces().iter().map(|face| face.map(|v| v + 6)));
+    let mesh = TriComplex2::from_indexed_triangles(
+        "separate-current-paths",
+        positions,
+        faces,
+        Metric2::planar(0.2).unwrap(),
+    )
+    .unwrap();
+    let materials = [2.0, 4.0]
+        .into_iter()
+        .flat_map(|sigma| vec![conductor(sigma, ElectricalPropertyBasis::Conductivity); 4])
+        .collect();
+    let problem = PlanarConduction::new(mesh, materials, limits(), &mut || false).unwrap();
+    let bias = 2.0_f64.powi(54);
+    let field = problem
+        .solve_with_current_traces(
+            &[(0, bias), (3, bias), (6, -bias), (9, -bias)],
+            &[
+                ConductionCurrentTrace {
+                    vertices: [2, 5],
+                    inward_current_density_a_m2: 3.0,
+                },
+                ConductionCurrentTrace {
+                    vertices: [8, 11],
+                    inward_current_density_a_m2: -5.0,
+                },
+            ],
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(&field.reference_voltage_v()[..6], &[bias; 6]);
+    assert_eq!(&field.reference_voltage_v()[6..], &[-bias; 6]);
+    near(field.relative_voltage_v()[2], 1.5);
+    near(field.relative_voltage_v()[8], -1.25);
+    for cell in 0..8 {
+        let (sigma, density) = if cell < 4 { (2.0, 3.0) } else { (4.0, -5.0) };
+        near(field.current_density_a_m2()[cell][0], -density);
+        near(field.electric_field_v_m()[cell][0], -density / sigma);
+        near(field.cell_power_w()[cell], 0.05 * density * density / sigma);
+    }
+    near(field.power_w(), 0.2 * (9.0 / 2.0 + 25.0 / 4.0));
+    near(field.boundary_current_a(), 0.0);
+    near(field.power_balance_residual_w(), 0.0);
+}
+
+#[test]
 fn distributed_currents_and_voltage_corners_have_one_source_work_account() {
     let material = conductor(2.0, ElectricalPropertyBasis::Conductivity);
     let problem = slab(material.clone(), material, 0.2);

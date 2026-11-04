@@ -313,7 +313,7 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
         let prescribed = self.prescribed_boundary(boundary_voltage_v, cancelled)?;
         let applied = self.current_loads(current_traces, &prescribed, cancelled)?;
         let rhs: Vec<_> = applied.iter().map(|load| load.unwrap_or(0.0)).collect();
-        let (voltage, report) = scalar_potential::solve(
+        let solved = scalar_potential::solve_relative(
             &self.stiffness,
             &rhs,
             &prescribed,
@@ -321,12 +321,13 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
             cancelled,
         )?;
         self.recover_field(
-            voltage,
+            solved.relative,
+            solved.references,
             &prescribed,
             applied,
             controls.current_tolerance_a,
             controls.power_tolerance_w,
-            report,
+            solved.report,
             cancelled,
         )
     }
@@ -615,7 +616,8 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
     #[allow(clippy::too_many_arguments)]
     fn recover_field(
         &self,
-        voltage: Vec<f64>,
+        relative_voltage: Vec<f64>,
+        reference_voltage: Vec<f64>,
         prescribed: &[Option<f64>],
         applied: Vec<Option<f64>>,
         current_tolerance_a: f64,
@@ -628,13 +630,13 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
             current_density_a_m2,
             cell_power_w,
             mut power_w,
-        } = self.cell_response(&voltage, cancelled)?;
-        let contact_response = self.contact_response(&voltage, cancelled)?;
+        } = self.cell_response(&relative_voltage, cancelled)?;
+        let contact_response = self.contact_response(&relative_voltage, cancelled)?;
         for contact in &contact_response {
             power_w = finite(power_w + contact.power_w)?;
         }
         let boundary = self.boundary_response(
-            &voltage,
+            &relative_voltage,
             prescribed,
             &applied,
             None,
@@ -643,9 +645,23 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
             power_tolerance_w,
             cancelled,
         )?;
+        // Reconstruct absolute potentials only for observation. Current-driven
+        // drops may be smaller than one ulp of the component's common voltage;
+        // all fields, contact jumps and power above retain the solved differences.
+        let mut voltage = Vec::with_capacity(relative_voltage.len());
+        for v in 0..relative_voltage.len() {
+            poll(cancelled)?;
+            voltage.push(match prescribed[v] {
+                Some(value) => value,
+                None => finite(reference_voltage[v] + relative_voltage[v])?,
+            });
+        }
+        poll(cancelled)?;
         Ok(ConductionField {
             problem: self,
             voltage_v: voltage,
+            relative_voltage_v: relative_voltage,
+            reference_voltage_v: reference_voltage,
             electric_field_v_m,
             current_density_a_m2,
             cell_power_w,
@@ -663,7 +679,7 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
     #[allow(clippy::too_many_arguments)]
     fn boundary_response(
         &self,
-        voltage: &[f64],
+        relative_voltage: &[f64],
         prescribed: &[Option<f64>],
         applied: &[Option<f64>],
         motional_load: Option<&[f64]>,
@@ -677,15 +693,15 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
         let mut boundary_current_a = 0.0;
         let mut maximum_free_current_residual_a: f64 = 0.0;
         let mut terminal_power_w = 0.0;
-        // A common voltage cannot change terminal work. Form local differences
-        // in the weak reaction as well as the field before multiplication.
-        let reference = prescribed.iter().flatten().copied().next().unwrap_or(0.0);
+        // Each disconnected electrical component retains its own prescribed
+        // gauge. Only the solved differences enter current and terminal work;
+        // rounding the absolute reporting view must not change either quantity.
         for v in 0..n {
             poll(cancelled)?;
             let (cols, vals) = self.stiffness.row(v);
             let mut reaction = 0.0;
             for (&w, &value) in cols.iter().zip(vals) {
-                let difference = finite(voltage[w] - voltage[v])?;
+                let difference = finite(relative_voltage[w] - relative_voltage[v])?;
                 reaction = finite(value.mul_add(difference, reaction))?;
             }
             if let Some(load) = motional_load {
@@ -708,8 +724,7 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
             if let Some(current) = terminal {
                 nodal_boundary_current_a[v] = Some(current);
                 boundary_current_a = finite(boundary_current_a + current)?;
-                let difference = finite(voltage[v] - reference)?;
-                terminal_power_w = finite(difference.mul_add(current, terminal_power_w))?;
+                terminal_power_w = finite(relative_voltage[v].mul_add(current, terminal_power_w))?;
             }
         }
         let power_balance_residual_w = finite(electrical_power_w - terminal_power_w)?;
@@ -827,6 +842,8 @@ impl PlanarConduction<ResolvedConductorState> {
 pub struct ConductionField<'a, C = ResolvedConductorState> {
     problem: &'a PlanarConduction<C>,
     voltage_v: Vec<f64>,
+    relative_voltage_v: Vec<f64>,
+    reference_voltage_v: Vec<f64>,
     electric_field_v_m: Vec<[f64; 2]>,
     current_density_a_m2: Vec<[f64; 2]>,
     cell_power_w: Vec<f64>,
@@ -843,8 +860,21 @@ impl<C: PlanarOhmicResponse> ConductionField<'_, C> {
     pub fn problem(&self) -> &PlanarConduction<C> {
         self.problem
     }
+    /// Absolute nodal voltage view. Authored voltage traces remain exact;
+    /// small solved drops can round away under a large common reference.
+    /// The fields, contact currents and heat use `relative_voltage_v` instead.
     pub fn voltage_v(&self) -> &[f64] {
         &self.voltage_v
+    }
+    /// Solved potentials relative to each electrical component's prescribed
+    /// reference, retaining drops below the spacing of absolute voltages.
+    pub fn relative_voltage_v(&self) -> &[f64] {
+        &self.relative_voltage_v
+    }
+    /// The component reference at each original vertex [V]. Absolute voltage
+    /// is reference plus relative voltage, subject to reporting roundoff.
+    pub fn reference_voltage_v(&self) -> &[f64] {
+        &self.reference_voltage_v
     }
     /// Original cell E=-grad(V) [V/m]; no interfacial smoothing.
     pub fn electric_field_v_m(&self) -> &[[f64; 2]] {
@@ -949,21 +979,27 @@ impl<'a, C: PlanarOhmicResponse> PlanarResistance<'a, C> {
                 "finite branch voltage and positive actual-field tolerances required",
             ));
         }
-        let mut voltage = Vec::with_capacity(self.field.voltage_v.len());
+        let mut relative_voltage = Vec::with_capacity(self.field.voltage_v.len());
+        let mut reference_voltage = Vec::with_capacity(self.field.voltage_v.len());
         let mut prescribed = Vec::with_capacity(self.field.voltage_v.len());
-        for (&reference, current) in self
-            .field
-            .voltage_v
-            .iter()
-            .zip(&self.field.nodal_boundary_current_a)
-        {
+        for v in 0..self.field.voltage_v.len() {
             poll(cancelled)?;
-            let value = finite((reference / self.reference_voltage_v) * voltage_v)?;
-            voltage.push(value);
-            prescribed.push(current.map(|_| value));
+            relative_voltage.push(finite(
+                (self.field.relative_voltage_v[v] / self.reference_voltage_v) * voltage_v,
+            )?);
+            reference_voltage.push(finite(
+                (self.field.reference_voltage_v[v] / self.reference_voltage_v) * voltage_v,
+            )?);
+            prescribed.push(match self.field.nodal_boundary_current_a[v] {
+                Some(_) => Some(finite(
+                    (self.field.voltage_v[v] / self.reference_voltage_v) * voltage_v,
+                )?),
+                None => None,
+            });
         }
         self.field.problem.recover_field(
-            voltage,
+            relative_voltage,
+            reference_voltage,
             &prescribed,
             vec![None; self.field.voltage_v.len()],
             current_tolerance_a,

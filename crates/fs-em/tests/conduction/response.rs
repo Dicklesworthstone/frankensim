@@ -82,6 +82,64 @@ fn series_current(a: [f64; 2], b: [f64; 2], voltage: f64) -> (f64, [f64; 2]) {
 }
 
 #[test]
+fn nonlinear_source_queries_use_current_driven_fields_below_common_voltage_spacing() {
+    let model = specimen(
+        response(
+            ElectricalPropertyBasis::Conductivity,
+            ConductorMagnitude::ElectricField,
+            1.0,
+            0.2,
+            4.0,
+        ),
+        response(
+            ElectricalPropertyBasis::Conductivity,
+            ConductorMagnitude::ElectricField,
+            3.0,
+            0.4,
+            4.0,
+        ),
+        0.3,
+    );
+    let density = 2.0;
+    let expected = [(1.0_f64, 0.2), (3.0_f64, 0.4)]
+        .map(|(a, b)| 2.0 * density / (a + (a * a + 4.0 * b * density).sqrt()));
+    for bias in [0.0, 2.0_f64.powi(54)] {
+        let candidate = model
+            .solve_candidate(
+                &[(0, bias), (3, bias)],
+                &[ConductionCurrentTrace {
+                    vertices: [2, 5],
+                    inward_current_density_a_m2: density,
+                }],
+                limits(),
+                controls(),
+                policy(),
+                &mut || false,
+            )
+            .unwrap();
+        let report = candidate.report();
+        assert!(report.field_solves > 1);
+        assert_eq!(report.reference_voltage_v, [bias; 6]);
+        near(
+            report.relative_voltage_v[2],
+            0.5 * (expected[0] + expected[1]),
+        );
+        for cell in 0..4 {
+            let e = expected[cell / 2];
+            near(report.electric_field_v_m[cell][0], -e);
+            near(report.current_density_a_m2[cell][0], -density);
+            near(report.cell_power_w[cell], 0.075 * e * density);
+            near(
+                report.evaluated[cell].conductor.material().query().axes()["operating"],
+                e,
+            );
+        }
+        near(report.power_w, 0.3 * (expected[0] + expected[1]));
+        near(report.power_balance_residual_w, 0.0);
+    }
+}
+
+#[test]
 fn coupled_field_owner_uses_the_same_response_closure_and_retains_complete_sources() {
     let source = response(
         ElectricalPropertyBasis::Conductivity,

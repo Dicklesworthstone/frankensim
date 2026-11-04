@@ -111,7 +111,11 @@ fn open_translating_anisotropic_bar_screens_motional_emf_without_braking() {
         ElectricalPropertyBasis::Conductivity,
         ElectricalPropertyBasis::Resistivity,
     ] {
-        for (angle, b, offset) in [(0.0, 0.5, 0.0), (0.7, -0.5, 7.0)] {
+        for (angle, b, offset) in [
+            (0.0, 0.5, 0.0),
+            (0.7, -0.5, 7.0),
+            (0.0, 0.5, 2.0_f64.powi(54)),
+        ] {
             let source = conductor([2.0, 8.0], basis, angle);
             let problem =
                 PlanarConduction::new(square(0.3), vec![source; 4], limits(), &mut || false)
@@ -134,6 +138,14 @@ fn open_translating_anisotropic_bar_screens_motional_emf_without_braking() {
             for (&voltage, position) in field.voltage_v().iter().zip(problem.mesh().vertices()) {
                 near(voltage, offset - 2.0 * b * position[1]);
             }
+            for (&voltage, position) in field
+                .relative_voltage_v()
+                .iter()
+                .zip(problem.mesh().vertices())
+            {
+                near(voltage, -2.0 * b * position[1]);
+            }
+            assert_eq!(field.reference_voltage_v(), &[offset; 5]);
             for cell in 0..4 {
                 near(field.electric_field_v_m()[cell][0], 0.0);
                 near(field.electric_field_v_m()[cell][1], 2.0 * b);
@@ -300,6 +312,46 @@ fn imposed_current_retains_heat_and_shifts_terminal_voltage_by_motional_emf() {
         field.nodal_applied_current_a(),
         stationary.nodal_applied_current_a()
     );
+}
+
+#[test]
+fn current_driven_motion_retains_electrical_mechanical_and_heat_work_under_large_bias() {
+    let source = conductor([2.0, 8.0], ElectricalPropertyBasis::Conductivity, 0.0);
+    let problem =
+        PlanarConduction::new(square(0.4), vec![source; 4], limits(), &mut || false).unwrap();
+    for bias in [0.0, 2.0_f64.powi(54), -2.0_f64.powi(54)] {
+        let field = problem
+            .solve_with_motion(
+                &[(0, bias), (1, bias)],
+                &[ConductionCurrentTrace {
+                    vertices: [2, 3],
+                    inward_current_density_a_m2: 2.0,
+                }],
+                ConductionMotion {
+                    velocity_m_s: &[[2.0, 0.0]; 4],
+                    normal_flux_density_t: &[0.5; 4],
+                },
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        // E'=J/sigma=-0.25 V/m, E=E'-u x B=0.75 V/m.
+        // A source bias cannot alter heat, braking or generated terminal power.
+        near(field.relative_voltage_v()[2], -0.75);
+        near(field.relative_voltage_v()[4], -0.375);
+        assert_eq!(field.reference_voltage_v(), &[bias; 5]);
+        assert_eq!(field.voltage_v()[0], bias);
+        for cell in 0..4 {
+            near(field.electric_field_v_m()[cell][1], 0.75);
+            near(field.current_density_a_m2()[cell][1], -2.0);
+            near(field.lorentz_force_density_n_m3()[cell][0], -1.0);
+        }
+        near(field.joule_power_w(), 0.2);
+        near(field.mechanical_power_w(), -0.8);
+        near(field.terminal_power_w(), -0.6);
+        near(field.work_pairing_residual_w(), 0.0);
+        near(field.maximum_free_current_residual_a(), 0.0);
+    }
 }
 
 #[test]
