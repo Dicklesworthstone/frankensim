@@ -1,7 +1,8 @@
 //! Mass-owned, constant-density phase fronts and exact thermostatted retreat.
 //!
 //! A planar layer retreats through one face, a sphere radially, and a cylinder
-//! radially through its curved wall with inert end caps. These reductions assume
+//! radially through its curved wall with inert end caps. Curved coatings retain
+//! an explicitly inert core and evolve only the deposited shell. These reductions assume
 //! uniform flux and shape preservation. They are not a mesh-motion, deformation,
 //! surface-energy, Kelvin-curvature, nucleation or contact-topology model.
 //!
@@ -21,6 +22,8 @@ enum Shape {
     Layer { footprint_m2: f64 },
     Sphere,
     Cylinder { length_m: f64 },
+    SphericalCoating { core_radius_m: f64 },
+    CylindricalCoating { core_radius_m: f64, length_m: f64 },
 }
 
 /// Fixed morphology and solid density. Remaining mass owns all moving dimensions.
@@ -37,7 +40,7 @@ pub struct FrontGeometry {
     pub mass_kg: f64,
     pub volume_m3: f64,
     pub area_m2: f64,
-    /// Layer thickness, sphere radius or cylinder radius [m].
+    /// Layer/coating thickness, or radius of a core-free sphere/cylinder [m].
     pub extent_m: f64,
     /// dA/dm on the positive-mass branch; undefined at extinction.
     pub area_mass_derivative_m2_kg: Option<f64>,
@@ -61,12 +64,50 @@ impl RetreatGeometry {
         if !positive(length_m) { return Err(invalid("positive phase-cylinder length required")); }
         Self::new(Shape::Cylinder { length_m }, density_kg_m3)
     }
+    /// Uniform coating on a fixed spherical substrate. Mass and volume describe
+    /// only the deposited phase; exposed area is at the outer shell radius.
+    /// The substrate's mass, energy and displacement remain caller-owned.
+    pub fn spherical_coating(density_kg_m3: f64, core_radius_m: f64) -> Result<Self, SublimationError> {
+        if !positive(core_radius_m) { return Err(invalid("positive spherical substrate radius required")); }
+        Self::new(Shape::SphericalCoating { core_radius_m }, density_kg_m3)
+    }
+    /// Uniform radial coating of a fixed cylindrical substrate, with inert end
+    /// caps. Extent is coating thickness, not the substrate-plus-coating radius.
+    /// A positive seed is required by the existing phase-evolution owners;
+    /// heterogeneous nucleation and heat storage in the substrate are not inferred.
+    pub fn cylindrical_coating(density_kg_m3: f64, core_radius_m: f64, length_m: f64) -> Result<Self, SublimationError> {
+        if !positive(core_radius_m) || !positive(length_m) {
+            return Err(invalid("positive cylindrical substrate radius and length required"));
+        }
+        Self::new(Shape::CylindricalCoating { core_radius_m, length_m }, density_kg_m3)
+    }
     fn new(shape: Shape, density_kg_m3: f64) -> Result<Self, SublimationError> {
         if !positive(density_kg_m3) { return Err(invalid("positive constant solid density required")); }
         Ok(Self { shape, density_kg_m3 })
     }
     #[must_use]
     pub const fn density_kg_m3(self) -> f64 { self.density_kg_m3 }
+
+    /// Physical displaced volume [m3], including an inert coating substrate.
+    /// Use this for gas-volume/diluteness admission. `FrontGeometry::volume_m3`
+    /// instead counts only the phase mass that can deposit or sublime.
+    pub fn occupied_volume_m3(self, mass_kg: f64) -> Result<f64, SublimationError> {
+        let deposit = self.at_mass(mass_kg)?.volume_m3;
+        let core = match self.shape {
+            Shape::SphericalCoating { core_radius_m } => {
+                ((4.0 * PI / 3.0 * core_radius_m) * core_radius_m) * core_radius_m
+            }
+            Shape::CylindricalCoating { core_radius_m, length_m } => {
+                ((PI * core_radius_m) * core_radius_m) * length_m
+            }
+            _ => 0.0,
+        };
+        let occupied = core + deposit;
+        if !core.is_finite() || !occupied.is_finite() {
+            return Err(invalid("occupied phase/substrate volume is unrepresentable"));
+        }
+        Ok(occupied)
+    }
 
     /// Check the original phase law, rather than silently adding thermal expansion.
     pub fn admit_density(self, density: f64) -> Result<(), SublimationError> {
@@ -93,6 +134,30 @@ impl RetreatGeometry {
                 let r = (volume_m3 / length_m / PI).sqrt();
                 (r, (2.0 * PI * r) * length_m, (1.0 / self.density_kg_m3) / r)
             }
+            Shape::SphericalCoating { core_radius_m } => {
+                // Scale before cubing, then rationalize r - r_core. In
+                // particular, a film thinner than one ULP of the core radius
+                // still has a representable thickness and conserved mass.
+                let bulk_radius = (volume_m3 / (4.0 * PI / 3.0)).cbrt();
+                let scale = core_radius_m.max(bulk_radius);
+                let a = core_radius_m / scale;
+                let b = bulk_radius / scale;
+                let r = scale * (a * a * a + b * b * b).cbrt();
+                let ratio = core_radius_m / r;
+                let thickness = (volume_m3 / r / r)
+                    / ((4.0 * PI / 3.0) * (1.0 + ratio + ratio * ratio));
+                (thickness, (4.0 * PI * r) * r, (2.0 / self.density_kg_m3) / r)
+            }
+            Shape::CylindricalCoating { core_radius_m, length_m } => {
+                let bulk_radius = (volume_m3 / length_m / PI).sqrt();
+                let scale = core_radius_m.max(bulk_radius);
+                let a = core_radius_m / scale;
+                let b = bulk_radius / scale;
+                let r = scale * (a * a + b * b).sqrt();
+                let thickness = (volume_m3 / length_m / PI / r)
+                    / (1.0 + core_radius_m / r);
+                (thickness, (2.0 * PI * r) * length_m, (1.0 / self.density_kg_m3) / r)
+            }
         };
         if ![volume_m3, extent_m, area_m2].into_iter().all(positive)
             || !derivative.is_finite() || derivative < 0.0 {
@@ -110,6 +175,16 @@ impl RetreatGeometry {
             Shape::Layer { footprint_m2 } => footprint_m2 * extent_m,
             Shape::Sphere => ((4.0 * PI / 3.0 * extent_m) * extent_m) * extent_m,
             Shape::Cylinder { length_m } => ((PI * extent_m) * extent_m) * length_m,
+            Shape::SphericalCoating { core_radius_m } => {
+                let r = core_radius_m + extent_m;
+                // Factored difference of cubes; never subtract near-equal
+                // total/core volumes to recover a thin deposited shell.
+                ((4.0 * PI / 3.0) * extent_m)
+                    * (r * r + r * core_radius_m + core_radius_m * core_radius_m)
+            }
+            Shape::CylindricalCoating { core_radius_m, length_m } => {
+                ((PI * extent_m) * (2.0 * core_radius_m + extent_m)) * length_m
+            }
         };
         let mass = volume * self.density_kg_m3;
         if !positive(volume) || !positive(mass) { return Err(invalid("phase extent has unrepresentable mass")); }
@@ -132,6 +207,14 @@ impl RetreatGeometry {
             Shape::Layer { footprint_m2 } => footprint_m2,
             Shape::Cylinder { length_m } => PI * length_m * (x + y),
             Shape::Sphere => (4.0 * PI / 3.0) * (x * x + x * y + y * y),
+            Shape::SphericalCoating { core_radius_m } => {
+                let x = core_radius_m + x;
+                let y = core_radius_m + y;
+                (4.0 * PI / 3.0) * (x * x + x * y + y * y)
+            }
+            Shape::CylindricalCoating { core_radius_m, length_m } => {
+                PI * length_m * (2.0 * core_radius_m + x + y)
+            }
         };
         let result = delta_volume / shell;
         if !positive(shell) || !result.is_finite() || result == 0.0 {
@@ -317,6 +400,96 @@ mod tests {
             near(whole.final_geometry.mass_kg, b.final_geometry.mass_kg, 1e-14*m);
             near(whole.thermostat_heat_j, a.thermostat_heat_j+b.thermostat_heat_j, 1e-8);
         }
+    }
+    fn coatings() -> [RetreatGeometry; 2] {
+        [RetreatGeometry::spherical_coating(1000.0, 0.01).unwrap(),
+            RetreatGeometry::cylindrical_coating(1000.0, 0.01, 0.1).unwrap()]
+    }
+    /// G0/G1: shell mass, exposed area and dA/dm use the same physical radius.
+    #[test]
+    fn curved_coatings_preserve_substrate_and_exact_shell_geometry() {
+        for (i, g) in coatings().into_iter().enumerate() {
+            let thickness = 0.002;
+            let outer: f64 = 0.01 + thickness;
+            let (volume, area) = if i == 0 {
+                (4.0 * PI / 3.0 * (outer.powi(3) - 0.01_f64.powi(3)),
+                    4.0 * PI * outer * outer)
+            } else {
+                (PI * 0.1 * (outer * outer - 0.01 * 0.01), 2.0 * PI * outer * 0.1)
+            };
+            let state = g.at_extent(thickness).unwrap();
+            near(state.mass_kg, 1000.0 * volume, 2e-15);
+            near(state.area_m2, area, 2e-17);
+            let core = if i == 0 { 4.0 * PI / 3.0 * 0.01_f64.powi(3) }
+                else { PI * 0.01 * 0.01 * 0.1 };
+            near(g.occupied_volume_m3(state.mass_kg).unwrap(), core + volume, 2e-20);
+            near(g.occupied_volume_m3(0.0).unwrap(), core, 2e-20);
+            near(g.at_mass(state.mass_kg).unwrap().extent_m, thickness, 1e-17);
+            let dm = state.mass_kg * 1e-5;
+            let derivative = (g.at_mass(state.mass_kg + dm).unwrap().area_m2
+                - g.at_mass(state.mass_kg - dm).unwrap().area_m2) / (2.0 * dm);
+            near(derivative, state.area_mass_derivative_m2_kg.unwrap(), 2e-10);
+            let grown = g.at_extent(0.003).unwrap();
+            near(g.recession_m(state.mass_kg, grown.mass_kg).unwrap(), -0.001, 1e-17);
+            assert!(grown.area_m2 > state.area_m2);
+        }
+    }
+    /// G0/G3: thin films survive even when outer and core radii round equal.
+    #[test]
+    fn coating_mass_inversion_does_not_subtract_nearly_equal_radii() {
+        for g in coatings() {
+            for thickness in [1e-4, 1e-12, 1e-20] {
+                let state = g.at_extent(thickness).unwrap();
+                assert!(state.mass_kg > 0.0);
+                let recovered = g.at_mass(state.mass_kg).unwrap();
+                near(recovered.extent_m / thickness, 1.0, 2e-14);
+                near(g.recession_m(state.mass_kg, 0.0).unwrap() / thickness, 1.0, 2e-14);
+                assert!(g.recession_m(state.mass_kg, state.mass_kg.next_up()).unwrap() < 0.0);
+            }
+        }
+    }
+    /// G1/G3: integrate the moving outer surface, not a frozen footprint or core mass.
+    #[test]
+    fn deposition_grows_curved_coatings_and_releases_only_transferred_latent_heat() {
+        let kinetics = SurfaceKinetics { accommodation_coefficient: 0.5,
+            mass_transfer_coefficient_m_s: None };
+        let reservoir = VaporReservoir::Prescribed { partial_pressure_pa: 300.0, temperature_k: 300.0 };
+        let j = surface_flux(&Phase, 300.0, kinetics, reservoir).unwrap().mass_flux_kg_m2_s;
+        for g in coatings() {
+            let initial = g.at_extent(0.001).unwrap();
+            let whole = run(g, initial.mass_kg, 300.0, 0.5);
+            let expected = g.at_extent(0.001 - j / 1000.0 * 0.5).unwrap();
+            near(whole.final_geometry.mass_kg, expected.mass_kg, 2e-15);
+            assert!(whole.final_geometry.area_m2 > initial.area_m2);
+            assert!(whole.transferred_mass_kg < 0.0);
+            near(whole.thermostat_heat_j, 2e6 * whole.transferred_mass_kg, 1e-12);
+            near(whole.energy_residual_j, 0.0, 1e-10);
+            near(j * whole.area_time_m2_s, whole.transferred_mass_kg, 1e-16);
+            let first = run(g, initial.mass_kg, 300.0, 0.25);
+            let second = run(g, first.final_geometry.mass_kg, 300.0, 0.25);
+            near(whole.final_geometry.mass_kg, second.final_geometry.mass_kg, 2e-15);
+            near(whole.recession_m, first.recession_m + second.recession_m, 2e-17);
+        }
+    }
+    /// G0/G1: reaching the substrate consumes the coating, never the inert core.
+    #[test]
+    fn coating_extinction_stops_at_the_substrate() {
+        for g in coatings() {
+            let initial = g.at_extent(1e-5).unwrap();
+            let result = run(g, initial.mass_kg, 0.0, 100.0);
+            assert_eq!(result.final_geometry.mass_kg, 0.0);
+            assert_eq!(result.final_geometry.area_m2, 0.0);
+            assert_eq!(result.transferred_mass_kg, initial.mass_kg);
+            near(result.recession_m, initial.extent_m, 1e-18);
+            assert!(result.extinction_time_s.unwrap() < 100.0);
+            assert!(result.unused_duration_s > 0.0);
+            near(result.thermostat_heat_j, 2e6 * initial.mass_kg, 1e-12);
+        }
+        for radius in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(RetreatGeometry::spherical_coating(1000.0, radius).is_err());
+            assert!(RetreatGeometry::cylindrical_coating(1000.0, radius, 0.1).is_err());
+        }
+        assert!(RetreatGeometry::cylindrical_coating(1000.0, 0.01, 0.0).is_err());
     }
     #[test]
     fn equilibrium_zero_time_and_invalid_inputs_are_explicit() {
