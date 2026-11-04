@@ -7559,6 +7559,31 @@ There is no inferred mass transfer, constrained strain, phase law, evolving fram
 cross-source specimen match or propagated uncertainty.
 
 
+## Source-exact heating with free expansion
+
+`thermal::transport::isobaric::expansion::IsobaricFreeExpansion` combines
+the original single-phase Cp integral with the original engineering free-length
+and reference-density sources at one maintained pressure. Preparation binds the
+same material card, exact typed path and explicit pressure support; it never
+treats Cp as Cv or infers pressure qualification from an extra query coordinate.
+
+`advance_heat` resolves temperature through the existing analytic Cp inverse,
+retains direct enthalpy and Cp/T entropy increments, and reports conserved mass,
+original endpoint density/geometry, outward p Delta V and derived
+Delta U = Delta H - p Delta V. It creates an immutable proposal. The specimen
+is uniform and expands freely against a quasistatic load; constrained stress,
+pressure evolution and mesh motion remain separate physical owners.
+
+Original piecewise-affine principal stretches determine a cubic volume path.
+Their polynomial differences are evaluated interval by interval with compensated
+summation, preserving tiny expansion work when rounded endpoint densities or
+volumes coincide. Preparation caches source breakpoints; a local heat step
+visits only crossed intervals and performs no allocation, hashing or material
+source query. Four focused regressions cover affine Cp, heating/cooling,
+anisotropic source breaks, constant volume, tiny datum-independent increments,
+and incompatible or pressure-unqualified source refusal.
+
+
 ## Saturated-water boiling and condensation
 
 `phase::vaporization::IsobaricWaterVaporization` binds the original

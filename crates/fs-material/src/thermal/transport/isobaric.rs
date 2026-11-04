@@ -4,12 +4,17 @@
 //! The original thermal owner evolves m*h and exchanges heat. Geometry remains
 //! caller-authored heat-transfer geometry; this law supplies no current volume,
 //! pressure evolution, phase change, mechanical storage or separate p*dV account.
+//! The explicit [`expansion`] composition adds free geometry and pressure work
+//! when compatible original expansion and density sources support this isobar.
 //! The caller selects true single-phase isobaric Cp at fixed composition. A
 //! same-dimension Cv, apparent capacity or strained-body capacity cannot substitute.
 //!
 //! The shared capacity kernel owns integration, entropy and inversion. Original
 //! source knots, receipts and uncertainty survive; no resampled caloric chart,
 //! second integrator or material-name branch is introduced.
+
+/// Source-exact free expansion with explicit constant-pressure boundary work.
+pub mod expansion;
 
 use super::{
     SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point, capacity::CapacityCurve,
@@ -41,6 +46,8 @@ pub struct IsobaricHeatCapacityQuery<'a> {
 pub struct IsobaricHeatCapacityLaw {
     material_card: ContentHash,
     endpoints: [QueryPoint; 2],
+    temperature_axis: String,
+    pressure_axis: String,
     source: PropertyLineSlice,
     knots: Vec<[f64; 2]>,
     pressure_pa: f64,
@@ -164,6 +171,8 @@ impl IsobaricHeatCapacityLaw {
         Ok(Self {
             material_card: card.content_hash(),
             endpoints: [query.lower.clone(), query.upper.clone()],
+            temperature_axis: query.temperature_axis.to_owned(),
+            pressure_axis: query.pressure_axis.to_owned(),
             source,
             knots,
             pressure_pa,
@@ -190,6 +199,16 @@ impl IsobaricHeatCapacityLaw {
     #[must_use]
     pub const fn query_endpoints(&self) -> &[QueryPoint; 2] {
         &self.endpoints
+    }
+    /// Original typed temperature coordinate of this source path.
+    #[must_use]
+    pub fn temperature_axis(&self) -> &str {
+        &self.temperature_axis
+    }
+    /// Original source-supported static pressure coordinate of this isobar.
+    #[must_use]
+    pub fn pressure_axis(&self) -> &str {
+        &self.pressure_axis
     }
     #[must_use]
     pub const fn pressure_pa(&self) -> f64 {
