@@ -13,6 +13,10 @@
 //! deviatoric/elastic, surface, chemical and other work need their own owners.
 //! No moving mesh, fluid continuity solve or constrained-volume response is added.
 
+/// Continuing accepted phase inventory and actual volume under this pressure load.
+#[path = "pressure/parcel.rs"]
+pub mod parcel;
+
 use super::{
     AdaptiveCrystallizationStep, CrystallizationAdaptivity, CrystallizationError,
     CrystallizationLaw, CrystallizationSolve, CrystallizationState, EquivalentAgeRemelting,

@@ -87,6 +87,39 @@ regressions cover finite-mold calorimetry and later contact, latent remelting
 and recooling without kinetic aging, and atomic refusal/cancellation including
 unrepresentable heat increments. They require the full native thermal graph.
 
+### Kinetic phase evolution against a constant pressure load
+
+`crystallization::pressure::IsobaricCrystallization` binds the original phase
+law to a declared constant absolute pressure. The optional original-density
+capability on each caloric branch must be available and identified; no density
+or expansion coefficient is inferred. The caller admits the caloric, density
+and kinetic data at that same pressure and composition. This is not a
+variable-pressure EOS or a rigid sealed-volume caloric law.
+
+Signed heat changes the original enthalpy once. Instantaneous transitions reuse
+the original frozen-age/remelting path; finite-time transitions reuse its
+adaptive history integrator. Original phase densities and the evolving crystal
+mass fraction determine volume. A symmetric density-difference calculation
+retains sensible and phase-conversion contributions without subtracting rounded
+mixture volumes. Internal-energy change is defined by delta_H-p*delta_V on
+that same source convention; it is not independently measured EOS evidence.
+
+The published-volume boundary work is reported separately. Its difference from
+the source-volume increment, heat quantization and caloric defects consume the
+energy budget without cancellation; a separate volume budget also applies at
+zero pressure. In adiabatic growth, constant H can therefore coexist with
+contraction work and an increase of U. No pressure work is subtracted from the
+enthalpy target a second time.
+
+`pressure::parcel::IsobaricCrystallizationParcel` owns the continuing accepted
+mass, pressure, phase history, actual volume and elapsed time. Its immutable
+mechanical reference volume remains distinct from the evolving free volume.
+Clones retain retry state; a late source/work/accuracy refusal or cancellation
+publishes no partial parcel. Instantaneous heat does not age it, while positive
+elapsed intervals can crystallize even with zero heat. This uniform quasistatic
+parcel supplies neither a moving mesh nor piston inertia, pressure evolution,
+spatial continuity or fluid momentum.
+
 ## Finite-rate crystallization and latent thermal feedback
 
 `crystallization::CrystallizationLaw` retains an independent Nakamura exposure
