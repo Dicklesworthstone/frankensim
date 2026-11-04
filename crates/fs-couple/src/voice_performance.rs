@@ -38,6 +38,7 @@
 //! subglottal <time_s> <pressure_pa>                  (repeat, strictly increasing time)
 //! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
 //! tension_flutter <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional; slow pitch movement of a straight tone)
+//! tension_flutter_second <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional, needs tension_flutter; a second filter)
 //! fold_mapping bilateral                             (optional; the fold line is one fold of a pair)
 //! fold_shape <sine|rigid> <uniform|tapered>          (optional, two_mass only; the gap varies along the fold)
 //! aspiration_noise <seed> <xi_pa_s3_per_m6> [<re_crit>]   (optional; turbulence noise at the glottis)
@@ -91,6 +92,11 @@
 //! jitter: the filter's bandwidth is a few hertz, so `y` has no steps. The row moves the tension, not the pitch
 //! directly: the card, not this code, says how `sd_rel` was derived from a pitch extent, which depends on the note.
 //! A card declares this row or `tension_modulation`, not both. Without the key the tension is never touched and a
+//! performance is bit-identical to one written before the key existed; `sd_rel` 0 is bit-identical as well.
+//!
+//! `tension_flutter_second` is a second filter on that same gesture, for a card that models two bands of movement: the
+//! same law and the same four fields, its `y` added to the first row's. It draws from tile 1 of the row's key, so it is
+//! independent of the first row even on the same seed. A card needs `tension_flutter` to take it. Without the key a
 //! performance is bit-identical to one written before the key existed; `sd_rel` 0 is bit-identical as well.
 //!
 //! `fold_mapping bilateral` reads the fold line's masses and stiffnesses as ONE fold of Ishizaka and
@@ -180,6 +186,8 @@ pub struct VoiceDescription {
     pub tension_modulation: Option<(f64, f64)>,
     /// Slow random movement of the fold tension (filtered noise); `None` leaves the tension at the card's value.
     pub tension_flutter: Option<TensionFlutterCard>,
+    /// A second filter on the same gesture, its `y` added to the first's; `None` adds nothing.
+    pub tension_flutter_second: Option<TensionFlutterCard>,
     /// Opt-in glottal aspiration noise ([`crate::turbulence_noise`]); `None` adds nothing.
     pub aspiration_noise: Option<AspirationCard>,
     /// Opt-in glottal jet noise (Verge's fraction on the glottal jet, an extrapolation; [`crate::turbulence_noise::JetNoiseCard`]);
@@ -271,6 +279,7 @@ impl VoiceDescription {
         let mut subglottal: Vec<(f64, f64)> = Vec::new();
         let mut tension_modulation = None;
         let mut tension_flutter = None;
+        let mut tension_flutter_second = None;
         let mut aspiration_noise = None;
         let mut jet_noise = None;
         let mut constriction_noise = None;
@@ -442,6 +451,16 @@ impl VoiceDescription {
                     card.validate()?;
                     once(&mut tension_flutter, card, key)?;
                 }
+                "tension_flutter_second" => {
+                    arity(&rest, 4, key)?;
+                    let seed = whole(&rest, 0, "tension_flutter_second seed")?;
+                    let centre_hz = field(&rest, 1, "tension_flutter_second centre")?;
+                    let bandwidth_hz = field(&rest, 2, "tension_flutter_second bandwidth")?;
+                    let sd_rel = field(&rest, 3, "tension_flutter_second sd")?;
+                    let card = TensionFlutterCard { seed, centre_hz, bandwidth_hz, sd_rel };
+                    card.validate()?;
+                    once(&mut tension_flutter_second, card, key)?;
+                }
                 "aspiration_noise" => {
                     // The gain has no default (no source gives one for glottal aspiration); the threshold has the
                     // Sondhi-Schroeter value via Elie and Laprie.
@@ -538,6 +557,9 @@ impl VoiceDescription {
         if subglottal.is_empty() {
             return Err(missing("subglottal"));
         }
+        if tension_flutter_second.is_some() && tension_flutter.is_none() {
+            return Err("tension_flutter_second needs tension_flutter: it adds to that row".into());
+        }
         if tension_modulation.is_some() && tension_flutter.is_some() {
             return Err(
                 "tension_modulation and tension_flutter both set the fold tension: a card declares one gesture".into(),
@@ -561,6 +583,7 @@ impl VoiceDescription {
             subglottal,
             tension_modulation,
             tension_flutter,
+            tension_flutter_second,
             aspiration_noise,
             jet_noise,
             constriction_noise,
@@ -678,6 +701,9 @@ impl VoiceDescription {
             },
             tension_modulation: self.tension_modulation,
             tension_flutter: self.tension_flutter.map(|card| TensionFlutter::new(card, self.output_rate_hz)),
+            tension_flutter_second: self
+                .tension_flutter_second
+                .map(|card| TensionFlutter::on_tile(card, self.output_rate_hz, 1)),
             trace: vec![0.0; self.mechanics_per_output as usize],
             ratio: self.mechanics_per_output as usize,
             mechanics_rate,
@@ -815,6 +841,11 @@ struct TensionFlutter {
 
 impl TensionFlutter {
     fn new(card: TensionFlutterCard, output_rate_hz: u32) -> Self {
+        Self::on_tile(card, output_rate_hz, 0)
+    }
+
+    /// `tile` is the stream's place in the row's key: 0 for `tension_flutter`, 1 for `tension_flutter_second`.
+    fn on_tile(card: TensionFlutterCard, output_rate_hz: u32, tile: u32) -> Self {
         let rate = f64::from(output_rate_hz);
         let half_bandwidth = card.bandwidth_hz / 2.0;
         let damped_hz = det::sqrt(card.centre_hz * card.centre_hz - half_bandwidth * half_bandwidth);
@@ -829,7 +860,7 @@ impl TensionFlutter {
         let high = (1.0 + r) * (1.0 + r) - chord;
         let variance = (1.0 + r * r) / ((1.0 - r * r) * low * high);
         let mut flutter = Self {
-            white: StreamKey { seed: card.seed, kernel: TENSION_FLUTTER_KERNEL, tile: 0 }.stream(),
+            white: StreamKey { seed: card.seed, kernel: TENSION_FLUTTER_KERNEL, tile }.stream(),
             a1: 2.0 * r * det::cos(theta),
             a2: -r * r,
             gain: card.sd_rel / det::sqrt(variance),
@@ -861,6 +892,7 @@ pub struct VoicePerformance {
     schedule: Schedule,
     tension_modulation: Option<(f64, f64)>,
     tension_flutter: Option<TensionFlutter>,
+    tension_flutter_second: Option<TensionFlutter>,
     /// Opt-in aspiration source, with the gas properties and fold length its law needs.
     aspiration: Option<GlottalAspiration>,
     /// Opt-in glottal jet-noise source (Verge's fraction on the glottal jet, an extrapolation).
@@ -939,8 +971,14 @@ impl VoicePerformance {
                     .map_err(|e| format!("fold tension refused: {e:?}"))?;
             }
             if let (0, Some(flutter)) = (j, self.tension_flutter.as_mut()) {
+                let first = flutter.next_relative();
+                // No sum with zero when the row is absent: such a card keeps the first row's value bit for bit.
+                let y = match self.tension_flutter_second.as_mut() {
+                    Some(second) => first + second.next_relative(),
+                    None => first,
+                };
                 self.island
-                    .set_tension(1.0 + flutter.next_relative())
+                    .set_tension(1.0 + y)
                     .map_err(|e| format!("fold tension refused: {e:?}"))?;
             }
             let gesture = self.schedule.at(t);
@@ -1490,6 +1528,112 @@ mod tests {
         ] {
             let error = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect_err(extra);
             assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    #[test]
+    fn tension_flutter_second_parses_and_is_refused_by_name() {
+        let first = "tension_flutter 7 4 1.3 0.02\n";
+        let parse = |extra: &str| VoiceDescription::from_bytes(modulation_text(extra).as_bytes());
+        let ok = parse(&format!("{first}tension_flutter_second 7 20 20 0.005\n")).expect("parses");
+        let card = TensionFlutterCard { seed: 7, centre_hz: 20.0, bandwidth_hz: 20.0, sd_rel: 0.005 };
+        assert_eq!(ok.tension_flutter_second, Some(card));
+        assert_eq!(parse(first).expect("parses").tension_flutter_second, None);
+        for (row, needle) in [
+            ("tension_flutter_second 7 20 20\n", "takes 4 fields"),
+            ("tension_flutter_second x 20 20 0.005\n", "seed"),
+            ("tension_flutter_second 7 x 20 0.005\n", "not a number"),
+            ("tension_flutter_second 7 31 20 0.005\n", "centre"),
+            ("tension_flutter_second 7 20 40 0.005\n", "bandwidth"),
+            ("tension_flutter_second 7 20 20 0.06\n", "sd"),
+            ("tension_flutter_second 7 20 20 0.005\ntension_flutter_second 8 20 20 0.005\n", "only appear once"),
+        ] {
+            let error = parse(&format!("{first}{row}")).expect_err(row);
+            assert!(error.contains(needle), "{row:?} -> {error}");
+        }
+        for extra in [
+            "tension_flutter_second 7 20 20 0.005\n",
+            "tension_modulation 5.9 0.08\ntension_flutter_second 7 20 20 0.005\n",
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains("needs tension_flutter"), "{extra:?} -> {error}");
+        }
+    }
+
+    /// The row's law written out from its key, so a change to `TensionFlutter` can't move both sides of a comparison:
+    /// the recursion, the ten decay times of warm-up, and the key's tile (0 is what the first row has always drawn).
+    fn flutter_written_out(card: TensionFlutterCard, tile: u32, rate: u32, samples: usize) -> Vec<f64> {
+        let filter = TensionFlutter::new(card, rate);
+        let mut white = StreamKey { seed: card.seed, kernel: TENSION_FLUTTER_KERNEL, tile }.stream();
+        let warm_up = (10.0 * f64::from(rate) / (core::f64::consts::PI * card.bandwidth_hz)).ceil() as usize;
+        let (mut y1, mut y2) = (0.0_f64, 0.0_f64);
+        let mut out = Vec::with_capacity(samples);
+        for n in 0..warm_up + samples {
+            let y = filter.a1 * y1 + filter.a2 * y2 + filter.gain * white.next_normal();
+            y2 = y1;
+            y1 = y;
+            if n >= warm_up {
+                out.push(y);
+            }
+        }
+        out
+    }
+
+    /// A card with no flutter row, its tension set by hand before each output sample, where the row sets it.
+    fn render_by_hand(text: &str, y: &[f64]) -> Vec<f64> {
+        let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        let mut out = vec![0.0; description.samples as usize];
+        for (n, sample) in out.iter_mut().enumerate() {
+            performance.island.set_tension(1.0 + y[n]).expect("tension");
+            performance.block(core::slice::from_mut(sample)).expect("renders");
+        }
+        out
+    }
+
+    /// With the second row in the engine, a card with one row or none plays what it played before the key existed; the
+    /// old law is written out above. A silent second row changes nothing, and a sounding one adds to the first.
+    #[test]
+    fn one_flutter_row_or_none_stays_bit_identical_beside_the_second_row() {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let plain = modulation_text("");
+        let n = VoiceDescription::from_bytes(plain.as_bytes()).expect("parses").samples as usize;
+        let first = TensionFlutterCard { seed: 7, centre_hz: 4.0, bandwidth_hz: 1.3, sd_rel: 0.02 };
+        let second = TensionFlutterCard { seed: 7, centre_hz: 20.0, bandwidth_hz: 20.0, sd_rel: 0.005 };
+        let y1 = flutter_written_out(first, 0, 48_000, n);
+        let y2 = flutter_written_out(second, 1, 48_000, n);
+        let one = render(&modulation_text("tension_flutter 7 4 1.3 0.02\n"));
+        assert_eq!(bits(&render(&plain)), bits(&render_by_hand(&plain, &vec![0.0; n])), "no row");
+        assert_eq!(bits(&one), bits(&render_by_hand(&plain, &y1)), "one row");
+        let silent = render(&modulation_text("tension_flutter 7 4 1.3 0.02\ntension_flutter_second 7 20 20 0\n"));
+        assert_eq!(bits(&one), bits(&silent), "a silent second row");
+        let both = render(&modulation_text("tension_flutter 7 4 1.3 0.02\ntension_flutter_second 7 20 20 0.005\n"));
+        let sum: Vec<f64> = y1.iter().zip(&y2).map(|(a, b)| a + b).collect();
+        assert_eq!(bits(&both), bits(&render_by_hand(&plain, &sum)), "two rows add");
+        assert_ne!(bits(&both), bits(&one), "the second row must reach the pressure");
+    }
+
+    /// Same seed, same filter, and the two rows still don't correlate; each keeps its stated spread.
+    #[test]
+    fn tension_flutter_second_draws_its_own_stream() {
+        let sd_rel = 0.02;
+        let card = TensionFlutterCard { seed: 1, centre_hz: 20.0, bandwidth_hz: 20.0, sd_rel };
+        let rate = 4800_u32;
+        let mut a = TensionFlutter::on_tile(card, rate, 0);
+        let mut b = TensionFlutter::on_tile(card, rate, 1);
+        let n = rate as usize * 500;
+        let (mut ab, mut aa, mut bb) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for _ in 0..n {
+            let (x, y) = (a.next_relative(), b.next_relative());
+            ab += x * y;
+            aa += x * x;
+            bb += y * y;
+        }
+        let r = ab / det::sqrt(aa * bb);
+        assert!(r.abs() < 0.03, "correlation {r}");
+        for sum in [aa, bb] {
+            let sd = det::sqrt(sum / n as f64);
+            assert!((sd / sd_rel - 1.0).abs() < 0.05, "sd {sd:e}");
         }
     }
 
