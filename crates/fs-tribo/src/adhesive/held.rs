@@ -130,6 +130,7 @@ impl TangentialLaw for AdhesiveTangentialContact {
         crate::tangential::advance_with_capacity(
             s,
             x,
+            &self.law.pressure_law,
             self.contact.area_m2 == 0.0,
             self.law.static_capacity_n(self.contact)?,
             |speed| self.kinetic_capacity(speed),

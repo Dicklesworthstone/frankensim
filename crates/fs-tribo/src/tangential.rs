@@ -7,6 +7,11 @@
 //! Coulomb and Stribeck have zero reversible storage; heat is exported rather
 //! than accumulated in an invented thermal reservoir. Future compliant/layer
 //! laws supply their own state and Hamiltonian through the same trait.
+//!
+//! The dry owner retains static priority. When a Gaussian Stribeck load line
+//! has several sliding intersections, it selects the largest-slip stable
+//! branch; an effort budget never selects a different physical branch. This
+//! memoryless choice is not hysteretic continuation of an occupied branch.
 
 use crate::{
     DissipationStep, DryFrictionState, DryInterfaceSystemCard, FrictionLaw, FrictionRegime,
@@ -34,7 +39,7 @@ fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
 /// Explicit budgets for the deterministic stick test and sliding bisection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TangentialSolveConfig {
-    /// At most 128 scalar root iterations; zero is refused.
+    /// At most 128 root updates, including Stribeck branch isolation; zero is refused.
     pub max_iterations: usize,
     /// Inclusive traction magnitude ceiling [N].
     pub maximum_force_n: f64,
@@ -151,7 +156,7 @@ pub struct TangentialStep<S> {
     pub closure_residual_j: f64,
     /// Kinematic equation residual [m], including static projection roundoff.
     pub compatibility_residual_m: [f64; 2],
-    /// Scalar root iterations; zero for a static reaction, affine solution or endpoint root.
+    /// Root updates including branch isolation; zero for static or affine solutions.
     pub iterations: usize,
 }
 
@@ -214,6 +219,7 @@ impl TangentialLaw for FrictionLaw {
         advance_with_capacity(
             s,
             x,
+            self,
             x.normal_n == 0.0,
             checked_mul(self.static_mu(), x.normal_n, "static_limit")?,
             |speed| {
@@ -236,6 +242,7 @@ impl TangentialLaw for FrictionLaw {
 pub(crate) fn advance_with_capacity(
     s: &DryTangentialState,
     x: &TangentialStepInput,
+    pressure_law: &FrictionLaw,
     released: bool,
     static_capacity_n: f64,
     kinetic_capacity_n: impl Fn(f64) -> Result<f64, TriboError>,
@@ -264,6 +271,7 @@ pub(crate) fn advance_with_capacity(
     finite(distance, "free_slip_distance_m")?;
     let (magnitude, regime, iterations) = solve_magnitude(
         x,
+        pressure_law,
         distance,
         released,
         static_capacity_n,
@@ -483,11 +491,12 @@ impl FrictionLaw {
     }
 }
 
-// Operation order, endpoint limits and stopping criterion intentionally match
-// fs-couple's modal friction scalar owner. Its in-crate comparison exercises both
-// implementations bitwise; no modal/network type enters this constitutive leaf.
+// Single-root operation order and endpoint stopping criteria retain the modal
+// scalar owner's arithmetic. The Gaussian branch is isolated here before any
+// effort-budget truncation; no modal/network type enters this constitutive leaf.
 fn solve_magnitude(
     x: &TangentialStepInput,
+    pressure_law: &FrictionLaw,
     distance: f64,
     released: bool,
     cap: f64,
@@ -531,19 +540,38 @@ fn solve_magnitude(
     if evaluate(0.0)?.0 == 0.0 {
         return Ok((0.0, FrictionRegime::Sliding, 0));
     }
+    let mut used = 0;
+    let mut upper = required;
+    if let Some(speed) = stribeck_minimum_speed(pressure_law, x, distance, &mut used)? {
+        // In speed coordinates g(v)=v-v_free+C/dt*capacity(v). Its high-speed
+        // minimum separates the stable, largest-slip root from the other two
+        // intersections. In force coordinates its sign is reversed. If that
+        // minimum is above zero, only the low-speed root exists and the full
+        // bracket is safe. A fold within the original traction tolerance is
+        // resolved under that same tolerance, not a new speed regularization.
+        let turning_force = finite(
+            (distance - x.dt_s * speed) / compliance,
+            "stribeck_turning_force_n",
+        )?;
+        if turning_force > 0.0 && turning_force < required {
+            let (residual, tolerance) = evaluate(turning_force)?;
+            if residual >= -tolerance {
+                upper = turning_force;
+            }
+        }
+    }
     let mut lo = 0.0;
-    let mut hi = required.min(x.solve.maximum_force_n);
+    let mut hi = upper.min(x.solve.maximum_force_n);
     let (mut residual, mut tolerance) = evaluate(hi)?;
     if residual.abs() <= tolerance {
-        return Ok((hi, FrictionRegime::Sliding, 0));
+        return Ok((hi, FrictionRegime::Sliding, used));
     }
     if residual < 0.0 {
         return Err(TriboError::InvalidInput {
             field: "friction root outside maximum_force_n",
         });
     }
-    let mut used = 0;
-    for iteration in 1..=x.solve.max_iterations {
+    for iteration in used + 1..=x.solve.max_iterations {
         used = iteration;
         let mid = f64::midpoint(lo, hi);
         (residual, tolerance) = evaluate(mid)?;
@@ -564,6 +592,91 @@ fn solve_magnitude(
         tolerance_n: tolerance,
         iterations: used,
     })
+}
+
+/// The high-speed minimum of a Gaussian Stribeck load line, if it lies inside
+/// the released motion. A constant adhesive junction shifts the load line but
+/// not this derivative, so the original repulsive load remains the only load.
+fn stribeck_minimum_speed(
+    law: &FrictionLaw,
+    x: &TangentialStepInput,
+    distance: f64,
+    used: &mut usize,
+) -> Result<Option<f64>, TriboError> {
+    let FrictionLaw::Stribeck {
+        static_mu,
+        kinetic_mu,
+        characteristic_speed,
+        viscous_per_speed,
+    } = *law
+    else {
+        return Ok(None);
+    };
+    let delta = static_mu - kinetic_mu;
+    if delta <= 0.0 || x.normal_n == 0.0 {
+        return Ok(None);
+    }
+    let free_speed = finite(distance / x.dt_s, "slip_speed_mps")?;
+    if free_speed <= characteristic_speed * core::f64::consts::FRAC_1_SQRT_2 {
+        return Ok(None);
+    }
+
+    // g'=b-2*a*v/c²*exp(-(v/c)²), a=N*C/dt*Delta_mu,
+    // b=1+N*C/dt*eta. On the increasing-derivative half, y=(v/c)²
+    // satisfies y-ln(y)/2=ln(2*a/(b*c)), y>=1/2. Logs avoid overflowing
+    // dimensional products; the log-sum-exp also preserves large viscosity.
+    let log_response = det::ln(x.normal_n) + det::ln(x.compliance_m_per_n) - det::ln(x.dt_s);
+    let log_b = if viscous_per_speed == 0.0 {
+        0.0
+    } else {
+        let gain = log_response + det::ln(viscous_per_speed);
+        if gain > 0.0 {
+            gain + det::ln(1.0 + det::exp(-gain))
+        } else {
+            det::ln(1.0 + det::exp(gain))
+        }
+    };
+    let scale = core::f64::consts::LN_2 + log_response + det::ln(delta)
+        - log_b - det::ln(characteristic_speed);
+    if scale <= 0.5 * (1.0 + core::f64::consts::LN_2) {
+        return Ok(None); // the complete load line is monotone
+    }
+    let free_ratio = free_speed / characteristic_speed;
+    let free_y = free_ratio * free_ratio;
+    if free_y.is_finite() && free_y - 0.5 * det::ln(free_y) < scale {
+        return Ok(None); // the high-speed minimum lies beyond the free motion
+    }
+
+    // h(y)=y-ln(y)/2-scale is increasing and convex above 1/2.
+    // h(2*scale)>0, so Newton updates from this upper bound descend to the
+    // minimum. Unlike a uniform scan this cannot skip a narrow folded branch.
+    let mut y = (2.0 * scale).min(free_y);
+    loop {
+        if *used == x.solve.max_iterations {
+            return Err(TriboError::InvalidInput {
+                field: "Stribeck branch isolation exhausted max_iterations",
+            });
+        }
+        *used += 1;
+        let residual = y - 0.5 * det::ln(y) - scale;
+        let derivative = 1.0 - 0.5 / y;
+        if residual == 0.0 || derivative == 0.0 {
+            break;
+        }
+        let next = y - residual / derivative;
+        if !next.is_finite() || next < 0.5 {
+            return Err(TriboError::InvalidInput {
+                field: "unresolved Stribeck load-line minimum",
+            });
+        }
+        if (next - y).abs() <= 8.0 * f64::EPSILON * y {
+            y = next;
+            break;
+        }
+        y = next;
+    }
+    let speed = finite(characteristic_speed * det::sqrt(y), "stribeck_minimum_speed")?;
+    Ok((speed < free_speed).then_some(speed))
 }
 
 fn require_force_budget(force: f64, config: TangentialSolveConfig) -> Result<(), TriboError> {

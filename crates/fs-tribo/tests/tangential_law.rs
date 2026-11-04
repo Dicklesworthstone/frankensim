@@ -330,6 +330,136 @@ fn g0_force_budget_and_failed_root_refuse_without_publishing_state() {
     assert_eq!(state, law.initial_state());
 }
 
+/// G1: three independently bracketed intersections of the Gaussian law.
+/// A negative residual at the effort ceiling does not exclude a smaller root.
+#[test]
+fn g1_stribeck_largest_slip_root_is_not_lost_to_the_force_budget() {
+    let law = FrictionLaw::Stribeck {
+        static_mu: 1.0,
+        kinetic_mu: 0.1,
+        characteristic_speed: 1.0,
+        viscous_per_speed: 0.0,
+    };
+    let residual = |speed: f64| {
+        // det-ok: independent standard-library exponential oracle.
+        speed - 3.05 + 3.0 * (0.1 + 0.9 * (-speed * speed).exp())
+    };
+    let mut roots = [0.0; 3];
+    for (index, (mut lo, mut hi)) in [(0.0, 0.1), (0.2, 0.5), (2.5, 3.05)]
+        .into_iter()
+        .enumerate()
+    {
+        let positive_at_lo = residual(lo) > 0.0;
+        assert_ne!(positive_at_lo, residual(hi) > 0.0);
+        for _ in 0..80 {
+            let mid = (lo + hi) / 2.0;
+            if (residual(mid) > 0.0) == positive_at_lo {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        roots[index] = (lo + hi) / 2.0;
+    }
+    assert!(residual(3.05 - 3.0 * 0.95) > 0.0);
+    let expected_force = (3.05 - roots[2]) / 3.0;
+    for force_cap in [0.94, 0.95, 0.98, 1.0, 2.0, 100.0] {
+        for direction in [[1.0, 0.0], [-1.0, 0.0], [0.6, 0.8]] {
+            let x = TangentialStepInput {
+                slip_increment_m: direction.map(|v| 3.05 * v),
+                dt_s: 1.0,
+                compliance_m_per_n: 3.0,
+                solve: TangentialSolveConfig {
+                    maximum_force_n: force_cap,
+                    ..input().solve
+                },
+                ..input()
+            };
+            let step = law.advance(&law.initial_state(), &x).unwrap();
+            assert_eq!(step.regime, FrictionRegime::Sliding);
+            let force = step.traction_n[0].hypot(step.traction_n[1]);
+            let slip = step.slip_increment_m[0].hypot(step.slip_increment_m[1]);
+            assert!((force - expected_force).abs() < 5e-14);
+            assert!((slip - roots[2]).abs() < 2e-13);
+            assert!(step.iterations <= x.solve.max_iterations);
+            assert!((step.dissipated_j - force * slip).abs() < 2e-15);
+        }
+    }
+}
+
+/// G1/G3: preserve the only low-speed branch when the high branch does not
+/// exist, and resolve the high branch on either side of its finite fold.
+#[test]
+fn g1_stribeck_branch_selection_crosses_the_fold_with_viscous_drag() {
+    for viscous in [0.0, 0.02, 0.1, 2.0] {
+        let law = FrictionLaw::Stribeck {
+            static_mu: 1.0,
+            kinetic_mu: 0.1,
+            characteristic_speed: 1.0,
+            viscous_per_speed: viscous,
+        };
+        for free in [1.41, 1.50, 1.61, 1.63, 2.0, 4.0] {
+            let x = TangentialStepInput {
+                slip_increment_m: [free, 0.0],
+                dt_s: 1.0,
+                compliance_m_per_n: 1.4,
+                ..input()
+            };
+            let step = law.advance(&law.initial_state(), &x).unwrap();
+            let speed = step.slip_increment_m[0];
+            // det-ok: independent derivative and constitutive expression.
+            let decay = (-speed * speed).exp();
+            let slope = 1.0 + 1.4 * (viscous - 1.8 * speed * decay);
+            assert!(slope > 0.0, "unstable intersection: {viscous} {free}");
+            let expected = 0.1 + 0.9 * decay + viscous * speed;
+            assert!((step.traction_n[0] - expected).abs() < 3e-14);
+            if free <= 1.50 {
+                assert!(speed < 0.5, "only the low-slip root exists here");
+            }
+            if viscous <= 0.1 && (free >= 2.0 || (viscous == 0.0 && free >= 1.61)) {
+                assert!(speed > 0.9, "the stable high-slip root must be selected");
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_stribeck_budgets_preserve_static_priority_and_atomic_retry() {
+    let law = FrictionLaw::Stribeck {
+        static_mu: 1.0,
+        kinetic_mu: 0.1,
+        characteristic_speed: 1.0,
+        viscous_per_speed: 0.0,
+    };
+    let state = law.initial_state();
+    let mut x = TangentialStepInput {
+        slip_increment_m: [3.05, 0.0],
+        dt_s: 1.0,
+        compliance_m_per_n: 3.0,
+        ..input()
+    };
+    let expected = law.advance(&state, &x).unwrap();
+    x.solve.max_iterations = 1;
+    assert!(law.advance(&state, &x).is_err());
+    x.solve = input().solve;
+    x.solve.maximum_force_n = 0.1;
+    assert!(law.advance(&state, &x).is_err());
+    x.solve = input().solve;
+    assert_eq!(law.advance(&state, &x).unwrap(), expected);
+    assert_eq!(state, law.initial_state());
+
+    x.slip_increment_m = [2.9, 0.0];
+    let stuck = law.advance(&state, &x).unwrap();
+    assert_eq!(stuck.regime, FrictionRegime::Sticking);
+    assert_eq!(stuck.slip_increment_m, [0.0; 2]);
+    assert_eq!(stuck.dissipated_j, 0.0);
+    x.solve.maximum_force_n = 0.95;
+    assert!(
+        law.advance(&state, &x).is_err(),
+        "a force cap cannot select sliding instead of static support"
+    );
+}
+
 /// G1: compare the affine fast path with an independent, tightly bisected
 /// force/velocity intersection, including strengthening, weakening and the
 /// zero-traction branch. No numerical stick regularization is introduced.
@@ -378,7 +508,7 @@ fn g1_affine_sliding_matches_force_velocity_intersection_without_iterations() {
 }
 
 #[test]
-fn g0_static_capacity_endpoint_is_closed_but_zero_sliding_refuses() {
+fn g0_static_endpoint_retains_high_slip_while_zero_sliding_refuses() {
     let law = laws()[2].clone();
     let state = law.initial_state();
     let at_cap = TangentialStepInput {
@@ -394,8 +524,20 @@ fn g0_static_capacity_endpoint_is_closed_but_zero_sliding_refuses() {
         slip_increment_m: [0.8_f64.next_up(), 0.0],
         ..at_cap
     };
+    let slide = law.advance(&state, &over_cap).unwrap();
+    assert_eq!(slide.regime, FrictionRegime::Sliding);
+    assert!((slide.traction_n[0] - 0.3).abs() < 2e-14);
+    assert!((slide.slip_increment_m[0] - 0.5).abs() < 2e-14);
+    // With no weakening, there is no distinct high-slip root to recover.
+    // A zero-slip kinetic endpoint inside a loose tolerance still refuses.
+    let flat = FrictionLaw::Stribeck {
+        static_mu: 0.8,
+        kinetic_mu: 0.8,
+        characteristic_speed: 0.05,
+        viscous_per_speed: 0.0,
+    };
     assert!(matches!(
-        law.advance(&state, &over_cap),
+        flat.advance(&state, &over_cap),
         Err(TriboError::InvalidInput {
             field: "zero_sliding_increment"
         })

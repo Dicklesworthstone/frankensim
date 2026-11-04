@@ -205,3 +205,31 @@ fn nonlinear_pressure_capacity_closes_at_actual_compliant_slip() {
     );
     close(out.dissipated_j, f * slip);
 }
+
+/// G1: constant real-area junction shear translates all three Gaussian
+/// intersections without changing their derivative or occupied slip branch.
+#[test]
+fn gaussian_pressure_and_junction_shear_retain_the_high_slip_root() {
+    let pressure = FrictionLaw::Stribeck {
+        static_mu: 1.0,
+        kinetic_mu: 0.1,
+        characteristic_speed: 1.0,
+        viscous_per_speed: 0.0,
+    };
+    let dry = pressure
+        .advance(&pressure.initial_state(), &input(1.0, [3.05, 0.0], 3.0))
+        .unwrap();
+    // tau*A=0.2 N adds exactly C*0.2 m to the released displacement.
+    let law = contact(pressure, 1e-6, 1.0, 2e5, 2e5);
+    let mut x = input(1.0, [3.65, 0.0], 3.0);
+    for cap in [1.14, 1.15, 1.18, 100.0] {
+        x.solve.maximum_force_n = cap;
+        let out = law.advance(&law.initial_state(), &x).unwrap();
+        assert_eq!(out.regime, FrictionRegime::Sliding);
+        close(out.slip_increment_m[0], dry.slip_increment_m[0]);
+        close(out.traction_n[0], dry.traction_n[0] + 0.2);
+        close(out.dissipated_j, out.traction_n[0] * out.slip_increment_m[0]);
+        assert_eq!(out.stored_change_j, 0.0);
+        assert_eq!(out.closure_residual_j, 0.0);
+    }
+}

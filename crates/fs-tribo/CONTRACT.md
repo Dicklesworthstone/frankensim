@@ -326,8 +326,17 @@ reactions, and residual embedding.
   nonnegative terms; neither dimensional squares nor a difference of nearly
   equal roots is needed. Every candidate still faces the original force budget
   and constitutive residual; unresolved arithmetic falls back to bisection.
-  The modal friction owner consumes the same direct solution. Stribeck branch
-  selection and static-capacity selection are unchanged.
+  The modal friction owner consumes the same direct solution.
+  The dry tangential owner retains static priority, then selects the stable
+  largest-slip Stribeck intersection when three sliding roots coexist.
+  It isolates the high-speed load-line minimum analytically before applying
+  the effort ceiling: a negative residual at an arbitrary force cap cannot
+  hide a physically admissible smaller-force root. The Gaussian turning point
+  uses bounded dimensionless Newton updates, charged to the same iteration
+  budget as the traction solve. A constant adhesive junction shares this
+  isolation because it shifts the load line without changing its derivative.
+  This explicit memoryless branch policy does not model hysteretic branch
+  continuation; force/iteration failures preserve the original checkpoint.
   Input motion is the released driver-minus-body increment and the explicit
   isotropic body compliance gives `du = du_free - C F`. Returned traction is
   effort entering the interface, conjugate to the **solved** increment, so
@@ -335,7 +344,7 @@ reactions, and residual embedding.
   `DissipationStep`/`WorkLedger`, and retain accumulated slip plus the optional
   caller thermal boundary. They do not evolve temperature or a third-body layer.
   `TangentialSolveConfig` requires explicit force/residual/iteration budgets
-  (1 through 128 bisections); unresolved or unbracketed roots refuse. Candidate
+  (1 through 128 root updates); unresolved or unbracketed roots refuse. Candidate
   state is immutable until the consuming solver publishes it. The card impl
   requires temperature and pressure without defaults, and checks the solved
   speed against its closed applicability interval. The matrix adapter below
