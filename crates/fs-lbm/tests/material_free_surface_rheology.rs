@@ -9,6 +9,9 @@ mod pressure;
 #[path = "material_free_surface_rheology/motion.rs"]
 mod motion;
 
+#[path = "material_free_surface_rheology/frame.rs"]
+mod frame;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -203,13 +206,20 @@ fn numerator(
     gravity: [f64; 3],
     coordinates: [usize; 3],
 ) -> f64 {
+    numerator_with_force(flow, gravity.map(|g| g * DT * DT / DX), coordinates)
+}
+
+fn numerator_with_force(
+    flow: &MaterialFreeSurfaceRheology3<'_, '_>,
+    force: [f64; 3],
+    coordinates: [usize; 3],
+) -> f64 {
     let bits = flow.lattice().grid().state_bits();
     let [x, y, z] = coordinates;
     let slot = (x / 4) | ((y / 4) << 1) | ((z / 4) << 2);
     let lane = x % 4 + 4 * (y % 4 + 4 * (z % 4));
     let sample = flow.lattice().sample_at(x, y, z).unwrap();
     let eq = equilibrium3(sample.density, sample.velocity);
-    let force = gravity.map(|g| g * DT * DT / DX);
     let mut tensor = [[0.0; 3]; 3];
     for q in 0..Q3 {
         let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];

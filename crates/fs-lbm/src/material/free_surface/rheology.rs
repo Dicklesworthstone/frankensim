@@ -20,6 +20,7 @@ use super::{
     MaterialFreeSurface3, MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3,
     MaterialFreeSurfaceSample3, capillary_scaling, plan_free_surface_from_material,
 };
+use crate::d3q19::RigidFrame3;
 use crate::d3q19::freesurface3::pressure::GasPressureField3;
 use crate::d3q19::freesurface3::transport::MassLocation3;
 use crate::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
@@ -605,9 +606,21 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         gate: &CancelGate,
         gas_pressure: Option<(f64, GasPressureField3<'_>)>,
     ) -> Result<(), Error> {
+        self.step_inner_with_frame(gate, gas_pressure, None)
+    }
+
+    fn step_inner_with_frame(
+        &mut self,
+        gate: &CancelGate,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
+        frame: Option<(RigidFrame3, [f64; 3])>,
+    ) -> Result<(), Error> {
         poll(gate)?;
         let tau = self.local_relaxation(gate)?;
         let mut lattice = self.flow.lattice.clone();
+        if let Some((frame, acceleration)) = frame {
+            frame.prepare_free_surface_step(&mut lattice, acceleration, gate)?;
+        }
         lattice.step_with_material_relaxation_and_pressure(gate, &tau, gas_pressure)?;
         let samples = self.sample_lattice(&lattice, gate)?;
         poll(gate)?;

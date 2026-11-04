@@ -18,6 +18,39 @@ pub struct MaterialRigidFrame3 {
     pub origin_acceleration_m_s2: [f64; 3],
 }
 
+impl MaterialRigidFrame3 {
+    // Frozen and evolving-viscosity owners retain one SI conversion convention.
+    pub(super) fn lattice_forcing(
+        self,
+        scale: &MaterialFreeSurfaceScaling<'_>,
+        body_acceleration_m_s2: [f64; 3],
+    ) -> Result<(RigidFrame3, [f64; 3]), MaterialLbmError> {
+        let mut native = RigidFrame3::default();
+        let mut acceleration = [0.0; 3];
+        for axis in 0..3 {
+            native.origin[axis] =
+                converted(self.origin_m[axis], self.origin_m[axis] / scale.cell_size_m)?;
+            native.angular_velocity[axis] = converted(
+                self.angular_velocity_rad_s[axis],
+                self.angular_velocity_rad_s[axis] * scale.timestep_s,
+            )?;
+            native.angular_acceleration[axis] = converted(
+                self.angular_acceleration_rad_s2[axis],
+                (self.angular_acceleration_rad_s2[axis] * scale.timestep_s) * scale.timestep_s,
+            )?;
+            native.origin_acceleration[axis] = converted(
+                self.origin_acceleration_m_s2[axis],
+                scale.gravity_lattice(self.origin_acceleration_m_s2[axis])?,
+            )?;
+            acceleration[axis] = converted(
+                body_acceleration_m_s2[axis],
+                scale.gravity_lattice(body_acceleration_m_s2[axis])?,
+            )?;
+        }
+        Ok((native, acceleration))
+    }
+}
+
 impl MaterialFreeSurface3<'_> {
     /// Advance the original liquid by one SI timestep in an accelerating vessel.
     ///
@@ -47,31 +80,8 @@ impl MaterialFreeSurface3<'_> {
         if gate.is_requested() {
             return Err(crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled.into());
         }
-        let scale = &self.scaling;
-        let mut native = RigidFrame3::default();
-        let mut acceleration = [0.0; 3];
-        for axis in 0..3 {
-            native.origin[axis] = converted(
-                frame.origin_m[axis],
-                frame.origin_m[axis] / scale.cell_size_m,
-            )?;
-            native.angular_velocity[axis] = converted(
-                frame.angular_velocity_rad_s[axis],
-                frame.angular_velocity_rad_s[axis] * scale.timestep_s,
-            )?;
-            native.angular_acceleration[axis] = converted(
-                frame.angular_acceleration_rad_s2[axis],
-                (frame.angular_acceleration_rad_s2[axis] * scale.timestep_s) * scale.timestep_s,
-            )?;
-            native.origin_acceleration[axis] = converted(
-                frame.origin_acceleration_m_s2[axis],
-                scale.gravity_lattice(frame.origin_acceleration_m_s2[axis])?,
-            )?;
-            acceleration[axis] = converted(
-                body_acceleration_m_s2[axis],
-                scale.gravity_lattice(body_acceleration_m_s2[axis])?,
-            )?;
-        }
+        let (native, acceleration) =
+            frame.lattice_forcing(&self.scaling, body_acceleration_m_s2)?;
         native.step_free_surface(&mut self.lattice, acceleration, gate)?;
         Ok(())
     }

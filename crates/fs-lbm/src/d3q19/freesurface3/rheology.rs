@@ -11,7 +11,7 @@ use fs_exec::CancelGate;
 
 use super::transport::MassLocation3;
 use super::{Cell3, FreeSurface3, FreeSurfaceError3, TILE, TILE_CELLS, check_cancel};
-use crate::d3q19::CollisionModel3;
+use crate::d3q19::{CollisionModel3, RigidFrame3};
 use crate::rheology::{
     PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
 };
@@ -218,9 +218,42 @@ impl FreeSurfaceRheology3 {
         &mut self,
         gate: &CancelGate,
     ) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
+        self.step_with_frame(None, gate)
+    }
+
+    /// Advance the same non-Newtonian liquid in a prescribed accelerating frame.
+    ///
+    /// Frame coefficients and body acceleration use lattice units and moving
+    /// axes as in [`RigidFrame3::prepare_free_surface_step`]. Supply midpoint
+    /// coefficients before every step. The complete held force is replaced;
+    /// independently owned body acceleration and historical replay refuse.
+    ///
+    /// Force preparation preserves physical velocity and stress, so the current
+    /// constitutive relaxation remains the collision coefficient. The accepted
+    /// endpoint resolves the SAME uniform/spatial law, including newly wet cells.
+    /// One private sparse candidate contains preparation, native motion and all
+    /// source checks. Failure or cancellation preserves both flow and rheology.
+    /// This is prescribed isothermal motion, without vessel dynamics or heat.
+    pub fn step_in_rigid_frame(
+        &mut self,
+        frame: RigidFrame3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
+        self.step_with_frame(Some((frame, acceleration)), gate)
+    }
+
+    fn step_with_frame(
+        &mut self,
+        frame: Option<(RigidFrame3, [f64; 3])>,
+        gate: &CancelGate,
+    ) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
         check_cancel(gate)?;
         let applied = self.stats;
         let mut candidate = self.lattice.clone();
+        if let Some((frame, acceleration)) = frame {
+            frame.prepare_free_surface_step(&mut candidate, acceleration, gate)?;
+        }
         candidate.step_with_material_relaxation_and_pressure(gate, &self.tau, None)?;
         let (tau, stats) = resolve(&candidate, &self.assignment, &self.tau, gate)?;
         check_cancel(gate)?;
@@ -324,7 +357,7 @@ mod tests {
     use super::*;
     use crate::d3q19::freesurface3::{ContactModel3, ConversionRedistribution3};
     use crate::d3q19::sparse::morton3;
-    use crate::d3q19::{E3, W3, equilibrium3};
+    use crate::d3q19::{E3, Q3, W3, equilibrium3};
 
     fn laws() -> [Rheology; 4] {
         [
@@ -359,6 +392,133 @@ mod tests {
         for (&key, tile) in &a.tiles {
             assert_eq!(tile.cells, b.tiles[&key].cells);
             assert_eq!(tile.mass, b.tiles[&key].mass);
+        }
+    }
+
+    #[test]
+    fn rigid_frame_motion_uses_actual_local_relaxation_and_refreshes_the_law() {
+        let gate = CancelGate::new_clock_free();
+        let lattice = FreeSurface3::new(
+            8,
+            8,
+            8,
+            1.7,
+            [0.0; 3],
+            0.0,
+            ContactModel3::Neutral,
+            |_, _, _| true,
+        )
+        .unwrap()
+        .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocal);
+        let mut run = FreeSurfaceRheology3::uniform(lattice, laws()[2], &gate).unwrap();
+        let initial_tau = run.relaxation_at([3, 3, 3]).unwrap();
+        let mass = run.lattice.ledger_mass();
+        let mut changed = false;
+        for step in 0..4 {
+            let frame = RigidFrame3 {
+                origin: [3.5, 3.5, 1.5],
+                angular_velocity: [0.002, 0.001, -0.003 - f64::from(step) * 0.0001],
+                angular_acceleration: [0.0, 0.0, -0.0001],
+                origin_acceleration: [0.00001, -0.00002, 0.00001],
+            };
+            let body = [0.0002, -0.0001, -0.00005];
+            let mut prepared = run.lattice.clone();
+            frame
+                .prepare_free_surface_step(&mut prepared, body, &gate)
+                .unwrap();
+            // Independently collide the actual incoming populations. This
+            // interior pull has no gas or wall link, and the constitutive
+            // coefficient differs from the grid's original tau=1.7.
+            let mut expected = [0.0; Q3];
+            for (q, e) in E3.iter().enumerate() {
+                let p = [3 - e.0, 3 - e.1, 3 - e.2];
+                let sample = prepared
+                    .sample_at(p[0] as usize, p[1] as usize, p[2] as usize)
+                    .unwrap();
+                let (slot, lane) = prepared
+                    .grid
+                    .resolve_source(i64::from(p[0]), i64::from(p[1]), i64::from(p[2]))
+                    .unwrap();
+                let f = prepared.grid.populations(slot, lane);
+                let force = prepared.force_at_lane(prepared.grid.active_keys()[slot], lane);
+                let tau = run.relaxation_at(p.map(|v| v as usize)).unwrap();
+                let eq = equilibrium3(sample.density, sample.velocity);
+                let e = [f64::from(e.0), f64::from(e.1), f64::from(e.2)];
+                let eu: f64 = (0..3).map(|a| e[a] * sample.velocity[a]).sum();
+                let source: f64 = (0..3)
+                    .map(|a| (3.0 * (e[a] - sample.velocity[a]) + 9.0 * eu * e[a]) * force[a])
+                    .sum();
+                expected[q] = f[q] - (f[q] - eq[q]) / tau + (1.0 - 0.5 / tau) * W3[q] * source;
+            }
+            let applied = run.stats();
+            let report = run.step_in_rigid_frame(frame, body, &gate).unwrap();
+            assert_eq!(report.max_shear, applied.max_shear);
+            assert_eq!(report.tau_range, applied.tau_range);
+            let (slot, lane) = run.lattice.grid.resolve_source(3, 3, 3).unwrap();
+            for (actual, expected) in run
+                .lattice
+                .grid
+                .populations(slot, lane)
+                .into_iter()
+                .zip(expected)
+            {
+                assert!((actual - expected).abs() < 3e-14);
+            }
+            changed |= (run.relaxation_at([3, 3, 3]).unwrap() - initial_tau).abs() > 1e-9;
+            assert!((run.lattice.ledger_mass() - mass).abs() < 2e-10);
+        }
+        assert!(
+            changed,
+            "the endpoint stress must refresh constitutive viscosity"
+        );
+    }
+
+    #[test]
+    fn frame_ownership_refusals_preserve_native_rheology_and_force_history() {
+        let gate = CancelGate::new_clock_free();
+        let baseline = FreeSurface3::new(
+            4,
+            4,
+            4,
+            1.0,
+            [0.0; 3],
+            0.0,
+            ContactModel3::Neutral,
+            |_, _, _| true,
+        )
+        .unwrap();
+        for independent in [None, Some([0.0; 3]), Some([0.0001, -0.0002, 0.0003])] {
+            let mut lattice = baseline.clone();
+            if let Some(acceleration) = independent {
+                lattice
+                    .rebind_body_acceleration(acceleration, &gate)
+                    .unwrap();
+            } else {
+                lattice =
+                    lattice.with_conversion_redistribution(ConversionRedistribution3::LegacyGlobal);
+            }
+            let mut run = FreeSurfaceRheology3::uniform(lattice, laws()[2], &gate).unwrap();
+            let before = run.lattice.clone();
+            let tau = run.tau.clone();
+            let stats = run.stats();
+            assert!(
+                run.step_in_rigid_frame(RigidFrame3::default(), [0.0; 3], &gate)
+                    .is_err()
+            );
+            assert_same_state(&run.lattice, &before);
+            assert_eq!(run.lattice.body_acceleration(), independent);
+            assert_eq!(run.tau, tau);
+            assert_eq!(run.stats().max_shear, stats.max_shear);
+            assert_eq!(run.stats().tau_range, stats.tau_range);
+            let cancelled = CancelGate::new_clock_free();
+            cancelled.request();
+            assert!(matches!(
+                run.step_in_rigid_frame(RigidFrame3::default(), [0.0; 3], &cancelled),
+                Err(FreeSurfaceRheologyError3::Flow(
+                    FreeSurfaceError3::Cancelled
+                ))
+            ));
+            assert_same_state(&run.lattice, &before);
         }
     }
 

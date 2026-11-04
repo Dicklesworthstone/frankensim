@@ -3,10 +3,41 @@
 use super::*;
 use crate::d3q19::freesurface3::{PlanarWallFieldControls3, PlanarWallVelocityField3};
 use crate::material::free_surface::{
-    MaterialPlanarWallFieldReport3, MaterialPlanarWallVelocityField3,
+    MaterialPlanarWallFieldReport3, MaterialPlanarWallVelocityField3, MaterialRigidFrame3,
 };
 
 impl MaterialFreeSurfaceRheology3<'_, '_> {
+    /// Advance source-resolved viscosity in a prescribed accelerating vessel.
+    ///
+    /// Motion coefficients are supplied at the interval midpoint in SI and
+    /// moving axes, exactly as for [`MaterialFreeSurface3::step_in_rigid_frame_si`].
+    /// Body acceleration includes gravity; the complete held force is replaced.
+    /// The original dx/dt, constitutive law, selected claims and pressure datum
+    /// remain the owners of the same liquid trajectory.
+    ///
+    /// The native Guo reframe preserves physical strain, so the current local
+    /// source viscosity enters the SAME collision as translation, Euler,
+    /// centrifugal and midpoint Coriolis forcing. Actual endpoint pressure and
+    /// force-corrected strain refresh source viscosity before publication.
+    /// Uniform acceleration is not inserted as shear. Only one sparse candidate
+    /// is cloned, with no unused enthalpy-route history or extra flow solve.
+    ///
+    /// Source, speed, constitutive convergence, source-ownership or cancellation
+    /// refusal preserves all accepted populations, forces, mass and material
+    /// samples. The original imposed gas pressure, capillarity and wall model
+    /// remain; this entry adds no heat, independently driven gas pressure or
+    /// finite-inertia vessel dynamics. Refresh prescribed motion every step.
+    pub fn step_in_rigid_frame_si(
+        &mut self,
+        frame: MaterialRigidFrame3,
+        body_acceleration_m_s2: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        poll(gate)?;
+        let forcing = frame.lattice_forcing(&self.flow.scaling, body_acceleration_m_s2)?;
+        self.step_inner_with_frame(gate, None, Some(forcing))
+    }
+
     /// Drive a nonuniform tangential wall with the actual source viscosity.
     ///
     /// The accepted source viscosity at each wet cell supplies relaxation in

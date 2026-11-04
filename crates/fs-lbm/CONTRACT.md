@@ -10111,6 +10111,32 @@ wet-cell conversion, SI unit/source identity, changing load histories and
 transactional/independent-owner refusal. Original dense-grid rigid-frame
 arithmetic is retained.
 
+`FreeSurfaceRheology3::step_in_rigid_frame` and
+`MaterialFreeSurfaceRheology3::step_in_rigid_frame_si` advance that SAME source
+law with the original analytic or source-resolved non-Newtonian viscosity.
+The native uniform/spatial assignment and material card/claim identities remain
+attached. The SI entry shares the frozen-flow unit conversion. Its actual
+pressure-dependent source still queries interior liquid pressure at the fixed
+construction datum, not an externally prescribed gas value.
+
+The Guo preparation preserves physical strain, so accepted local relaxation
+enters the same forced collision without a redundant constitutive solve.
+Actual endpoint force-corrected stress and pressure then refresh viscosity,
+including new wet cells, before any state publishes. One private sparse
+candidate contains source preparation, native collision/transport/conversion
+and endpoint admission; no unused enthalpy routes or extra flow solve are
+allocated. Refusal preserves force history, populations, mass, local viscosity
+and source samples. Independent body-acceleration owners and historical replay
+retain their explicit refusal. Motion coefficients are refreshed every step;
+heat, finite-inertia vessel dynamics and simultaneous prescribed gas loading
+remain outside these isothermal entries.
+
+Native rheology tests and `material_free_surface_rheology/frame.rs` specify
+independent incoming BGK/Guo populations with local relaxation, the midpoint
+SI source equation, a changing source-viscosity trajectory against its closed
+quadratic constitutive root, free fall and uniform acceleration without false
+shear, and atomic source/convergence/ownership/cancellation refusal.
+
 ### Finite-inertia planar missing-film surfaces
 
 `FiniteLubricationPlane3` and
