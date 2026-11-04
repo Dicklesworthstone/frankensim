@@ -53,7 +53,7 @@ impl<'a> StorageTangent<'a> {
         }
     }
 
-    fn hessian(n: usize, action: &'a PhsStorageHessianAction<'a>) -> Self {
+    pub(super) fn hessian(n: usize, action: &'a PhsStorageHessianAction<'a>) -> Self {
         Self::Hessian {
             action,
             scratch: RefCell::new((vec![0.0; n], vec![0.0; n])),

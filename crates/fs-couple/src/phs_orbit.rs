@@ -37,6 +37,10 @@ pub use stability::{
     PhsFloquetControls, PhsFloquetLevel, PhsForcedStability, PhsNumericalStability,
     analyze_forced_orbit_stability,
 };
+mod shooting;
+pub use shooting::{
+    solve_forced_shooting_variational, solve_forced_shooting_variational_analytic,
+};
 mod autonomous;
 /// Full-state parameter branches of the original self-excited pHS.
 pub use autonomous::continuation as autonomous_continuation;
@@ -70,6 +74,8 @@ pub enum PhsOrbitError {
     },
     /// fs-orbit's underlying periodic solve refused.
     Orbit(OrbitError),
+    /// Exact discrete variational shooting, including cancellation and budgets.
+    Variational(fs_orbit::VariationalShootError),
 }
 impl core::fmt::Display for PhsOrbitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -193,6 +199,13 @@ impl OrbitProblem for PhsOrbitProblem<'_> {
         // This adapter's frequency port is exactly sI: island already evaluates
         // the complete original ODE, including all explicit memory coordinates.
         Some(Self::island)
+    }
+    fn time_domain_state_jacobian(&self) -> Option<fs_orbit::TimeDomainStateJacobian<Self>> {
+        // Only this complete ODE adapter has the exact sI port. Its declared
+        // storage tangent differentiates the whole flow for state-independent
+        // forcing/bias. An arbitrary feedback law also needs its own derivative.
+        (!matches!(self.input, InputKind::Feedback { .. }) && self.tangent.available())
+            .then_some(Self::state_jacobian)
     }
 
     fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
