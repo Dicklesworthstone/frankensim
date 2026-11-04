@@ -13,7 +13,9 @@ use super::{MaugisError, MaugisWorkEstimate, SourceMaugisSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::ContentHash;
 
+#[path = "mechanical/derivative.rs"]
 mod derivative;
+#[path = "mechanical/temperature.rs"]
 mod temperature;
 
 /// Explicit attached-branch choice with bounded original-force integration.
