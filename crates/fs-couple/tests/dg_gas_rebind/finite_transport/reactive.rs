@@ -267,7 +267,8 @@ fn thermal(input: &FiniteGasAcousticInput) -> &FiniteGasDgTransportInput {
     match input {
         FiniteGasAcousticInput::Passive(row) => row,
         FiniteGasAcousticInput::MolecularWall { thermal, .. }
-        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. } => thermal,
+        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. }
+        | FiniteGasAcousticInput::ViscousMolecularPort { thermal, .. } => thermal,
         FiniteGasAcousticInput::Aperture(row) => &row.thermal,
     }
 }
@@ -275,7 +276,8 @@ fn thermal_mut(input: &mut FiniteGasAcousticInput) -> &mut FiniteGasDgTransportI
     match input {
         FiniteGasAcousticInput::Passive(row) => row,
         FiniteGasAcousticInput::MolecularWall { thermal, .. }
-        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. } => thermal,
+        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. }
+        | FiniteGasAcousticInput::ViscousMolecularPort { thermal, .. } => thermal,
         FiniteGasAcousticInput::Aperture(row) => &mut row.thermal,
     }
 }

@@ -1,4 +1,6 @@
 //! Different original acoustic owners share one conservative material snapshot.
+mod heat;
+
 use super::*;
 use fs_couple::bernoulli_aperture::wall::material::{
     AxialConstraint, FiniteGasDgBackground, FiniteGasDgBinding, FiniteGasDgNode, LocalMaterialWall,
@@ -182,7 +184,8 @@ fn thermal(input: &FiniteGasAcousticInput) -> &FiniteGasDgTransportInput {
     match input {
         FiniteGasAcousticInput::Passive(input) => input,
         FiniteGasAcousticInput::MolecularWall { thermal, .. }
-        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. } => thermal,
+        | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. }
+        | FiniteGasAcousticInput::ViscousMolecularPort { thermal, .. } => thermal,
         FiniteGasAcousticInput::Aperture(input) => &input.thermal,
     }
 }

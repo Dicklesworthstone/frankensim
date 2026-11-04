@@ -15195,6 +15195,37 @@ immutable preview, final cancellation, exact retry and continued evolution.
 These are authored synthetic implementation regressions; native execution and
 measured physical validation remain separate gates.
 
+### Complete-load viscous and molecular heat during material transport
+
+`FiniteGasAcousticInput::ViscousMolecularPort` selects the complete-load heat
+continuation described above for an original `FiniteGasAcousticNode::Port`.
+Admission rejects other acoustic owners and unbound reservoirs before material
+transport. Main-gas bore molecular and viscous losses and main-gas terminal
+passage shear heat return through the same caloric, chemical and finite-body
+transaction. Independent branch and numerical losses retain their original
+exported ownership; no independent source is assigned to the main parcel.
+
+Preparation retains one original marched load, its actual implicit port flows,
+the native output and both physical heat accounts. Every later transported,
+reacting, thermal-body or material-work trial borrows this same proposal; it
+does not repeat the acoustic step or its dense source integrals. The original
+kernel keeps the prepared owner beside its source heat until final atomic
+publication. Plain port and existing wall/aperture inputs preserve their
+previous explicit selection and zero-transfer behavior.
+
+The common `viscous_heat_j` account includes bore and main-terminal viscosity,
+while the native complete-load report retains those contributions separately.
+Internal gas heat is included once in endpoint caloric energy and subtracted
+once from exported acoustic loss. It is excluded from prescribed external
+heat. Existing species, source, driving-force, parameter-work and cancellation
+gates remain in force, including molecular source composition restrictions.
+
+Focused assembly regressions independently integrate slit shear heating while
+species transport runs, retain the original channel/exterior histories, and
+check caloric/species balance, wrong-owner refusal and late-cancellation retry.
+Source/parser checks and an independent bounded review passed; native coupled
+compilation and execution remain unverified in this environment.
+
 ## Reacting finite gas in mixed acoustic assemblies
 
 `dg_port::finite_gas::transport::assembly::reactive` connects the original

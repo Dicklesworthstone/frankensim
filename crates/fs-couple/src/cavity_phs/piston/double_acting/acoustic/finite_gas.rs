@@ -191,6 +191,9 @@ impl StagedPort<'_> {
 impl FiniteGasTransportNode for StagedPort<'_> {
     type Step<S> = FiniteGasDgPortStep<S>;
     type Input = FiniteGasDgTransportInput;
+    type PreparedHeat = FiniteGasDgInternalHeat;
+
+    fn internal_heat(prepared: &Self::PreparedHeat) -> FiniteGasDgInternalHeat { *prepared }
 
     fn transport_input(
         input: &Self::Input,
@@ -222,11 +225,12 @@ impl FiniteGasTransportNode for StagedPort<'_> {
 
     fn prepare_internal_heat<E, C: FnMut() -> bool>(
         &self,
+        gas: &ClosedGasParcel,
         input: &Self::Input,
         cancelled: &mut C,
     ) -> Result<FiniteGasDgInternalHeat, FiniteGasDgError<E>> {
         <DgPortLoad as FiniteGasTransportNode>::prepare_internal_heat(
-            self.original, input, cancelled,
+            self.original, gas, input, cancelled,
         )
     }
 
@@ -234,7 +238,7 @@ impl FiniteGasTransportNode for StagedPort<'_> {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        heat: FiniteGasDgInternalHeat,
+        heat: &Self::PreparedHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
@@ -246,7 +250,7 @@ impl FiniteGasTransportNode for StagedPort<'_> {
         // Retain the complete-load owner's admission. Its native decrement is
         // exported loss; only source-wall owners supply these gas heat integrals.
         // An unsupported transfer must not disappear during staged completion.
-        if heat != FiniteGasDgInternalHeat::default() {
+        if *heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
                 "complete passive loads do not own source-wall gas heat integrals",
             ));

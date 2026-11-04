@@ -170,6 +170,11 @@ pub(crate) struct FiniteGasTransportAccounts {
 pub(crate) trait FiniteGasTransportNode: Clone {
     type Step<S>;
     type Input;
+    /// Retain the original solved acoustic trial when its implicit ports are
+    /// needed to observe heat. Plain owners only retain their two source totals.
+    type PreparedHeat: Default;
+
+    fn internal_heat(prepared: &Self::PreparedHeat) -> FiniteGasDgInternalHeat;
 
     /// Admit the node-specific source controls before any transport runs, and
     /// expose the same caloric controls for bound nodes and finite reservoirs.
@@ -194,18 +199,19 @@ pub(crate) trait FiniteGasTransportNode: Clone {
     /// the existing exported-loss behavior of ordinary inputs and owners.
     fn prepare_internal_heat<E, C: FnMut() -> bool>(
         &self,
+        _gas: &ClosedGasParcel,
         _input: &Self::Input,
         cancelled: &mut C,
-    ) -> Result<FiniteGasDgInternalHeat, FiniteGasDgError<E>> {
+    ) -> Result<Self::PreparedHeat, FiniteGasDgError<E>> {
         super::check(cancelled)?;
-        Ok(FiniteGasDgInternalHeat::default())
+        Ok(Self::PreparedHeat::default())
     }
 
     fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        heat: FiniteGasDgInternalHeat,
+        prepared: &Self::PreparedHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
@@ -272,6 +278,9 @@ impl FiniteGasDgNode {
 impl FiniteGasTransportNode for FiniteGasDgNode {
     type Step<S> = FiniteGasDgStep<S>;
     type Input = FiniteGasDgTransportInput;
+    type PreparedHeat = FiniteGasDgInternalHeat;
+
+    fn internal_heat(prepared: &Self::PreparedHeat) -> FiniteGasDgInternalHeat { *prepared }
 
     fn transport_input(
         input: &Self::Input,
@@ -319,7 +328,7 @@ impl FiniteGasTransportNode for FiniteGasDgNode {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
-        heat: FiniteGasDgInternalHeat,
+        heat: &Self::PreparedHeat,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
@@ -328,11 +337,11 @@ impl FiniteGasTransportNode for FiniteGasDgNode {
         match &mut self.binding {
             FiniteGasDgBinding::Uniform(wall) => wall.step_with_prepared_internal_heat_controlled(
                 &mut self.state, &mut self.propagator, gas, &input.ports,
-                solve, heat, evolve, cancelled,
+                solve, *heat, evolve, cancelled,
             ),
             FiniteGasDgBinding::Regional(wall) => wall.step_with_prepared_internal_heat_controlled(
                 &mut self.state, &mut self.propagator, gas, &input.ports,
-                solve, heat, evolve, cancelled,
+                solve, *heat, evolve, cancelled,
             ),
         }
     }
@@ -629,8 +638,9 @@ pub(crate) struct PreparedFiniteGasTransport<'a, N: FiniteGasTransportNode> {
     inputs: &'a BTreeMap<u64, N::Input>,
     transported: BTreeMap<u64, ClosedGasParcel>,
     transport: GasTransportStep,
-    /// Original source observations, never recomputed by body/heat/work probes.
-    internal_heat: BTreeMap<u64, FiniteGasDgInternalHeat>,
+    /// Original source observations and any solved native acoustic candidates,
+    /// never recomputed by body/heat/work probes.
+    prepared_heat: BTreeMap<u64, N::PreparedHeat>,
     duration_s: f64,
     controls: FiniteGasDgTransportSolve,
 }
@@ -682,20 +692,21 @@ pub(crate) fn prepare_finite_gas_transport<
     }
     // Every source/owner is admitted before the first original heat observation.
     // The material transport and all later nonlinear trials reuse these values.
-    let mut internal_heat = BTreeMap::new();
+    let mut prepared_heat = BTreeMap::new();
     for (&id, node) in nodes {
         check(cancelled)?;
-        let heat = node.prepare_internal_heat(&inputs[&id], cancelled)
+        let prepared = node.prepare_internal_heat(&parcels[&id], &inputs[&id], cancelled)
             .map_err(|error| acoustic_error::<T>(id, error))?;
-        heat.total_j().map_err(|error| acoustic_error::<T>(id, error))?;
-        internal_heat.insert(id, heat);
+        N::internal_heat(&prepared).total_j()
+            .map_err(|error| acoustic_error::<T>(id, error))?;
+        prepared_heat.insert(id, prepared);
     }
     let (transported, transport) = material::step_candidate_with_paths(
         parcels, paths, duration_s, &endpoints, controls.transport, &mut *cancelled,
     ).map_err(transport_error)?.into_parts();
     check(cancelled)?;
     Ok(PreparedFiniteGasTransport {
-        parcels, nodes, inputs, transported, transport, internal_heat, duration_s, controls,
+        parcels, nodes, inputs, transported, transport, prepared_heat, duration_s, controls,
     })
 }
 
@@ -734,7 +745,8 @@ impl<N: FiniteGasTransportNode> PreparedFiniteGasTransport<'_, N> {
         check(cancelled)?;
         let input = N::transport_input(node_input, nodes.contains_key(&id)).map_err(Error::Invalid)?;
         if let Some(node) = next_nodes.get_mut(&id) {
-            let internal_heat = self.internal_heat[&id];
+            let prepared = &self.prepared_heat[&id];
+            let internal_heat = N::internal_heat(prepared);
             let internal_heat_j = internal_heat.total_j()
                 .map_err(|error| acoustic_error::<T>(id, error))?;
             // The original chemistry/thermal owner receives the actual heat.
@@ -766,7 +778,7 @@ impl<N: FiniteGasTransportNode> PreparedFiniteGasTransport<'_, N> {
                     transported_enthalpy_j: enthalpy, source,
                 })
             };
-            let step = node.advance(&mut gas, node_input, internal_heat, evolve, cancelled)
+            let step = node.advance(&mut gas, node_input, prepared, evolve, cancelled)
                 .map_err(|error| acoustic_error::<T>(id, error))?;
             evolution.admit_node_endpoint(id, N::source::<T::Source>(&step))
                 .map_err(|error| gas_error::<T>(id, error))?;

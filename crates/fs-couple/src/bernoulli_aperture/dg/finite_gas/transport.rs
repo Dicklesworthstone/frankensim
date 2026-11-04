@@ -65,6 +65,9 @@ pub type FiniteGasApertureTransportCandidate =
 impl FiniteGasTransportNode for LoadedApertureDg {
     type Step<S> = FiniteGasApertureDgStep<S>;
     type Input = FiniteGasApertureTransportInput;
+    type PreparedHeat = FiniteGasDgInternalHeat;
+
+    fn internal_heat(prepared: &Self::PreparedHeat) -> FiniteGasDgInternalHeat { *prepared }
 
     fn transport_input(
         input: &Self::Input,
@@ -128,7 +131,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        heat: FiniteGasDgInternalHeat,
+        heat: &Self::PreparedHeat,
         evolve: impl FnMut(
             &ClosedGasParcel,
             f64,
@@ -137,7 +140,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
-        if heat != FiniteGasDgInternalHeat::default() {
+        if *heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
                 "moving apertures do not own source-wall gas heat integrals",
             ));

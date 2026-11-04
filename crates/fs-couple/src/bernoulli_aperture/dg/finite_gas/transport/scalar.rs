@@ -23,6 +23,9 @@ pub type FiniteGasScalarApertureTransportCandidate =
 impl FiniteGasTransportNode for ApertureDg {
     type Step<S> = FiniteGasApertureDgStep<S>;
     type Input = FiniteGasApertureTransportInput;
+    type PreparedHeat = FiniteGasDgInternalHeat;
+
+    fn internal_heat(prepared: &Self::PreparedHeat) -> FiniteGasDgInternalHeat { *prepared }
 
     fn transport_input(
         input: &Self::Input,
@@ -78,13 +81,13 @@ impl FiniteGasTransportNode for ApertureDg {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
-        heat: FiniteGasDgInternalHeat,
+        heat: &Self::PreparedHeat,
         evolve: impl FnMut(
             &ClosedGasParcel, f64, f64, &mut C,
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
-        if heat != FiniteGasDgInternalHeat::default() {
+        if *heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
                 "scalar apertures do not own source-wall gas heat integrals",
             ));

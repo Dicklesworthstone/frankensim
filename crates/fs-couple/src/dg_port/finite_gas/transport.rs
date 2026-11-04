@@ -36,6 +36,9 @@ pub type FiniteGasDgPortTransportCandidate =
 impl FiniteGasTransportNode for DgPortLoad {
     type Step<S> = FiniteGasDgPortStep<S>;
     type Input = FiniteGasDgTransportInput;
+    type PreparedHeat = FiniteGasDgInternalHeat;
+
+    fn internal_heat(prepared: &Self::PreparedHeat) -> FiniteGasDgInternalHeat { *prepared }
 
     fn transport_input(
         input: &Self::Input,
@@ -80,7 +83,7 @@ impl FiniteGasTransportNode for DgPortLoad {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
-        heat: FiniteGasDgInternalHeat,
+        heat: &Self::PreparedHeat,
         evolve: impl FnMut(
             &ClosedGasParcel,
             f64,
@@ -89,7 +92,7 @@ impl FiniteGasTransportNode for DgPortLoad {
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
-        if heat != FiniteGasDgInternalHeat::default() {
+        if *heat != FiniteGasDgInternalHeat::default() {
             return Err(FiniteGasDgError::Invalid(
                 "complete passive loads do not own source-wall gas heat integrals",
             ));
@@ -108,7 +111,10 @@ impl FiniteGasTransportNode for DgPortLoad {
             port_work_j: step.acoustic.ledger.port_work_step_j,
             acoustic_dissipation_j: step.acoustic_dissipation_j,
             parameter_work_j: step.refresh.parameter_work_j,
-            heat: FiniteGasDgInternalHeat::default(),
+            heat: FiniteGasDgInternalHeat {
+                molecular_heat_j: step.molecular_heat_j,
+                viscous_heat_j: step.viscous_heat_j + step.terminal_viscous_heat_j,
+            },
         }
     }
 
