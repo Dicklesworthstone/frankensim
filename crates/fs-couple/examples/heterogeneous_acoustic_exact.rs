@@ -2,8 +2,13 @@
 //!
 //! cargo run -p fs-couple --example heterogeneous_acoustic_exact -- cold-hot-air 4 160 0.00025 100
 //! cargo run -p fs-couple --example heterogeneous_acoustic_exact -- air-water 8 320 0.000125 100
-//! Arguments: CASE NX STEPS DT_S FREQUENCY_HZ. NX is even so the material
-//! interface at x=0.5 m is an actual tetrahedral face. The 1 x 0.1 x 0.1 m tube
+//! Volume-only drive with a 1e-6 m^3/s peak injection into the left fluid:
+//! cargo run -p fs-couple --example heterogeneous_acoustic_exact -- cold-hot-air 4 160 0.00025 100 0 1e-6
+//! Arguments: CASE NX STEPS DT_S FREQUENCY_HZ [INLET_VELOCITY_M_S VOLUME_FLOW_M3_S].
+//! The optional amplitudes must appear together and be finite and signed;
+//! zero disables that input. Defaults are 1e-4 m/s and zero m^3/s.
+//! NX is even so the material interface at x=0.5 m is an actual tetrahedral face.
+//! The 1 x 0.1 x 0.1 m tube
 //! retains every P1 pressure/potential coordinate, including the potential gauge.
 //! Preparation uses a bounded dense exponential; this is a small-domain example,
 //! not a modal model or a sparse large-domain time solver.
@@ -13,16 +18,21 @@
 //! material states supply both density and sound speed. The side walls are rigid.
 //! Each end has the local real admittance 1/(rho*c) of its own fluid. This load
 //! matches normally incident plane waves, not arbitrary three-dimensional waves.
-//! A 1e-4 m/s sine velocity source acts at the inlet in parallel with that load.
-//! Its midpoint value is HELD over each interval; exact propagation does not
+//! A sine velocity source acts at the inlet in parallel with that load.
+//! The optional distributed source has a fixed shape of 200 m^-3 throughout
+//! the original left half (0.005 m^3), zero elsewhere, and unit volume integral.
+//! Its volume-flow amplitude [m^3/s] prescribes injection into continuity;
+//! no mass-transfer or heat-release law is inferred. Both amplitudes multiply
+//! the SAME sine. Its midpoint value is HELD over each interval; propagation does not
 //! remove this source approximation or the FE spatial error. Initial fields
 //! are at rest, so the output includes the physical startup transient.
 //!
 //! Stdout is CSV of pressure, particle velocity and instantaneous intensity at
 //! the SAME interface point approached from each fluid. The original one-sided
 //! gradients are reported; their normal velocities are not averaged or forced
-//! to agree. Stderr reports physical stored energy and cumulative source work
-//! from the integrated conjugate pressure, with independently integrated
+//! to agree. Stderr reports physical stored energy and cumulative total source
+//! work, with separate signed boundary and volume contributions from their
+//! integrated conjugate pressures. It also reports independently integrated
 //! boundary absorption and the signed work defect. Refine NX and DT_S separately
 //! at fixed duration/frequency; samples are not an antialiased audio recording.
 //! Media/geometry are frozen, bulk loss is absent, and no heat/mass/phase transfer
@@ -31,6 +41,7 @@
 use std::error::Error;
 
 use fs_couple::cavity_modal::interior::heterogeneous::regions::FluidRegionsInterior;
+use fs_feec::acoustics::helmholtz::heterogeneous::HeterogeneousError;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::{
     ResistiveBoundary,
     exact::{ExactTimeLimits, ExactVelocityPort},
@@ -45,9 +56,9 @@ use fs_thermochem::water::if97::{If97Region, If97State};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 6 {
+    if args.len() != 6 && args.len() != 8 {
         return Err(
-            "usage: heterogeneous_acoustic_exact air-water|cold-hot-air NX STEPS DT_S FREQUENCY_HZ"
+            "usage: heterogeneous_acoustic_exact air-water|cold-hot-air NX STEPS DT_S FREQUENCY_HZ [INLET_VELOCITY_M_S VOLUME_FLOW_M3_S]"
                 .into(),
         );
     }
@@ -55,6 +66,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let steps: usize = args[3].parse()?;
     let dt: f64 = args[4].parse()?;
     let frequency: f64 = args[5].parse()?;
+    let (inlet_velocity_m_s, volume_flow_m3_s): (f64, f64) = if args.len() == 8 {
+        (args[6].parse()?, args[7].parse()?)
+    } else {
+        (1e-4, 0.0)
+    };
+    if !inlet_velocity_m_s.is_finite() || !volume_flow_m3_s.is_finite() {
+        return Err(
+            "inlet velocity [m/s] and volume flow [m^3/s] must be finite signed amplitudes".into(),
+        );
+    }
     if !(2..=14).contains(&nx)
         || nx % 2 != 0
         || !(1..=200_000).contains(&steps)
@@ -69,10 +90,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let limits = ExactTimeLimits::default();
     let pressure_dofs = 4 * (nx + 1);
-    // The original pHS cap counts potential, momentum, the source and affine
+    let input_count = usize::from(inlet_velocity_m_s != 0.0) + usize::from(volume_flow_m3_s != 0.0);
+    // The original pHS cap counts potential, momentum, each input and affine
     // coordinate, then doubles that block for the flow integrals. Never trim it.
     if pressure_dofs > limits.max_dofs
-        || 2 * (2 * pressure_dofs + 2) > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+        || 2 * (2 * pressure_dofs + input_count + 1) > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
     {
         return Err("requested full field exceeds the original exact preparation capacity".into());
     }
@@ -125,11 +147,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter(|face| face.iter().all(|&v| positions[v as usize][0] == x))
             .collect::<Vec<_>>()
     };
-    let source = ExactVelocityPort {
-        profile: end_faces(0.0)
-            .into_iter()
-            .map(|face| (face, [1.0; 3]))
-            .collect(),
+    let ports = if inlet_velocity_m_s != 0.0 {
+        vec![ExactVelocityPort {
+            profile: end_faces(0.0)
+                .into_iter()
+                .map(|face| (face, [1.0; 3]))
+                .collect(),
+        }]
+    } else {
+        Vec::new()
+    };
+    let volume_source = if volume_flow_m3_s != 0.0 {
+        Some(acoustic.operator().volume_velocity_source(
+            3,
+            &mut |element, _| {
+                Ok::<_, HeterogeneousError>(if regions[element] == 0 { 200.0 } else { 0.0 })
+            },
+            &mut || false,
+        )?)
+    } else {
+        None
     };
     let mut boundaries = Vec::with_capacity(2);
     for region in 0..2 {
@@ -146,10 +183,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             medium.sound_speed_m_s()
         );
     }
-    let prepared =
+    let prepared = if let Some(source) = &volume_source {
+        acoustic.operator().prepare_exact_time_with_volume_sources(
+            dt,
+            &boundaries,
+            &ports,
+            &[source],
+            limits,
+            &mut || false,
+        )?
+    } else {
         acoustic
             .operator()
-            .prepare_exact_time(dt, &boundaries, &[source], limits, &mut || false)?;
+            .prepare_exact_time(dt, &boundaries, &ports, limits, &mut || false)?
+    };
     // Both probes use one fixed interface triangle, with each element's own
     // material density and original potential gradient. No interface averaging.
     let face = geometry
@@ -193,27 +240,58 @@ fn main() -> Result<(), Box<dyn Error>> {
         geometry.ndof(),
         geometry.tetrahedra().len()
     );
+    eprintln!("# inlet_velocity_m_s={inlet_velocity_m_s},volume_flow_m3_s={volume_flow_m3_s}");
     eprintln!(
-        "time_s,kinetic_j,compression_j,source_work_j,absorbed_j,cumulative_defect_j,step_defect_j"
+        "time_s,kinetic_j,compression_j,source_work_j,absorbed_j,cumulative_defect_j,step_defect_j,boundary_source_work_j,volume_source_work_j"
     );
     println!("time_s,region,pressure_pa,vx_m_s,vy_m_s,vz_m_s,ix_w_m2,iy_w_m2,iz_w_m2");
     let mut state = prepared.zero_state();
     let initial_energy = prepared.energy(&state)?.total_j();
     let mut supplied = 0.0;
+    let mut boundary_supplied = 0.0;
+    let mut volume_supplied = 0.0;
     let mut absorbed = 0.0;
     for index in 0..steps {
         let phase = core::f64::consts::TAU * (frequency * dt) * (index as f64 + 0.5);
-        let amplitude = 1e-4 * det::sin(phase);
-        let step = prepared.step(&state, &[amplitude], &mut || false)?;
+        let sine = det::sin(phase);
+        let inlet_amplitudes = [inlet_velocity_m_s * sine];
+        let inlet_amplitudes = if ports.is_empty() {
+            &[][..]
+        } else {
+            &inlet_amplitudes[..]
+        };
+        let volume_amplitude = volume_flow_m3_s * sine;
+        let step = if volume_source.is_some() {
+            prepared.step_with_volume_sources(
+                &state,
+                inlet_amplitudes,
+                &[volume_amplitude],
+                &mut || false,
+            )?
+        } else {
+            prepared.step(&state, inlet_amplitudes, &mut || false)?
+        };
         // Independently use the returned conjugate-pressure integral. Its
-        // multiplication by the actual held velocity is source work, not heat.
-        supplied += amplitude * step.integrated_port_pressure_pa_m2_s[0];
+        // multiplication by each actual held amplitude is signed source work.
+        let boundary_work: f64 = inlet_amplitudes
+            .iter()
+            .zip(&step.integrated_port_pressure_pa_m2_s)
+            .map(|(amplitude, integral)| amplitude * integral)
+            .sum();
+        let volume_work = if volume_source.is_some() {
+            volume_amplitude * step.integrated_volume_source_pressure_pa_s[0]
+        } else {
+            0.0
+        };
+        boundary_supplied += boundary_work;
+        volume_supplied += volume_work;
+        supplied += boundary_work + volume_work;
         absorbed += step.work.boundary_dissipation_j;
         let energy = prepared.energy(&step.state)?;
         let time = (index + 1) as f64 * dt;
         let defect = energy.total_j() - initial_energy + absorbed - supplied;
         eprintln!(
-            "{time},{},{},{supplied},{absorbed},{defect},{}",
+            "{time},{},{},{supplied},{absorbed},{defect},{},{boundary_supplied},{volume_supplied}",
             energy.kinetic_j,
             energy.compression_j,
             step.work.balance_residual_j()
