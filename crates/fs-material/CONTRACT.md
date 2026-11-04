@@ -7011,6 +7011,15 @@ positive storage and numerical energy balance before mutation. At most 64
 strictly positive branches are admitted, or an empty elastic spectrum.
 Instantaneous stress jumps have zero viscous heat.
 
+Total strain integrates the same modal rate used for work, avoiding stress
+subtraction divided by a weak equilibrium modulus. Whole-ramp strain bounds sum
+monotone integrated initial and forcing terms, retaining finite long-hold
+limits. Modal roundoff is closed through the instantaneous modulus only within
+a bound derived from uncancelled reconstruction terms; strict constitutive
+coherence and the independent energy ledger must still pass. This numerical
+closure adds no physical load step, work or heat. Zero-duration no-ops preserve
+every admitted state field bitwise.
+
 `visco::source::ResolvedPronyReference` consumes dimensioned scalar
 `prony-branch-count`, `prony-equilibrium-modulus`, and indexed
 `prony-modulus-N` / `prony-relaxation-time-N` claims under the original typed

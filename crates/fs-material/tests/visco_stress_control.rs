@@ -82,6 +82,94 @@ fn g1_standard_linear_solid_creep_and_zero_load_recovery_match_closed_form() {
 }
 
 #[test]
+fn g1_near_fluid_creep_preserves_analytical_strain_work_and_heat() {
+    let e = 1e9;
+    let tau = 1.0;
+    let time = 1.0;
+    for e_inf in [1.0, 1e-3, 1e-6] {
+        let law = GeneralizedMaxwell::new(e_inf, vec![(e, tau)]).unwrap();
+        let control = StressControlledMaxwell::new(&law).unwrap();
+        let e0 = e_inf + e;
+        let creep_rate = (e_inf / e0) / tau;
+        for stress in [-1e5, 1e5] {
+            let mut state = law.state();
+            control.step(&mut state, stress, 0.0).unwrap();
+            let initial = state.clone();
+            let report = control.step(&mut state, stress, time).unwrap();
+            // J(t) = 1/E0 + E/(E_inf E0) (1-exp(-t/tau_creep)).
+            // exp_m1 retains the exact weak-spring creep increment; subtracting
+            // the branch stress from total stress loses it at these contrasts.
+            let expected =
+                stress / e0 + (stress / e_inf) * (e / e0) * -(-creep_rate * time).exp_m1();
+            let heat = (e / tau)
+                * initial.q[0].powi(2)
+                * time
+                * (-(-2.0 * creep_rate * time).exp_m1() / (2.0 * creep_rate * time));
+            close(state.strain, expected, 5e-14);
+            close(
+                report.incremental_work_j_m3,
+                stress * (expected - initial.strain),
+                5e-14,
+            );
+            close(report.incremental_dissipated_j_m3, heat, 5e-14);
+            close(state.work, stored(&law, &state) + state.dissipated, 5e-14);
+            // A hold is monotone: the bounds should retain that physical path,
+            // rather than widening with the branch/equilibrium modulus ratio.
+            close(report.strain_bounds[0], initial.strain.min(expected), 5e-14);
+            close(report.strain_bounds[1], initial.strain.max(expected), 5e-14);
+        }
+    }
+}
+
+#[test]
+fn g3_near_fluid_stress_ramps_subdivide_and_bound_interior_creep() {
+    let law = GeneralizedMaxwell::new(1e-6, vec![(1e9, 1.0)]).unwrap();
+    let control = StressControlledMaxwell::new(&law).unwrap();
+    let mut initial = law.state();
+    control.step(&mut initial, 1e5, 0.0).unwrap();
+    for (target, duration) in [(1e5, 1.0), (2e5, 0.75), (-1e5, 0.5), (0.0, 0.5)] {
+        let mut whole = initial.clone();
+        let report = control.step(&mut whole, target, duration).unwrap();
+        let mut split = initial.clone();
+        for i in 1..=37 {
+            let stress = initial.stress + (target - initial.stress) * i as f64 / 37.0;
+            control.step(&mut split, stress, duration / 37.0).unwrap();
+            assert!(split.strain >= report.strain_bounds[0] - 1e-16);
+            assert!(split.strain <= report.strain_bounds[1] + 1e-16);
+        }
+        close(split.strain, whole.strain, 2e-12);
+        close(split.work, whole.work, 2e-12);
+        close(split.dissipated, whole.dissipated, 2e-12);
+        close(split.q[0], whole.q[0], 2e-12);
+        // The accepted endpoint remains a valid initial state for recovery.
+        control.step(&mut whole, target, 0.25).unwrap();
+        control.step(&mut split, target, 0.25).unwrap();
+        close(split.strain, whole.strain, 2e-12);
+    }
+}
+
+#[test]
+fn g0_zero_duration_noop_preserves_admitted_multibranch_history_bitwise() {
+    let law = GeneralizedMaxwell::new(3.0, vec![(2.0, 0.05), (7.0, 0.8), (1.5, 8.0)]).unwrap();
+    let control = StressControlledMaxwell::new(&law).unwrap();
+    let mut state = law.state();
+    law.step(&mut state, 0.07, 0.2);
+    control.step(&mut state, -0.18, 4.3).unwrap();
+    // Entry coherence permits a rounded constitutive stress. This does not
+    // authorize correcting an existing state when no time or load advances.
+    state.stress = state.stress.next_up();
+    let before = state.clone();
+    let report = control.step(&mut state, before.stress, 0.0).unwrap();
+    same_state(&state, &before);
+    assert_eq!(report.strain_bounds, [before.strain; 2]);
+    assert_eq!(report.strain_rate_bounds_s, [0.0; 2]);
+    assert_eq!(report.incremental_work_j_m3, 0.0);
+    assert_eq!(report.incremental_dissipated_j_m3, 0.0);
+    assert_eq!(report.energy_balance_residual_j_m3, 0.0);
+    close(report.stored_energy_j_m3, stored(&law, &before), 2e-15);
+}
+
+#[test]
 fn g1_stress_ramps_match_independent_simpson_work_and_heat_on_both_series_sides() {
     let law = GeneralizedMaxwell::new(3.0, vec![(7.0, 2.0)]).unwrap();
     let control = StressControlledMaxwell::new(&law).unwrap();

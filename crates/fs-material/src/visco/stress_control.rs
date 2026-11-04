@@ -13,7 +13,7 @@
 //! separate concerns. The returned interval sums are ordinary floating-point
 //! bounds, not certified outward-rounded enclosures.
 
-use super::{GeneralizedMaxwell, PronyState, ViscoError, prony_ramp};
+use super::{GeneralizedMaxwell, PronyRamp, PronyState, ViscoError};
 use fs_la::eigen::jacobi_eigh;
 use fs_math::det;
 
@@ -51,7 +51,7 @@ pub struct StressRampResponse {
     pub stored_energy_j_m3: f64,
     /// Independent work minus change in storage minus independent dashpot heat.
     pub energy_balance_residual_j_m3: f64,
-    /// Whole-ramp bounds from monotone modal endpoint intervals.
+    /// Whole-ramp bounds from integrated monotone modal response terms.
     pub strain_bounds: [f64; 2],
     /// Whole-ramp rate bounds [1/s]. A nontrivial instantaneous jump has
     /// `[-infinity,+infinity]`; a zero-duration no-op has `[0,0]`.
@@ -70,7 +70,6 @@ pub struct StressControlledMaxwell {
     rates: Vec<f64>,
     modes: Vec<f64>,
     forcing: Vec<f64>,
-    branch_stress: Vec<f64>,
 }
 impl StressControlledMaxwell {
     pub fn new(law: &GeneralizedMaxwell) -> Result<Self> {
@@ -105,7 +104,6 @@ impl StressControlledMaxwell {
                 rates: vec![],
                 modes: vec![],
                 forcing: vec![],
-                branch_stress: vec![],
             });
         }
         let scale = branch_rates.iter().copied().fold(0.0_f64, f64::max);
@@ -163,14 +161,12 @@ impl StressControlledMaxwell {
             .map(|r| positive(r * scale, "unrepresentable stress relaxation rate"))
             .collect::<Result<_>>()?;
         let mut forcing = vec![0.0; n];
-        let mut branch_stress = vec![0.0; n];
         for i in 0..n {
             for j in 0..n {
                 forcing[i] += modes[j * n + i] * (weights[j] / e0);
-                branch_stress[i] += modes[j * n + i] * (law.terms[j].0 / weights[j]);
             }
             require(
-                forcing[i].is_finite() && branch_stress[i].is_finite(),
+                forcing[i].is_finite(),
                 "unrepresentable stress transform coefficients",
             )?;
         }
@@ -181,7 +177,6 @@ impl StressControlledMaxwell {
             rates,
             modes,
             forcing,
-            branch_stress,
         })
     }
 
@@ -230,68 +225,108 @@ impl StressControlledMaxwell {
         let before = energy(&self.law, state.strain, &state.q)?;
         let delta_stress = stress_new - state.stress;
         require(delta_stress.is_finite(), "unrepresentable stress increment")?;
+        if dt == 0.0 && delta_stress == 0.0 {
+            // Entry coherence admits floating-point roundoff, but a no-op
+            // must not use that allowance to alter an accepted history.
+            return Ok(StressRampResponse {
+                stress: state.stress,
+                strain: state.strain,
+                incremental_work_j_m3: 0.0,
+                incremental_dissipated_j_m3: 0.0,
+                stored_energy_j_m3: before,
+                energy_balance_residual_j_m3: 0.0,
+                strain_bounds: [state.strain; 2],
+                strain_rate_bounds_s: [0.0; 2],
+            });
+        }
         let mut q = state.q.clone();
         let mut work = (0.5 * state.stress + 0.5 * stress_new) * (delta_stress / self.e0);
         let mut heat = 0.0;
-        let (strain, strain_bounds, rate_bounds);
+        let mut reconstruction_scale = stress_new.abs();
+        let (mut strain, mut strain_bounds, rate_bounds);
         if dt == 0.0 || n == 0 {
             let delta_strain = delta_stress / self.e0;
             strain = state.strain + delta_strain;
-            for q in &mut q {
+            reconstruction_scale +=
+                self.law.e_inf * state.strain.abs() + self.law.e_inf * delta_strain.abs();
+            for (&(e, _), q) in self.law.terms.iter().zip(&mut q) {
+                reconstruction_scale += e * q.abs() + e * delta_strain.abs();
                 *q += delta_strain;
             }
             strain_bounds = [state.strain.min(strain), state.strain.max(strain)];
             rate_bounds = if dt > 0.0 {
                 [delta_strain / dt; 2]
-            } else if delta_stress == 0.0 {
-                [0.0; 2]
             } else {
                 [f64::NEG_INFINITY, f64::INFINITY]
             };
         } else {
-            let mut next = vec![0.0; n];
-            let mut branch_bounds = [0.0; 2];
-            let mut rates = [(delta_stress / self.e0) / dt; 2];
+            let mut next = vec![(0.0, 0.0); n];
+            let elastic_increment = delta_stress / self.e0;
+            let mut increment = elastic_increment;
+            let mut increment_bounds = [elastic_increment.min(0.0), elastic_increment.max(0.0)];
+            let mut rates = [elastic_increment / dt; 2];
             for i in 0..n {
-                let initial = (0..n)
-                    .map(|j| self.modes[j * n + i] * (self.weights[j] * state.q[j]))
-                    .sum::<f64>();
+                let mut initial = 0.0;
+                let mut initial_magnitude = 0.0;
+                for j in 0..n {
+                    let term = self.modes[j * n + i] * (self.weights[j] * state.q[j]);
+                    initial += term;
+                    initial_magnitude += term.abs();
+                }
                 let delta = self.forcing[i] * delta_stress;
-                let (end, mean, loss) = prony_ramp(initial, delta, self.rates[i] * dt);
+                let ramp = PronyRamp::new(self.rates[i] * dt);
+                let (end, mean, loss) = ramp.apply(initial, delta);
                 require(
                     end.is_finite() && mean.is_finite() && loss.is_finite() && loss >= 0.0,
                     "unrepresentable stress-controlled modal history",
                 )?;
-                next[i] = end;
+                next[i] = (
+                    end,
+                    ramp.decay * initial_magnitude + (ramp.ramp * delta).abs(),
+                );
                 heat += loss / self.rates[i];
-                let (zeroth, first) = modal_integrals(initial, delta, self.rates[i], dt, mean);
+                let (zeroth, first, parts) =
+                    modal_integrals(initial, delta, self.rates[i], dt, mean, &ramp);
+                increment += self.forcing[i] * zeroth;
                 work += (self.forcing[i] * zeroth) * state.stress
                     + (self.forcing[i] * first) * delta_stress;
-                let a = self.branch_stress[i] * initial;
-                let b = self.branch_stress[i] * end;
-                branch_bounds[0] += a.min(b);
-                branch_bounds[1] += a.max(b);
+                // Each integrated initial/forcing term is monotone from zero
+                // to its endpoint. Summing their intervals also bounds paths
+                // that reverse direction, without dividing by E_inf or using
+                // dt times a potentially enormous initial relaxation rate.
+                for part in parts {
+                    let contribution = self.forcing[i] * part;
+                    increment_bounds[0] += contribution.min(0.0);
+                    increment_bounds[1] += contribution.max(0.0);
+                }
                 let a = self.forcing[i] * initial;
                 let b = self.forcing[i] * end;
                 rates[0] += a.min(b);
                 rates[1] += a.max(b);
             }
             for (j, q) in q.iter_mut().enumerate() {
-                *q = (0..n).map(|i| self.modes[j * n + i] * next[i]).sum::<f64>() / self.weights[j];
+                let mut value = 0.0;
+                let mut magnitude = 0.0;
+                for (i, &(end, scale)) in next.iter().enumerate() {
+                    let mode = self.modes[j * n + i];
+                    value += mode * end;
+                    magnitude += mode.abs() * scale;
+                }
+                *q = value / self.weights[j];
+                reconstruction_scale += (magnitude / self.weights[j]) * self.law.terms[j].0;
             }
-            let branch_sum = self
-                .law
-                .terms
-                .iter()
-                .zip(&q)
-                .map(|(&(e, _), &q)| e * q)
-                .sum::<f64>();
-            strain = (stress_new - branch_sum) / self.law.e_inf;
+            // Integrate the same strain rate used by external work. Recovering
+            // strain from (stress - branch stress)/E_inf loses creep accuracy
+            // when the equilibrium spring is weak compared with the branches.
+            strain = state.strain + increment;
+            reconstruction_scale += self.law.e_inf * state.strain.abs()
+                + self.law.e_inf * increment_bounds[0].abs()
+                + self.law.e_inf * increment_bounds[1].abs();
             strain_bounds = [
-                ((state.stress.min(stress_new) - branch_bounds[1]) / self.law.e_inf)
+                (state.strain + increment_bounds[0])
                     .min(state.strain)
                     .min(strain),
-                ((state.stress.max(stress_new) - branch_bounds[0]) / self.law.e_inf)
+                (state.strain + increment_bounds[1])
                     .max(state.strain)
                     .max(strain),
             ];
@@ -306,6 +341,53 @@ impl StressControlledMaxwell {
                 && heat.is_finite()
                 && heat >= 0.0,
             "unrepresentable stress ramp response",
+        )?;
+        // Roundoff in the modal transforms can leave a tiny constitutive
+        // residual, especially when unloading cancels the branch history.
+        // Close only that residual through the instantaneous modulus, never
+        // through the weak equilibrium spring. The allowance uses the actual
+        // reconstructed terms before cancellation, not just the target stress.
+        // This is numerical closure, not an additional physical stress jump.
+        let reconstructed = self.law.e_inf * strain
+            + self
+                .law
+                .terms
+                .iter()
+                .zip(&q)
+                .map(|(&(e, _), &q)| e * q)
+                .sum::<f64>();
+        let stress_residual = stress_new - reconstructed;
+        let relative_roundoff = 128.0 * f64::EPSILON * (n + 1) as f64;
+        require(
+            reconstruction_scale.is_finite()
+                && stress_residual.is_finite()
+                && stress_residual.abs()
+                    <= relative_roundoff * reconstruction_scale.max(f64::MIN_POSITIVE),
+            "stress ramp constitutive reconstruction is numerically unresolved",
+        )?;
+        let correction = stress_residual / self.e0;
+        if correction != 0.0 {
+            strain += correction;
+            for q in &mut q {
+                *q += correction;
+            }
+            strain_bounds[0] = strain_bounds[0].min(strain);
+            strain_bounds[1] = strain_bounds[1].max(strain);
+        }
+        let mut corrected_stress = self.law.e_inf * strain;
+        let mut corrected_magnitude = corrected_stress.abs() + stress_new.abs();
+        for (&(e, _), &q) in self.law.terms.iter().zip(&q) {
+            corrected_stress += e * q;
+            corrected_magnitude += (e * q).abs();
+        }
+        require(
+            strain.is_finite()
+                && q.iter().all(|q| q.is_finite())
+                && corrected_stress.is_finite()
+                && corrected_magnitude.is_finite()
+                && (corrected_stress - stress_new).abs()
+                    <= relative_roundoff * corrected_magnitude.max(f64::MIN_POSITIVE),
+            "stress ramp numerical closure is unresolved",
         )?;
         let stored = energy(&self.law, strain, &q)?;
         let residual = work - (stored - before) - heat;
@@ -346,9 +428,19 @@ impl StressControlledMaxwell {
     }
 }
 
-// Integrals of y(t) and (t/dt)y(t), respectively. Computing them directly for
-// large lambda*dt retains finite creep work even when the mean underflows.
-fn modal_integrals(y0: f64, delta: f64, rate: f64, dt: f64, mean: f64) -> (f64, f64) {
+// Integrals of y(t) and (t/dt)y(t), plus the separate initial and forcing
+// contributions to the first integral. Both contributions are monotone over
+// the ramp, so their endpoint intervals bound strain even through reversal.
+// Computing them directly for large lambda*dt retains finite creep strain and
+// work even when the mean underflows. Reuse the original Prony coefficients.
+fn modal_integrals(
+    y0: f64,
+    delta: f64,
+    rate: f64,
+    dt: f64,
+    mean: f64,
+    ramp: &PronyRamp,
+) -> (f64, f64, [f64; 2]) {
     let r = rate * dt;
     if r < 0.1 {
         // d=integral_0^1 u exp(-r*u)du; e=(1/2-d)/r.
@@ -371,15 +463,20 @@ fn modal_integrals(y0: f64, delta: f64, rate: f64, dt: f64, mean: f64) -> (f64, 
                                 + r * (1.0 / 45360.0
                                     + r * (-1.0 / 403200.0
                                         + r * (1.0 / 3991680.0 - r / 43545600.0))))))));
-        (dt * mean, dt * (d * y0 + e * delta))
+        (
+            dt * mean,
+            dt * (d * y0 + e * delta),
+            [dt * (ramp.ramp * y0), dt * (ramp.mean_ramp * delta)],
+        )
     } else {
-        let a = det::exp(-r);
+        let a = ramp.decay;
         let s = -det::expm1(-r);
-        let b = s / r;
+        let b = ramp.ramp;
         let d = (b - a) / r;
         (
             (s * y0 + (1.0 - b) * delta) / rate,
             ((b - a) * y0 + (0.5 - d) * delta) / rate,
+            [(s * y0) / rate, ((1.0 - b) * delta) / rate],
         )
     }
 }
