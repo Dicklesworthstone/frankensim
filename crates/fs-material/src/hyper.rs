@@ -422,9 +422,9 @@ impl Hyperelastic {
     ///
     /// Requires an admissible F. Ogden's spectral lift carries the exact
     /// value, gradient and Hessian at the primal point, including repeated
-    /// stretches; derivatives above second order are not claimed. NH, MR,
-    /// and HGO use equivalent objective strain expressions near rigid
-    /// rotations so small stored energies survive unit-invariant subtraction.
+    /// stretches; derivatives above second order are not claimed. All four
+    /// laws use equivalent objective strain expressions near rigid rotations
+    /// so small stored energies survive unit-invariant subtraction.
     pub fn energy<T: Real>(&self, f: &[T; 9]) -> T {
         match &self.model {
             HyperelasticModel::NeoHookean { mu, lambda } => neo_hookean_energy(f, *mu, *lambda),
@@ -458,6 +458,11 @@ impl Hyperelastic {
             }
             HyperelasticModel::Ogden { terms, .. } => {
                 let j = det3(f);
+                if let Some(a) = small_objective_strain(f, j)
+                    && let Some(energy) = spectral::small_ogden_energy(&a, terms)
+                {
+                    return energy;
+                }
                 let jm23 = (T::from_f64(-2.0 / 3.0) * j.ln()).exp();
                 let cbar = core::array::from_fn(|ij| {
                     let (i, k) = (ij / 3, ij % 3);

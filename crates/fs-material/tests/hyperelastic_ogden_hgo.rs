@@ -366,6 +366,163 @@ fn g3_neo_hookean_tangent_transforms_with_the_physical_frame() {
 }
 
 #[test]
+fn g1_ogden_retains_small_shear_storage_and_work() {
+    // The exact principal log stretches of F=I+gamma e1*e2^T are
+    // [+asinh(gamma/2), -asinh(gamma/2), 0]. This oracle never forms
+    // unit-size invariants or subtracts cosh(x)-1.
+    let law = ogden(20.0);
+    for amplitude in [1e-2, 1e-6, 1e-8, 1e-10, 1e-12] {
+        for shear in [-amplitude, amplitude] {
+            let mut f = I;
+            f[1] = shear;
+            let (energy, stress, tangent) = ogden_simple_shear(&TRELOAR, shear);
+            close(law.energy(&f), energy, energy, 3e-13);
+            close(law.isochoric_energy(&f), energy, energy, 3e-13);
+            close(law.piola(&f).unwrap()[1], stress, stress.abs(), 5e-13);
+            close(law.tangent(&f).unwrap()[1][1], tangent, tangent, 7e-13);
+            let step = amplitude * 1e-3;
+            let (mut plus, mut minus) = (f, f);
+            plus[1] += step;
+            minus[1] -= step;
+            close(
+                (law.energy(&plus) - law.energy(&minus)) / (2.0 * step),
+                stress,
+                stress.abs(),
+                3e-10,
+            );
+        }
+    }
+}
+
+fn ogden_simple_shear(terms: &[OgdenTerm], shear: f64) -> (f64, f64, f64) {
+    let logarithmic_stretch = (shear / 2.0).asinh();
+    let first = 1.0 / (4.0 + shear * shear).sqrt();
+    let second = -shear * first * first * first;
+    let mut energy = 0.0;
+    let mut stress = 0.0;
+    let mut tangent = 0.0;
+    for term in terms {
+        let x = term.alpha * logarithmic_stretch;
+        energy += 4.0 * (term.mu_pa / term.alpha) * (0.5 * x).sinh().powi(2);
+        stress += 2.0 * term.mu_pa * x.sinh() * first;
+        tangent += 2.0 * term.mu_pa * (term.alpha * x.cosh() * first * first + x.sinh() * second);
+    }
+    (energy, stress, tangent)
+}
+
+#[test]
+fn g0_ogden_small_and_large_exponents_retain_the_original_shear_law() {
+    // Hold the infinitesimal shear modulus fixed. Small alpha must not lose
+    // storage in an O(alpha)-O(alpha) cancellation; negative exponents retain
+    // their original signs and large exponents retain their nonlinearity.
+    for alpha in [-512.0, -2.0, -1e-8, 1e-8, 2.0, 512.0] {
+        let terms = vec![OgdenTerm {
+            mu_pa: 2.0 * MU / alpha,
+            alpha,
+        }];
+        let law = Hyperelastic::new(
+            HyperelasticModel::Ogden {
+                terms: terms.clone(),
+                volumetric: Volumetric::Quadratic { kappa: 20.0 * MU },
+            },
+            4.0,
+        )
+        .unwrap();
+        for shear in [1e-4, -1e-8, 1e-12] {
+            let mut f = I;
+            f[1] = shear;
+            let (energy, stress, tangent) = ogden_simple_shear(&terms, shear);
+            close(law.energy(&f), energy, energy, 4e-13);
+            close(law.piola(&f).unwrap()[1], stress, stress.abs(), 6e-13);
+            close(law.tangent(&f).unwrap()[1][1], tangent, tangent, 8e-13);
+        }
+    }
+}
+
+#[test]
+fn g0_ogden_small_storage_retains_dilation_and_frame_indifference() {
+    let law = ogden(20.0);
+    for stretch in [0.998, 1.0, 1.002] {
+        let hydrostatic = diag([stretch; 3]);
+        assert_eq!(law.isochoric_energy(&hydrostatic), 0.0);
+        close(
+            law.tangent(&hydrostatic).unwrap()[1][1],
+            MU / (stretch * stretch),
+            MU,
+            8e-13,
+        );
+        for shear in [1e-3, 1e-8, 1e-12] {
+            let mut f = hydrostatic;
+            f[1] = stretch * shear;
+            let energy = ogden_simple_shear(&TRELOAR, f[1] / stretch).0;
+            close(law.isochoric_energy(&f), energy, energy, 5e-13);
+            let bulk = 10.0 * MU * (determinant(&f) - 1.0).powi(2);
+            close(law.energy(&f), energy + bulk, energy + bulk, 5e-13);
+            // An exact proper permutation retains acoustic-sized storage
+            // without introducing rounding of a general rotation matrix.
+            let qf = flat(matmul3(
+                &[[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]],
+                &matrix(&f),
+            ));
+            close(law.isochoric_energy(&qf), energy, energy, 5e-13);
+        }
+    }
+    let q = rotation([0.6, 0., 0.8], 0.71);
+    for shear in [1e-3, 1e-6] {
+        let mut f = I;
+        f[1] = shear;
+        let qf = flat(matmul3(&q, &matrix(&f)));
+        let energy = ogden_simple_shear(&TRELOAR, shear).0;
+        // Allow the O(epsilon) change in actual strain caused by representing
+        // QF; there is no artificial zeroing of the material's stored energy.
+        close(law.energy(&qf), energy, energy, 3e-8);
+        let expected = flat(matmul3(&q, &matrix(&law.piola(&f).unwrap())));
+        for (actual, expected) in law.piola(&qf).unwrap().into_iter().zip(expected) {
+            close(actual, expected, 20.0 * MU, 2e-14);
+        }
+        let (a, rotated) = (law.tangent(&f).unwrap(), law.tangent(&qf).unwrap());
+        for row in 0..9 {
+            for col in 0..9 {
+                let expected = (0..3)
+                    .flat_map(|i| (0..3).map(move |j| (i, j)))
+                    .map(|(i, j)| {
+                        q[row / 3][i] * a[3 * i + row % 3][3 * j + col % 3] * q[col / 3][j]
+                    })
+                    .sum();
+                close(rotated[row][col], expected, 20.0 * MU, 3e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_ogden_stable_branch_retains_finite_strain_and_full_derivatives() {
+    let law = ogden(20.0);
+    // Straddle the objective-strain branch and retain a finite-strain control.
+    for shear in [(1.0 - 1e-7) / 64.0, (1.0 + 1e-7) / 64.0, 0.4] {
+        let mut f = I;
+        f[1] = shear;
+        let (energy, stress, tangent) = ogden_simple_shear(&TRELOAR, shear);
+        close(law.energy(&f), energy, energy, 6e-11);
+        close(law.piola(&f).unwrap()[1], stress, stress.abs(), 2e-11);
+        close(law.tangent(&f).unwrap()[1][1], tangent, tangent, 3e-12);
+    }
+    let f = [
+        1.003, 0.004, -0.002, 0.001, 0.997, 0.003, -0.001, 0.002, 1.001,
+    ];
+    let piola = law.piola(&f).unwrap();
+    let step = 1e-7;
+    for i in 0..9 {
+        let (mut plus, mut minus) = (f, f);
+        plus[i] += step;
+        minus[i] -= step;
+        let derivative = (law.energy(&plus) - law.energy(&minus)) / (2.0 * step);
+        close(derivative, piola[i], 20.0 * MU, 1e-10);
+    }
+    fd_tangent(&law, f);
+}
+
+#[test]
 fn g1_neo_hookean_retains_small_shear_storage_and_work() {
     let mu = 3.2e6;
     let law = Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda: 7.1e6 }, 4.0).unwrap();

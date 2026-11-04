@@ -2784,8 +2784,21 @@ homogenization, the P2 milestone.
   consistent. The ordinary invariant expression remains outside that numerical
   branch. Full and split Neo-Hookean energy use the same helper. This addresses
   the zero-energy cancellation of tiny simple shear without changing the
-  physical potential or the original stretch domain; it does not establish
-  equivalent small-strain accuracy for the other energy families.
+  physical potential or the original stretch domain.
+  Ogden also retains small elastic storage through `L=dev(log(C))`, evaluated
+  from the objective increment with bounded matrix-log and exponential series.
+  Cayley-Hamilton scalar recurrences avoid an eigensolve and heap allocation
+  on this branch. Every term starts at quadratic strain order; factoring the
+  original `mu*alpha` preserves positive/negative and near-zero exponent
+  limits without cancellation. The series use the same `Real` scalar for
+  energy, stress and tangent. Admission requires `C-I` entries at most `1/64`,
+  a normalized traceless strain infinity norm at most `1/16`, and an exponent
+  bound guaranteeing `||alpha L/2||_inf <= 1/8`; the original spectral owner
+  remains outside those numerical bounds. This preserves the finite-strain
+  law and stretch envelope, including pure dilation and finite rotations.
+  Four focused G0/G1 regressions in `hyperelastic_ogden_hgo.rs` check independent
+  simple-shear work/stress/tangent down to `1e-12`, signed and near-zero
+  exponents, dilation/rotation, branch continuity and all tangent columns.
 - `hyper::acoustic` prepares the original full finite-strain tangent once and
   evaluates current-direction wave modes without repeating constitutive AD.
   It uses the 3-D compressible law, not a plane-stress/incompressibility
