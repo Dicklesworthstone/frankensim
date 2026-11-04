@@ -20953,72 +20953,79 @@ differences, preserving common translation and uncontacted modes. Source,
 ordered material identities, fixed normal and numerical budgets remain bound.
 
 The free constructor retains its original scope.
-`new_with_elastic_connection` instead admits exactly one original positive,
-undamped spring. It uses that connection's own column, stiffness and rest
-extension; the initial source indentation anchors its actual extension without
-moving accepted bodies. The source normal-motion solver resolves this elastic
-load together with adhesion, so stiffness and preload change capture and
-pull-off. Arbitrary elastic networks, physical damping, memory, radiating
+`new_with_elastic_connection` admits exactly one original positive undamped
+spring. `new_with_viscoelastic_connection` additionally admits that link's
+finite nonnegative viscous coefficient. Both use the original column,
+stiffness and rest extension without moving accepted bodies. This is one
+Kelvin--Voigt mechanical connection, not an inferred rate-dependent adhesive
+material law. Arbitrary elastic networks, component damping, memory, radiating
 coordinates and harmonic-only preparation remain outside this adapter.
 
-The scalar discrete gradient localizes attachment and pull-off. Separate
-contact and spring impulses and first time moments restore all original
-bodies through the existing event restoration owner. Branch changes preserve
-velocity and expose released contact storage separately; spring storage is
-continuous. Capture and rebound follow incoming energy, original elastic
-loading and source releases, without an invented restitution or snap impulse.
-Original body limits and the connection force bound over the complete event
-trajectory still apply.
+The source scalar discrete gradient resolves elastic load and passive
+midpoint viscous work together with adhesion. Separate contact, spring and
+dashpot impulses and first time moments restore the original bodies through
+the existing event restoration owner. Branch changes preserve velocity and
+release contact storage; spring storage is continuous and support dissipation
+remains a distinct finite-time account. Original body limits and the combined
+connection force bound over the complete trajectory still apply.
 
-The adapter independently reconstructs native spring extension, storage and
-work, reevaluates contact storage at restored geometry, and checks approach,
-speed, reaction work and whole mechanical energy. Distinct contact and spring
-gates keep those accounts separate from common and spectator motion. Spring
-storage remains internal to the native network: its original reaction and
-work port are retained, while contact work includes the actual native spring
-storage change. Frames expose spring energy, spring-work residual and the
-trajectory force bound.
+Native geometry independently supplies spring extension, storage, work and
+the actual endpoint spring-plus-dashpot reaction. A separate loss-sized gate
+reconstructs `sum(c * duration * midpoint_velocity^2)` from the original
+coefficient and sealed source segments. The native connection retains its
+spring storage, positive dissipation and internal port work
+`-delta_spring_energy - support_loss`. Adding that storage change and loss
+to the total reaction work isolates contact boundary work. Contact work,
+coordinate/speed compatibility and whole mechanical energy retain separate
+checks. No restitution, extra snap loss or heat fraction is invented.
 
 Accepted bodies, native clock, source history and observations publish
-together. `step_with_admission` can stage a receiving candidate before the
-final shared cancellation/publication boundary. Refusal leaves accepted
-mechanics unchanged; installation of an admitted receiving candidate is then
-infallible. Original `JkrSnapHeat` proposals consume sealed start/end states
-and ordered source events rather than editable work reports. Full motion
-continuation includes mass, support, policy, time and step identity, preventing
-replay even when the final contact state returns to its initial value.
-Prescribed-path calls cannot erase that chronology.
+together. `step_with_admission` stages a receiving candidate before the final
+shared cancellation/publication boundary. Frames are cloneable and retain a
+private optional shared immutable dissipation trace only for positive damping;
+the original scalar step remains copyable. Full source/mass/support/policy,
+time and step continuation prevents replay even after a closed contact cycle.
 
 ### Joint native mechanics and event-timed thermal transport
 
 `adhesive_normal_events::thermal::JkrThermalModalSystem` owns the original
-mechanical system, source-bound heat history and native thermal timeline.
-Read-only participant access prevents independent advancement. Free and
-single-spring mechanics share this composition. Each accepted interval uses
-`propose_timed_normal_motion` to transport heat to the actual snap timestamps,
-apply the declared surface shares after coincident native scheduled events,
-and continue ordinary transport to the endpoint on an explicit thermal clock.
+mechanics, source-bound heat history and native thermal timeline. Read-only
+participant access prevents independent advancement. The original constructor
+accepts free or undamped supported mechanics. Damped mechanics require
+`new_with_support_heat` with an explicit separate `JkrViscousHeatRoute`;
+omitting the support destination refuses construction.
 
-The shared gate checks the independently regenerated source release against
-the mechanical debit and composes native relative-energy residuals with
-double-double accumulation. Boundary/source heat, incoming material energy
-and the declared outside destination retain their original accounts; large
-absolute caloric reference energies do not replace small-work checks. A
-caloric, transport, mechanical or cancellation refusal preserves bodies,
+Each interval transports snap heat at the original branch-event timestamps
+and, when damping is present, adds the declared smooth support shares through
+native source powers over sealed mechanical segments. Coincident scheduled
+thermal events retain native ordering. Both channels have distinct work
+ledgers, outside destinations and independent mechanical-to-thermal transfer
+checks. A positive support loss never becomes adhesive snap heat.
+
+The shared gate composes native relative-energy residuals and both transfer
+defects with double-double accumulation. The frame's
+`external_transport_heat_j` excludes both internal transfers; the underlying
+`heat.transport.external_heat_j` still reports the original native source
+account, including any support-generated heat. Boundary/source heat, incoming
+material energy and both declared outside destinations remain explicit.
+Large absolute caloric reference energies cannot replace small-work gates.
+Any caloric, transport, mechanical or cancellation refusal preserves bodies,
 spring/contact storage, both clocks, heat history and accepted observations.
 
-Normal coefficients and heat fractions remain frozen. This one-way coupling
-does not infer temperature-dependent adhesion, contact conducting area,
-topology changes, rotating normals or contact waves. Native explicit thermal
-space/time discretization and source applicability limits remain binding.
-The same-time heat proposal remains available within its original scope.
+Normal coefficients and both heat fractions remain frozen. This one-way
+coupling does not infer temperature-dependent adhesion, contact conducting
+area, topology changes, rotating normals or contact waves. Native explicit
+thermal discretization, mechanical midpoint refinement and source applicability
+limits remain binding. The same-time heat proposal remains available within
+its original scope.
 
-The original seven `adhesive_jkr_events_modal` groups remain passing. Four
-`adhesive_jkr_elastic_modal` groups cover original oscillator convergence,
-preload equilibrium, spring-driven capture/pull-off, native ports, force limits
-and atomic refusal. Three `adhesive_jkr_thermal_modal` groups independently
-check event-time cooling, full mechanical/thermal/outside energy closure,
-shifted clocks, supported events and joint caloric/cancellation rollback.
+The original free, elastic and thermal regressions remain passing. Native
+viscous tests compare underdamped, critically damped and overdamped oscillators
+with independent continuum solutions, demonstrate damping-driven capture,
+and check original ports, momentum, energy, force caps and retry. Joint
+thermal tests independently integrate continuous damped-oscillator heating,
+exercise capture/pull-off with distinct snap/support destinations, and verify
+explicit-route refusal plus caloric/cancellation rollback.
 
 ## Native event-resolved adhesive stopping and restart
 

@@ -247,7 +247,7 @@ fn detached_native_spring_converges_to_original_oscillator_and_retains_its_ports
         let energy = owner.total_energy_j().unwrap();
         let mut spring = 0.5 * k * setup.extension.powi(2);
         for _ in 0..8 {
-            let frame = *owner.step(&[0.0; 2]).unwrap();
+            let frame = owner.step(&[0.0; 2]).unwrap().clone();
             assert_eq!(frame.path.event_count(), 0);
             assert!(frame.normal_work_on_network_j.abs() < 1e-10 * f * d);
             close(owner.total_energy_j().unwrap(), energy, energy, 2e-9);
@@ -294,7 +294,7 @@ fn original_preload_balances_tensile_adhesion_and_anchors_actual_native_geometry
     assert_eq!(owner.support_stiffness_n_per_m(), k);
     close(owner.effective_mass_kg(), MU, MU, 2e-15);
     let before = owner.total_energy_j().unwrap();
-    let frame = *owner.step(&[0.0; 2]).unwrap();
+    let frame = owner.step(&[0.0; 2]).unwrap().clone();
     close(owner.state().contact_state().indentation_m(), 0.0, d, 3e-9);
     close(owner.state().velocity_m_s(), 0.0, v, 3e-9);
     close(
@@ -350,7 +350,7 @@ fn original_spring_load_changes_capture_and_pull_off_with_native_energy_and_mome
         let mut found = false;
         let mut spring = 0.5 * setup.k * extension * extension;
         for _ in 0..80 {
-            let frame = *owner.step(&[0.0; 2]).unwrap();
+            let frame = owner.step(&[0.0; 2]).unwrap().clone();
             released += frame.released_energy_j;
             close(
                 owner.total_energy_j().unwrap() + released,
@@ -416,25 +416,29 @@ fn unsupported_links_source_and_native_force_caps_refuse_without_publishing() {
         },
         Setup { k: 0.0, ..setup },
     ] {
-        assert!(JkrNormalEventModalSystem::new_with_elastic_connection(
-            network(bad),
+        assert!(
+            JkrNormalEventModalSystem::new_with_elastic_connection(
+                network(bad),
+                &law,
+                [&ids[0], &ids[1]],
+                state,
+                config(&law, 20.0),
+                &CancelGate::new_clock_free()
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        JkrNormalEventModalSystem::new_with_elastic_connection(
+            network(setup),
             &law,
-            [&ids[0], &ids[1]],
+            [&ids[1], &ids[0]],
             state,
             config(&law, 20.0),
             &CancelGate::new_clock_free()
         )
-        .is_err());
-    }
-    assert!(JkrNormalEventModalSystem::new_with_elastic_connection(
-        network(setup),
-        &law,
-        [&ids[1], &ids[0]],
-        state,
-        config(&law, 20.0),
-        &CancelGate::new_clock_free()
-    )
-    .is_err());
+        .is_err()
+    );
     let mut owner = make(
         &law,
         law.detached_state(-20.0 * d).unwrap(),
@@ -468,7 +472,10 @@ fn unsupported_links_source_and_native_force_caps_refuse_without_publishing() {
     assert_eq!(states(&owner), old);
     assert_eq!(owner.state(), token);
     assert_eq!(owner.samples_rendered(), 0);
-    let frame = *owner.step(&[0.0; 2]).unwrap();
+    let frame = owner.step(&[0.0; 2]).unwrap().clone();
     let mut replay = make(&law, state, setup, 20.0);
-    assert_eq!(frame, *replay.step(&[0.0; 2]).unwrap());
+    assert_eq!(frame, replay.step(&[0.0; 2]).unwrap().clone());
 }
+
+#[path = "adhesive_jkr_elastic_modal/viscous.rs"]
+mod viscous;

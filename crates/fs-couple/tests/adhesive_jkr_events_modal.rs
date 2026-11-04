@@ -230,7 +230,7 @@ fn incoming_energy_selects_capture_or_rebound_on_the_original_native_bodies() {
         let mut jumps = Vec::new();
         let mut reversed = false;
         for _ in 0..60 {
-            let frame = *owner.step(&[0.0; 4]).unwrap();
+            let frame = owner.step(&[0.0; 4]).unwrap().clone();
             released += frame.released_energy_j;
             jumps.extend(frame.path.events().copied());
             reversed |= owner.state().velocity_m_s() < 0.0;
@@ -319,7 +319,7 @@ fn common_acceleration_and_uncontacted_loads_keep_their_original_work_and_motion
     let mut release = 0.0;
     let mut work = 0.0;
     for _ in 0..8 {
-        let frame = *owner.step(&external).unwrap();
+        let frame = owner.step(&external).unwrap().clone();
         release += frame.released_energy_j;
         work += frame.external_work_j;
         let t = owner.samples_rendered() as f64 * DT;
@@ -420,9 +420,9 @@ fn receiving_owner_refusal_and_late_cancellation_preserve_bodies_branch_and_cloc
     assert_eq!(states(&owner), initial);
     assert_eq!(owner.state(), initial_contact);
     assert_eq!(owner.samples_rendered(), 0);
-    let accepted = *owner.step(&[0.0; 4]).unwrap();
+    let accepted = owner.step(&[0.0; 4]).unwrap().clone();
     let mut reference = make(&source, 10.0, 0.003);
-    assert_eq!(accepted, *reference.step(&[0.0; 4]).unwrap());
+    assert_eq!(accepted, reference.step(&[0.0; 4]).unwrap().clone());
     assert_eq!(states(&owner), states(&reference));
 }
 
@@ -507,7 +507,7 @@ fn detached_touch_is_retained_until_the_original_zero_time_attachment_event() {
     )
     .unwrap();
     assert_eq!(owner.state().contact_state().branch(), JkrBranch::Detached);
-    let frame = *owner.step(&[0.0; 4]).unwrap();
+    let frame = owner.step(&[0.0; 4]).unwrap().clone();
     let event = *frame.path.events().next().unwrap();
     assert_eq!(event.offset_s, 0.0);
     assert_eq!(event.before().branch(), JkrBranch::Detached);

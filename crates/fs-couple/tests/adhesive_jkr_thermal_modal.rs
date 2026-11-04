@@ -2,8 +2,11 @@
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_jkr_thermal_modal/damping.rs"]
+mod damping;
+
 use fs_contact::normal_patch::adhesive::{motion::*, *};
-use fs_couple::friction_heat::adhesive::snap::{timed::*, *};
+use fs_couple::friction_heat::adhesive::snap::{timed::*, viscous::*, *};
 use fs_couple::modal_acoustic_time::*;
 use fs_couple::render::schedule::force::coupled::contact::adhesive_normal_events::{thermal::*, *};
 use fs_couple::render::schedule::force::coupled::{
@@ -58,6 +61,19 @@ fn mechanical<'a>(
     incoming: f64,
     support: Option<(f64, f64)>,
 ) -> JkrNormalEventModalSystem<'a> {
+    mechanical_with_damping(
+        law,
+        state,
+        incoming,
+        support.map(|(k, extension)| (k, extension, 0.0)),
+    )
+}
+fn mechanical_with_damping<'a>(
+    law: &'a SourceJkrSphereContact,
+    state: JkrState,
+    incoming: f64,
+    support: Option<(f64, f64, f64)>,
+) -> JkrNormalEventModalSystem<'a> {
     let (d, e, v) = scales(law);
     let models = [MA, MB]
         .into_iter()
@@ -89,7 +105,7 @@ fn mechanical<'a>(
         .collect();
     let links = support
         .into_iter()
-        .map(|(k, extension)| ModalConnection {
+        .map(|(k, extension, damping)| ModalConnection {
             left: ModalAttachment {
                 component: 0,
                 shapes: vec![1.0 / det::sqrt(MA)],
@@ -99,7 +115,7 @@ fn mechanical<'a>(
                 shapes: vec![1.0 / det::sqrt(MB)],
             },
             stiffness_n_m: k,
-            damping_n_s_m: 0.0,
+            damping_n_s_m: damping,
             rest_extension_m: -extension,
         })
         .collect();
@@ -147,7 +163,17 @@ fn mechanical<'a>(
         velocity_relative_tolerance: 2e-10,
     };
     let ids = law.normal_state().elastic().interface().surface_materials();
-    if support.is_some() {
+    if support.is_some_and(|(_, _, c)| c > 0.0) {
+        JkrNormalEventModalSystem::new_with_viscoelastic_connection(
+            native,
+            law,
+            [&ids[0], &ids[1]],
+            state,
+            config,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap()
+    } else if support.is_some() {
         JkrNormalEventModalSystem::new_with_elastic_connection(
             native,
             law,
@@ -282,6 +308,30 @@ fn joint<'s, 'm>(
     )
     .unwrap()
 }
+fn joint_with_support_heat<'s, 'm>(
+    mechanical: JkrNormalEventModalSystem<'s>,
+    thermal: DepositionSimulation<'m>,
+    caloric: &'s [EquilibriumEnthalpyPhaseCurve; 2],
+    origin: f64,
+) -> JkrThermalModalSystem<'s, 'm> {
+    JkrThermalModalSystem::new_with_support_heat(
+        mechanical,
+        thermal,
+        [CellId(0), CellId(1)],
+        [&caloric[0], &caloric[1]],
+        HeatPartition::new(0.25, 0.5, 0.25).unwrap(),
+        Some("outgoing elastic waves".into()),
+        origin,
+        controls(),
+        JkrViscousHeatRoute::new(
+            HeatPartition::new(0.6, 0.1, 0.3).unwrap(),
+            Some("unresolved support reservoir".into()),
+        )
+        .unwrap(),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap()
+}
 fn states(owner: &JkrNormalEventModalSystem<'_>) -> Vec<ModalAcousticState> {
     owner
         .components()
@@ -327,7 +377,7 @@ fn native_rebound_snap_temperatures_follow_event_exponentials_and_full_energy_cl
     let mut first_cooled = false;
     for _ in 0..60 {
         let frame = owner.step(&[0.0; 2]).unwrap().clone();
-        let bare = *reference.step(&[0.0; 2]).unwrap();
+        let bare = reference.step(&[0.0; 2]).unwrap().clone();
         assert_eq!(frame.mechanical, bare);
         assert_eq!(states(owner.mechanical()), states(&reference));
         for event in frame.mechanical.path.events() {
@@ -510,16 +560,18 @@ fn caloric_failure_cancellation_retry_and_clock_refusal_preserve_all_native_owne
     assert_eq!(accepted, *fresh.step(&[0.0; 2]).unwrap());
     assert_eq!(owner.thermal().cells(), fresh.thermal().cells());
     assert_eq!(states(owner.mechanical()), states(fresh.mechanical()));
-    assert!(JkrThermalModalSystem::new(
-        mechanical(&law, state, 10.0 * v, None),
-        timeline(&law, &caloric, [1.0; 2], 3.0 * DT),
-        [CellId(0), CellId(1)],
-        [&caloric[0], &caloric[1]],
-        HeatPartition::new(0.25, 0.5, 0.25).unwrap(),
-        Some("outgoing elastic waves".into()),
-        0.0,
-        controls(),
-        &CancelGate::new_clock_free()
-    )
-    .is_err());
+    assert!(
+        JkrThermalModalSystem::new(
+            mechanical(&law, state, 10.0 * v, None),
+            timeline(&law, &caloric, [1.0; 2], 3.0 * DT),
+            [CellId(0), CellId(1)],
+            [&caloric[0], &caloric[1]],
+            HeatPartition::new(0.25, 0.5, 0.25).unwrap(),
+            Some("outgoing elastic waves".into()),
+            0.0,
+            controls(),
+            &CancelGate::new_clock_free()
+        )
+        .is_err()
+    );
 }

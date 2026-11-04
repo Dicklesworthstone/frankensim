@@ -4,25 +4,28 @@
 //! impulse and first time moment restore every original native coordinate.
 //! Approach evolves with the bodies. A branch jump changes contact storage but
 //! supplies no impulse: its released energy remains an explicit outward account.
-//! One original undamped elastic connection may share the normal work column.
-//! Its actual spring storage and connection ports remain in the native owner.
+//! One original elastic connection, optionally with passive viscous damping,
+//! may share the normal work column. Its spring storage, viscous loss and
+//! connection ports remain in the native owner. Loss uses the source's passive
+//! midpoint work quadrature; it is separate from adhesive jump release.
 //! One fixed normal and a frozen quasistatic JKR source are required. General
 //! elastic networks, rotating normals and resolved waves need their own owner.
 
 use super::adhesive_events::native::{
-    projected_velocity, stage_account, stage_motion, EventNativeAccount,
+    EventNativeAccount, projected_velocity, stage_account, stage_motion,
 };
-use super::{dot, finite, invalid, limit, poll, CoupledModalSystem, ModalCouplingError};
+use super::{CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, poll};
 use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel};
 use fs_contact::normal_patch::adhesive::{
+    JkrBranch, JkrError, JkrResponse, JkrState, SourceJkrSphereContact,
     motion::{
         JkrNormalMotion, JkrNormalMotionBudget, JkrNormalMotionError, JkrNormalMotionState,
-        JkrNormalMotionStep,
+        JkrNormalMotionStep, JkrNormalMotionTrace,
     },
-    JkrBranch, JkrError, JkrResponse, JkrState, SourceJkrSphereContact,
 };
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
+use std::sync::Arc;
 
 mod elastic;
 use elastic::{ElasticConnection, SpringObservation};
@@ -72,7 +75,7 @@ pub struct JkrNormalEventModalConfig {
 }
 
 /// One accepted native interval. Release is not silently classified as heat.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct JkrNormalEventModalFrame {
     pub sample: u64,
     pub network_energy_j: f64,
@@ -80,9 +83,11 @@ pub struct JkrNormalEventModalFrame {
     pub spring_energy_j: f64,
     /// Actual spring storage change minus its scalar conservative path work.
     pub spring_work_residual_j: f64,
+    /// Original connection's passive midpoint viscous loss, separate from snap release.
+    pub damping_dissipation_j: f64,
     /// Original connection reaction, multiplying its native signed column.
     pub connection_force_n: f64,
-    /// Maximum absolute original spring force over the accepted trajectory.
+    /// Maximum absolute original spring-plus-dashpot force over the trajectory.
     pub connection_force_bound_n: f64,
     /// Original source evaluated at the actual restored native approach.
     pub contact: JkrResponse,
@@ -95,6 +100,15 @@ pub struct JkrNormalEventModalFrame {
     pub coordinate_residual_m: f64,
     pub velocity_residual_m_s: f64,
     pub path: JkrNormalMotionStep,
+    dissipation_trace: Option<Arc<JkrNormalMotionTrace>>,
+}
+
+impl JkrNormalEventModalFrame {
+    /// Sealed positive-loss time segments from this accepted source path.
+    /// Present only for an original connection with positive viscous damping.
+    pub fn dissipation_trace(&self) -> Option<&JkrNormalMotionTrace> {
+        self.dissipation_trace.as_deref()
+    }
 }
 
 pub struct JkrNormalEventModalSystem<'a> {
@@ -151,7 +165,34 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         gate: &CancelGate,
     ) -> Result<Self, JkrNormalEventModalError> {
         poll(Some(gate))?;
-        let (column, support) = elastic::admit(&network, initial_contact.indentation_m())?;
+        let (column, support) = elastic::admit(&network, initial_contact.indentation_m(), false)?;
+        Self::new_inner(
+            network,
+            normal,
+            surface_materials,
+            initial_contact,
+            column,
+            Some(support),
+            config,
+            gate,
+        )
+    }
+
+    /// Couple normal adhesion to one original positive-stiffness spring with
+    /// finite nonnegative viscous damping. Its signed column, rest extension,
+    /// stiffness and dashpot are preserved in the native network. Dissipation
+    /// is an explicit mechanical loss; routing it into thermal state requires
+    /// a separately declared receiving path.
+    pub fn new_with_viscoelastic_connection(
+        network: CoupledModalSystem,
+        normal: &'a SourceJkrSphereContact,
+        surface_materials: [&MaterialStateId; 2],
+        initial_contact: JkrState,
+        config: JkrNormalEventModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, JkrNormalEventModalError> {
+        poll(Some(gate))?;
+        let (column, support) = elastic::admit(&network, initial_contact.indentation_m(), true)?;
         Self::new_inner(
             network,
             normal,
@@ -223,12 +264,13 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         }
         let mass = finite(1.0 / dot(&column, &column)?)?;
         let motion = match support {
-            Some(support) => JkrNormalMotion::new_with_support(
+            Some(support) => JkrNormalMotion::new_with_damped_support(
                 normal,
                 mass,
                 config.motion,
                 support.stiffness_n_per_m,
                 support.zero_force_indentation_m,
+                support.damping_n_s_per_m,
             )?,
             None => JkrNormalMotion::new(normal, mass, config.motion)?,
         };
@@ -294,6 +336,9 @@ impl<'a> JkrNormalEventModalSystem<'a> {
     }
     pub const fn support_stiffness_n_per_m(&self) -> f64 {
         self.motion.support_stiffness_n_per_m()
+    }
+    pub const fn support_damping_n_s_per_m(&self) -> f64 {
+        self.motion.support_damping_n_s_per_m()
     }
     pub fn support_zero_force_indentation_m(&self) -> Option<f64> {
         self.support.map(|support| support.zero_force_indentation_m)
@@ -397,9 +442,49 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             self.config.velocity_relative_tolerance,
         )?;
         let force = finite(self.effective_mass_kg() * dot(&self.column, external)?)?;
-        let path = self
-            .motion
-            .advance(self.state, force, self.network.dt, gate)?;
+        let dissipation_trace = if self.support_damping_n_s_per_m() > 0.0 {
+            Some(Arc::new(self.motion.advance_with_dissipation_trace(
+                self.state,
+                force,
+                self.network.dt,
+                gate,
+            )?))
+        } else {
+            None
+        };
+        let path = match &dissipation_trace {
+            Some(trace) => *trace.step(),
+            None => self
+                .motion
+                .advance(self.state, force, self.network.dt, gate)?,
+        };
+        let damping_loss = finite(path.damping_dissipation_j)?;
+        if damping_loss < 0.0 {
+            return Err(
+                invalid("original viscous connection cannot create mechanical energy").into(),
+            );
+        }
+        // Audit the source's passive work quadrature with the actual original
+        // dashpot coefficient. Its small loss gate cannot be hidden by spring
+        // preload, unrelated kinetic energy or a large thermal reference datum.
+        let mut native_damping_loss = 0.0;
+        if let Some(trace) = &dissipation_trace {
+            let damping = self.support_damping_n_s_per_m();
+            for segment in trace.segments() {
+                let velocity = segment.midpoint_velocity_m_s();
+                native_damping_loss = finite(
+                    native_damping_loss + damping * segment.duration_s() * velocity * velocity,
+                )?;
+            }
+        }
+        check_energy(
+            finite(native_damping_loss - damping_loss)?,
+            finite(
+                self.config.motion.energy_absolute_tolerance_j
+                    + self.config.motion.energy_relative_tolerance
+                        * native_damping_loss.max(damping_loss),
+            )?,
+        )?;
         let motion = stage_motion(
             &mut self.network,
             &mut self.candidate_states,
@@ -470,12 +555,12 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             finite(after + contact.reversible_energy_j)?.abs(),
             self.network.config.maximum_total_energy_j,
         )?;
-        // The shared restoration integrates the total contact-plus-spring
-        // reaction on free coordinates. Original spring storage is internal to
-        // the native network, so adding its actual change isolates contact work.
-        let contact_work = finite(motion.reaction_work_j + spring_change)?;
+        // The shared restoration integrates contact, spring and dashpot on the
+        // free coordinates. Spring storage and positive viscous loss belong to
+        // the original network; adding both isolates contact boundary work.
+        let contact_work = finite(motion.reaction_work_j + spring_change + damping_loss)?;
         let work = finite(motion.external_work_j + contact_work)?;
-        let native_residual = finite(after - before - work)?;
+        let native_residual = finite(after - before + damping_loss - work)?;
         let normal_residual = finite(
             contact_work + contact.reversible_energy_j - old.reversible_energy_j
                 + path.released_energy_j,
@@ -483,6 +568,7 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         let residual = finite(
             after - before + contact.reversible_energy_j - old.reversible_energy_j
                 + path.released_energy_j
+                + damping_loss
                 - motion.external_work_j,
         )?;
         let contact_scale = old
@@ -506,6 +592,7 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             .max(after.abs())
             .max(contact_scale)
             .max(work.abs())
+            .max(damping_loss)
             .max(motion.external_work_j.abs());
         let tolerance = finite(
             self.network.config.energy_absolute_tolerance_j
@@ -515,18 +602,18 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         check_energy(residual, tolerance)?;
         let connection_transfer = if self.support.is_some() {
             limit(
-                "original normal spring force over event trajectory",
-                path.support_force_bound_n,
+                "original normal connection force over event trajectory",
+                path.support_reaction_force_bound_n,
                 self.network.config.maximum_abs_connection_force_n,
             )?;
             limit(
-                "restored original normal spring force",
+                "restored original normal connection force",
                 spring_after.reaction_n.abs(),
                 self.network.config.maximum_abs_connection_force_n,
             )?;
             self.network.reactions[0] = spring_after.reaction_n;
             Some(crate::port_adoption::PortTransfer::work(
-                finite(-spring_change)?,
+                finite(-spring_change - damping_loss)?,
                 false,
             ))
         } else {
@@ -541,7 +628,7 @@ impl<'a> JkrNormalEventModalSystem<'a> {
                 modal_energy_j: motion.modal_energy_j,
                 component_dissipation_j: 0.0,
                 connection_energy_j: spring_after.energy_j,
-                connection_dissipation_j: 0.0,
+                connection_dissipation_j: damping_loss,
                 work_j: work,
                 residual_j: native_residual,
                 tolerance_j: tolerance,
@@ -553,8 +640,9 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             network_energy_j: after,
             spring_energy_j: spring_after.energy_j,
             spring_work_residual_j: spring_work_residual,
+            damping_dissipation_j: damping_loss,
             connection_force_n: spring_after.reaction_n,
-            connection_force_bound_n: path.support_force_bound_n,
+            connection_force_bound_n: path.support_reaction_force_bound_n,
             contact,
             external_work_j: motion.external_work_j,
             normal_work_on_network_j: contact_work,
@@ -565,6 +653,7 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             coordinate_residual_m: coordinate_residual,
             velocity_residual_m_s: velocity_residual,
             path,
+            dissipation_trace,
         };
         self.network.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
