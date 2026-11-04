@@ -465,7 +465,6 @@ fn charge_material_budget_and_cancellation_refusals_leave_the_field_intact() {
     ));
 }
 
-
 #[test]
 fn anisotropic_interior_uses_scalar_collar_but_anisotropic_collar_refuses() {
     use fs_material::field_storage::planar::PlanarDielectricLaw;
@@ -478,15 +477,25 @@ fn anisotropic_interior_uses_scalar_collar_but_anisotropic_collar_refuses() {
         laws[cell] = super::anisotropic::law(0.31);
     }
     let problem = PlanarElectrostatics::new_with_laws(
-        reference.mesh().clone(), materials, laws, limits(), &mut || false,
-    ).unwrap();
+        reference.mesh().clone(),
+        materials,
+        laws,
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
     let potential = |[x, y]: [f64; 2]| -10.0 * (x + 0.2 * y);
-    let field = problem.solve(
-        &vec![0.0; count], &boundary(&problem, potential), controls(), &mut || false,
-    ).unwrap();
-    let wrench = field.maxwell_wrench(
-        &enclosed, &frame(), [0.0; 3], force_limits(), &mut || false,
-    ).unwrap();
+    let field = problem
+        .solve(
+            &vec![0.0; count],
+            &boundary(&problem, potential),
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    let wrench = field
+        .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
+        .unwrap();
     assert!(wrench.to_array().iter().all(|value| value.is_finite()));
 
     // Numerical equality of principal values is insufficient to assign a
@@ -495,15 +504,69 @@ fn anisotropic_interior_uses_scalar_collar_but_anisotropic_collar_refuses() {
         reference.mesh().clone(),
         vec![super::anisotropic::material([EPSILON; 2]); count],
         vec![super::anisotropic::law(0.31); count],
-        limits(), &mut || false,
-    ).unwrap();
-    let field = exterior.solve(
-        &vec![0.0; count], &boundary(&exterior, potential), controls(), &mut || false,
-    ).unwrap();
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let field = exterior
+        .solve(
+            &vec![0.0; count],
+            &boundary(&exterior, potential),
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
     assert!(matches!(
         field.maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false),
         Err(ElectrostaticError::Invalid(
             "electric force requires an explicitly isotropic exterior dielectric law"
         ))
+    ));
+}
+
+#[test]
+fn impressed_polarization_is_allowed_inside_but_excluded_from_force_collar() {
+    use fs_em::electrostatic::PlanarElectrostaticSources;
+    let (problem, enclosed, body) = specimen(8, EPSILON, false, DEPTH);
+    let cells = problem.mesh().faces().len();
+    let mut polarization = vec![[0.0; 2]; cells];
+    for cell in body {
+        polarization[cell] = [1e-6, 0.0];
+    }
+    let rho = vec![0.0; cells];
+    let trace = boundary(&problem, |[x, _]| -10.0 * x);
+    let field = problem
+        .solve_with_sources(
+            PlanarElectrostaticSources {
+                impressed_polarization_c_m2: Some(&polarization),
+                ..PlanarElectrostaticSources::volume_charge(&rho)
+            },
+            &trace,
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    let wrench = field
+        .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
+        .unwrap();
+    assert!(wrench.to_array().iter().all(|value| value.is_finite()));
+
+    // A constitutive stress for the maintained polarization itself has not
+    // been supplied. Moving the artificial contour into it must refuse.
+    polarization.fill([1e-6, 0.0]);
+    let field = problem
+        .solve_with_sources(
+            PlanarElectrostaticSources {
+                impressed_polarization_c_m2: Some(&polarization),
+                ..PlanarElectrostaticSources::volume_charge(&rho)
+            },
+            &trace,
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    assert!(matches!(
+        field.maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false),
+        Err(ElectrostaticError::Invalid(_))
     ));
 }

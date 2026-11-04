@@ -78,12 +78,14 @@ impl ElectricField<'_> {
                 }
                 if self.free_charge_density_c_m3()[inner] != 0.0
                     || self.free_charge_density_c_m3()[outer] != 0.0
+                    || self.source_loaded_cells.get(inner).copied().unwrap_or(false)
+                    || self.source_loaded_cells.get(outer).copied().unwrap_or(false)
                     || vertices
                         .iter()
                         .any(|&v| self.nodal_boundary_charge_c()[v as usize].is_some())
                 {
                     return Err(ContourError::Invalid(
-                        "electric contour must avoid free-charge sources and electrode vertices",
+                        "electric contour must avoid free-charge, impressed-polarization and boundary sources",
                     ));
                 }
                 Ok((

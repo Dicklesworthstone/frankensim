@@ -171,7 +171,7 @@ impl<'a> SpatialCapacitance<'a> {
         let boundary = voltage_boundary(&self.faces, voltages_v);
         let problem = self.field.problem;
         let rho = vec![0.0; problem.materials.len()];
-        let (load, traces) = problem.prepare_boundary(&rho, &boundary, controls, cancelled)?;
+        let (sources, traces) = problem.prepare_boundary(&rho, &boundary, controls, cancelled)?;
         let relative = self
             .field
             .relative_voltage_v
@@ -179,7 +179,7 @@ impl<'a> SpatialCapacitance<'a> {
             .map(|value| finite(*value * difference))
             .collect::<Result<Vec<_>>>()?;
         let field = problem.recover_field(
-            relative, &rho, load, traces, &boundary, controls, None, cancelled,
+            relative, sources, traces, &boundary, controls, None, cancelled,
         )?;
         let expected_charge = finite(self.capacitance_f * difference)?;
         let expected_energy = finite(0.5 * expected_charge * difference)?;

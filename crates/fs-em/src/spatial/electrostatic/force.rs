@@ -15,9 +15,10 @@ impl SpatialElectricField<'_> {
     ///
     /// Every surface face lies strictly inside the mesh. Both neighboring
     /// tetrahedra must have the SAME complete original isotropic dielectric
-    /// snapshot and zero prescribed volume charge. That one source must extend
+    /// snapshot, zero prescribed volume charge and zero impressed polarization.
+    /// That one source must extend
     /// around the whole surface. Conservatively, neither neighboring tetrahedron
-    /// may contain an electrode or imposed-displacement vertex. Charge and
+    /// may contain an electrode, imposed-displacement or charged-sheet vertex. Charge and
     /// different materials may be enclosed beyond this clear exterior collar.
     ///
     /// The exterior medium is nondeforming, without electrostriction or fluid
@@ -69,13 +70,19 @@ impl SpatialElectricField<'_> {
                 }
                 if self.free_charge_density_c_m3[inner] != 0.0
                     || self.free_charge_density_c_m3[outer] != 0.0
+                    || self.impressed_polarization_c_m2.as_ref().is_some_and(|p| {
+                        p[inner] != [0.0; 3] || p[outer] != [0.0; 3]
+                    })
                     || geometry.mesh.tets[inner]
                         .iter()
                         .chain(&geometry.mesh.tets[outer])
-                        .any(|&v| self.nodal_boundary_charge_c[v as usize].is_some())
+                        .any(|&v| {
+                            self.nodal_boundary_charge_c[v as usize].is_some()
+                                || self.charged_sheet_vertices.get(v as usize) == Some(&true)
+                        })
                 {
                     return Err(SpatialMagneticError::Invalid(
-                        "3D electric stress collar must avoid free charge and boundary vertices",
+                        "3D electric stress collar must avoid charge, impressed polarization and source vertices",
                     ));
                 }
                 Ok((

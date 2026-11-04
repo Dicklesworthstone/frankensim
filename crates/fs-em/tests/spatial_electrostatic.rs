@@ -4,6 +4,8 @@
 
 #[path = "spatial_electrostatic/force.rs"]
 mod force;
+#[path = "spatial_electrostatic/sources.rs"]
+mod sources;
 
 use fs_em::{
     electrostatic::ElectrostaticControls,

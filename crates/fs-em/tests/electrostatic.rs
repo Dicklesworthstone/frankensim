@@ -1,13 +1,15 @@
 //! Synthetic source-data regressions, not experimentally qualified dielectrics.
+#[path = "electrostatic/anisotropic.rs"]
+mod anisotropic;
 mod common;
 #[path = "electrostatic/force.rs"]
 mod force;
 #[path = "electrostatic/network.rs"]
 mod network;
-#[path = "electrostatic/anisotropic.rs"]
-mod anisotropic;
 #[path = "electrostatic/rebind.rs"]
 mod rebind;
+#[path = "electrostatic/sources.rs"]
+mod sources;
 use common::{config, layered, limits};
 use fs_em::electrostatic::{ElectrostaticControls, ElectrostaticError, PlanarElectrostatics};
 use fs_evidence::ValidityDomain;
@@ -277,13 +279,9 @@ fn induced_voltage_below_absolute_spacing_survives_in_the_physical_field() {
         Metric2::planar(0.25).unwrap(),
     )
     .unwrap();
-    let problem = PlanarElectrostatics::new(
-        mesh,
-        vec![dielectric(epsilon); 4],
-        limits(),
-        &mut || false,
-    )
-    .unwrap();
+    let problem =
+        PlanarElectrostatics::new(mesh, vec![dielectric(epsilon); 4], limits(), &mut || false)
+            .unwrap();
     let charges = [12.0 * epsilon * induced_voltage; 4];
     let mut budget = controls();
     budget.charge_tolerance_c = 1e-29;
@@ -307,7 +305,12 @@ fn induced_voltage_below_absolute_spacing_survives_in_the_physical_field() {
     let expected_energy = 0.5 * epsilon * induced_voltage * induced_voltage;
     assert!((shifted.energy_j() - expected_energy).abs() < 1e-35);
     assert!(shifted.voltage_v().iter().all(|&voltage| voltage == bias));
-    assert!(shifted.reference_voltage_v().iter().all(|&voltage| voltage == bias));
+    assert!(
+        shifted
+            .reference_voltage_v()
+            .iter()
+            .all(|&voltage| voltage == bias)
+    );
     assert_eq!(shifted.relative_voltage_v(), original.relative_voltage_v());
     assert_eq!(shifted.electric_field_v_m(), original.electric_field_v_m());
     assert_eq!(shifted.displacement_c_m2(), original.displacement_c_m2());

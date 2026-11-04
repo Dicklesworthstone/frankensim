@@ -2,21 +2,27 @@
 //! circuit capacitance. Solve -div(epsilon grad(V)) = rho_free on a planar
 //! P1 mesh using the existing material Hodge and checked-CG owners.
 //!
-//! Prescribed exterior voltage traces supply electrode charge; other exterior
-//! edges have zero normal electric displacement. Fields are not averaged across
-//! dielectric interfaces. Charge reactions and the stored integral E.D/2 are
+//! Prescribed exterior voltage traces supply electrode charge. Explicit normal
+//! displacement traces, internal free sheet charge and fixed impressed
+//! polarization use the same weak operator; other exterior edges insulate.
+//! Fields are not averaged across dielectric interfaces. Charge reactions and
+//! the induced dielectric storage integral E.epsilon.E/2 are
 //! checked before publication. These are discrete residual checks, not spatial
 //! error bounds. This static solve adds no conduction, dielectric dispersion,
 //! breakdown or geometry evolution. [`relaxation`] composes its native storage
 //! with Ohmic transport on a retained charge history at constant permittivity.
 
 mod force;
+mod sources;
+pub use sources::{
+    ElectrostaticChargeSheet, ElectrostaticDisplacementTrace, PlanarElectrostaticSources,
+};
 /// Multiple source-resolved electrodes and passive native circuit reduction.
 pub mod network;
-/// Retained dielectric charge, native Ohmic current and physical relaxation heat.
-pub mod relaxation;
 /// Reversible nonlinear dielectrics, mixed electrode controls and bias tangents.
 pub mod nonlinear;
+/// Retained dielectric charge, native Ohmic current and physical relaxation heat.
+pub mod relaxation;
 /// Three-dimensional dielectric weak forms and polarization loads on native P1 tetrahedra.
 pub mod tetrahedral;
 
@@ -179,7 +185,9 @@ impl PlanarElectrostatics {
             ));
         }
         if materials.len() != mesh.faces().len()
-            || laws.as_ref().is_some_and(|values| values.len() != materials.len())
+            || laws
+                .as_ref()
+                .is_some_and(|values| values.len() != materials.len())
             || mesh.vertices().len() > limits.max_dofs
             || mesh.edges().len() > limits.max_dofs
             || mesh.faces().len() > limits.max_cells
@@ -193,8 +201,8 @@ impl PlanarElectrostatics {
                 "one material per triangle and bounded assembly extents required",
             ));
         }
-        let permittivity_laws = laws
-            .unwrap_or_else(|| vec![PlanarDielectricLaw::Isotropic; materials.len()]);
+        let permittivity_laws =
+            laws.unwrap_or_else(|| vec![PlanarDielectricLaw::Isotropic; materials.len()]);
         let mut permittivity = Vec::with_capacity(materials.len());
         let mut weights = Vec::with_capacity(materials.len());
         let mut geometry_frame = None;
@@ -208,7 +216,9 @@ impl PlanarElectrostatics {
                 }
                 geometry_frame = Some(frame.geometry_frame());
             }
-            let epsilon = law.resolve(material).map_err(ElectrostaticError::Material)?;
+            let epsilon = law
+                .resolve(material)
+                .map_err(ElectrostaticError::Material)?;
             // Tensor SPD admission stays with the original outward-interval
             // weighted FEEC owner; the solver never substitutes an average.
             weights.push(match epsilon {
@@ -217,10 +227,13 @@ impl PlanarElectrostatics {
             });
             permittivity.push(epsilon);
         }
-        let scalar_permittivity_f_m = permittivity.iter().map(|value| match value {
-            PlanarPermittivity::Scalar(value) => Some(*value),
-            PlanarPermittivity::Tensor(_) => None,
-        }).collect();
+        let scalar_permittivity_f_m = permittivity
+            .iter()
+            .map(|value| match value {
+                PlanarPermittivity::Scalar(value) => Some(*value),
+                PlanarPermittivity::Tensor(_) => None,
+            })
+            .collect();
         let mass = weighted_mass_matrix_2d(
             &mesh,
             1,
@@ -283,10 +296,27 @@ impl PlanarElectrostatics {
         controls: ElectrostaticControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ElectricField<'_>, ElectrostaticError> {
+        self.solve_with_sources(
+            PlanarElectrostaticSources::volume_charge(free_charge_density_c_m3),
+            boundary_voltage_v,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Solve with explicit volume/sheet free charge, outward displacement and
+    /// fixed impressed polarization on the original mesh. The same sourced
+    /// epsilon, scalar solve, electrode reactions and energy gates are reused.
+    /// Every component still needs a complete prescribed voltage trace.
+    pub fn solve_with_sources(
+        &self,
+        sources: PlanarElectrostaticSources<'_>,
+        boundary_voltage_v: &[(usize, f64)],
+        controls: ElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ElectricField<'_>, ElectrostaticError> {
         poll(cancelled)?;
-        if free_charge_density_c_m3.len() != self.mesh.faces().len()
-            || free_charge_density_c_m3.iter().any(|v| !v.is_finite())
-            || boundary_voltage_v.len() > self.mesh.vertices().len()
+        if boundary_voltage_v.len() > self.mesh.vertices().len()
             || !positive(controls.linear.tolerance)
             || controls.linear.tolerance >= 1.0
             || !positive(controls.charge_tolerance_c)
@@ -298,44 +328,32 @@ impl PlanarElectrostatics {
         }
         let prescribed =
             scalar_potential::prescribed_boundary(&self.mesh, boundary_voltage_v, cancelled)?;
-        let n = self.mesh.vertices().len();
-        let mut rhs = vec![0.0; n];
-        let mut volume_charge_c = 0.0;
-        for (cell, face) in self.mesh.faces().iter().enumerate() {
-            poll(cancelled)?;
-            let charge = finite(
-                free_charge_density_c_m3[cell]
-                    * self
-                        .mesh
-                        .face_measure(cell)
-                        .ok_or(ElectrostaticError::Invalid(
-                            "missing dielectric cell measure",
-                        ))?,
-            )?;
-            volume_charge_c = finite(volume_charge_c + charge)?;
-            for &vertex in face {
-                rhs[vertex as usize] = finite(rhs[vertex as usize] + charge / 3.0)?;
-            }
-        }
+        let loads = sources::assemble(&self.mesh, sources, &prescribed, cancelled)?;
         let solved = scalar_potential::solve_relative(
             &self.stiffness,
-            &rhs,
+            &loads.rhs,
             &prescribed,
             controls.linear,
             cancelled,
         )?;
-        self.recover_field(
+        let mut field = self.recover_field(
             solved.relative,
             solved.references,
-            free_charge_density_c_m3,
-            &rhs,
+            sources.free_charge_density_c_m3,
+            &loads.rhs,
             &prescribed,
-            volume_charge_c,
+            finite(loads.volume_charge_c + loads.sheet_charge_c - loads.outward_displacement_c)?,
             controls.charge_tolerance_c,
             controls.energy_tolerance_j,
             solved.report,
             cancelled,
-        )
+        )?;
+        // The reaction calculation above subtracts ALL authored source loads.
+        // Polarization changes D, but its externally maintained source is not
+        // assigned the induced dielectric energy E.epsilon.E/2.
+        sources::retain(&mut field, sources, loads, cancelled)?;
+        poll(cancelled)?;
+        Ok(field)
     }
 
     // Share actual E, D and storage with the retained charge owner without
@@ -346,7 +364,9 @@ impl PlanarElectrostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ElectricCellResponse, ElectrostaticError> {
         if voltage.len() != self.mesh.vertices().len() || voltage.iter().any(|v| !v.is_finite()) {
-            return Err(ElectrostaticError::Invalid("complete finite native potentials required"));
+            return Err(ElectrostaticError::Invalid(
+                "complete finite native potentials required",
+            ));
         }
         let mut electric_field_v_m = Vec::with_capacity(self.materials.len());
         let mut displacement_c_m2 = Vec::with_capacity(self.materials.len());
@@ -384,7 +404,10 @@ impl PlanarElectrostatics {
             cell_energy_j.push(energy);
         }
         Ok(ElectricCellResponse {
-            electric_field_v_m, displacement_c_m2, cell_energy_j, energy_j,
+            electric_field_v_m,
+            displacement_c_m2,
+            cell_energy_j,
+            energy_j,
         })
     }
 
@@ -486,6 +509,13 @@ impl PlanarElectrostatics {
         Ok(ElectricField {
             problem: self,
             free_charge_density_c_m3: free_charge_density_c_m3.to_vec(),
+            impressed_polarization_c_m2: None,
+            free_charge_sheets: Vec::new(),
+            displacement_traces: Vec::new(),
+            source_loaded_cells: Vec::new(),
+            sheet_charge_c: 0.0,
+            outward_displacement_c: 0.0,
+            polarization_pairing_j: 0.0,
             voltage_v: voltage,
             relative_voltage_v: relative_voltage,
             reference_voltage_v: reference_voltage,
@@ -570,6 +600,13 @@ impl PlanarElectrostatics {
 pub struct ElectricField<'a> {
     problem: &'a PlanarElectrostatics,
     free_charge_density_c_m3: Vec<f64>,
+    impressed_polarization_c_m2: Option<Vec<[f64; 2]>>,
+    free_charge_sheets: Vec<ElectrostaticChargeSheet>,
+    displacement_traces: Vec<ElectrostaticDisplacementTrace>,
+    source_loaded_cells: Vec<bool>,
+    sheet_charge_c: f64,
+    outward_displacement_c: f64,
+    polarization_pairing_j: f64,
     voltage_v: Vec<f64>,
     relative_voltage_v: Vec<f64>,
     reference_voltage_v: Vec<f64>,
@@ -614,10 +651,12 @@ impl ElectricField<'_> {
     pub fn electric_field_v_m(&self) -> &[[f64; 2]] {
         &self.electric_field_v_m
     }
-    /// Cell D=epsilon E [C/m2]; no averaging across material interfaces.
+    /// Cell D=epsilon E+P_impressed [C/m2], without interface averaging.
     pub fn displacement_c_m2(&self) -> &[[f64; 2]] {
         &self.displacement_c_m2
     }
+    /// Induced dielectric storage E.epsilon.E/2 per cell [J]. Fixed impressed
+    /// polarization has no inferred source energy, hysteresis or work law.
     pub fn cell_energy_j(&self) -> &[f64] {
         &self.cell_energy_j
     }
@@ -642,8 +681,9 @@ impl ElectricField<'_> {
     pub fn maximum_free_charge_residual_c(&self) -> f64 {
         self.maximum_free_charge_residual_c
     }
-    /// U - (sum(V * volume-load) + sum(V * electrode-charge))/2 [J],
-    /// evaluated relative to each connected component's prescribed reference.
+    /// U - V.(volume + sheet - outward displacement + polarization load +
+    /// electrode charge)/2 [J], using each component's prescribed reference.
+    /// The polarization load pairs as -integral(E.P_impressed), not free charge.
     pub fn energy_balance_residual_j(&self) -> f64 {
         self.energy_balance_residual_j
     }

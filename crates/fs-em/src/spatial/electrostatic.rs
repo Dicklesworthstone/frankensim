@@ -1,6 +1,6 @@
 //! Three-dimensional source-bound electrostatics on the original P1 complex.
 //!
-//! Solve -div(epsilon grad(V))=rho, with E=-grad(V) and D=epsilon E.
+//! Solve div(D)=rho, with E=-grad(V) and D=epsilon E+P_fixed.
 //! The tetrahedral Whitney Hodge, geometry, trace integration and checked CG
 //! are the SAME owners used by the other spatial fields. Permittivity is an
 //! absolute SI dielectric source, never a conductivity or a relative constant.
@@ -14,6 +14,8 @@
 //! faces have D.n=0; a finite enclosing box is not an infinite-domain model.
 //! Cell fields retain material jumps. Reported weak residuals and raw interface
 //! jumps are not continuum error bounds or an equilibrated H(div) certificate.
+//! Impressed polarization is additional to the induced response in epsilon.
+//! Its maintaining source owns any changing-polarization work or storage law.
 //! Formulation reference: <https://mfem.org/electromagnetics/#electrostatics>.
 
 mod force;
@@ -55,6 +57,28 @@ pub struct ElectrostaticVoltageFace {
 pub struct ElectrostaticDisplacementFace {
     pub face: usize,
     pub outward_displacement_c_m2: f64,
+}
+
+/// Uniform free sheet charge [C/m2] on one original INTERNAL face.
+/// Positive charge is independent of face orientation. This is an impressed
+/// distribution, not an equipotential conductor or an inferred bound charge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElectrostaticChargeSheet {
+    pub face: usize,
+    pub free_charge_density_c_m2: f64,
+}
+
+/// Explicit fixed sources for the original three-dimensional dielectric law.
+/// Volume charge has one entry per cell. When present, impressed polarization
+/// also has one mesh-frame vector per cell and is ADDED to epsilon E; it must
+/// not duplicate the induced polarization already included in permittivity.
+/// Sheets use distinct internal faces. Their weak P1 face moments and those of
+/// constant cell sources are exact for the represented finite-element data.
+#[derive(Clone, Copy, Debug)]
+pub struct SpatialElectrostaticSources<'a> {
+    pub free_charge_density_c_m3: &'a [f64],
+    pub impressed_polarization_c_m2: Option<&'a [[f64; 3]]>,
+    pub sheets: &'a [ElectrostaticChargeSheet],
 }
 
 /// Unlisted faces have zero normal displacement. Voltage and displacement
@@ -136,6 +160,28 @@ pub struct SpatialElectrostatics {
     laws: Vec<SpatialDielectricLaw>,
     permittivity: Vec<SpatialPermittivity>,
     stiffness: Csr,
+}
+
+struct PreparedSources {
+    rho: Vec<f64>,
+    polarization: Option<Vec<[f64; 3]>>,
+    sheets: Vec<ElectrostaticChargeSheet>,
+    volume_load: Vec<f64>,
+    sheet_load: Vec<f64>,
+    polarization_load: Vec<f64>,
+    total_load: Vec<f64>,
+    sheet_charge_by_face: Vec<f64>,
+    charged_sheet_vertices: Vec<bool>,
+}
+
+impl PreparedSources {
+    fn weak_load_c(&self) -> &[f64] {
+        if self.total_load.is_empty() {
+            &self.volume_load
+        } else {
+            &self.total_load
+        }
+    }
 }
 
 impl SpatialElectrostatics {
@@ -266,9 +312,39 @@ impl SpatialElectrostatics {
         controls: ElectrostaticControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialElectricField<'_>> {
-        let (volume_load, traces) =
-            self.prepare_boundary(free_charge_density_c_m3, boundary, controls, cancelled)?;
-        let rhs = volume_load
+        self.solve_with_sources(
+            SpatialElectrostaticSources {
+                free_charge_density_c_m3,
+                impressed_polarization_c_m2: None,
+                sheets: &[],
+            },
+            boundary,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Solve volume/sheet free charge and fixed impressed polarization using
+    /// the original immutable operator. The weak equation is
+    /// `K V = q_volume + q_sheet + integral grad(N).P_fixed - integral N D.n`.
+    /// Interior sheets impose the normal-D jump without smoothing either cell
+    /// field. Polarization discontinuities supply their own bound charge and
+    /// must not also be authored as free sheets.
+    ///
+    /// Reported storage remains `integral E.epsilon.E/2`, the reversible linear
+    /// dielectric store at fixed P. It is not `integral E.D/2` when P is nonzero.
+    /// No constitutive evolution, hysteresis, polarization-source energy or
+    /// changing-material/mechanical work is inferred from these fixed inputs.
+    pub fn solve_with_sources(
+        &self,
+        sources: SpatialElectrostaticSources<'_>,
+        boundary: &SpatialElectrostaticBoundary,
+        controls: ElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialElectricField<'_>> {
+        let (sources, traces) = self.prepare_sources(sources, boundary, controls, cancelled)?;
+        let rhs = sources
+            .weak_load_c()
             .iter()
             .zip(&traces.flux_load_wb)
             .map(|(&volume, &surface)| finite(volume + surface))
@@ -281,14 +357,7 @@ impl SpatialElectrostatics {
             cancelled,
         )?;
         self.recover_field(
-            relative,
-            free_charge_density_c_m3,
-            volume_load,
-            traces,
-            boundary,
-            controls,
-            report,
-            cancelled,
+            relative, sources, traces, boundary, controls, report, cancelled,
         )
     }
 
@@ -298,10 +367,34 @@ impl SpatialElectrostatics {
         boundary: &SpatialElectrostaticBoundary,
         controls: ElectrostaticControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(Vec<f64>, ScalarBoundary)> {
+    ) -> Result<(PreparedSources, ScalarBoundary)> {
+        self.prepare_sources(
+            SpatialElectrostaticSources {
+                free_charge_density_c_m3: rho,
+                impressed_polarization_c_m2: None,
+                sheets: &[],
+            },
+            boundary,
+            controls,
+            cancelled,
+        )
+    }
+
+    fn prepare_sources(
+        &self,
+        sources: SpatialElectrostaticSources<'_>,
+        boundary: &SpatialElectrostaticBoundary,
+        controls: ElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(PreparedSources, ScalarBoundary)> {
         check(cancelled)?;
+        let rho = sources.free_charge_density_c_m3;
         if rho.len() != self.mesh().tets.len()
             || rho.iter().any(|v| !v.is_finite())
+            || sources.impressed_polarization_c_m2.is_some_and(|p| {
+                p.len() != self.mesh().tets.len() || p.iter().flatten().any(|v| !v.is_finite())
+            })
+            || sources.sheets.len() > self.geometry.faces.len()
             || boundary.voltage.len() > self.geometry.faces.len()
             || boundary.displacement.len() > self.geometry.faces.len()
             || !positive(controls.linear.tolerance)
@@ -310,7 +403,7 @@ impl SpatialElectrostatics {
             || !positive(controls.energy_tolerance_j)
         {
             return Err(invalid(
-                "complete finite volume sources, bounded traces and positive tolerances required",
+                "complete finite cell sources, bounded sheets/traces and positive tolerances required",
             ));
         }
         let g = &self.geometry;
@@ -327,6 +420,47 @@ impl SpatialElectrostatics {
                 )?;
             }
         }
+        let mut sheets = sources.sheets.to_vec();
+        sheets.sort_unstable_by_key(|s| s.face);
+        let mut sheet_load = Vec::new();
+        let mut sheet_charge_by_face = Vec::new();
+        let mut charged_sheet_vertices = Vec::new();
+        if !sheets.is_empty() {
+            sheet_load.resize(g.mesh.vertex_count, 0.0);
+            sheet_charge_by_face.resize(g.faces.len(), 0.0);
+            charged_sheet_vertices.resize(g.mesh.vertex_count, false);
+            corrections.fill(0.0);
+        }
+        for (i, sheet) in sheets.iter().enumerate() {
+            check(cancelled)?;
+            if g.faces.get(sheet.face).is_none_or(|f| f.cells.len() != 2)
+                || i > 0 && sheets[i - 1].face == sheet.face
+                || !sheet.free_charge_density_c_m2.is_finite()
+            {
+                return Err(invalid(
+                    "finite free sheets require distinct original internal faces",
+                ));
+            }
+            let charge = finite(sheet.free_charge_density_c_m2 * g.faces[sheet.face].area_m2)?;
+            sheet_charge_by_face[sheet.face] = charge;
+            for v in g.mesh.faces[sheet.face] {
+                let v = v as usize;
+                add(&mut sheet_load[v], &mut corrections[v], charge / 3.0)?;
+                charged_sheet_vertices[v] |= sheet.free_charge_density_c_m2 != 0.0;
+            }
+        }
+        // No extra nodal/face arrays are needed for the original volume-only
+        // path. When sheets are present, reuse their complete free-charge
+        // buffer for the eventual polarized weak load after gauge admission.
+        let mut total_load = if sheets.is_empty() {
+            Vec::new()
+        } else {
+            volume_load
+                .iter()
+                .zip(&sheet_load)
+                .map(|(&volume, &sheet)| finite(volume + sheet))
+                .collect::<Result<Vec<_>>>()?
+        };
         let traces = prepare_scalar_boundary_traces_with_sources(
             &g.mesh,
             &g.faces,
@@ -336,19 +470,69 @@ impl SpatialElectrostatics {
                 .displacement
                 .iter()
                 .map(|b| (b.face, -b.outward_displacement_c_m2)),
-            Some(&volume_load),
+            // Polarization creates no net free charge. Check the physical
+            // compatibility of volume + sheet charge against outward D.n;
+            // never let a numerical gauge hide uncompensated free charge.
+            Some(if total_load.is_empty() {
+                &volume_load
+            } else {
+                &total_load
+            }),
             controls.charge_tolerance_c,
             cancelled,
         )?;
-        Ok((volume_load, traces))
+        let mut polarization_load = Vec::new();
+        if let Some(polarization) = sources.impressed_polarization_c_m2 {
+            polarization_load.resize(g.mesh.vertex_count, 0.0);
+            corrections.fill(0.0);
+            for (cell, tet) in g.mesh.tets.iter().enumerate() {
+                check(cancelled)?;
+                let (mut first, mut first_correction) = (0.0, 0.0);
+                // The constant test function has zero gradient. Form its
+                // zeroth contribution from the other three, matching the
+                // voltage-difference gradient used by field recovery.
+                for local in 1..4 {
+                    let term = finite(
+                        g.geometry.vol_signed[cell].abs()
+                            * dot(g.geometry.grads[cell][local], polarization[cell]),
+                    )?;
+                    let v = tet[local] as usize;
+                    add(&mut polarization_load[v], &mut corrections[v], term)?;
+                    add(&mut first, &mut first_correction, -term)?;
+                }
+                let v = tet[0] as usize;
+                add(&mut polarization_load[v], &mut corrections[v], first)?;
+            }
+            if total_load.is_empty() {
+                total_load.clone_from(&volume_load);
+            }
+            for (load, &polarized) in total_load.iter_mut().zip(&polarization_load) {
+                check(cancelled)?;
+                *load = finite(*load + polarized)?;
+            }
+        }
+        check(cancelled)?;
+        Ok((
+            PreparedSources {
+                rho: rho.to_vec(),
+                polarization: sources.impressed_polarization_c_m2.map(<[_]>::to_vec),
+                sheets,
+                volume_load,
+                sheet_load,
+                polarization_load,
+                total_load,
+                sheet_charge_by_face,
+                charged_sheet_vertices,
+            },
+            traces,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn recover_field(
         &self,
         relative: Vec<f64>,
-        rho: &[f64],
-        volume_load: Vec<f64>,
+        sources: PreparedSources,
         traces: ScalarBoundary,
         boundary: &SpatialElectrostaticBoundary,
         controls: ElectrostaticControls,
@@ -368,6 +552,7 @@ impl SpatialElectrostatics {
         let mut component_charge = vec![0.0; n];
         let mut component_correction = vec![0.0; n];
         let (mut volume_charge_c, mut volume_correction) = (0.0, 0.0);
+        let (mut sheet_charge_c, mut sheet_correction) = (0.0, 0.0);
         let (mut boundary_charge_c, mut boundary_correction) = (0.0, 0.0);
         let (mut pairing_j, mut pairing_correction) = (0.0, 0.0);
         let (mut hodge_j, mut hodge_correction) = (0.0, 0.0);
@@ -388,38 +573,53 @@ impl SpatialElectrostatics {
                 &mut hodge_correction,
                 finite(0.5 * relative[v] * applied)?,
             )?;
+            let sheet_load = sources.sheet_load.get(v).copied().unwrap_or(0.0);
+            let polarization_load = sources.polarization_load.get(v).copied().unwrap_or(0.0);
+            let free_load = finite(sources.volume_load[v] + sheet_load)?;
+            let free_applied = finite(applied - polarization_load)?;
             let charge = if physical_prescribed[v] {
                 // Includes prescribed displacement on adjacent faces ONCE.
-                Some(finite(applied - volume_load[v])?)
+                Some(finite(free_applied - free_load)?)
             } else {
-                let residual = finite(applied - finite(volume_load[v] + surface_load[v])?)?;
+                let residual =
+                    finite(applied - finite(sources.weak_load_c()[v] + surface_load[v])?)?;
                 maximum_free_charge_residual_c = maximum_free_charge_residual_c.max(residual.abs());
                 (surface_load[v] != 0.0).then_some(surface_load[v])
             };
             let boundary_charge = charge.unwrap_or(0.0);
             let supplied = if physical_prescribed[v] {
                 // Keep the exact operator reaction instead of subtracting then
-                // re-adding a potentially much larger prescribed volume load.
+                // re-adding potentially much larger prescribed source loads.
                 applied
             } else {
-                finite(volume_load[v] + boundary_charge)?
+                finite(sources.weak_load_c()[v] + boundary_charge)?
             };
             add(
                 &mut pairing_j,
                 &mut pairing_correction,
                 finite(0.5 * relative[v] * supplied)?,
             )?;
-            add(&mut volume_charge_c, &mut volume_correction, volume_load[v])?;
+            add(
+                &mut volume_charge_c,
+                &mut volume_correction,
+                sources.volume_load[v],
+            )?;
+            add(&mut sheet_charge_c, &mut sheet_correction, sheet_load)?;
             add(
                 &mut boundary_charge_c,
                 &mut boundary_correction,
                 boundary_charge,
             )?;
             let component = g.components[v];
+            let free_supplied = if physical_prescribed[v] {
+                free_applied
+            } else {
+                finite(free_load + boundary_charge)?
+            };
             add(
                 &mut component_charge[component],
                 &mut component_correction[component],
-                supplied,
+                free_supplied,
             )?;
             nodal_boundary_charge_c[v] = charge;
         }
@@ -427,6 +627,7 @@ impl SpatialElectrostatics {
         let mut displacement_c_m2 = Vec::with_capacity(self.materials.len());
         let mut cell_energy_j = Vec::with_capacity(self.materials.len());
         let (mut energy_j, mut energy_correction) = (0.0, 0.0);
+        let (mut polarization_pairing_j, mut polarization_pairing_correction) = (0.0, 0.0);
         for (cell, tet) in g.mesh.tets.iter().enumerate() {
             check(cancelled)?;
             let mut e = [0.0; 3];
@@ -437,11 +638,24 @@ impl SpatialElectrostatics {
                         finite((-difference).mul_add(g.geometry.grads[cell][local][axis], *out))?;
                 }
             }
-            let d = self.permittivity[cell].displacement_c_m2(e);
+            let epsilon_e = self.permittivity[cell].displacement_c_m2(e);
+            let d = if let Some(p) = &sources.polarization {
+                add(
+                    &mut polarization_pairing_j,
+                    &mut polarization_pairing_correction,
+                    finite(dot(e, p[cell]) * g.geometry.vol_signed[cell].abs())?,
+                )?;
+                std::array::from_fn(|axis| epsilon_e[axis] + p[cell][axis])
+            } else {
+                epsilon_e
+            };
             for value in d {
                 finite(value)?;
             }
-            let energy = finite(0.5 * dot(e, d) * g.geometry.vol_signed[cell].abs())?;
+            // Fixed impressed polarization is a source, not an additional
+            // linear storage coefficient. In an open-circuit polarized body
+            // D may vanish while the depolarizing field stores positive energy.
+            let energy = finite(0.5 * dot(e, epsilon_e) * g.geometry.vol_signed[cell].abs())?;
             if energy < 0.0 || (e != [0.0; 3] && energy == 0.0) {
                 return Err(invalid(
                     "nonzero dielectric field lost representably positive storage",
@@ -452,7 +666,8 @@ impl SpatialElectrostatics {
             displacement_c_m2.push(d);
             cell_energy_j.push(energy);
         }
-        let charge_balance_residual_c = finite(volume_charge_c + boundary_charge_c)?;
+        let charge_balance_residual_c =
+            finite(finite(volume_charge_c + sheet_charge_c)? + boundary_charge_c)?;
         let maximum_component_charge_residual_c =
             component_charge.iter().map(|v| v.abs()).fold(0.0, f64::max);
         let energy_balance_residual_j = finite(energy_j - pairing_j)?;
@@ -472,14 +687,21 @@ impl SpatialElectrostatics {
             });
         }
         let mut interface_displacement_jumps_c = Vec::new();
+        let mut interface_displacement_residuals_c = Vec::new();
         for (face, data) in g.faces.iter().enumerate() {
             check(cancelled)?;
             if let [left, right] = data.cells.as_slice() {
                 let jump = std::array::from_fn(|axis| {
                     displacement_c_m2[*left][axis] - displacement_c_m2[*right][axis]
                 });
-                interface_displacement_jumps_c
-                    .push((face, finite(dot(jump, data.outward_normal) * data.area_m2)?));
+                let jump = finite(dot(jump, data.outward_normal) * data.area_m2)?;
+                interface_displacement_jumps_c.push((face, jump));
+                // n points from the first cell to the second. Gauss' pillbox
+                // gives (D_second-D_first).n = sigma_free on a sheet.
+                if !sources.sheets.is_empty() {
+                    interface_displacement_residuals_c
+                        .push((face, finite(jump + sources.sheet_charge_by_face[face])?));
+                }
             }
         }
         let mut voltage_v = relative
@@ -497,7 +719,10 @@ impl SpatialElectrostatics {
         check(cancelled)?;
         Ok(SpatialElectricField {
             problem: self,
-            free_charge_density_c_m3: rho.to_vec(),
+            free_charge_density_c_m3: sources.rho,
+            impressed_polarization_c_m2: sources.polarization,
+            sheets: sources.sheets,
+            charged_sheet_vertices: sources.charged_sheet_vertices,
             voltage_v,
             relative_voltage_v: relative,
             electric_field_v_m,
@@ -505,16 +730,21 @@ impl SpatialElectrostatics {
             cell_energy_j,
             energy_j,
             nodal_boundary_charge_c,
-            nodal_volume_charge_c: volume_load,
+            nodal_volume_charge_c: sources.volume_load,
+            nodal_sheet_charge_c: sources.sheet_load,
+            nodal_polarization_load_c: sources.polarization_load,
             nodal_applied_surface_charge_c: surface_load,
             volume_charge_c,
+            sheet_charge_c,
             boundary_charge_c,
+            polarization_pairing_j,
             charge_balance_residual_c,
             maximum_component_charge_residual_c,
             maximum_free_charge_residual_c,
             energy_balance_residual_j,
             hodge_energy_residual_j,
             interface_displacement_jumps_c,
+            interface_displacement_residuals_c,
             gauges,
             report,
         })
@@ -527,6 +757,9 @@ impl SpatialElectrostatics {
 pub struct SpatialElectricField<'a> {
     problem: &'a SpatialElectrostatics,
     free_charge_density_c_m3: Vec<f64>,
+    impressed_polarization_c_m2: Option<Vec<[f64; 3]>>,
+    sheets: Vec<ElectrostaticChargeSheet>,
+    charged_sheet_vertices: Vec<bool>,
     voltage_v: Vec<f64>,
     relative_voltage_v: Vec<f64>,
     electric_field_v_m: Vec<[f64; 3]>,
@@ -535,15 +768,20 @@ pub struct SpatialElectricField<'a> {
     energy_j: f64,
     nodal_boundary_charge_c: Vec<Option<f64>>,
     nodal_volume_charge_c: Vec<f64>,
+    nodal_sheet_charge_c: Vec<f64>,
+    nodal_polarization_load_c: Vec<f64>,
     nodal_applied_surface_charge_c: Vec<f64>,
     volume_charge_c: f64,
+    sheet_charge_c: f64,
     boundary_charge_c: f64,
+    polarization_pairing_j: f64,
     charge_balance_residual_c: f64,
     maximum_component_charge_residual_c: f64,
     maximum_free_charge_residual_c: f64,
     energy_balance_residual_j: f64,
     hodge_energy_residual_j: f64,
     interface_displacement_jumps_c: Vec<(usize, f64)>,
+    interface_displacement_residuals_c: Vec<(usize, f64)>,
     gauges: Vec<usize>,
     report: Option<SolveReport>,
 }
@@ -560,6 +798,15 @@ impl SpatialElectricField<'_> {
     pub fn free_charge_density_c_m3(&self) -> &[f64] {
         &self.free_charge_density_c_m3
     }
+    /// Original additional fixed polarization in the mesh frame. None means
+    /// exactly zero; induced response remains represented by epsilon.
+    pub fn impressed_polarization_c_m2(&self) -> Option<&[[f64; 3]]> {
+        self.impressed_polarization_c_m2.as_deref()
+    }
+    /// Original impressed free sheets, in canonical face order.
+    pub fn charge_sheets(&self) -> &[ElectrostaticChargeSheet] {
+        &self.sheets
+    }
     pub fn electric_field_v_m(&self) -> &[[f64; 3]] {
         &self.electric_field_v_m
     }
@@ -569,6 +816,8 @@ impl SpatialElectricField<'_> {
     pub fn cell_energy_j(&self) -> &[f64] {
         &self.cell_energy_j
     }
+    /// Reversible linear dielectric storage, integral E.epsilon.E/2, at fixed
+    /// impressed polarization. No polarization-source energy is included.
     pub fn energy_j(&self) -> f64 {
         self.energy_j
     }
@@ -580,6 +829,16 @@ impl SpatialElectricField<'_> {
     pub fn nodal_volume_charge_c(&self) -> &[f64] {
         &self.nodal_volume_charge_c
     }
+    /// Exact P1 moments of internal free sheet charge [C]. Empty means no
+    /// sheets were supplied, hence exactly zero at every node.
+    pub fn nodal_sheet_charge_c(&self) -> &[f64] {
+        &self.nodal_sheet_charge_c
+    }
+    /// Nodal weak load integral grad(N).P_fixed [C]. This is not free charge.
+    /// Empty means no impressed polarization was supplied, hence exactly zero.
+    pub fn nodal_polarization_load_c(&self) -> &[f64] {
+        &self.nodal_polarization_load_c
+    }
     /// Signed free surface load = -integral(N_i D.n dA) [C].
     pub fn nodal_applied_surface_charge_c(&self) -> &[f64] {
         &self.nodal_applied_surface_charge_c
@@ -587,8 +846,19 @@ impl SpatialElectricField<'_> {
     pub fn volume_charge_c(&self) -> f64 {
         self.volume_charge_c
     }
+    pub fn sheet_charge_c(&self) -> f64 {
+        self.sheet_charge_c
+    }
     pub fn boundary_charge_c(&self) -> f64 {
         self.boundary_charge_c
+    }
+    /// Integral E.P_fixed [J], evaluated on the original cells. With the
+    /// complete free-charge load, the weak identity is
+    /// `2 energy_j = phi.q_free - polarization_pairing_j`.
+    /// This signed pairing is not a separately inferred energy of the
+    /// apparatus maintaining P or time-integrated changing-polarization work.
+    pub fn polarization_pairing_j(&self) -> f64 {
+        self.polarization_pairing_j
     }
     pub fn charge_balance_residual_c(&self) -> f64 {
         self.charge_balance_residual_c
@@ -606,8 +876,20 @@ impl SpatialElectricField<'_> {
         self.hodge_energy_residual_j
     }
     /// Raw P1 normal-D discontinuity integrated on each interior face [C].
+    /// The normal points from the first adjacent cell to the second; an exact
+    /// free sheet contributes minus its charge to this first-minus-second jump.
     pub fn interface_displacement_jumps_c(&self) -> &[(usize, f64)] {
         &self.interface_displacement_jumps_c
+    }
+    /// Raw interface jump PLUS prescribed free sheet charge [C]. Zero is the
+    /// resolved jump condition; P1 discretization residuals remain unsmoothed.
+    /// This is a diagnostic, not an equilibrated flux or continuum error bound.
+    pub fn interface_displacement_residuals_c(&self) -> &[(usize, f64)] {
+        if self.interface_displacement_residuals_c.is_empty() {
+            &self.interface_displacement_jumps_c
+        } else {
+            &self.interface_displacement_residuals_c
+        }
     }
     pub fn gauge_vertices(&self) -> &[usize] {
         &self.gauges
