@@ -19334,6 +19334,42 @@ six-coordinate finite bodies, three momenta and complete energy, a native
 oblique spring with off-diagonal compliance, prescribed-port work, mixed rupture
 and reclosure, source identity, and late-refusal replay.
 
+### Prescribed temperature on the original cohesive modal network
+
+`CohesiveModalSystem::apply_temperature_successor` continues the accepted
+source-bound interface at fixed local jump. An enabled residual or
+damaged-area friction mode requires the paired
+`apply_temperature_and_friction_successors` operation; the original two
+sources retain their card, selected claims, surface order and held coordinates
+and must agree on the complete new query. The material owner's existing
+temperature transfer runs once. It preserves irreversible history, accounts
+for signed coefficient work and additional fracture release separately, and
+cannot heal or rebond on cooling. Friction occupancy is retained exactly;
+coefficient changes supply no slip displacement or frictional heat.
+
+The returned report records the unchanged sample and jump, old/new damage,
+interface and total storage, signed parameter work, additional damage loss,
+and an independent double-double energy residual. Its tolerance scales only
+with the interface energy account, so unrelated native energy cannot mask
+contact defects. The original material tolerance and total native energy
+ceiling also remain in force. Existing total-force limits retain their
+actual-mechanical-audit semantics.
+
+Only the original source, material point and enabled local friction binding
+are replaced after all audits. Bodies, every modal coordinate and native
+material/Maxwell history, work columns, full compliance,
+clock and last accepted mechanical frame are retained. The next ordinary step
+uses the new local coefficients. No mechanical time, viscosity loss,
+temperature trajectory, bulk expansion or heat destination is inferred.
+`apply_temperature_successors_with_admission` lets a receiving owner stage its
+account before publication; receiving refusal or late cancellation leaves the
+whole accepted mechanical/interface state unchanged.
+
+G1/G3 regressions in `tests/cohesive_modal/temperature.rs` cover original
+moving bodies, independently computed coefficient work and damage release,
+cooling without healing, same-source continuation, paired friction occupancy,
+next-step mechanical response and atomic refusal/retry.
+
 ## Material magnetostrictive rod inside a Kirchhoff RLC circuit
 
 `material_circuit::magnetostrictive::MagnetostrictiveCircuit` binds one original

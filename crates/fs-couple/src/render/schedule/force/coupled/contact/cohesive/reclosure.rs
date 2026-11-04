@@ -15,6 +15,27 @@ pub(super) struct ReclosureBinding<'a> {
     state: ReclosureState<'a>,
 }
 
+impl<'a> ReclosureBinding<'a> {
+    pub(super) fn transfer_temperature(
+        &self,
+        expected_point: CohesivePoint<'a>,
+        next: &'a ResolvedBilinearCohesive,
+        next_friction: &'a ResidualCoulombSource,
+        temperature_axis: &str,
+    ) -> Result<(Self, fs_material::cohesive::temperature::CohesiveTemperatureStep<'a>), CohesiveModalError> {
+        if self.state.point() != expected_point {
+            return Err(ReclosureError::StateMismatch.into());
+        }
+        let (load_line, state, transfer) = self.load_line.transfer_temperature(
+            self.state,
+            next,
+            next_friction,
+            temperature_axis,
+        )?;
+        Ok((Self { load_line, state }, transfer))
+    }
+}
+
 impl<'a> CohesiveModalSystem<'a> {
     /// Explicitly select residual contact on the SAME fully failed interface.
     /// Both material assignments, original interface card and fixed query must

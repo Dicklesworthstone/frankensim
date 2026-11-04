@@ -27,6 +27,27 @@ pub(super) struct DamageFrictionBinding<'a> {
     state: DamageFrictionState<'a>,
 }
 
+impl<'a> DamageFrictionBinding<'a> {
+    pub(super) fn transfer_temperature(
+        &self,
+        expected_point: CohesivePoint<'a>,
+        next: &'a ResolvedBilinearCohesive,
+        next_friction: &'a ResidualCoulombSource,
+        temperature_axis: &str,
+    ) -> Result<(Self, fs_material::cohesive::temperature::CohesiveTemperatureStep<'a>), CohesiveModalError> {
+        if self.state.point() != expected_point {
+            return Err(DamageFrictionError::StateMismatch.into());
+        }
+        let (load_line, state, transfer) = self.load_line.transfer_temperature(
+            self.state,
+            next,
+            next_friction,
+            temperature_axis,
+        )?;
+        Ok((Self { load_line, state }, transfer))
+    }
+}
+
 impl<'a> CohesiveModalSystem<'a> {
     /// Explicitly select the damaged-area rigid-Coulomb mixture on the SAME
     /// original bond. This can be enabled before initiation or after partial

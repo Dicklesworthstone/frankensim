@@ -21,6 +21,9 @@ const RATE: u32 = 5_000;
 #[path = "cohesive_modal/patch.rs"]
 mod patch;
 
+#[path = "cohesive_modal/temperature.rs"]
+mod temperature;
+
 fn law() -> BilinearCohesive {
     BilinearCohesive::new_mixed_mode(
         MixedModeParameters {

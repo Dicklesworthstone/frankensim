@@ -10,8 +10,9 @@
 //! observation. Fracture and physical bond-viscosity loss are reported separately
 //! and are not automatically assigned to heat. Straight jump paths and a fixed
 //! local frame are the constitutive approximation: resolve reversals by refining
-//! the physical timestep. No evolving geometry, rebonding or thermal refresh is
-//! inferred from this fixed-source interface.
+//! the physical timestep. Explicit temperature continuation retains the original
+//! native state and accounts for coefficient work and further damage. No
+//! evolving geometry, rebonding or autonomous thermal feedback is inferred.
 
 use super::{
     CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, network_response, poll,
@@ -32,6 +33,9 @@ pub mod reclosure;
 
 /// Compression-only damaged-area friction during progressive bond damage.
 pub mod frictional_damage;
+
+/// Explicit original-source temperature changes at fixed native state.
+pub mod temperature;
 
 /// Bounded constitutive solve plus the independent actual-body force gate.
 #[derive(Clone, Copy, Debug, PartialEq)]
