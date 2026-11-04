@@ -6,10 +6,10 @@
 //! the two original material caloric cells through `apply_heat_j`. Any remainder
 //! has an explicit named destination outside those cells.
 //!
-//! All segments are a same-time frozen-normal-source split. This module neither
-//! advances thermal time nor invents conduction between events, radiation,
-//! dynamic fracture, or a temperature-dependent normal potential. A trajectory
-//! owner must localize its events and arrange intervening transport separately.
+//! The default proposals are a same-time frozen-normal-source split. The opt-in
+//! [`timed`] composition advances the original thermal timeline between sealed
+//! normal events. Neither path invents radiation, dynamic fracture or a
+//! temperature-dependent normal potential.
 
 use fs_blake3::ContentHash;
 use fs_contact::normal_patch::adhesive::{
@@ -23,6 +23,8 @@ use fs_tribo::{DissipationStep, HeatPartition, TriboError, WorkLedger};
 use std::collections::BTreeMap;
 
 mod normal_motion;
+/// Original thermal transport between the sealed normal trajectory's events.
+pub mod timed;
 
 /// Finite work and heat accuracy budgets, all chosen by the caller.
 #[derive(Clone, Copy, Debug, PartialEq)]
