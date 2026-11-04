@@ -144,8 +144,9 @@ pub struct Config {
     pub silent_bank_hz: f64,
     /// Geometric string extension: the reference's complete `--string-stretching` file
     /// (`linear`, `stretch` or `waves` per key of the scale; see `crate::stretch`). It acts
-    /// on each physical string's retained active/bank union through one explicit kick
-    /// per step, booked in `Ledger::coupling_j`. Axial motion survives ownership changes.
+    /// on each physical string's retained active/bank union through symmetric exact
+    /// extension half-flows. Splitting work stays in `Ledger::coupling_j`; axial
+    /// motion survives ownership changes.
     /// `None` keeps the linear strings bit for bit.
     pub string_stretching: Option<String>,
 }
@@ -1544,7 +1545,7 @@ pub struct Ledger {
     /// motion stay in stored_j; a nonlinear projection's energy increase is
     /// representation work in coupling_j, never retirement or physical heat.
     pub retired_j: f64,
-    /// Signed numerical work of the explicit nonlinear string-extension split.
+    /// Signed numerical work of the symmetric nonlinear string-extension split.
     /// Also includes extension energy introduced by adding previously absent modes.
     /// Reciprocal linear string/bank/board exchange adds no source to this account.
     pub coupling_j: f64,
@@ -1567,8 +1568,8 @@ pub struct Counters {
     pub contact_failures: u64,
     pub clipped_samples: u64,
     pub peak_pa: f64,
-    /// Steps on which a stretching string left its file's slope or strain domain (the
-    /// reference refuses those; the live kernel counts them).
+    /// Physical-string half-flows that left the file's slope or strain domain
+    /// (the reference refuses those; the live kernel counts them).
     pub stretch_out_of_domain: u64,
 }
 
@@ -3392,6 +3393,9 @@ impl LivePiano {
         }
         let r = self.r;
         let dur = 0.5 * self.dt;
+        // Exact frozen-geometry extension flows surround the existing coupled
+        // linear/contact step. Both reciprocal bridge impulses use this half-clock.
+        let mut string_loss = if self.stretching { self.step_stretch() } else { 0.0 };
         self.refresh_pads();
         for slot in 0..self.active.len() {
             let damped = self.is_damped(&self.active[slot]);
@@ -3401,7 +3405,6 @@ impl LivePiano {
         let mut damper_loss = self.damp(false);
         damper_loss += self.damp_bank(false);
         let coupled_bank = self.bank_courses.iter().any(|c| c.modes != 0);
-        let mut string_loss = 0.0;
         let mut board_loss = 0.0;
 
         // ---- intrinsic string loss, pre half-flow (implicit midpoint) ----
@@ -4014,13 +4017,14 @@ impl LivePiano {
         }
     }
 
-    /// One extension kick per physical retained string, after its shared linear
-    /// active/bank motion. Owed damper flows settle before reading those velocities.
-    /// Returns physical axial loss; the split's numerical work and the reciprocal
-    /// board impulse remain explicitly in `Ledger::coupling_j`.
+    /// One exact extension half-flow per physical retained string, before or
+    /// after its shared linear active/bank motion. Owed damper flows settle
+    /// before reading those velocities. The returned mean forces apply their
+    /// integrated impulses through both conjugate board participation rows.
+    /// Physical axial loss is separate from the split's numerical work.
     fn step_stretch(&mut self) -> f64 {
         if self.stretch_courses.is_empty() { return 0.0; }
-        let dt = self.dt;
+        let dt = 0.5 * self.dt;
         for ac in &mut self.active {
             for s in &mut ac.segs {
                 if self.stretches[s.seg].is_some() && s.owed {

@@ -11,23 +11,30 @@
 //! bridge, `y = sum phi_k (z_k - beta_k b) + x/L b`, with the reference's slope
 //! scales (the Kirchhoff--Carrier channel's diagonal).
 //!
-//! The reference resolves the extension force implicitly, a discrete-gradient
-//! fixed point iterated with its contact solve every tick. Here the linear motion of strings
-//! and board keeps its exact transitions and the extension potential acts as one
-//! velocity kick per step, evaluated where the step left the coordinates. The
-//! axial modes are linear oscillators forced by the strings; with the strings'
-//! start and end of the step both known, they take the exact response to that
-//! force varying linearly over the step. The shared `fs-modal` owner also
-//! integrates their physical viscous heat along that same trajectory. Earlier
-//! timestep comparisons used the former scalar bridge port; that convergence
-//! measurement must be repeated with the geometry-derived rows. The two
-//! integration methods do not promise bitwise parity. The method's numerical
-//! work is booked in `Ledger::coupling_j`.
+//! The reference resolves extension by a discrete-gradient/contact iteration.
+//! This live image instead composes an exact extension half-flow, the existing
+//! coupled linear/contact step, and a second exact extension half-flow. In each
+//! extension flow transverse and bridge positions are frozen, the axial modes
+//! take the shared `fs-modal` held-force transition, and their exact mean
+//! displacement integrates both reciprocal termination reactions. No endpoint
+//! reaction is substituted for that impulse. Physical axial viscous heat comes
+//! from the same continuous transition.
+//!
+//! The symmetric composition is second order for admitted smooth dynamics when
+//! the middle step has that order. Contact events and unresolved physical bands
+//! need separate refinement. Individual exact subflows do not imply exact
+//! conservation of the full nonlinear energy; their splitting work remains
+//! explicit in `Ledger::coupling_j`. No amplitude normalization or artificial
+//! damping enforces closure.
 
 use crate::refmods::linear::string_stretching::{Material, WaveMaterial};
 use fs_math::det;
 use fs_modal::time::{LinearForceTransition, ModalAcousticState};
 use fs_nlmodal::{KcStringParams, kirchhoff_carrier_string, longitudinal::LongitudinalString};
+
+#[path = "stretch_flow.rs"]
+mod flow;
+use flow::AxialMean;
 
 /// Exact transition of y'' + c y' + w2 y = 0 over `dt` for (y, y'), underdamped.
 pub(crate) fn damped_transition(w2: f64, c: f64, dt: f64) -> [f64; 4] {
@@ -86,18 +93,18 @@ pub(crate) struct Stretch {
     /// Axial coordinate per unit axial bridge displacement (static correction).
     betas: Vec<f64>,
     omega2: Vec<f64>,
-    /// Shared exact linearly forced transitions, including independent viscous heat.
+    /// Shared exact held-force half-flows, including independent viscous heat.
     flow: Vec<LinearForceTransition>,
+    /// Exact displacement means lowered from the SAME owner's held/ramp maps.
+    mean_flow: Vec<AxialMean>,
+    /// One extension subflow spans half the original mechanical step.
     step_s: f64,
     u: Vec<f64>,
     w: Vec<f64>,
-    /// Axial force of the strings and bridge where the last step left them.
-    force: Vec<f64>,
-    /// Rejected axial trials must not advance any accepted coordinate or force history.
+    /// Rejected axial trials must not advance any accepted coordinate.
     next_u: Vec<f64>,
     next_w: Vec<f64>,
-    next_force: Vec<f64>,
-    /// Extension potential less the axial oscillators' own, where the last kick left it [J].
+    /// Extension potential less the axial oscillators' own, after the last subflow [J].
     potential: f64,
     slopes: Vec<f64>,
     slope_gradient: Vec<f64>,
@@ -107,16 +114,16 @@ pub(crate) struct Stretch {
     weights: Vec<f64>,
 }
 
-/// What one step's kick did.
+/// Integrated effects of one frozen-geometry extension subflow.
 pub(crate) struct Kick {
-    /// d(potential)/d(bridge displacement) [N]: the board takes minus this.
+    /// Mean d(potential)/d(bridge displacement) [N]: the board takes minus this.
     pub reaction: f64,
-    /// d(potential)/d(axial termination displacement) [N]. Its own modal row
+    /// Mean d(potential)/d(axial termination displacement) [N]. Its own modal row
     /// returns the force to the board; it is not a vertical-force multiplier.
     pub axial_reaction: f64,
     /// Numerical work of the method on this segment [J].
     pub work: f64,
-    /// Axial modal loss of the step [J].
+    /// Axial modal loss of the subflow [J].
     pub loss: f64,
     /// The strain left the supplied slope or strain domain, or tension went nonpositive.
     pub out_of_domain: bool,
@@ -164,21 +171,28 @@ impl Stretch {
             maximum_strain = w.maximum_strain;
         }
         let model = LongitudinalString::new(params, n, 1, &indices).map_err(|e| e.to_string())?;
-        let dt = 1.0 / f64::from(rate);
+        let dt = 0.5 / f64::from(rate);
         let omega2: Vec<f64> = model.axial_omegas().iter().map(|w| w * w).collect();
         let flow = model.axial_omegas().iter().map(|&omega|
             LinearForceTransition::try_new(omega, damping, dt).map_err(|e| e.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
+        let rest = ModalAcousticState { displacement_m_sqrt_kg: 0.0, velocity_m_sqrt_kg_per_s: 0.0 };
+        let mean_flow = flow.iter().map(|map| {
+            let held = map.advance(rest, 1.0, 1.0).map_err(|e| e.to_string())?.displacement_m_sqrt_kg;
+            let ramp = map.advance(rest, 0.0, 1.0).map_err(|e| e.to_string())?.displacement_m_sqrt_kg;
+            AxialMean::try_new(held, ramp, dt)
+                .ok_or_else(|| "longitudinal half-flow mean is not representable".to_string())
+        }).collect::<Result<Vec<_>, _>>()?;
         let betas = model.axial_modes().iter().zip(model.axial_slope_scales())
             .map(|(&mode, &scale)| 2.0 * if mode % 2 == 0 { -1.0 } else { 1.0 } / (length * scale)).collect();
         let axial = indices.len();
         Ok(Self {
             slopes: vec![0.0; n + 1], slope_gradient: vec![0.0; n + 1],
             relative: vec![0.0; axial], harmonics: vec![0.0; axial], strain: vec![0.0; axial], weights: vec![0.0; axial],
-            u: vec![0.0; axial], w: vec![0.0; axial], force: vec![0.0; axial],
-            next_u: vec![0.0; axial], next_w: vec![0.0; axial], next_force: vec![0.0; axial],
+            u: vec![0.0; axial], w: vec![0.0; axial],
+            next_u: vec![0.0; axial], next_w: vec![0.0; axial],
             model, length, ea: material.axial_rigidity_n, rest_tension: tension, material, maximum_strain,
-            axial_port, scales, betas, omega2, flow, step_s: dt, potential: 0.0,
+            axial_port, scales, betas, omega2, flow, mean_flow, step_s: dt, potential: 0.0,
         })
     }
 
@@ -194,12 +208,12 @@ impl Stretch {
 
     /// Cold projection onto a changed transverse prefix of the SAME string.
     /// The axial sine coordinates have not changed basis: retain their physical
-    /// displacement and velocity exactly. The new prefix's current strain is the
-    /// next FOH drive's starting value, and its extension potential is the split's
-    /// new energy baseline. The caller accounts separately for projection energy.
+    /// displacement and velocity exactly. The new prefix's current strain drives
+    /// the next exact subflow, and its extension potential is the split's new
+    /// energy baseline. The caller accounts separately for projection energy.
     ///
     /// When the retained union is unchanged, the kernel keeps the original owner
-    /// without calling this method, preserving its drive history bit for bit.
+    /// without calling this method, preserving its physical state bit for bit.
     /// This is initialization of a replacement trial; an error never changes the
     /// previous accepted owner.
     pub fn reproject_from(&mut self, previous: Option<&Self>, q: &[f64], beta: &[f64],
@@ -227,13 +241,8 @@ impl Stretch {
         let total = self.storage(mean, axial_bridge).0;
         let axial_own: f64 = self.u.iter().zip(&self.omega2).map(|(u, w2)| 0.5 * w2 * u * u).sum();
         let potential = total - axial_own;
-        let c = self.model.strain_energy_coefficient();
-        for j in 0..self.force.len() {
-            self.force[j] = self.omega2[j] * self.betas[j] * axial_bridge
-                - c * self.model.axial_slope_scales()[j] * self.harmonics[j];
-        }
         if !total.is_finite() || !potential.is_finite()
-            || self.force.iter().chain(&self.u).chain(&self.w).any(|x| !x.is_finite()) {
+            || self.u.iter().chain(&self.w).any(|x| !x.is_finite()) {
             return Err("string extension projection is not representable".into());
         }
         self.potential = potential;
@@ -275,53 +284,55 @@ impl Stretch {
         copy.storage(mean, axial_bridge).0 + 0.5 * self.w.iter().map(|x| x * x).sum::<f64>()
     }
 
-    /// One step of the axial modes, then the kick of the extension potential on the segment's
-    /// velocities `v`, from the coordinates the step left (`q`, `b`). One pass over the slopes
-    /// gives the strain harmonics; everything else follows from them.
+    /// Exact extension subflow with transverse and bridge positions frozen.
+    /// The axial force `g_j = -(dE/du_j - w_j^2 u_j)` is constant in this flow.
+    /// Its exact trajectory supplies both physical heat and the mean axial
+    /// coordinate; the latter integrates the reciprocal transverse/bridge
+    /// forces because their dependence on that coordinate is affine.
     ///
-    /// The axial modes are linear oscillators forced by the strings and the bridge:
-    /// `g_j = -(dE/du_j - w_j^2 u_j)` does not depend on `u`. With the strings' start and end
-    /// of the step both known, they take the exact response to that force varying linearly
-    /// over the step (a first-order hold): an impulse would sample oscillators of up to
-    /// `w dt` ~ 1.3 at 48 kHz too coarsely.
-    /// On an axial-transition refusal, no axial coordinate, force history,
-    /// extension potential or supplied transverse velocity is published.
+    /// Two half-flows surround the existing linear/contact step. The residual
+    /// potential baseline also captures its change during that middle step, so
+    /// the full splitting work stays visible. A refusal publishes no axial
+    /// coordinate, potential or supplied transverse velocity.
     pub fn step(&mut self, q: &[f64], beta: &[f64], b: f64, axial_bridge: f64, dt: f64, v: &mut [f64]) -> Result<Kick, String> {
         if dt != self.step_s {
-            return Err("longitudinal step must use its prepared mechanics clock".into());
+            return Err("longitudinal subflow must use half its prepared mechanics clock".into());
+        }
+        if q.len() != self.scales.len() || beta.len() != q.len() || v.len() != q.len()
+            || !b.is_finite() || !axial_bridge.is_finite()
+            || q.iter().chain(beta).chain(v.iter()).any(|x| !x.is_finite()) {
+            return Err("string extension subflow needs its complete finite transverse state".into());
         }
         let axial_bridge = if self.axial_port { axial_bridge } else { 0.0 };
         self.fill_slopes(q, beta, b);
-        let mean = self.model.geometric_strain(&self.slopes, &mut self.harmonics).unwrap_or(f64::NAN);
+        let mean = self.model.geometric_strain(&self.slopes, &mut self.harmonics)
+            .map_err(|e| e.to_string())?;
         let c = self.model.strain_energy_coefficient();
         let (mut loss, mut axial_change) = (0.0, 0.0);
         for j in 0..self.u.len() {
             let w2 = self.omega2[j];
             let d = self.model.axial_slope_scales()[j];
-            let g1 = w2 * self.betas[j] * axial_bridge - c * d * self.harmonics[j];
+            let force = w2 * self.betas[j] * axial_bridge - c * d * self.harmonics[j];
             let (u0, w0) = (self.u[j], self.w[j]);
             let frame = self.flow[j].advance_with_energy(ModalAcousticState {
                 displacement_m_sqrt_kg: u0,
                 velocity_m_sqrt_kg_per_s: w0,
-            }, self.force[j], g1).map_err(|e| e.to_string())?;
+            }, force, force).map_err(|e| e.to_string())?;
             let (u1, w1) = (frame.state.displacement_m_sqrt_kg, frame.state.velocity_m_sqrt_kg_per_s);
             self.next_u[j] = u1;
             self.next_w[j] = w1;
-            self.next_force[j] = g1;
+            let average = self.mean_flow[j].displacement(u0, w0, force, w2);
+            if !average.is_finite() {
+                return Err("longitudinal subflow mean is not representable".into());
+            }
+            self.relative[j] = average - self.betas[j] * axial_bridge;
             loss += frame.viscous_dissipation_j;
-            axial_change += 0.5 * (w1 * w1 - w0 * w0 + w2 * (u1 * u1 - u0 * u0));
+            axial_change += 0.5 * ((w1 - w0) * (w1 + w0) + w2 * (u1 - u0) * (u1 + u0));
         }
-        std::mem::swap(&mut self.u, &mut self.next_u);
-        std::mem::swap(&mut self.w, &mut self.next_w);
-        std::mem::swap(&mut self.force, &mut self.next_force);
-        self.fill_relative(axial_bridge);
-        let (total, mean_total, spread) = self.storage(mean, axial_bridge);
-        let axial_own: f64 = self.u.iter().zip(&self.omega2).map(|(u, w2)| 0.5 * w2 * u * u).sum();
-        let potential = total - axial_own;
-        let slope_bound = self.slopes[0].abs() + self.slopes[1..].iter().map(|a| a.abs()).sum::<f64>();
-        let out_of_domain = !(slope_bound <= self.material.maximum_slope)
-            || !(mean_total.abs() + spread <= self.maximum_strain)
-            || self.rest_tension + self.ea * (mean_total - spread) <= 0.0;
+        // At fixed slopes the gradient is affine in axial displacement. Thus
+        // its value at the exact mean is its exact time integral divided by dt.
+        self.model.storage_from_strain(mean, &self.harmonics, &self.relative, &mut self.strain)
+            .map_err(|e| e.to_string())?;
         for (weight, &s) in self.weights.iter_mut().zip(&self.strain) {
             *weight = c * s;
         }
@@ -329,24 +340,46 @@ impl Stretch {
         // (`longitudinal_string.rs`, `evaluate`): 2 c (s_0 + eps) in all.
         let eps = axial_bridge / self.length;
         let sg = &mut self.slope_gradient;
-        if self.model.geometric_strain_gradient(&self.slopes, 2.0 * c * (mean + eps), &self.weights, sg).is_err() {
-            sg.fill(0.0);
-        }
+        self.model.geometric_strain_gradient(&self.slopes, 2.0 * c * (mean + eps), &self.weights, sg)
+            .map_err(|e| e.to_string())?;
         let mut reaction = sg[0] / self.length;
-        let mut axial_reaction = self.ea * mean_total;
+        let mut axial_reaction = self.ea * (mean + eps);
         let mut kinetic = 0.0;
-        for (((vk, &g), &scale), &bk) in v.iter_mut().zip(&sg[1..]).zip(&self.scales).zip(beta) {
+        for (((&old, &g), &scale), &bk) in v.iter().zip(&sg[1..]).zip(&self.scales).zip(beta) {
             let force = g * scale;
             reaction -= bk * force;
-            let old = *vk;
-            *vk = old - dt * force;
-            kinetic += 0.5 * (*vk * *vk - old * old);
+            let next = old - dt * force;
+            if !next.is_finite() {
+                return Err("string extension impulse is not representable".into());
+            }
+            kinetic += 0.5 * (next - old) * (next + old);
         }
         for ((&weight, &d), &bj) in self.weights.iter().zip(self.model.axial_slope_scales()).zip(&self.betas) {
             axial_reaction -= bj * weight * d;
         }
-        // Exact dynamics would trade these against each other; what is left is the method's.
+        // Endpoint storage belongs to the actual endpoint, not the mean used
+        // for impulses. Scratch is staged until every published result is finite.
+        for ((slot, &u), &bj) in self.relative.iter_mut().zip(&self.next_u).zip(&self.betas) {
+            *slot = u - bj * axial_bridge;
+        }
+        let (total, mean_total, spread) = self.storage(mean, axial_bridge);
+        let axial_own: f64 = self.next_u.iter().zip(&self.omega2).map(|(u, w2)| 0.5 * w2 * u * u).sum();
+        let potential = total - axial_own;
         let work = kinetic + axial_change + loss + potential - self.potential;
+        if [reaction, axial_reaction, kinetic, axial_change, loss, total, mean_total, spread, potential, work]
+            .iter().any(|x| !x.is_finite()) {
+            return Err("string extension subflow is not representable".into());
+        }
+        let slope_bound = self.slopes[0].abs() + self.slopes[1..].iter().map(|a| a.abs()).sum::<f64>();
+        let out_of_domain = !(slope_bound <= self.material.maximum_slope)
+            || !(mean_total.abs() + spread <= self.maximum_strain)
+            || self.rest_tension + self.ea * (mean_total - spread) <= 0.0;
+        for ((vk, &g), &scale) in v.iter_mut().zip(&self.slope_gradient[1..]).zip(&self.scales) {
+            let force = g * scale;
+            *vk -= dt * force;
+        }
+        std::mem::swap(&mut self.u, &mut self.next_u);
+        std::mem::swap(&mut self.w, &mut self.next_w);
         self.potential = potential;
         Ok(Kick { reaction, axial_reaction: if self.axial_port { axial_reaction } else { 0.0 }, work, loss, out_of_domain })
     }
@@ -385,13 +418,89 @@ mod axial_transition_tests {
         }
     }
 
+    /// G0/G1: moving axial coordinates require time-integrated reactions, not
+    /// endpoint gradients. Independently integrate finite differences of the
+    /// physical stored energy along the analytic held-force axial trajectory.
+    /// This checks every transverse impulse and both conjugate bridge forces.
+    #[test]
+    fn reciprocal_impulses_integrate_physical_energy_gradients_along_axial_motion() {
+        let (q, beta) = ([2e-5, -1e-5, 4e-6, 3e-6], [0.02, -0.01, 0.006, -0.004]);
+        let (b, axial, delta) = (3e-6, -2e-6, 1e-9);
+        for damping in [0.0, 0.03, 1.0] {
+            let mut model = Stretch::new(
+                Material { axial_rigidity_n: 150_000.0, maximum_slope: 0.2 },
+                Some(WaveMaterial { bandwidth_hz: 10_000.0, mode_cap: 8,
+                    damping_ratio: damping, maximum_strain: 0.01 }),
+                1.0, 0.006, 500.0, q.len(), 48_000,
+            ).unwrap();
+            assert_eq!(model.axial_modes(), 4);
+            for j in 0..model.u.len() {
+                model.u[j] = (j + 1) as f64 * if j % 2 == 0 { 3e-8 } else { -3e-8 };
+                model.w[j] = (j + 1) as f64 * -0.004;
+            }
+            model.reproject_from(None, &q, &beta, b, axial).unwrap();
+            let initial = model.clone();
+            let duration = model.step_s;
+            // Obtain the held forces from independent axial energy gradients;
+            // no production gradient/mean helper supplies the oracle forces.
+            let forcing: Vec<f64> = (0..initial.u.len()).map(|j| {
+                let mut plus = initial.clone();
+                let mut minus = initial.clone();
+                let du = 1e-10;
+                plus.u[j] += du;
+                minus.u[j] -= du;
+                initial.omega2[j] * initial.u[j]
+                    - (plus.stored(&q, &beta, b, axial) - minus.stored(&q, &beta, b, axial)) / (2.0 * du)
+            }).collect();
+            let intervals = 1024;
+            let mut integrated = [0.0; 6];
+            for sample in 0..=intervals {
+                let weight = if sample == 0 || sample == intervals { 1.0 }
+                    else if sample % 2 == 0 { 2.0 } else { 4.0 };
+                let time = duration * sample as f64 / intervals as f64;
+                let mut state = initial.clone();
+                for (j, &force) in forcing.iter().enumerate() {
+                    let equilibrium = force / initial.omega2[j];
+                    let (u, w) = free_motion(initial.model.axial_omegas()[j], damping,
+                        initial.u[j] - equilibrium, initial.w[j], time);
+                    state.u[j] = equilibrium + u;
+                    state.w[j] = w;
+                }
+                for k in 0..q.len() {
+                    let (mut plus, mut minus) = (q, q);
+                    plus[k] += delta;
+                    minus[k] -= delta;
+                    integrated[k] += weight * (state.stored(&plus, &beta, b, axial)
+                        - state.stored(&minus, &beta, b, axial)) / (2.0 * delta);
+                }
+                integrated[4] += weight * (state.stored(&q, &beta, b + delta, axial)
+                    - state.stored(&q, &beta, b - delta, axial)) / (2.0 * delta);
+                integrated[5] += weight * (state.stored(&q, &beta, b, axial + delta)
+                    - state.stored(&q, &beta, b, axial - delta)) / (2.0 * delta);
+            }
+            let mut velocity = [0.0; 4];
+            let kick = model.step(&q, &beta, b, axial, duration, &mut velocity).unwrap();
+            for (k, mean_force) in integrated.iter_mut().enumerate() {
+                *mean_force /= 3.0 * intervals as f64;
+                let got = match k { 4 => kick.reaction, 5 => kick.axial_reaction,
+                    _ => -velocity[k] / duration };
+                assert!((got - *mean_force).abs() < 2e-6 * mean_force.abs().max(1e-7),
+                    "damping={damping}, coordinate={k}: mean force {got:e}, integrated energy gradient {mean_force:e}");
+            }
+            let before = initial.stored(&q, &beta, b, axial);
+            let after = model.stored(&q, &beta, b, axial) + 0.5 * velocity.iter().map(|v| v * v).sum::<f64>();
+            assert!((after - before + kick.loss - kick.work).abs() < 2e-12 * before,
+                "the split's real energy change must remain visible as work");
+        }
+    }
+
     /// G1: high-frequency axial motion and physical heat, independently
     /// integrated from the continuous viscous power. Endpoint trapezoids do
     /// not pass this test, including at the small material-loss limit.
     #[test]
     fn free_axial_ringdown_and_heat_follow_the_continuous_oscillator() {
         let rate = 48_000;
-        let dt = 1.0 / f64::from(rate);
+        let dt = 0.5 / f64::from(rate);
         for zeta in [0.0, 1e-10, 0.01, 0.8, 1.0] {
             let mut model = fixture(20_000.0, zeta, rate, 1);
             let omega = model.model.axial_omegas()[0];
@@ -425,8 +534,8 @@ mod axial_transition_tests {
     }
 
     /// G1: the actual axial bridge force builds the lossless resonant secular
-    /// response. Only interpolation of the sine remains, with second-order
-    /// convergence as the existing mechanics clock is refined.
+    /// response. Symmetric held forcing converges at second order as the
+    /// existing mechanics clock is refined.
     #[test]
     fn axial_bridge_resonance_converges_without_a_numerical_frequency_shift() {
         let mut errors = Vec::new();
@@ -437,10 +546,14 @@ mod axial_transition_tests {
             let steps = 8 * rate / 2000;
             let dt = 1.0 / f64::from(rate);
             for i in 1..=steps {
-                let b = amplitude * (omega * f64::from(i) * dt).sin();
-                let kick = model.step(&[], &[], 0.0, b, dt, &mut []).unwrap();
-                assert_eq!(kick.loss, 0.0);
-                assert!(!kick.out_of_domain);
+                // Exact half-flows at the bridge positions on either side
+                // of the intervening prescribed smooth bridge motion.
+                for sample in [i - 1, i] {
+                    let b = amplitude * (omega * f64::from(sample) * dt).sin();
+                    let kick = model.step(&[], &[], 0.0, b, 0.5 * dt, &mut []).unwrap();
+                    assert_eq!(kick.loss, 0.0);
+                    assert!(!kick.out_of_domain);
+                }
             }
             let t = f64::from(steps) * dt;
             let scale = model.betas[0] * amplitude * 0.5;
@@ -454,11 +567,11 @@ mod axial_transition_tests {
     }
 
     /// G0/G4: a later axial refusal cannot consume earlier coordinates or the
-    /// endpoint-force history; the next admitted step exactly matches a retry.
+    /// storage baseline; the next admitted subflow exactly matches a retry.
     #[test]
-    fn axial_transition_refusal_preserves_state_and_force_history() {
+    fn axial_transition_refusal_preserves_motion_and_storage() {
         let mut model = fixture(2000.0, 0.01, 48_000, 2);
-        let dt = 1.0 / 48_000.0;
+        let dt = 0.5 / 48_000.0;
         model.step(&[], &[], 0.0, 1e-6, dt, &mut []).unwrap();
         let mut reference = model.clone();
         let beta = model.betas[1];
@@ -467,7 +580,6 @@ mod axial_transition_tests {
         assert!(model.step(&[], &[], 0.0, 1.0, dt, &mut []).is_err());
         assert_eq!(model.u, reference.u);
         assert_eq!(model.w, reference.w);
-        assert_eq!(model.force, reference.force);
         assert_eq!(model.potential.to_bits(), reference.potential.to_bits());
         model.betas[1] = beta;
         assert!(model.step(&[], &[], 0.0, 2e-6, 2.0 * dt, &mut []).is_err());
@@ -475,7 +587,6 @@ mod axial_transition_tests {
         let expected = reference.step(&[], &[], 0.0, 2e-6, dt, &mut []).unwrap();
         assert_eq!(model.u, reference.u);
         assert_eq!(model.w, reference.w);
-        assert_eq!(model.force, reference.force);
         assert_eq!(got.loss.to_bits(), expected.loss.to_bits());
         assert_eq!(got.work.to_bits(), expected.work.to_bits());
     }
@@ -483,7 +594,7 @@ mod axial_transition_tests {
     /// G0/G3: a transverse reduction does not reset an axial resonator. Its
     /// cross term can INCREASE extension energy, so projection is not heat.
     #[test]
-    fn changing_the_transverse_prefix_retains_axial_motion_and_rebases_the_drive() {
+    fn changing_the_transverse_prefix_retains_axial_motion_and_rebases_storage() {
         let make = |n| Stretch::new(
             Material { axial_rigidity_n: 96_000.0, maximum_slope: 0.2 },
             Some(WaveMaterial { bandwidth_hz: 8_100.0, mode_cap: 4,
@@ -513,11 +624,10 @@ mod axial_transition_tests {
         let expected_after = 4.5 * c * geometric * geometric + 0.5 * 0.02_f64.powi(2);
         assert!(after > before, "removing a cancelling strain component can add extension storage");
         assert!((after - expected_after).abs() < 2e-14 * expected_after);
-        assert!(reduced.force.iter().all(|&f| f == 0.0));
         assert!(reduced.potential.abs() < 2e-14 * after);
 
         // All remaining axial motion is now a freely decaying oscillator.
-        // An obsolete pre-projection force or potential would introduce work.
+        // An obsolete pre-projection potential would introduce work.
         let omega = reduced.model.axial_omegas()[3];
         let (want_q, want_v) = free_motion(omega, 0.01, reduced.u[3], reduced.w[3], reduced.step_s);
         let kick = reduced.step(&[0.0], &[0.0], 0.0, 0.0, reduced.step_s, &mut [0.0]).unwrap();

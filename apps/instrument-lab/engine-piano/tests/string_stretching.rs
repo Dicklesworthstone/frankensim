@@ -1,7 +1,7 @@
 //! Geometric string extension on the live kernel (`Config::string_stretching`,
-//! `src/stretch.rs`): the reference's own strain, storage and file, with one
-//! kick per physical retained string per step. Active and sympathetic partials
-//! share the same axial state. The wider comparison is
+//! `src/stretch.rs`): the reference's own strain, storage and file, with exact
+//! extension half-flows surrounding the linear/contact step. Active and
+//! sympathetic partials share the same axial state. The wider comparison is
 //! `examples/validate.rs --string-waves`.
 use fs_live_piano::refmods::{engine, geometry, linear::string_stretching::{Specification, HEADER}, steinway_scale};
 use fs_live_piano::stretch::plain_steel_waves_spec;
@@ -16,20 +16,23 @@ mod stretch_adapter;
 
 const RATE: u32 = 48_000;
 
-/// G0: both independent termination forces are gradients of the actual
-/// owner's stored energy, including when no axial oscillator fits the band.
+/// G0: without an axial oscillator the geometry stays constant during the
+/// extension flow, so both mean termination forces equal its energy gradient.
+/// The adapter's unit tests independently integrate gradients along moving
+/// axial trajectories when the band retains those oscillators.
 #[test]
-fn independent_transverse_and_axial_reactions_match_stored_energy_gradients() {
+fn unresolved_axial_band_keeps_both_physical_termination_gradients() {
     use refmods::linear::string_stretching::{Material, WaveMaterial};
-    for band in [100.0, 10_000.0] {
+    let band = 100.0;
+    {
         let mut model = stretch_adapter::Stretch::new(
             Material { axial_rigidity_n: 150_000.0, maximum_slope: 0.2 },
             Some(WaveMaterial { bandwidth_hz: band, mode_cap: 8, damping_ratio: 0.01, maximum_strain: 0.01 }),
             1.0, 0.006, 500.0, 4, RATE).unwrap();
-        assert_eq!(model.axial_modes() > 0, band > 100.0);
+        assert_eq!(model.axial_modes(), 0);
         let (q, beta) = ([2e-5, -1e-5, 4e-6, 3e-6], [0.02, -0.01, 0.006, -0.004]);
         let (b, axial, h) = (3e-6, -2e-6, 1e-9);
-        let kick = model.step(&q, &beta, b, axial, 1.0 / f64::from(RATE), &mut [0.0; 4]).unwrap();
+        let kick = model.step(&q, &beta, b, axial, 0.5 / f64::from(RATE), &mut [0.0; 4]).unwrap();
         let transverse = (model.stored(&q, &beta, b + h, axial) - model.stored(&q, &beta, b - h, axial)) / (2.0 * h);
         let longitudinal = (model.stored(&q, &beta, b, axial + h) - model.stored(&q, &beta, b, axial - h)) / (2.0 * h);
         for (got, want) in [(kick.reaction, transverse), (kick.axial_reaction, longitudinal)] {
@@ -55,8 +58,8 @@ fn stretch_without_waves_ignores_an_axial_port_exactly() {
     let mut b = a.clone();
     let (q, beta) = ([2e-5, -1e-5, 4e-6, 3e-6], [0.02, -0.01, 0.006, -0.004]);
     let (mut va, mut vb) = ([0.0; 4], [0.0; 4]);
-    let ka = a.step(&q, &beta, 3e-6, 0.0, 1.0 / f64::from(RATE), &mut va).unwrap();
-    let kb = b.step(&q, &beta, 3e-6, 0.25, 1.0 / f64::from(RATE), &mut vb).unwrap();
+    let ka = a.step(&q, &beta, 3e-6, 0.0, 0.5 / f64::from(RATE), &mut va).unwrap();
+    let kb = b.step(&q, &beta, 3e-6, 0.25, 0.5 / f64::from(RATE), &mut vb).unwrap();
     assert_eq!(va.map(f64::to_bits), vb.map(f64::to_bits));
     assert_eq!(ka.reaction.to_bits(), kb.reaction.to_bits());
     assert_eq!(ka.axial_reaction, 0.0);
@@ -385,7 +388,7 @@ fn longitudinal_motion_survives_bank_retirement_and_restrike() {
 }
 
 /// G0/G4: a failed expansion must restore the old nonlinear prefix, its axial
-/// coordinates, FOH source, potential baseline, cached rows and energy ledger.
+/// coordinates, potential baseline, cached rows and energy ledger.
 #[test]
 fn a_refused_prefix_expansion_preserves_the_ringing_nonlinear_bank() {
     let (desc, cfg) = sympathetic_fixture(800.0);

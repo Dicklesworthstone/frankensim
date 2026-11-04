@@ -111,14 +111,22 @@ rows for its keys; a board without that data refuses the request. No axial
 projection is inferred from the vertical bridge row. The model remains the
 declared live reduction, with its numerical work in the physical ledger.
 
-The axial coordinates consume the shared exact linear-force transition from
-`fs-modal`. Their viscous heat is integrated along the same continuous motion,
-including during resonant buildup, rather than estimated from endpoint powers.
+An exact extension half-flow now surrounds each side of the existing coupled
+linear/contact step. During each half-flow the transverse and bridge positions
+are frozen, while the axial coordinates take the shared exact held-force
+transition from `fs-modal`. Their exact mean displacement integrates the
+reciprocal forces on every transverse partial and on both bridge participation
+rows. An endpoint force cannot replace that impulse when an axial mode moves
+appreciably during a sample. Axial viscous heat is integrated along the same
+continuous trajectory, including during resonant buildup.
+
 The live path accepts the file's complete damping-ratio range `[0, 1]`, including
-critical damping. Transitions and heat coefficients are prepared before playback;
-the axial update allocates nothing. A refused axial trial preserves that segment's
-accepted coordinates and force history and is reported by `take_error()`.
-This segment-level refusal does not roll back the complete piano timestep.
+critical damping. Transitions, heat coefficients and mean-displacement gains are
+prepared before playback; each subflow allocates nothing. It uses two bounded
+passes over the same retained state per mechanical step. A refused axial or
+impulse trial preserves that segment's accepted coordinates, transverse velocity
+and storage baseline and is reported by `take_error()`. This segment-level
+refusal does not roll back the complete piano timestep.
 
 One extension/longitudinal state now belongs to each physical retained string,
 including an unplayed sympathetic string. Its geometric strain uses the union
@@ -126,25 +134,28 @@ of its active prefix and remaining bank tail. Both the transverse and axial
 bridge reactions return to the same board, and axial viscous heat is counted
 once. The state continues while a key is released or its active voice retires.
 When ownership changes without changing that union, the exact same axial
-displacement, velocity, previous force and split-energy baseline are retained.
+displacement, velocity and split-energy baseline are retained.
 
 A changed partial budget projects only the transverse prefix. The unchanged
 axial sine coordinates keep their physical displacement and velocity; the new
-current strain starts the next linearly interpolated force. The actual change
+current strain drives the next exact extension half-flow. The actual change
 of linear, chord and nonlinear storage is accounted at that boundary. A net
 removal goes to `retired_j`; a net increase goes to signed representation work
 in `coupling_j`. Nonlinear cross terms can increase extension energy when a
 partial is removed, so this projection is never called physical heat and no
 amplitude normalization is applied. Failed rebuilds restore the nonlinear
-state, drive history and ledger along with the existing linear state.
+state and ledger along with the existing linear state.
 
 `LivePiano::string_extension_energy_j(midi)` observes the course's extension
 storage and axial kinetic energy across both owners. Total stored energy
-includes that physical state once. The conservative nonlinear coupling still
-uses the declared explicit kick; its time-discretization work remains in
-`coupling_j`. Shared ownership does not turn it into an implicit or exactly
-energy-conserving nonlinear integrator. Mode-band and timestep convergence
-remain separate requirements.
+includes that physical state once. The symmetric composition is second order
+for admitted smooth dynamics when the existing middle step supports that order;
+contact events may lower it. Exact extension subflows do not imply exact
+conservation of the complete nonlinear energy. Their splitting work remains
+in `coupling_j`, including the nonlinear storage change during the intervening
+linear step and the actual bridge momentum changes. No amplitude rescaling or
+added damping hides that work. Mode-band and timestep convergence remain
+separate requirements.
 
 The optional final argument on the WASM preparation constructors carries the
 unchanged text. The factory checks `supportsStringStretching()` first, so older
@@ -250,6 +261,17 @@ while removing a cancelling transverse strain component; it checks the resulting
 increase of extension storage and the subsequent free axial decay. These added
 tests have syntax validation here; full native integration execution remains
 outstanding.
+
+The mean-displacement leaf has three executed native tests: independent
+continuous-trajectory quadrature through critical damping, coupled normal-mode
+and resonant-beating refinement, and nonlinear axial/transverse exchange against
+an independent fine-step RK4 solution. The smooth refinement fixtures verify
+second-order motion and splitting-energy error. The actual adapter's integration
+target additionally checks both bridge reactions and every transverse impulse
+against energy gradients integrated along a known axial trajectory, along with
+free ringdown/heat, resonant forcing, refusal and projection. Those full adapter
+and engine tests remain unexecuted here; no new audio or throughput measurement
+is claimed.
 
 ## Native composition
 
