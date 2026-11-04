@@ -323,3 +323,355 @@ fn clear_endpoints_cannot_hide_a_rotating_collision_or_crossing_duplicate() {
     assert_eq!(walls, original_walls);
     assert_eq!(snapshot(&g), original_fluid);
 }
+
+fn endpoint_field([x, y, z]: [usize; 3]) -> [f64; 3] {
+    [
+        (y as f64 - 2.3) * 2e-6,
+        (z as f64 + 0.7) * -1e-6,
+        (x as f64 - 1.1) * 3e-6,
+    ]
+}
+fn force_snapshot(g: &BoundaryGrid3) -> Vec<[f64; 3]> {
+    (0..512)
+        .map(|i| g.force_density(i % 8, (i / 8) % 8, i / 64))
+        .collect()
+}
+
+#[test]
+fn endpoint_history_drives_finite_recoil_and_closes_actual_fluid_body_reservoir_momentum() {
+    let uniform = [2e-6, -1e-6, 3e-6];
+    for boundaries in [
+        BoundarySpec3::periodic(),
+        BoundarySpec3::new([fs_lbm::d3q19::FaceBoundary3::stationary_wall(); 6]),
+        BoundarySpec3::velocity_pressure_duct_z([0.001, -0.002, 0.012], 1.002),
+    ] {
+        let make = || {
+            let mut g = BoundaryGrid3::new(8, 8, 8, 0.83, uniform, boundaries);
+            g.rebind_force_field(endpoint_field);
+            g
+        };
+        let (mut g, mut held) = (make(), make());
+        let mut fields = [BodyFrameSampler3::new(&g, 4).unwrap()];
+        let mut control_fields = [BodyFrameSampler3::new(&held, 4).unwrap()];
+        let (mut bodies, mut control_bodies) = ([sphere()], [sphere()]);
+        let (mut walls, mut control_walls) = (surfaces(), surfaces());
+        let gate = CancelGate::new();
+        for (tick, scale) in [0.0, -0.5, 1.5].into_iter().enumerate() {
+            let before = snapshot(&g);
+            let old_force = force_snapshot(&g);
+            let old_sphere = bodies[0];
+            let old_carrier = finite(walls[0]).body();
+            let old_plane = match walls[1] {
+                MovingLubricationSurface3::Prescribed(p) => p,
+                _ => unreachable!(),
+            };
+            let report = g
+                .step_with_lubricated_spheres_and_surfaces_and_endpoint_force_scale(
+                    &mut fields,
+                    [RADIUS],
+                    &mut bodies,
+                    [LOAD],
+                    model(),
+                    &mut walls,
+                    &[CARRIER_LOAD, [0.0; 6]],
+                    scale,
+                    ORIGIN,
+                    &gate,
+                )
+                .unwrap();
+            let _held_report = held
+                .step_with_lubricated_spheres_and_surfaces(
+                    &mut control_fields,
+                    [RADIUS],
+                    &mut control_bodies,
+                    [LOAD],
+                    model(),
+                    &mut control_walls,
+                    &[CARRIER_LOAD, [0.0; 6]],
+                    ORIGIN,
+                    &gate,
+                )
+                .unwrap();
+            // The first collision and its reciprocal carrier response still
+            // use the old force, even though endpoint Guo inventories differ.
+            if tick == 0 {
+                assert_eq!(bodies, control_bodies);
+                assert_eq!(walls, control_walls);
+            }
+            let after = snapshot(&g);
+            let next_force = force_snapshot(&g);
+            let mut balance = [0.0; 6];
+            let mut source = [0.0; 6];
+            for cell in 0..512 {
+                let actual = next_force[cell];
+                let shape = endpoint_field([cell % 8, (cell / 8) % 8, cell / 64]);
+                assert_eq!(
+                    actual,
+                    core::array::from_fn(|i| uniform[i] + scale * shape[i])
+                );
+                let dp: [f64; 3] = core::array::from_fn(|i| {
+                    (0..Q3)
+                        .map(|q| {
+                            let e = [E3[q].0, E3[q].1, E3[q].2];
+                            f64::from(e[i]) * (after[cell][q] - before[cell][q])
+                        })
+                        .sum::<f64>()
+                        + 0.5 * (actual[i] - old_force[cell][i])
+                });
+                let j = core::array::from_fn(|i| 0.5 * old_force[cell][i] + 0.5 * actual[i]);
+                let arm = [
+                    (cell % 8) as f64 + 0.5 - ORIGIN[0],
+                    ((cell / 8) % 8) as f64 + 0.5 - ORIGIN[1],
+                    (cell / 64) as f64 + 0.5 - ORIGIN[2],
+                ];
+                let dl = cross(arm, dp);
+                let torque = cross(arm, j);
+                for i in 0..3 {
+                    balance[i] += dp[i] - j[i];
+                    balance[i + 3] += dl[i] - torque[i];
+                    source[i] += j[i];
+                    source[i + 3] += torque[i];
+                }
+            }
+            let carrier = finite(walls[0]).body();
+            for (before, after, load) in [
+                (old_sphere, bodies[0], LOAD),
+                (old_carrier, carrier, CARRIER_LOAD),
+            ] {
+                let p0 = momentum(before, ORIGIN);
+                let p1 = momentum(after, ORIGIN);
+                let authored = applied(before, load, ORIGIN);
+                for i in 0..6 {
+                    balance[i] += p1[i] - p0[i] - authored[i];
+                }
+            }
+            let coupling = report.motion.coupling;
+            for i in 0..3 {
+                close(
+                    balance[i] + report.surfaces[1].film.impulse[i]
+                        - coupling.walls.fluid_population_impulse[i]
+                        - coupling.open.impulse[i],
+                    0.0,
+                    3e-12,
+                );
+                close(
+                    balance[i + 3] + report.surfaces[1].film.angular_impulse[i]
+                        - coupling.walls.fluid_population_angular_impulse[i]
+                        - coupling.open.angular_impulse[i]
+                        - coupling.periodic.angular_momentum_change[i],
+                    0.0,
+                    1e-11,
+                );
+                close(coupling.forcing.impulse[i], source[i], 3e-16);
+                close(coupling.forcing.angular_impulse[i], source[i + 3], 2e-15);
+            }
+            let account = report.surfaces[0].finite.unwrap();
+            close(
+                energy(carrier) - energy(old_carrier),
+                report.surfaces[0].film.work
+                    + report.surfaces[0].film.finite_body.unwrap().external_work
+                    + account.free_rotation_energy_change,
+                1e-19,
+            );
+            let MovingLubricationSurface3::Prescribed(plane) = walls[1] else {
+                unreachable!()
+            };
+            assert_eq!(plane, old_plane.translated(1.0).unwrap());
+            assert_eq!(carrier.mass, old_carrier.mass);
+            assert_eq!(carrier.inertia, old_carrier.inertia);
+            assert_eq!(coupling.lubrication.active_plane_pairs, 2);
+            assert!(coupling.lubrication.dissipated_energy >= 0.0);
+        }
+        assert_ne!(
+            finite(walls[0]).body().velocity,
+            finite(control_walls[0]).body().velocity
+        );
+    }
+}
+
+#[test]
+fn constant_and_zero_endpoint_fields_keep_independent_finite_transaction_bits() {
+    for dry in [false, true] {
+        for nonzero in [false, true] {
+            let make = || {
+                let mut g = grid();
+                g.rebind_force_field(|p| if nonzero { endpoint_field(p) } else { [0.0; 3] });
+                g
+            };
+            let (mut held, mut endpoint) = (make(), make());
+            let (mut a, mut b) = ([sphere()], [sphere()]);
+            let (mut wa, mut wb) = (surfaces(), surfaces());
+            let (mut fa, mut fb) = (
+                [BodyFrameSampler3::new(&held, 4).unwrap()],
+                [BodyFrameSampler3::new(&endpoint, 4).unwrap()],
+            );
+            let gate = CancelGate::new();
+            let scale = if nonzero { 1.0 } else { 0.0 };
+            if dry {
+                let expected = held
+                    .step_with_dry_lubricated_spheres_and_surfaces(
+                        &mut fa,
+                        [RADIUS],
+                        &mut a,
+                        [LOAD],
+                        model(),
+                        &mut wa,
+                        &[CARRIER_LOAD, [0.0; 6]],
+                        ORIGIN,
+                        DryBodyCouplingConfig3::default(),
+                        &gate,
+                    )
+                    .unwrap();
+                let actual = endpoint
+                    .step_with_dry_lubricated_spheres_and_surfaces_and_endpoint_force_scale(
+                        &mut fb,
+                        [RADIUS],
+                        &mut b,
+                        [LOAD],
+                        model(),
+                        &mut wb,
+                        &[CARRIER_LOAD, [0.0; 6]],
+                        scale,
+                        ORIGIN,
+                        DryBodyCouplingConfig3::default(),
+                        &gate,
+                    )
+                    .unwrap();
+                assert_eq!(actual, expected);
+            } else {
+                let expected = held
+                    .step_with_lubricated_spheres_and_surfaces(
+                        &mut fa,
+                        [RADIUS],
+                        &mut a,
+                        [LOAD],
+                        model(),
+                        &mut wa,
+                        &[CARRIER_LOAD, [0.0; 6]],
+                        ORIGIN,
+                        &gate,
+                    )
+                    .unwrap();
+                let actual = endpoint
+                    .step_with_lubricated_spheres_and_surfaces_and_endpoint_force_scale(
+                        &mut fb,
+                        [RADIUS],
+                        &mut b,
+                        [LOAD],
+                        model(),
+                        &mut wb,
+                        &[CARRIER_LOAD, [0.0; 6]],
+                        scale,
+                        ORIGIN,
+                        &gate,
+                    )
+                    .unwrap();
+                assert_eq!(actual, expected);
+            }
+            assert_eq!(a, b);
+            assert_eq!(wa, wb);
+            assert_eq!(snapshot(&held), snapshot(&endpoint));
+            assert_eq!(force_snapshot(&held), force_snapshot(&endpoint));
+        }
+    }
+}
+
+#[test]
+fn late_finite_carrier_refusal_preserves_endpoint_source_and_retries_exactly() {
+    let mut g = grid();
+    g.rebind_force_field(endpoint_field);
+    let accepted_force = force_snapshot(&g);
+    let mut fields = [BodyFrameSampler3::new(&g, 4).unwrap()];
+    let mut bodies = [sphere()];
+    let initial = bodies;
+    let p = carrier();
+    let local_point = p
+        .body()
+        .orientation
+        .inverse()
+        .rotate(Vec3::new(
+            p.point()[0] - p.body().center[0],
+            p.point()[1] - p.body().center[1],
+            p.point()[2] - p.body().center[2],
+        ))
+        .unwrap();
+    let local_normal = p
+        .body()
+        .orientation
+        .inverse()
+        .rotate(Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    // This inactive film permits a bounded external load to move the finite
+    // plane through the sphere during the SECOND half-drift. Both the initial
+    // and collision-midpoint gaps are valid, so this exercises late admission.
+    let p = MovingFiniteLubricationPlane3::new(
+        p.body(),
+        array(local_point),
+        array(local_normal),
+        0.001,
+        0.0001,
+    )
+    .unwrap();
+    let mut walls = [MovingLubricationSurface3::Finite(p)];
+    let original_walls = walls;
+    let original_fluid = snapshot(&g);
+    let error = g
+        .step_with_lubricated_spheres_and_surfaces_and_endpoint_force_scale(
+            &mut fields,
+            [RADIUS],
+            &mut bodies,
+            [LOAD],
+            model(),
+            &mut walls,
+            &[[0.2, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            -0.5,
+            ORIGIN,
+            &CancelGate::new(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, PartialSaturationError3::Invalid { reason } if reason.contains("half-drift cannot exclude contact")),
+        "{error:?}"
+    );
+    assert_eq!(bodies, initial);
+    assert_eq!(walls, original_walls);
+    assert_eq!(snapshot(&g), original_fluid);
+    assert_eq!(force_snapshot(&g), accepted_force);
+    let accepted = g
+        .step_with_lubricated_spheres_and_surfaces_and_endpoint_force_scale(
+            &mut fields,
+            [RADIUS],
+            &mut bodies,
+            [LOAD],
+            model(),
+            &mut walls,
+            &[CARRIER_LOAD],
+            -0.5,
+            ORIGIN,
+            &CancelGate::new(),
+        )
+        .unwrap();
+    let mut fresh = grid();
+    fresh.rebind_force_field(endpoint_field);
+    let mut fresh_fields = [BodyFrameSampler3::new(&fresh, 4).unwrap()];
+    let mut fresh_bodies = initial;
+    let mut fresh_walls = original_walls;
+    let repeated = fresh
+        .step_with_lubricated_spheres_and_surfaces_and_endpoint_force_scale(
+            &mut fresh_fields,
+            [RADIUS],
+            &mut fresh_bodies,
+            [LOAD],
+            model(),
+            &mut fresh_walls,
+            &[CARRIER_LOAD],
+            -0.5,
+            ORIGIN,
+            &CancelGate::new(),
+        )
+        .unwrap();
+    assert_eq!(accepted, repeated);
+    assert_eq!(bodies, fresh_bodies);
+    assert_eq!(walls, fresh_walls);
+    assert_eq!(snapshot(&g), snapshot(&fresh));
+}

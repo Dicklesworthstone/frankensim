@@ -8981,8 +8981,8 @@ endpoint source publish only after final trajectory, film, population and
 independent momentum accounts. None callers and singleton delegation preserve
 their original arithmetic; no field clone or additional fluid stream is
 introduced per probe. New material assembly entries cover retained and physical
-dry sphere/ellipsoid consumers. Material plane-film and finite/shared-carrier
-entry points retain held-force semantics; this adds no complete coupled-order,
+dry sphere/ellipsoid consumers. Moving plane-film and finite/shared-carrier
+consumers are covered below; this adds no complete coupled-order,
 implicit constitutive force, GCL or thermodynamic work claim.
 
 Focused selected native execution passed 39 tests across
@@ -8996,6 +8996,39 @@ frontend graphs are excluded. A subsequent current-source build retained the
 concurrent local-viscosity curved-wall owner and passed seven endpoint/history
 cases plus the original curved-wall halfway parity case. The full Cargo
 workspace and material source-card constructors were not executed.
+
+### Endpoint force histories with moving finite and shared film carriers
+
+The moving `*_and_surfaces_and_endpoint_force_scale` and
+`*_and_carriers_and_endpoint_force_scale` entries carry the original prescribed
+source history through retained-fluid and physical dry-body transactions.
+Collision uses the accepted old force; endpoint Guo inventories and open
+velocity/pressure reconstruction use the next force. Every dry probe starts
+from the same accepted surface/registry state and reuses the cached midpoint
+fictitious-interior source. Finite recoil and cross-patch resistance therefore
+participate inside the accepted coupled candidate.
+
+A registry carrier owns one original mass/full tensor, authored load, aggregate
+film wrench and kinetic inventory regardless of its attached face count.
+Film-only carriers acquire no sampled-fluid interior or extra source
+subtraction. Prescribed reactions remain external ports; finite reaction work
+belongs to actual carrier motion. All final trajectory, sweep, allocation and
+momentum checks precede the shared source/fluid/body publication; subsequent
+surface and registry copies are infallible. Held callers preserve their None
+arithmetic.
+
+Sixteen focused selected-native checks passed, including seven new groups.
+Independent population/Guo inventories close linear and angular momentum for
+a dry sphere, two unique carriers, three attached faces and a prescribed
+spinning surface under source ramps/reversal across periodic, wall and
+pressure-reservoir boundaries. Retained-body controls prove the first
+collision retains old-force recoil and later source history changes finite
+motion. Constant/zero parity, candidate refusal, late finite-surface crossing
+and exact retry preserve source and every accepted owner. These tests use
+the current original serial numerical owners and genuine cached dependencies;
+full Cargo/DSR and the material constructor graph remain unexecuted.
+Frozen-geometry finite entries and the original film-only geometric/thermal
+limitations are unchanged.
 
 ### Simultaneous physical dry-body assemblies
 

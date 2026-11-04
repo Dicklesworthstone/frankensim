@@ -161,20 +161,96 @@ impl BoundaryGrid3 {
         origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<MovingLubricatedCarriersExchange3<N>> {
+        self.moving_lubricated_carriers_transition(
+            samplers,
+            radii,
+            bodies,
+            external,
+            model,
+            carriers,
+            carrier_external,
+            surfaces,
+            origin,
+            gate,
+            None,
+        )
+    }
+
+    /// Advance the same retained-fluid sphere and shared-carrier registry transaction
+    /// with a prescribed next endpoint scale of the selected fluid-force field.
+    /// Collision retains the old force; endpoint Guo inventories and open-face
+    /// reconstruction use the next force. The shared full-fluid source
+    /// integrates their trapezoidal impulse and angular impulse once.
+    /// A carrier's inertia, authored load and aggregate film wrench appear
+    /// once regardless of its patch count. The uniform fluid force remains held.
+    ///
+    /// # Errors
+    /// Inherits all original body/film/sweep and endpoint-force admission.
+    /// Final carrier geometry and
+    /// momentum accounts complete before populations, bodies, surfaces and the
+    /// source scale publish together. Refusal changes only reusable scratch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_lubricated_spheres_and_carriers_and_endpoint_force_scale<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        carriers: &mut [MovingPartialSaturationBody3],
+        carrier_external: &[[f64; 6]],
+        surfaces: &mut [MovingCarrierSurface3],
+        next_scale: f64,
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<MovingLubricatedCarriersExchange3<N>> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.moving_lubricated_carriers_transition(
+            samplers,
+            radii,
+            bodies,
+            external,
+            model,
+            carriers,
+            carrier_external,
+            surfaces,
+            origin,
+            gate,
+            Some(next_scale),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn moving_lubricated_carriers_transition<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        carriers: &mut [MovingPartialSaturationBody3],
+        carrier_external: &[[f64; 6]],
+        surfaces: &mut [MovingCarrierSurface3],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<MovingLubricatedCarriersExchange3<N>> {
         model.admit(radii)?;
         let prepared = PreparedSurfaces::new_shared(carriers, carrier_external, surfaces, gate)?;
         let shapes = radii.map(|r| BodyFrameEllipsoid3::sphere(r).expect("admitted radius"));
-        let (report, candidate) = self.moving_partial_saturation_resistance_transition(
-            samplers,
-            core::array::from_fn(|a| &shapes[a] as &dyn BodyFrameShape3),
-            bodies,
-            external,
-            origin,
-            gate,
-            Some((model, &prepared.initial_planes)),
-            true,
-            Some(&prepared),
-        )?;
+        let (report, candidate) = self
+            .moving_partial_saturation_resistance_transition_with_endpoint_force(
+                samplers,
+                core::array::from_fn(|a| &shapes[a] as &dyn BodyFrameShape3),
+                bodies,
+                external,
+                origin,
+                gate,
+                Some((model, &prepared.initial_planes)),
+                true,
+                Some(&prepared),
+                endpoint_force_scale,
+            )?;
         let candidate = candidate
             .expect("shared surfaces prepare an accepted candidate")
             .shared
@@ -214,20 +290,102 @@ impl BoundaryGrid3 {
         config: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryLubricatedCarriersExchange3<N>> {
-        model.admit(radii)?;
-        let prepared = PreparedSurfaces::new_shared(carriers, carrier_external, surfaces, gate)?;
-        let shapes = radii.map(|r| BodyFrameEllipsoid3::sphere(r).expect("admitted radius"));
-        let (report, candidate) = self.step_with_dry_partial_saturation_resistance(
+        self.dry_lubricated_carriers_transition(
             samplers,
-            core::array::from_fn(|a| &shapes[a] as &dyn BodyFrameShape3),
+            radii,
             bodies,
             external,
+            model,
+            carriers,
+            carrier_external,
+            surfaces,
             origin,
             config,
             gate,
-            Some((model, &prepared.initial_planes)),
-            Some(&prepared),
-        )?;
+            None,
+        )
+    }
+
+    /// Advance the same physical dry sphere and shared-carrier registry transaction
+    /// with a prescribed next endpoint scale of the selected fluid-force field.
+    /// Collision retains the old force; endpoint Guo inventories and open-face
+    /// reconstruction use the next force. Each sphere's fictitious interior
+    /// subtracts the same source trapezoid once inside every coupled probe.
+    /// A carrier's inertia, authored load and aggregate film wrench appear
+    /// once regardless of its patch count. The uniform fluid force remains held.
+    ///
+    /// # Errors
+    /// Inherits all original body/film/sweep and endpoint-force admission.
+    /// Every probe starts from the accepted carrier state. Final carrier geometry and
+    /// momentum accounts complete before populations, bodies, surfaces and the
+    /// source scale publish together. Refusal changes only reusable scratch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dry_lubricated_spheres_and_carriers_and_endpoint_force_scale<
+        const N: usize,
+    >(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        carriers: &mut [MovingPartialSaturationBody3],
+        carrier_external: &[[f64; 6]],
+        surfaces: &mut [MovingCarrierSurface3],
+        next_scale: f64,
+        origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryLubricatedCarriersExchange3<N>> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.dry_lubricated_carriers_transition(
+            samplers,
+            radii,
+            bodies,
+            external,
+            model,
+            carriers,
+            carrier_external,
+            surfaces,
+            origin,
+            config,
+            gate,
+            Some(next_scale),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dry_lubricated_carriers_transition<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        carriers: &mut [MovingPartialSaturationBody3],
+        carrier_external: &[[f64; 6]],
+        surfaces: &mut [MovingCarrierSurface3],
+        origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<DryLubricatedCarriersExchange3<N>> {
+        model.admit(radii)?;
+        let prepared = PreparedSurfaces::new_shared(carriers, carrier_external, surfaces, gate)?;
+        let shapes = radii.map(|r| BodyFrameEllipsoid3::sphere(r).expect("admitted radius"));
+        let (report, candidate) = self
+            .step_with_dry_partial_saturation_resistance_with_endpoint_force(
+                samplers,
+                core::array::from_fn(|a| &shapes[a] as &dyn BodyFrameShape3),
+                bodies,
+                external,
+                origin,
+                config,
+                gate,
+                Some((model, &prepared.initial_planes)),
+                Some(&prepared),
+                endpoint_force_scale,
+            )?;
         let candidate = candidate
             .expect("shared surfaces prepare an accepted candidate")
             .shared

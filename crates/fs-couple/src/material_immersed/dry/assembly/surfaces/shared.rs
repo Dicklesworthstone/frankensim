@@ -325,6 +325,56 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedSharedSurfa
         controls: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryLubricatedCarriersExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(
+            sphere_loads,
+            carrier_loads,
+            moment_origin_m,
+            controls,
+            gate,
+            None,
+        )
+    }
+
+    /// Advance the original finite/shared-carrier transaction with the selected SI
+    /// fluid-force field scaled at the next endpoint. The uniform force remains
+    /// held. Source density, dx/dt, authored loads and reduced weight retain the
+    /// same conversion; the native dry solve subtracts each fictitious-interior
+    /// source trapezoid once. Each registry carrier retains one load and inertia.
+    ///
+    /// The native receipt remains in lattice units. Every conversion and
+    /// finite-carrier endpoint is admitted before the common publication of
+    /// fluid, bodies, registry/patch states, endpoint source and accepted clock.
+    /// Refusal preserves all accepted history; only reusable scratch may change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_forces_si_with_endpoint_fluid_force_scale(
+        &mut self,
+        sphere_loads: [[f64; 6]; N],
+        carrier_loads: &[[f64; 6]],
+        next_scale: f64,
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryLubricatedCarriersExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(
+            sphere_loads,
+            carrier_loads,
+            moment_origin_m,
+            controls,
+            gate,
+            Some(next_scale),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_forces_si_with_fluid_endpoint(
+        &mut self,
+        sphere_loads: [[f64; 6]; N],
+        carrier_loads: &[[f64; 6]],
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<DryLubricatedCarriersExchange3<N>, Error> {
         poll(gate)?;
         if carrier_loads.len() != self.carriers.len() {
             return Err(Error::Invalid("carrier/load count mismatch"));
@@ -348,19 +398,37 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedSharedSurfa
         let CarrierSurfaces::Spheres { radii, film } = native.surfaces else {
             return Err(Error::Invalid("plane films require spherical dry bodies"));
         };
-        let report = native.grid.step_with_dry_lubricated_spheres_and_carriers(
-            &mut native.samplers,
-            radii,
-            &mut native.bodies,
-            loads.impulses,
-            film,
-            &mut self.carriers,
-            &self.carrier_impulses,
-            &mut self.surfaces,
-            loads.origin,
-            controls,
-            gate,
-        )?;
+        let report = match endpoint_force_scale {
+            None => native.grid.step_with_dry_lubricated_spheres_and_carriers(
+                &mut native.samplers,
+                radii,
+                &mut native.bodies,
+                loads.impulses,
+                film,
+                &mut self.carriers,
+                &self.carrier_impulses,
+                &mut self.surfaces,
+                loads.origin,
+                controls,
+                gate,
+            )?,
+            Some(scale) => native
+                .grid
+                .step_with_dry_lubricated_spheres_and_carriers_and_endpoint_force_scale(
+                    &mut native.samplers,
+                    radii,
+                    &mut native.bodies,
+                    loads.impulses,
+                    film,
+                    &mut self.carriers,
+                    &self.carrier_impulses,
+                    &mut self.surfaces,
+                    scale,
+                    loads.origin,
+                    controls,
+                    gate,
+                )?,
+        };
         native.accepted_steps = loads.next;
         Ok(report)
     }

@@ -28022,12 +28022,34 @@ retain explicit lattice units and shared boundary/source ownership.
 All SI conversion and next-clock admission precede native execution.
 Populations, all body poses/momenta, endpoint force and accepted clock advance
 together; no fallible post-publication conversion was added. Held entry points
-retain their original path. Plane-film and finite/shared-carrier material
-wrappers remain held in this increment. The native implementation passed the
+retain their original path. The moving plane-film and finite/shared-carrier
+continuation below extends this source history to those owners. The native implementation passed the
 focused 39-check selection documented in fs-lbm; these two typed source-card
 wrapper implementations were reviewed and rustfmt-parser checked, but their
 complete constructor/dependency graph was not executed.
 
+
+### Endpoint force histories on material film surfaces and carriers
+
+`ResolvedImmersedPlanes`, `ResolvedImmersedSurfaces` and
+`ResolvedImmersedSharedSurfaces` expose
+`step_forces_si_with_endpoint_fluid_force_scale` through their original native
+transaction. The selected SI spatial force receives the next dimensionless
+scale; uniform fluid force, reference density, dx/dt, original material inertia,
+authored center loads and reduced-weight ownership remain unchanged. Shared
+registries convert and apply one complete load per carrier, independently of
+patch count.
+
+The prescribed-plane owner prepares every next position before native
+acceptance. Finite/shared owners prepare and admit their actual coupled
+trajectories inside native candidates. Populations, dry-body and carrier/patch
+states, endpoint force and accepted material clock advance together; no fallible
+conversion follows publication. Refusal preserves the accepted source and all
+clocks/states, while reusable scratch may change. Native receipts retain lattice
+units and distinct prescribed work/finite storage. The 16 native checks are
+documented in fs-lbm; these three typed SI implementations passed source/API
+review and parser checks, but their complete source-card constructor graph
+was not executed.
 
 ### SI reservoir boundaries on material immersed bodies
 

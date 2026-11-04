@@ -318,6 +318,46 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedPlanes<'a, 
         controls: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryLubricatedPlanesExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(authored, moment_origin_m, controls, gate, None)
+    }
+
+    /// Advance the original prescribed-plane transaction with the selected SI
+    /// fluid-force field scaled at the next endpoint. The uniform force remains
+    /// held. Source density, dx/dt, authored loads and reduced weight retain the
+    /// same conversion; the native dry solve subtracts each fictitious-interior
+    /// source trapezoid once. Film reaction/work retain their original physical owners.
+    ///
+    /// The native receipt remains in lattice units. Every conversion and
+    /// next prescribed-plane position is admitted before the common publication of
+    /// fluid, bodies, surface states, endpoint source and accepted clock.
+    /// Refusal preserves all accepted history; only reusable scratch may change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_forces_si_with_endpoint_fluid_force_scale(
+        &mut self,
+        authored: [[f64; 6]; N],
+        next_scale: f64,
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryLubricatedPlanesExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(
+            authored,
+            moment_origin_m,
+            controls,
+            gate,
+            Some(next_scale),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_forces_si_with_fluid_endpoint(
+        &mut self,
+        authored: [[f64; 6]; N],
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<DryLubricatedPlanesExchange3<N>, Error> {
         let loads = self
             .assembly
             .prepare_step(authored, moment_origin_m, gate)?;
@@ -329,17 +369,33 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedPlanes<'a, 
         let CarrierSurfaces::Spheres { radii, film } = native.surfaces else {
             return Err(Error::Invalid("plane films require spherical dry bodies"));
         };
-        let report = native.grid.step_with_dry_lubricated_spheres_and_planes(
-            &mut native.samplers,
-            radii,
-            &mut native.bodies,
-            loads.impulses,
-            film,
-            &self.planes,
-            loads.origin,
-            controls,
-            gate,
-        )?;
+        let report = match endpoint_force_scale {
+            None => native.grid.step_with_dry_lubricated_spheres_and_planes(
+                &mut native.samplers,
+                radii,
+                &mut native.bodies,
+                loads.impulses,
+                film,
+                &self.planes,
+                loads.origin,
+                controls,
+                gate,
+            )?,
+            Some(scale) => native
+                .grid
+                .step_with_dry_lubricated_spheres_and_planes_and_endpoint_force_scale(
+                    &mut native.samplers,
+                    radii,
+                    &mut native.bodies,
+                    loads.impulses,
+                    film,
+                    &self.planes,
+                    scale,
+                    loads.origin,
+                    controls,
+                    gate,
+                )?,
+        };
         core::mem::swap(&mut self.planes, &mut self.next_planes);
         native.accepted_steps = loads.next;
         Ok(report)
