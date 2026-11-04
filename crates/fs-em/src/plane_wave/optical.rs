@@ -28,9 +28,11 @@ use fs_math::{c64::C64, det};
 
 mod dispersion;
 mod spectral;
+mod water;
 pub use spectral::{
     RefreshedSpectralOpticalSource, SpectralOpticalResponse, SpectralOpticalSource,
 };
+pub use water::WaterOpticalResponse;
 
 /// Exact SI vacuum light speed, used only to interpret vacuum wavelengths.
 const VACUUM_SPEED_M_S: f64 = 299_792_458.0;

@@ -312,6 +312,9 @@ impl<'a> PlanarDielectricLayers<'a> {
             (DielectricResponse::SpectralOptical(a), DielectricResponse::SpectralOptical(b)) => {
                 a.same_source(b)
             }
+            (DielectricResponse::WaterOptical(a), DielectricResponse::WaterOptical(b)) => {
+                a.same_source(b)
+            }
             _ => false,
         };
         same_response(self.incident_response, other.incident_response)

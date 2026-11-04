@@ -3902,3 +3902,11 @@ regressions are authored but unrun, covering source perturbations through
 films/evanescent exits, two-face magnetic standing nodes, source identity and
 work/storage admission. Full Cargo/DSR remains blocked by absent constellation
 sibling repositories.
+
+## Original IAPWS water dispersion in native interfaces, films and beams
+
+`plane_wave::optical::WaterOpticalResponse::try_lossless` and `DielectricResponse::WaterOptical` bind the original IAPWS R9-97 phase-index law to temperature, bulk density and absolute SI magnetic permeability from one complete `ResolvedMaterialStatePoint`. Absolute-temperature semantics, original stationary property sources, native state bounds and strict vacuum-frequency/wavelength support remain attached. The caller explicitly selects ordinary-water applicability and a zero-absorption approximation; material names do not infer purity, an EOS, or measured optical loss.
+
+The existing constitutive/interface/film/angular-spectrum owners consume epsilon = n_phase²/(mu*c0²), with the same retained permeability. The original group index and analytic material partials remain separately available. Evaluation allocates nothing, and existing prepared film/beam values retain their normal caching. Multifrequency identity checks retain the original source; the finite-window heat owner explicitly refuses this finite-band real-index law because it supplies no original causal material reservoir.
+
+Six focused actual-source controls pass through the complete native plane-wave subtree: published index and group/phase/mu distinctions; source/state/band refusals; oblique TE/TM, Snell, reciprocity, Brewster and TIR; independent Fabry–Perot and interior Maxwell fields across two water states; coherent three-mode/two-polarization beam fields and Poynting flux; and source-continuity/causal-reservoir behavior. This is homogeneous isotropic finite-band optical dispersion under an explicitly lossless approximation, not measured transparent-water absorption, scattering, phase-mixture optics, or a causal time-domain energy law.

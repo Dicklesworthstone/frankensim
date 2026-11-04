@@ -42,7 +42,7 @@ pub mod angular_spectrum;
 pub mod optical;
 pub use optical::{
     OpticalConductorResponse, OpticalMaterialResponse, RefreshedSpectralOpticalSource,
-    SpectralOpticalResponse, SpectralOpticalSource,
+    SpectralOpticalResponse, SpectralOpticalSource, WaterOpticalResponse,
 };
 
 // Shared power-to-momentum contractions. Source/geometry admission belongs
@@ -90,6 +90,10 @@ pub enum DielectricResponse<'a> {
     /// The authored interpolation-gap limit and same-state permeability remain
     /// attached; no visible-band restriction or extrapolated tail is supplied.
     SpectralOptical(SpectralOpticalResponse<'a>),
+    /// Original IAPWS ordinary-water phase dispersion at retained T/rho/mu,
+    /// with an explicitly selected lossless approximation. Real water absorption
+    /// and causal transient reservoirs are not supplied by this index release.
+    WaterOptical(WaterOpticalResponse<'a>),
 }
 impl<'a> DielectricResponse<'a> {
     pub fn material(self) -> &'a ResolvedMaterialStatePoint {
@@ -101,6 +105,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalConductor(response) => response.material(),
             Self::OpticalMaterial(response) => response.material(),
             Self::SpectralOptical(response) => response.material(),
+            Self::WaterOptical(response) => response.material(),
         }
     }
 
@@ -136,6 +141,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalConductor(response) => response.permittivity_f_m(omega)?,
             Self::OpticalMaterial(response) => response.permittivity_f_m(omega)?,
             Self::SpectralOptical(response) => response.permittivity_f_m(omega)?,
+            Self::WaterOptical(response) => response.permittivity_f_m(omega)?,
         };
         if !finite(epsilon) || epsilon == C64::ZERO || epsilon.im > 0.0 {
             return Err(ReflectionError::Invalid(
@@ -350,7 +356,8 @@ impl<'a> PlanarDielectricInterface<'a> {
                 DielectricResponse::Debye(_)
                 | DielectricResponse::OpticalConductor(_)
                 | DielectricResponse::OpticalMaterial(_)
-                | DielectricResponse::SpectralOptical(_) => {}
+                | DielectricResponse::SpectralOptical(_)
+                | DielectricResponse::WaterOptical(_) => {}
             }
         }
         Ok(Self {
