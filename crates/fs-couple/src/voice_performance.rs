@@ -37,6 +37,7 @@
 //! microphone <x_m> <y_m> <z_m> <radial_rings> <angular_points> <max_frequency_hz>
 //! subglottal <time_s> <pressure_pa>                  (repeat, strictly increasing time)
 //! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
+//! tension_flutter <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional; slow pitch movement of a straight tone)
 //! fold_mapping bilateral                             (optional; the fold line is one fold of a pair)
 //! aspiration_noise <seed> <xi_pa_s3_per_m6> [<re_crit>]   (optional; turbulence noise at the glottis)
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>         (optional; constriction noise of the glottal jet, Verge's fraction)
@@ -68,6 +69,15 @@
 //! `1731 e a` cents peak (`e` ~ 0.5, f0 ~ sqrt(stiffness)). Without the key the tension is never touched
 //! and a performance is bit-identical to one written before the key existed.
 //!
+//! `tension_flutter` is the same gesture driven by noise instead of a sinusoid: the slow, unrepeating F0 movement of
+//! a tone sung as straight as a singer can, in the form Ternstrom and Friberg print (STL-QPSR 30(3):1-14, 1989):
+//! white noise through a resonant second-order filter of centre frequency and bandwidth. The stiffnesses scale by
+//! `1 + y`, with `y` of stationary standard deviation `sd_rel`, set once per output sample. It is not per-cycle
+//! jitter: the filter's bandwidth is a few hertz, so `y` has no steps. The row moves the tension, not the pitch
+//! directly: the card, not this code, says how `sd_rel` was derived from a pitch extent, which depends on the note.
+//! A card declares this row or `tension_modulation`, not both. Without the key the tension is never touched and a
+//! performance is bit-identical to one written before the key existed; `sd_rel` 0 is bit-identical as well.
+//!
 //! `fold_mapping bilateral` reads the fold line's masses and stiffnesses as ONE fold of Ishizaka and
 //! Flanagan's mirror pair and halves them for the island's full-gap coordinate
 //! ([`FoldCard::bilateral`]); without it they enter the gap coordinate as written, and a performance is
@@ -93,6 +103,7 @@ use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
 use fs_math::det;
 use fs_phs::WallPin;
+use fs_rand::{Stream, StreamKey};
 use fs_vfit::discretize::DelayedFilter;
 
 /// First line of every voice performance file.
@@ -139,6 +150,8 @@ pub struct VoiceDescription {
     /// Vibrato as a fold-tension gesture `(rate_hz, relative_amplitude)`: the stiffnesses scale by
     /// `1 + a sin(2 pi r t)`. `None` leaves the tension at the card's value for the whole performance.
     pub tension_modulation: Option<(f64, f64)>,
+    /// Slow random movement of the fold tension (filtered noise); `None` leaves the tension at the card's value.
+    pub tension_flutter: Option<TensionFlutterCard>,
     /// Opt-in glottal aspiration noise ([`crate::turbulence_noise`]); `None` adds nothing.
     pub aspiration_noise: Option<AspirationCard>,
     /// Opt-in glottal jet noise (Verge's fraction on the glottal jet, an extrapolation; [`crate::turbulence_noise::JetNoiseCard`]);
@@ -226,6 +239,7 @@ impl VoiceDescription {
         let mut sections: Vec<TractSection> = Vec::new();
         let mut subglottal: Vec<(f64, f64)> = Vec::new();
         let mut tension_modulation = None;
+        let mut tension_flutter = None;
         let mut aspiration_noise = None;
         let mut jet_noise = None;
         let mut fold_mapping = None;
@@ -385,6 +399,16 @@ impl VoiceDescription {
                     }
                     once(&mut tension_modulation, (rate, amplitude), key)?;
                 }
+                "tension_flutter" => {
+                    arity(&rest, 4, key)?;
+                    let seed = whole(&rest, 0, "tension_flutter seed")?;
+                    let centre_hz = field(&rest, 1, "tension_flutter centre")?;
+                    let bandwidth_hz = field(&rest, 2, "tension_flutter bandwidth")?;
+                    let sd_rel = field(&rest, 3, "tension_flutter sd")?;
+                    let card = TensionFlutterCard { seed, centre_hz, bandwidth_hz, sd_rel };
+                    card.validate()?;
+                    once(&mut tension_flutter, card, key)?;
+                }
                 "aspiration_noise" => {
                     // The gain has no default (no source gives one for glottal aspiration); the threshold has the
                     // Sondhi-Schroeter value via Elie and Laprie.
@@ -454,6 +478,11 @@ impl VoiceDescription {
         if subglottal.is_empty() {
             return Err(missing("subglottal"));
         }
+        if tension_modulation.is_some() && tension_flutter.is_some() {
+            return Err(
+                "tension_modulation and tension_flutter both set the fold tension: a card declares one gesture".into(),
+            );
+        }
         Ok(Self {
             output_rate_hz,
             samples,
@@ -470,6 +499,7 @@ impl VoiceDescription {
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
             subglottal,
             tension_modulation,
+            tension_flutter,
             aspiration_noise,
             jet_noise,
         })
@@ -576,6 +606,7 @@ impl VoiceDescription {
                 cursor: 0,
             },
             tension_modulation: self.tension_modulation,
+            tension_flutter: self.tension_flutter.map(|card| TensionFlutter::new(card, self.output_rate_hz)),
             trace: vec![0.0; self.mechanics_per_output as usize],
             ratio: self.mechanics_per_output as usize,
             mechanics_rate,
@@ -664,6 +695,89 @@ impl Schedule {
     }
 }
 
+/// Kernel id of the `tension_flutter` noise stream in `fs_rand`'s `(seed, kernel, tile)` key: "flut".
+pub const TENSION_FLUTTER_KERNEL: u32 = 0x666c_7574;
+
+/// A `tension_flutter` row: the filtered-noise model of Ternstrom and Friberg (1989), its two parameters and the
+/// standard deviation it is scaled to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TensionFlutterCard {
+    /// Seed of the noise stream.
+    pub seed: u64,
+    /// Natural frequency of the resonant filter [Hz].
+    pub centre_hz: f64,
+    /// Bandwidth of the resonant filter [Hz]; its poles decay at `pi * bandwidth_hz`.
+    pub bandwidth_hz: f64,
+    /// Stationary standard deviation of the relative stiffness change.
+    pub sd_rel: f64,
+}
+
+impl TensionFlutterCard {
+    fn validate(&self) -> Result<(), String> {
+        if !(self.centre_hz > 0.0 && self.centre_hz <= 30.0) {
+            return Err("tension_flutter centre must be in (0, 30] Hz".into());
+        }
+        // At twice the centre the poles turn real and the filter no longer resonates.
+        if !(self.bandwidth_hz > 0.0 && self.bandwidth_hz < 2.0 * self.centre_hz) {
+            return Err("tension_flutter bandwidth must be positive and below twice the centre".into());
+        }
+        // 0.05 puts the island's admitted tension range (1/4..=4) 15 standard deviations away.
+        if !(0.0..=0.05).contains(&self.sd_rel) {
+            return Err("tension_flutter sd must be in 0..=0.05".into());
+        }
+        Ok(())
+    }
+}
+
+/// White noise through a two-pole resonator, `y[n] = a1 y[n-1] + a2 y[n-2] + gain w[n]`, one step per output sample.
+struct TensionFlutter {
+    white: Stream,
+    a1: f64,
+    a2: f64,
+    gain: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl TensionFlutter {
+    fn new(card: TensionFlutterCard, output_rate_hz: u32) -> Self {
+        let rate = f64::from(output_rate_hz);
+        let half_bandwidth = card.bandwidth_hz / 2.0;
+        let damped_hz = det::sqrt(card.centre_hz * card.centre_hz - half_bandwidth * half_bandwidth);
+        let r = det::exp(-core::f64::consts::PI * card.bandwidth_hz / rate);
+        let theta = core::f64::consts::TAU * damped_hz / rate;
+        // The stationary variance of the unit-innovation recursion is
+        // (1 - a2) / ((1 + a2) (1 - a1 - a2) (1 + a1 - a2)); these forms of the last two factors keep their digits with
+        // both poles this close to 1.
+        let half_sin = det::sin(theta / 2.0);
+        let chord = 4.0 * r * half_sin * half_sin;
+        let low = (1.0 - r) * (1.0 - r) + chord;
+        let high = (1.0 + r) * (1.0 + r) - chord;
+        let variance = (1.0 + r * r) / ((1.0 - r * r) * low * high);
+        let mut flutter = Self {
+            white: StreamKey { seed: card.seed, kernel: TENSION_FLUTTER_KERNEL, tile: 0 }.stream(),
+            a1: 2.0 * r * det::cos(theta),
+            a2: -r * r,
+            gain: card.sd_rel / det::sqrt(variance),
+            y1: 0.0,
+            y2: 0.0,
+        };
+        // Ten decay times from rest, so the performance starts in the stationary state and not at y = 0.
+        let warm_up = (10.0 * rate / (core::f64::consts::PI * card.bandwidth_hz)).ceil() as u64;
+        for _ in 0..warm_up {
+            flutter.next_relative();
+        }
+        flutter
+    }
+
+    fn next_relative(&mut self) -> f64 {
+        let y = self.a1 * self.y1 + self.a2 * self.y2 + self.gain * self.white.next_normal();
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
 /// A realized performance: the fold, the tract and the microphone, advanced
 /// together on one physical clock.
 pub struct VoicePerformance {
@@ -672,6 +786,7 @@ pub struct VoicePerformance {
     receiver: BaffledPressure,
     schedule: Schedule,
     tension_modulation: Option<(f64, f64)>,
+    tension_flutter: Option<TensionFlutter>,
     /// Opt-in aspiration source, with the gas properties and fold length its law needs.
     aspiration: Option<GlottalAspiration>,
     /// Opt-in glottal jet-noise source (Verge's fraction on the glottal jet, an extrapolation).
@@ -736,6 +851,11 @@ impl VoicePerformance {
                 let tension = 1.0 + amplitude * det::sin(core::f64::consts::TAU * rate_hz * t);
                 self.island
                     .set_tension(tension)
+                    .map_err(|e| format!("fold tension refused: {e:?}"))?;
+            }
+            if let (0, Some(flutter)) = (j, self.tension_flutter.as_mut()) {
+                self.island
+                    .set_tension(1.0 + flutter.next_relative())
                     .map_err(|e| format!("fold tension refused: {e:?}"))?;
             }
             let mut drive = self.schedule.at(t);
@@ -1246,6 +1366,134 @@ mod tests {
         let swung = render(&fixture("tension_modulation 5.9 0.08\n"));
         assert!(swung.iter().all(|v| v.is_finite()));
         assert_ne!(plain, swung, "a real gesture must reach the radiated pressure");
+    }
+
+    #[test]
+    fn tension_flutter_parses_and_is_refused_by_name() {
+        let ok = VoiceDescription::from_bytes(modulation_text("tension_flutter 7 4 1.3 0.02\n").as_bytes())
+            .expect("parses");
+        let card = TensionFlutterCard { seed: 7, centre_hz: 4.0, bandwidth_hz: 1.3, sd_rel: 0.02 };
+        assert_eq!(ok.tension_flutter, Some(card));
+        let none = VoiceDescription::from_bytes(modulation_text("").as_bytes()).expect("parses");
+        assert_eq!(none.tension_flutter, None);
+        for (extra, needle) in [
+            ("tension_flutter 7 4 1.3\n", "takes 4 fields"),
+            ("tension_flutter x 4 1.3 0.02\n", "seed"),
+            ("tension_flutter 7 x 1.3 0.02\n", "not a number"),
+            ("tension_flutter 7 0 1.3 0.02\n", "centre"),
+            ("tension_flutter 7 31 1.3 0.02\n", "centre"),
+            ("tension_flutter 7 4 0 0.02\n", "bandwidth"),
+            ("tension_flutter 7 4 8 0.02\n", "bandwidth"),
+            ("tension_flutter 7 4 1.3 -0.01\n", "sd"),
+            ("tension_flutter 7 4 1.3 0.06\n", "sd"),
+            ("tension_flutter 7 4 1.3 0.02\ntension_flutter 8 4 1.3 0.02\n", "only appear once"),
+            ("tension_flutter 7 4 1.3 0.02\ntension_modulation 5.9 0.08\n", "one gesture"),
+            ("tension_modulation 5.9 0.08\ntension_flutter 7 4 1.3 0.02\n", "one gesture"),
+        ] {
+            let error = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    /// The five filters of Ternstrom and Friberg's Fig. 9, at a rate low enough for a long run. Standard deviation
+    /// against the closed form the gain is scaled from, mean, and the lag correlation at half the damped period,
+    /// `-exp(-pi B tau)`, which a filter of the wrong centre or bandwidth would miss.
+    #[test]
+    fn tension_flutter_matches_its_closed_form_on_the_printed_filters() {
+        for (centre_hz, bandwidth_hz) in [(6.0, 1.5), (6.0, 3.0), (4.0, 1.3), (4.0, 5.0), (3.0, 3.0)] {
+            let sd_rel = 0.02;
+            let card = TensionFlutterCard { seed: 1, centre_hz, bandwidth_hz, sd_rel };
+            let rate = 4800_u32;
+            let mut flutter = TensionFlutter::new(card, rate);
+            let y: Vec<f64> = (0..rate as usize * 1000).map(|_| flutter.next_relative()).collect();
+            let mean = y.iter().sum::<f64>() / y.len() as f64;
+            let sd = det::sqrt(y.iter().map(|v| v * v).sum::<f64>() / y.len() as f64);
+            assert!(mean.abs() < 0.1 * sd_rel, "({centre_hz}, {bandwidth_hz}): mean {mean:e}");
+            assert!((sd / sd_rel - 1.0).abs() < 0.05, "({centre_hz}, {bandwidth_hz}): sd {sd:e}");
+            let half_bandwidth = bandwidth_hz / 2.0;
+            let tau = 0.5 / det::sqrt(centre_hz * centre_hz - half_bandwidth * half_bandwidth);
+            let lag = (tau * f64::from(rate)).round() as usize;
+            let covariance = y.iter().zip(&y[lag..]).map(|(a, b)| a * b).sum::<f64>() / (y.len() - lag) as f64;
+            let read = covariance / (sd * sd);
+            let closed = -det::exp(-core::f64::consts::PI * bandwidth_hz * tau);
+            assert!(
+                (read - closed).abs() < 0.05,
+                "({centre_hz}, {bandwidth_hz}): lag correlation {read} against {closed}"
+            );
+        }
+    }
+
+    /// At the audio rate the row must move smoothly. For (4, 1.3) at 48 kHz the closed-form rms step is `sqrt(2 (1 -
+    /// rho_1))` = 5.2e-4 of the extent, so a limit of 5e-3 is about ten times that: a process that stepped once per
+    /// cycle would pass it by far. The standard deviation holds at that rate too, and from the first sample: over many
+    /// seeds the first value already has the full spread.
+    #[test]
+    fn tension_flutter_is_smooth_at_the_audio_rate_and_starts_stationary() {
+        let sd_rel = 0.02;
+        let card = TensionFlutterCard { seed: 1, centre_hz: 4.0, bandwidth_hz: 1.3, sd_rel };
+        let mut flutter = TensionFlutter::new(card, 48_000);
+        let y: Vec<f64> = (0..48_000 * 200).map(|_| flutter.next_relative()).collect();
+        let sd = det::sqrt(y.iter().map(|v| v * v).sum::<f64>() / y.len() as f64);
+        assert!((sd / sd_rel - 1.0).abs() < 0.1, "sd {sd:e} at 48 kHz");
+        let largest = y.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f64::max);
+        assert!(largest < 5e-3 * sd_rel, "a step of {largest:e} against an extent of {sd_rel:e}");
+        let first: Vec<f64> = (0..400)
+            .map(|seed| TensionFlutter::new(TensionFlutterCard { seed, ..card }, 4800).next_relative())
+            .collect();
+        let spread = det::sqrt(first.iter().map(|v| v * v).sum::<f64>() / first.len() as f64);
+        assert!((spread / sd_rel - 1.0).abs() < 0.15, "first-sample spread {spread:e}");
+    }
+
+    #[test]
+    fn zero_sd_flutter_is_bit_identical_to_no_key_and_a_real_one_is_seeded() {
+        let plain = render(&fixture(""));
+        let zero = render(&fixture("tension_flutter 7 4 1.3 0\n"));
+        assert!(first_difference(&plain, &zero).is_none(), "a zero extent must leave the tension untouched");
+        let moved = render(&fixture("tension_flutter 7 4 1.3 0.03\n"));
+        assert!(moved.iter().all(|v| v.is_finite()));
+        assert!(first_difference(&plain, &moved).is_some(), "a real row must reach the radiated pressure");
+        assert!(first_difference(&moved, &render(&fixture("tension_flutter 7 4 1.3 0.03\n"))).is_none());
+        assert!(first_difference(&moved, &render(&fixture("tension_flutter 8 4 1.3 0.03\n"))).is_some());
+    }
+
+    #[test]
+    fn tension_flutter_rendering_is_independent_of_callback_partition() {
+        let text = fixture("tension_flutter 7 4 1.3 0.03\n");
+        let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+        let mut whole = description.build().expect("builds");
+        let mut split = description.build().expect("builds");
+        let mut a = vec![0.0; 600];
+        whole.block(&mut a).expect("whole block");
+        let mut b = vec![0.0; 600];
+        for chunk in b.chunks_mut(37) {
+            split.block(chunk).expect("split block");
+        }
+        assert!(first_difference(&a, &b).is_none(), "block partition changed the pressure");
+    }
+
+    /// With a planted negative: the radiated f0 reads steady with no key and moves with the row, and doubling `sd_rel`
+    /// on one seed about doubles the movement, so the noise reaches the pitch. Measured on the fixture's own tube: the
+    /// result is no note's extent. The broad filter (4, 5) puts several independent values in this 1 s hold.
+    #[test]
+    fn tension_flutter_moves_the_radiated_pitch_in_proportion_to_its_sd() {
+        let rate = 48_000.0_f64;
+        let steady = render(&modulation_text(""));
+        let prior = steady_f0_hz(&steady[(0.4 * rate) as usize..(0.9 * rate) as usize], rate);
+        let sd_cents = |pcm: &[f64]| -> f64 {
+            let track = f0_track(&pcm[(0.30 * rate) as usize..], rate, prior);
+            let count = track.len() as f64;
+            let mean = track.iter().map(|p| p.1).sum::<f64>() / count;
+            let cents = track.iter().map(|p| 1200.0 * det::ln(p.1 / mean) / core::f64::consts::LN_2);
+            det::sqrt(cents.map(|c| c * c).sum::<f64>() / count)
+        };
+        let none = sd_cents(&steady);
+        let small = sd_cents(&render(&modulation_text("tension_flutter 7 4 5 0.01\n")));
+        let full = sd_cents(&render(&modulation_text("tension_flutter 7 4 5 0.02\n")));
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"voice-tension-flutter\",\"prior_hz\":{prior:.2},\"sd_cents_none\":{none:.2},\"sd_cents_0p01\":{small:.1},\"sd_cents_0p02\":{full:.1}}}"
+        );
+        assert!(none < 0.2 * full, "no key, yet {none:.2} cents against {full:.1}");
+        assert!((1.6..=2.4).contains(&(full / small)), "doubling the sd gave {small:.1} -> {full:.1} cents");
     }
 
     fn first_difference(a: &[f64], b: &[f64]) -> Option<usize> {
