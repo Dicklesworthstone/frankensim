@@ -6,7 +6,7 @@ use super::{
 use crate::body_force::{BodyForce, ForceChange, ForceControl};
 use fs_qty::{Length, Time};
 
-mod forcing;
+pub(super) mod forcing;
 
 /// Extensive conserved integrals in the canonical source-species order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -123,7 +123,7 @@ pub struct MixtureEuler1d {
     pub(super) time: f64,
     pub(super) work: Workspace,
     pub(super) moving: Option<crate::dynamics::MovingWorkspace>,
-    body_force_stage: Option<Vec<f64>>,
+    pub(super) body_force_stage: Option<Vec<f64>>,
 }
 impl MixtureEuler1d {
     /// Construct a uniform fixed-area flow from complete conservative cells.

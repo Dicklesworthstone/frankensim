@@ -3,7 +3,7 @@ use super::{Conserved, Error, FaceFlux, FrozenGas, Mesh1d, Primitive, allocated,
 use crate::body_force::{BodyForce, ForceChange, ForceControl};
 use fs_qty::{Length, Time};
 
-mod forcing;
+pub(super) mod forcing;
 
 /// Physical boundary on one end of a stationary interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -182,7 +182,7 @@ pub struct Euler1d {
     pub(super) work: Workspace,
     pub(super) hydrostatic: Option<HydrostaticBalance>,
     pub(super) moving: Option<super::moving::MovingWorkspace>,
-    body_force_stage: Option<Vec<Conserved>>,
+    pub(super) body_force_stage: Option<Vec<Conserved>>,
 }
 
 impl Euler1d {

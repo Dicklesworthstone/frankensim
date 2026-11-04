@@ -662,3 +662,6 @@ fn g1_time_dependent_drive_refines_to_exact_velocity_and_work() {
         assert!((3.9..4.1).contains(&(pair[0] / pair[1])), "{errors:?}");
     }
 }
+
+#[path = "body_force/moving.rs"]
+mod moving;

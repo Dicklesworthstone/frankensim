@@ -106,7 +106,7 @@ impl MixtureEuler1d {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update(
+pub(in crate::multicomponent) fn update(
     gas: &MixtureGas,
     state: &mut [f64],
     primitive: &mut Primitive,

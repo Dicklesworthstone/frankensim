@@ -98,7 +98,7 @@ impl Euler1d {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update(
+pub(in crate::dynamics) fn update(
     gas: &FrozenGas,
     q: Conserved,
     primitive: &mut Primitive,

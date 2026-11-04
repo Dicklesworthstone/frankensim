@@ -27,6 +27,35 @@ moving boundaries, finite networks, chemistry and molecular/wall exchanges keep
 their existing separate composing owners. State/time-dependent source values
 need temporal refinement; no new entropy-stability theorem is asserted.
 
+### Distributed body work on moving intervals
+
+`Euler1d::step_with_moving_walls_and_body_force` and its original mixture
+counterpart compose the shared source maps with the existing extensive ALE
+SSP-RK2 owner. The first half-source uses accepted volumes; the last uses the
+admitted moved volumes and current densities. Uniform force density therefore
+integrates the actual linear volume trajectory, while acceleration follows the
+actual transported mass. Both source endpoints use relative-face CFL, original
+calorics and the authored Mach bound.
+
+Boundary pressure impulse and `p_star * wall_velocity` work remain in the
+original end exchanges; independent body impulse, conjugate work and visible
+energy-representation error remain in `source_change`. The complete balance
+subtracts source work once. Each retry reconstructs both source halves and the
+moving geometry from accepted fields, reusing the existing flat source buffer.
+Cells, mesh, clock and accounting publish together after final admission.
+
+Zero source preserves the original moving path, and zero wall velocity preserves
+the stationary forced path. Constant area, affine mesh motion and reflecting ends
+remain required; the frozen owner continues to refuse a bound gravitational
+reference. Force values are held in original cell order. Chemistry, radial heat
+transport and dynamically solved wall inertia retain their separate owners.
+
+Six regression groups in `tests/body_force/moving.rs` define exact accelerating
+translations with braking/reversal, original multicomponent calorics and absent
+species, independent changing-volume impulse and boosted wall/body work, zero
+identity, source/CFL retries and cancellation/refusal with unchanged physical
+fields. Native execution remains outstanding in the constrained host session.
+
 ## Constant-pressure finite-rate chemistry
 
 `chemistry::isobaric::IsobaricReactor` advances a sealed ideal-gas parcel at

@@ -9,6 +9,7 @@ use super::{
     Boundaries, Boundary, Conserved, Error, Euler1d, FrozenGas, Mesh1d, Reconstruction,
     StepControl, StepReport, Totals, allocated, poll, positive,
 };
+use crate::body_force::{Accumulator, BodyForce, ForceChange, ForceControl};
 use fs_qty::Time;
 
 pub(crate) struct MovingWorkspace {
@@ -70,6 +71,20 @@ impl MovingWorkspace {
         }
         Ok((length, difference))
     }
+
+    /// Same relative-face acoustic rate for both source-owned gas fields.
+    pub(crate) fn relative_signal_rate(
+        &self,
+        mesh: &Mesh1d,
+        cell: usize,
+        velocity: f64,
+        sound_speed: f64,
+    ) -> f64 {
+        let relative = (velocity - self.velocity[cell])
+            .abs()
+            .max((velocity - self.velocity[cell + 1]).abs());
+        (relative + sound_speed) * (mesh.face_areas()[0] / mesh.volumes()[cell])
+    }
 }
 
 impl Euler1d {
@@ -114,6 +129,59 @@ impl Euler1d {
         maximum_duration: Time,
         controls: StepControl,
         wall_velocity: [f64; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.advance_moving(maximum_duration, controls, wall_velocity, None, cancelled)
+    }
+
+    /// Advance distributed mechanical forcing and moving-wall pressure together.
+    ///
+    /// Exact source half-steps surround the original extensive ALE SSP-RK2 map.
+    /// The first source uses accepted cell volumes; the second uses the admitted
+    /// moved volumes and densities. Their actual impulse and conjugate work are
+    /// returned in `source_change`, separately from `boundary_change`, which
+    /// retains the original pressure impulse and `p_star * wall_velocity` work.
+    /// Neither contribution is inferred from the complete energy increment.
+    ///
+    /// Source endpoints obey the original EOS, explicit Mach bound and the same
+    /// full-interval CFL relative to moving faces. Each retry restarts both
+    /// sources, transport and geometry from the accepted field. Only the full
+    /// admitted state, mesh, clock and work report publish. The stationary force
+    /// buffer is reused; no complete field is cloned for a retry. Zero force
+    /// follows the original moving method, and zero wall speeds retain the
+    /// original stationary forced method.
+    ///
+    /// Force values follow the original cell order and are held for this entire
+    /// accepted interval. The original constant-area, reflecting-wall and
+    /// no-bound-atmosphere restrictions remain. Prescribed wall inertia, radial
+    /// heat exchange and a changing source history require their separate owners.
+    ///
+    /// # Errors
+    /// Invalid source/controls, geometry, source-domain or CFL refusal, exhausted
+    /// retries and cancellation leave all accepted physical state unchanged.
+    pub fn step_with_moving_walls_and_body_force(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        wall_velocity: [f64; 2],
+        force: BodyForce<'_>,
+        force_controls: ForceControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        poll(&mut cancelled)?;
+        force_controls.admit::<Error>()?;
+        let source = force
+            .admit::<Error>(self.states.len(), &mut cancelled)?
+            .then_some((force, force_controls));
+        self.advance_moving(maximum_duration, controls, wall_velocity, source, cancelled)
+    }
+
+    fn advance_moving(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        wall_velocity: [f64; 2],
+        source: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -138,7 +206,19 @@ impl Euler1d {
             return Err(Error::Invalid("moving-wall speeds or step controls"));
         }
         if wall_velocity == [0.0; 2] {
-            return self.step(maximum_duration, controls, cancelled);
+            return match source {
+                Some((force, force_controls)) => self.step_with_body_force(
+                    maximum_duration,
+                    controls,
+                    force,
+                    force_controls,
+                    cancelled,
+                ),
+                None => self.step(maximum_duration, controls, cancelled),
+            };
+        }
+        if source.is_some() && self.body_force_stage.is_none() {
+            self.body_force_stage = Some(allocated(self.states.len(), Conserved::default())?);
         }
         if self.moving.is_none() {
             self.moving = Some(MovingWorkspace::new(&self.mesh)?);
@@ -155,10 +235,7 @@ impl Euler1d {
                 &mut cancelled,
             )?;
             self.work.primitive[i] = p;
-            let relative = (p.velocity - moving.velocity[i])
-                .abs()
-                .max((p.velocity - moving.velocity[i + 1]).abs());
-            let rate = (relative + p.sound_speed) * (area / self.mesh.volumes()[i]);
+            let rate = moving.relative_signal_rate(&self.mesh, i, p.velocity, p.sound_speed);
             if !positive(rate) {
                 return Err(Error::Invalid("moving interval acoustic CFL overflow"));
             }
@@ -188,22 +265,52 @@ impl Euler1d {
             } else {
                 controls.reconstruction
             };
-            match attempt(
-                &self.gas,
-                &self.states,
-                &self.mesh,
-                self.boundaries,
-                dt,
-                controls.cfl,
-                reconstruction,
-                &mut self.work,
-                moving,
-                &mut cancelled,
-            ) {
-                Ok((a, b)) => {
+            let trial = if let Some((force, force_controls)) = source {
+                attempt_with_body_force(
+                    &self.gas,
+                    &self.states,
+                    &self.mesh,
+                    self.boundaries,
+                    dt,
+                    controls.cfl,
+                    reconstruction,
+                    &mut self.work,
+                    moving,
+                    self.body_force_stage
+                        .as_mut()
+                        .expect("source workspace initialized"),
+                    force,
+                    force_controls,
+                    &mut cancelled,
+                )
+            } else {
+                attempt(
+                    &self.gas,
+                    &self.states,
+                    &self.mesh,
+                    self.boundaries,
+                    dt,
+                    controls.cfl,
+                    reconstruction,
+                    &mut self.work,
+                    moving,
+                    &mut cancelled,
+                )
+                .map(|(a, b)| (a, b, ForceChange::default(), 0.0))
+            };
+            match trial {
+                Ok((a, b, source_change, source_signal_rate)) => {
                     let after =
                         totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
-                    let mut report = reported_step(before, after, [a, b], dt, area)?;
+                    let mut report = reported_step_with_source(
+                        before,
+                        after,
+                        [a, b],
+                        dt,
+                        area,
+                        source_change,
+                        source_signal_rate,
+                    )?;
                     report.halvings = halvings;
                     report.first_order_retry =
                         first_order_retry && controls.reconstruction == Reconstruction::Muscl;
@@ -238,6 +345,18 @@ pub(super) fn reported_step(
     dt: f64,
     area: f64,
 ) -> Result<StepReport, Error> {
+    reported_step_with_source(before, after, [a, b], dt, area, ForceChange::default(), 0.0)
+}
+
+fn reported_step_with_source(
+    before: Totals,
+    after: Totals,
+    [a, b]: [Stage; 2],
+    dt: f64,
+    area: f64,
+    source_change: ForceChange,
+    source_signal_rate: f64,
+) -> Result<StepReport, Error> {
     let factor = 0.5 * dt * area;
     let left = Totals::from_array(core::array::from_fn(|k| {
         factor * (a.left.array()[k] + b.left.array()[k])
@@ -247,7 +366,17 @@ pub(super) fn reported_step(
     }));
     let boundary = Totals::from_array(core::array::from_fn(|k| left.array()[k] + right.array()[k]));
     let residual = Totals::from_array(core::array::from_fn(|k| {
-        after.array()[k] - before.array()[k] - boundary.array()[k]
+        let residual = after.array()[k] - before.array()[k] - boundary.array()[k];
+        let source = match k {
+            1 => source_change.impulse,
+            2 => source_change.work,
+            _ => 0.0,
+        };
+        if source == 0.0 {
+            residual
+        } else {
+            residual - source
+        }
     }));
     if !after
         .array()
@@ -262,7 +391,7 @@ pub(super) fn reported_step(
     }
     Ok(StepReport {
         elapsed: Time::new(dt),
-        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
+        maximum_cfl: a.signal_rate.max(b.signal_rate).max(source_signal_rate) * dt,
         halvings: 0,
         hll_fallback_faces: a.fallbacks + b.fallbacks,
         limited_cells: a.limited + b.limited,
@@ -278,7 +407,7 @@ pub(super) fn reported_step(
         wall_momentum_impulse: 0.0,
         wall_heat: 0.0,
         wall_work: 0.0,
-        source_change: crate::body_force::ForceChange::default(),
+        source_change,
         conservation_residual: residual,
     })
 }
@@ -360,8 +489,78 @@ pub(super) fn attempt(
     Ok((a, b))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_body_force(
+    gas: &FrozenGas,
+    states: &[Conserved],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    work: &mut Workspace,
+    moving: &mut MovingWorkspace,
+    forced: &mut [Conserved],
+    force: BodyForce<'_>,
+    controls: ForceControl,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Stage, Stage, ForceChange, f64), Error> {
+    let mut exchange = Accumulator::default();
+    let mut signal_rate = 0.0_f64;
+    for (i, &q) in states.iter().enumerate() {
+        forced[i] = super::evolve::forcing::update(
+            gas,
+            q,
+            &mut work.primitive[i],
+            i,
+            force,
+            0.5 * dt,
+            controls,
+            mesh.volumes()[i],
+            &mut exchange,
+            cancelled,
+        )?;
+        let p = work.primitive[i];
+        let rate = moving.relative_signal_rate(mesh, i, p.velocity, p.sound_speed);
+        check_cfl(rate, dt, cfl)?;
+        signal_rate = signal_rate.max(rate);
+    }
+    let (a, b) = attempt(
+        gas,
+        forced,
+        mesh,
+        boundaries,
+        dt,
+        cfl,
+        reconstruction,
+        work,
+        moving,
+        cancelled,
+    )?;
+    for (i, q) in work.candidate.iter_mut().enumerate() {
+        *q = super::evolve::forcing::update(
+            gas,
+            *q,
+            &mut work.primitive[i],
+            i,
+            force,
+            0.5 * dt,
+            controls,
+            moving.mesh.volumes()[i],
+            &mut exchange,
+            cancelled,
+        )?;
+        let p = work.primitive[i];
+        let rate = moving.relative_signal_rate(&moving.mesh, i, p.velocity, p.sound_speed);
+        check_cfl(rate, dt, cfl)?;
+        signal_rate = signal_rate.max(rate);
+    }
+    Ok((a, b, exchange.finish(), signal_rate))
+}
+
 fn check_cfl(rate: f64, dt: f64, cfl: f64) -> Result<(), Error> {
-    if rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
+    if !positive(rate) || !(rate * dt).is_finite() || rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON)
+    {
         return Err(Error::CflExceeded {
             observed: rate * dt,
             maximum: cfl,
