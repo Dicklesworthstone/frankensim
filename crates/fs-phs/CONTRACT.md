@@ -1411,6 +1411,47 @@ preserved. No tolerance discards a small quadratic term; genuine quadratic
 integrals keep their complete dense contraction. The classification adds no
 warm allocation or alternate physical loss approximation.
 
+Strictly linear observations now prepare as a batch of compact symmetric
+half-rows, using the same Gramian Taylor recurrence and doubling. The complete
+generator's constant row and column must be exactly zero; no approximate
+support classification is used. Exponential Taylor terms are shared, but each
+observation keeps its original joint E/W stopping order. Forms that converge
+at one order are immediately doubled from that order's own transition before
+the shared series continues. Only one dense group snapshot is live. The first
+original observation still selects the endpoint transition, including a
+preceding quadratic form; no-observation preparation and full quadratic
+integrals retain their existing path.
+
+For d complete augmented coordinates and L linear observations, the cached
+observation coefficients occupy L*d doubles instead of L*d*d. For 51 outputs
+at d=256 this is 104,448 bytes instead of 26,738,688 bytes (102 KiB instead
+of 25.5 MiB), excluding other owner caches and container overhead. Cubic
+Taylor work is shared and cubic doubling work is paid once per distinct
+convergence group; individual linear rows require quadratic work. These are
+storage and operation counts, not a measured end-to-end speed or throughput
+claim. Warm contractions still perform the original two ordered half-row sums,
+and `linear_integral_map` retains acceptance of dense forms that satisfy its
+original exact affine-property check.
+
+The 256-coordinate ceiling, 32-term/48-doubling limits, scaling rule,
+double-double selection, finite checks and conservative dense-reference
+byte/work budgets are unchanged. At d<=2, the original full kernel runs
+sequentially and replaces each compact result row in place, avoiding extra
+group bookkeeping within the smaller byte allowance. Preparation polls
+cancellation between row conversion, Taylor stages, form updates and group
+doublings, and returns no partial batch. No inverse generator, discarded
+coefficient, new physical loss law or changed source clock is introduced.
+
+Six batch regressions compare every retained coefficient and the selected
+transition bit for bit with the unchanged dense Gramian, including ordinary
+and double-double chains, distinct convergence orders, signed zeros,
+subnormal rows, many-output tiny operators and cancellation/replay. Together
+with the seven original Gramian tests, they pass as the actual production
+module in a standalone native harness. Prepared-owner regressions additionally
+cover compact payloads, first-quadratic transition selection, dense affine-map
+fallback, unchanged byte/work thresholds and cancellation replay; full-crate
+execution remains a separate validation requirement.
+
 `prepared_exact_owned` checks 1,000 warm calls with zero allocations, complete
 coupled damping and Maxwell states, bitwise borrowed/owned work and motion,
 direct exact propagation, energy-datum invariance, capacity and atomic refusal.

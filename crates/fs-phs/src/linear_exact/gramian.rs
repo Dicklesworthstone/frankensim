@@ -3,6 +3,9 @@
 //! W(2t) = W(t) + E(t)^T W(t) E(t). Only the physical propagator is squared;
 //! a rapidly decaying mode never requires forming exp(-A t).
 
+mod affine;
+pub(crate) use affine::flow_integrals as affine_flow_integrals;
+
 pub(crate) fn identity(n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
     for i in 0..n {

@@ -30,6 +30,14 @@ pub struct PreparedQuadraticStep {
     pub integrals: Vec<f64>,
 }
 
+enum CachedIntegral {
+    // Full quadratic observations retain their original property check and
+    // contraction, including matrices that happen to be exactly affine.
+    Dense { matrix: Vec<f64>, affine: bool },
+    // Symmetric final row/column of a strictly linear observation's Gramian.
+    Linear(Vec<f64>),
+}
+
 /// Fixed original state/port layout; no physical state is stored or reset here.
 /// Warm work is matrix-vector multiplication and quadratic contractions only.
 pub struct PreparedQuadraticFlow {
@@ -39,10 +47,7 @@ pub struct PreparedQuadraticFlow {
     forward: Vec<f64>,
     inverse: Vec<f64>,
     transition: Vec<f64>,
-    integrals: Vec<Vec<f64>>,
-    // Exactly affine observations only have entries in the constant coordinate's
-    // row/column. Keep their dense arithmetic order without its O(d^2) zero work.
-    affine_integrals: Vec<bool>,
+    integrals: Vec<CachedIntegral>,
     dt: f64,
     growth_factor: f64,
     storage_norm_factor: f64,
@@ -86,9 +91,9 @@ impl PreparedQuadraticFlow {
     }
 
     /// Same preparation with cooperative cancellation between transform rows,
-    /// forms and after each existing Gramian call. One original bounded
-    /// `flow_integral` is the largest atomic operation (at most 256 coordinates,
-    /// 32 series terms and 48 doublings, within the supplied work/byte budgets).
+    /// forms, linear Taylor stages and convergence-group doublings. One original
+    /// full `flow_integral` remains the largest atomic operation (at most 256
+    /// coordinates, 32 series terms and 48 doublings, within the supplied budgets).
     #[allow(clippy::too_many_arguments)]
     pub fn new_controlled(
         sys: &PortHamiltonian,
@@ -491,8 +496,10 @@ impl PreparedQuadraticFlow {
         }
         let mut transition = Vec::new();
         let mut integrals = Vec::with_capacity(count);
-        let mut affine_integrals = Vec::with_capacity(count);
-        for index in 0..count.max(1) {
+        // Quadratic observations retain the unchanged full Gramian path.
+        // With no observations, one zero form still prepares the transition.
+        let full_count = if count == 0 { 1 } else { quadratic_forms.len() };
+        for index in 0..full_count {
             check_cancel(&mut cancelled)?;
             let mut form = vec![0.0; d * d];
             if index < quadratic_forms.len() {
@@ -504,13 +511,6 @@ impl PreparedQuadraticFlow {
                 for i in 0..n {
                     form[i * d..i * d + n].copy_from_slice(&c[i * n..(i + 1) * n]);
                 }
-            } else if index < count {
-                let c = &linear_forms[index - quadratic_forms.len()];
-                for i in 0..n {
-                    let value = 0.5 * (0..n).map(|j| c[j] * inverse[j * n + i]).sum::<f64>();
-                    form[i * d + d - 1] = value;
-                    form[(d - 1) * d + i] = value;
-                }
             }
             check_cancel(&mut cancelled)?;
             let prepared = gramian::flow_integral(&generator, &form, d, dt).map_err(refuse)?;
@@ -518,10 +518,33 @@ impl PreparedQuadraticFlow {
             if transition.is_empty() {
                 transition = prepared.transition;
             }
-            if index < count {
-                affine_integrals.push(is_affine_integral(&prepared.loss_integral, d));
-                integrals.push(prepared.loss_integral);
+            if index < quadratic_forms.len() {
+                let affine = is_affine_integral(&prepared.loss_integral, d);
+                integrals.push(CachedIntegral::Dense {
+                    matrix: prepared.loss_integral,
+                    affine,
+                });
             }
+        }
+        if !linear_forms.is_empty() {
+            let mut rows = Vec::with_capacity(linear_forms.len());
+            for c in linear_forms {
+                check_cancel(&mut cancelled)?;
+                let mut row = vec![0.0; d];
+                for i in 0..n {
+                    row[i] = 0.5 * (0..n).map(|j| c[j] * inverse[j * n + i]).sum::<f64>();
+                }
+                rows.push(row);
+            }
+            // The existing conservative dense-reference budgets dominate this
+            // shared transition, one live group snapshot and compact row work.
+            let prepared = gramian::affine_flow_integrals(
+                &generator, rows, d, dt, &mut cancelled,
+            ).map_err(refuse)?.ok_or(PreparedStepError::Cancelled)?;
+            if transition.is_empty() {
+                transition = prepared.transition;
+            }
+            integrals.extend(prepared.half_rows.into_iter().map(CachedIntegral::Linear));
         }
         check_cancel(&mut cancelled)?;
         Ok(Self {
@@ -532,7 +555,6 @@ impl PreparedQuadraticFlow {
             inverse,
             transition,
             integrals,
-            affine_integrals,
             dt,
             growth_factor,
             storage_norm_factor,
@@ -611,25 +633,31 @@ impl PreparedQuadraticFlow {
         &self,
         index: usize,
     ) -> Result<(Vec<f64>, Vec<f64>), PhsError> {
-        let w = self.integrals.get(index)
+        let form = self.integrals.get(index)
             .ok_or_else(|| refuse("prepared linear observation index"))?;
         let last = self.d - 1;
-        if w[last * self.d + last] != 0.0
-            || (0..last).any(|i| (0..last).any(|j| w[i * self.d + j] != 0.0))
-        {
+        let linear = match form {
+            CachedIntegral::Linear(row) => row[last] == 0.0,
+            CachedIntegral::Dense { matrix, .. } => {
+                matrix[last * self.d + last] == 0.0
+                    && (0..last).all(|i| (0..last).all(|j| matrix[i * self.d + j] == 0.0))
+            }
+        };
+        if !linear {
             return Err(refuse("prepared observation is not a linear form"));
         }
-        let balanced: Vec<f64> = (0..self.n)
-            .map(|i| w[i * self.d + last] + w[last * self.d + i])
-            .collect();
+        let coefficient = |i: usize| match form {
+            CachedIntegral::Linear(row) => row[i] + row[i],
+            CachedIntegral::Dense { matrix, .. } => {
+                matrix[i * self.d + last] + matrix[last * self.d + i]
+            }
+        };
+        let balanced: Vec<f64> = (0..self.n).map(coefficient).collect();
         let state: Vec<f64> = (0..self.n)
             .map(|j| (0..self.n).map(|i| balanced[i] * self.forward[i * self.n + j]).sum())
             .collect();
         let input: Vec<f64> = (0..self.m)
-            .map(|p| {
-                (w[(self.n + p) * self.d + last] + w[last * self.d + self.n + p])
-                    * self.source_scales[p]
-            })
+            .map(|p| coefficient(self.n + p) * self.source_scales[p])
             .collect();
         if !finite(&state) || !finite(&input) {
             return Err(refuse("prepared linear observation map is nonfinite"));
@@ -672,15 +700,11 @@ impl PreparedQuadraticFlow {
                 .map(|j| self.inverse[i * self.n + j] * balanced[j])
                 .sum();
         }
-        for ((out, w), &affine) in integrals
-            .iter_mut()
-            .zip(&self.integrals)
-            .zip(&self.affine_integrals)
-        {
-            *out = if affine {
-                affine_integral(w, z)
-            } else {
-                quadratic(w, z)
+        for (out, form) in integrals.iter_mut().zip(&self.integrals) {
+            *out = match form {
+                CachedIntegral::Dense { matrix, affine: true } => affine_integral(matrix, z),
+                CachedIntegral::Dense { matrix, affine: false } => quadratic(matrix, z),
+                CachedIntegral::Linear(row) => compact_affine_integral(row, z),
             };
         }
         if !finite(endpoint) || !finite(integrals) {
@@ -713,6 +737,20 @@ fn affine_integral(matrix: &[f64], coordinates: &[f64]) -> f64 {
     }
     for j in 0..dimension {
         result += coordinates[last] * matrix[last * dimension + j] * coordinates[j];
+    }
+    result
+}
+
+// The same two half-row contractions as affine_integral(), with the symmetric
+// entries stored once. Combining the halves would change cancellation rounding.
+fn compact_affine_integral(row: &[f64], coordinates: &[f64]) -> f64 {
+    let last = coordinates.len() - 1;
+    let mut result = 0.0;
+    for i in 0..last {
+        result += coordinates[i] * row[i] * coordinates[last];
+    }
+    for j in 0..coordinates.len() {
+        result += coordinates[last] * row[j] * coordinates[j];
     }
     result
 }
@@ -790,6 +828,21 @@ fn extended_growth_rate(
 mod affine_integral_tests {
     use super::*;
 
+    fn dense(form: &CachedIntegral, dimension: usize) -> Vec<f64> {
+        match form {
+            CachedIntegral::Dense { matrix, .. } => matrix.clone(),
+            CachedIntegral::Linear(row) => {
+                let mut matrix = vec![0.0; dimension * dimension];
+                let last = dimension - 1;
+                for i in 0..dimension {
+                    matrix[i * dimension + last] = row[i];
+                    matrix[last * dimension + i] = row[i];
+                }
+                matrix
+            }
+        }
+    }
+
     #[test]
     fn affine_observations_preserve_dense_bits_without_discarding_quadratic_terms() {
         let system = crate::mass_spring_damper(1.0, 9.0, 0.7).unwrap();
@@ -814,7 +867,8 @@ mod affine_integral_tests {
             },
         )
         .unwrap();
-        assert_eq!(flow.affine_integrals, [false, true]);
+        assert!(matches!(flow.integrals[0], CachedIntegral::Dense { affine: false, .. }));
+        assert!(matches!(flow.integrals[1], CachedIntegral::Linear(_)));
         for scale in [1.0 / 1_099_511_627_776.0, 1.0, 1_099_511_627_776.0] {
             for i in 0..32 {
                 let state = [
@@ -833,13 +887,168 @@ mod affine_integral_tests {
                     &mut values,
                 )
                 .unwrap();
-                for (&actual, full) in values.iter().zip(&flow.integrals) {
-                    assert_eq!(actual.to_bits(), quadratic(full, &z).to_bits());
+                for (&actual, form) in values.iter().zip(&flow.integrals) {
+                    assert_eq!(actual.to_bits(), quadratic(&dense(form, flow.d), &z).to_bits());
                 }
             }
         }
-        let mut almost_linear = flow.integrals[1].clone();
+        let mut almost_linear = dense(&flow.integrals[1], flow.d);
         almost_linear[0] = f64::from_bits(1);
         assert!(!is_affine_integral(&almost_linear, flow.d));
     }
+
+    #[test]
+    fn compact_batch_preserves_first_quadratic_transition_and_dense_affine_maps() {
+        let n = 32;
+        let d = n + 1;
+        let rate = 0.21875;
+        let mut q = vec![0.0; n * n];
+        for i in 0..n {
+            q[i * n + i] = 1.0;
+        }
+        let system = PortHamiltonian::new(
+            n, 0, vec![0.0; n * n], vec![rate / n as f64; n * n], Vec::new(),
+            Box::new(crate::QuadraticStorage::new(q, n).unwrap()),
+        ).unwrap();
+        let split = super::super::split_quadratic(
+            &system, LinearSplitBudget { max_modes: n, max_omega_dt: 2.8 },
+        ).unwrap();
+        let flow = PreparedQuadraticFlow::new(
+            &system, &split, 1.0, &[vec![0.0; n * n]], &[vec![1.0; n]],
+            DenseExponentialBudget {
+                max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
+                max_dense_bytes: usize::MAX,
+                max_multiply_terms: u64::MAX,
+            },
+        ).unwrap();
+        let mut generator = vec![0.0; d * d];
+        let mut linear_form = vec![0.0; d * d];
+        for i in 0..n {
+            for j in 0..n {
+                generator[i * d + j] = -rate / n as f64;
+            }
+            linear_form[i * d + n] = 0.5;
+            linear_form[n * d + i] = 0.5;
+        }
+        let quadratic_reference = gramian::flow_integral(
+            &generator, &vec![0.0; d * d], d, 1.0,
+        ).unwrap();
+        let linear_reference = gramian::flow_integral(
+            &generator, &linear_form, d, 1.0,
+        ).unwrap();
+        let bits = |values: &[f64]| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&flow.transition), bits(&quadratic_reference.transition));
+        assert_ne!(bits(&flow.transition), bits(&linear_reference.transition));
+        assert!(matches!(flow.integrals[0], CachedIntegral::Dense { affine: true, .. }));
+        match &flow.integrals[1] {
+            CachedIntegral::Linear(row) => {
+                assert_eq!(row.len(), d);
+                assert_eq!(bits(row), bits(&linear_reference.loss_integral[n * d..]));
+            }
+            CachedIntegral::Dense { .. } => panic!("linear observation must use compact storage"),
+        }
+        let (zero_state, zero_input) = flow.linear_integral_map(0).unwrap();
+        assert_eq!(zero_state, vec![0.0; n]);
+        assert!(zero_input.is_empty());
+        let (state_map, input_map) = flow.linear_integral_map(1).unwrap();
+        assert!(input_map.is_empty());
+        let mean_decay = -(-rate).exp_m1() / rate;
+        for coefficient in state_map {
+            assert!((coefficient - mean_decay).abs() < 32.0 * f64::EPSILON);
+        }
+        let initial: Vec<_> = (0..n).map(|i| (i as f64 - 15.0) / 17.0).collect();
+        let step = flow.evaluate(&initial, &[]).unwrap();
+        assert_eq!(step.integrals[0], 0.0);
+        let expected = mean_decay * initial.iter().sum::<f64>();
+        assert!((step.integrals[1] - expected).abs() < 128.0 * f64::EPSILON);
+    }
+
+    #[test]
+    fn compact_preparation_keeps_reference_budgets_and_cancellation_replay() {
+        let system = crate::mass_spring_damper(1.0, 9.0, 0.7).unwrap();
+        let split = super::super::split_quadratic(
+            &system, LinearSplitBudget { max_modes: 2, max_omega_dt: 2.8 },
+        ).unwrap();
+        let forms: Vec<_> = (0..24)
+            .map(|i| vec![(i as f64 - 11.0) / 13.0, (7.0 - i as f64) / 19.0])
+            .collect();
+        let d = 4_usize;
+        let budget = DenseExponentialBudget {
+            max_dimension: d,
+            max_dense_bytes: d * d * 8 * (2 * forms.len() + 24),
+            max_multiply_terms: (d as u64).pow(3) * 224 * forms.len() as u64,
+        };
+        let mut polls = 0;
+        let flow = PreparedQuadraticFlow::new_controlled(
+            &system, &split, 0.03, &[], &forms, budget, || {
+                polls += 1;
+                false
+            },
+        ).unwrap();
+        assert_eq!(flow.integrals.len(), forms.len());
+        for form in &flow.integrals {
+            match form {
+                CachedIntegral::Linear(row) => assert_eq!(row.len(), d),
+                CachedIntegral::Dense { .. } => panic!("linear cache must stay compact"),
+            }
+        }
+        let stop = polls / 2;
+        let mut seen = 0;
+        let cancelled = PreparedQuadraticFlow::new_controlled(
+            &system, &split, 0.03, &[], &forms, budget, || {
+                seen += 1;
+                seen >= stop
+            },
+        );
+        assert!(matches!(cancelled, Err(PreparedStepError::Cancelled)));
+        let replay = PreparedQuadraticFlow::new(
+            &system, &split, 0.03, &[], &forms, budget,
+        ).unwrap();
+        let first = flow.evaluate(&[0.3, -0.2], &[0.4]).unwrap();
+        let second = replay.evaluate(&[0.3, -0.2], &[0.4]).unwrap();
+        assert_eq!(first.state, second.state);
+        assert_eq!(first.integrals, second.integrals);
+        let mut too_small = budget;
+        too_small.max_dense_bytes -= 1;
+        assert!(PreparedQuadraticFlow::new(
+            &system, &split, 0.03, &[], &forms, too_small,
+        ).is_err());
+        too_small = budget;
+        too_small.max_multiply_terms -= 1;
+        assert!(PreparedQuadraticFlow::new(
+            &system, &split, 0.03, &[], &forms, too_small,
+        ).is_err());
+    }
+
+    #[test]
+    fn tiny_dimension_many_outputs_fit_the_unchanged_reference_byte_budget() {
+        let system = PortHamiltonian::new(
+            1, 0, vec![0.0], vec![1.0], Vec::new(),
+            Box::new(crate::QuadraticStorage::new(vec![1.0], 1).unwrap()),
+        ).unwrap();
+        let split = super::super::split_quadratic(
+            &system, LinearSplitBudget { max_modes: 1, max_omega_dt: 2.8 },
+        ).unwrap();
+        let forms: Vec<_> = (0..128).map(|i| vec![(i as f64 - 63.0) / 17.0]).collect();
+        let d = 2_usize;
+        let flow = PreparedQuadraticFlow::new(
+            &system, &split, 0.1, &[], &forms,
+            DenseExponentialBudget {
+                max_dimension: d,
+                max_dense_bytes: d * d * 8 * (2 * forms.len() + 24),
+                max_multiply_terms: (d as u64).pow(3) * 224 * forms.len() as u64,
+            },
+        ).unwrap();
+        let step = flow.evaluate(&[0.25], &[]).unwrap();
+        assert!((step.state[0] - 0.25 * (-0.1_f64).exp()).abs() < 8.0 * f64::EPSILON);
+        for (index, form) in flow.integrals.iter().enumerate() {
+            match form {
+                CachedIntegral::Linear(row) => assert_eq!(row.len(), d),
+                CachedIntegral::Dense { .. } => panic!("tiny fallback must still compact its cache"),
+            }
+            let expected = forms[index][0] * 0.25 * -(-0.1_f64).exp_m1();
+            assert!((step.integrals[index] - expected).abs() < 32.0 * f64::EPSILON);
+        }
+    }
+
 }
