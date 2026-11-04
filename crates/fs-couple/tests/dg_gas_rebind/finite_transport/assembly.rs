@@ -186,7 +186,8 @@ fn thermal(input: &FiniteGasAcousticInput) -> &FiniteGasDgTransportInput {
         FiniteGasAcousticInput::MolecularWall { thermal, .. }
         | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. }
         | FiniteGasAcousticInput::ViscousMolecularPort { thermal, .. } => thermal,
-        FiniteGasAcousticInput::Aperture(input) => &input.thermal,
+        FiniteGasAcousticInput::Aperture(input)
+        | FiniteGasAcousticInput::ViscousMolecularAperture { aperture: input, .. } => &input.thermal,
     }
 }
 

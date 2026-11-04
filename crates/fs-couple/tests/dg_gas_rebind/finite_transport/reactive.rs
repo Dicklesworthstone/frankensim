@@ -269,7 +269,8 @@ fn thermal(input: &FiniteGasAcousticInput) -> &FiniteGasDgTransportInput {
         FiniteGasAcousticInput::MolecularWall { thermal, .. }
         | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. }
         | FiniteGasAcousticInput::ViscousMolecularPort { thermal, .. } => thermal,
-        FiniteGasAcousticInput::Aperture(row) => &row.thermal,
+        FiniteGasAcousticInput::Aperture(row)
+        | FiniteGasAcousticInput::ViscousMolecularAperture { aperture: row, .. } => &row.thermal,
     }
 }
 fn thermal_mut(input: &mut FiniteGasAcousticInput) -> &mut FiniteGasDgTransportInput {
@@ -278,7 +279,8 @@ fn thermal_mut(input: &mut FiniteGasAcousticInput) -> &mut FiniteGasDgTransportI
         FiniteGasAcousticInput::MolecularWall { thermal, .. }
         | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. }
         | FiniteGasAcousticInput::ViscousMolecularPort { thermal, .. } => thermal,
-        FiniteGasAcousticInput::Aperture(row) => &mut row.thermal,
+        FiniteGasAcousticInput::Aperture(row)
+        | FiniteGasAcousticInput::ViscousMolecularAperture { aperture: row, .. } => &mut row.thermal,
     }
 }
 fn equal_nodes(actual: &MixedNodes, expected: &MixedNodes) {

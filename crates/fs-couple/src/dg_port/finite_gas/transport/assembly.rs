@@ -9,7 +9,9 @@ pub mod reactive;
 
 pub use super::{FiniteGasDgTransportError, FiniteGasDgTransportInput, FiniteGasDgTransportSolve};
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
-use crate::bernoulli_aperture::dg::finite_gas::FiniteGasApertureDgStep;
+use crate::bernoulli_aperture::dg::finite_gas::{
+    FiniteGasApertureDgStep, PreparedFiniteGasApertureHeat,
+};
 use crate::bernoulli_aperture::dg::finite_gas::transport::FiniteGasApertureTransportInput;
 use crate::bernoulli_aperture::wall::material::{
     FiniteGasDgNode, FiniteGasDgStep, FiniteGasDgTransportCandidate, FiniteGasDgTransportStep,
@@ -108,6 +110,16 @@ pub enum FiniteGasAcousticInput {
     },
     /// Held drives of an actual moving source, with no prescribed acoustic flow.
     Aperture(FiniteGasApertureTransportInput),
+    /// Return physical main-gas losses from a moving source's original complete
+    /// load. The source solves its own held flow once; that same mechanical and
+    /// acoustic proposal is reused by every transport, chemistry and thermal
+    /// endpoint. Bore molecular/viscous and main-terminal passage shear losses
+    /// heat the gas. Mechanical, contact, jet and independent-branch losses keep
+    /// their original exported ownership. No valve flow becomes mass transport.
+    ViscousMolecularAperture {
+        aperture: FiniteGasApertureTransportInput,
+        heat_budgets: FiniteGasDgHeatBudget,
+    },
 }
 
 /// Native per-owner reports without erasing their distinct physical accounts.
@@ -137,6 +149,7 @@ fn mismatch<E>() -> FiniteGasDgError<E> {
 pub(crate) struct PreparedFiniteGasAcousticHeat {
     heat: FiniteGasDgInternalHeat,
     port: Option<PreparedFiniteGasDgPortHeat>,
+    aperture: Option<PreparedFiniteGasApertureHeat>,
 }
 
 impl FiniteGasTransportNode for FiniteGasAcousticNode {
@@ -157,10 +170,12 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
             FiniteGasAcousticInput::MolecularWall { thermal, .. }
             | FiniteGasAcousticInput::ViscousMolecularWall { thermal, .. }
             | FiniteGasAcousticInput::ViscousMolecularPort { thermal, .. } if bound => Ok(thermal),
-            FiniteGasAcousticInput::Aperture(input) if bound => {
+            FiniteGasAcousticInput::Aperture(input)
+            | FiniteGasAcousticInput::ViscousMolecularAperture { aperture: input, .. } if bound => {
                 LoadedApertureDg::transport_input(input, bound)
             }
             FiniteGasAcousticInput::Aperture(_)
+            | FiniteGasAcousticInput::ViscousMolecularAperture { .. }
             | FiniteGasAcousticInput::MolecularWall { .. }
             | FiniteGasAcousticInput::ViscousMolecularWall { .. }
             | FiniteGasAcousticInput::ViscousMolecularPort { .. } => {
@@ -211,7 +226,8 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
             | (Self::Port(node), FiniteGasAcousticInput::ViscousMolecularPort { thermal: input, .. }) => {
                 node.admit(gas, input, cancelled)
             }
-            (Self::Aperture(node), FiniteGasAcousticInput::Aperture(input)) => {
+            (Self::Aperture(node), FiniteGasAcousticInput::Aperture(input))
+            | (Self::Aperture(node), FiniteGasAcousticInput::ViscousMolecularAperture { aperture: input, .. }) => {
                 node.admit(gas, input, cancelled)
             }
             _ => Err(mismatch()),
@@ -232,12 +248,14 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
                         viscous_heat_j: 0.0,
                     },
                     port: None,
+                    aperture: None,
                 })
             }
             (Self::Wall(node), FiniteGasAcousticInput::ViscousMolecularWall { thermal, heat_budgets }) => {
                 Ok(PreparedFiniteGasAcousticHeat {
                     heat: node.prepare_viscous_molecular_heat(thermal, *heat_budgets, cancelled)?,
                     port: None,
+                    aperture: None,
                 })
             }
             (Self::Port(node), FiniteGasAcousticInput::ViscousMolecularPort { thermal, heat_budgets }) => {
@@ -249,11 +267,26 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
                 Ok(PreparedFiniteGasAcousticHeat {
                     heat: prepared.heat(),
                     port: Some(prepared),
+                    aperture: None,
+                })
+            }
+            (Self::Aperture(node), FiniteGasAcousticInput::ViscousMolecularAperture { aperture, heat_budgets }) => {
+                let source = aperture.source.expect("admitted moving-source input");
+                let prepared = node.prepare_finite_gas_source_heat(
+                    gas, source.drive, source.forces_n, source.pressures_pa,
+                    aperture.thermal.acoustic.expect("admitted acoustic controls"),
+                    *heat_budgets, cancelled,
+                )?;
+                Ok(PreparedFiniteGasAcousticHeat {
+                    heat: prepared.heat(),
+                    port: None,
+                    aperture: Some(prepared),
                 })
             }
             (_, FiniteGasAcousticInput::MolecularWall { .. }
                 | FiniteGasAcousticInput::ViscousMolecularWall { .. }
-                | FiniteGasAcousticInput::ViscousMolecularPort { .. }) => Err(mismatch()),
+                | FiniteGasAcousticInput::ViscousMolecularPort { .. }
+                | FiniteGasAcousticInput::ViscousMolecularAperture { .. }) => Err(mismatch()),
             _ => Ok(PreparedFiniteGasAcousticHeat::default()),
         }
     }
@@ -293,6 +326,17 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
             (Self::Aperture(node), FiniteGasAcousticInput::Aperture(input)) => node
                 .advance(gas, input, &prepared.heat, evolve, cancelled)
                 .map(FiniteGasAcousticStep::Aperture),
+            (Self::Aperture(node), FiniteGasAcousticInput::ViscousMolecularAperture { aperture, .. }) => {
+                let original = prepared.aperture.as_ref().ok_or_else(mismatch)?;
+                let (next, next_gas, step) = node.complete_finite_gas_source_heat(
+                    original, gas,
+                    aperture.thermal.acoustic.expect("admitted acoustic controls"),
+                    evolve, cancelled,
+                )?;
+                *node = next;
+                *gas = next_gas;
+                Ok(FiniteGasAcousticStep::Aperture(step))
+            }
             _ => Err(mismatch()),
         }
     }

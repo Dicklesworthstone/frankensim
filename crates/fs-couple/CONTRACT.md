@@ -15405,6 +15405,30 @@ check caloric/species balance, wrong-owner refusal and late-cancellation retry.
 Source/parser checks and an independent bounded review passed; native coupled
 compilation and execution remain unverified in this environment.
 
+### Moving-source viscous heat during material transport
+
+`FiniteGasAcousticInput::ViscousMolecularAperture` selects the same original
+main-gas heat for an actual moving aperture. Its input retains the original
+held drive, blade forces and material-modal pressures; it cannot prescribe an
+acoustic flow. Other owners and unbound reservoirs refuse this input before
+material transport. The original mechanical and acoustic trial solves that
+flow once, and its private prepared owner is retained with its physical heat.
+
+All caloric, chemical, finite-body and parameter-work endpoint trials borrow
+the same prepared motion, waves, channel profiles and terminal histories.
+The existing transport kernel includes main-bore and main-terminal gas heat
+once and removes it once from exported loss. Prescribed external heat remains
+separate. Mechanical, contact, jet and independently owned branch losses
+retain their original exported accounts; no aperture-gap inventory is inferred.
+
+The focused transport regressions reconstruct terminal shear heat independently,
+check unchanged species transport, NASA caloric balance, original paired-blade
+motion and exactly one accepted source/acoustic step, and exercise wrong-owner
+and final-cancellation refusal with exact retry. Source/parser checks completed
+before the execution service became unavailable; recovered source patches were
+reviewed and verified through GitHub. Native coupled compilation and execution
+remain unverified.
+
 ## Reacting finite gas in mixed acoustic assemblies
 
 `dg_port::finite_gas::transport::assembly::reactive` connects the original

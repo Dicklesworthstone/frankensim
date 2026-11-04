@@ -1,4 +1,6 @@
 //! Resolved main-passage shear heats the same inventory during species transport.
+mod aperture;
+
 use super::*;
 use fs_couple::bernoulli_aperture::wall::material::FiniteGasDgHeatBudget;
 use fs_phs::linear_exact::DenseExponentialBudget;

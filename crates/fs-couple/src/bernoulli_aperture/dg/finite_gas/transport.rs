@@ -167,7 +167,10 @@ impl FiniteGasTransportNode for LoadedApertureDg {
                 - sum_terminal_work(&frame.terminals),
             acoustic_dissipation_j: frame.inferred_total_dissipation_j,
             parameter_work_j: frame.parameter_work_j,
-            heat: FiniteGasDgInternalHeat::default(),
+            heat: FiniteGasDgInternalHeat {
+                molecular_heat_j: step.gas.molecular_heat_j,
+                viscous_heat_j: step.gas.viscous_heat_j + step.gas.terminal_viscous_heat_j,
+            },
         }
     }
 
