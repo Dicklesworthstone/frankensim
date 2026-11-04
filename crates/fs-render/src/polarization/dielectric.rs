@@ -131,7 +131,7 @@ pub mod mirrors {
     fn apply_passive(matrix: Mueller, input: Stokes) -> Result<Stokes, BeamError> {
         if input.i == 0.0 { return Ok(Stokes::unpolarized(0.0)); }
         // Normalize before mixing signed terms to avoid overflow at large power.
-        let mut out = matrix.apply(Stokes {
+        let mut out = matrix.apply_diagonal_jones(Stokes {
             i: 1.0, q: input.q / input.i, u: input.u / input.i, v: input.v / input.i,
         });
         let tolerance = 128.0 * f64::EPSILON;
@@ -193,6 +193,32 @@ pub mod mirrors {
             close(out.beam.ray().dir.x, b.ray().dir.x);
             close(out.beam.ray().dir.z, -b.ray().dir.z);
             close(out.beam.power().degree(), 1.0);
+        }
+
+        #[test]
+        fn g1_weakly_absorbing_pseudo_brewster_reflection_is_not_artificially_extinguished() {
+            let eta = 1.5_f64;
+            let cosine = 1.0 / eta.hypot(1.0);
+            let sine = eta * cosine;
+            let source = ConductorSource::try_new(fs_blake3::ContentHash([37; 32]),
+                ConductorDataStatus::Representative).unwrap();
+            for k in [1e-8, 1e-9] {
+                let optics = ConductorOptics::try_new(core::array::from_fn(|i|
+                    ConductorIorSample::try_new(380.0 + 50.0 * i as f64, eta, k).unwrap()),
+                    source).unwrap();
+                let input = beam(Vec3::new(sine, 0.0, -cosine), Vec3::new(0.0, 1.0, 0.0),
+                    Stokes { i: 1.0, q: -1.0, u: 0.0, v: 0.0 });
+                let output = input.reflect_conductor(Vec3::new(0.0, 0.0, 1.0), &optics)
+                    .unwrap().beam.power();
+                // The derivative of the textbook p amplitude with respect to
+                // complex index at Brewster incidence is (eta²-1)/(2 eta³).
+                let amplitude = k * (eta * eta - 1.0) / (2.0 * eta * eta * eta);
+                let expected = amplitude * amplitude;
+                assert!(output.i > 0.0);
+                assert!((output.i / expected - 1.0).abs() < 2e-6,
+                    "actual={:.17e}, expected={expected:.17e}", output.i);
+                assert_eq!(output.q, -output.i);
+            }
         }
 
         #[test]

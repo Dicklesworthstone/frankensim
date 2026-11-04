@@ -641,7 +641,7 @@ impl PolarizedBeam {
         } else { unit(transverse)? };
         let incident_frame = PolarizationFrame::try_new(self.frame.direction, s)?;
         let input = self.frame.express_in(self.power, incident_frame);
-        let output = matrix.apply(input);
+        let output = matrix.apply_diagonal_jones(input);
         // Bounds the four-term matrix/vector roundoff, including extinction
         // where the correct result is zero. Refuse meaningful violations.
         let magnitude = matrix.0.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
@@ -805,6 +805,34 @@ mod tests {
         let second = first.beam.sample_smooth_interface(n, glass(1.5, 0.0), 0.0).unwrap();
         assert_eq!(second.event, DielectricEvent::Reflection);
         near(second.beam.power().i, 0.0);
+    }
+
+    #[test]
+    fn g1_near_brewster_beam_retains_the_nonzero_reflected_p_power() {
+        let index = 1.5_f64;
+        for offset in [-1e-9, 1e-9, 1e-10] {
+            let cosine = 1.0 / index.hypot(1.0) + offset;
+            let sine = (1.0 - cosine * cosine).sqrt();
+            let input = beam(Vec3::new(sine, 0.0, -cosine), Vec3::new(0.0, 1.0, 0.0),
+                glass(1.0, 0.0), Stokes { i: 1.0, q: -1.0, u: 0.0, v: 0.0 });
+            let sample = input.sample_smooth_interface(Vec3::new(0.0, 0.0, 1.0),
+                glass(index, 0.0), 0.0).unwrap();
+            assert_eq!(sample.event, DielectricEvent::Reflection);
+            // Independently evaluated textbook Fresnel p amplitude. Use the
+            // admitted beam's actual cosine after native normalization.
+            let ci = -input.frame().direction().z;
+            let ct = (1.0 - (1.0 - ci * ci) / (index * index)).sqrt();
+            let amplitude = (index * ci - ct) / (index * ci + ct);
+            let expected = amplitude * amplitude;
+            let actual = sample.beam.power().i * sample.pdf;
+            assert!(actual > 0.0, "near-Brewster reflection is weak, not extinct");
+            // The direct oracle loses a few digits in its numerator. The
+            // production rationalized amplitude deliberately retains them.
+            assert!((actual / expected - 1.0).abs() < 5e-6,
+                "cosine={ci:.17e}, actual={actual:.17e}, expected={expected:.17e}");
+            assert_eq!(sample.beam.power().q, -sample.beam.power().i);
+            assert_eq!(sample.beam.medium(), input.medium());
+        }
     }
 
     #[test]

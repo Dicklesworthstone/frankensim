@@ -94,6 +94,53 @@ impl Mueller {
         Stokes { i: y[0], q: y[1], u: y[2], v: y[3] }
     }
 
+    /// Apply a nondepolarizing diagonal Jones response in its s/p frame.
+    ///
+    /// Native Fresnel matrices retain `r_s conj(r_p)` in the U/V block.
+    /// Recover the weaker power from this product instead of subtracting
+    /// rounded `(R_s + R_p)/2` and `(R_s - R_p)/2`. That subtraction erases
+    /// representable p reflection near Brewster incidence, and can turn a
+    /// strongly polarized coherent-film transmission into exact extinction.
+    ///
+    /// This is only for the native coherent interface matrices (including a
+    /// scalar transport weight). Arbitrary or depolarizing Mueller matrices
+    /// must use `apply`; their U/V block does not determine s/p powers.
+    pub(crate) fn apply_diagonal_jones(self, input: Stokes) -> Stokes {
+        let mean = self.0[0][0];
+        let difference = self.0[0][1];
+        let large = mean + difference.abs();
+        if large == 0.0 {
+            return Stokes::unpolarized(0.0);
+        }
+        let cross_re = self.0[2][2];
+        let cross_im = self.0[3][2];
+        let cross_scale = cross_re.abs().max(cross_im.abs());
+        let small = if cross_scale == 0.0 { 0.0 } else {
+            let ratio = cross_re.abs().min(cross_im.abs()) / cross_scale;
+            // Divide before multiplying: |cross|² can underflow while the
+            // weaker power remains representable. Scaling also avoids sqrt
+            // and platform-libm hypot, retaining deterministic IEEE ops.
+            cross_scale * ((cross_scale / large) * ratio.mul_add(ratio, 1.0))
+        };
+        let (s_power, p_power) = if difference >= 0.0 {
+            (large, small)
+        } else {
+            (small, large)
+        };
+        let half_sum = |a: f64, b: f64| {
+            let sum = a + b;
+            if sum.is_finite() { 0.5 * sum } else { 0.5 * a + 0.5 * b }
+        };
+        let s = s_power * half_sum(input.i, input.q);
+        let p = p_power * half_sum(input.i, -input.q);
+        Stokes {
+            i: s + p,
+            q: s - p,
+            u: cross_re * input.u - cross_im * input.v,
+            v: cross_im * input.u + cross_re * input.v,
+        }
+    }
+
     /// Composition: self acts after rhs.
     pub fn compose(self, rhs: Self) -> Self {
         Self(core::array::from_fn(|r| core::array::from_fn(|c|
@@ -147,6 +194,74 @@ mod tests {
         assert!(Stokes::try_new(-1.0, 0.0, 0.0, 0.0).is_none());
         assert!(Stokes::try_new(0.0, 0.0, 0.0, 1.0).is_none());
         assert!(Stokes::try_new(f64::NAN, 0.0, 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn g1_diagonal_jones_retains_weak_channels_and_complex_phase() {
+        // Independent Jones amplitudes s=0.4+0.2i, p=1e-10+2e-10i.
+        // Their powers differ by 4e18, so the ordinary Mueller I/Q block
+        // rounds the weaker channel out of both its sum and difference.
+        let (rs, rp, re, im) = (0.2, 5e-20, 8e-11, -6e-11);
+        for swapped in [false, true] {
+            let (s, p, phase_im) = if swapped { (rp, rs, -im) } else { (rs, rp, im) };
+            let mean = 0.5 * s + 0.5 * p;
+            let difference = 0.5 * s - 0.5 * p;
+            let matrix = Mueller([
+                [mean, difference, 0.0, 0.0],
+                [difference, mean, 0.0, 0.0],
+                [0.0, 0.0, re, -phase_im],
+                [0.0, 0.0, phase_im, re],
+            ]);
+            let q = if swapped { 1.0 } else { -1.0 };
+            let weak = Stokes::try_new(1.0, q, 0.0, 0.0).unwrap();
+            assert_eq!(matrix.apply(weak).i, 0.0, "regression must expose cancellation");
+            let actual = matrix.apply_diagonal_jones(weak);
+            assert!((actual.i / rp - 1.0).abs() < 8.0 * f64::EPSILON);
+            assert_eq!(actual.q, q * actual.i);
+            let mixed = matrix.apply_diagonal_jones(Stokes::try_new(1.0, 0.0, 0.6, 0.8).unwrap());
+            near(mixed.i, mean);
+            near(mixed.q, difference);
+            assert!((mixed.u - (0.6 * re - 0.8 * phase_im)).abs() < 1e-25);
+            assert!((mixed.v - (0.6 * phase_im + 0.8 * re)).abs() < 1e-25);
+        }
+    }
+
+    #[test]
+    fn g0_diagonal_jones_keeps_subnormal_survival_without_squaring_the_cross_term() {
+        let s = 1e-300_f64;
+        let p = 1e-320_f64;
+        let cross = s.sqrt() * p.sqrt();
+        let mean = 0.5 * s + 0.5 * p;
+        let difference = 0.5 * s - 0.5 * p;
+        let matrix = Mueller([
+            [mean, difference, 0.0, 0.0],
+            [difference, mean, 0.0, 0.0],
+            [0.0, 0.0, cross, 0.0],
+            [0.0, 0.0, 0.0, cross],
+        ]);
+        let out = matrix.apply_diagonal_jones(Stokes { i: 1.0, q: -1.0, u: 0.0, v: 0.0 });
+        assert!(out.i > 0.0);
+        assert!((out.i - p).abs() <= f64::from_bits(2));
+        assert_eq!(out.q, -out.i);
+        // Each squared cross component alone rounds to zero. Combining the
+        // scale factor before the last product retains the least positive power.
+        let minimum = f64::from_bits(1);
+        let component = minimum.sqrt() * core::f64::consts::FRAC_1_SQRT_2;
+        let complex = Mueller([
+            [0.5, 0.5, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+            [0.0, 0.0, component, -component],
+            [0.0, 0.0, component, component],
+        ]);
+        assert_eq!(complex.apply_diagonal_jones(Stokes { i: 1.0, q: -1.0, u: 0.0, v: 0.0 }).i,
+            minimum);
+        let identity = Mueller::IDENTITY;
+        for i in [f64::from_bits(1), 1.0, f64::MAX] {
+            let state = Stokes { i, q: -i, u: 0.0, v: 0.0 };
+            assert_eq!(identity.apply_diagonal_jones(state), state);
+        }
+        assert_eq!(Mueller([[0.0; 4]; 4]).apply_diagonal_jones(Stokes::unpolarized(1.0)),
+            Stokes::unpolarized(0.0));
     }
 }
 

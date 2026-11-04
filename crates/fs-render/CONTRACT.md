@@ -248,6 +248,14 @@ differentiable lift). Pure Rust throughout.
   that weak transmitted channel also takes the low end of the variate. The
   scalar camera model remains unpolarized at
   each interaction; repeated scalar R/T products do not carry Stokes history.
+  Native polarized dielectric sampling, reciprocal connections, ray bundles
+  and conductor beams apply their coherent s/p response through the diagonal
+  Jones identity `R_s R_p = |r_s conj(r_p)|²`. The weaker channel is recovered
+  from the retained U/V block instead of subtracting rounded Mueller I/Q
+  terms. Thus a near-Brewster reflected p wave survives even when its power
+  is smaller than one ulp of the s wave. General or depolarizing Mueller
+  application retains its original semantics; this does not infer coherence
+  between independent paths or resolve powers below representable range.
   The exterior longitudinal wave is taken from native Snell/TIR classification,
   preventing a separate squared-index rounding from inventing a propagating
   transmitted mode at a native critical ray; internal film roots remain complex.
