@@ -1,8 +1,12 @@
 //! Actual coexistence compositions drive existing flow and component exchange.
 
 use super::*;
-use fs_flux::capillary::material::miscibility::step_binary_liquid_horizontal;
+use fs_flux::capillary::material::miscibility::{
+    step_binary_liquid_horizontal, step_binary_liquid_planar_horizontal,
+};
 use fs_material::liquid::resolve_liquid_state;
+use fs_material::liquid::solution::gradient::BinaryLiquidSquareGradientLaw;
+use fs_material::liquid::solution::gradient::interface::ResolvedBinaryLiquidPlanarInterface;
 use fs_material::liquid::solution::{BinaryLiquidSolutionLaw, ResolvedBinaryLiquidEquilibrium};
 use fs_material::state_point::{
     SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS,
@@ -11,8 +15,10 @@ use fs_material::state_point::{
 use fs_qty::semantic::{
     CompositionBasis, FrequencyConvention, QuantityKind, SemanticType, ValueForm,
 };
-use fs_qty::{MolarMass, Temperature};
+use fs_qty::{AmountConcentration, MolarMass, Temperature};
 use fs_thermochem::SpeciesId;
+use fs_thermochem::solution::gradient::BinarySquareGradientV1;
+use fs_thermochem::solution::gradient::interface::BinaryPlanarInterfaceOptionsV1;
 use fs_thermochem::solution::{BinaryCoexistenceOptionsV1, BinaryRegularSolutionV1};
 
 fn quantity(kind: QuantityKind) -> QuantitySpec {
@@ -27,9 +33,25 @@ fn equilibrium_with_source_context(
     temperature: f64,
     context: Option<(&str, QuantitySpec, bool)>,
 ) -> ResolvedBinaryLiquidEquilibrium {
+    with_liquid_law(context, [800.0, 1200.0], |law| {
+        law.equilibrate(
+            Temperature::new(temperature),
+            [4.0, 6.0],
+            BinaryCoexistenceOptionsV1::default(),
+            || false,
+        )
+        .unwrap()
+    })
+}
+
+fn with_liquid_law<T>(
+    context: Option<(&str, QuantitySpec, bool)>,
+    density: [f64; 2],
+    use_law: impl FnOnce(&BinaryLiquidSolutionLaw<'_>) -> T,
+) -> T {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
-        (DENSITY_PROPERTY, Density::DIMS, [800.0, 1200.0]),
+        (DENSITY_PROPERTY, Density::DIMS, density),
         (
             SPECIFIC_HEAT_CAPACITY_PROPERTY,
             SPECIFIC_HEAT_CAPACITY_DIMS,
@@ -132,7 +154,7 @@ fn equilibrium_with_source_context(
         Temperature::new(600.0),
     )
     .unwrap();
-    BinaryLiquidSolutionLaw::try_new(
+    let law = BinaryLiquidSolutionLaw::try_new(
         model,
         [MolarMass::new(0.018), MolarMass::new(0.046)],
         &card,
@@ -140,14 +162,106 @@ fn equilibrium_with_source_context(
         "T",
         "x_a",
     )
-    .unwrap()
-    .equilibrate(
-        Temperature::new(temperature),
-        [4.0, 6.0],
-        BinaryCoexistenceOptionsV1::default(),
-        || false,
-    )
-    .unwrap()
+    .unwrap();
+    use_law(&law)
+}
+
+fn planar_interface() -> ResolvedBinaryLiquidPlanarInterface {
+    // rho = c * (x_A M_A + x_B M_B), matching the same fixed site volume.
+    with_liquid_law(None, [10_000.0 * 0.046, 10_000.0 * 0.018], |law| {
+        let gradient = BinarySquareGradientV1::new(
+            law.thermodynamics().clone(),
+            Temperature::new(300.0),
+            AmountConcentration::new(10_000.0),
+            1e-9,
+        )
+        .unwrap();
+        BinaryLiquidSquareGradientLaw::try_new(law, gradient, 1e-12)
+            .unwrap()
+            .equilibrium_interface(
+                [4.0, 6.0],
+                BinaryPlanarInterfaceOptionsV1::default(),
+                || false,
+            )
+            .unwrap()
+            .unwrap()
+    })
+}
+
+#[test]
+fn derived_planar_tension_preserves_the_original_flow_sources_and_inventory() {
+    let planar = planar_interface();
+    let before = planar.clone();
+    let sigma = planar.interface().surface_tension_n_m();
+    assert!(sigma > 0.0);
+    for invading in [0, 1] {
+        for pressure in [1000.0, -1000.0] {
+            let input = MaterialMeniscusInput {
+                wet_length_m: 0.03,
+                applied_pressure_pa: pressure,
+                ..input()
+            };
+            let step =
+                step_binary_liquid_planar_horizontal(&planar, invading, 0.4, 0.01, input).unwrap();
+            let explicit =
+                step_binary_liquid_horizontal(planar.equilibrium(), invading, sigma, 0.4, input)
+                    .unwrap();
+            assert_eq!(step.meniscus, explicit);
+            assert!(std::ptr::eq(step.planar_interface, &planar));
+            assert!(std::ptr::eq(
+                step.meniscus.equilibrium,
+                planar.equilibrium()
+            ));
+            assert_eq!(step.maximum_interface_width_radius_ratio, 0.01);
+            close(
+                step.interface_width_radius_ratio,
+                planar.interface().central_slope_width_m() / input.radius_m,
+            );
+            assert!(step.interface_width_radius_ratio < 0.01);
+            assert_eq!(
+                step.meniscus
+                    .discrete
+                    .meniscus
+                    .transferred_volume_m3
+                    .signum(),
+                pressure.signum(),
+            );
+        }
+    }
+    assert_eq!(planar, before);
+}
+
+#[test]
+fn diffuse_interface_and_invalid_wall_angle_refuse_sharp_capillary_flow() {
+    let planar = planar_interface();
+    let before = planar.clone();
+    let ratio = planar.interface().central_slope_width_m() / input().radius_m;
+    for allowance in [0.5 * ratio, 0.0, -0.1, 1.01, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            step_binary_liquid_planar_horizontal(
+                &planar,
+                0,
+                0.4,
+                allowance,
+                MaterialMeniscusInput {
+                    duration_s: f64::NAN,
+                    ..input()
+                },
+            ),
+            Err(MaterialCapillaryError::Unsupported(_))
+        ));
+    }
+    for cosine in [-1.01, 1.01, f64::NAN] {
+        assert!(matches!(
+            step_binary_liquid_planar_horizontal(&planar, 0, cosine, 0.01, input()),
+            Err(MaterialCapillaryError::Flow(_))
+        ));
+    }
+    assert!(matches!(
+        step_binary_liquid_planar_horizontal(&planar, 2, 0.4, 0.01, input()),
+        Err(MaterialCapillaryError::Unsupported(_))
+    ));
+    assert_eq!(planar, before);
 }
 
 #[test]

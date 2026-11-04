@@ -18,6 +18,9 @@ use fs_qty::Temperature;
 use fs_thermochem::solution::BinarySolutionStateV1;
 use fs_thermochem::solution::gradient::BinarySquareGradientV1;
 
+/// Source-bound planar liquid-liquid interfaces for capillary consumers.
+pub mod interface;
+
 /// A local homogeneous branch and the unchanged original source-resolved phase.
 /// This type deliberately makes no claim of local bulk phase equilibrium.
 #[derive(Clone, Debug, PartialEq)]
@@ -120,18 +123,27 @@ impl<'a, 'card> BinaryLiquidSquareGradientLaw<'a, 'card> {
             component_moles,
             &mut cancelled,
         )?;
+        self.validate_phase_volume(&cell.phase)?;
+        poll(&mut cancelled)?;
+        Ok(cell)
+    }
+
+    fn validate_phase_volume(
+        &self,
+        phase: &ResolvedBinaryLiquidPhase,
+    ) -> Result<(), BinaryLiquidError> {
+        let amounts = phase.component_moles();
         let expected = positive_value(
-            (component_moles[0] + component_moles[1]) / self.gradient.molar_concentration_mol_m3(),
+            (amounts[0] + amounts[1]) / self.gradient.molar_concentration_mol_m3(),
             "fixed-site cell volume",
         )?;
-        let actual = cell.phase.volume_m3();
+        let actual = phase.volume_m3();
         let mismatch = (actual - expected).abs() / actual.max(expected);
         if !mismatch.is_finite() || mismatch > self.maximum_relative_volume_mismatch {
             return Err(BinaryLiquidError::Invalid(
                 "original density violates the fixed equal-partial-molar-volume field model",
             ));
         }
-        poll(&mut cancelled)?;
-        Ok(cell)
+        Ok(())
     }
 }

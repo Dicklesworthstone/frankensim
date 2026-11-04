@@ -18,6 +18,8 @@ use super::{
 use crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use fs_qty::{AmountConcentration, Temperature};
 
+pub mod interface;
+
 /// Immutable isothermal constitutive owner for a binary square-gradient field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BinarySquareGradientV1 {

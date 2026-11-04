@@ -3952,3 +3952,30 @@ long evolution, adaptive error reduction against an independent RK4 scalar
 oracle, integrated flux/species/energy closure and atomic budget/cancellation
 refusals. These feature-level tests do not replace the full default-feature
 workspace gate.
+
+## Same-energy binary interface tension in capillary flow
+
+`capillary::material::miscibility::step_binary_liquid_planar_horizontal`
+accepts the privately bound `ResolvedBinaryLiquidPlanarInterface`. It uses
+that original interface's derived surface tension with its actual coexisting
+material phases, then delegates to the existing open two-fluid Washburn
+operator. The returned `BinaryLiquidPlanarMeniscusStep` retains the original
+interface, actual/allowed width-to-radius ratios and the complete existing
+flow, end-event, work and signed species/mass-transfer result.
+
+The wall contact-angle cosine remains explicit. Before any flow evaluation,
+the caller supplies a finite positive maximum characteristic-width/radius
+ratio in (0,1]; an overly broad or unrepresentable interface refuses. This is
+an explicit applicability check for a planar-to-curved sharp-meniscus
+approximation, not an independent bound on curvature or contact-line errors.
+The central-slope width is not the full extent of the profile's infinite
+tails. All existing open-reservoir, frozen-coefficient and
+pressure-independent-coexistence assumptions remain in force.
+
+The original supplied-sigma API remains available. Neither path borrows a
+liquid/gas surface or turns the calculated tension into measured material
+authority. Focused integration regressions compare the entire derived-tension
+step with the existing supplied-tension result in both directions and phase
+orders, retain original inventory/owner identity, and reject thick interfaces
+or invalid wall/phase controls. These continuum/material tests require the
+normal runtime build.

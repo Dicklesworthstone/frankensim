@@ -1,16 +1,18 @@
 //! Coexisting liquid phases enter the original open two-fluid Washburn owner.
 //!
-//! Surface tension and contact angle are caller-authored properties of the
-//! ACTUAL coexisting pair and substrate at this temperature. They carry no
-//! material-source authority and are never taken from a liquid/gas surface or
-//! pure-liquid wetting card. An equilibrium with one miscible phase has no
-//! liquid-liquid meniscus and is refused before any flow or work is evaluated.
+//! Surface tension is explicitly authored or derived from the original
+//! source-bound square-gradient interface. Contact angle remains caller-authored
+//! for the ACTUAL coexisting pair and substrate at this temperature. Neither
+//! path borrows a liquid/gas surface or pure-liquid wetting card. An equilibrium
+//! with one miscible phase has no liquid-liquid meniscus and is refused before
+//! any flow or work is evaluated.
 
 use super::{MaterialCapillaryError, MaterialMeniscusInput, signed_mass};
 use crate::capillary::{
     CircularMeniscusInput, TwoFluidCircularMeniscusInput, TwoFluidCircularMeniscusStep,
     step_newtonian_two_fluid_circular_meniscus,
 };
+use fs_material::liquid::solution::gradient::interface::ResolvedBinaryLiquidPlanarInterface;
 use fs_material::liquid::solution::{ResolvedBinaryLiquidEquilibrium, ResolvedBinaryLiquidPhase};
 
 /// Accepted open-reservoir displacement, retaining the original source phases.
@@ -38,6 +40,77 @@ pub struct BinaryLiquidMeniscusStep<'a> {
     pub invading_mass_inflow_kg: f64,
     /// Signed displaced mass leaving at the outlet [kg].
     pub displaced_mass_outflow_kg: f64,
+}
+
+/// Sharp-meniscus approximation retaining the SAME planar-interface owner and
+/// the complete original two-fluid flow, work and signed component account.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BinaryLiquidPlanarMeniscusStep<'a> {
+    /// Source phases, original bulk law, kappa and interface quadrature receipts.
+    pub planar_interface: &'a ResolvedBinaryLiquidPlanarInterface,
+    /// Characteristic central-slope interface width divided by tube radius.
+    pub interface_width_radius_ratio: f64,
+    /// Explicit caller allowance used to qualify the sharp-meniscus reduction.
+    pub maximum_interface_width_radius_ratio: f64,
+    /// Existing accepted step with sigma supplied by this planar interface.
+    pub meniscus: BinaryLiquidMeniscusStep<'a>,
+}
+
+/// Advance the same coexisting liquids using their derived planar tension.
+///
+/// The caller supplies the wall angle and the maximum allowed characteristic
+/// interface width/radius, a finite number in (0,1]. The central-slope width is
+/// the composition gap divided by the maximum planar slope; it is not the full
+/// extent of the profile's infinite tails. Selecting a suitably small allowance
+/// is part of qualifying this planar-to-curved, sharp-meniscus approximation.
+/// The ratio check itself does not bound curvature or contact-line errors.
+///
+/// No wall angle is inferred from bulk miscibility, and the calculated tension
+/// is not promoted to a measured material claim. All open-reservoir, frozen-
+/// coefficient and pressure-independent-coexistence assumptions of
+/// [`step_binary_liquid_horizontal`] still apply. This adapter allocates no memory.
+///
+/// # Errors
+/// Refuses an invalid width allowance, unrepresentable geometry ratio or an
+/// interface too broad for the caller's allowance before evaluating any flow.
+/// The existing two-fluid owner then admits the original phase and flow inputs.
+pub fn step_binary_liquid_planar_horizontal(
+    planar_interface: &ResolvedBinaryLiquidPlanarInterface,
+    invading_phase: usize,
+    contact_angle_cosine: f64,
+    maximum_interface_width_radius_ratio: f64,
+    input: MaterialMeniscusInput,
+) -> Result<BinaryLiquidPlanarMeniscusStep<'_>, MaterialCapillaryError> {
+    if !maximum_interface_width_radius_ratio.is_finite()
+        || maximum_interface_width_radius_ratio <= 0.0
+        || maximum_interface_width_radius_ratio > 1.0
+        || !input.radius_m.is_finite()
+        || input.radius_m <= 0.0
+    {
+        return Err(MaterialCapillaryError::Unsupported(
+            "positive tube radius and finite interface-width/radius allowance in (0,1] required",
+        ));
+    }
+    let interface = planar_interface.interface();
+    let ratio = interface.central_slope_width_m() / input.radius_m;
+    if !ratio.is_finite() || ratio <= 0.0 || ratio > maximum_interface_width_radius_ratio {
+        return Err(MaterialCapillaryError::Unsupported(
+            "planar interface width exceeds the admitted sharp-meniscus scale or is unrepresentable",
+        ));
+    }
+    let meniscus = step_binary_liquid_horizontal(
+        planar_interface.equilibrium(),
+        invading_phase,
+        interface.surface_tension_n_m(),
+        contact_angle_cosine,
+        input,
+    )?;
+    Ok(BinaryLiquidPlanarMeniscusStep {
+        planar_interface,
+        interface_width_radius_ratio: ratio,
+        maximum_interface_width_radius_ratio,
+        meniscus,
+    })
 }
 
 /// Advance a horizontal meniscus between the two actual equilibrium liquids.

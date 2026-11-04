@@ -13006,3 +13006,26 @@ The prepared operator applies six coherent incoming modal velocity amplitudes wi
 Peak phasors use `exp(i omega(s.x-t))`; +z points first to second and traction is `sigma.e_z` on both sides. Finite drives must satisfy a conservative sum of modal Mandel-strain norms within each original componentwise source ceiling. This is a floating-point model check, not an interval certificate. No power clipping, attenuation, anisotropic projection, contact compliance, finite-layer resonance, head-wave or finite-source approximation is introduced. The scope is an infinite, stationary, perfectly bonded interface between frozen lossless isotropic half-spaces; static moduli do not acquire measured ultrasonic authority. Singular or unrepresentable boundary systems refuse.
 
 Ten focused G0/G1/G3/G4 regressions check independent normal-incidence impedance formulas, original-tensor field/traction continuity, coherent two-sided power, weighted unitarity and reciprocal conversion, supercritical phase and evanescence, critical branches, exact transparency, auxetic/high-contrast media, common material scaling, zero-Lame grazing traction, original domain refusal and cancellation. Native actual-source execution passed with the original elastic constructors, Jacobi, Cholesky, complex LU and scalar GEMM; the narrow wiring omits unrelated source-selection/constitutive modules. Full Cargo/workspace verification was unavailable.
+
+## Source-bound planar binary liquid interfaces
+
+`BinaryLiquidSquareGradientLaw::equilibrium_interface` joins the original
+finite-inventory equilibrium, its actual coexisting material phases and the
+same-pair planar interface calculation. The private-construction
+`ResolvedBinaryLiquidPlanarInterface` exposes both retained owners to
+capillary consumers. A one-phase inventory returns None even when a different
+overall composition of that pair could split.
+
+Each coexisting phase must pass the same source-density/fixed-site-volume
+check as a spatial cell. The check reuses resolved source properties rather
+than evaluating or replacing them again. Original species inventories,
+temperature, card/claim selection and query context remain intact. The
+operation has at most two bounded coexistence solves, two source refreshes
+and the explicit quadrature work allowance; failure or cancellation publishes
+no partially bound interface. It supplies neither a substrate wetting law nor
+a claim that a diffuse interface is thin enough for a particular flow geometry.
+
+Integration regressions retain actual mass/volume and source identity, compare
+the bound interface with its original core calculation, reject source-domain
+and density incompatibility, and preserve one-phase/cancellation behavior.
+These material integrations require the normal runtime build.

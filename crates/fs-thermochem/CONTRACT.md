@@ -2756,3 +2756,32 @@ time integrator or claim of nucleation kinetics.
 Five focused native tests cover original-energy derivatives, reversible and
 trace increments, critical higher-order terms, the convex-split energy bound
 for both signs of chi, and endpoint/regularization admission.
+
+## Planar interface tension from original binary coexistence
+
+`solution::gradient::interface` computes the equilibrium planar liquid-liquid
+surface tension and a characteristic interface width from the SAME
+`BinarySquareGradientV1`. For the symmetric regular solution, the common
+tangent between original binodals is horizontal. With
+`Delta_g = g_mix(x)-g_mix(x_alpha)`, the model evaluates
+`sigma = integral sqrt(2*kappa*c*Delta_g) dx` between the two binodals,
+consistent with the existing `kappa*|grad x|^2/2` energy convention.
+The width is the composition gap divided by the central profile slope; the
+exact equilibrium profile has infinite tails, not a finite total thickness.
+
+The calculation retains the original model, coexistence receipt, requested
+controls, quadrature estimate and sample count. Near-critical conditioning
+uses direct cancellation-resistant free-energy increments and normalization
+by the center barrier. Adaptive Simpson quadrature has one global
+absolute-plus-relative accuracy budget, bounded work (at most 65,537 samples)
+and cancellation. Its reported error is a truncation estimate, not a rigorous
+certificate; floating-point roundoff and the separately reported binodal
+uncertainty are not included. Negative or unresolved interior excess energy
+refuses rather than being clipped. Miscible and critical states return None.
+
+This is a model prediction from an explicitly qualified kappa, not a measured
+material surface-tension claim, wall contact angle or automatic curved-interface
+force law. Five focused native tests cover independent high-precision regular-
+solution quadrature, the near-critical sigma~(chi-2)^(3/2) and width~(chi-2)^(-1/2)
+limits with their prefactors, kappa/concentration/component-order scaling,
+physical absence/refusal cases and bounded work/cancellation.

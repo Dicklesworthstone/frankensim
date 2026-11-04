@@ -4,6 +4,7 @@ use super::*;
 use fs_material::liquid::solution::gradient::BinaryLiquidSquareGradientLaw;
 use fs_qty::AmountConcentration;
 use fs_thermochem::solution::gradient::BinarySquareGradientV1;
+use fs_thermochem::solution::gradient::interface::BinaryPlanarInterfaceOptionsV1;
 
 fn field(law: &BinaryLiquidSolutionLaw<'_>) -> BinarySquareGradientV1 {
     BinarySquareGradientV1::new(
@@ -121,4 +122,81 @@ fn g4_field_source_failure_and_cancellation_publish_no_partial_cell() {
     assert!(adapter.resolve_cell([4.5, 0.5], || false).is_err());
     assert!(adapter.resolve_cell([1.0, 1e-20], || false).is_err());
     assert!(adapter.resolve_cell([0.0, 0.0], || false).is_err());
+}
+
+#[test]
+fn g1_planar_interface_retains_actual_inventory_and_coexisting_source_properties() {
+    let card = card_with_density(CompositionBasis::MoleFraction, 1.0, [1000.0, 590.0, 180.0]);
+    let liquid = law(&card);
+    let adapter = BinaryLiquidSquareGradientLaw::try_new(&liquid, field(&liquid), 1e-12).unwrap();
+    let options = BinaryPlanarInterfaceOptionsV1::default();
+    let resolved = adapter
+        .equilibrium_interface([4.0, 6.0], options, || false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.equilibrium().total_component_moles(), [4.0, 6.0]);
+    assert_eq!(resolved.equilibrium().phases().len(), 2);
+    assert_eq!(resolved.interface().model(), adapter.gradient_model());
+    assert_eq!(
+        resolved.interface(),
+        &adapter
+            .gradient_model()
+            .equilibrium_interface(options, || false)
+            .unwrap()
+            .unwrap()
+    );
+    assert!(resolved.interface().surface_tension_n_m() > 0.0);
+    assert!(resolved.interface().central_slope_width_m() > 0.0);
+    for phase in resolved.equilibrium().phases() {
+        near(phase.molar_concentration_mol_m3(), 10_000.0);
+        assert_eq!(
+            phase.liquid().material().card_identity(),
+            liquid.reference_state().material().card_identity()
+        );
+    }
+    near(resolved.equilibrium().total_volume_m3(), 0.001);
+    near(
+        resolved.equilibrium().total_mass_kg(),
+        4.0 * 0.018 + 6.0 * 0.10,
+    );
+    assert!(
+        adapter
+            .equilibrium_interface([0.0, 10.0], options, || false)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn g4_planar_interface_never_bypasses_source_domain_or_volume_admission() {
+    for (upper, density) in [
+        (0.8, [1000.0, 590.0, 180.0]),
+        (1.0, [1000.0, 1100.0, 800.0]),
+    ] {
+        let card = card_with_density(CompositionBasis::MoleFraction, upper, density);
+        let liquid = law(&card);
+        let adapter =
+            BinaryLiquidSquareGradientLaw::try_new(&liquid, field(&liquid), 1e-12).unwrap();
+        assert!(
+            adapter
+                .equilibrium_interface(
+                    [4.0, 6.0],
+                    BinaryPlanarInterfaceOptionsV1::default(),
+                    || false
+                )
+                .is_err()
+        );
+    }
+    let card = card_with_density(CompositionBasis::MoleFraction, 1.0, [1000.0, 590.0, 180.0]);
+    let liquid = law(&card);
+    let adapter = BinaryLiquidSquareGradientLaw::try_new(&liquid, field(&liquid), 1e-12).unwrap();
+    assert!(
+        adapter
+            .equilibrium_interface(
+                [4.0, 6.0],
+                BinaryPlanarInterfaceOptionsV1::default(),
+                || true
+            )
+            .is_err()
+    );
 }
