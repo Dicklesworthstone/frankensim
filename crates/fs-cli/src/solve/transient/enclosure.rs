@@ -3,11 +3,16 @@
 //! is explicit so outer convection owners never advance or relabel history.
 
 use fs_conduction::radiation::GrayDiffuseEnclosure;
+use fs_conduction::interface::temperature::{ContactIterationConfig, TemperatureContacts};
+use fs_conduction::transient::backward_euler::EndpointEvaluation;
 use super::*;
 
 pub(super) struct Step {
     pub(super) conduction: StepSolution,
     pub(super) nonlinear: Option<NonlinearStepSolution>,
+    pub(super) contact_evidence: Option<String>,
+    pub(super) solid_solves: usize,
+    pub(super) nonlinear_updates: usize,
     pub(super) nonlinear_backtracks: usize,
     pub(super) endpoint: radiation::EnclosureEndpoint,
     pub(super) net_input_w: f64,
@@ -24,12 +29,26 @@ fn finite(value: f64) -> Result<f64, SolveRefusal> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
-    interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+    interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    contact_config: Option<contact::Config>, old: &[f64], dt_s: f64,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
     model: &GrayDiffuseEnclosure, radiation_config: fs_conduction::AmbientRadiationConfig,
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
+    if temperature_contacts.is_some() != contact_config.is_some()
+        || (temperature_contacts.is_some() && interfaces.is_some())
+    {
+        return Err(bad("capacity enclosure requires matching live contacts and controls without duplicate frozen interfaces"));
+    }
+    if let Some(contacts) = temperature_contacts {
+        return advance_contact(
+            cx, engine, problem, contacts,
+            contact_config.ok_or_else(|| bad("capacity enclosure lost its contact controls"))?,
+            old, dt_s, config, nonlinear, model, radiation_config, deadline,
+        );
+    }
     let solved = engine.advance_prescribed_with_enclosure_radiation(
         cx, problem, interfaces, old, dt_s, config, nonlinear, model, radiation_config,
     ).map_err(lower)?;
@@ -49,7 +68,125 @@ pub(super) fn advance(
             - solved.prescribed_neumann_out_w - solved.convective_out_w
             - fresh.enclosure_energy_closure_w,
     )?;
-    let mut patches = Vec::with_capacity(model.surfaces().len());
+    let solid_solves = report.iterations;
+    let nonlinear_updates = if nonlinear.is_some() { report.solid_iterations } else { 0 };
+    let endpoint = radiation::EnclosureEndpoint {
+        combined_boundary: solved.combined_boundary,
+        convective_robin_fluxes: solved.convective_robin_fluxes,
+        convective_out_w: solved.convective_out_w,
+        report: solved.radiation,
+        dt_s,
+        time_integration: "backward-euler-capacity",
+        physical_residual_norm_j: solved.physical_residual_norm_j,
+        physical_residual_tolerance_j: solved.physical_residual_tolerance_j,
+        physical_energy_residual_j: solved.physical_energy_residual_j,
+        decomposition_residual_w: decomposition,
+    };
+    let row = step_row(
+        cx, model, &endpoint, solid_solves, solved.nonlinear_backtracks,
+        solved.prescribed_neumann_out_w, solved.physical_dirichlet_in_w, deadline,
+    )?;
+    Ok(Step {
+        conduction: solved.conduction,
+        nonlinear: solved.nonlinear,
+        contact_evidence: None,
+        solid_solves,
+        nonlinear_updates,
+        nonlinear_backtracks: solved.nonlinear_backtracks,
+        endpoint,
+        net_input_w,
+        physical_neumann_out_w: solved.prescribed_neumann_out_w,
+        physical_dirichlet_in_w: solved.physical_dirichlet_in_w,
+        row,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_contact(
+    cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
+    contacts: &TemperatureContacts<'_, '_>, controls: contact::Config,
+    old: &[f64], dt_s: f64, config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
+    model: &GrayDiffuseEnclosure, radiation_config: fs_conduction::AmbientRadiationConfig,
+    deadline: Option<(Instant, f64)>,
+) -> Result<Step, SolveRefusal> {
+    let coupling = ContactIterationConfig {
+        max_iterations: controls.max_responses(), relaxation: 0.5,
+        residual_tolerance_j: controls.residual_tolerance_j,
+    };
+    let solved = if controls.coupled_newton {
+        contacts.advance_capacity_newton_with_enclosure_radiation(
+            cx, engine, problem, old, dt_s, config,
+            nonlinear.ok_or_else(|| bad("enclosure contact Newton lost its nonlinear controls"))?,
+            coupling, controls.max_face_pairs, model, radiation_config,
+        )
+    } else {
+        contacts.advance_capacity_with_enclosure_radiation(
+            cx, engine, problem, old, dt_s, config, nonlinear, coupling, model, radiation_config,
+        )
+    }.map_err(lower)?;
+    poll(cx, deadline)?;
+    let physical = &solved.physical;
+    // Inspect the counted applied response before publishing fresh physical
+    // heat. Authored Neumann and convection remain distinct from reflection.
+    let applied = finite(solved.radiation.applied_heat_w.iter().sum())?;
+    let decomposition = finite(
+        solved.conduction.robin_out_w + solved.conduction.neumann_out_w
+            - physical.convective_out_w - physical.neumann_out_w - applied,
+    )?;
+    if decomposition.abs() > radiation_config.balance_tolerance_w {
+        return Err(bad("capacity contact/enclosure failed its original boundary decomposition allowance"));
+    }
+    let contact_evidence = contact::step_receipt(
+        cx, contact::Config {
+            residual_tolerance_j: solved.physical_residual_tolerance_j, ..controls
+        }, physical, &solved.physical_contacts, solved.thermal_responses,
+        solved.krylov_iterations, solved.nonlinear_updates, solved.nonlinear_backtracks,
+        config.energy_tolerance_j, deadline,
+    )?;
+    let net_input_w = finite(physical.source_w + physical.dirichlet_in_w
+        - physical.neumann_out_w - physical.convective_out_w - physical.radiation_out_w)?;
+    let mut conduction = solved.conduction;
+    contact::publish_physical(&mut conduction, physical, &solved.physical_contacts)?;
+    let endpoint = radiation::EnclosureEndpoint {
+        combined_boundary: physical.combined_boundary.clone(),
+        convective_robin_fluxes: physical.convective_robin_fluxes.clone(),
+        convective_out_w: physical.convective_out_w,
+        report: solved.radiation,
+        dt_s, time_integration: "backward-euler-capacity",
+        physical_residual_norm_j: physical.residual_norm_j,
+        physical_residual_tolerance_j: solved.physical_residual_tolerance_j,
+        physical_energy_residual_j: physical.energy_residual_j,
+        decomposition_residual_w: decomposition,
+    };
+    let row = step_row(
+        cx, model, &endpoint, solved.thermal_responses, solved.nonlinear_backtracks,
+        physical.neumann_out_w, physical.dirichlet_in_w, deadline,
+    )?;
+    Ok(Step {
+        conduction, nonlinear: None, contact_evidence: Some(contact_evidence),
+        solid_solves: solved.thermal_responses, nonlinear_updates: solved.nonlinear_updates,
+        nonlinear_backtracks: solved.nonlinear_backtracks, endpoint, net_input_w,
+        physical_neumann_out_w: physical.neumann_out_w,
+        physical_dirichlet_in_w: physical.dirichlet_in_w, row,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_row(
+    cx: &Cx<'_>, model: &GrayDiffuseEnclosure, endpoint: &radiation::EnclosureEndpoint,
+    solid_solves: usize, nonlinear_backtracks: usize,
+    prescribed_neumann_out_w: f64, physical_dirichlet_in_w: f64,
+    deadline: Option<(Instant, f64)>,
+) -> Result<String, SolveRefusal> {
+    let report = &endpoint.report;
+    let fresh = &report.radiosity;
+    let count = model.surfaces().len();
+    if fresh.surface_temperatures_k.len() != count || fresh.net_outward_heat_w.len() != count
+        || report.applied_heat_w.len() != count
+    {
+        return Err(bad("capacity enclosure evidence lost its ordered physical patches"));
+    }
+    let mut patches = Vec::with_capacity(count);
     for (index, surface) in model.surfaces().iter().enumerate() {
         poll(cx, deadline)?;
         patches.push(format!(
@@ -59,36 +196,37 @@ pub(super) fn advance(
             number(report.applied_heat_w[index])?, number(fresh.net_outward_heat_w[index])?,
         ));
     }
-    let row = format!(
-        "{{\"model\":\"closed-gray-diffuse-enclosure\",\"storage\":\"volumetric-heat-capacity\",\"solid_solves\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"nonlinear_backtracks\":{},\"max_heat_mismatch_w\":{},\"applied_radiation_out_w\":{},\"nonlinear_radiation_out_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"physical_dirichlet_in_w\":{},\"radiosity_residual_w_m2\":{},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"decomposition_residual_w\":{},\"patches\":[{}]}}",
-        report.iterations, report.solid_iterations, report.krylov_iterations,
-        solved.nonlinear_backtracks, number(report.max_heat_mismatch_w)?, number(applied)?,
-        number(fresh.enclosure_energy_closure_w)?, number(solved.convective_out_w)?,
-        number(solved.prescribed_neumann_out_w)?, number(solved.physical_dirichlet_in_w)?,
-        number(fresh.linear_residual_max_w_m2)?, number(solved.physical_residual_norm_j)?,
-        number(solved.physical_residual_tolerance_j)?, number(solved.physical_energy_residual_j)?,
-        number(decomposition)?, patches.join(","),
-    );
-    Ok(Step {
-        conduction: solved.conduction,
-        nonlinear: solved.nonlinear,
-        nonlinear_backtracks: solved.nonlinear_backtracks,
-        endpoint: radiation::EnclosureEndpoint {
-            combined_boundary: solved.combined_boundary,
-            convective_robin_fluxes: solved.convective_robin_fluxes,
-            convective_out_w: solved.convective_out_w,
-            report: solved.radiation,
-            dt_s,
-            time_integration: "backward-euler-capacity",
-            physical_residual_norm_j: solved.physical_residual_norm_j,
-            physical_residual_tolerance_j: solved.physical_residual_tolerance_j,
-            physical_energy_residual_j: solved.physical_energy_residual_j,
-            decomposition_residual_w: decomposition,
-        },
-        net_input_w,
-        physical_neumann_out_w: solved.prescribed_neumann_out_w,
-        physical_dirichlet_in_w: solved.physical_dirichlet_in_w,
-        row,
-    })
+    Ok(format!(
+        "{{\"model\":\"closed-gray-diffuse-enclosure\",\"storage\":\"volumetric-heat-capacity\",\"solid_solves\":{},\"radiation_trials\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"nonlinear_backtracks\":{},\"max_heat_mismatch_w\":{},\"applied_radiation_out_w\":{},\"nonlinear_radiation_out_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"physical_dirichlet_in_w\":{},\"radiosity_residual_w_m2\":{},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"decomposition_residual_w\":{},\"patches\":[{}]}}",
+        solid_solves, report.iterations, report.solid_iterations, report.krylov_iterations,
+        nonlinear_backtracks, number(report.max_heat_mismatch_w)?,
+        number(finite(report.applied_heat_w.iter().sum())?)?,
+        number(fresh.enclosure_energy_closure_w)?, number(endpoint.convective_out_w)?,
+        number(prescribed_neumann_out_w)?, number(physical_dirichlet_in_w)?,
+        number(fresh.linear_residual_max_w_m2)?, number(endpoint.physical_residual_norm_j)?,
+        number(endpoint.physical_residual_tolerance_j)?, number(endpoint.physical_energy_residual_j)?,
+        number(endpoint.decomposition_residual_w)?, patches.join(","),
+    ))
+}
+
+/// The accepted temperature is unchanged, so its exact patch means and
+/// radiosity remain the counted enclosure result. Refresh only the complete
+/// physical boundary and original convection/reactions audited by its caller.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn refresh(
+    cx: &Cx<'_>, endpoint: &mut radiation::EnclosureEndpoint,
+    model: &GrayDiffuseEnclosure, physical: &EndpointEvaluation,
+    physical_residual_tolerance_j: f64, solid_solves: usize, nonlinear_backtracks: usize,
+    deadline: Option<(Instant, f64)>,
+) -> Result<String, SolveRefusal> {
+    poll(cx, deadline)?;
+    endpoint.combined_boundary = physical.combined_boundary.clone();
+    endpoint.convective_robin_fluxes = physical.convective_robin_fluxes.clone();
+    endpoint.convective_out_w = physical.convective_out_w;
+    endpoint.physical_residual_norm_j = physical.residual_norm_j;
+    endpoint.physical_residual_tolerance_j = physical_residual_tolerance_j;
+    endpoint.physical_energy_residual_j = physical.energy_residual_j;
+    step_row(cx, model, endpoint, solid_solves, nonlinear_backtracks,
+        physical.neumann_out_w, physical.dirichlet_in_w, deadline)
 }
 

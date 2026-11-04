@@ -253,22 +253,28 @@ enum RadiativeEndpoint {
         convective_robin_fluxes: Vec<fs_conduction::RobinFlux>,
         convective_out_w: f64,
         report: fs_conduction::AmbientRadiationReport,
+        solid_solves: usize,
     },
-    Enclosure(radiation::EnclosureEndpoint),
+    Enclosure {
+        endpoint: radiation::EnclosureEndpoint,
+        /// All thermal responses nested in this counted enclosure solve.
+        solid_solves: usize,
+        nonlinear_backtracks: usize,
+    },
 }
 
 impl RadiativeEndpoint {
     fn convective_robin_fluxes(&self) -> &[fs_conduction::RobinFlux] {
         match self {
             Self::Ambient { convective_robin_fluxes, .. } => convective_robin_fluxes,
-            Self::Enclosure(endpoint) => &endpoint.convective_robin_fluxes,
+            Self::Enclosure { endpoint, .. } => &endpoint.convective_robin_fluxes,
         }
     }
 
     fn convective_out_w(&self) -> f64 {
         match self {
             Self::Ambient { convective_out_w, .. } => *convective_out_w,
-            Self::Enclosure(endpoint) => endpoint.convective_out_w,
+            Self::Enclosure { endpoint, .. } => endpoint.convective_out_w,
         }
     }
 }
@@ -1377,14 +1383,14 @@ pub(super) fn solve(
     };
     let solution = match fine.radiation {
         Some(RadiativeEndpoint::Ambient {
-            combined_boundary, convective_robin_fluxes, convective_out_w, report,
+            combined_boundary, convective_robin_fluxes, convective_out_w, report, solid_solves,
         }) => radiation::SolidSolution::from_radiative_endpoint(
             conduction, combined_boundary, convective_robin_fluxes, convective_out_w, report,
-        ),
-        Some(RadiativeEndpoint::Enclosure(endpoint)) => radiation::SolidSolution::from_enclosure_endpoint(
+        ).with_radiation_thermal_responses(solid_solves),
+        Some(RadiativeEndpoint::Enclosure { endpoint, solid_solves, .. }) => radiation::SolidSolution::from_enclosure_endpoint(
             conduction, enclosure.ok_or_else(|| bad("final enclosure endpoint lost its bound model"))?,
             endpoint,
-        ),
+        ).with_radiation_thermal_responses(solid_solves),
         None => radiation::SolidSolution::from_conduction(conduction),
     };
     Ok(NativeTransientResult {

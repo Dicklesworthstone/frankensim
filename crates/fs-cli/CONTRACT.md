@@ -3477,3 +3477,29 @@ audit. This is the existing area-mean emission model, not pointwise radiation.
 Capacity contact with reflected enclosures and transient contact adjoints
 remain unsupported. The focused native and imported-project regressions require
 native execution; formatter parsing alone does not establish runtime correctness.
+
+### Live capacity contact with reflected enclosure radiation — driver 111
+
+Regional heat-capacity trajectories now compose live source-backed contact
+with the existing closed gray-diffuse enclosure owner. The original enclosure
+iteration evaluates reflected exchange while each thermal response solves the
+complete contact law from unchanged old temperature. Scalar and curve sources
+retain coupled Newton, and source surfaces retain their bounded fixed point.
+Fresh contact queries and reflected patch heat share one full nodal residual
+and independent physical storage/heat gate.
+
+The same response serves prescribed, natural-convection and transported-air
+boundaries, including mixed cooling. Original prescribed flux, convection and
+boundary-node storage remain distinct from internal reflected exchange.
+Individual enclosure patches can transfer nonzero heat while their signed
+sum remains subject to the existing closure allowance. Neither contact heat
+nor internal radiation becomes air-stream heat.
+
+Accepted outer natural/air audits refresh the physical enclosure boundary,
+reservoir reactions and convection at the same unchanged field. Retained
+applied patch heat and all counted work remain attached to their actual solve.
+Enclosure callbacks, nested contact responses, Newton updates, backtracks and
+Krylov work keep their separate bounded counts. Capacity contact still refuses
+pointwise radiation, open-enclosure histories and trajectory derivatives.
+Focused native and imported-project regressions accompany the integration;
+syntax checks do not replace their required native execution.

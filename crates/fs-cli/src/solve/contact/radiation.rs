@@ -118,7 +118,8 @@ fn solve_picard(
         PICARD_SCOPE, &composition)?;
     Ok((SolidSolution::from_radiative_endpoint(solid.conduction,
         accepted.physical_boundary, accepted.convective_robin_fluxes,
-        accepted.convective_out_w, accepted.radiation), receipt))
+        accepted.convective_out_w, accepted.radiation)
+        .with_radiation_thermal_responses(accepted.thermal_responses), receipt))
 }
 
 fn earlier(total: usize, last: usize) -> Result<usize, SolveRefusal> {

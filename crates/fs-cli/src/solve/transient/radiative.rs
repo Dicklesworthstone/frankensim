@@ -75,8 +75,10 @@ pub(super) fn advance(
     if lowering.is_enclosure() != model.is_some() {
         return Err(bad("capacity radiation iteration lost its exact enclosure model"));
     }
-    if let Some(contacts) = temperature_contacts {
+    if temperature_contacts.is_some() {
         contact::admit_radiation(Some(lowering), model)?;
+    }
+    if let Some(contacts) = temperature_contacts.filter(|_| model.is_none()) {
         let controls = contact_config
             .ok_or_else(|| bad("capacity radiation lost its live contact controls"))?;
         let coupling = ContactIterationConfig {
@@ -128,13 +130,15 @@ pub(super) fn advance(
                 combined_boundary: physical.combined_boundary.clone(),
                 convective_robin_fluxes: physical.convective_robin_fluxes.clone(),
                 convective_out_w: physical.convective_out_w,
+                solid_solves: solved.thermal_responses,
                 report: solved.radiation,
             },
         });
     }
     if let Some(model) = model {
         let solved = enclosure::advance(
-            cx, engine, problem, interfaces, old, dt_s, config, nonlinear,
+            cx, engine, problem, interfaces, temperature_contacts, contact_config,
+            old, dt_s, config, nonlinear,
             model, lowering.config, deadline,
         )?;
         let nonlinear_evidence = solved.nonlinear.as_ref().map(nonlinear_row)
@@ -152,15 +156,18 @@ pub(super) fn advance(
             conduction: solved.conduction,
             nonlinear_evidence,
             radiation_evidence: solved.row,
-            contact_evidence: None,
+            contact_evidence: solved.contact_evidence,
             radiation_trials: report.iterations,
-            solid_solves: report.iterations,
-            nonlinear_updates: if nonlinear.is_some() { report.solid_iterations } else { 0 },
+            solid_solves: solved.solid_solves,
+            nonlinear_updates: solved.nonlinear_updates,
             nonlinear_backtracks: solved.nonlinear_backtracks,
             krylov_iterations: report.krylov_iterations,
             physical_residual_tolerance_j: solved.endpoint.physical_residual_tolerance_j,
             physical_energy,
-            radiation: RadiativeEndpoint::Enclosure(solved.endpoint),
+            radiation: RadiativeEndpoint::Enclosure {
+                endpoint: solved.endpoint, solid_solves: solved.solid_solves,
+                nonlinear_backtracks: solved.nonlinear_backtracks,
+            },
         });
     }
     poll(cx, deadline)?;
@@ -201,31 +208,45 @@ pub(super) fn advance(
             combined_boundary: solved.combined_boundary,
             convective_robin_fluxes: solved.convective_robin_fluxes,
             convective_out_w: solved.convective_out_w,
+            solid_solves: solved.radiation.iterations,
             report: solved.radiation,
         },
     })
 }
 
 /// A surrounding natural/air solve changes convection at the same unchanged
-/// field. Keep its last counted radiative secant evidence while publishing the
+/// field. Keep its last counted radiation response while publishing the
 /// fresh complete physical boundary, residual and separated convective heat.
-pub(super) fn refresh_ambient(
+pub(super) fn refresh(
+    cx: &Cx<'_>,
     endpoint: &mut RadiativeEndpoint,
+    model: Option<&GrayDiffuseEnclosure>,
     physical: &EndpointEvaluation,
     physical_residual_tolerance_j: f64,
+    deadline: Option<(Instant, f64)>,
 ) -> Result<String, SolveRefusal> {
-    let RadiativeEndpoint::Ambient {
-        combined_boundary, convective_robin_fluxes, convective_out_w, report,
-    } = endpoint else {
-        return Err(bad("live capacity contact cannot refresh an enclosure radiation endpoint"));
-    };
-    *combined_boundary = physical.combined_boundary.clone();
-    *convective_robin_fluxes = physical.convective_robin_fluxes.clone();
-    *convective_out_w = physical.convective_out_w;
-    radiation_row(
-        report, physical.convective_out_w, physical.residual_norm_j,
-        physical_residual_tolerance_j, physical.energy_residual_j, physical.dirichlet_in_w,
-    )
+    poll(cx, deadline)?;
+    match endpoint {
+        RadiativeEndpoint::Ambient {
+            combined_boundary, convective_robin_fluxes, convective_out_w, report, ..
+        } if model.is_none() => {
+            *combined_boundary = physical.combined_boundary.clone();
+            *convective_robin_fluxes = physical.convective_robin_fluxes.clone();
+            *convective_out_w = physical.convective_out_w;
+            radiation_row(
+                report, physical.convective_out_w, physical.residual_norm_j,
+                physical_residual_tolerance_j, physical.energy_residual_j, physical.dirichlet_in_w,
+            )
+        }
+        RadiativeEndpoint::Enclosure { endpoint, solid_solves, nonlinear_backtracks } => {
+            let model = model.ok_or_else(|| bad("capacity radiation refresh lost its closed enclosure"))?;
+            enclosure::refresh(
+                cx, endpoint, model, physical, physical_residual_tolerance_j,
+                *solid_solves, *nonlinear_backtracks, deadline,
+            )
+        }
+        _ => Err(bad("capacity radiation refresh has inconsistent ambient/enclosure ownership")),
+    }
 }
 
 /// No primal step is taken here. Candidate and old temperature retain their

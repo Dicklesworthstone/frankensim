@@ -349,6 +349,7 @@ pub(super) fn solve(
         convective_out: Some(solved.convective_out_w),
         radiation: None,
         pointwise: None,
+        radiation_thermal_responses: None,
         combined_boundary: Some(solved.combined_boundary),
         enclosure: Some(EnclosureResult::Closed(ClosedEnclosureResult {
             model,
@@ -395,9 +396,10 @@ impl EnclosureResult {
         &self,
         lowering: &LoweredRadiation,
         convective_out_w: f64,
+        thermal_responses: Option<usize>,
     ) -> Result<String, SolveRefusal> {
         match self {
-            Self::Closed(result) => result.receipt(lowering, convective_out_w),
+            Self::Closed(result) => result.receipt(lowering, convective_out_w, thermal_responses),
             Self::Open(result) => result.receipt(lowering, convective_out_w),
         }
     }
@@ -406,6 +408,7 @@ impl EnclosureResult {
 impl ClosedEnclosureResult {
     fn receipt(
         &self, lowering: &LoweredRadiation, convective_out_w: f64,
+        thermal_responses: Option<usize>,
     ) -> Result<String, SolveRefusal> {
         let declaration = &lowering
             .enclosure
@@ -433,8 +436,9 @@ impl ClosedEnclosureResult {
                 radiation.applied_heat_w.as_slice(),
                 radiation.applied_heat_w.iter().sum(),
                 format!(
-                    "\"time_integration\":{},\"time_step_s\":{},\"solid_solves\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_j\":{},\"nonlinear_residual_threshold_j\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"physical_energy_residual_j\":{}",
-                    json_string(time_integration), num(*dt_s)?, radiation.iterations, radiation.solid_iterations,
+                    "\"time_integration\":{},\"time_step_s\":{},\"solid_solves\":{},\"radiation_trials\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_j\":{},\"nonlinear_residual_threshold_j\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"physical_energy_residual_j\":{}",
+                    json_string(time_integration), num(*dt_s)?,
+                    thermal_responses.unwrap_or(radiation.iterations), radiation.iterations, radiation.solid_iterations,
                     radiation.krylov_iterations, num(radiation.max_heat_mismatch_w)?,
                     num(*residual_j)?, num(*threshold_j)?,
                     num(*residual_j / *dt_s)?, num(*threshold_j / *dt_s)?,

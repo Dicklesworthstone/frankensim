@@ -485,7 +485,9 @@ pub(super) fn advance(
                 // under the freshly queried contact, radiation and convection.
                 contact::publish_physical(&mut endpoint, &physical, states)?;
                 if let Some(radiation) = radiative.as_mut() {
-                    radiation_evidence = radiative::refresh_ambient(radiation, &physical, target)?;
+                    radiation_evidence = radiative::refresh(
+                        cx, radiation, enclosure, &physical, target, deadline,
+                    )?;
                 }
             }
             let contact_evidence = match (contact_config, physical_contacts.as_ref()) {

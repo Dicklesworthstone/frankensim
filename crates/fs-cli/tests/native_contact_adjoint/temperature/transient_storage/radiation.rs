@@ -10,11 +10,11 @@ const SIGMA: f64 = 5.670_374_419e-8;
 const EMISSIVITY: f64 = 0.85; // Existing gray-surface.fsmcdpk fixture declaration.
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Cooling { Prescribed, Natural, Air, Mixed }
+pub(super) enum Cooling { Prescribed, Natural, Air, Mixed }
 
 fn n(row: &J, key: &str) -> f64 { row.f64_field(key).unwrap() }
 
-fn radiating_fixture(cooling: Cooling, bath: f64) -> Fixture {
+pub(super) fn radiating_fixture(cooling: Cooling, bath: f64) -> Fixture {
     let mut f = fixture(false, false);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let reference = fs_project::parse_sexpr_migrating(&std::fs::read_to_string(
@@ -76,7 +76,7 @@ fn run_radiating(f: &Fixture, source: &Path, contact: &Path, ledger: &Path) -> f
         "--interfaces".into(), contact.display().to_string()])
 }
 
-fn solve_radiating(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
+pub(super) fn solve_radiating(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
     let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
     let output = run_radiating(f, &source, &contact, &ledger);
     assert_eq!(output.exit_code, fs_cli::exit::SUCCESS, "{}\n{}", output.stdout, output.stderr);
@@ -108,7 +108,7 @@ fn radiation_heat(row: &J, bath: f64) -> (f64, f64) {
     (heat, wall)
 }
 
-fn reservoir_heat(row: &J, target: &str) -> f64 {
+pub(super) fn reservoir_heat(row: &J, target: &str) -> f64 {
     let natural = row.get("natural").unwrap();
     let laws = natural.get("exchange").unwrap().get("laws").unwrap().as_array().unwrap();
     assert_eq!(laws.len(), 1);
@@ -231,6 +231,16 @@ fn native_capacity_contact_radiation_preserves_heat_accounts_across_all_cooling_
             close(n(energy, "stored_change_j"), stored, 1e-8);
             close(n(energy, "integrated_net_input_j"), fine_energy, 4e-6);
             assert!(stored < 0.0, "the baths remove stored heat despite 10 J supplied power");
+            // Final receipt work belongs to the last inner radiation solve;
+            // natural/air contact rows also count discarded outer trials.
+            let last = trajectory.get("fine").unwrap().as_array().unwrap().last().unwrap();
+            let final_radiation = receipt.get("radiation").unwrap();
+            close(n(final_radiation, "radiation_trials"), n(last.get("radiation").unwrap(), "iterations"), 0.0);
+            assert!(n(final_radiation, "solid_solves") >= n(final_radiation, "radiation_trials"));
+            if surface { assert!(n(final_radiation, "solid_solves") > n(final_radiation, "radiation_trials")); }
+            if cooling == Cooling::Prescribed {
+                close(n(final_radiation, "solid_solves"), n(last.get("temperature_contact").unwrap(), "thermal_responses"), 0.0);
+            }
             if surface {
                 for (actual, expected) in temperatures.iter().zip(&curve_endpoint) { close(*actual, *expected, 3e-6); }
             } else { curve_endpoint = temperatures; }

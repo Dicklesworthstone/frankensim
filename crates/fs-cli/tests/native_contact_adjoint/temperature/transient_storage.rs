@@ -13,6 +13,8 @@ mod convection;
 mod airflow;
 #[path = "transient_storage/radiation.rs"]
 mod radiation;
+#[path = "transient_storage/enclosure.rs"]
+mod enclosure;
 
 const INITIAL_K: f64 = 293.15;
 const CP: f64 = 10.0;

@@ -680,8 +680,8 @@ pub(super) fn advance(
         // references at this same field; counted inner solve evidence remains.
         contact::publish_physical(&mut last.endpoint, &physical, states)?;
         if let Some(radiation) = last.radiation.as_mut() {
-            last.radiation_evidence = radiative::refresh_ambient(
-                radiation, &physical, physical_residual_tolerance_j,
+            last.radiation_evidence = radiative::refresh(
+                cx, radiation, enclosure, &physical, physical_residual_tolerance_j, deadline,
             )?;
         }
     }

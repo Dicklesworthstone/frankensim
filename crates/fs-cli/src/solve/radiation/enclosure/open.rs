@@ -125,6 +125,7 @@ pub(super) fn solve(
         convective_out: Some(solved.convective_out_w),
         radiation: None,
         pointwise: None,
+        radiation_thermal_responses: None,
         combined_boundary: Some(solved.combined_boundary),
         enclosure: Some(EnclosureResult::Open(OpenResult {
             model,

@@ -229,6 +229,9 @@ pub(super) struct SolidSolution {
     radiation: Option<AmbientRadiationReport>,
     enclosure: Option<enclosure::EnclosureResult>,
     pointwise: Option<PointwiseEndpoint>,
+    /// Actual thermal responses when contact nests several inside each
+    /// radiative callback; absent producers use one response per callback.
+    radiation_thermal_responses: Option<usize>,
     /// The exact combined convective + radiative Robin partition behind a
     /// radiating field; the roundoff bound must see this operator.
     pub(super) combined_boundary: Option<fs_conduction::ThermalBoundary>,
@@ -244,6 +247,7 @@ impl SolidSolution {
             radiation: None,
             enclosure: None,
             pointwise: None,
+            radiation_thermal_responses: None,
             combined_boundary: None,
         }
     }
@@ -265,6 +269,7 @@ impl SolidSolution {
             radiation: Some(radiation),
             enclosure: None,
             pointwise: None,
+            radiation_thermal_responses: None,
             combined_boundary: Some(combined_boundary),
         }
     }
@@ -282,6 +287,7 @@ impl SolidSolution {
             radiation: None,
             enclosure: Some(enclosure),
             pointwise: None,
+            radiation_thermal_responses: None,
             combined_boundary: Some(endpoint.combined_boundary),
         }
     }
@@ -310,8 +316,14 @@ impl SolidSolution {
             radiation: None,
             enclosure: None,
             pointwise: Some(endpoint),
+            radiation_thermal_responses: None,
             combined_boundary: None,
         })
+    }
+
+    pub(super) fn with_radiation_thermal_responses(mut self, responses: usize) -> Self {
+        self.radiation_thermal_responses = Some(responses);
+        self
     }
 
     pub(super) fn enclosure_model(&self) -> Option<&GrayDiffuseEnclosure> {
@@ -356,6 +368,7 @@ impl SolidSolution {
                 .receipt(
                     lowering.expect("enclosure solution retains its declaration"),
                     self.convective_out_w(),
+                    self.radiation_thermal_responses,
                 )
                 .map(Some);
         }
@@ -392,8 +405,9 @@ impl SolidSolution {
             "null".to_string()
         };
         Ok(Some(format!(
-            "{{\"model\":\"area-mean-gray-surface-to-black-reservoir\",\"surfaces\":[{}],\"solid_solves\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"decomposition_residual_w\":{},\"radiative_magnitude_share\":{},\"controls\":{{\"max_iterations\":{},\"temperature_tolerance_k\":{},\"heat_tolerance_w\":{},\"relative_heat_tolerance\":{},\"relaxation\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+            "{{\"model\":\"area-mean-gray-surface-to-black-reservoir\",\"surfaces\":[{}],\"solid_solves\":{},\"radiation_trials\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"decomposition_residual_w\":{},\"radiative_magnitude_share\":{},\"controls\":{{\"max_iterations\":{},\"temperature_tolerance_k\":{},\"heat_tolerance_w\":{},\"relative_heat_tolerance\":{},\"relaxation\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
             rows.join(","),
+            self.radiation_thermal_responses.unwrap_or(report.iterations),
             report.iterations,
             report.solid_iterations,
             report.krylov_iterations,
@@ -598,6 +612,7 @@ pub(super) fn solve(
             radiation: None,
             enclosure: None,
             pointwise: None,
+            radiation_thermal_responses: None,
             combined_boundary: None,
         })
     }
