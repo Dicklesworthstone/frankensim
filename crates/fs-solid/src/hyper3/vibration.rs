@@ -23,6 +23,9 @@ use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_modal::{ModalError, ModePair, eigh_gen_dense};
 use fs_sparse::Csr;
 
+/// Sparse, inertia-certified signed windows on the original loaded pencil.
+pub mod windows;
+
 /// Hard bound on the existing non-interruptible dense eigensolver leaf.
 pub const MAX_DENSE_FREE_DOFS: usize = 128;
 

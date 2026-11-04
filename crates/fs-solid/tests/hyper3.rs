@@ -1037,6 +1037,29 @@ fn vibration_close(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+fn vibration_window_plan(windows: Vec<(f64, f64)>) -> fs_modal::WindowPlan {
+    fs_modal::WindowPlan {
+        windows,
+        threads: 2,
+        maximum_windows: 8,
+        maximum_bytes: 128 * 1024 * 1024,
+        maximum_relative_halfwidth: 1e-8,
+        coordinates: None,
+    }
+}
+
+fn vibration_slice_options() -> fs_modal::SliceOptions {
+    fs_modal::SliceOptions {
+        max_lanczos: 256,
+        ritz_tol: 1e-12,
+        ldlt: fs_sparse::LdltOptions {
+            max_factor_bytes: Some(16 * 1024 * 1024),
+            ..fs_sparse::LdltOptions::default()
+        },
+        ..fs_modal::SliceOptions::default()
+    }
+}
+
 #[test]
 fn g1_finite_strain_vibration_matches_loaded_neo_hookean_tangent() {
     let (mu, lame, rho, length) = (2e5, 8e5, 1100.0, 0.02);
@@ -1147,6 +1170,40 @@ fn g0_source_bound_vibration_retains_native_equilibrium_and_complete_pencil() {
                 assert_eq!(
                     spectrum.mass_kg()[i * n + j].to_bits(),
                     mass.get(row, col).to_bits()
+                );
+            }
+        }
+        let plan = vibration_window_plan(vec![(
+            0.5 * spectrum.modes()[0].lambda,
+            1.5 * spectrum.modes()[n - 1].lambda,
+        )]);
+        let sparse = p
+            .solve_vibration_windows(&density, &plan, &vibration_slice_options(), cx)
+            .unwrap();
+        assert_eq!(sparse.equilibrium(), spectrum.equilibrium());
+        assert_eq!(sparse.free_dofs(), spectrum.free_dofs());
+        assert_eq!(sparse.reference_density_kg_m3(), density);
+        let HyperelasticLawField::PerElement(retained) = sparse.problem().material else {
+            panic!("sparse spectrum replaced the original source field");
+        };
+        assert!(core::ptr::eq(retained.as_ptr(), laws.as_ptr()));
+        assert_eq!(sparse.spectrum().reports[0].expected, n);
+        for (a, b) in sparse.spectrum().reports[0]
+            .modes
+            .iter()
+            .zip(spectrum.modes())
+        {
+            vibration_close(a.lambda, b.lambda, 2e-9);
+        }
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(
+                    sparse.stiffness_n_m().get(i, j).to_bits(),
+                    spectrum.stiffness_n_m()[i * n + j].to_bits()
+                );
+                assert_eq!(
+                    sparse.mass_kg().get(i, j).to_bits(),
+                    spectrum.mass_kg()[i * n + j].to_bits()
                 );
             }
         }
@@ -1269,6 +1326,19 @@ fn g0_finite_strain_vibration_retains_unstable_and_rigid_modes() {
         assert!(expected < 0.0);
         vibration_close(spectrum.modes()[0].lambda, expected, 2e-12);
         assert!(spectrum.modes()[0].interval.1 < 0.0);
+        let plan = vibration_window_plan(vec![(1.6 * expected, 0.5 * expected), (1.0, 2.0)]);
+        let sparse = p
+            .solve_vibration_windows_from(&initial, &[1.0], &plan, &vibration_slice_options(), cx)
+            .unwrap();
+        let reports = &sparse.spectrum().reports;
+        assert_eq!(reports[0].expected, 1);
+        vibration_close(reports[0].modes[0].lambda, expected, 2e-12);
+        assert!(reports[0].modes[0].interval.1 < 0.0);
+        // The positive window is empty, but its endpoint inertia retains the
+        // excluded unstable mode. A selected positive band is not stability.
+        assert_eq!(reports[1].expected, 0);
+        assert_eq!(reports[1].below_low, 1);
+        assert_eq!(reports[1].below_high, 1);
         let free = problem(&nodes, &tets, &material, &[], &[], 1)
             .solve_vibration(&[1.0], vibration_settings(), cx)
             .unwrap();
@@ -1323,6 +1393,21 @@ fn g0_finite_strain_vibration_preserves_budgets_mass_domains_and_cancellation() 
             large.solve_vibration(&vec![1.0; large_tets.len()], vibration_settings(), cx),
             Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
         ));
+        let mut plan = vibration_window_plan(vec![(1.0, 100.0)]);
+        plan.maximum_bytes = 1;
+        assert!(matches!(
+            p.solve_vibration_windows(&[1.0], &plan, &vibration_slice_options(), cx),
+            Err(VibrationError::Modal(
+                fs_modal::ModalError::MemoryBudget { .. }
+            ))
+        ));
+        let plan = vibration_window_plan(vec![]);
+        assert!(matches!(
+            p.solve_vibration_windows(&[1.0], &plan, &vibration_slice_options(), cx),
+            Err(VibrationError::Modal(
+                fs_modal::ModalError::WindowPlan { .. }
+            ))
+        ));
     });
     let gate = CancelGate::new();
     gate.request();
@@ -1341,6 +1426,15 @@ fn g0_finite_strain_vibration_preserves_budgets_mass_domains_and_cancellation() 
         );
         assert!(matches!(
             p.solve_vibration(&[1.0], vibration_settings(), &cx),
+            Err(VibrationError::Solid(HyperTetError::Cancelled))
+        ));
+        assert!(matches!(
+            p.solve_vibration_windows(
+                &[1.0],
+                &vibration_window_plan(vec![(1.0, 100.0)]),
+                &vibration_slice_options(),
+                &cx
+            ),
             Err(VibrationError::Solid(HyperTetError::Cancelled))
         ));
     });
@@ -1426,6 +1520,39 @@ fn g1_closed_pressure_vibration_matches_hydrostatic_and_deviatoric_modes() {
                     );
                 }
             }
+            if stretch == 0.9 {
+                let plan = vibration_window_plan(vec![(0.5 * expected[0], 1.5 * expected[2])]);
+                let sparse = p
+                    .solve_vibration_windows_with_pressure(
+                        &surface,
+                        pressure,
+                        &[rho],
+                        &plan,
+                        &vibration_slice_options(),
+                        cx,
+                    )
+                    .unwrap();
+                assert_eq!(sparse.equilibrium(), spectrum.equilibrium());
+                let (retained_surface, retained_pressure) = sparse.held_pressure().unwrap();
+                assert!(core::ptr::eq(retained_surface, &surface));
+                assert_eq!(retained_pressure.to_bits(), pressure.to_bits());
+                assert_eq!(sparse.spectrum().reports[0].expected, 3);
+                for (mode, expected) in sparse.spectrum().reports[0].modes.iter().zip(expected) {
+                    vibration_close(mode.lambda, expected, 2e-8);
+                }
+                for i in 0..3 {
+                    for j in 0..3 {
+                        assert_eq!(
+                            sparse.stiffness_n_m().get(i, j).to_bits(),
+                            spectrum.stiffness_n_m()[3 * i + j].to_bits()
+                        );
+                        assert_eq!(
+                            sparse.mass_kg().get(i, j).to_bits(),
+                            spectrum.mass_kg()[3 * i + j].to_bits()
+                        );
+                    }
+                }
+            }
         });
     }
 }
@@ -1473,5 +1600,98 @@ fn g0_closed_pressure_vibration_preserves_zero_load_and_reference_binding() {
                 Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
             ));
         }
+    });
+}
+
+#[test]
+fn g1_sparse_finite_strain_windows_exceed_dense_cap_on_connected_mesh() {
+    use fs_solid::hyper3::vibration::VibrationError;
+    let (nodes, tets) = box_mesh([3, 3, 3], [1.0; 3]);
+    let fixed: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x[0] == 0.0)
+        .flat_map(|(node, _)| (0..3).map(move |axis| (3 * node + axis, 0.0)))
+        .collect();
+    let free: Vec<_> = (0..3 * nodes.len())
+        .filter(|dof| !fixed.iter().any(|(fixed, _)| fixed == dof))
+        .collect();
+    assert_eq!(free.len(), 144);
+    let material = neo_hookean(2.0, 4.0);
+    let initial: Vec<_> = nodes.iter().flat_map(|x| [0.2 * x[0], 0.0, 0.0]).collect();
+    let density = vec![1.0; tets.len()];
+    with_cx(|cx| {
+        // Native equivalent dead forces select the finite homogeneous branch;
+        // solve_from must still recheck this state through the original solver.
+        let forces: Vec<_> = problem(&nodes, &tets, &material, &fixed, &[], 1)
+            .internal_force(&initial, cx)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .collect();
+        let mut p = problem(&nodes, &tets, &material, &fixed, &forces, 1);
+        p.budget.maximum_free_dofs = free.len();
+        let tangent = p.tangent_matrix(&initial, cx).unwrap();
+        let mass = p.reference_mass_matrix(&density, cx).unwrap();
+        // The independently called dense owner is a bounded test oracle only;
+        // production retains CSR storage and uses sparse window slicing.
+        let mut kd = Vec::new();
+        let mut md = Vec::new();
+        for &row in &free {
+            for &col in &free {
+                kd.push(tangent.get(row, col));
+                md.push(mass.get(row, col));
+            }
+        }
+        let truth = fs_modal::eigh_gen_dense(&kd, &md, free.len()).unwrap();
+        assert!(truth[0].interval.0 > 0.0);
+        let cuts: Vec<_> = truth
+            .windows(2)
+            .filter(|pair| pair[1].lambda - pair[0].lambda > 1e-6 * pair[1].lambda)
+            .take(2)
+            .map(|pair| 0.5 * (pair[0].lambda + pair[1].lambda))
+            .collect();
+        assert_eq!(cuts.len(), 2);
+        let mut plan = vibration_window_plan(vec![(0.0, cuts[0]), (cuts[0], cuts[1])]);
+        plan.coordinates = Some(free.iter().map(|&dof| nodes[dof / 3]).collect());
+        let mut options = vibration_slice_options();
+        options.ordering = fs_sparse::DirectOrdering::NestedDissection(fs_sparse::NdOptions {
+            leaf_size: 16,
+            refinement_passes: 4,
+        });
+        let sparse = p
+            .solve_vibration_windows_from(&initial, &density, &plan, &options, cx)
+            .unwrap();
+        assert_eq!(sparse.free_dofs(), free);
+        assert_eq!(sparse.plan().windows, plan.windows);
+        assert_eq!(sparse.options().ordering, options.ordering);
+        let report = sparse.spectrum();
+        assert_eq!(report.receipt.pencil_symbolic_analyses, 1);
+        assert_eq!(report.receipt.endpoint_factorizations, 3);
+        assert_eq!(report.reports[0].below_high, report.reports[1].below_low);
+        for slice in &report.reports {
+            let expected: Vec<_> = truth
+                .iter()
+                .filter(|mode| mode.lambda > slice.window.0 && mode.lambda <= slice.window.1)
+                .collect();
+            assert_eq!(slice.expected, expected.len());
+            assert_eq!(slice.modes.len(), expected.len());
+            for (actual, expected) in slice.modes.iter().zip(expected) {
+                vibration_close(actual.lambda, expected.lambda, 2e-8);
+                assert!(actual.residual / actual.lambda.abs() <= plan.maximum_relative_halfwidth);
+            }
+        }
+        for (i, &row) in free.iter().enumerate() {
+            for (j, &col) in free.iter().enumerate() {
+                assert_eq!(sparse.stiffness_n_m().get(i, j), tangent.get(row, col));
+                assert_eq!(sparse.mass_kg().get(i, j), mass.get(row, col));
+            }
+        }
+        // Removing one DOF of admission is still the original assembly refusal.
+        p.budget.maximum_free_dofs -= 1;
+        assert!(matches!(
+            p.solve_vibration_windows_from(&initial, &density, &plan, &options, cx),
+            Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
+        ));
     });
 }
