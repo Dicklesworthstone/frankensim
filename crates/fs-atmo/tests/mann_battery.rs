@@ -156,6 +156,55 @@ fn hypergeom_cross_path_oracle() {
 }
 
 #[test]
+fn hypergeom_converges_across_the_energy_scale_and_branch_join() {
+    // Independent Euler integral (DLMF 15.6.1, https://dlmf.nist.gov/15.6.E1):
+    // interchange a,b and put t=s^3 to obtain integral_0^1 (1-z*s^3)^(-17/6) ds.
+    // Composite Simpson integrates a smooth positive function without either
+    // production transformation, its series, or its gamma-function constants.
+    let integral = |z: f64| {
+        const BINS: usize = 4096;
+        let mut sum = 1.0 + (1.0 - z).powf(-17.0 / 6.0);
+        for i in 1..BINS {
+            let s = i as f64 / BINS as f64;
+            let weight = if i % 2 == 0 { 2.0 } else { 4.0 };
+            sum += weight * (1.0 - z * s * s * s).powf(-17.0 / 6.0);
+        }
+        sum / (3 * BINS) as f64
+    };
+    for z in [
+        -50.0,
+        -2.001,
+        (-2.0_f64).next_down(),
+        -2.0,
+        (-2.0_f64).next_up(),
+        -1.9,
+        -1.1,
+        -1.02,
+        -1.01,
+        -1.005,
+        -1.001,
+        -1.000_001,
+        (-1.0_f64).next_down(),
+        -1.0,
+        (-1.0_f64).next_up(),
+        -0.5,
+        0.0,
+    ] {
+        let actual = hypergeom_mann(z).unwrap();
+        let expected = integral(z);
+        assert!(
+            (actual - expected).abs() < 2e-12 * expected,
+            "2F1({z}): transformed series {actual} versus Euler integral {expected}"
+        );
+    }
+    for boundary in [-2.0_f64, -1.0] {
+        let left = hypergeom_mann(boundary.next_down()).unwrap();
+        let right = hypergeom_mann(boundary.next_up()).unwrap();
+        assert!((left - right).abs() < 1e-13 * right);
+    }
+}
+
+#[test]
 fn stresses_show_surface_layer_anisotropy_and_negative_uw() {
     let s = stress_integrals(&MANN_TARGET_V1).unwrap();
     let (u2, v2, w2, uw) = (s[0][0], s[1][1], s[2][2], s[0][2]);
@@ -258,7 +307,7 @@ fn determinism_and_golden() {
         fs_blake3::hash_domain("org.frankensim.fs-atmo.v04b1a-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "7f5cbd11e9d3493df8b4cfde0859b2e98ca28c3e8f078bdbc6bcdf0f8e5a2097",
+        digest, "e45155ab38d690c76da04a8265459bd28bdc3e498e8c3e5137bdf3fd204136f1",
         "Mann-tensor golden moved — determinism regression or an \
          intentional target change requiring the golden-bump protocol"
     );

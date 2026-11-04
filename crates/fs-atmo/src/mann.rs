@@ -9,9 +9,9 @@
 //!   E(k)  = α·ε^{2/3}·L^{5/3}·(kL)⁴ / (1 + (kL)²)^{17/6}
 //!   β(k)  = Γ·(kL)^{−2/3} / √(₂F₁(1/3, 17/6; 4/3; −(kL)^{−2}))
 //!   k₀    = (k₁, k₂, k₃ + β k₁),  ζ₁/ζ₂ from the C₁/C₂ algebra.
-//! The hypergeometric is evaluated through the Pfaff transformation
-//! (argument mapped to w = 1/(1+(kL)²) ∈ (0,1); convergent series,
-//! deterministic fixed tolerance + term cap).
+//! The hypergeometric uses Pfaff and inverse-argument transformations,
+//! keeping both series away from their convergence boundaries, with a
+//! deterministic fixed tolerance and term cap.
 
 use crate::Refusal;
 use fs_math::det;
@@ -68,9 +68,10 @@ impl MannParams {
     }
 }
 
-/// ₂F₁(1/3, 17/6; 4/3; z) for z ≤ 0 via Pfaff:
-/// (1−z)^{−1/3}·₂F₁(1/3, −3/2; 4/3; z/(z−1)); the mapped argument lies
-/// in [0, 1) and the series converges (c − a − b' = 5/2 > 0 at w → 1).
+/// ₂F₁(1/3, 17/6; 4/3; z) for z ≤ 0. Pfaff maps z ≥ −2 to
+/// w = z/(z−1) ∈ [0, 2/3]; below −2 the connection formula uses
+/// 1/z ∈ (−1/2, 0). Neither series approaches its convergence boundary.
+/// Transformations: DLMF 15.8.1 and 15.8.2, <https://dlmf.nist.gov/15.8>.
 ///
 /// # Errors
 /// `hypergeom-did-not-converge` (term cap).
@@ -90,16 +91,19 @@ pub fn hypergeom_mann(z: f64) -> Result<f64, Refusal> {
         Err(Refusal {
             code: "hypergeom-did-not-converge",
             message: format!("series argument {x}, {HYPERGEOM_MAX_TERMS} terms"),
-            ranked_repairs: vec!["argument mapping bug — both branches keep |x| <= 0.5".into()],
+            ranked_repairs: vec![
+                "check argument mapping: Pfaff x in [0, 2/3], inverse x in (-1/2, 0)".into(),
+            ],
         })
     };
     let (a, b, c) = (1.0 / 3.0, 17.0 / 6.0, 4.0 / 3.0);
-    if z >= -1.0 {
-        // Pfaff: w = z/(z−1) ∈ [0, 0.5] here — fast.
+    if z >= -2.0 {
+        // Keep Pfaff through z = -2: switching at -1 sent the inverse
+        // series arbitrarily close to -1, refusing valid modes near kL = 1.
         let w = z / (z - 1.0);
         Ok(det::pow(1.0 - z, -1.0 / 3.0) * gauss(a, c - b, c, w)?)
     } else {
-        // z → 1/z connection formula (|1/z| < 1). Constants:
+        // z → 1/z connection formula (|1/z| < 1/2). Constants:
         // C1 = Γ(4/3)Γ(5/2)/(Γ(17/6)Γ(1)), C2 = Γ(4/3)Γ(−5/2)/(Γ(1/3)Γ(−3/2)) = −2/15
         // (cross-verified against direct series at z = −2, −50, −8870).
         const C1: f64 = 0.688_343_942_614_314_09;
