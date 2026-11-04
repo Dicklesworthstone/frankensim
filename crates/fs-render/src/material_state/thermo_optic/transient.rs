@@ -223,6 +223,15 @@ impl<'a> P1ConductionElement<'a> {
         position_m: Point3,
     ) -> Result<TemperatureJet, TransientTemperatureFieldError> {
         let lambda = self.barycentric(position_m)?;
+        self.temperature_jet_at_barycentric(lambda)
+    }
+
+    // Only native barycentric admission supplies these coordinates. Joint
+    // physical fields reuse them without a second element/side decision.
+    fn temperature_jet_at_barycentric(
+        &self,
+        lambda: [f64; 4],
+    ) -> Result<TemperatureJet, TransientTemperatureFieldError> {
         let vertex = lambda.iter().enumerate().find_map(|(index, &value)| {
             (value == 1.0
                 && lambda

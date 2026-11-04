@@ -26,6 +26,9 @@ use crate::material_state::water_refraction::isobaric::{
     IsobaricWaterError, IsobaricWaterField,
 };
 
+/// Joint original P1 pressure and temperature reconstruction, with explicit SI pressure.
+pub mod pressure_temperature;
+
 impl<'a> P1ConductionMesh<'a> {
     /// Propagate the original water binding through this exact thermal snapshot.
     ///

@@ -7333,3 +7333,9 @@ paths, Beer loss, temperature-jump refraction and reverse incidence, TIR and
 equal-index limits, composition through three original elements with nonparallel
 incidence planes, analytic TIR polarization phase, frame covariance and
 source/domain/cancellation refusals.
+
+## Original P1 pressure and temperature as one water-optical source
+
+`thermo_optic::transient::mesh::water::pressure_temperature` supplies an immutable `P1PressureSnapshot` and `P1PressureTemperatureSnapshot` on the original native mesh. Pressure is an independently supplied absolute thermodynamic field: `NodalPressureValues` borrows either dimensioned pressure quantities or explicitly declared Pa values without allocation, conversion or a pressure-as-temperature surrogate. The mesh supplies geometry and original P1 gradients only. The joint snapshot requires the exact same mesh owner and combines the accepted pressure and temperature source identities under its reconstruction identity.
+
+Each joint element uses one original barycentric admission and the same coordinates for both fields, retaining exact vertex values and the separate original buffers. `bind_water` connects the combined identity and source to the existing IF97/IAPWS owner. Both input Hessians are zero inside a P1 element, while the complete optical Hessian retains pressure, temperature and mixed nonlinear responses. Four focused controls cover typed/raw-Pa equivalence, both orientations, liquid/vapor scalar derivative references with nonparallel source gradients, native in-element rays/bundles and source/domain refusals. This source adapter declares original nodal P1 fields; it does not turn cell averages, DG traces or gauge-pressure perturbations into an absolute pressure field or add a fluid-pressure solve.
