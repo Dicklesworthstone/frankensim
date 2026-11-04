@@ -382,6 +382,142 @@ fn g0_normalization_underflow_refuses_to_erase_a_representable_source_bin() {
 }
 
 #[test]
+fn g1_borrowed_peak_bin_retains_phase_and_converts_bin_power_once() {
+    let rows: Vec<[f64; 2]> = (0..64)
+        .map(|j| {
+            let phase = TAU * 3.0 * j as f64 / 32.0;
+            [2.0 * phase.cos(), -3.0 * phase.sin()]
+        })
+        .collect();
+    let cfg = WelchConfig {
+        hop_samples: 32,
+        ..config(WelchWindow::Rectangular, WelchDetrend::None)
+    };
+    let spectrum =
+        WelchCrossSpectrum::estimate_interleaved(&rows, 0.003, cfg, budget(), || false).unwrap();
+    let frequency = spectrum.frequency_hz(3).unwrap();
+    let view = spectrum.peak_bin_hz(3, frequency).unwrap();
+    assert_eq!(view.channel_count(), 2);
+    assert_eq!(view.segment_count(), 2);
+    assert_eq!(view.frequency_hz(), frequency);
+    let original = spectrum.factors(3).unwrap().next().unwrap();
+    assert!(core::ptr::eq(
+        view.factors().next().unwrap().as_ptr(),
+        original.as_ptr()
+    ));
+    let mut powers = [0.0; 2];
+    for factor in view.factors() {
+        let first = view.peak_factor(factor[0]).unwrap();
+        let second = view.peak_factor(factor[1]).unwrap();
+        close(first.re, core::f64::consts::SQRT_2, 2.0);
+        close(first.im, 0.0, 2.0);
+        close(second.re, 0.0, 3.0);
+        close(second.im, -3.0 / core::f64::consts::SQRT_2, 3.0);
+        powers[0] += first.norm_sq() * 0.5;
+        powers[1] += second.norm_sq() * 0.5;
+    }
+    close(powers[0], 2.0, 2.0);
+    close(powers[1], 4.5, 4.5);
+}
+
+#[test]
+fn g0_peak_bin_admission_respects_exact_hz_and_original_angular_clock() {
+    let spectrum = WelchCrossSpectrum::estimate(
+        &[&[0.0; 32]],
+        0.003,
+        config(WelchWindow::Rectangular, WelchDetrend::None),
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let frequency = spectrum.frequency_hz(3).unwrap();
+    let omega = TAU * frequency;
+    // This actual bin loses one ULP if its authored angular clock is divided
+    // back to Hz. Admission must compare clocks in the observer's units.
+    assert_ne!((omega / TAU).to_bits(), frequency.to_bits());
+    assert!(spectrum.peak_bin_rad_s(3, omega).is_ok());
+    assert!(spectrum.peak_bin_hz(3, frequency).is_ok());
+    for bin in [0, 16, 17, usize::MAX] {
+        assert!(spectrum.peak_bin_hz(bin, frequency).is_err());
+        assert!(spectrum.peak_bin_rad_s(bin, omega).is_err());
+    }
+    for bad in [
+        0.0,
+        -frequency,
+        f64::NAN,
+        f64::INFINITY,
+        f64::from_bits(frequency.to_bits() + 1),
+    ] {
+        assert!(spectrum.peak_bin_hz(3, bad).is_err());
+    }
+    for bad in [
+        0.0,
+        -omega,
+        f64::NAN,
+        f64::INFINITY,
+        f64::from_bits(omega.to_bits() + 1),
+    ] {
+        assert!(spectrum.peak_bin_rad_s(3, bad).is_err());
+    }
+}
+
+#[test]
+fn g0_peak_conversion_preserves_representable_extremes_and_refuses_range_loss() {
+    let cfg = WelchConfig {
+        segment_samples: 4,
+        hop_samples: 4,
+        window: WelchWindow::Rectangular,
+        detrend: WelchDetrend::None,
+    };
+    let zero_record = [0.0; 4];
+    let at_clock =
+        |dt| WelchCrossSpectrum::estimate(&[&zero_record], dt, cfg, budget(), || false).unwrap();
+    let high = at_clock(2.0_f64.powi(-1001));
+    let high = high.peak_bin_hz(1, high.frequency_hz(1).unwrap()).unwrap();
+    let low = at_clock(2.0_f64.powi(999));
+    let low = low.peak_bin_hz(1, low.frequency_hz(1).unwrap()).unwrap();
+    let small = 2.0_f64.powi(-600);
+    let large = 2.0_f64.powi(600);
+    close(
+        high.peak_factor(C64::new(small, -small)).unwrap().re,
+        2.0_f64.powi(-100),
+        2.0_f64.powi(-100),
+    );
+    close(
+        low.peak_factor(C64::new(large, -large)).unwrap().im,
+        -2.0_f64.powi(100),
+        2.0_f64.powi(100),
+    );
+    assert_eq!(
+        low.peak_factor(C64::new(2.0_f64.powi(-570), 0.0))
+            .unwrap()
+            .re,
+        2.0_f64.powi(-1070)
+    );
+    assert!(matches!(
+        high.peak_factor(C64::new(large, 0.0)),
+        Err(WelchError::Unrepresentable)
+    ));
+    assert!(matches!(
+        low.peak_factor(C64::new(0.0, small)),
+        Err(WelchError::Unrepresentable)
+    ));
+    assert_eq!(low.peak_factor(C64::default()).unwrap(), C64::default());
+    assert!(matches!(
+        high.peak_factor(C64::new(f64::NAN, 0.0)),
+        Err(WelchError::NonFinite)
+    ));
+    assert!(matches!(
+        low.peak_factor(C64::new(0.0, f64::INFINITY)),
+        Err(WelchError::NonFinite)
+    ));
+    let angular_overflow = at_clock(6.0e-309);
+    let frequency = angular_overflow.frequency_hz(1).unwrap();
+    assert!(angular_overflow.peak_bin_hz(1, frequency).is_ok());
+    assert!(angular_overflow.peak_bin_rad_s(1, TAU * frequency).is_err());
+}
+
+#[test]
 fn g1_detrending_preserves_representable_fluctuations_beside_dc_offsets() {
     let cfg = WelchConfig {
         segment_samples: 4,

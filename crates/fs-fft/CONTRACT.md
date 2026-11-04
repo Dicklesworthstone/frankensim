@@ -805,3 +805,22 @@ complex phase, rectangular/Hann windows, detrending, Parseval with endpoint
 weights, coherent and partially correlated channels, layout equivalence,
 numerical range, resource refusal, cancellation and replay. This scoped
 execution is not the full workspace or distributed repository gate.
+
+### Shared physical-bin admission for propagation owners
+
+`peak_bin_hz` and `peak_bin_rad_s` borrow a `WelchPeakBin` without copying its
+retained factors. They admit only positive interior bins at exactly the
+prepared physical frequency. The angular-frequency entry point compares
+`TAU*bin_hz` directly, avoiding a lossy inverse conversion back to hertz.
+`peak_factor` applies `sqrt(2)*sqrt(df)` once and refuses nonfinite, overflowing
+or silently underflowing physical source components. The resulting peak
+factors feed the original half-weighted harmonic statistics. Raw borrowed
+factors remain explicitly in source units per square root hertz.
+
+Physical consumers still own source identity/order, units, material, work and
+cancellation admission; this view invents none of those. The original 2D
+Curle consumer now uses this shared conversion, which also supports the 3D
+and BEM propagation owners. Eleven native estimator tests and the four
+original physical 2D consumer tests pass after rebuilding/relinking; new
+coverage includes exact angular-frequency matching and representable
+normal/subnormal conversion alongside explicit range refusals.

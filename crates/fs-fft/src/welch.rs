@@ -95,6 +95,63 @@ pub struct WelchCrossSpectrum {
     factors: Vec<C64>,
 }
 
+/// Borrowed interior bin admitted at a physical observer's exact frequency.
+///
+/// The factors remain in input-units / sqrt(Hz). Apply [`Self::peak_factor`]
+/// once to each coefficient before a peak-phasor observer: its quadratic
+/// quantities then represent this bin's power, including the observer's 1/2
+/// time average. This is not a coherent-gain tone fit or a cross-frequency
+/// covariance. The caller still binds channel order, units and source identity.
+#[derive(Clone, Copy, Debug)]
+pub struct WelchPeakBin<'a> {
+    factors: &'a [C64],
+    channels: usize,
+    segments: usize,
+    frequency_hz: f64,
+    peak_scale: f64,
+}
+
+impl<'a> WelchPeakBin<'a> {
+    pub const fn channel_count(self) -> usize {
+        self.channels
+    }
+    pub const fn segment_count(self) -> usize {
+        self.segments
+    }
+    pub const fn frequency_hz(self) -> f64 {
+        self.frequency_hz
+    }
+
+    /// Borrow the original **unscaled** input-units / sqrt(Hz) coefficients.
+    /// Each slice is one segment's factor, in the permanent channel order.
+    /// No coefficient is copied, allocated, phase-rotated or normalized here.
+    pub fn factors(self) -> impl ExactSizeIterator<Item = &'a [C64]> {
+        self.factors.chunks_exact(self.channels)
+    }
+
+    /// Convert one raw coefficient to peak-equivalent units for this bin.
+    /// Multiplication by sqrt(2*df) supplies bin width and the peak convention
+    /// exactly once. A nonzero component that rounds to zero, overflow, and
+    /// nonfinite input are refused; genuine zero components remain zero.
+    pub fn peak_factor(self, coefficient: C64) -> Result<C64, WelchError> {
+        let convert = |value: f64| {
+            if !value.is_finite() {
+                return Err(WelchError::NonFinite);
+            }
+            let result = Dd::from_f64(value) * Dd::from_f64(self.peak_scale);
+            if !result.hi.is_finite()
+                || !result.lo.is_finite()
+                || (value != 0.0 && result.to_f64() == 0.0)
+            {
+                Err(WelchError::Unrepresentable)
+            } else {
+                Ok(result.to_f64())
+            }
+        };
+        Ok(C64::new(convert(coefficient.re)?, convert(coefficient.im)?))
+    }
+}
+
 impl WelchCrossSpectrum {
     /// Estimate synchronized real channels in their original physical units.
     /// Channels must be nonempty and have equal lengths. No interpolation,
@@ -349,6 +406,59 @@ impl WelchCrossSpectrum {
         self.check_bin(bin)?;
         let count = self.channels * self.segments;
         Ok(self.factors[bin * count..(bin + 1) * count].chunks_exact(self.channels))
+    }
+
+    /// Admit an interior bin at an observer's original frequency in Hz.
+    /// Exact equality is required; no interpolation or frequency snapping is
+    /// inferred. DC and Nyquist do not represent the positive harmonic used by
+    /// peak-phasor propagation and are refused before any factor is exposed.
+    pub fn peak_bin_hz(
+        &self,
+        bin: usize,
+        expected_frequency_hz: f64,
+    ) -> Result<WelchPeakBin<'_>, WelchError> {
+        let view = self.interior_peak_bin(bin)?;
+        if view.frequency_hz.to_bits() != expected_frequency_hz.to_bits() {
+            return Err(WelchError::Invalid(
+                "observer frequency must exactly match the Welch bin in Hz",
+            ));
+        }
+        Ok(view)
+    }
+
+    /// Admit an interior bin at an observer's original angular frequency.
+    /// Match exactly `TAU * bin_frequency_hz`, without dividing the observer's
+    /// angular frequency back to Hz: that round trip can move a valid bin by
+    /// one ULP. An unrepresentable angular frequency is refused.
+    pub fn peak_bin_rad_s(
+        &self,
+        bin: usize,
+        expected_angular_frequency_rad_s: f64,
+    ) -> Result<WelchPeakBin<'_>, WelchError> {
+        let view = self.interior_peak_bin(bin)?;
+        let omega = core::f64::consts::TAU * view.frequency_hz;
+        if !omega.is_finite() || omega.to_bits() != expected_angular_frequency_rad_s.to_bits() {
+            return Err(WelchError::Invalid(
+                "observer angular frequency must exactly match TAU times the Welch bin",
+            ));
+        }
+        Ok(view)
+    }
+
+    fn interior_peak_bin(&self, bin: usize) -> Result<WelchPeakBin<'_>, WelchError> {
+        if bin == 0 || bin >= self.bin_count() - 1 {
+            return Err(WelchError::Invalid(
+                "peak-phasor observation requires an interior positive Welch bin",
+            ));
+        }
+        let count = self.channels * self.segments;
+        Ok(WelchPeakBin {
+            factors: &self.factors[bin * count..(bin + 1) * count],
+            channels: self.channels,
+            segments: self.segments,
+            frequency_hz: bin as f64 * self.bin_width_hz,
+            peak_scale: core::f64::consts::SQRT_2 * det::sqrt(self.bin_width_hz),
+        })
     }
 
     /// One-sided `S_ab` per Hz; the diagonal is channel power density.

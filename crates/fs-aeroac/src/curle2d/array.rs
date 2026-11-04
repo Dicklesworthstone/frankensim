@@ -331,40 +331,35 @@ impl PreparedDipoleObserver {
             }
         };
         poll(&mut cancelled)?;
-        if bin == 0 || bin >= spectrum.bin_count() - 1 {
-            return Err(invalid("radiation requires an interior positive Welch bin"));
-        }
-        let frequency = spectrum
-            .frequency_hz(bin)
-            .map_err(|_| invalid("recorded dipole spectrum bin"))?;
-        if frequency.to_bits() != self.frequency_hz.to_bits()
-            || self.source_count().checked_mul(2) != Some(spectrum.channel_count())
-        {
+        let measured = spectrum
+            .peak_bin_hz(bin, self.frequency_hz)
+            .map_err(|_| invalid("recorded dipole spectrum bin/frequency"))?;
+        if self.source_count().checked_mul(2) != Some(measured.channel_count()) {
             return Err(invalid(
-                "Welch source channels/frequency must match the prepared observer",
+                "Welch source channels must match the prepared observer",
             ));
         }
-        if spectrum.segment_count() > budget.max_modes
+        if measured.segment_count() > budget.max_modes
             || self
                 .source_count()
-                .checked_mul(spectrum.segment_count())
+                .checked_mul(measured.segment_count())
                 .is_none_or(|work| work > budget.max_source_mode_pairs)
         {
             return Err(invalid("recorded dipole coherence exceeds the work budget"));
         }
-        let peak_scale = core::f64::consts::SQRT_2 * det::sqrt(spectrum.bin_width_hz());
         let mut statistics = StatisticsSum::default();
-        for factor in spectrum
-            .factors(bin)
-            .map_err(|_| invalid("recorded dipole spectrum bin"))?
-        {
+        for factor in measured.factors() {
             poll(&mut cancelled)?;
             let mut sums = [ComplexSum::default(); 3];
             for (transfer, force) in self.transfers.iter().zip(factor.chunks_exact(2)) {
                 poll(&mut cancelled)?;
-                let forces = core::array::from_fn(|axis| {
-                    C64::new(force[axis].re, force[axis].im).scale(peak_scale)
-                });
+                let mut forces = [C64::ZERO; 2];
+                for (out, &coefficient) in forces.iter_mut().zip(force) {
+                    let value = measured
+                        .peak_factor(coefficient)
+                        .map_err(|_| invalid("recorded dipole peak factor is unrepresentable"))?;
+                    *out = C64::new(value.re, value.im);
+                }
                 transfer.accumulate(forces, &mut sums)?;
             }
             statistics.add(sums.map(ComplexSum::value))?;
