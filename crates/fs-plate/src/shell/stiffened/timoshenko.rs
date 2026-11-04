@@ -64,7 +64,59 @@ pub fn segment_matrices_with_mass(
     kind: BeamKind,
     mass: BeamMass,
 ) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    segment_matrices_with_axial_force(p0_m, p1_m, section_z, section, kind, mass, 0.0)
+}
+
+/// Tangent stiffness and consistent inertia about a straight, axially loaded segment.
+/// `axial_force_n` is the equilibrated section force [N]: positive in tension,
+/// negative in compression. It adds the initial-stress potential
+/// `N/2 * integral(v'^2 + w'^2) dx` on the SAME transverse trial fields as the
+/// elastic element, including Timoshenko shear deformation. It is not an end
+/// force or an additional elastic spring. Mass and the unloaded material law
+/// are unchanged; zero force reproduces [`segment_matrices`] bit for bit.
+///
+/// This is the conservative total-slope beam-column linearization (Cheng and
+/// Pantelides, 1988, doi:10.1061/(ASCE)0733-9445(1988)114:5(1152)). The caller
+/// supplies the already balanced prestress and its supports. Compression may
+/// produce a singular or indefinite tangent: it is retained for stability
+/// analysis, never clipped. No prestress equilibrium, follower force,
+/// finite-rotation dynamics, torsional buckling or post-buckling is inferred.
+///
+/// # Errors
+/// The refusals of [`segment_matrices`], nonfinite axial force or overflow.
+pub fn prestressed_segment_matrices(
+    p0_m: [f64; 3],
+    p1_m: [f64; 3],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    axial_force_n: f64,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    segment_matrices_with_axial_force(
+        p0_m,
+        p1_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        axial_force_n,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn segment_matrices_with_axial_force(
+    p0_m: [f64; 3],
+    p1_m: [f64; 3],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    mass: BeamMass,
+    axial_force_n: f64,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
     section.validate()?;
+    if !axial_force_n.is_finite() {
+        return Err(bad("beam axial force must be finite, positive in tension"));
+    }
     if let BeamKind::Timoshenko(shear) = kind {
         if [shear.y_m2, shear.z_m2]
             .iter()
@@ -88,7 +140,10 @@ pub fn segment_matrices_with_mass(
     let projection = dot(hint, x);
     let z = unit(std::array::from_fn(|i| hint[i] - projection * x[i]))?;
     let axes = [x, cross(z, x), z];
-    let (k, m) = local_matrices(section, kind, length, mass)?;
+    let (mut k, m) = local_matrices(section, kind, length, mass)?;
+    if axial_force_n != 0.0 {
+        add_initial_stress(&mut k, section, kind, length, axial_force_n)?;
+    }
     let mut transform = [0.0; 144];
     for node in 0..2 {
         let base = 6 * node;
@@ -110,6 +165,60 @@ pub fn segment_matrices_with_mass(
         return Err(bad("beam stiffness/inertia overflow"));
     }
     Ok((k, m))
+}
+
+// Exact integration of N B_slope^T B_slope. The displacement derivative is
+// quadratic, so three Gauss points integrate the quartic product exactly.
+// Use the displacement slope, not the independent section rotation: the two
+// differ when shear is finite. Mirrored addends keep the tangent symmetric.
+fn add_initial_stress(
+    k: &mut [f64; 144],
+    s: BeamSection,
+    kind: BeamKind,
+    l: f64,
+    force: f64,
+) -> Result<(), PlateError> {
+    const GAUSS: [(f64, f64); 3] = [
+        (0.1127016653792583, 5.0 / 18.0),
+        (0.5, 4.0 / 9.0),
+        (0.8872983346207417, 5.0 / 18.0),
+    ];
+    let shear = match kind {
+        BeamKind::EulerBernoulli => [None, None],
+        BeamKind::Timoshenko(a) => [Some(a.y_m2), Some(a.z_m2)],
+    };
+    for (slots, signs, inertia, area) in [
+        ([1, 5, 7, 11], [1.0; 4], s.iz_m4, shear[0]),
+        ([2, 4, 8, 10], [1.0, -1.0, 1.0, -1.0], s.iy_m4, shear[1]),
+    ] {
+        let phi = area.map_or(0.0, |a| {
+            12.0 * s.young_pa * inertia / (s.shear_pa * a * l * l)
+        });
+        if !phi.is_finite() {
+            return Err(bad("unresolved beam shear-to-bending ratio"));
+        }
+        let r = 1.0 / (1.0 + phi);
+        for (t, weight) in GAUSS {
+            let derivative = 6.0 * r * t * (1.0 - t) + phi * r;
+            let slope = [
+                -derivative / l,
+                1.0 - t - 0.5 * derivative,
+                derivative / l,
+                t - 0.5 * derivative,
+            ];
+            for i in 0..4 {
+                for j in i..4 {
+                    let value = force * l * weight * slope[i] * slope[j] * signs[i] * signs[j];
+                    let (row, col) = (slots[i], slots[j]);
+                    k[12 * row + col] += value;
+                    if row != col {
+                        k[12 * col + row] += value;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Local (chord axes) stiffness and inertia of a segment of length `l`.
@@ -185,15 +294,67 @@ pub fn assemble_beam_chain_with_mass(
     kind: BeamKind,
     mass: BeamMass,
 ) -> Result<(Csr, Csr), PlateError> {
+    assemble_beam_chain_impl(nodes_m, section_z, section, kind, mass, None)
+}
+
+/// Assemble the original beam chain with a signed equilibrated axial force [N]
+/// for every segment. See [`prestressed_segment_matrices`] for the energy and
+/// applicability boundary. Segment forces may differ when balanced by supplied
+/// nodal loads; this function does not solve or infer that balance.
+///
+/// The unchanged full-coordinate pencil can enter the existing supports,
+/// modal, stability and shell-mortar owners. Zero forces retain the original
+/// chain bits, and the consistent mass is independent of all axial forces.
+///
+/// # Errors
+/// The refusals of [`assemble_beam_chain`], a force count other than
+/// `nodes_m.len() - 1`, nonfinite force or tangent overflow.
+pub fn assemble_prestressed_beam_chain(
+    nodes_m: &[[f64; 3]],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    axial_forces_n: &[f64],
+) -> Result<(Csr, Csr), PlateError> {
+    assemble_beam_chain_impl(
+        nodes_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        Some(axial_forces_n),
+    )
+}
+
+fn assemble_beam_chain_impl(
+    nodes_m: &[[f64; 3]],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    mass: BeamMass,
+    axial_forces_n: Option<&[f64]>,
+) -> Result<(Csr, Csr), PlateError> {
     if nodes_m.len() < 2 {
         return Err(bad("a beam chain needs at least two nodes"));
+    }
+    if let Some(forces) = axial_forces_n {
+        if forces.len() != nodes_m.len() - 1 || forces.iter().any(|f| !f.is_finite()) {
+            return Err(bad("beam chain needs one finite axial force per segment"));
+        }
     }
     let n = 6 * nodes_m.len();
     let mut k = Coo::new(n, n);
     let mut m = Coo::new(n, n);
     for (e, pair) in nodes_m.windows(2).enumerate() {
-        let (ke, me) =
-            segment_matrices_with_mass(pair[0], pair[1], section_z, section, kind, mass)?;
+        let (ke, me) = segment_matrices_with_axial_force(
+            pair[0],
+            pair[1],
+            section_z,
+            section,
+            kind,
+            mass,
+            axial_forces_n.map_or(0.0, |forces| forces[e]),
+        )?;
         for i in 0..12 {
             for j in 0..12 {
                 let (row, col) = (6 * e + i, 6 * e + j);
@@ -206,8 +367,23 @@ pub fn assemble_beam_chain_with_mass(
             }
         }
     }
-    Ok((k.assemble(), m.assemble()))
+    let k = k.assemble();
+    let m = m.assemble();
+    if (0..n).any(|row| {
+        k.row(row)
+            .1
+            .iter()
+            .chain(m.row(row).1)
+            .any(|v| !v.is_finite())
+    }) {
+        return Err(bad("beam chain stiffness/inertia accumulation overflow"));
+    }
+    Ok((k, m))
 }
+
+#[cfg(test)]
+#[path = "timoshenko/prestress_tests.rs"]
+mod prestress_tests;
 
 #[cfg(test)]
 mod tests {

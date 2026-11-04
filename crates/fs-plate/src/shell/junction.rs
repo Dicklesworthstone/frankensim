@@ -21,7 +21,9 @@
 //! energy, and zero net virtual interface power $P_m + P_s = 0$.
 
 use super::stiffened::BeamSection;
-use super::stiffened::timoshenko::{BeamKind, assemble_beam_chain};
+use super::stiffened::timoshenko::{
+    BeamKind, assemble_beam_chain, assemble_prestressed_beam_chain,
+};
 use super::{ShellMesh, ShellModel, dot, sub};
 use crate::PlateError;
 use fs_math::det;
@@ -2574,10 +2576,69 @@ pub fn tie_beams_to_shells(
     components: &[ShellComponent<'_>],
     beams: &[BeamOnShell<'_>],
     budget: TieBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BeamTiedShellModel, PlateError> {
+    tie_beams_to_shells_impl(tied, components, beams, None, budget, cancelled)
+}
+
+/// Attach the original beam chains with their signed, equilibrated segment
+/// forces [N]. `axial_forces_n[b][e]` is positive in tension and negative in
+/// compression for segment `e` of beam `b`; every beam and segment must be
+/// present. The same mortar/offset map transfers elastic AND geometric
+/// stiffness, including all force/moment cross terms. Original shell stiffness,
+/// supports, ties and consistent physical mass are retained.
+///
+/// This is a small-vibration/stability pencil about caller-supplied balanced
+/// prestress. It does not establish that equilibrium, update shell prestress,
+/// or add the corresponding dead loads. The beam contribution has the
+/// total-slope energy of
+/// [`super::stiffened::timoshenko::prestressed_segment_matrices`]. Negative
+/// tangent directions remain available to the existing stability owner; they
+/// are not regularized into a positive vibration model. A zero-force field is
+/// bitwise identical to [`tie_beams_to_shells`].
+///
+/// # Errors
+/// All original beam-tie refusals, missing/nonfinite segment forces, or overflow.
+pub fn tie_prestressed_beams_to_shells(
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    beams: &[BeamOnShell<'_>],
+    axial_forces_n: &[&[f64]],
+    budget: TieBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BeamTiedShellModel, PlateError> {
+    tie_beams_to_shells_impl(
+        tied,
+        components,
+        beams,
+        Some(axial_forces_n),
+        budget,
+        cancelled,
+    )
+}
+
+fn tie_beams_to_shells_impl(
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    beams: &[BeamOnShell<'_>],
+    axial_forces_n: Option<&[&[f64]]>,
+    budget: TieBudget,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<BeamTiedShellModel, PlateError> {
     if cancelled() {
         return Err(PlateError::Cancelled);
+    }
+    if let Some(forces) = axial_forces_n {
+        if forces.len() != beams.len()
+            || forces.iter().zip(beams).any(|(f, beam)| {
+                f.len() != beam.beam_nodes_m.len().saturating_sub(1)
+                    || f.iter().any(|n| !n.is_finite())
+            })
+        {
+            return Err(PlateError::BadConstraint {
+                what: "prestressed beam ties require one finite force per segment of every beam",
+            });
+        }
     }
     if !budget.gap_tolerance_m.is_finite()
         || budget.gap_tolerance_m < 0.0
@@ -2624,7 +2685,7 @@ pub fn tie_beams_to_shells(
     let mut max_gap_m = 0.0_f64;
     let mut max_angle_rad = 0.0_f64;
     let mut beam_rows = Vec::with_capacity(beams.len());
-    for beam in beams {
+    for (beam_index, beam) in beams.iter().enumerate() {
         if cancelled() {
             return Err(PlateError::Cancelled);
         }
@@ -2730,8 +2791,17 @@ pub fn tie_beams_to_shells(
                 rows.push(acc.into_iter().filter(|&(_, w)| w != 0.0).collect());
             }
         }
-        let (k_b, m_b) =
-            assemble_beam_chain(beam.beam_nodes_m, beam.section_z, beam.section, beam.kind)?;
+        let (k_b, m_b) = if let Some(forces) = axial_forces_n {
+            assemble_prestressed_beam_chain(
+                beam.beam_nodes_m,
+                beam.section_z,
+                beam.section,
+                beam.kind,
+                forces[beam_index],
+            )?
+        } else {
+            assemble_beam_chain(beam.beam_nodes_m, beam.section_z, beam.section, beam.kind)?
+        };
         accumulate_congruence(&k_b, &rows, &mut k_coo, &mut cancelled)?;
         accumulate_congruence(&m_b, &rows, &mut m_coo, &mut cancelled)?;
         beam_rows.push(rows);
@@ -3991,3 +4061,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "junction_beam_prestress_tests.rs"]
+mod beam_prestress_tests;

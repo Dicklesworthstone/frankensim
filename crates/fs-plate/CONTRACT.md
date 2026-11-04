@@ -620,6 +620,44 @@ spatial rigid motion with eccentric bonds, the shear-rigid limit, the
 continuum Timoshenko spectrum, bonded/tied congruence, and the unchanged
 legacy piano golden.
 
+### Signed axial prestress in beams and shell ties
+
+`timoshenko::{prestressed_segment_matrices, assemble_prestressed_beam_chain}`
+accept the caller's equilibrated axial section forces in newtons, positive in
+tension and negative in compression. The original elastic element gains the
+conservative total-slope initial-stress potential
+`N/2 * integral(v'^2 + w'^2) dx`. Three Gauss points integrate its quartic
+strain products exactly on the SAME Euler--Bernoulli or Timoshenko displacement
+fields. The independent section rotation is not substituted for displacement
+slope. Both bending planes and their signed rotation conventions are retained.
+This is the total-slope beam-column model of Cheng and Pantelides (1988),
+doi:10.1061/(ASCE)0733-9445(1988)114:5(1152).
+
+`junction::tie_prestressed_beams_to_shells` transfers this complete tangent by
+the original nonmatching mortar and eccentric rigid-arm map, including
+translation/rotation cross terms and supported/slave coordinates. Every beam
+and segment needs an explicit finite force. Mass, shell stiffness and existing
+ties are unchanged. Zero-force fields reproduce the original segment, chain
+and beam-tie pencils bit for bit. Compression-induced indefinite tangents are
+retained for the existing stability owner, never clipped or regularized.
+Nonfinite element or accumulated chain/tie entries refuse transactionally;
+the tie retains its original work budgets and cancellation boundaries.
+
+G0/G1/G3 tests cover independent continuum polynomial work, the closed-form
+Euler geometric matrix, rotated two-plane work, zero-force/mass parity, signed
+eccentric mortar virtual work, and finite-input/overflow/cancellation refusals.
+Three mesh rungs bracket the pinned critical load against
+`Pcr = EI*q^2/(1 + EI*q^2/(G*As))` (Euler limit `EI*q^2`), within 3e-5 relative
+on the finest rung. Four rungs check the continuum bending/shear frequency
+Rayleigh quotient with original rotary inertia to 1e-5 relative. The static
+trial fields still require spatial refinement for a loaded dynamic problem.
+
+This extension requires an already balanced, straight-segment reference and
+physical supports. It does not solve prestress equilibrium, infer external
+forces or shell membrane stress, change the nonlinear bonded-beam preload
+model, or claim follower-load, torsional-buckling, finite-rotation or
+post-buckling dynamics. The broader assembled-equilibrium bead remains open.
+
 ## Invariants
 1. Element certificates (tested on an irregular triangle): stiffness
    symmetry; all three rigid-body motions store zero energy to roundoff;
