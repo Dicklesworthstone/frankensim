@@ -1,6 +1,7 @@
 //! Complete sliding-film layer work deposited on the original impact clock.
 //!
-//! The native ShearedFilm reports integral(tau^2/mu) for every retained layer,
+//! Native passive and pressure-fed sliding films report integral(tau^2/mu)
+//! for every retained layer,
 //! including the signed pressure/Couette cross term. Its original pressure,
 //! force, tangent and phase-space stepping remain the mechanical owners.
 //! Finite thermal destinations are explicit; no wall partition, layer mass,
@@ -16,13 +17,15 @@ use super::{
 
 /// Complete finite destinations for one original sliding passage's layers.
 ///
-/// Film indices use `sliding_film_count`, independently of squeeze-film
-/// indices. Each selected channel is routed once; unselected channels remain
+/// Passive routes use `sliding_film_count`; the driven-route argument of
+/// `HeatedImpactSystem::new_with_driven_sliding_losses` instead uses
+/// `driven_sliding_film_count`. These and squeeze-film indices are separate.
+/// Each selected channel is routed once; unselected channels remain
 /// mechanical losses outside this thermal boundary. A uniform channel has
 /// one implicit layer. Explicit profile layers retain lower-to-upper order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlidingFilmLayerHeatRoute {
-    /// Original sliding pressure-island insertion index.
+    /// Original insertion index within the selected passive or driven namespace.
     pub film: usize,
     /// Original channel insertion index inside that sliding island.
     pub channel: usize,
@@ -36,19 +39,44 @@ pub(super) fn compile(
     stores: &[CaloricReservoir<'_>],
     compiled: &[FilmRoute],
 ) -> Result<FilmRoute, ImpactError> {
-    let film = mechanics
-        .sliding_film(route.film)
-        .ok_or_else(|| invalid("sliding heat names an absent sliding pressure island"))?;
-    let range = film
-        .channel_layer_range(route.channel)
-        .ok_or_else(|| invalid("sliding heat names an absent original passage"))?;
+    compile_kind(mechanics, route, stores, compiled, FilmRouteKind::Sliding)
+}
+
+pub(super) fn compile_driven(
+    mechanics: &PreparedImpactSystem,
+    route: SlidingFilmLayerHeatRoute,
+    stores: &[CaloricReservoir<'_>],
+    compiled: &[FilmRoute],
+) -> Result<FilmRoute, ImpactError> {
+    compile_kind(mechanics, route, stores, compiled, FilmRouteKind::DrivenSliding)
+}
+
+fn compile_kind(
+    mechanics: &PreparedImpactSystem,
+    route: SlidingFilmLayerHeatRoute,
+    stores: &[CaloricReservoir<'_>],
+    compiled: &[FilmRoute],
+    kind: FilmRouteKind,
+) -> Result<FilmRoute, ImpactError> {
+    let range = match kind {
+        FilmRouteKind::Sliding => mechanics
+            .sliding_film(route.film)
+            .ok_or_else(|| invalid("sliding heat names an absent sliding pressure island"))?
+            .channel_layer_range(route.channel),
+        FilmRouteKind::DrivenSliding => mechanics
+            .driven_sliding_film(route.film)
+            .ok_or_else(|| invalid("driven sliding heat names an absent pressure island"))?
+            .channel_layer_range(route.channel),
+        _ => return Err(invalid("sliding heat requires its original film namespace")),
+    }
+    .ok_or_else(|| invalid("sliding heat names an absent original passage"))?;
     if route.layer_destinations.len() != range.len() {
         return Err(invalid(
             "sliding heat needs exactly one destination per original layer",
         ));
     }
     if compiled.iter().any(|old| {
-        old.sliding_layers.is_some() && old.film == route.film && old.channel == Some(route.channel)
+        old.kind == kind && old.film == route.film && old.channel == Some(route.channel)
     }) {
         return Err(invalid("sliding channel heat must be routed at most once"));
     }
@@ -63,7 +91,7 @@ pub(super) fn compile(
     }
     let first = destinations[0];
     Ok(FilmRoute {
-        kind: FilmRouteKind::Sliding,
+        kind,
         film: route.film,
         channel: Some(route.channel),
         a: first,
@@ -96,28 +124,53 @@ pub(super) fn stage(
     let mut current_film = None;
     let mut deposited = 0.0;
     for route in routes.iter().filter(|route| route.sliding_layers.is_some()) {
-        let film = system
-            .sliding_film(route.film)
-            .ok_or_else(|| invalid("sliding heat lost its original pressure island"))?;
-        let native = film.pressure_operator();
-        if current_film != Some(route.film) {
-            film.evaluate_with_layers_into(
-                &configuration[..n],
-                velocity,
-                &mut force[..n],
-                &mut pressure[..native.cell_count()],
-                &mut channels[..native.channel_count()],
-                &mut layers[..film.layer_count()],
-            )
-            .map_err(|error| invalid(error.0))?;
-            current_film = Some(route.film);
-        }
         let channel = route
             .channel
             .ok_or_else(|| invalid("sliding heat requires an original channel"))?;
-        let range = film
-            .channel_layer_range(channel)
-            .ok_or_else(|| invalid("sliding heat lost its original layer range"))?;
+        let identity = (route.kind, route.film);
+        let range = match route.kind {
+            FilmRouteKind::Sliding => {
+                let film = system
+                    .sliding_film(route.film)
+                    .ok_or_else(|| invalid("sliding heat lost its original pressure island"))?;
+                let native = film.pressure_operator();
+                if current_film != Some(identity) {
+                    film.evaluate_with_layers_into(
+                        &configuration[..n],
+                        velocity,
+                        &mut force[..n],
+                        &mut pressure[..native.cell_count()],
+                        &mut channels[..native.channel_count()],
+                        &mut layers[..film.layer_count()],
+                    )
+                    .map_err(|error| invalid(error.0))?;
+                }
+                film.channel_layer_range(channel)
+            }
+            FilmRouteKind::DrivenSliding => {
+                let film = system
+                    .driven_sliding_film(route.film)
+                    .ok_or_else(|| invalid("driven sliding heat lost its original pressure island"))?;
+                if current_film != Some(identity) {
+                    // Only native viscous layer work is deposited. The same
+                    // solve's signed reservoir work already belongs to the
+                    // accepted mechanical supply account.
+                    film.evaluate_with_layers_into(
+                        &configuration[..n],
+                        velocity,
+                        &mut force[..n],
+                        &mut pressure[..film.cell_count()],
+                        &mut channels[..film.channel_count()],
+                        &mut layers[..film.layer_count()],
+                    )
+                    .map_err(|error| invalid(error.0))?;
+                }
+                film.channel_layer_range(channel)
+            }
+            _ => return Err(invalid("sliding heat lost its original film namespace")),
+        }
+        .ok_or_else(|| invalid("sliding heat lost its original layer range"))?;
+        current_film = Some(identity);
         let destinations = route
             .sliding_layers
             .as_ref()

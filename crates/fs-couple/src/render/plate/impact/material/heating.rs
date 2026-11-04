@@ -125,7 +125,7 @@ struct FilmRoute {
     sliding_layers: Option<Vec<usize>>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum FilmRouteKind { Squeeze, Sliding, PowerLaw }
+enum FilmRouteKind { Squeeze, Sliding, PowerLaw, DrivenSliding }
 impl FilmRoute {
     fn is_squeeze(&self) -> bool { self.kind == FilmRouteKind::Squeeze }
 }
@@ -342,13 +342,42 @@ impl<'a> HeatedImpactSystem<'a> {
         power_law_routes: Vec<PowerLawFilmHeatRoute>,
         memory_routes: Vec<RelaxationHeatRoute>, heat_tolerance_j: f64,
     ) -> Result<Self, ImpactError> {
+        Self::new_with_driven_sliding_losses(mechanics, stores, routes, film_routes,
+            channel_routes, layer_routes, sliding_routes, Vec::new(), power_law_routes,
+            memory_routes, heat_tolerance_j)
+    }
+
+    /// Route actual pressure-fed sliding-film layer heat on the original clock.
+    ///
+    /// The two sliding-route lists use separate passive and pressure-driven
+    /// film insertion indices. A driven route uses exactly the same original
+    /// channel and lower-to-upper layer order as its mechanical film.
+    ///
+    /// Deposits are the native integral of viscous stress work, including
+    /// pressure/Couette cross terms in each layer. Signed reservoir supply
+    /// remains external mechanical work; it is never deposited a second time.
+    /// Existing adiabatic, transport and network transactions publish motion
+    /// and heat together, including refusal at a finite enthalpy limit.
+    ///
+    /// Viscosity and prescribed supply pressures stay fixed during the sample.
+    /// This supplies no reservoir inventory, heat advection or new thermal clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_driven_sliding_losses(mechanics: PreparedImpactSystem,
+        stores: Vec<CaloricReservoir<'a>>, routes: Vec<ContactHeatRoute>,
+        film_routes: Vec<SqueezeFilmHeatRoute>, channel_routes: Vec<SqueezeFilmChannelHeatRoute>,
+        layer_routes: Vec<SqueezeFilmLayerHeatRoute>,
+        sliding_routes: Vec<SlidingFilmLayerHeatRoute>,
+        driven_sliding_routes: Vec<SlidingFilmLayerHeatRoute>,
+        power_law_routes: Vec<PowerLawFilmHeatRoute>,
+        memory_routes: Vec<RelaxationHeatRoute>, heat_tolerance_j: f64,
+    ) -> Result<Self, ImpactError> {
         if stores.is_empty() || stores.len()>64
             || (routes.is_empty() && film_routes.is_empty() && channel_routes.is_empty()
-                && layer_routes.is_empty() && sliding_routes.is_empty()
+                && layer_routes.is_empty() && sliding_routes.is_empty() && driven_sliding_routes.is_empty()
                 && power_law_routes.is_empty() && memory_routes.is_empty())
             || routes.len()>32 || film_routes.len()>4 || memory_routes.len()>256
             || channel_routes.len().saturating_add(layer_routes.len()).saturating_add(sliding_routes.len())
-                .saturating_add(power_law_routes.len())
+                .saturating_add(power_law_routes.len()).saturating_add(driven_sliding_routes.len())
                 >4*fs_tribo::resistive_film::MAX_CHANNELS
             || !positive(heat_tolerance_j) {
             return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts, four incompressible films with bounded channels and 256 material arms, at least one route and a positive joule allowance"));
@@ -372,7 +401,7 @@ impl<'a> HeatedImpactSystem<'a> {
         }
         // Canonical contact order makes input route ordering immaterial.
         compiled.sort_by_key(|r|r.contact);
-        let mut compiled_films: Vec<FilmRoute> = Vec::with_capacity(film_routes.len()+channel_routes.len()+layer_routes.len()+sliding_routes.len()+power_law_routes.len());
+        let mut compiled_films: Vec<FilmRoute> = Vec::with_capacity(film_routes.len()+channel_routes.len()+layer_routes.len()+sliding_routes.len()+driven_sliding_routes.len()+power_law_routes.len());
         for route in film_routes {
             if route.film >= mechanics.squeeze_film_count()
                 || compiled_films.iter().any(|r| r.is_squeeze() && r.film == route.film) {
@@ -416,6 +445,9 @@ impl<'a> HeatedImpactSystem<'a> {
         }
         for route in sliding_routes {
             compiled_films.push(sliding_film::compile(&mechanics,route,&stores,&compiled_films)?);
+        }
+        for route in driven_sliding_routes {
+            compiled_films.push(sliding_film::compile_driven(&mechanics,route,&stores,&compiled_films)?);
         }
         for route in power_law_routes {
             compiled_films.push(power_law_film::compile(&mechanics,route,&stores,&compiled_films)?);

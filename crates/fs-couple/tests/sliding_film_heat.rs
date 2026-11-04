@@ -6,6 +6,9 @@
 #[path = "sliding_film_heat/feedback.rs"]
 mod feedback;
 
+#[path = "sliding_film_heat/driven.rs"]
+mod driven;
+
 use fs_blake3::ContentHash;
 use fs_couple::render::plate::impact::material::heating::network::ReservoirCell;
 use fs_couple::render::plate::impact::material::heating::{

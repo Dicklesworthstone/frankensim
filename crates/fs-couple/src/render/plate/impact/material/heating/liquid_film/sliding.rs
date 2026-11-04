@@ -82,7 +82,8 @@ pub(super) fn groups(
                 .film_routes
                 .iter()
                 .find(|route| {
-                    route.sliding_layers.is_some()
+                    route.kind == super::super::FilmRouteKind::Sliding
+                        && route.sliding_layers.is_some()
                         && route.film == film_index
                         && route.channel == Some(channel)
                 })
