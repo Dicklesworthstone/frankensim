@@ -155,3 +155,60 @@ fn g0_invalid_detector_sources_and_variates_refuse() {
         );
     }
 }
+
+#[test]
+fn g0_positive_subnormal_channels_refuse_underflow_instead_of_becoming_dark() {
+    let tiny = f64::from_bits(1);
+    let weak = QuantumEfficiencySensor::try_new(vec![
+        (1000.0, [tiny, 1.0, 1.0]),
+        (2000.0, [tiny, 1.0, 1.0]),
+    ])
+    .unwrap();
+    // QE/p = QE * 1000 nm is representable, but QE/(sum QE) is not.
+    assert!(tiny * 1000.0 > 0.0);
+    assert_eq!(
+        weak.sample_wavelength(0.5),
+        Err(SpectralSensorError::NumericalRange)
+    );
+    assert_eq!(
+        weak.quantum_efficiency(1500.0),
+        Err(SpectralSensorError::NumericalRange)
+    );
+    assert_eq!(weak.quantum_efficiency(1000.0).unwrap()[0], tiny);
+
+    let dark = QuantumEfficiencySensor::try_new(vec![
+        (1000.0, [0.0, 1.0, 1.0]),
+        (2000.0, [0.0, 1.0, 1.0]),
+    ])
+    .unwrap();
+    let draw = dark.sample_wavelength(0.5).unwrap();
+    assert_eq!(draw.radiance_weights_nm()[0], 0.0);
+    assert_eq!(draw.electron_weights_nm_per_joule()[0], 0.0);
+    assert_eq!(dark.quantum_efficiency(1500.0).unwrap()[0], 0.0);
+
+    // The same refusal applies to a positive one-sided channel at an exactly
+    // zero-density endpoint; ordinary ramps retain their finite analytic limit.
+    let ramp =
+        QuantumEfficiencySensor::try_new(vec![(1000.0, [0.0; 3]), (2000.0, [tiny, 1.0, 1.0])])
+            .unwrap();
+    assert_eq!(
+        ramp.sample_wavelength(0.0),
+        Err(SpectralSensorError::NumericalRange)
+    );
+    assert_eq!(ramp.quantum_efficiency(1000.0).unwrap(), [0.0; 3]);
+    assert_eq!(
+        ramp.quantum_efficiency(1500.0),
+        Err(SpectralSensorError::NumericalRange)
+    );
+
+    // A weak supported endpoint must not vanish when normalizing the proposal,
+    // even if a different interval gives the sensor an ordinary total area.
+    assert!(matches!(
+        QuantumEfficiencySensor::try_new(vec![
+            (1000.0, [tiny, 0.0, 0.0]),
+            (2000.0, [0.0; 3]),
+            (3000.0, [0.0, 1.0, 1.0]),
+        ]),
+        Err(SpectralSensorError::NumericalRange)
+    ));
+}

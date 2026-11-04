@@ -129,6 +129,11 @@ impl<const C: usize> QuantumEfficiencySensor<C> {
         for i in 1..knots.len() {
             let a = total_efficiency[i - 1] / scale;
             let b = total_efficiency[i] / scale;
+            if (total_efficiency[i - 1] > 0.0 && a == 0.0)
+                || (total_efficiency[i] > 0.0 && b == 0.0)
+            {
+                return Err(SpectralSensorError::NumericalRange);
+            }
             let segment = (0.5 * a + 0.5 * b) * (knots[i].0 - knots[i - 1].0);
             if !segment.is_finite() || ((a > 0.0 || b > 0.0) && segment == 0.0) {
                 return Err(SpectralSensorError::NumericalRange);
@@ -173,9 +178,20 @@ impl<const C: usize> QuantumEfficiencySensor<C> {
         let a = self.knots[upper - 1];
         let b = self.knots[upper];
         let t = (wavelength_nm - a.0) / (b.0 - a.0);
-        Ok(core::array::from_fn(|channel| {
-            (1.0 - t) * a.1[channel] + t * b.1[channel]
-        }))
+        let efficiency: [f64; C] =
+            core::array::from_fn(|channel| (1.0 - t) * a.1[channel] + t * b.1[channel]);
+        // This query is strictly inside a source interval. A positive endpoint
+        // therefore gives a positive response, even if both weighted terms
+        // underflow when evaluated separately. Exact source knots above keep
+        // their original zeros; a lost positive interpolation must refuse.
+        if efficiency
+            .iter()
+            .enumerate()
+            .any(|(channel, &q)| q == 0.0 && (a.1[channel] > 0.0 || b.1[channel] > 0.0))
+        {
+            return Err(SpectralSensorError::NumericalRange);
+        }
+        Ok(efficiency)
     }
 
     /// Invert the represented sum-of-QE CDF in O(log K + C), without an FFT,
@@ -222,6 +238,25 @@ impl<const C: usize> QuantumEfficiencySensor<C> {
                     / density
             }
         });
+        // Dividing a positive subnormal channel by the proposal scale can
+        // round it to zero before the band width restores a representable
+        // weight. Retain authored dark channels, but never report this loss
+        // of a positive source response as darkness. At a zero-density
+        // endpoint, positivity belongs to the same one-sided limit as above.
+        for channel in 0..C {
+            let positive_response = if density == 0.0 {
+                if t == 0.0 {
+                    b.1[channel] > 0.0
+                } else {
+                    a.1[channel] > 0.0
+                }
+            } else {
+                (t < 1.0 && a.1[channel] > 0.0) || (t > 0.0 && b.1[channel] > 0.0)
+            };
+            if positive_response && ratio[channel] == 0.0 {
+                return Err(SpectralSensorError::NumericalRange);
+            }
+        }
         let radiance_weights_nm = ratio.map(|ratio| (ratio * self.scale) * self.area_nm);
         let photon_conversion = wavelength_nm * PHOTONS_PER_JOULE_PER_NM;
         let electron_weights_nm_per_joule =

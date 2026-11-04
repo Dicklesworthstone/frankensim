@@ -6610,3 +6610,43 @@ ordinary conduction. Further tests exercise transparent intermediates, opaque
 screening, bath events, continuation, fixed-optics reuse, enthalpy-driven optics
 on a latent plateau, coverage and atomic refusal.
 <!-- native-coating-radiative-stack:end -->
+
+## Source-bounded quantum-efficiency detector channels
+
+`spectral::detector::QuantumEfficiencySensor<C>` retains 1–16 external
+quantum-efficiency channels on 2–1024 original positive vacuum-wavelength
+knots. Efficiencies are collected electrons per incident photon without gain,
+between zero and one. Piecewise-linear source curves, dark channels and dark
+spectral gaps remain explicit; there is no extrapolation or CIE/RGB extension.
+An analytic sum-of-QE proposal costs O(C*K) to prepare and O(log K + C) per
+wavelength with no query allocation or rejection sampling. Every draw supplies
+the physical QE/pdf radiance weight and QE*lambda_vac/(h*c*pdf) electron weight,
+using the exact SI defining constants. Zero-density endpoints use the analytic
+one-sided ratio. Unrepresentable nonzero support or response refuses instead of
+silently becoming a dark channel.
+
+`CurvedCameraRaster::sample_pixel_sensor` integrates those original channels
+through four wavelength-specific native camera paths. A stratified CDF packet
+shares four paths across every channel; channel count does not multiply scene
+transport. Curved geometry, wavelength-dependent index and absorption, source
+emission, surface events, path budgets and absolute sample identities remain
+owned by the original camera. The common raster/lens helper preserves the
+existing visible XYZ path and random-counter domains.
+`sample_pixel_sensor_rayleigh` also retains each wavelength's original
+scattering spectrum, phase law, free-flight draws and volume-event budget.
+Zero scattering preserves the complete surface detector sample bit for bit.
+Failure or cancellation publishes no partial channels or renormalized lanes.
+
+Outputs are QE-weighted radiance in W/(m² sr) and collected-electron rate per
+m² sr, before pixel etendue, exposure and electronics. The existing aperture
+average is retained. These observations do not infer sensor irradiance,
+calibrated counts, gain, shot noise, saturation, or display colors. Authored
+response curves are not empirical detector calibration.
+
+Focused native detector tests exercise analytic energy/photon moments, sloped
+and disjoint responses, weak-response scaling and range refusals. Camera
+regressions cover source-bounded infrared emission, independent dispersive GRIN
+paths and absorption, deterministic replay, dark channels, molecular transport
+parity, volume limits and cancellation. The detector numerical module was
+executed against real fs_math; full native camera/material integration tests
+remain unexecuted without the complete constellation dependency checkouts.

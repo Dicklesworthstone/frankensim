@@ -33,6 +33,9 @@ pub mod point_lights;
 /// Spectral pixels with finite-area refractive light and emitter-hit MIS.
 pub mod area_lights;
 
+/// Source-bounded multichannel detector signals, including infrared bands.
+pub mod sensor;
+
 /// Each pixel sample independently traces this many wavelengths.
 pub const CAMERA_WAVELENGTHS: usize = 4;
 
@@ -40,6 +43,7 @@ pub const CAMERA_WAVELENGTHS: usize = 4;
 pub enum CurvedRasterError {
     Camera(CameraError),
     Transport(CameraRadianceError),
+    Sensor(crate::spectral::detector::SpectralSensorError),
     /// Zero/overflowing dimensions or an out-of-range row-major pixel.
     InvalidRaster,
     NumericalRange,
@@ -53,6 +57,11 @@ impl From<CameraError> for CurvedRasterError {
 impl From<CameraRadianceError> for CurvedRasterError {
     fn from(error: CameraRadianceError) -> Self {
         Self::Transport(error)
+    }
+}
+impl From<crate::spectral::detector::SpectralSensorError> for CurvedRasterError {
+    fn from(error: crate::spectral::detector::SpectralSensorError) -> Self {
+        Self::Sensor(error)
     }
 }
 impl core::fmt::Display for CurvedRasterError {
@@ -172,13 +181,67 @@ impl<'a> CurvedCameraRaster<'a> {
         seed: u64,
         pixel: u32,
         sample: u32,
+        trace: impl FnMut(&Cx<'_>, Ray, f64, usize) -> Result<CameraRadianceSample, CameraRadianceError>,
+    ) -> Result<CurvedPixelSample, CurvedRasterError> {
+        let (ray, wavelengths_nm, spectral) = self.sample_packet_with_transport(
+            cx,
+            seed,
+            pixel,
+            sample,
+            |u| {
+                Ok(hero_wavelength_packet::<CAMERA_WAVELENGTHS>(
+                    LAMBDA_MIN + u * (LAMBDA_MAX - LAMBDA_MIN),
+                    LAMBDA_MIN,
+                    LAMBDA_MAX,
+                ))
+            },
+            trace,
+        )?;
+        let mut xyz = [0.0; 3];
+        for (lane, &wavelength) in spectral.iter().zip(&wavelengths_nm) {
+            let weight = lane.radiance_w_m2_sr_nm() * self.xyz_scale;
+            for (sum, observer) in
+                xyz.iter_mut()
+                    .zip([cie_x(wavelength), cie_y(wavelength), cie_z(wavelength)])
+            {
+                *sum += weight * observer;
+            }
+        }
+        if xyz.iter().any(|value| !value.is_finite()) {
+            return Err(CurvedRasterError::NumericalRange);
+        }
+        cx.checkpoint().map_err(CameraError::from)?;
+        Ok(CurvedPixelSample {
+            xyz,
+            ray,
+            wavelengths_nm,
+            spectral,
+        })
+    }
+
+    // One raster/lens/transport owner serves visible XYZ and source-bounded
+    // detectors. The wavelength proposal never lends one lane another's path.
+    fn sample_packet_with_transport(
+        &self,
+        cx: &Cx<'_>,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        wavelengths: impl FnOnce(f64) -> Result<[f64; CAMERA_WAVELENGTHS], CurvedRasterError>,
         mut trace: impl FnMut(
             &Cx<'_>,
             Ray,
             f64,
             usize,
         ) -> Result<CameraRadianceSample, CameraRadianceError>,
-    ) -> Result<CurvedPixelSample, CurvedRasterError> {
+    ) -> Result<
+        (
+            Ray,
+            [f64; CAMERA_WAVELENGTHS],
+            [CameraRadianceSample; CAMERA_WAVELENGTHS],
+        ),
+        CurvedRasterError,
+    > {
         cx.checkpoint().map_err(CameraError::from)?;
         if pixel >= self.pixels {
             return Err(CurvedRasterError::InvalidRaster);
@@ -200,11 +263,7 @@ impl<'a> CurvedCameraRaster<'a> {
             y_tan,
             LensSample::try_new(unit(lens[0]), unit(lens[1]))?,
         )?;
-        let wavelengths_nm = hero_wavelength_packet::<CAMERA_WAVELENGTHS>(
-            LAMBDA_MIN + unit(raster[2]) * (LAMBDA_MAX - LAMBDA_MIN),
-            LAMBDA_MIN,
-            LAMBDA_MAX,
-        );
+        let wavelengths_nm = wavelengths(unit(raster[2]))?;
         let mut trace_lane = |lane: usize| trace(&render_cx, ray, wavelengths_nm[lane], lane);
         // Fixed storage and explicit propagation of the first failed lane.
         let spectral = [
@@ -213,26 +272,7 @@ impl<'a> CurvedCameraRaster<'a> {
             trace_lane(2)?,
             trace_lane(3)?,
         ];
-        let mut xyz = [0.0; 3];
-        for (lane, &wavelength) in spectral.iter().zip(&wavelengths_nm) {
-            let weight = lane.radiance_w_m2_sr_nm() * self.xyz_scale;
-            for (sum, observer) in
-                xyz.iter_mut()
-                    .zip([cie_x(wavelength), cie_y(wavelength), cie_z(wavelength)])
-            {
-                *sum += weight * observer;
-            }
-        }
-        if xyz.iter().any(|value| !value.is_finite()) {
-            return Err(CurvedRasterError::NumericalRange);
-        }
-        render_cx.checkpoint().map_err(CameraError::from)?;
-        Ok(CurvedPixelSample {
-            xyz,
-            ray,
-            wavelengths_nm,
-            spectral,
-        })
+        Ok((ray, wavelengths_nm, spectral))
     }
 }
 
