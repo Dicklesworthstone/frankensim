@@ -16,7 +16,8 @@ mod exact;
 
 /// A fixed physical point trace in one orthonormal normal/two-tangent frame.
 ///
-/// Covectors are dimensionless and use the original `free_dofs()` order. Their
+/// Covectors are dimensionless. Free owners use `free_dofs()` order; the supported
+/// owner uses every `represented_dofs()` coordinate, including supports. Their
 /// transpose maps force [N] to nodal force, including both signed traces for
 /// self contact. Geometry owns interpolation, frame orthonormality, feature
 /// coverage and the validity of holding the trace over the complete interval.
@@ -73,8 +74,8 @@ pub struct SolidSustainedPath<'a, 'contact, B = ExactLinearSolid> {
 
 /// One physically admitted interval on the original trajectory and clock.
 #[derive(Debug)]
-pub struct SolidSustainedStep<P> {
-    pub native: ExactLinearSolidStep,
+pub struct SolidSustainedStep<P, S = ExactLinearSolidStep> {
+    pub native: S,
     /// Stable contact-ID order, also used by `solve` and the path callback.
     pub contact_ids: Vec<u64>,
     pub solve: SolveReport,
@@ -84,6 +85,9 @@ pub struct SolidSustainedStep<P> {
     pub momentum_change_kg_m_s: Vec<f64>,
     pub external_work_j: f64,
     pub prescribed_surface_work_j: f64,
+    /// Independently integrated actuator work at prescribed native supports.
+    /// Zero for owners with homogeneous stationary supports.
+    pub support_work_j: f64,
     pub normal_contact_work_j: f64,
     pub frictional_work_j: f64,
     /// Relative sliding loss, separate from native physical viscosity. No heat
@@ -91,7 +95,7 @@ pub struct SolidSustainedStep<P> {
     pub frictional_dissipation_j: f64,
     pub passivity_residual_j: f64,
     pub contact_work_balance_error_j: f64,
-    /// Original energy change + viscosity - external - surface - relative work.
+    /// Original energy change + viscosity - external - surface - support - relative work.
     pub energy_balance_error_j: f64,
 }
 
@@ -242,9 +246,17 @@ pub(crate) struct State<'a> {
     pub stiffness: &'a [f64],
     pub dt_s: f64,
 }
+pub(crate) struct Work {
+    pub applied_j: f64,
+    pub viscosity_j: f64,
+    pub support_j: f64,
+}
 pub(crate) trait Native {
+    type Owner;
+    type Step;
     type Error;
     type Workspace;
+    fn owner(&self) -> &Self::Owner;
     fn state(&self) -> State<'_>;
     fn admit(&self, cx: &Cx<'_>) -> Result<(), Self::Error>;
     fn cancelled() -> Self::Error;
@@ -266,13 +278,13 @@ pub(crate) trait Native {
         force: &[f64],
         scratch: &Self::Workspace,
         cx: &Cx<'_>,
-    ) -> Result<(f64, f64), Self::Error>;
+    ) -> Result<Work, Self::Error>;
     fn accept(
         &mut self,
         scratch: Self::Workspace,
         force: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<ExactLinearSolidStep, Self::Error>;
+    ) -> Result<Self::Step, Self::Error>;
 }
 impl<E, N> From<&'static str> for SolidSustainedError<E, N> {
     fn from(what: &'static str) -> Self {
@@ -297,8 +309,8 @@ pub(crate) fn advance<B: Native, P, E>(
     external_force_n: &[f64],
     controls: SolidSustainedControls,
     cx: &Cx<'_>,
-    admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, B>) -> Result<P, E>,
-) -> Result<SolidSustainedStep<P>, SolidSustainedError<E, B::Error>> {
+    admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, B::Owner>) -> Result<P, E>,
+) -> Result<SolidSustainedStep<P, B::Step>, SolidSustainedError<E, B::Error>> {
     poll(cx)?;
     body.admit(cx).map_err(native_error::<E, B>)?;
     let before = body.state();
@@ -455,7 +467,7 @@ pub(crate) fn advance<B: Native, P, E>(
         ));
     }
     poll(cx)?;
-    let (supplied_work, viscosity_loss) = body
+    let work = body
         .work(&total_force, &workspace, cx)
         .map_err(native_error::<E, B>)?;
     let measured = audit(
@@ -466,13 +478,14 @@ pub(crate) fn advance<B: Native, P, E>(
         &ordered,
         &solve,
         external_force_n,
-        supplied_work,
-        viscosity_loss,
+        work.applied_j,
+        work.viscosity_j,
+        work.support_j,
         controls,
         cx,
     )?;
     let path_admission = admit_path(&SolidSustainedPath {
-        before: body,
+        before: body.owner(),
         displacement_after_m: body.displacement(&workspace),
         velocity_after_mps: body.velocity(&workspace),
         displacement_change_m: &displacement,
@@ -499,6 +512,7 @@ pub(crate) fn advance<B: Native, P, E>(
         momentum_change_kg_m_s: measured.momentum,
         external_work_j: measured.external,
         prescribed_surface_work_j: measured.surface,
+        support_work_j: work.support_j,
         normal_contact_work_j: measured.normal,
         frictional_work_j: measured.friction,
         frictional_dissipation_j: (-measured.friction).max(0.0),
@@ -529,6 +543,7 @@ fn audit<E, N>(
     external: &[f64],
     supplied: f64,
     viscosity_loss: f64,
+    support_work: f64,
     controls: SolidSustainedControls,
     cx: &Cx<'_>,
 ) -> Result<Measured, SolidSustainedError<E, N>> {
@@ -690,12 +705,21 @@ fn audit<E, N>(
                 + Dd::from_f64(0.5 * before.displacement[i]))
                 * dot(&before.stiffness[i * n..(i + 1) * n], du);
     }
-    let energy_error =
-        change + Dd::from_f64(viscosity_loss) - external_work - surface - normal - friction;
+    let energy_error = change + Dd::from_f64(viscosity_loss)
+        - external_work
+        - surface
+        - normal
+        - friction
+        - Dd::from_f64(support_work);
     gate(
         "complete original energy and contact work",
         energy_error,
-        work_allowance + rounding(&[change, Dd::from_f64(viscosity_loss)]),
+        work_allowance
+            + rounding(&[
+                change,
+                Dd::from_f64(viscosity_loss),
+                Dd::from_f64(support_work),
+            ]),
     )?;
     Ok(Measured {
         momentum,

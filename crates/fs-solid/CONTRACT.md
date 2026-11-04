@@ -125,6 +125,31 @@ consistent mass, all-mode continuation and basis order/sign changes, and atomic
 refusals including the original physical work gate. Native execution is reported
 with the implementation commit.
 
+`SupportedSpectralSolid::advance_sustained_contacts` extends the same shared
+owner to authored support-acceleration histories. Contact traces and external
+loads use every represented coordinate, including prescribed supports. Their
+actual velocities enter slip and contact work; loads at those rows change the
+original reactions without inventing mobility or discarding physical work.
+The native cubic free source retains both K_fc and consistent M_fc coupling.
+
+Each response is an unpublished original supported interval with all free modes,
+continuous displacement moments, original full-row reactions, and independent
+support-actuator work. No prepared matrix is cloned or refactored. Native free
+and full energy gates remain active; contact/path admission and cancellation
+precede one infallible publication of both physical/modal states, support motion
+and cumulative accounts. Explicit response-product and simultaneous scratch
+limits include this original cubic staging. Ordinary supported advance uses
+the same private trial/commit seam with unchanged physical formulas.
+
+The shared receipt now exposes `support_work_j` separately from the opposing
+contact surface's work, external work and relative friction. It comes from the
+original reaction integral and enters complete energy once. Four focused
+`supported_sustained_contact` regression groups cover friction on prescribed
+coordinates under boosts, independently integrated accelerating-support work
+with cross mass and load partition, native continuation, and transactional
+refusal including the original whole-supported energy gate. Geometry/event
+discovery and allocation of frictional loss to thermal owners remain separate.
+
 ## Native quadratic Maxwell force, contact and pressure drift
 
 `MixedViscoTetMotion::force_kick_candidate` integrates the accepted original

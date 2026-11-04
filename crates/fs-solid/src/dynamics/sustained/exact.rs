@@ -10,9 +10,14 @@ pub(crate) struct Workspace {
 }
 
 impl Native for ExactLinearSolid {
+    type Owner = Self;
+    type Step = ExactLinearSolidStep;
     type Error = ExactLinearSolidError;
     type Workspace = Workspace;
 
+    fn owner(&self) -> &Self {
+        self
+    }
     fn state(&self) -> State<'_> {
         State {
             displacement: self.displacement_m(),
@@ -79,13 +84,13 @@ impl Native for ExactLinearSolid {
     fn velocity<'a>(&self, scratch: &'a Workspace) -> &'a [f64] {
         &scratch.candidate[self.free_dofs.len()..]
     }
-    fn work(
-        &self,
-        force: &[f64],
-        scratch: &Workspace,
-        _: &Cx<'_>,
-    ) -> Result<(f64, f64), Self::Error> {
+    fn work(&self, force: &[f64], scratch: &Workspace, _: &Cx<'_>) -> Result<Work, Self::Error> {
         self.held_force_work(force, &scratch.candidate, &scratch.integrals)
+            .map(|(applied_j, viscosity_j)| Work {
+                applied_j,
+                viscosity_j,
+                support_j: 0.0,
+            })
     }
     fn accept(
         &mut self,

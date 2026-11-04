@@ -1,7 +1,7 @@
 //! Complete-spectrum finite contact forces through the shared physical owner.
 
 use super::*;
-use crate::dynamics::sustained::{self as contact, Native, State};
+use crate::dynamics::sustained::{self as contact, Native, State, Work};
 use contact::{
     SolidSustainedContact, SolidSustainedControls, SolidSustainedError, SolidSustainedPath,
     SolidSustainedStep,
@@ -54,9 +54,14 @@ impl CompleteSpectralSolid {
 }
 
 impl Native for CompleteSpectralSolid {
+    type Owner = Self;
+    type Step = ExactLinearSolidStep;
     type Error = CompleteSpectralSolidError;
     type Workspace = Workspace;
 
+    fn owner(&self) -> &Self {
+        self
+    }
     fn state(&self) -> State<'_> {
         State {
             displacement: &self.displacement,
@@ -127,7 +132,7 @@ impl Native for CompleteSpectralSolid {
     fn velocity<'a>(&self, scratch: &'a Workspace) -> &'a [f64] {
         &scratch.velocity
     }
-    fn work(&self, force: &[f64], scratch: &Workspace, cx: &Cx<'_>) -> Result<(f64, f64)> {
+    fn work(&self, force: &[f64], scratch: &Workspace, cx: &Cx<'_>) -> Result<Work> {
         let (mut supplied, mut correction) = (0.0, 0.0);
         for (i, &force) in force.iter().enumerate() {
             poll(cx)?;
@@ -140,7 +145,11 @@ impl Native for CompleteSpectralSolid {
         if !supplied.is_finite() {
             return Err(invalid("unrepresentable held source work"));
         }
-        Ok((supplied, 0.0))
+        Ok(Work {
+            applied_j: supplied,
+            viscosity_j: 0.0,
+            support_j: 0.0,
+        })
     }
     fn accept(
         &mut self,

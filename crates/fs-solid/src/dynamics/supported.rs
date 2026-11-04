@@ -27,12 +27,13 @@ mod admission;
 mod frictional_impact;
 mod impact;
 mod impulse;
+mod sustained;
 pub use frictional_impact::{
     SupportedSolidFrictionalImpactError, SupportedSolidFrictionalImpactReport,
 };
 pub use impact::{SupportedSolidNormalImpactError, SupportedSolidNormalImpactReport};
-pub use impulse::SupportedSolidImpulse;
 pub(super) use impulse::SupportedImpulseCandidate;
+pub use impulse::SupportedSolidImpulse;
 
 /// Whole-system limits in addition to the free spectral owner's limits.
 #[derive(Clone, Copy, Debug)]
@@ -202,6 +203,18 @@ pub struct SupportedSpectralSolid {
     support_correction_j: f64,
 }
 
+// Complete unpublished original interval, including its free modal state and
+// independently integrated full-coordinate support reactions/work.
+struct SupportedIntervalTrial {
+    free: super::spectral::polynomial::PolynomialTrial,
+    displacement: Vec<f64>,
+    velocity: Vec<f64>,
+    support_acceleration: Vec<f64>,
+    applied_correction_j: f64,
+    support_correction_j: f64,
+    output: SupportedSolidStep,
+}
+
 impl SupportedSpectralSolid {
     /// Supply ALL generalized eigenpairs of [`partition_free_pencil`]. Initial
     /// u and v and applied forces use the ORIGINAL assembly.free_dofs order;
@@ -340,6 +353,22 @@ impl SupportedSpectralSolid {
         force_end_n: &[f64],
         cx: &Cx<'_>,
     ) -> Result<SupportedSolidStep> {
+        let trial = self.trial_affine_supports(
+            support_acceleration_end_mps2,
+            force_start_n,
+            force_end_n,
+            cx,
+        )?;
+        Ok(self.accept_affine_supports(trial))
+    }
+
+    fn trial_affine_supports(
+        &self,
+        support_acceleration_end_mps2: &[f64],
+        force_start_n: &[f64],
+        force_end_n: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SupportedIntervalTrial> {
         poll(cx)?;
         let n = self.coordinates.len();
         let count = self.support_rows.len();
@@ -559,26 +588,39 @@ impl SupportedSpectralSolid {
         let time_s = trial.motion().time_s;
         let accepted_acceleration = copy(support_acceleration_end_mps2)?;
         poll(cx)?;
-        // Both owners publish together; the inner commit is infallible and
-        // moves only its O(n) trial state, never cloning its prepared matrices.
-        self.free.commit_polynomial(trial);
-        self.displacement = displacement;
-        self.velocity = velocity;
-        self.support_acceleration = accepted_acceleration;
-        self.stored_j = stored_after_j;
-        self.kinetic_j = kinetic_after_j;
-        self.applied_work_j = cumulative_applied_work_j;
-        self.applied_correction_j = applied_correction_j;
-        self.support_work_j = cumulative_support_work_j;
-        self.support_correction_j = support_correction_j;
-        Ok(SupportedSolidStep {
-            step,
-            time_s,
-            mean_velocity_mps,
-            support_reaction_n,
-            free_force_residual_n,
-            energy,
+        Ok(SupportedIntervalTrial {
+            free: trial,
+            displacement,
+            velocity,
+            support_acceleration: accepted_acceleration,
+            applied_correction_j,
+            support_correction_j,
+            output: SupportedSolidStep {
+                step,
+                time_s,
+                mean_velocity_mps,
+                support_reaction_n,
+                free_force_residual_n,
+                energy,
+            },
         })
+    }
+
+    fn accept_affine_supports(&mut self, trial: SupportedIntervalTrial) -> SupportedSolidStep {
+        debug_assert_eq!(self.accepted_steps() + 1, trial.output.step);
+        // All original free and full-system checks precede this shared,
+        // infallible publication boundary. No prepared operator is cloned.
+        self.free.commit_polynomial(trial.free);
+        self.displacement = trial.displacement;
+        self.velocity = trial.velocity;
+        self.support_acceleration = trial.support_acceleration;
+        self.stored_j = trial.output.energy.stored_after_j;
+        self.kinetic_j = trial.output.energy.kinetic_after_j;
+        self.applied_work_j = trial.output.energy.cumulative_applied_work_j;
+        self.applied_correction_j = trial.applied_correction_j;
+        self.support_work_j = trial.output.energy.cumulative_support_work_j;
+        self.support_correction_j = trial.support_correction_j;
+        trial.output
     }
 }
 
