@@ -1746,7 +1746,7 @@ trials atomic and runtime continuation allocation-free.
 
 This is a quasistatic failure handoff under constant mode-independent adhesion
 energy. It does not resolve inertial snap trajectories, post-slip JKR behavior,
-partial slip, changing shear-stage motion or empirical mixed-mode toughness.
+partial slip or empirical mixed-mode toughness.
 Six focused original-source tests recover the pure-normal finite-spring limit,
 check complete energy gradients/stiffness and independent normal-work
 quadrature, retain release across subdivision, and cover source/refusal/retry.
@@ -1765,6 +1765,23 @@ temperatures and spring work, thermal-cycle recovery, detached release retention
 and atomic source/domain/stability/cancellation refusals. This is endpoint
 continuation; an intervening thermal path, thermal expansion and snap dynamics
 remain outside the model.
+
+`JkrPullOffFixture::advance_tangential_stage` now follows a complete straight
+vector shear-stage segment while holding the actual accepted normal stage.
+Original sources and apparatus stiffnesses stay fixed; contact area, normal
+tip motion and both spring stores follow the same coupled equilibrium. Actual
+actuator work is the total potential change, with no normal-stage work or new
+release. A single connected stable branch is established from the strictly
+log-concave relation between squared shear-stage magnitude and contact radius.
+Endpoint slip/fold screens and a conservative interior minimum-magnitude check
+also reject reversals that would exceed the radius cap between valid endpoints.
+One original evaluation budget covers the old state, the single successor
+construction, the interior check and the new equilibrium. Exact no-ops reuse
+the fixture; detached motion preserves cumulative release and never reattaches.
+Five focused regressions cover independent force-work quadrature, reversal and
+rotation, an interior radius violation, first slip/fold and atomic refusals,
+and detached history. This owner refuses an inadmissible whole segment; it does
+not manufacture post-slip or post-fold motion.
 
 ## Dynamic wetting, contact-line pinning and mechanical adhesion
 

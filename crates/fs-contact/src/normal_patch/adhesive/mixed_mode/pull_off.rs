@@ -23,6 +23,9 @@
 /// Original-source temperature changes at the actual held apparatus stages.
 pub mod temperature;
 
+/// Reversible changes of the vector shear stage at a held normal stage.
+pub mod controls;
+
 use super::loading::JkrShearBoundaryKind;
 use super::{JkrMixedModeControl, JkrMixedModeError, JkrMixedModeResponse, SourceJkrMixedMode};
 use crate::interface_binding::adhesive_shear::{AdhesiveShearError, SourceAdhesiveShear};
@@ -185,6 +188,27 @@ impl JkrPullOffFixture {
         limits: JkrPullOffLimits,
         gate: &CancelGate,
     ) -> Result<Self, JkrPullOffError> {
+        let mut budget = Work::new(limits.maximum_evaluations, gate);
+        Self::new_with_budget(
+            contact,
+            shear,
+            normal_stiffness_n_per_m,
+            tangential_stiffness_n_per_m,
+            tangential_stage_m,
+            limits,
+            &mut budget,
+        )
+    }
+
+    fn new_with_budget(
+        contact: SourceJkrMixedMode,
+        shear: SourceAdhesiveShear,
+        normal_stiffness_n_per_m: f64,
+        tangential_stiffness_n_per_m: f64,
+        tangential_stage_m: [f64; 2],
+        limits: JkrPullOffLimits,
+        budget: &mut Work<'_>,
+    ) -> Result<Self, JkrPullOffError> {
         for value in [
             normal_stiffness_n_per_m,
             tangential_stiffness_n_per_m,
@@ -231,13 +255,12 @@ impl JkrPullOffFixture {
             stage: tangential_stage_m,
             identity,
         };
-        let mut budget = Work::new(limits.maximum_evaluations, gate);
         let maximum = limits.maximum_contact_radius_m;
-        let at_maximum = parameters.kinematics(maximum, &mut budget)?;
+        let at_maximum = parameters.kinematics(maximum, budget)?;
         if at_maximum.ratio <= 1.0 {
             return Err(JkrPullOffError::NoAdmittedAttachedBranch);
         }
-        let initial = parameters.response(maximum, at_maximum, false, &mut budget)?;
+        let initial = parameters.response(maximum, at_maximum, false, budget)?;
         if initial.static_margin_n < 0.0 {
             return Err(JkrPullOffError::NoAdmittedAttachedBranch);
         }
@@ -252,7 +275,7 @@ impl JkrPullOffFixture {
                 complete = true;
                 break;
             }
-            let ratio = parameters.fold_ratio(a, &mut budget)?;
+            let ratio = parameters.fold_ratio(a, budget)?;
             if ratio < 1.0 {
                 lo = a;
             } else {
@@ -299,12 +322,12 @@ impl JkrPullOffFixture {
         if boundary_radius > maximum {
             return Err(JkrPullOffError::NoAdmittedAttachedBranch);
         }
-        let kin = parameters.kinematics(boundary_radius, &mut budget)?;
+        let kin = parameters.kinematics(boundary_radius, budget)?;
         let boundary_response = parameters.response(
             boundary_radius,
             kin,
             kind != JkrShearBoundaryKind::GrossSlip,
-            &mut budget,
+            budget,
         )?;
         if boundary_response.static_margin_n < 0.0 {
             return Err(JkrPullOffError::NoConvergence);

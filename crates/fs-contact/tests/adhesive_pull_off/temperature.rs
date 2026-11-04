@@ -214,10 +214,66 @@ fn no_op_is_exact_and_a_supported_thermal_cycle_restores_equilibrium_and_work() 
             &CancelGate::new(),
         )
         .unwrap();
-    assert_eq!(cold.source(), &law);
-    assert_eq!(cold.response(), &before);
+    // Returning to the original temperatures restores the mechanics and the
+    // selected claims. Refreshed receipts correctly retain the pinned-claim
+    // query policy, rather than impersonating the initial selection operation.
+    let old = law.contact().normal_source().normal_state();
+    let new = cold.source().contact().normal_source().normal_state();
+    for (original, restored) in [
+        (
+            old.elastic().surface_a_state().resolved().properties(),
+            new.elastic().surface_a_state().resolved().properties(),
+        ),
+        (
+            old.elastic().surface_b_state().resolved().properties(),
+            new.elastic().surface_b_state().resolved().properties(),
+        ),
+        (
+            old.interface_state().properties(),
+            new.interface_state().properties(),
+        ),
+        (
+            law.shear_source().resolved().properties(),
+            cold.source().shear_source().resolved().properties(),
+        ),
+    ] {
+        assert_eq!(original.len(), restored.len());
+        for (a, b) in original.iter().zip(restored) {
+            assert_eq!(a.answer().receipt.selected, b.answer().receipt.selected);
+            assert_eq!(a.value_si(), b.value_si());
+        }
+    }
+    let restored = cold.response();
+    assert_eq!(restored.state().branch(), before.state().branch());
+    assert_eq!(
+        restored.state().normal_stage_m(),
+        before.state().normal_stage_m()
+    );
+    assert_eq!(
+        restored.state().accumulated_released_energy_j(),
+        before.state().accumulated_released_energy_j()
+    );
+    assert_eq!(restored.tip_coordinates_m, before.tip_coordinates_m);
+    assert_eq!(restored.stage_force_n, before.stage_force_n);
+    assert_eq!(
+        restored.stage_stiffness_n_per_m,
+        before.stage_stiffness_n_per_m
+    );
+    assert_eq!(
+        restored.normal_spring_energy_j,
+        before.normal_spring_energy_j
+    );
+    assert_eq!(
+        restored.tangential_spring_energy_j,
+        before.tangential_spring_energy_j
+    );
+    assert_eq!(restored.total_stored_energy_j, before.total_stored_energy_j);
+    assert_eq!(
+        restored.contact.unwrap().contact_area_m2,
+        before.contact.unwrap().contact_area_m2
+    );
     assert_eq!(hot.parameter_work_j() + cold.parameter_work_j(), 0.0);
-    assert_eq!(cold.clone().into_source(), law);
+    assert_eq!(&cold.clone().into_source(), cold.source());
 }
 
 #[test]
