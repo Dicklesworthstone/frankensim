@@ -1,6 +1,7 @@
 //! Physical momentum histories on the original dense collide/stream owner.
 
-use fs_lbm::core2::{Cell, CollisionModel2, ForceRebindError2, Grid};
+use fs_exec::CancelGate;
+use fs_lbm::core2::{Cell, CollisionModel2, ForceRebindError2, ForceStepError2, Grid};
 use fs_lbm::{CS2, Q, equilibrium};
 
 const DIRECTIONS: [[f64; 2]; Q] = [
@@ -200,6 +201,198 @@ fn nonuniform_periodic_flow_closes_total_momentum_against_actual_body_force() {
     near(after[0], before[0]);
     for d in 0..2 {
         near(after[d + 1] - before[d + 1], supplied[d]);
+    }
+}
+
+#[test]
+fn endpoint_force_ramps_and_reversals_integrate_the_physical_impulse() {
+    let gate = CancelGate::new();
+    for collision in [
+        CollisionModel2::Bgk,
+        CollisionModel2::Regularized,
+        CollisionModel2::RecursiveRegularized,
+        CollisionModel2::Trt { magic: 3.0 / 16.0 },
+        CollisionModel2::CentralMoment,
+    ] {
+        for (rho, tau) in [(0.55, 0.61), (1.9, 1.37)] {
+            let mut grid = Grid::uniform(3, 2, tau);
+            grid.collision = collision;
+            let mut expected_velocity = [0.023, -0.017];
+            grid.f
+                .fill(equilibrium(rho, expected_velocity[0], expected_velocity[1]));
+            let mut post = Vec::new();
+            let mut next = Vec::new();
+            for (gravity, local) in [
+                ([0.002, -0.001], [0.0007, 0.0002]),
+                ([0.004, -0.002], [0.0014, 0.0004]),
+                ([-0.003, 0.002], [-0.0004, 0.0003]),
+                ([0.0; 2], [0.0; 2]),
+            ] {
+                for d in 0..2 {
+                    expected_velocity[d] +=
+                        0.5 * (grid.g[d] + gravity[d] + (grid.fext[0][d] + local[d]) / rho);
+                }
+                grid.step_with_endpoint_forcing(
+                    gravity,
+                    &vec![local; grid.f.len()],
+                    &mut post,
+                    &mut next,
+                    &gate,
+                )
+                .unwrap();
+                for cell in 0..grid.f.len() {
+                    let state = physical(&grid, cell);
+                    near(state[0], rho);
+                    for d in 0..2 {
+                        near(state[d + 1] / state[0], expected_velocity[d]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn endpoint_forces_close_spatial_momentum_with_native_wall_reaction() {
+    // Cross a cancellation chunk boundary; retain nonuniform density and a
+    // stationary internal wall so neither uniform-state nor periodic-only
+    // momentum accounting can satisfy this balance accidentally.
+    let mut grid = Grid::uniform(18, 17, 0.9);
+    grid.flags[..18].fill(Cell::Wall);
+    for (i, f) in grid.f.iter_mut().enumerate() {
+        *f = equilibrium(0.8 + 0.01 * (i % 23) as f64, 0.003 * (i % 3) as f64, -0.01);
+    }
+    let initial_external: Vec<_> = (0..grid.f.len())
+        .map(|i| [0.0001 * (i % 4) as f64, -0.0002 * (i % 3) as f64])
+        .collect();
+    let mut post = Vec::new();
+    let mut next = Vec::new();
+    grid.rebind_forcing([0.001, -0.0007], &initial_external, &mut post)
+        .unwrap();
+    let before = grid.clone();
+    let mut native = grid.clone();
+    native.collide_into(&mut post);
+    let wall_mask: Vec<_> = grid.flags.iter().map(|flag| *flag == Cell::Wall).collect();
+    let reaction = native.stream_from_with_wall_momentum(&post, &wall_mask);
+    assert!(reaction.measured_links > 0);
+
+    let endpoint_gravity = [-0.0004, 0.0013];
+    let endpoint_external: Vec<_> = (0..grid.f.len())
+        .map(|i| [-0.0003 * (i % 5) as f64, 0.0001 * (i % 7) as f64])
+        .collect();
+    grid.step_with_endpoint_forcing(
+        endpoint_gravity,
+        &endpoint_external,
+        &mut post,
+        &mut next,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        grid.f, native.f,
+        "endpoint source must retain the native pull"
+    );
+    assert_eq!(grid.f[..18], before.f[..18]);
+
+    let mut mass_change = 0.0;
+    let mut momentum_change = [0.0; 2];
+    let mut supplied = [0.0; 2];
+    let mut density_transport = 0.0;
+    for cell in 18..grid.f.len() {
+        let previous = physical(&before, cell);
+        let current = physical(&grid, cell);
+        mass_change += current[0] - previous[0];
+        density_transport += (current[0] - previous[0]).abs();
+        for d in 0..2 {
+            momentum_change[d] += current[d + 1] - previous[d + 1];
+            supplied[d] += 0.5
+                * (previous[0] * before.g[d]
+                    + initial_external[cell][d]
+                    + current[0] * endpoint_gravity[d]
+                    + endpoint_external[cell][d]);
+        }
+    }
+    assert!(density_transport > 0.01, "fixture must transport density");
+    near(mass_change, 0.0);
+    for d in 0..2 {
+        near(momentum_change[d] + reaction.wall_impulse[d], supplied[d]);
+    }
+}
+
+#[test]
+fn unchanged_endpoint_forces_preserve_every_native_collision_bit() {
+    let gate = CancelGate::new();
+    for collision in [
+        CollisionModel2::Bgk,
+        CollisionModel2::Regularized,
+        CollisionModel2::RecursiveRegularized,
+        CollisionModel2::Trt { magic: 3.0 / 16.0 },
+        CollisionModel2::CentralMoment,
+    ] {
+        let mut grid = Grid::uniform(19, 15, 0.8);
+        grid.collision = collision;
+        grid.periodic_x = false;
+        grid.flags[20] = Cell::Wall;
+        grid.flags[21] = Cell::Gas;
+        grid.flags[22] = Cell::Interface;
+        for (i, f) in grid.f.iter_mut().enumerate() {
+            *f = equilibrium(0.8 + 0.02 * (i % 11) as f64, 0.01, -0.012);
+            grid.tau[i] += 0.02 * (i % 7) as f64;
+        }
+        let external = vec![[0.0002, -0.0001]; grid.f.len()];
+        let mut post = Vec::new();
+        let mut next = Vec::new();
+        grid.rebind_forcing([0.001, -0.002], &external, &mut post)
+            .unwrap();
+        let mut native = grid.clone();
+        for _ in 0..3 {
+            native.step(&mut post);
+            grid.step_with_endpoint_forcing(grid.g, &external, &mut post, &mut next, &gate)
+                .unwrap();
+            unchanged(&grid, &native);
+        }
+    }
+}
+
+#[test]
+fn refused_endpoint_steps_publish_neither_populations_nor_forces() {
+    let initial = Grid::uniform(3, 2, 0.8);
+    let mut post = Vec::new();
+    let mut next = Vec::new();
+    for case in 0..10 {
+        let mut grid = initial.clone();
+        let mut gravity = [0.001, -0.002];
+        let mut external = vec![[0.0002, 0.0001]; grid.f.len()];
+        let gate = CancelGate::new();
+        match case {
+            0 => {
+                external.pop();
+            }
+            1 => gravity[1] = f64::NAN,
+            2 => external[5][0] = f64::NAN,
+            3 => grid.f[5] = [0.0; Q],
+            4 => grid.tau[5] = 0.5,
+            5 => {
+                grid.tau.pop();
+            }
+            6 => grid.collision = CollisionModel2::Trt { magic: 0.0 },
+            7 => {
+                grid.f.fill(equilibrium(2.0, 0.0, 0.0));
+                gravity[0] = f64::MAX;
+            }
+            // The inputs and initial physical velocity are finite; collision
+            // overflows. This must refuse after proposal work, before publish.
+            8 => grid.fext[5][0] = 1e200,
+            _ => gate.request(),
+        }
+        let before = grid.clone();
+        assert!(matches!(
+            grid.step_with_endpoint_forcing(gravity, &external, &mut post, &mut next, &gate),
+            Err(ForceStepError2::Invalid(_)
+                | ForceStepError2::Unphysical { .. }
+                | ForceStepError2::Cancelled)
+        ));
+        unchanged(&grid, &before);
     }
 }
 

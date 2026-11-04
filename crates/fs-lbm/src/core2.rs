@@ -15,7 +15,7 @@ pub mod frame;
 pub mod moving_disk;
 
 mod forcing;
-pub use forcing::ForceRebindError2;
+pub use forcing::{ForceRebindError2, ForceStepError2};
 
 const MAX_REGULARIZED_BOUNDARY_SPEED_SQ: f64 = 0.03;
 const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
@@ -1055,6 +1055,12 @@ impl Grid {
     pub fn collide_into(&self, post: &mut Vec<[f64; Q]>) {
         post.clear();
         post.resize(self.nx * self.ny, [0.0; Q]);
+        self.collide_cells_into(0, post);
+    }
+
+    // Shared by the ordinary full-grid collision and cancellable force-history
+    // proposals. Chunk boundaries change no cell arithmetic or reduction order.
+    fn collide_cells_into(&self, start: usize, post: &mut [[f64; Q]]) {
         let model = self.collision;
         if let CollisionModel2::Trt { magic } = model {
             assert!(
@@ -1062,7 +1068,8 @@ impl Grid {
                 "TRT magic parameter must be finite and positive"
             );
         }
-        for (i, out) in post.iter_mut().enumerate().take(self.nx * self.ny) {
+        for (offset, out) in post.iter_mut().enumerate() {
+            let i = start + offset;
             if !matches!(self.flags[i], Cell::Fluid | Cell::Interface) {
                 *out = self.f[i];
                 continue;
