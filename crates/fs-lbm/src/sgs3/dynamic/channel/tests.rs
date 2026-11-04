@@ -83,7 +83,7 @@ fn derivative(
             * match walls[side] {
                 ScalarWall::Value(w) => (-8.0 * w + 6.0 * f + 2.0 * g) / 6.0,
                 ScalarWall::ZeroGradient if !filtered => (g - f) / 2.0,
-                ScalarWall::ZeroGradient => {
+                ScalarWall::ZeroGradient | ScalarWall::Interior => {
                     let mut far = p;
                     far[axis] = if low { 2 } else { shape[axis] - 3 };
                     (-3.0 * f + 4.0 * g - field[at(shape, far)]) / 2.0
@@ -250,6 +250,11 @@ fn channel_favre_momentum_and_heat_match_independent_physical_reference() {
             [ScalarWall::Value(1.0), ScalarWall::Value(0.0)],
             [ScalarWall::ZeroGradient; 2],
             [ScalarWall::Value(1.0), ScalarWall::ZeroGradient],
+            [ScalarWall::Interior; 2],
+            [ScalarWall::Value(1.0), ScalarWall::Interior],
+            [ScalarWall::Interior, ScalarWall::Value(0.0)],
+            [ScalarWall::ZeroGradient, ScalarWall::Interior],
+            [ScalarWall::Interior, ScalarWall::ZeroGradient],
         ] {
             let mut flow =
                 ChannelDynamicSgs::new_cartesian(shape, spacing, normal, usize::MAX).unwrap();
@@ -495,4 +500,139 @@ fn channel_workspace_caps_cancellation_and_boundary_admission() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn interior_scalar_derivatives_resolve_quadratics_and_favre_covariance_at_both_walls() {
+    // rho=1+a(x)y, phi=a(x)+0.4y+0.2y^2, with <a>=0 and <a^2>=1/6.
+    // The physical derivative is 0.4+0.4y, while the exact Favre derivative
+    // gains 1/6. Both are quadratic-field oracles at every half-cell wall.
+    let h = 0.2;
+    for normal in 0..3 {
+        let mut shape = [3; 3];
+        shape[normal] = 5;
+        let tangent = (normal + 1) % 3;
+        let cells: usize = shape.iter().product();
+        let mut physical = Vec::with_capacity(cells);
+        let mut filtered = Vec::with_capacity(cells);
+        for cell in 0..cells {
+            let p = xyz(shape, cell);
+            let y = (p[normal] as f64 + 0.5) * h;
+            let a = 0.5 * (p[tangent] as f64 - 1.0);
+            physical.push(a + 0.4 * y + 0.2 * y * y);
+            let mut moment = 0.0;
+            let mut density = 0.0;
+            // The three equally weighted tangent values are independent of
+            // production filtering and account for the full Favre quotient.
+            for b in [-0.5, 0.0, 0.5] {
+                let rho = 1.0 + b * y;
+                moment += rho * (b + 0.4 * y + 0.2 * y * y) / 3.0;
+                density += rho / 3.0;
+            }
+            filtered.push(moment / density);
+        }
+        for cell in 0..cells {
+            let p = xyz(shape, cell);
+            if p[normal] != 0 && p[normal] + 1 != shape[normal] {
+                continue;
+            }
+            let y = (p[normal] as f64 + 0.5) * h;
+            let stencil = FilterGeometry::Channel(normal)
+                .stencil(shape, [1.0 / h; 3], cell, p, normal);
+            let grid = stencil
+                .derivative(|j| physical[j], [ScalarWall::Interior; 2])
+                .unwrap();
+            let favre = stencil
+                .filtered_scalar_derivative(&filtered, [ScalarWall::Interior; 2])
+                .unwrap();
+            assert!((grid - (0.4 + 0.4 * y)).abs() < 3e-14);
+            assert!((favre - (0.4 + 0.4 * y + 1.0 / 6.0)).abs() < 3e-14);
+            assert!((favre - grid - 1.0 / 6.0).abs() < 3e-14);
+        }
+    }
+}
+
+#[test]
+fn interior_and_mixed_wall_fits_preserve_affine_and_reversed_scalar_coordinates() {
+    let shape = [5, 4, 5];
+    let (rho, velocity, phi) = fields(shape, 2);
+    let (momentum, heat) = settings();
+    let mut flow = ChannelDynamicSgs::new(shape, 1.0, 2, usize::MAX).unwrap();
+    let mut scalar = ChannelDynamicScalar::new(shape, 2, usize::MAX).unwrap();
+    for walls in [
+        [ScalarWall::Interior; 2],
+        [ScalarWall::Value(1.0), ScalarWall::Interior],
+        [ScalarWall::Interior, ScalarWall::ZeroGradient],
+    ] {
+        let baseline = flow
+            .prepare_with_scalar(
+                momentum, heat, &rho, &velocity, [[0.0; 3]; 2], &phi,
+                walls, &mut scalar, || false,
+            )
+            .unwrap().1;
+        assert!(baseline.maximum_diffusivity > 0.0);
+        let expected = scalar.diffusivities().to_vec();
+        for (offset, scale) in [(293.15, 20.0), (320.0, -20.0)] {
+            let transformed: Vec<_> = phi.iter().map(|value| offset + scale * value).collect();
+            let transformed_walls = walls.map(|wall| match wall {
+                ScalarWall::Value(value) => ScalarWall::Value(offset + scale * value),
+                other => other,
+            });
+            let actual = flow
+                .prepare_with_scalar(
+                    momentum, heat, &rho, &velocity, [[0.0; 3]; 2], &transformed,
+                    transformed_walls, &mut scalar, || false,
+                )
+                .unwrap().1;
+            for (a, b) in [
+                (actual.maximum_coefficient, baseline.maximum_coefficient),
+                (actual.minimum_raw_coefficient, baseline.minimum_raw_coefficient),
+                (actual.maximum_diffusivity, baseline.maximum_diffusivity),
+            ] {
+                assert!((a - b).abs() < 5e-12 * (1.0 + b.abs()));
+            }
+            for (&a, &b) in scalar.diffusivities().iter().zip(&expected) {
+                assert!((a - b).abs() < 5e-12 * (1.0 + b.abs()));
+            }
+        }
+    }
+}
+
+#[test]
+fn interior_wall_admission_precedes_uniform_zero_fit_in_every_normal_direction() {
+    let (momentum, heat) = settings();
+    for normal in 0..3 {
+        let mut shape = [3; 3];
+        shape[normal] = 2;
+        let cells: usize = shape.iter().product();
+        let mut flow = ChannelDynamicSgs::new(shape, 1.0, normal, usize::MAX).unwrap();
+        let mut scalar = ChannelDynamicScalar::new(shape, normal, usize::MAX).unwrap();
+        let rho = vec![1.0; cells];
+        let velocity = vec![[0.0; 3]; cells];
+        let phi = vec![0.0; cells];
+        for walls in [
+            [ScalarWall::Interior; 2],
+            [ScalarWall::Interior, ScalarWall::Value(0.0)],
+            [ScalarWall::Value(0.0), ScalarWall::Interior],
+            [ScalarWall::ZeroGradient; 2],
+        ] {
+            assert!(matches!(
+                flow.prepare_with_scalar(
+                    momentum, heat, &rho, &velocity, [[0.0; 3]; 2], &phi,
+                    walls, &mut scalar, || false,
+                ),
+                Err(DynamicSgsError::Invalid(
+                    "scalar wall reconstruction requires three normal fluid cells"
+                ))
+            ));
+        }
+        let reports = flow
+            .prepare_with_scalar(
+                momentum, heat, &rho, &velocity, [[0.0; 3]; 2], &phi,
+                [ScalarWall::Value(0.0); 2], &mut scalar, || false,
+            )
+            .unwrap();
+        assert_eq!(reports.1.undetermined_cells, cells);
+        assert!(scalar.diffusivities().iter().all(|value| *value == 0.0));
+    }
 }
