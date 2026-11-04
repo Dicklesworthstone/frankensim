@@ -22,6 +22,9 @@ use fs_blake3::ContentHash;
 use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// Coherent acoustic/elastic reflection with original fluid and solid states.
+pub mod fluid;
+
 /// Coherent scattering and interior fields of a finite bonded elastic slab.
 pub mod layer;
 
