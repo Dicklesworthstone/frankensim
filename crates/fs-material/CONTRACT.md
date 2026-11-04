@@ -11179,14 +11179,38 @@ wavenumber retains critical incidence and exponential evanescent decay.
 Preparation has explicit component/work limits and O(component count) storage;
 observation is O(component count), allocates nothing and checks cancellation.
 This is an explicitly supplied finite angular sum, not an automatically sampled
-aperture, a certified angular quadrature, a finite-specimen diffraction model or
-a field inside the finite layers. The existing incoherent angular-power API
+aperture, a certified angular quadrature or a finite-specimen diffraction model.
+The existing incoherent angular-power API
 retains its separate meaning.
+
+`PreparedAcousticSpectrum::prepare_layer_field` optionally prepares one original
+finite layer's coherent pressure, three-component particle velocity and complex
+intensity. Its `field` query uses depth from that layer's front face, includes
+both faces, and keeps the original transverse phase origin. One-sided material
+traces retain pressure and normal-velocity continuity without incorrectly
+equating the tangential velocities across a density jump. A zero-thickness
+identity admits only depth zero. Porous velocity retains the equivalent-fluid
+volume-flow convention and the original complex dynamic density.
+
+Optional preparation costs O(components × layers) through the original bounded
+scattering owner and stores O(components) for the selected layer; exterior-only
+spectra incur no layer cache. Queries allocate nothing, re-query no source,
+perform O(components) local matrix work and poll cancellation. Full/remaining
+normalization ratios cancel exponential growth analytically, preserving finite
+entrance fields even when transmission through the whole layer underflows.
+The original finite critical-angle matrix limit is reused without dividing by
+normal wavenumber. Focused controls in `porous_angular_spectrum` compare
+independent propagating/critical/evanescent interior fields, coherent interface
+work, opaque penetration, and flux divergence against the original local
+viscous/thermal loss law. This observation does not evolve thermal state or
+extend the planar equivalent-fluid model's physical validity.
 
 The `layered_acoustic_refraction` example accepts a fourth argument `field` to
 emit a coherent pressure, velocity and active/reactive intensity CSV map through
 the original warm-air layer. Its nine directions and binomial pressure weights
 are explicit; the original three-argument angle/power table remains available.
+The fourth argument `interior` instead resolves the same beam inside that warm
+layer, including its two boundary faces and evanescent/standing fields.
 
 ### Diffuse and authored angular incident power
 

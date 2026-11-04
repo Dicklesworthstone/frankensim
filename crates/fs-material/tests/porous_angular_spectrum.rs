@@ -9,6 +9,7 @@ use fs_material::porous::layers::{
     AcousticSpectrumError, AngularSpectrumBudget, IncidentPlaneWave, Layer,
     MAX_ANGULAR_SPECTRUM_COMPONENTS, TransmittingLayers,
 };
+use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_math::c64::C64;
 
 const OMEGA: f64 = core::f64::consts::TAU * 1000.0;
@@ -308,6 +309,320 @@ fn source_warm_air_layer_preserves_evanescent_tunnelling_amplitude_and_phase() {
     }
 }
 
+// Independent unscaled cosine/sine transfer, used only at modest depths.
+// Returns cos(k_n d), sin(k_n d)/k_n and k_n sin(k_n d), including k_n=0.
+fn normal_matrix(kn_squared: f64, depth: f64) -> [f64; 3] {
+    if kn_squared > 0.0 {
+        let kn = kn_squared.sqrt();
+        let phase = kn * depth;
+        [phase.cos(), phase.sin() / kn, kn * phase.sin()]
+    } else if kn_squared < 0.0 {
+        let alpha = (-kn_squared).sqrt();
+        let decay = alpha * depth;
+        [decay.cosh(), decay.sinh() / alpha, -alpha * decay.sinh()]
+    } else {
+        [1.0, depth, 0.0]
+    }
+}
+
+#[test]
+fn interior_refraction_matches_independent_fields_across_critical_incidence() {
+    let incident = fluid();
+    let layer = FluidAcousticState::try_new(0.7, 425.0).unwrap();
+    let thickness = 0.17;
+    let stack = TransmittingLayers::new(
+        &incident,
+        &incident,
+        OMEGA,
+        &[Layer::FluidLayer {
+            fluid: &layer,
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    let amplitude = C64::new(0.6, -0.8);
+    for cosine in [1.0_f64, 0.9, 0.6, 0.3] {
+        let sine = (1.0 - cosine * cosine).sqrt();
+        let direction = [0.6 * sine, 0.8 * sine, cosine];
+        let beam = stack
+            .prepare_angular_spectrum(
+                &[IncidentPlaneWave {
+                    direction,
+                    pressure_pa: amplitude,
+                }],
+                budget(1),
+                &mut || false,
+            )
+            .unwrap();
+        let interior = beam.prepare_layer_field(0, &mut || false).unwrap();
+        let kt = OMEGA / 340.0 * sine;
+        let kn_squared = (OMEGA / 425.0).powi(2) - kt * kt;
+        let yi = cosine / (1.2 * 340.0);
+        let rho_omega = 0.7 * OMEGA;
+        let [c, s_over_k, k_s] = normal_matrix(kn_squared, thickness);
+        let t = C64::from_re(2.0)
+            / C64::new(2.0 * c, rho_omega * yi * s_over_k + k_s / (rho_omega * yi));
+        for depth in [0.0, 0.2 * thickness, 0.5 * thickness, thickness] {
+            let [c, s_over_k, k_s] = normal_matrix(kn_squared, thickness - depth);
+            let position = [0.04, -0.03, depth];
+            let carrier = amplitude * phase(-kt * (0.6 * position[0] + 0.8 * position[1]));
+            let p = carrier * t * C64::new(c, rho_omega * yi * s_over_k);
+            let vz = carrier * t * C64::new(yi * c, k_s / rho_omega);
+            let sample = interior.field(position, &mut || false).unwrap();
+            near(sample.pressure_pa, p, 2e-14);
+            near(
+                sample.particle_velocity_m_s[0],
+                p.scale(0.6 * kt / rho_omega),
+                2e-16,
+            );
+            near(
+                sample.particle_velocity_m_s[1],
+                p.scale(0.8 * kt / rho_omega),
+                2e-16,
+            );
+            near(sample.particle_velocity_m_s[2], vz, 2e-16);
+            near_real(
+                sample.active_intensity_w_m2[2],
+                0.5 * yi * t.norm_sq(),
+                3e-17,
+            );
+            assert_eq!(sample, interior.field(position, &mut || false).unwrap());
+        }
+        assert_eq!(interior.layer_index(), 0);
+        assert!(core::ptr::eq(interior.spectrum(), &beam));
+    }
+}
+
+#[test]
+fn coherent_interior_layers_keep_interface_work_and_zero_thickness_identity() {
+    let incident = fluid();
+    let other = FluidAcousticState::try_new(0.4, 500.0).unwrap();
+    let layers = [
+        Layer::FluidGap { thickness_m: 0.03 },
+        Layer::FluidLayer {
+            fluid: &other,
+            thickness_m: 0.08,
+        },
+        Layer::FluidGap { thickness_m: 0.0 },
+    ];
+    let stack = TransmittingLayers::new(&incident, &incident, OMEGA, &layers).unwrap();
+    let components = [
+        IncidentPlaneWave {
+            direction: [0.6, 0.0, 0.8],
+            pressure_pa: C64::new(0.7, 0.2),
+        },
+        IncidentPlaneWave {
+            direction: [-0.8, 0.0, 0.6],
+            pressure_pa: C64::new(-0.3, 0.5),
+        },
+    ];
+    let beam = stack
+        .prepare_angular_spectrum(&components, budget(2), &mut || false)
+        .unwrap();
+    let interiors: Vec<_> = (0..3)
+        .map(|index| beam.prepare_layer_field(index, &mut || false).unwrap())
+        .collect();
+    let x = 0.013;
+    let y = -0.017;
+    let mut previous = beam.incident_field([x, y, 0.0], &mut || false).unwrap();
+    for (index, thickness) in [0.03, 0.08, 0.0].into_iter().enumerate() {
+        let front = interiors[index].field([x, y, 0.0], &mut || false).unwrap();
+        near(previous.pressure_pa, front.pressure_pa, 2e-14);
+        near(
+            previous.particle_velocity_m_s[2],
+            front.particle_velocity_m_s[2],
+            2e-16,
+        );
+        near_real(
+            previous.active_intensity_w_m2[2],
+            front.active_intensity_w_m2[2],
+            3e-17,
+        );
+        previous = interiors[index]
+            .field([x, y, thickness], &mut || false)
+            .unwrap();
+    }
+    let transmitted = beam.transmitted_field([x, y, 0.0], &mut || false).unwrap();
+    near(previous.pressure_pa, transmitted.pressure_pa, 2e-14);
+    near(
+        previous.particle_velocity_m_s[2],
+        transmitted.particle_velocity_m_s[2],
+        2e-16,
+    );
+    let interior = &interiors[1];
+    for point in [[x, y, -0.1], [x, y, 0.09], [f64::NAN, y, 0.01]] {
+        assert!(interior.field(point, &mut || false).is_err());
+    }
+    assert!(beam.prepare_layer_field(3, &mut || false).is_err());
+    assert!(matches!(
+        beam.prepare_layer_field(0, &mut || true),
+        Err(AcousticSpectrumError::Cancelled)
+    ));
+    let mut polls = 0;
+    assert_eq!(
+        interior.field([x, y, 0.02], &mut || {
+            polls += 1;
+            polls == 3
+        }),
+        Err(AcousticSpectrumError::Cancelled)
+    );
+}
+
+#[test]
+fn opaque_evanescent_layer_preserves_finite_interior_near_entrance() {
+    let incident = fluid();
+    let layer = FluidAcousticState::try_new(0.6, 680.0).unwrap();
+    let thickness = 1.0e100;
+    let stack = TransmittingLayers::new(
+        &incident,
+        &incident,
+        OMEGA,
+        &[Layer::FluidLayer {
+            fluid: &layer,
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    let beam = stack
+        .prepare_angular_spectrum(
+            &[IncidentPlaneWave {
+                direction: [0.8, 0.0, 0.6],
+                pressure_pa: C64::ONE,
+            }],
+            budget(1),
+            &mut || false,
+        )
+        .unwrap();
+    let interior = beam.prepare_layer_field(0, &mut || false).unwrap();
+    let kt = OMEGA * 0.8 / 340.0;
+    let alpha = (kt * kt - (OMEGA / 680.0).powi(2)).sqrt();
+    let yi = 0.6 / (1.2 * 340.0);
+    let yl = C64::new(0.0, -alpha / (0.6 * OMEGA));
+    let p0 = C64::from_re(2.0 * yi) / (C64::from_re(yi) + yl);
+    for z in [0.0, 0.1 / alpha, 1.0 / alpha, 4.0 / alpha] {
+        let p = p0.scale((-alpha * z).exp());
+        let sample = interior.field([0.0, 0.0, z], &mut || false).unwrap();
+        near(sample.pressure_pa, p, 5e-14);
+        near(sample.particle_velocity_m_s[2], p * yl, 2e-16);
+        near_real(sample.active_intensity_w_m2[2], 0.0, 3e-17);
+        assert!(sample.reactive_intensity_w_m2[2] > 0.0);
+    }
+    let deep = interior
+        .field([0.0, 0.0, 0.5 * thickness], &mut || false)
+        .unwrap();
+    assert_eq!(deep.pressure_pa, C64::ZERO);
+    assert_eq!(deep.particle_velocity_m_s, [C64::ZERO; 3]);
+}
+
+#[test]
+fn porous_interior_flux_divergence_matches_original_local_constitutive_loss() {
+    let incident = fluid();
+    let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let material = law.effective_fluid(&incident, OMEGA).unwrap();
+    let density = material.dynamic_density_kg_m3();
+    let compliance = material.dynamic_bulk_modulus_pa().recip();
+    for thickness in [0.06, 1000.0] {
+        let stack = TransmittingLayers::new(
+            &incident,
+            &incident,
+            OMEGA,
+            &[Layer::Porous {
+                law: &law,
+                thickness_m: thickness,
+            }],
+        )
+        .unwrap();
+        let beam = stack
+            .prepare_angular_spectrum(
+                &[IncidentPlaneWave {
+                    direction: [0.36, 0.48, 0.8],
+                    pressure_pa: C64::new(0.9, 0.2),
+                }],
+                budget(1),
+                &mut || false,
+            )
+            .unwrap();
+        let interior = beam.prepare_layer_field(0, &mut || false).unwrap();
+        let entrance = beam.incident_field([0.0; 3], &mut || false).unwrap();
+        let front = interior.field([0.0; 3], &mut || false).unwrap();
+        near(front.pressure_pa, entrance.pressure_pa, 3e-14);
+        near(
+            front.particle_velocity_m_s[2],
+            entrance.particle_velocity_m_s[2],
+            2e-16,
+        );
+        let exit = beam.transmitted_field([0.0; 3], &mut || false).unwrap();
+        let back = interior
+            .field([0.0, 0.0, thickness], &mut || false)
+            .unwrap();
+        near(back.pressure_pa, exit.pressure_pa, 3e-14);
+        near(
+            back.particle_velocity_m_s[2],
+            exit.particle_velocity_m_s[2],
+            2e-16,
+        );
+        let z = 0.02;
+        let h = 1e-6;
+        let sample = interior.field([0.0, 0.0, z], &mut || false).unwrap();
+        let front_flux = interior
+            .field([0.0, 0.0, z - h], &mut || false)
+            .unwrap()
+            .active_intensity_w_m2[2];
+        let back_flux = interior
+            .field([0.0, 0.0, z + h], &mut || false)
+            .unwrap()
+            .active_intensity_w_m2[2];
+        let divergence = (back_flux - front_flux) / (2.0 * h);
+        let loss = 0.5
+            * OMEGA
+            * (-density.im
+                * sample
+                    .particle_velocity_m_s
+                    .iter()
+                    .map(|v| v.norm_sq())
+                    .sum::<f64>()
+                - compliance.im * sample.pressure_pa.norm_sq());
+        assert!(loss > 0.0);
+        near_real(divergence, -loss, 2e-8 * loss);
+    }
+}
+
+#[test]
+fn small_interior_depth_is_not_lost_against_a_long_lossless_layer() {
+    let incident = fluid();
+    let thickness = 1.0e16;
+    let z = 0.013;
+    assert_eq!(thickness - z, thickness);
+    let stack = TransmittingLayers::new(
+        &incident,
+        &incident,
+        OMEGA,
+        &[Layer::FluidGap {
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    let beam = stack
+        .prepare_angular_spectrum(
+            &[IncidentPlaneWave {
+                direction: [0.6, 0.0, 0.8],
+                pressure_pa: C64::ONE,
+            }],
+            budget(1),
+            &mut || false,
+        )
+        .unwrap();
+    let interior = beam.prepare_layer_field(0, &mut || false).unwrap();
+    let sample = interior.field([0.0, 0.0, z], &mut || false).unwrap();
+    let expected = phase(-OMEGA / 340.0 * 0.8 * z);
+    near(sample.pressure_pa, expected, 2e-14);
+    near(
+        sample.particle_velocity_m_s[2],
+        expected.scale(0.8 / (1.2 * 340.0)),
+        2e-16,
+    );
+}
+
 struct CountedFluid {
     state: ThermoviscousFluidState,
     samples: Cell<usize>,
@@ -372,6 +687,8 @@ fn beam_preparation_and_observation_share_original_frozen_sources() {
     let first = beam
         .transmitted_field([0.02, 0.0, 0.13], &mut || false)
         .unwrap();
+    let interior = beam.prepare_layer_field(0, &mut || false).unwrap();
+    let original_interior = interior.field([0.02, 0.0, 0.03], &mut || false).unwrap();
     receiver
         .state
         .set(FluidAcousticState::try_new(50.0, 900.0).unwrap());
@@ -383,6 +700,10 @@ fn beam_preparation_and_observation_share_original_frozen_sources() {
         );
         beam.incident_field([0.0, 0.0, -0.1], &mut || false)
             .unwrap();
+        assert_eq!(
+            interior.field([0.02, 0.0, 0.03], &mut || false).unwrap(),
+            original_interior
+        );
     }
     let another = stack
         .prepare_angular_spectrum(&components, budget(3), &mut || false)

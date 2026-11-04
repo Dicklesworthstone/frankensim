@@ -18,6 +18,9 @@ use super::{TransmittingLayers, finite};
 use crate::MaterialError;
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod interior;
+pub use interior::PreparedLayerAcousticSpectrum;
+
 /// Hard ceiling on cached coherent plane-wave components.
 pub const MAX_ANGULAR_SPECTRUM_COMPONENTS: usize = 4096;
 
@@ -89,6 +92,7 @@ impl PlaneField {
 }
 
 struct PreparedPlaneWave {
+    cosine: f64,
     tangential_wavenumber: [f64; 2],
     incident_normal_wavenumber: f64,
     receiving_normal_wavenumber: C64,
@@ -183,6 +187,7 @@ impl<'a> TransmittingLayers<'a> {
                 ),
             ];
             components.push(PreparedPlaneWave {
+                cosine: direction[2],
                 tangential_wavenumber,
                 incident_normal_wavenumber,
                 receiving_normal_wavenumber,

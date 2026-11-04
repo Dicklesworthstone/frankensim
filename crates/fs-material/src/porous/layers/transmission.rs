@@ -270,26 +270,7 @@ impl TransmittedState {
         coefficient: C64,
         log_scale: f64,
     ) -> Result<C64, MaterialError> {
-        if coefficient == C64::ZERO {
-            return Ok(C64::ZERO);
-        }
-        let scale = magnitude_scale(coefficient);
-        if !finite(coefficient) || !scale.is_finite() {
-            return Err(bad("layer transmission coefficient is unrepresentable"));
-        }
-        let direction = divided(coefficient, scale);
-        let norm = direction.abs();
-        let magnitude = det::exp(self.amplitude.log + log_scale + det::ln(scale) + det::ln(norm));
-        if !magnitude.is_finite() {
-            return Err(bad("layer transmission amplitude is unrepresentable"));
-        }
-        if magnitude == 0.0 {
-            return Ok(C64::ZERO);
-        }
-        if !self.amplitude.phase_valid {
-            return Err(bad("layer transmission phase is unrepresentable"));
-        }
-        Ok((self.amplitude.phase * divided(direction, norm)).scale(magnitude))
+        self.amplitude.coefficient(coefficient, log_scale)
     }
 
     /// Normal mode power before squaring an underflowed field coefficient.
@@ -339,6 +320,7 @@ pub(super) fn log_scaled(factor: f64, value: f64) -> f64 {
 
 // Compensated logarithmic magnitude prevents intermediate attenuation underflow;
 // the separately normalized phase keeps the common complex factor explicit.
+#[derive(Clone)]
 pub(super) struct LogAmplitude {
     pub(super) log: f64,
     correction: f64,
@@ -380,5 +362,51 @@ impl LogAmplitude {
         let (sine, cosine) = det::sin_cos(radians);
         self.phase = self.phase * C64::new(cosine, sine);
         self.phase = divided(self.phase, self.phase.abs());
+    }
+
+    /// Multiply without rounding a representable downstream field to zero.
+    pub(super) fn multiply(&mut self, coefficient: C64) -> Result<(), MaterialError> {
+        if !finite(coefficient) {
+            return Err(bad("layer field amplitude is unrepresentable"));
+        }
+        if coefficient == C64::ZERO {
+            self.add(f64::NEG_INFINITY);
+            return Ok(());
+        }
+        let scale = magnitude_scale(coefficient);
+        let direction = divided(coefficient, scale);
+        let norm = direction.abs();
+        self.add(det::ln(scale) + det::ln(norm));
+        self.phase = self.phase * divided(direction, norm);
+        self.phase = divided(self.phase, self.phase.abs());
+        Ok(())
+    }
+
+    /// Apply a retained complex scale only after including the field's units.
+    pub(super) fn coefficient(
+        &self,
+        coefficient: C64,
+        log_scale: f64,
+    ) -> Result<C64, MaterialError> {
+        if coefficient == C64::ZERO {
+            return Ok(C64::ZERO);
+        }
+        let scale = magnitude_scale(coefficient);
+        if !finite(coefficient) || !scale.is_finite() {
+            return Err(bad("layer transmission coefficient is unrepresentable"));
+        }
+        let direction = divided(coefficient, scale);
+        let norm = direction.abs();
+        let magnitude = det::exp(self.log + log_scale + det::ln(scale) + det::ln(norm));
+        if !magnitude.is_finite() {
+            return Err(bad("layer transmission amplitude is unrepresentable"));
+        }
+        if magnitude == 0.0 {
+            return Ok(C64::ZERO);
+        }
+        if !self.phase_valid {
+            return Err(bad("layer transmission phase is unrepresentable"));
+        }
+        Ok((self.phase * divided(direction, norm)).scale(magnitude))
     }
 }

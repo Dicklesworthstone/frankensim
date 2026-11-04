@@ -2,7 +2,8 @@
 //!
 //! Run: `cargo run -p fs-material --example layered_acoustic_refraction -- 353.15 0.05 1000`
 //! Arguments: layer temperature [K], nominal thickness [m], frequency [Hz],
-//! and optional `field` to emit a coherent transmitted pressure/velocity map.
+//! and optional `field` or `interior` to emit a coherent pressure/velocity map
+//! in the receiving half-space or inside the finite layer, respectively.
 //! Both exterior half-spaces contain dry air at 293.15 K and 101325 Pa. The
 //! finite layer uses the same explicit USSA-1976 calorically perfect gas model
 //! at the requested temperature and pressure. The maintained planar states
@@ -26,9 +27,13 @@ use std::io::Write as _;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() > 4 || args.get(3).is_some_and(|mode| mode != "field") {
+    if args.len() > 4
+        || args
+            .get(3)
+            .is_some_and(|mode| mode != "field" && mode != "interior")
+    {
         return Err(
-            "usage: layered_acoustic_refraction [layer_temperature_k] [thickness_m] [frequency_hz] [field]"
+            "usage: layered_acoustic_refraction [layer_temperature_k] [thickness_m] [frequency_hz] [field|interior]"
                 .into(),
         );
     }
@@ -59,8 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         layer_acoustic.density_kg_m3(),
         layer_acoustic.sound_speed_m_s(),
     );
-    if args.get(3).is_some() {
-        return coherent_field(&exterior, &layer, thickness, frequency);
+    if let Some(mode) = args.get(3) {
+        return coherent_field(&exterior, &layer, thickness, frequency, mode == "interior");
     }
     let mut angles = vec![0.0_f64, 30.0, 60.0, 80.0];
     if speed_ratio < 1.0 {
@@ -112,6 +117,7 @@ fn coherent_field(
     layer: &GasState,
     thickness_m: f64,
     frequency_hz: f64,
+    inside_layer: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stack = TransmittingLayers::new(
         exterior,
@@ -138,6 +144,11 @@ fn coherent_field(
         AngularSpectrumBudget { max_components: 9 },
         &mut || false,
     )?;
+    let interior = if inside_layer {
+        Some(spectrum.prepare_layer_field(0, &mut || false)?)
+    } else {
+        None
+    };
     let wavelength_m = exterior.acoustic_state()?.sound_speed_m_s() / frequency_hz;
     if !wavelength_m.is_finite() || wavelength_m <= 0.0 {
         return Err("the exterior wavelength must be representable".into());
@@ -145,17 +156,34 @@ fn coherent_field(
     eprintln!(
         "coherent field: 9 plane waves at 48..72 degrees in 3-degree steps; binomial pressure weights /256, total incident peak pressure 1 Pa at the entrance origin"
     );
+    let depth_name = if inside_layer {
+        eprintln!(
+            "interior depth is measured in metres from the layer entrance, including both faces"
+        );
+        "layer_depth_m"
+    } else {
+        eprintln!("receiving depth is measured in metres from the layer exit");
+        "receiving_depth_m"
+    };
     eprintln!(
-        "x and receiving depth are metres; z=0 is the layer exit; time convention exp(+i omega t); intensity is computed after summing complex fields"
+        "x is metres; time convention exp(+i omega t); intensity is computed after summing complex fields"
     );
-    let mut csv = String::from(
-        "x_m,receiving_depth_m,pressure_real_pa,pressure_imag_pa,velocity_x_real_m_s,velocity_x_imag_m_s,velocity_z_real_m_s,velocity_z_imag_m_s,active_x_w_m2,active_z_w_m2,reactive_x_w_m2,reactive_z_w_m2\n",
+    let mut csv = format!(
+        "x_m,{depth_name},pressure_real_pa,pressure_imag_pa,velocity_x_real_m_s,velocity_x_imag_m_s,velocity_z_real_m_s,velocity_z_imag_m_s,active_x_w_m2,active_z_w_m2,reactive_x_w_m2,reactive_z_w_m2\n",
     );
     for iz in 0..=10 {
-        let z = 0.2 * iz as f64 * wavelength_m;
+        let z = if inside_layer {
+            thickness_m * (iz as f64 / 10.0)
+        } else {
+            0.2 * iz as f64 * wavelength_m
+        };
         for ix in 0..=40 {
             let x = (-2.0 + 0.15 * ix as f64) * wavelength_m;
-            let sample = spectrum.transmitted_field([x, 0.0, z], &mut || false)?;
+            let sample = if let Some(interior) = &interior {
+                interior.field([x, 0.0, z], &mut || false)?
+            } else {
+                spectrum.transmitted_field([x, 0.0, z], &mut || false)?
+            };
             let p = sample.pressure_pa;
             let vx = sample.particle_velocity_m_s[0];
             let vz = sample.particle_velocity_m_s[2];
