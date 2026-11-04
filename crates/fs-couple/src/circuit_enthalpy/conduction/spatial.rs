@@ -11,6 +11,8 @@
 
 /// Native multi-electrode current coupled to finite circuit storage.
 pub mod circuit;
+/// Same-stage original current and source-bound rigid momentum.
+pub mod mechanical;
 /// Conductor-frame Joule heating under prescribed motion and magnetic field.
 pub mod motion;
 

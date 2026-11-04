@@ -1,5 +1,45 @@
 # CONTRACT: fs-couple
 
+## Source-bound moving-current feedback into native rigid momentum
+
+`circuit_enthalpy::conduction::spatial::mechanical::PreparedSpatialConductionKick`
+closes the original moving-conductor current and six rigid velocity components
+at one implicit-midpoint force substep. The exact `TetrahedralMass` mesh and its
+retained material-card/state identities must match the complete electrical mesh.
+Its original `ResolvedBody::inertia()` enters the native articulated body without
+an authored replacement mass, diagonal inertia or fitted motor constant.
+
+Fixed conductivity, imposed B and native linear voltage/current traces make the
+Lorentz wrench affine in rigid velocity. Preparation obtains the source wrench
+and six homogeneous response columns through seven complete native field solves.
+It factors `M - dt*A/2` without deleting couplings or modifying drag. A warm kick
+uses one complete electrical solve at the coupled midpoint, the original P1
+Lorentz-load/wrench map, and `fs_mbd::apply_free_floating_impulses` for actual
+linear/angular momentum and polarized kinetic work. Source and response fields
+are released promptly; the prepared cache retains only the small coupling and
+the original immutable owners, plus held boundary/B snapshots.
+
+The actual endpoint midpoint must agree with the field velocity. Independent
+Lorentz/kinetic and `delta_K + Q_Joule - W_terminal - W_external` gates precede
+publication. Only conductor-frame Joule heat belongs in a thermal receiver;
+mechanical output changes kinetic storage, and a held external wrench has its
+own signed work. Neither Maxwell/induction loads nor the native impulse may be
+applied again. Refusal/cancellation changes no accepted state and permits retry.
+
+This is explicitly a fixed-configuration momentum substep. It does not advance
+pose, free rigid drift, gyroscopic transport, induction, thermal state or material
+occupancy. Changing geometry, sources, B, boundary law, pose or duration requires
+new preparation; a changed incoming pose refuses. The caller owns transport and
+the physical validity of frozen geometry. Finite electrical contacts and joint
+constraints require their own coupling laws and are outside this lane.
+
+`tests/spatial_conduction_mechanical.rs` specifies independent uniform-bar
+braking/generation/motoring and external-work oracles, source-density and mesh
+variation, actual current-driven voltage feedback, a non-diagonal rotational
+response with world-frame momentum transfer, open-circuit screening, second-order
+fixed-operator time refinement, and source/budget/cancellation/retry refusals.
+These manufactured-law fixtures do not qualify an empirical electric machine.
+
 ## Physical harmonic pressure reaches the existing WAV stream
 
 pcm_wav::observation::harmonic::HarmonicPressureRenderer borrows an original
