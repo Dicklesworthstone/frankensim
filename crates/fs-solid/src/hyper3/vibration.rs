@@ -10,15 +10,17 @@
 //! averaging a graded density before constructing the pencil is not equivalent.
 //!
 //! This bounded dense route freezes hyperelastic material conditions, dead
-//! loads and optional uniform closed-surface pressure. The latter contributes
-//! the original conservative follower tangent exactly once. It does not admit
+//! loads and optional conservative closed-surface pressure. Uniform, affine
+//! Eulerian and planar free-surface fields contribute their original follower
+//! tangent exactly once, including buoyancy and wetted-area restoring terms.
+//! It does not admit
 //! a viscous/plastic algorithmic tangent, nonconservative pressure patches,
 //! evolving gravity, damping, finite-amplitude motion or mode truncation.
 //! At constitutive switching surfaces it reports the original declared tangent,
 //! not a unique two-sided harmonic response. P1 volumetric locking and spatial
 //! convergence remain properties of the original discretization.
 
-use super::pressure::ClosedTetPressureSurface;
+use super::pressure::{ClosedTetPressureSurface, TetPressure};
 use super::{HyperTetError, HyperTetProblem, HyperTetSolution, checkpoint};
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
@@ -87,7 +89,7 @@ impl std::error::Error for VibrationError {
 #[derive(Debug)]
 pub struct HyperTetVibration<'a, L: HyperelasticMaterial = Hyperelastic> {
     problem: HyperTetProblem<'a, L>,
-    held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
+    held_pressure: Option<(&'a ClosedTetPressureSurface, TetPressure<'a>)>,
     reference_density: RetainedReferenceDensity,
     equilibrium: HyperTetSolution,
     free_dofs: Vec<usize>,
@@ -162,6 +164,26 @@ impl ReferenceDensityInput<'_> {
 
 fn invalid(what: &str) -> HyperTetError {
     HyperTetError::InvalidInput { what: what.into() }
+}
+
+/// Both spectral routes require a scalar loading potential. A per-face patch
+/// has no such contract, even if its current tangent happens to be symmetric.
+/// Return the native exact-zero classification so unloaded arithmetic is kept.
+fn admit_pressure_field<L: HyperelasticMaterial>(
+    problem: &HyperTetProblem<'_, L>,
+    surface: &ClosedTetPressureSurface,
+    pressure: TetPressure<'_>,
+    cx: &Cx<'_>,
+) -> Result<bool, HyperTetError> {
+    if matches!(pressure, TetPressure::PerFace(_)) {
+        return Err(invalid(
+            "symmetric vibration requires uniform, affine or free-surface pressure, not face patches",
+        ));
+    }
+    if !surface.matches_reference(problem.nodes_m, problem.tetrahedra) {
+        return Err(invalid("the exact reference pressure surface is required"));
+    }
+    surface.validate_pressure(pressure, cx)
 }
 
 fn dense_restriction(matrix: &Csr, free: &[usize], cx: &Cx<'_>) -> Result<Vec<f64>, HyperTetError> {
@@ -248,19 +270,23 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
 
     /// Original pressure-loaded equilibrium and its complete signed spectrum.
     ///
-    /// Positive pressure acts inward on the same complete closed surface.
-    /// The linearization is K=d(f_internal-f_pressure)/du, including p*d²V/du²
-    /// exactly once. Pressure is held by an external reservoir; neither a finite
-    /// gas stiffness nor pressure dynamics is inferred. The exact reference
-    /// surface and pressure remain borrowed in the returned spectrum.
+    /// A scalar retains the original uniform-pressure semantics. Affine and
+    /// planar free-surface fields are fixed in world space and sampled on the
+    /// current surface by the original pressure owner. The linearization is
+    /// K=d(f_internal-f_pressure)/du, including field gradients and wetted-area
+    /// changes exactly once. Pressure has no inertia or finite reservoir
+    /// stiffness. The exact surface and field are retained with the spectrum.
+    /// At a whole face on the zero-pressure plane, the native dry-side
+    /// generalized tangent is returned, not a unique two-sided oscillation law.
     ///
     /// # Errors
     /// The original pressure reference/finite-value gates and all errors of
-    /// [`Self::solve_vibration`]. Nonuniform/open-patch pressure is not admitted.
+    /// [`Self::solve_vibration`]. Per-face patches are not conservative load
+    /// data and are refused, including a currently uniform per-face array.
     pub fn solve_vibration_with_pressure(
         &self,
         surface: &'a ClosedTetPressureSurface,
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'a>>,
         reference_density_kg_m3: &[f64],
         settings: VibrationSettings,
         cx: &Cx<'_>,
@@ -268,7 +294,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         self.solve_vibration_impl(
             ReferenceDensityInput::PerElement(reference_density_kg_m3),
             None,
-            Some((surface, pressure_pa)),
+            Some((surface, pressure_pa.into())),
             settings,
             cx,
         )
@@ -284,7 +310,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
     pub fn solve_vibration_with_nodal_density_and_pressure(
         &self,
         surface: &'a ClosedTetPressureSurface,
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'a>>,
         reference_nodal_density_kg_m3: &[f64],
         settings: VibrationSettings,
         cx: &Cx<'_>,
@@ -292,7 +318,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         self.solve_vibration_impl(
             ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
             None,
-            Some((surface, pressure_pa)),
+            Some((surface, pressure_pa.into())),
             settings,
             cx,
         )
@@ -347,20 +373,16 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         &self,
         density: ReferenceDensityInput<'_>,
         initial: Option<&[f64]>,
-        held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
+        held_pressure: Option<(&'a ClosedTetPressureSurface, TetPressure<'a>)>,
         settings: VibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
         checkpoint(cx)?;
         self.validate_inputs()?;
-        if let Some((surface, pressure)) = held_pressure {
-            if !pressure.is_finite() || !surface.matches_reference(self.nodes_m, self.tetrahedra) {
-                return Err(invalid(
-                    "finite pressure and the exact reference pressure surface are required",
-                )
-                .into());
-            }
-        }
+        let unloaded_pressure = match held_pressure {
+            Some((surface, pressure)) => admit_pressure_field(self, surface, pressure, cx)?,
+            None => true,
+        };
         if !settings.relative_residual_tolerance.is_finite()
             || !(0.0..1.0).contains(&settings.relative_residual_tolerance)
             || settings.relative_residual_tolerance == 0.0
@@ -383,7 +405,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         // volume is updated to the deformed geometry or statically lumped.
         let mass_kg = dense_restriction(&density.mass_matrix(self, cx)?, &free_dofs, cx)?;
         let equilibrium = match held_pressure {
-            Some((surface, pressure)) => self.solve_with_pressure(surface, pressure, cx)?,
+            Some((surface, pressure)) => self.solve_with_pressure_field(surface, pressure, cx)?,
             None => match initial {
                 None => self.solve(cx)?,
                 Some(displacement) => self.solve_from(displacement, cx)?,
@@ -401,7 +423,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             cx,
         )?;
         if let Some((surface, pressure)) = held_pressure {
-            if pressure != 0.0 {
+            if !unloaded_pressure {
                 let external = dense_restriction(
                     &surface.force_tangent(&displacement, pressure, cx)?,
                     &free_dofs,
@@ -460,10 +482,23 @@ impl<L: HyperelasticMaterial> HyperTetVibration<'_, L> {
         &self.problem
     }
 
-    /// Exact original closed pressure surface and held signed pressure [Pa].
-    /// None selects dead loads only; Some with zero retains an explicitly
-    /// supplied unloaded surface. Positive pressure acts inward.
+    /// Exact original surface and held UNIFORM signed pressure [Pa].
+    /// Some with zero retains an explicitly supplied unloaded surface. None
+    /// means no uniform load; use [`Self::held_pressure_field`] to distinguish
+    /// dead loads only from a retained spatial field. Positive pressure is inward.
     pub const fn held_pressure(&self) -> Option<(&ClosedTetPressureSurface, f64)> {
+        match self.held_pressure {
+            Some((surface, TetPressure::Uniform(pressure))) => Some((surface, pressure)),
+            _ => None,
+        }
+    }
+
+    /// Exact original closed surface and conservative held field. None selects
+    /// dead loads only. Spatial fields retain their world origin, gradient and
+    /// free-surface plane; their tangent is never replaced by uniform pressure.
+    pub const fn held_pressure_field(
+        &self,
+    ) -> Option<(&ClosedTetPressureSurface, TetPressure<'_>)> {
         self.held_pressure
     }
 

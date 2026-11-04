@@ -1316,6 +1316,25 @@ uniform bit parity, dense/sparse agreement, the independent pressure-loaded
 three-mode spectrum, and invalid-density/cancellation refusals. The original
 dense DOF cap, sparse spectral budgets and signed-mode limitations remain.
 
+Those same pressure entry points accept the original `TetPressure::Affine`
+and `TetPressure::FreeSurface` fields as well as scalar uniform pressure.
+The native equilibrium samples the held Eulerian field on the current surface;
+the complete pencil subtracts that same owner's analytic follower derivative
+exactly once. Field gradients, buoyancy and moving wet-area contributions are
+retained with no added fluid inertia, density refresh or separate prestress
+matrix. Both cellwise and original P1 nodal reference inertia remain available.
+`held_pressure_field()` returns the exact bound surface and field; the existing
+`held_pressure()` accessor continues to identify uniform loads. Per-face patches
+refuse this symmetric spectral route even if their current matrix happens to
+be symmetric: they do not supply a conservative loading-potential contract.
+At a whole face on the zero-pressure plane, the native dry-side generalized
+tangent is reported, not a unique two-sided harmonic law. Pressure evolution,
+finite reservoirs, coupled added mass and continuum stability remain separate.
+G1/G3/G4 regression definitions in `tests/hyper3_pressure/vibration.rs` cover
+independent affine and clipped-volume modal stiffness, Archimedes waterplane
+restoring work, original graded mass, dense/sparse agreement, uniform limits,
+invalid fields, patch refusal and cancellation.
+
 `tet10::QuadraticTetProblem::assemble_with_reference_density` carries graded
 reference inertia into the same native quadratic stiffness/mass pencil. Each
 element supplies four positive corner densities, interpolated with P1 reference
