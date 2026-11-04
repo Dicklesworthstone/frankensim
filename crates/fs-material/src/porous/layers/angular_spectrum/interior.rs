@@ -76,9 +76,9 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
                     .density_kg_m3(),
             )
         };
-        let compliance = layer
-            .porous
-            .map_or(C64::ZERO, |response| response.dynamic_bulk_modulus_pa().recip());
+        let compliance = layer.porous.map_or(C64::ZERO, |response| {
+            response.dynamic_bulk_modulus_pa().recip()
+        });
         // Square roots retain a weak field times a strong loss coefficient
         // without first squaring an unweighted field. Preparation reuses the
         // same original material snapshot; observations need no extra query.
@@ -86,9 +86,7 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
             if loss == 0.0 {
                 0.0
             } else {
-                det::exp(
-                    0.5 * (det::ln(prepared.omega) + det::ln(loss) - core::f64::consts::LN_2),
-                )
+                det::exp(0.5 * (det::ln(prepared.omega) + det::ln(loss) - core::f64::consts::LN_2))
             }
         });
         let mut waves = Vec::with_capacity(self.components.len());

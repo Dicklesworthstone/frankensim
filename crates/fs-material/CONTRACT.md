@@ -11349,6 +11349,15 @@ integrates sampled heat against the original analytic layer-absorption owner,
 preserves coherent nodes/cancellation, and checks lossless/source/cancellation
 semantics.
 
+The `porous_acoustic_heat` example emits a complete interior CSV map for two
+coherent rays in the original Basotect Foam-02 layer with explicitly authored
+characterization viscosity and the USSA-1976 dry-air state. Frequency, thickness,
+pressure scale and relative phase are arguments. It resolves one transverse
+interference period, reports all pressure/velocity/intensity components and
+both heat mechanisms, and buffers the bounded map before output. The sampling
+is a visualization grid, not an asserted spatial integration accuracy or a
+thermal-feedback model.
+
 ### Diffuse and authored angular incident power
 
 `RigidBackedLayers::diffuse_power` and `TransmittingLayers::diffuse_power`

@@ -807,7 +807,6 @@ fn explicit_budgets_domains_and_cancellation_refuse_without_partial_fields() {
     );
 }
 
-
 // Independent conventional transfer from the receiving face. Growing cos/sin
 // are used only for this well-conditioned reference, not for production fields.
 fn porous_heat_reference(
@@ -1055,8 +1054,7 @@ fn g1_coherent_heat_retains_velocity_nodes_and_exact_source_cancellation() {
         .material_response(0)
         .unwrap()
         .dynamic_density_kg_m3();
-    let expected_viscous =
-        -2.0 * OMEGA * rho.im * one.field.particle_velocity_m_s[0].norm_sq();
+    let expected_viscous = -2.0 * OMEGA * rho.im * one.field.particle_velocity_m_s[0].norm_sq();
     near_real(
         node.viscous_heating_w_m3,
         expected_viscous,
@@ -1102,6 +1100,9 @@ fn g0_coherent_heat_is_a_pure_observation_and_keeps_lossless_identity_semantics(
         ],
     )
     .unwrap();
+    // The original constructor owns source sampling. This observation must
+    // introduce no additional queries, independent of its preparation count.
+    let constructor_queries = incident.samples.get();
     let waves = [IncidentPlaneWave {
         direction: [0.6, 0.0, 0.8],
         pressure_pa: C64::ONE,
@@ -1110,21 +1111,20 @@ fn g0_coherent_heat_is_a_pure_observation_and_keeps_lossless_identity_semantics(
         .prepare_angular_spectrum(&waves, budget(2), &mut || false)
         .unwrap();
     let inside = beam.prepare_layer_field(0, &mut || false).unwrap();
+    assert_eq!(incident.samples.get(), constructor_queries);
     let point = [0.02, 0.03, 0.04];
     let expected = inside.field_with_heat(point, &mut || false).unwrap();
     assert_eq!(expected.field, inside.field(point, &mut || false).unwrap());
     assert_eq!(expected.viscous_heating_w_m3, 0.0);
     assert_eq!(expected.thermal_heating_w_m3, 0.0);
-    assert_eq!(incident.samples.get(), 1);
+    assert_eq!(incident.samples.get(), constructor_queries);
     let identity = beam.prepare_layer_field(1, &mut || false).unwrap();
     assert!(identity.field([0.0; 3], &mut || false).is_ok());
     assert!(identity.field_with_heat([0.0; 3], &mut || false).is_err());
-    for bad in [
-        [0.0, 0.0, -1e-9],
-        [0.0, 0.0, 0.11],
-        [f64::NAN, 0.0, 0.05],
-    ] {
+    assert_eq!(incident.samples.get(), constructor_queries);
+    for bad in [[0.0, 0.0, -1e-9], [0.0, 0.0, 0.11], [f64::NAN, 0.0, 0.05]] {
         assert!(inside.field_with_heat(bad, &mut || false).is_err());
+        assert_eq!(incident.samples.get(), constructor_queries);
     }
     let mut polls = 0;
     assert!(matches!(
@@ -1134,6 +1134,9 @@ fn g0_coherent_heat_is_a_pure_observation_and_keeps_lossless_identity_semantics(
         }),
         Err(AcousticSpectrumError::Cancelled)
     ));
-    assert_eq!(inside.field_with_heat(point, &mut || false).unwrap(), expected);
-    assert_eq!(incident.samples.get(), 1);
+    assert_eq!(
+        inside.field_with_heat(point, &mut || false).unwrap(),
+        expected
+    );
+    assert_eq!(incident.samples.get(), constructor_queries);
 }
