@@ -30,6 +30,8 @@ mod forcing;
 pub use forcing::{RotorPeriodicOrbit, RotorPeriodicTrajectory, prepare_forced_cycle};
 mod harmonic;
 pub use harmonic::{MAX_ROTOR_FORCE_HARMONIC, RotorHarmonicForce, prepare_harmonic_cycle};
+mod fourier;
+pub use fourier::{MAX_ROTOR_FORCE_TONES, RotorFourierForce, prepare_fourier_cycle};
 
 #[derive(Clone, Copy)]
 enum CycleForcing<'a> {
@@ -39,6 +41,10 @@ enum CycleForcing<'a> {
         rows: &'a [RotorHarmonicForce<'a>],
         order: usize,
     },
+    Fourier {
+        rows: &'a [RotorFourierForce<'a>],
+        orders: &'a [usize],
+    },
 }
 
 impl CycleForcing<'_> {
@@ -47,6 +53,20 @@ impl CycleForcing<'_> {
             Self::Homogeneous => 0,
             Self::Held(_) => 1,
             Self::Harmonic { .. } => 2,
+            Self::Fourier { orders, .. } => {
+                if orders.is_empty() {
+                    1
+                } else {
+                    2
+                }
+            }
+        }
+    }
+
+    fn exponentials_per_segment(self) -> usize {
+        match self {
+            Self::Fourier { orders, .. } => 1 + orders.len(),
+            _ => 1,
         }
     }
 
@@ -62,12 +82,28 @@ impl CycleForcing<'_> {
                         .iter()
                         .all(|row| valid_row(row.cosine) && valid_row(row.sine))
             }
+            Self::Fourier { rows, orders } => {
+                orders.len() <= MAX_ROTOR_FORCE_TONES
+                    && orders
+                        .iter()
+                        .all(|order| (1..=MAX_ROTOR_FORCE_HARMONIC).contains(order))
+                    && orders.windows(2).all(|pair| pair[0] < pair[1])
+                    && rows.len() == segments
+                    && rows.iter().all(|row| {
+                        valid_row(row.steady)
+                            && row.harmonics.len() == orders.len()
+                            && row
+                                .harmonics
+                                .iter()
+                                .all(|tone| valid_row(tone.cosine) && valid_row(tone.sine))
+                    })
+            }
         };
         if valid {
             Ok(())
         } else {
             Err(RotorError::Invalid(
-                "matching finite segment loads and bounded positive harmonic order required",
+                "matching finite segment loads and bounded strictly increasing harmonic orders required",
             ))
         }
     }
@@ -95,6 +131,7 @@ pub struct RotorPeriodicSegment<'a> {
 /// all owner workspace and returned arrays, excluding the borrowed models.
 /// Work conservatively reserves 80 dense products per segment exponential,
 /// and additionally mass solves, chronological products and bounded complex QR.
+/// Fourier forcing reserves one held-source exponential plus one per tone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RotorFloquetBudget {
     /// Supplied segment count ceiling, in 1..=MAX_ROTOR_PERIODIC_SEGMENTS.
@@ -124,6 +161,7 @@ impl RotorFloquetBudget {
         n: usize,
         segments: usize,
         source_coordinates: usize,
+        exponentials_per_segment: usize,
     ) -> Result<DenseExponentialBudget, RotorError> {
         if self.max_segments == 0
             || self.max_segments > MAX_ROTOR_PERIODIC_SEGMENTS
@@ -145,9 +183,17 @@ impl RotorFloquetBudget {
         } else {
             0
         };
-        let bytes = (16 * e * e + 32 * e + retained) * core::mem::size_of::<f64>();
+        // A Fourier sum retains the held-source map and compensated offset
+        // while evaluating one tone at a time. No harmonic state bank is kept.
+        let superposition = if exponentials_per_segment > 1 {
+            d * d + 4 * d
+        } else {
+            0
+        };
+        let bytes = (16 * e * e + 32 * e + retained + superposition) * core::mem::size_of::<f64>();
         let cube = (d as u64).pow(3);
-        let exponential_work = (e as u64).pow(3) * 84 * segments as u64;
+        let exponential_work =
+            (e as u64).pow(3) * 84 * segments as u64 * exponentials_per_segment as u64;
         let work = exponential_work
             + cube
                 * (64 * (self.max_qr_sweeps_per_window as u64 + 1) + if forced { 32 } else { 0 });
@@ -190,8 +236,9 @@ pub struct RotorFloquetResponse {
 
 /// Cached full affine rotor cycle with a fixed physical force schedule.
 ///
-/// Construct with prepare_forced_cycle or prepare_harmonic_cycle. Held loads
-/// and continuous harmonic sources share the same complete coupled operators.
+/// Construct with prepare_forced_cycle, prepare_harmonic_cycle or
+/// prepare_fourier_cycle. Held loads and continuous harmonic sources share the
+/// same complete coupled operators.
 /// Coefficient and force changes introduce no state reset.
 /// Warm trajectory calls use the retained maps without new exponentials.
 /// The homogeneous Floquet report does not classify this forced orbit as
@@ -271,7 +318,12 @@ fn prepare_cycle(
     let n = reference.dofs();
     forces.admit(n, segments.len())?;
     let forced = forces.source_coordinates() != 0;
-    let dense_budget = budget.admit(n, segments.len(), forces.source_coordinates())?;
+    let dense_budget = budget.admit(
+        n,
+        segments.len(),
+        forces.source_coordinates(),
+        forces.exponentials_per_segment(),
+    )?;
     let mut boundary_times = if forced {
         Vec::with_capacity(segments.len() + 1)
     } else {
@@ -355,6 +407,22 @@ fn prepare_cycle(
                     &generator,
                     rows[index],
                     order,
+                    boundary_times[index],
+                    segment.duration_seconds,
+                    period_seconds,
+                    relative_mass_residual_tolerance,
+                    dense_budget,
+                    &mut cancelled,
+                )?;
+                maximum_mass_residual = maximum_mass_residual.max(residual);
+                flow
+            }
+            CycleForcing::Fourier { rows, orders } => {
+                let (flow, residual) = fourier::segment_flow(
+                    &mass,
+                    &generator,
+                    rows[index],
+                    orders,
                     boundary_times[index],
                     segment.duration_seconds,
                     period_seconds,

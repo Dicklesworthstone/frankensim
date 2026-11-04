@@ -592,6 +592,30 @@ scales and subdivision, signed gyroscopic rotating loads, full mutual inertia
 with free coordinates, secular lossless resonance, globally phased coefficient
 switches, and homogeneous/admission equivalence.
 
+`rotordynamics::periodic::prepare_fourier_cycle` composes steady physical
+loading with up to 32 simultaneous harmonics of the same declared period.
+Orders are strictly increasing in 1..=1024; every segment supplies its actual
+DC and cosine/sine coefficients. All tones retain the common phase through
+coefficient and amplitude switches. Empty or silent harmonic sets reuse the
+held-source behavior, including the complete physical Floquet spectrum.
+
+One shared mass factor and segment generator serve every component. The
+existing normalized harmonic exponential integrates each tone separately,
+and double-double accumulation combines their affine offsets. A single
+physical transition is retained per segment, so warm trajectory/orbit work
+and retained storage are independent of tone count. Cold exponential work is
+linear in tone count with a fixed 66-coordinate maximum; the complete query
+budget reserves all tones before allocation. Original full-mass force-column
+residuals, cancellation and singular periodic-orbit refusals remain active.
+
+Six G1/G3 regression groups cover analytic resonant multi-harmonic orbits
+across 160 decades of force scale, full mutual-mass integration, globally
+phased coefficient/amplitude switches, lossless secular growth, exact
+held/silent-source parity, and whole-spectrum resource/shape admission.
+This finite Fourier load does not infer an unmodeled force spectrum,
+nonlinear bearing/mesh feedback, smooth modulation or spin acceleration;
+waveform truncation and full actuator-work audits remain separate questions.
+
 `harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
 on `K - omega^2 M + i omega(C + Omega G)`. Row equilibration precedes the solve;
 compensated inertial products retain the original binary coefficients' detuning

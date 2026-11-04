@@ -43,8 +43,9 @@ pub struct RotorHarmonicForce<'a> {
 /// The original full mass residuals are checked independently for BOTH loads.
 ///
 /// Numerical exponential/residual error is distinct from model validity. Full
-/// force-work receipts, smooth coefficient modulation, speed ramps and harmonic
-/// superposition are outside this single-harmonic segmented-coefficient API.
+/// force-work receipts, smooth coefficient modulation and speed ramps are
+/// outside this segmented-coefficient API. Use prepare_fourier_cycle for
+/// simultaneous steady loading and multiple harmonics of the same period.
 /// Failure/cancellation publishes no partial plan. Warm advance/orbit queries
 /// reuse the same maps and solve owner as held forcing.
 #[allow(clippy::too_many_arguments)] // explicit physical cycle, source and caller budgets
