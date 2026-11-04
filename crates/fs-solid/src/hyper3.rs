@@ -114,11 +114,11 @@ pub struct HyperTetSettings {
     pub load_steps: usize,
     /// Newton iterations allowed per load step.
     pub max_newton_iterations: usize,
-    /// Relative force-residual gate (see module docs).
+    /// Relative force-residual gate (see module docs), strictly in (0, 1).
     pub relative_tolerance: f64,
     /// Step halvings allowed per Newton iteration.
     pub max_backtracks: usize,
-    /// Relative residual required of each linear solve.
+    /// Relative residual required of each linear solve, strictly in (0, 1).
     pub linear_tolerance: f64,
     /// Iteration cap of each linear solve.
     pub max_linear_iterations: usize,
@@ -467,8 +467,13 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         let s = self.settings;
         if s.load_steps == 0
             || s.max_newton_iterations == 0
-            || !(s.relative_tolerance.is_finite() && s.relative_tolerance > 0.0)
-            || !(s.linear_tolerance.is_finite() && s.linear_tolerance > 0.0)
+            || s.max_linear_iterations == 0
+            || !(s.relative_tolerance.is_finite()
+                && s.relative_tolerance > 0.0
+                && s.relative_tolerance < 1.0)
+            || !(s.linear_tolerance.is_finite()
+                && s.linear_tolerance > 0.0
+                && s.linear_tolerance < 1.0)
         {
             return invalid(format!("inadmissible settings {s:?}"));
         }
@@ -1919,7 +1924,68 @@ impl Precond for AbsJacobi {
 
 #[cfg(test)]
 mod force_norm_tests {
-    use super::norm;
+    use super::*;
+    use fs_material::hyper::HyperelasticModel;
+
+    #[test]
+    fn relative_solver_controls_refuse_vacuous_convergence_gates() {
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tetrahedra = [[0, 1, 2, 3]];
+        let material = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 1.0,
+                lambda: 1.0,
+            },
+            2.0,
+        )
+        .unwrap();
+        let base = HyperTetProblem {
+            nodes_m: &nodes,
+            tetrahedra: &tetrahedra,
+            material: HyperelasticLawField::Uniform(&material),
+            prescribed_m: &[],
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings::default(),
+        };
+
+        for settings in [
+            HyperTetSettings {
+                relative_tolerance: 1.0,
+                ..base.settings
+            },
+            HyperTetSettings {
+                relative_tolerance: 2.0,
+                ..base.settings
+            },
+            HyperTetSettings {
+                linear_tolerance: 1.0,
+                ..base.settings
+            },
+            HyperTetSettings {
+                linear_tolerance: 2.0,
+                ..base.settings
+            },
+            HyperTetSettings {
+                max_linear_iterations: 0,
+                ..base.settings
+            },
+        ] {
+            let problem = HyperTetProblem { settings, ..base };
+            assert!(matches!(
+                problem.validate_inputs(),
+                Err(HyperTetError::InvalidInput { .. })
+            ));
+        }
+
+        assert!(base.validate_inputs().is_ok());
+    }
 
     #[test]
     fn force_norm_preserves_representable_extremes_and_refuses_nonfinite_input() {
