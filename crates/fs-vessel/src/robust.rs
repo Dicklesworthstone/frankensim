@@ -103,3 +103,140 @@ pub fn robustify(beta: f64) -> RobustReport {
         beta,
     }
 }
+
+/// Physical film-width selection over a finite authored candidate set.
+///
+/// Widths are dimensionless multipliers of the study's SI section widths.
+/// Both nominal and robust choices may coincide or lie on the candidate
+/// boundary. No interior optimum or strictly different robust choice is forced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaminarRobustReport {
+    /// Candidate minimizing nominal growth.
+    pub nominal_candidate: usize,
+    /// Candidate minimizing the fluid band's CVaR.
+    pub robust_candidate: usize,
+    /// Nominal candidate's width multiplier.
+    pub nominal_width_scale: f64,
+    /// Robust candidate's width multiplier.
+    pub robust_width_scale: f64,
+    /// Fluid-band CVaR at the nominal choice, in 1/s.
+    pub nominal_band_cvar_per_s: f64,
+    /// Fluid-band CVaR at the robust choice, in 1/s.
+    pub robust_band_cvar_per_s: f64,
+    /// Largest sampled band growth at the nominal choice, in 1/s.
+    pub nominal_worst_growth_per_s: f64,
+    /// Largest sampled band growth at the robust choice, in 1/s.
+    pub robust_worst_growth_per_s: f64,
+    /// CVaR level.
+    pub beta: f64,
+}
+
+/// A refused physical candidate or risk calculation; no optimum is published.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LaminarRobustError {
+    /// At least one authored width candidate is required.
+    EmptyCandidates,
+    /// At least one physical band operating point is required.
+    EmptyBand,
+    /// Native film admission failed.
+    Film {
+        /// Candidate index.
+        candidate: usize,
+        /// None for the nominal point; otherwise the band index.
+        fluid: Option<usize>,
+        /// Original physical refusal.
+        source: crate::stability::laminar::LaminarFilmError,
+    },
+    /// Canonical empirical CVaR refused.
+    Risk(RobustError),
+}
+
+impl core::fmt::Display for LaminarRobustError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EmptyCandidates => write!(f, "physical film optimization needs a width candidate"),
+            Self::EmptyBand => write!(f, "physical film optimization needs a fluid-band point"),
+            Self::Film { candidate, fluid, source } => {
+                write!(f, "film candidate {candidate}, fluid {fluid:?}: {source}")
+            }
+            Self::Risk(source) => write!(f, "film-band CVaR: {source:?}"),
+        }
+    }
+}
+
+impl std::error::Error for LaminarRobustError {}
+
+/// Optimize the actual free-surface long-wave screen, with explicit SI inputs.
+///
+/// Every candidate must be admitted at the nominal point AND every band point.
+/// A rejected model is returned with its candidate/fluid indices; it is never
+/// dropped from the band or assigned an artificial penalty. Candidate order
+/// deterministically breaks exact ties. CVaR minimization guarantees no worse
+/// band CVaR than the nominal choice, but need not minimize the band's maximum.
+pub fn robustify_laminar(
+    study: &crate::stability::laminar::LaminarFilmStudy<'_>,
+    width_scales: &[f64],
+    nominal: crate::stability::laminar::LaminarPourConditions,
+    band: &[crate::stability::laminar::LaminarPourConditions],
+    beta: f64,
+) -> Result<LaminarRobustReport, LaminarRobustError> {
+    if width_scales.is_empty() {
+        return Err(LaminarRobustError::EmptyCandidates);
+    }
+    if band.is_empty() {
+        return Err(LaminarRobustError::EmptyBand);
+    }
+    // Validate the requested risk level before evaluating any candidate.
+    let _ = cvar(&[0.0], beta).map_err(LaminarRobustError::Risk)?;
+    let mut nominal_candidate = 0;
+    let mut robust_candidate = 0;
+    let mut best_nominal = f64::INFINITY;
+    let mut best_cvar = f64::INFINITY;
+    let mut candidate_risks = Vec::with_capacity(width_scales.len());
+    let mut losses = Vec::with_capacity(band.len());
+    for (candidate, &width) in width_scales.iter().enumerate() {
+        let nominal_growth = study
+            .evaluate(width, nominal)
+            .map_err(|source| LaminarRobustError::Film {
+                candidate,
+                fluid: None,
+                source,
+            })?
+            .max_growth_per_s;
+        if nominal_growth < best_nominal {
+            best_nominal = nominal_growth;
+            nominal_candidate = candidate;
+        }
+        losses.clear();
+        let mut worst = f64::NEG_INFINITY;
+        for (fluid, &conditions) in band.iter().enumerate() {
+            let growth = study
+                .evaluate(width, conditions)
+                .map_err(|source| LaminarRobustError::Film {
+                    candidate,
+                    fluid: Some(fluid),
+                    source,
+                })?
+                .max_growth_per_s;
+            losses.push(growth);
+            worst = worst.max(growth);
+        }
+        let risk = cvar(&losses, beta).map_err(LaminarRobustError::Risk)?;
+        candidate_risks.push((risk, worst));
+        if risk < best_cvar {
+            best_cvar = risk;
+            robust_candidate = candidate;
+        }
+    }
+    Ok(LaminarRobustReport {
+        nominal_candidate,
+        robust_candidate,
+        nominal_width_scale: width_scales[nominal_candidate],
+        robust_width_scale: width_scales[robust_candidate],
+        nominal_band_cvar_per_s: candidate_risks[nominal_candidate].0,
+        robust_band_cvar_per_s: candidate_risks[robust_candidate].0,
+        nominal_worst_growth_per_s: candidate_risks[nominal_candidate].1,
+        robust_worst_growth_per_s: candidate_risks[robust_candidate].1,
+        beta,
+    })
+}

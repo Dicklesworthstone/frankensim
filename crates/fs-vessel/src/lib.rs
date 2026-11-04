@@ -19,6 +19,11 @@
 //! own mass buffer — the marketing shot and the physics are the same
 //! bytes).
 //!
+//! Physical SI film studies are available through [`LaminarFilmStudy`],
+//! [`robustify_laminar`] and [`screen_laminar_lips`]. They share the native
+//! free-surface Nusselt/long-wave owner and refuse unsupported modes. The
+//! historical two-wall growth proxy remains an explicitly separate smoke path.
+//!
 //! Recorded successors (named, not pretended): level-set lip topology
 //! change (fs-topols wiring), cumulant collision, recorded-fluid
 //! calibration, the full Appendix C study-program runner.
@@ -31,9 +36,15 @@ pub mod stability;
 pub use pour::{PourOutcome, PourRig, render_pour};
 pub use race::{
     LipScreenReport, SCREEN_JITTER_WIDTH, SCREEN_SCALE, ScreenError, declared_span,
-    race_base_losses, screen_lips, screening_losses,
+    race_base_losses, screen_laminar_lips, screen_lips, screening_losses,
 };
-pub use robust::{RobustReport, robustify};
+pub use robust::{
+    LaminarRobustError, LaminarRobustReport, RobustReport, robustify, robustify_laminar,
+};
+pub use stability::laminar::{
+    LaminarFilmError, LaminarFilmSection, LaminarFilmStudy, LaminarGrowthReport,
+    LaminarPourConditions,
+};
 pub use stability::{VesselProfile, growth_objective};
 
 /// Crate version, re-exported for provenance stamping.

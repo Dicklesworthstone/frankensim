@@ -6,6 +6,51 @@ FAMILY of fluids — stability objective, free-surface validation,
 CVaR robustification, e-raced screening, and a render that is the
 physics.
 
+## Physical SI free-surface film studies
+
+`stability::laminar::LaminarFilmStudy` is the physical alternative to the
+historical U-shaped channel proxy. Each section declares its actual wetted
+width and effective acceleration tangent to and toward the supporting wall.
+An operating point supplies total volume flow and the actual constant liquid
+density, kinematic viscosity and surface tension. These are SI quantities;
+no arbitrary factor converts them into the two-wall transition benchmark.
+
+The original `fs_lbm::film::NusseltFilm` owner solves the no-slip/shear-free
+base profile and the isothermal Benney long-wave approximation. Continuity
+holds section by section: `q=Q/(width*scale)`, `Re=q/nu`. The caller supplies
+physical wavenumbers and explicit `kh` and `Re*kh` budgets. Every section and
+mode must be admitted; failure returns its exact section/mode, never a clipped
+Reynolds number, skipped mode, or invented stable score. The report identifies
+the worst sampled growth in 1/s and the observed nondimensional ranges.
+Evaluation is allocation-free and linear in section count times mode count.
+
+`robust::robustify_laminar` uses the same physical evaluator over an authored
+width-candidate set and fluid band, then invokes canonical empirical CVaR.
+It returns both candidates' band CVaR and worst sampled growth. Equal nominal
+and robust choices, ties and boundary optima are legitimate outcomes; the
+algorithm does not force an interior optimum or a strict robustness benefit.
+A domain failure at any candidate/band point refuses the complete study.
+
+`race::screen_laminar_lips` sends native growth rates to the existing public
+race owner. Its fixed demonstration jitter has units 1/s here and remains
+synthetic; it is not measured fluid uncertainty. Candidate refusals produce
+no race verdict. Historical smoke APIs, browser fixtures and frozen smoke
+goldens retain their original explicitly documented proxy.
+
+Scope: constant-property Newtonian, locally planar, slowly varying,
+fully developed, laterally wide films with no slip and negligible gas shear.
+Section widths alone do not establish lateral-wall, curvature or entrance
+validity. The long-wave budgets are declared approximation restrictions,
+not error certificates. Positive growth predicts a surface-wave mechanism,
+not turbulence; negative sampled growth is not proof over all wavelengths.
+This route does not replace or calibrate the transient LBM pour, contact-line
+physics, or measured-fluid laws.
+
+`tests/laminar.rs` covers the independent dimensional dispersion relation,
+conserved flux/viscosity scaling, mode-domain refusals, physical CVaR candidate
+selection and the original race integration. Native Rust execution remains
+unavailable in this session; numerical equation checks are distinct evidence.
+
 ## Purpose and layer
 
 Layer **L6 (HELM)**. Composes battle-tested lower crates end-to-end:

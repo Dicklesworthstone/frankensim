@@ -80,6 +80,13 @@ pub enum ScreenError {
         /// IEEE-754 bits of the rejected span.
         span_bits: u64,
     },
+    /// A physical film candidate cannot be evaluated in its declared domain.
+    Film {
+        /// Candidate index.
+        candidate: usize,
+        /// Original native-film refusal.
+        source: crate::stability::laminar::LaminarFilmError,
+    },
     /// The shared race core refused.
     Race(
         /// The structured race refusal.
@@ -106,6 +113,9 @@ impl core::fmt::Display for ScreenError {
                 "the data-derived vessel loss span is invalid ({})",
                 f64::from_bits(*span_bits)
             ),
+            ScreenError::Film { candidate, source } => {
+                write!(f, "physical film candidate {candidate}: {source}")
+            }
             ScreenError::Race(err) => write!(f, "e-raced lip screen: {err}"),
         }
     }
@@ -225,6 +235,37 @@ pub fn race_base_losses(base: &[f64], seed: u64) -> Result<LipScreenReport, Scre
 /// [`ScreenError`] exactly as [`race_base_losses`].
 pub fn screen_lips(lips: &[f64], seed: u64) -> Result<LipScreenReport, ScreenError> {
     race_base_losses(&screening_losses(lips), seed)
+}
+
+/// Screen actual SI free-surface films through the existing race owner.
+///
+/// Candidate values multiply the study's declared section widths. The base
+/// losses are native temporal growth rates in 1/s. Every candidate must be
+/// admitted; a physical refusal names its index and produces no race verdict.
+/// The existing deterministic demonstration jitter is retained in 1/s; it is
+/// not a measured fluid uncertainty or evidence of turbulence/transition.
+pub fn screen_laminar_lips(
+    study: &crate::stability::laminar::LaminarFilmStudy<'_>,
+    width_scales: &[f64],
+    conditions: crate::stability::laminar::LaminarPourConditions,
+    seed: u64,
+) -> Result<LipScreenReport, ScreenError> {
+    if width_scales.len() < 2 {
+        return Err(ScreenError::TooFewCandidates {
+            count: width_scales.len(),
+        });
+    }
+    let losses = width_scales
+        .iter()
+        .enumerate()
+        .map(|(candidate, &width)| {
+            study
+                .evaluate(width, conditions)
+                .map(|report| report.max_growth_per_s)
+                .map_err(|source| ScreenError::Film { candidate, source })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    race_base_losses(&losses, seed)
 }
 
 #[cfg(test)]

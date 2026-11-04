@@ -9,6 +9,13 @@
 //! modes: negative everywhere = every mode decays = the differentiable
 //! laminarity proxy of Appendix C. The level-set lip (topology change)
 //! is the recorded successor; the scalar channel is the smoke knob.
+//!
+//! This historical U-shaped two-wall proxy is retained for the smoke fixtures.
+//! Physical free-surface studies use [`laminar::LaminarFilmStudy`], with actual
+//! flow, material properties, geometry, wavelengths and approximation budgets.
+
+/// SI free-surface film physics and admitted long-wave screening.
+pub mod laminar;
 
 use fs_cheb::Cheb1;
 use fs_cheb::orr_sommerfeld::growth_rates;
