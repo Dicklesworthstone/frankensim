@@ -33,7 +33,10 @@ use fs_math::det;
 mod layer_work;
 use layer_work::LayerWork;
 pub use layer_work::MAX_LAYER_REPORTS;
+/// Prescribed pressure supplies combined with the original sliding-wall film.
+pub mod pressure;
 
+use super::pressure::{PressureDatum, PressureDrivenReport, ReservoirPressures};
 use super::stratified::{GapViscosityProfile, StratifiedFilm, ViscosityLayer};
 use super::{
     FilmError, FilmReport, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, Solution, dot, fail,
@@ -376,6 +379,23 @@ impl ShearedFilm {
         channels: &mut [ShearChannelReport],
         layer_power_w: &mut [f64],
     ) -> Result<FilmReport, FilmError> {
+        self.evaluate_with_reservoirs::<REPORT_CHANNELS, REPORT_LAYERS>(
+            q, velocity, force, pressure, channels, layer_power_w, None,
+        )
+        .map(|report| report.film)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_with_reservoirs<const REPORT_CHANNELS: bool, const REPORT_LAYERS: bool>(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [ShearChannelReport],
+        layer_power_w: &mut [f64],
+        reservoirs: Option<&ReservoirPressures>,
+    ) -> Result<PressureDrivenReport, FilmError> {
         if force.len() != self.film.ports
             || pressure.len() != self.film.cell_count()
             || (REPORT_CHANNELS && channels.len() != self.film.channel_count())
@@ -383,19 +403,23 @@ impl ShearedFilm {
         {
             return fail("invalid sliding film output shape");
         }
-        let state = self.state(q, velocity)?;
+        let state = self.state_with_reservoirs(q, velocity, reservoirs)?;
         let mut candidate = [0.0; MAX_PORTS];
         let mut channel_candidate = [ShearChannelReport::default(); MAX_CHANNELS];
         self.film.project(&state.pressure.pressure, &mut candidate);
         let mut pressure_drops = [0.0; MAX_CHANNELS];
         let mut power = 0.0;
+        let mut supply = 0.0;
+        let mut supply_magnitude = 0.0;
         for (k, edge) in self.film.channels.iter().enumerate() {
             let local = state.channels[k];
             let coefficient = &self.coefficients[k];
-            let dp = state.pressure.pressure[edge.from]
-                - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
+            let dp = self.pressure_difference(&state, k, reservoirs);
             let potential_drop = state.pressure.potential[edge.from]
-                - edge.to.map_or(0.0, |j| state.pressure.potential[j]);
+                - edge.to.map_or_else(
+                    || reservoirs.map_or(0.0, |r| r.potential[k]),
+                    |j| state.pressure.potential[j],
+                );
             let pressure_flow = state.pressure.conductance[k] * potential_drop;
             let pressure_loss = pressure_flow * dp;
             let shear_force = local.drag * local.relative_speed;
@@ -417,6 +441,13 @@ impl ShearedFilm {
                 return fail("nonfinite or negative sliding film channel work");
             }
             power += pressure_loss + shear_loss;
+            if let Some(p) = reservoirs.and_then(|r| r.reservoirs_pa[k]) {
+                // Reservoir work uses TOTAL flow, including Couette pumping.
+                // Only Qp*delta_p and relative-wall drag are irreversible heat.
+                let incoming = -p * flow;
+                supply += incoming;
+                supply_magnitude += incoming.abs();
+            }
             if REPORT_LAYERS {
                 pressure_drops[k] = dp;
             }
@@ -430,11 +461,15 @@ impl ShearedFilm {
             }
         }
         let work = dot(velocity, &candidate[..self.film.ports]);
+        let residual = work + supply - power;
+        let magnitude = work.abs() + supply_magnitude + power.abs();
         if candidate[..self.film.ports].iter().any(|x| !x.is_finite())
             || !power.is_finite()
             || power < 0.0
             || !work.is_finite()
-            || (work - power).abs() > 1e-9 * (work.abs() + power.abs()).max(1e-30)
+            || !magnitude.is_finite()
+            || !residual.is_finite()
+            || residual.abs() > 1e-9 * magnitude.max(1e-30)
         {
             return fail("sliding film failed reciprocal pressure and wall work balance");
         }
@@ -451,10 +486,15 @@ impl ShearedFilm {
         if REPORT_CHANNELS {
             channels.copy_from_slice(&channel_candidate[..self.film.channel_count()]);
         }
-        Ok(FilmReport {
-            minimum_gap_m: state.pressure.minimum_gap,
-            peak_pressure_pa: pressure.iter().fold(0.0_f64, |m, p| m.max(p.abs())),
-            dissipated_power_w: power,
+        Ok(PressureDrivenReport {
+            film: FilmReport {
+                minimum_gap_m: state.pressure.minimum_gap,
+                peak_pressure_pa: pressure.iter().fold(0.0_f64, |m, p| m.max(p.abs())),
+                dissipated_power_w: power,
+            },
+            mechanical_power_w: work,
+            reservoir_power_w: supply,
+            power_residual_w: residual,
         })
     }
 
@@ -474,6 +514,20 @@ impl ShearedFilm {
         dv: &[f64],
         out: &mut [f64],
     ) -> Result<(), FilmError> {
+        self.tangent_with_reservoirs(q, velocity, dq, dv, out, None, &[])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tangent_with_reservoirs(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        dq: &[f64],
+        dv: &[f64],
+        out: &mut [f64],
+        reservoirs: Option<&ReservoirPressures>,
+        reservoir_directions_pa: &[f64],
+    ) -> Result<(), FilmError> {
         if dq.len() != self.film.ports
             || dv.len() != self.film.ports
             || out.len() != self.film.ports
@@ -481,7 +535,17 @@ impl ShearedFilm {
         {
             return fail("invalid sliding film tangent shape or direction");
         }
-        let state = self.state(q, velocity)?;
+        if reservoirs.is_some()
+            && (reservoir_directions_pa.len() != self.film.channel_count()
+                || reservoir_directions_pa.iter().any(|x| !x.is_finite())
+                || self.film.channels.iter().zip(reservoir_directions_pa)
+                    .any(|(edge, &dp)| edge.to.is_some() && dp != 0.0))
+        {
+            return fail("invalid sliding film reservoir pressure direction");
+        }
+        let state = self.state_with_reservoirs(q, velocity, reservoirs)?;
+        let datum = reservoirs.map_or(PressureDatum::ZERO, |r| r.datum);
+        let alpha = self.film.pressure_viscosity_coefficient_per_pa();
         let mut rhs = [0.0; MAX_CELLS];
         for (i, cell) in self.film.cells.iter().enumerate() {
             rhs[i] = cell.area_m2 * dot(&cell.gap.closure, dv);
@@ -502,7 +566,10 @@ impl ShearedFilm {
                 0.0
             };
             let dpsi = state.pressure.potential[edge.from]
-                - edge.to.map_or(0.0, |j| state.pressure.potential[j]);
+                - edge.to.map_or_else(
+                    || reservoirs.map_or(0.0, |r| r.potential[k]),
+                    |j| state.pressure.potential[j],
+                );
             let entrainment_change = if coefficient.moving {
                 let mean_change = dot(&coefficient.mean_velocity, dv);
                 edge.width_m * (dh * local.mean_speed + local.gap * mean_change)
@@ -513,6 +580,10 @@ impl ShearedFilm {
             rhs[edge.from] -= flux_change;
             if let Some(j) = edge.to {
                 rhs[j] += flux_change;
+            } else if let Some(boundary) = reservoirs {
+                let change = (datum.fluidity - alpha * boundary.potential[k])
+                    * reservoir_directions_pa[k];
+                rhs[edge.from] += state.pressure.conductance[k] * change;
             }
         }
         solve_factored(
@@ -522,13 +593,12 @@ impl ShearedFilm {
             &mut rhs,
         )?;
         let potential_change = rhs;
-        let alpha = self.film.pressure_viscosity_coefficient_per_pa();
         if alpha != 0.0 {
             for (dp, psi) in rhs[..self.film.cell_count()]
                 .iter_mut()
                 .zip(&state.pressure.potential)
             {
-                *dp /= 1.0 - alpha * psi;
+                *dp /= datum.fluidity - alpha * psi;
             }
         }
         let mut candidate = [0.0; MAX_PORTS];
@@ -540,19 +610,28 @@ impl ShearedFilm {
             }
             let local = state.channels[k];
             let dh = -dot(&edge.gap.closure, dq);
-            let dp = state.pressure.pressure[edge.from]
-                - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
-            let pressure_change = rhs[edge.from] - edge.to.map_or(0.0, |j| rhs[j]);
+            let dp = self.pressure_difference(&state, k, reservoirs);
+            let boundary_change = if reservoirs.is_some() {
+                reservoir_directions_pa[k]
+            } else {
+                0.0
+            };
+            let pressure_change = rhs[edge.from] - edge.to.map_or(boundary_change, |j| rhs[j]);
             let relative_change = dot(&coefficient.relative_velocity, dv);
             let mut shear_change = (-local.drag * (dh / local.gap)) * local.relative_speed
                 + local.drag * relative_change;
             if alpha != 0.0 {
-                let (_, multiplier_change) = barus_mean(
+                let boundary_potential = reservoirs.map_or(0.0, |r| r.potential[k]);
+                let (_, multiplier_change) = barus_mean_at_datum(
                     alpha,
+                    datum.fluidity,
                     state.pressure.potential[edge.from],
-                    edge.to.map_or(0.0, |j| state.pressure.potential[j]),
+                    edge.to.map_or(boundary_potential, |j| state.pressure.potential[j]),
                     potential_change[edge.from],
-                    edge.to.map_or(0.0, |j| potential_change[j]),
+                    edge.to.map_or(
+                        (datum.fluidity - alpha * boundary_potential) * boundary_change,
+                        |j| potential_change[j],
+                    ),
                 )?;
                 shear_change += (coefficient.shear_scale / local.gap)
                     * multiplier_change
@@ -571,7 +650,31 @@ impl ShearedFilm {
         Ok(())
     }
 
-    fn state(&self, q: &[f64], velocity: &[f64]) -> Result<State, FilmError> {
+    fn pressure_difference(
+        &self,
+        state: &State,
+        channel: usize,
+        reservoirs: Option<&ReservoirPressures>,
+    ) -> f64 {
+        let edge = &self.film.channels[channel];
+        let Some(boundary) = reservoirs else {
+            return state.pressure.pressure[edge.from]
+                - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
+        };
+        let alpha = self.film.pressure_viscosity_coefficient_per_pa();
+        let to = edge.to.map_or(boundary.potential[channel], |j| state.pressure.potential[j]);
+        let delta = state.pressure.potential[edge.from] - to;
+        let fluidity = boundary.datum.fluidity - alpha * to;
+        let scaled = alpha * delta / fluidity;
+        if scaled == 0.0 { delta / fluidity } else { -(-scaled).ln_1p() / alpha }
+    }
+
+    fn state_with_reservoirs(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        reservoirs: Option<&ReservoirPressures>,
+    ) -> Result<State, FilmError> {
         if q.len() != self.film.ports
             || velocity.len() != self.film.ports
             || q.iter().chain(velocity).any(|x| !x.is_finite())
@@ -617,19 +720,28 @@ impl ShearedFilm {
                 entrainment: flow,
             };
         }
-        let pressure = self.film.solve_with_entrainment::<true>(
-            q,
-            velocity,
-            &entrainment[..self.film.channel_count()],
-        )?;
+        let pressure = if let Some(boundary) = reservoirs {
+            self.film.solve_with_boundaries::<true, true>(
+                q, velocity, &entrainment[..self.film.channel_count()],
+                &boundary.potential, boundary.datum,
+            )?
+        } else {
+            self.film.solve_with_entrainment::<true>(
+                q, velocity, &entrainment[..self.film.channel_count()],
+            )?
+        };
         let alpha = self.film.pressure_viscosity_coefficient_per_pa();
         if alpha != 0.0 {
             for (k, edge) in self.film.channels.iter().enumerate() {
                 if self.coefficients[k].moving {
-                    let (multiplier, _) = barus_mean(
+                    let (multiplier, _) = barus_mean_at_datum(
                         alpha,
+                        reservoirs.map_or(1.0, |r| r.datum.fluidity),
                         pressure.potential[edge.from],
-                        edge.to.map_or(0.0, |j| pressure.potential[j]),
+                        edge.to.map_or_else(
+                            || reservoirs.map_or(0.0, |r| r.potential[k]),
+                            |j| pressure.potential[j],
+                        ),
                         0.0,
                         0.0,
                     )?;
@@ -647,8 +759,9 @@ impl ShearedFilm {
 // Integrate exp(alpha*p(x)) along the passage, where psi(x) is affine.
 // The coincident-pressure divided difference and its derivative are evaluated
 // by a fixed convergent series; no pressure subtraction or quadrature is used.
-fn barus_mean(
+fn barus_mean_at_datum(
     alpha: f64,
+    fluidity: f64,
     from: f64,
     to: f64,
     from_change: f64,
@@ -662,7 +775,7 @@ fn barus_mean(
     } else {
         (to, from, to_change, from_change)
     };
-    let r = 1.0 - alpha * high;
+    let r = fluidity - alpha * high;
     let delta = high - low;
     let x = alpha * delta / r;
     let (mean, change) = if x <= 0.125 {
@@ -684,7 +797,7 @@ fn barus_mean(
         };
         (mean, change)
     } else {
-        let r_low = 1.0 - alpha * low;
+        let r_low = fluidity - alpha * low;
         let log_ratio = if x.is_finite() {
             det::ln(1.0 + x)
         } else {

@@ -45,9 +45,15 @@ impl PressureDatum {
 #[derive(Clone, Debug)]
 pub struct PressureDrivenFilm {
     film: ResistiveFilm,
-    reservoirs_pa: Vec<Option<f64>>,
-    potential: Vec<f64>,
-    datum: PressureDatum,
+    reservoirs: ReservoirPressures,
+}
+
+/// One compiled pressure boundary shared by normal and sliding-wall films.
+#[derive(Clone, Debug)]
+pub(super) struct ReservoirPressures {
+    pub(super) reservoirs_pa: Vec<Option<f64>>,
+    pub(super) potential: Vec<f64>,
+    pub(super) datum: PressureDatum,
 }
 
 /// Work from one simultaneous pressure/flow/force evaluation, in watts.
@@ -65,11 +71,11 @@ pub struct PressureDrivenReport {
     pub power_residual_w: f64,
 }
 
-impl PressureDrivenFilm {
-    /// Bind fixed reservoir pressures without changing geometry or transport.
-    /// The same pressure limit and Barus source law apply to reservoir and cell
-    /// endpoints. No omitted or duplicate reservoir can silently become ambient.
-    pub fn new(film: ResistiveFilm, reservoirs_pa: &[Option<f64>]) -> Result<Self, FilmError> {
+impl ReservoirPressures {
+    pub(super) fn new(
+        film: &ResistiveFilm,
+        reservoirs_pa: &[Option<f64>],
+    ) -> Result<Self, FilmError> {
         if reservoirs_pa.len() != film.channel_count() {
             return fail("film reservoir pressure count must match original channels");
         }
@@ -122,17 +128,26 @@ impl PressureDrivenFilm {
             potential.push(value);
         }
         Ok(Self {
-            film,
             reservoirs_pa: reservoirs_pa.to_vec(),
             potential,
             datum,
         })
     }
+}
+
+impl PressureDrivenFilm {
+    /// Bind fixed reservoir pressures without changing geometry or transport.
+    /// The same pressure limit and Barus source law apply to reservoir and cell
+    /// endpoints. No omitted or duplicate reservoir can silently become ambient.
+    pub fn new(film: ResistiveFilm, reservoirs_pa: &[Option<f64>]) -> Result<Self, FilmError> {
+        let reservoirs = ReservoirPressures::new(&film, reservoirs_pa)?;
+        Ok(Self { film, reservoirs })
+    }
 
     /// Original channel-indexed boundary mapping, in gauge Pa.
     #[must_use]
     pub fn reservoir_pressures_pa(&self) -> &[Option<f64>] {
-        &self.reservoirs_pa
+        &self.reservoirs.reservoirs_pa
     }
 
     /// Rebind the prescribed supplies while retaining the original graph and
@@ -180,8 +195,8 @@ impl PressureDrivenFilm {
             q,
             velocity,
             &[],
-            &self.potential,
-            self.datum,
+            &self.reservoirs.potential,
+            self.reservoirs.datum,
         )?;
         let mut candidate = [0.0; MAX_PORTS];
         let mut reports = [FilmChannelReport::default(); MAX_CHANNELS];
@@ -191,12 +206,12 @@ impl PressureDrivenFilm {
         let mut supply = 0.0;
         let mut supply_magnitude = 0.0;
         for (k, edge) in film.channels.iter().enumerate() {
-            let to = edge.to.map_or(self.potential[k], |j| s.potential[j]);
+            let to = edge.to.map_or(self.reservoirs.potential[k], |j| s.potential[j]);
             let delta = s.potential[edge.from] - to;
             let flow = s.conductance[k] * delta;
             // Recover a pressure DIFFERENCE without subtracting two biased
             // physical pressures. This is also exact for the constant-mu law.
-            let fluidity = self.datum.fluidity - alpha * to;
+            let fluidity = self.reservoirs.datum.fluidity - alpha * to;
             let scaled = alpha * delta / fluidity;
             let dp = if scaled == 0.0 {
                 delta / fluidity
@@ -212,7 +227,7 @@ impl PressureDrivenFilm {
                 dissipated_power_w: power,
             };
             loss += power;
-            if let Some(p) = self.reservoirs_pa[k] {
+            if let Some(p) = self.reservoirs.reservoirs_pa[k] {
                 let incoming = -p * flow;
                 supply += incoming;
                 supply_magnitude += incoming.abs();
@@ -279,8 +294,8 @@ impl PressureDrivenFilm {
             q,
             velocity,
             &[],
-            &self.potential,
-            self.datum,
+            &self.reservoirs.potential,
+            self.reservoirs.datum,
         )?;
         let alpha = film.pressure_viscosity_coefficient_per_pa;
         let mut rhs = [0.0; MAX_CELLS];
@@ -294,20 +309,20 @@ impl PressureDrivenFilm {
             }
             let dh = -dot(&edge.gap.closure, dq);
             let dg = 3.0 * factor * h * h * dh;
-            let to = edge.to.map_or(self.potential[k], |j| s.potential[j]);
+            let to = edge.to.map_or(self.reservoirs.potential[k], |j| s.potential[j]);
             let change = dg * (s.potential[edge.from] - to);
             rhs[edge.from] -= change;
             if let Some(j) = edge.to {
                 rhs[j] += change;
             } else {
-                let dpsi = (self.datum.fluidity - alpha * to) * reservoir_directions_pa[k];
+                let dpsi = (self.reservoirs.datum.fluidity - alpha * to) * reservoir_directions_pa[k];
                 rhs[edge.from] += s.conductance[k] * dpsi;
             }
         }
         solve_factored(&s.lower, &s.scale, film.cell_count(), &mut rhs)?;
         if alpha != 0.0 {
             for (dp, psi) in rhs[..film.cell_count()].iter_mut().zip(&s.potential) {
-                *dp /= self.datum.fluidity - alpha * psi;
+                *dp /= self.reservoirs.datum.fluidity - alpha * psi;
             }
         }
         let mut candidate = [0.0; MAX_PORTS];

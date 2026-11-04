@@ -206,7 +206,7 @@ fn equal_pressure_sliding_retains_ambient_pressure_viscosity_and_its_tangent() {
     );
     // G3: the exact coincident limit also admits independently changing ends.
     let psi = 800.0;
-    let (mean, tangent) = barus_mean(alpha, psi, psi, 3.0, -1.0).unwrap();
+    let (mean, tangent) = barus_mean_at_datum(alpha, 1.0, psi, psi, 3.0, -1.0).unwrap();
     let r = 1.0 - alpha * psi;
     near(mean, 1.0 / r, 1e-15);
     near(tangent, alpha / (r * r), 1e-18);

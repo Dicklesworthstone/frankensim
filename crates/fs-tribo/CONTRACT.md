@@ -1,5 +1,35 @@
 # CONTRACT: fs-tribo
 
+## Pressure-fed sliding Reynolds films
+
+`resistive_film::shear::pressure::PressureDrivenShearedFilm` composes prescribed
+reservoir pressures with the original sliding-wall film. A single retained
+graph, wall mapping, viscosity profile and pressure factorization own squeeze,
+Couette entrainment, pressure flow and complete work-conjugate wall traction.
+Supply potentials are compiled once; evaluation and the full directional
+tangent use bounded stack storage and allocate no heap memory.
+
+The instantaneous work identity is
+`F dot v - sum_boundary(p_b * Q_total,out) = Qp * delta_p + shear_heat`,
+summed over channels. Supply power uses total flow, including entrainment.
+Irreversible heat uses pressure-driven flow and relative-wall drag, preserving
+both pressure-driven mechanical output and wall-driven pumping against supplies.
+Mechanical power and supply power may each be negative; their sum is the
+nonnegative viscous heat. This is not a time-integrated energy receipt.
+
+Supply pressures retain the original mechanical and zero-gauge viscosity datum.
+Barus viscosity uses the exact pressure-dependent shear average on that datum;
+retained layers keep their local pressure/shear stress cross terms. The force
+tangent differentiates gaps, wall rates and all prescribed boundary pressures
+together. Viscosity continuation retains supplies, geometry and wall rows.
+Admission failures leave caller outputs untouched.
+
+The model adds no finite reservoir inventory, supply-line dynamics, thermal
+clock, fluid inertia, cavitation or general high-pressure EHL constitutive law.
+Regressions cover analytic supplied Couette/Poiseuille work, static Barus load
+and drag, independent piecewise Stokes layer integrals, complete directional
+derivatives, the zero-supply limit, viscosity refresh and atomic refusal.
+
 ## Externally pressurized Reynolds films
 
 `resistive_film::pressure::PressureDrivenFilm` binds an explicit gauge pressure

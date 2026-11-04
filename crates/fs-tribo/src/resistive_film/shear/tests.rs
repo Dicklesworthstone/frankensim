@@ -9,6 +9,7 @@ const AREA: f64 = 0.0001;
 const MU: f64 = 0.01;
 
 mod barus;
+mod pressure;
 mod viscosity;
 
 fn near(a: f64, b: f64, tolerance: f64) {
