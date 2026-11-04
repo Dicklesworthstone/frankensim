@@ -20915,46 +20915,80 @@ replay, common-speed/port-scale equivalence and invalid speed/count refusal.
 ## Native normal JKR attachment, capture and rebound
 
 `contact::adhesive_normal_events::JkrNormalEventModalSystem` couples the
-original source-owned JKR normal trajectory to the original free modal
+original source-owned JKR normal trajectory to original free modal
 coordinates. A complete mass-normalized work column `B` defines the actual
 relative approach and effective mass `1/(B dot B)`. Initial source history
-anchors approach at the original native positions; subsequent motion uses
-position differences, preserving common translation and uncontacted modes.
-The source, ordered material identities, fixed normal and numerical budgets
-remain bound. Harmonic-only preparation, elastic connections, physical viscous
-rates, memory and radiating coordinates are outside this free-motion rung.
+anchors approach at native positions; subsequent motion uses position
+differences, preserving common translation and uncontacted modes. Source,
+ordered material identities, fixed normal and numerical budgets remain bound.
 
-The source-owned scalar discrete gradient localizes attachment and pull-off,
-then its contact impulse and first time moment restore every original native
-body through the existing event restoration owner. Branch changes preserve
-velocity and expose released storage separately. Capture and rebound follow
-incoming energy and the original adhesive releases; no restitution coefficient
-or snap impulse is introduced. Original body state limits still apply.
+The free constructor retains its original scope.
+`new_with_elastic_connection` instead admits exactly one original positive,
+undamped spring. It uses that connection's own column, stiffness and rest
+extension; the initial source indentation anchors its actual extension without
+moving accepted bodies. The source normal-motion solver resolves this elastic
+load together with adhesion, so stiffness and preload change capture and
+pull-off. Arbitrary elastic networks, physical damping, memory, radiating
+coordinates and harmonic-only preparation remain outside this adapter.
 
-The adapter reevaluates contact storage at the restored native geometry and
-independently checks approach, normal speed, reaction work and whole mechanical
-energy. A contact-sized energy gate prevents large common or spectator motion
-from masking a contact-work defect. Accepted bodies, native clock, source
-history and observations publish together only after these gates succeed.
-`step_with_admission` additionally permits a native heat or other receiving
-candidate to be staged before mechanical publication. Callback refusal or late
-cancellation leaves accepted mechanics unchanged; the returned external
-candidate is installed only after success. The original `JkrSnapHeat` candidate
-can receive the declared release shares through `propose_normal_motion` in
-this transaction. It consumes the motion owner's sealed start, final state and
-ordered event history; editable work reports cannot create thermal credit.
-The full motion continuation, including mass/policy identity, time and step
-count, remains bound after acceptance. Even an interval ending at its initial
-contact state cannot be replayed with a fresh heat stamp. Prescribed-path calls
-cannot silently erase that chronology. Reversible excursions between jumps
-may be omitted from this heat-only replay; it does not reconstruct smooth work.
-The same-time, frozen-source thermal split and explicit outside-work destination
-still apply.
+The scalar discrete gradient localizes attachment and pull-off. Separate
+contact and spring impulses and first time moments restore all original
+bodies through the existing event restoration owner. Branch changes preserve
+velocity and expose released contact storage separately; spring storage is
+continuous. Capture and rebound follow incoming energy, original elastic
+loading and source releases, without an invented restitution or snap impulse.
+Original body limits and the connection force bound over the complete event
+trajectory still apply.
 
-`adhesive_jkr_events_modal` covers capture/rebound on unequal native masses,
-conserved common and uncontacted motion, held external work, original state
-limits, source/preparation refusal, callback rollback and original finite-cell
-snap heat with the combined mechanical/thermal/outside energy account.
+The adapter independently reconstructs native spring extension, storage and
+work, reevaluates contact storage at restored geometry, and checks approach,
+speed, reaction work and whole mechanical energy. Distinct contact and spring
+gates keep those accounts separate from common and spectator motion. Spring
+storage remains internal to the native network: its original reaction and
+work port are retained, while contact work includes the actual native spring
+storage change. Frames expose spring energy, spring-work residual and the
+trajectory force bound.
+
+Accepted bodies, native clock, source history and observations publish
+together. `step_with_admission` can stage a receiving candidate before the
+final shared cancellation/publication boundary. Refusal leaves accepted
+mechanics unchanged; installation of an admitted receiving candidate is then
+infallible. Original `JkrSnapHeat` proposals consume sealed start/end states
+and ordered source events rather than editable work reports. Full motion
+continuation includes mass, support, policy, time and step identity, preventing
+replay even when the final contact state returns to its initial value.
+Prescribed-path calls cannot erase that chronology.
+
+### Joint native mechanics and event-timed thermal transport
+
+`adhesive_normal_events::thermal::JkrThermalModalSystem` owns the original
+mechanical system, source-bound heat history and native thermal timeline.
+Read-only participant access prevents independent advancement. Free and
+single-spring mechanics share this composition. Each accepted interval uses
+`propose_timed_normal_motion` to transport heat to the actual snap timestamps,
+apply the declared surface shares after coincident native scheduled events,
+and continue ordinary transport to the endpoint on an explicit thermal clock.
+
+The shared gate checks the independently regenerated source release against
+the mechanical debit and composes native relative-energy residuals with
+double-double accumulation. Boundary/source heat, incoming material energy
+and the declared outside destination retain their original accounts; large
+absolute caloric reference energies do not replace small-work checks. A
+caloric, transport, mechanical or cancellation refusal preserves bodies,
+spring/contact storage, both clocks, heat history and accepted observations.
+
+Normal coefficients and heat fractions remain frozen. This one-way coupling
+does not infer temperature-dependent adhesion, contact conducting area,
+topology changes, rotating normals or contact waves. Native explicit thermal
+space/time discretization and source applicability limits remain binding.
+The same-time heat proposal remains available within its original scope.
+
+The original seven `adhesive_jkr_events_modal` groups remain passing. Four
+`adhesive_jkr_elastic_modal` groups cover original oscillator convergence,
+preload equilibrium, spring-driven capture/pull-off, native ports, force limits
+and atomic refusal. Three `adhesive_jkr_thermal_modal` groups independently
+check event-time cooling, full mechanical/thermal/outside energy closure,
+shifted clocks, supported events and joint caloric/cancellation rollback.
 
 ## Native event-resolved adhesive stopping and restart
 

@@ -4,24 +4,30 @@
 //! impulse and first time moment restore every original native coordinate.
 //! Approach evolves with the bodies. A branch jump changes contact storage but
 //! supplies no impulse: its released energy remains an explicit outward account.
-//! One fixed normal and a frozen quasistatic JKR source are required. Elastic
-//! networks, rotating normals, resolved contact waves and thermal feedback need
-//! their own propagation; they are not represented by free coordinates here.
+//! One original undamped elastic connection may share the normal work column.
+//! Its actual spring storage and connection ports remain in the native owner.
+//! One fixed normal and a frozen quasistatic JKR source are required. General
+//! elastic networks, rotating normals and resolved waves need their own owner.
 
 use super::adhesive_events::native::{
-    EventNativeAccount, projected_velocity, stage_account, stage_motion,
+    projected_velocity, stage_account, stage_motion, EventNativeAccount,
 };
-use super::{CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, poll};
+use super::{dot, finite, invalid, limit, poll, CoupledModalSystem, ModalCouplingError};
 use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel};
 use fs_contact::normal_patch::adhesive::{
-    JkrBranch, JkrError, JkrResponse, JkrState, SourceJkrSphereContact,
     motion::{
         JkrNormalMotion, JkrNormalMotionBudget, JkrNormalMotionError, JkrNormalMotionState,
         JkrNormalMotionStep,
     },
+    JkrBranch, JkrError, JkrResponse, JkrState, SourceJkrSphereContact,
 };
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
+
+mod elastic;
+use elastic::{ElasticConnection, SpringObservation};
+
+pub mod thermal;
 
 #[derive(Debug)]
 pub enum JkrNormalEventModalError {
@@ -70,6 +76,14 @@ pub struct JkrNormalEventModalConfig {
 pub struct JkrNormalEventModalFrame {
     pub sample: u64,
     pub network_energy_j: f64,
+    /// Actual original native spring storage; zero on the free-motion path.
+    pub spring_energy_j: f64,
+    /// Actual spring storage change minus its scalar conservative path work.
+    pub spring_work_residual_j: f64,
+    /// Original connection reaction, multiplying its native signed column.
+    pub connection_force_n: f64,
+    /// Maximum absolute original spring force over the accepted trajectory.
+    pub connection_force_bound_n: f64,
     /// Original source evaluated at the actual restored native approach.
     pub contact: JkrResponse,
     pub external_work_j: f64,
@@ -90,6 +104,7 @@ pub struct JkrNormalEventModalSystem<'a> {
     column: Vec<f64>,
     reference_positions: Vec<f64>,
     initial_indentation_m: f64,
+    support: Option<ElasticConnection>,
     candidate_states: Vec<ModalAcousticState>,
     config: JkrNormalEventModalConfig,
     last: Option<JkrNormalEventModalFrame>,
@@ -110,10 +125,60 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         config: JkrNormalEventModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, JkrNormalEventModalError> {
+        Self::new_inner(
+            network,
+            normal,
+            surface_materials,
+            initial_contact,
+            column,
+            None,
+            config,
+            gate,
+        )
+    }
+
+    /// Couple normal adhesion to exactly one original undamped elastic link.
+    /// Its complete native column defines relative approach; its original
+    /// stiffness and rest extension define support preload. Initial source
+    /// approach anchors this geometry without moving the accepted bodies.
+    /// The original connection remains an internal storage and work port.
+    pub fn new_with_elastic_connection(
+        network: CoupledModalSystem,
+        normal: &'a SourceJkrSphereContact,
+        surface_materials: [&MaterialStateId; 2],
+        initial_contact: JkrState,
+        config: JkrNormalEventModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, JkrNormalEventModalError> {
+        poll(Some(gate))?;
+        let (column, support) = elastic::admit(&network, initial_contact.indentation_m())?;
+        Self::new_inner(
+            network,
+            normal,
+            surface_materials,
+            initial_contact,
+            column,
+            Some(support),
+            config,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        network: CoupledModalSystem,
+        normal: &'a SourceJkrSphereContact,
+        surface_materials: [&MaterialStateId; 2],
+        initial_contact: JkrState,
+        column: Vec<f64>,
+        support: Option<ElasticConnection>,
+        config: JkrNormalEventModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, JkrNormalEventModalError> {
         poll(Some(gate))?;
         network.require_time_domain()?;
         if network.samples_rendered() != 0
-            || !network.connections.is_empty()
+            || network.connections.len() != usize::from(support.is_some())
             || !network.relaxation_branches.is_empty()
             || !network.plane_stress_material_points.is_empty()
             || network.radiation.is_some()
@@ -127,7 +192,7 @@ impl<'a> JkrNormalEventModalSystem<'a> {
                     || m.pressure_per_modal_velocity != fs_math::c64::C64::ZERO
             })
         {
-            return Err(invalid("JKR normal events require a sample-zero free network without connections, memory or radiation").into());
+            return Err(invalid("JKR normal events require sample-zero free modes, the declared elastic link, and no memory or radiation").into());
         }
         let materials = normal
             .normal_state()
@@ -156,8 +221,17 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         {
             return Err(invalid("complete finite JKR work column and positive native compatibility budgets required").into());
         }
-        let motion =
-            JkrNormalMotion::new(normal, finite(1.0 / dot(&column, &column)?)?, config.motion)?;
+        let mass = finite(1.0 / dot(&column, &column)?)?;
+        let motion = match support {
+            Some(support) => JkrNormalMotion::new_with_support(
+                normal,
+                mass,
+                config.motion,
+                support.stiffness_n_per_m,
+                support.zero_force_indentation_m,
+            )?,
+            None => JkrNormalMotion::new(normal, mass, config.motion)?,
+        };
         let state = motion.initialize(
             initial_contact,
             projected_velocity(network.components(), &column)?,
@@ -180,6 +254,7 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             column,
             reference_positions,
             initial_indentation_m: initial_contact.indentation_m(),
+            support,
             candidate_states,
             config,
             last: None,
@@ -216,6 +291,12 @@ impl<'a> JkrNormalEventModalSystem<'a> {
     }
     pub const fn effective_mass_kg(&self) -> f64 {
         self.motion.effective_mass_kg()
+    }
+    pub const fn support_stiffness_n_per_m(&self) -> f64 {
+        self.motion.support_stiffness_n_per_m()
+    }
+    pub fn support_zero_force_indentation_m(&self) -> Option<f64> {
+        self.support.map(|support| support.zero_force_indentation_m)
     }
     pub fn work_column(&self) -> &[f64] {
         &self.column
@@ -300,6 +381,7 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             .ok_or_else(|| invalid("JKR native clock overflow"))?;
         let before = self.network.total_energy_j()?;
         let old = self.native_contact(self.components(), self.state.contact_state().branch())?;
+        let spring_before = self.spring_observation(self.components(), old.indentation_m)?;
         compatible(
             "accepted native approach",
             old.indentation_m,
@@ -323,8 +405,8 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             &mut self.candidate_states,
             &self.column,
             external,
-            path.normal_impulse_n_s,
-            path.normal_time_moment_n_s2,
+            path.reaction_impulse_n_s(),
+            path.reaction_time_moment_n_s2(),
             gate,
         )?;
         let contact = self.native_contact(
@@ -352,9 +434,34 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             self.config.velocity_absolute_tolerance_m_s,
             self.config.velocity_relative_tolerance,
         )?;
-        let after = motion.modal_energy_j;
+        let spring_after =
+            self.spring_observation(&self.network.candidates, contact.indentation_m)?;
+        let spring_change = match self.support {
+            Some(support) => support.storage_change(spring_before, spring_after)?,
+            None => 0.0,
+        };
+        let spring_work_residual = finite(spring_change - path.support_work_j)?;
+        let spring_scale = spring_before
+            .energy_j
+            .max(spring_after.energy_j)
+            .max(path.support_work_j.abs())
+            .max(spring_change.abs());
+        let spring_tolerance = finite(
+            self.config.motion.energy_absolute_tolerance_j
+                + self.config.motion.energy_relative_tolerance * spring_scale,
+        )?;
+        check_energy(spring_work_residual, spring_tolerance)?;
+        check_energy(
+            finite(spring_before.energy_j - self.motion.support_energy_j(self.state)?)?,
+            spring_tolerance,
+        )?;
+        check_energy(
+            finite(spring_after.energy_j - path.support_energy_j)?,
+            spring_tolerance,
+        )?;
+        let after = finite(motion.modal_energy_j + spring_after.energy_j)?;
         limit(
-            "native JKR kinetic energy",
+            "native JKR kinetic and spring energy",
             after,
             self.network.config.maximum_total_energy_j,
         )?;
@@ -363,10 +470,14 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             finite(after + contact.reversible_energy_j)?.abs(),
             self.network.config.maximum_total_energy_j,
         )?;
-        let work = finite(motion.external_work_j + motion.reaction_work_j)?;
+        // The shared restoration integrates the total contact-plus-spring
+        // reaction on free coordinates. Original spring storage is internal to
+        // the native network, so adding its actual change isolates contact work.
+        let contact_work = finite(motion.reaction_work_j + spring_change)?;
+        let work = finite(motion.external_work_j + contact_work)?;
         let native_residual = finite(after - before - work)?;
         let normal_residual = finite(
-            motion.reaction_work_j + contact.reversible_energy_j - old.reversible_energy_j
+            contact_work + contact.reversible_energy_j - old.reversible_energy_j
                 + path.released_energy_j,
         )?;
         let residual = finite(
@@ -378,13 +489,18 @@ impl<'a> JkrNormalEventModalSystem<'a> {
             .reversible_energy_j
             .abs()
             .max(contact.reversible_energy_j.abs())
-            .max(motion.reaction_work_j.abs())
+            .max(contact_work.abs())
+            .max(path.normal_work_j.abs())
             .max(path.released_energy_j);
         let contact_tolerance = finite(
             self.config.motion.energy_absolute_tolerance_j
                 + self.config.motion.energy_relative_tolerance * contact_scale,
         )?;
         check_energy(normal_residual, contact_tolerance)?;
+        check_energy(
+            finite(contact_work + path.normal_work_j)?,
+            contact_tolerance,
+        )?;
         let scale = before
             .abs()
             .max(after.abs())
@@ -397,28 +513,51 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         )?;
         check_energy(native_residual, tolerance)?;
         check_energy(residual, tolerance)?;
+        let connection_transfer = if self.support.is_some() {
+            limit(
+                "original normal spring force over event trajectory",
+                path.support_force_bound_n,
+                self.network.config.maximum_abs_connection_force_n,
+            )?;
+            limit(
+                "restored original normal spring force",
+                spring_after.reaction_n.abs(),
+                self.network.config.maximum_abs_connection_force_n,
+            )?;
+            self.network.reactions[0] = spring_after.reaction_n;
+            Some(crate::port_adoption::PortTransfer::work(
+                finite(-spring_change)?,
+                false,
+            ))
+        } else {
+            None
+        };
         stage_account(
             &mut self.network,
             EventNativeAccount {
                 sample,
                 observer_pressure_pa: 0.0,
                 energy_before_j: before,
-                modal_energy_j: after,
+                modal_energy_j: motion.modal_energy_j,
                 component_dissipation_j: 0.0,
-                connection_energy_j: 0.0,
+                connection_energy_j: spring_after.energy_j,
                 connection_dissipation_j: 0.0,
                 work_j: work,
                 residual_j: native_residual,
                 tolerance_j: tolerance,
             },
-            [],
+            connection_transfer,
         );
         let accepted = JkrNormalEventModalFrame {
             sample,
             network_energy_j: after,
+            spring_energy_j: spring_after.energy_j,
+            spring_work_residual_j: spring_work_residual,
+            connection_force_n: spring_after.reaction_n,
+            connection_force_bound_n: path.support_force_bound_n,
             contact,
             external_work_j: motion.external_work_j,
-            normal_work_on_network_j: motion.reaction_work_j,
+            normal_work_on_network_j: contact_work,
             released_energy_j: path.released_energy_j,
             normal_work_residual_j: normal_residual,
             energy_residual_j: residual,
@@ -430,6 +569,17 @@ impl<'a> JkrNormalEventModalSystem<'a> {
         self.network.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
         Ok(accepted)
+    }
+
+    fn spring_observation(
+        &self,
+        models: &[ModalAcousticTimeModel],
+        indentation_m: f64,
+    ) -> Result<SpringObservation, JkrNormalEventModalError> {
+        match self.support {
+            Some(support) => support.observe(models, &self.column, indentation_m, self.config),
+            None => Ok(SpringObservation::default()),
+        }
     }
 
     fn native_contact(
