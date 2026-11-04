@@ -31299,3 +31299,30 @@ original graph, material or BEM assembly. Two original-assembly regressions
 are also authored (mixed-SI fresh-field derivatives and full mutual generator
 impedance/raw-trace refusal) but unrun. Full Cargo/DSR remains unavailable
 because seven constellation sibling repositories are absent.
+
+## Changing-cutoff aspiration colour
+
+`turbulence_noise::ColouredGaussian` carries its normalised first-order
+Gaussian state through changing flow cutoffs. For a cutoff held over a step,
+`b = exp(-2*pi*fc*dt)` and `y_next = b*y + sqrt(1-b*b)*xi`; the innovation
+uses `expm1` so a small positive interval does not clear a warm history.
+This is the exact Ornstein--Uhlenbeck transition (Gillespie, Phys. Rev. E
+54, 2084, 1996, DOI 10.1103/PhysRevE.54.2084). Replacing a cutoff changes the
+correlation time without rescaling the retained sample by a new stationary
+filter gain. Each call consumes exactly one original keyed Philox normal.
+
+At a fixed cutoff the law and autocorrelation equal the previous normalised
+matched-pole filter up to rounding; previous sample bits are not promised.
+A prescribed changing cutoff retains unit equilibrium variance, while the
+zero-start and closed-gate reset retain finite warmup. A cutoff coupled to
+the random flow state need not preserve an unconditional stationary variance.
+The aspiration amplitude law, source placement, authored gain and Reynolds
+gate are unchanged. This remains optional stochastic colour, without resolved
+turbulence, measured aspiration calibration or acceptance-render authority.
+
+Focused regressions cover the fixed-cutoff limit, independent exact
+transitions after a warm history, a tiny positive relaxation interval,
+changing-cutoff ensemble variance, keyed replay and gate clearing. Four focused
+native Rust tests pass using the complete original math and RNG libraries and
+the pinned nightly compiler. Full fs-couple and workspace execution remain
+unrun.

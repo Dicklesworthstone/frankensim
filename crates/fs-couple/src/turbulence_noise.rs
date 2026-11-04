@@ -36,9 +36,11 @@
 //!   `Re^2 - Re_c^2` times a negative `w_c`) and half-wave rectify it above. The text says the source "is
 //!   activated when the Reynolds number is above a certain critical value", so this code gates on `Re > Re_c`
 //!   and keeps the noise signed (zero-mean).
-//! - READING 3, the colour: `w_c` is unit variance, whatever the cutoff, so that `xi` times the flow terms is
-//!   the rms pressure; the cutoff changes with the flow every step, and the normalisation is that of the
-//!   stationary one-pole filter at the present cutoff (quasi-stationary).
+//! - READING 3, the colour: `w_c` has unit equilibrium variance, so that `xi` times the flow terms is the
+//!   stationary rms pressure. The cutoff changes with the flow every step. Its matched-pole Ornstein--Uhlenbeck
+//!   transition carries the normalised state and pairs its decay with the corresponding innovation variance;
+//!   a smaller cutoff does not amplify retained history. Closed gates still clear the state, so reopening
+//!   retains the finite warmup, and flow/noise feedback need not have a stationary unit-variance distribution.
 //! - READING 4, the sample: the law is quasi-steady in the island's own previous-step flow and area (one
 //!   mechanics step of lag, no implicit loop).
 //!
@@ -69,7 +71,12 @@ pub const RE_CRIT_SONDHI_SCHROETER: f64 = 1700.0;
 /// same core takes its own kernel id, so no two consumers share a stream.
 pub const GLOTTAL_NOISE_KERNEL: u32 = 0x676c_6f74;
 
-/// Gaussian noise through a first-order low-pass of changing cutoff, normalised to unit variance.
+/// First-order Gaussian colour with unit equilibrium variance and a changing relaxation cutoff.
+///
+/// The state is the normalised output, not an unnormalised filter memory rescaled at each new cutoff.
+/// This is the exact Ornstein--Uhlenbeck transition for a cutoff held over one step; see Gillespie,
+/// Phys. Rev. E 54, 2084 (1996), <https://doi.org/10.1103/PhysRevE.54.2084>. It is a stochastic
+/// colour model, not a resolved turbulent field or an additional acoustic-source calibration.
 #[derive(Clone, Debug)]
 pub struct ColouredGaussian {
     white: Stream,
@@ -81,27 +88,37 @@ impl ColouredGaussian {
     #[must_use]
     pub fn new(seed: u64, kernel: u32) -> Self {
         Self {
-            white: StreamKey { seed, kernel, tile: 0 }.stream(),
+            white: StreamKey {
+                seed,
+                kernel,
+                tile: 0,
+            }
+            .stream(),
             y: 0.0,
         }
     }
 
-    /// One filtered sample at `cutoff_hz` and step `dt` seconds. The pole is matched,
-    /// `alpha = 1 - exp(-2 pi f_c dt)`; for a white input of unit variance the stationary output variance is
-    /// `alpha / (2 - alpha)`, so the output is scaled by its inverse square root. A cutoff at or above the
-    /// matched-pole limit (`alpha = 1`) is the white sample itself; a non-positive or non-finite cutoff counts as
-    /// closed and is [`ColouredGaussian::skip`].
+    /// One sample at `cutoff_hz` and step `dt` seconds:
+    /// `y_next = b y + sqrt(1 - b^2) x`, `b = exp(-2 pi f_c dt)`, with one unit normal `x`.
+    /// For a fixed cutoff this is the previous normalised matched-pole filter, up to rounding.
+    /// For a prescribed changing cutoff, `V_next = b^2 V + 1 - b^2` retains unit equilibrium
+    /// variance without amplifying stored history. A zero-start or cleared filter warms toward it;
+    /// no instantaneous normalisation of startup or feedback-driven variance is applied.
+    ///
+    /// `expm1` resolves the innovation even when the pole rounds to one. An unresolved positive
+    /// interval retains the state and consumes its one draw; the white limit is that draw itself.
+    /// Non-positive or non-finite cutoff/step values close and clear the source through [`Self::skip`].
     pub fn step(&mut self, cutoff_hz: f64, dt: f64) -> f64 {
         if !(cutoff_hz > 0.0 && cutoff_hz.is_finite() && dt > 0.0 && dt.is_finite()) {
             return self.skip();
         }
         let x = self.white.next_normal();
-        let alpha = (1.0 - det::exp(-core::f64::consts::TAU * cutoff_hz * dt)).clamp(0.0, 1.0);
-        if alpha <= 0.0 {
-            return self.skip_with(x);
-        }
-        self.y += alpha * (x - self.y);
-        self.y * det::sqrt((2.0 - alpha) / alpha)
+        let relaxation = core::f64::consts::TAU * (cutoff_hz * dt);
+        let alpha = -det::expm1(-relaxation);
+        // 1 - b^2 = alpha * (2 - alpha): one exponential evaluation, with
+        // neither small-interval cancellation nor a cutoff-dependent state gain.
+        self.y = (1.0 - alpha) * self.y + det::sqrt(alpha * (2.0 - alpha)) * x;
+        self.y
     }
 
     /// A step with the source closed: the generator advances by one white sample (so the noise at a given
@@ -159,7 +176,7 @@ impl BandedGaussian {
     }
 
     /// One band sample for edges `f_lo_hz < f_hi_hz` and step `dt` seconds, scaled by the closed-form stationary
-    /// standard deviation at the present edges (quasi-stationary, like [`ColouredGaussian::step`]). Edges that are not
+    /// standard deviation at the present edges (quasi-stationary). Edges that are not
     /// ordered, positive and finite count as closed and are [`BandedGaussian::skip`]; edges so close or so high that
     /// the two poles coincide give exactly zero (the difference vanishes identically).
     pub fn step(&mut self, f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> f64 {
@@ -1156,6 +1173,106 @@ mod tests {
         let rho = det::exp(-core::f64::consts::TAU * fc * dt);
         assert!((var - 1.0).abs() < 0.06, "variance {var}");
         assert!((r1 - rho).abs() < 0.02, "lag-1 correlation {r1} against {rho}");
+    }
+
+    #[test]
+    fn coloured_noise_fixed_cutoff_matches_the_normalized_one_pole() {
+        let dt = 1.0 / 96_000.0;
+        for fc in [1000.0, 9000.0] {
+            let mut actual = ColouredGaussian::new(31, GLOTTAL_NOISE_KERNEL);
+            let mut white = StreamKey {
+                seed: 31,
+                kernel: GLOTTAL_NOISE_KERNEL,
+                tile: 0,
+            }
+            .stream();
+            let alpha = 1.0 - det::exp(-core::f64::consts::TAU * fc * dt);
+            let scale = det::sqrt((2.0 - alpha) / alpha);
+            let mut legacy = 0.0;
+            for _ in 0..4096 {
+                legacy += alpha * (white.next_normal() - legacy);
+                let expected = legacy * scale;
+                let observed = actual.step(fc, dt);
+                assert!((observed - expected).abs() <= 4.0e-14 * expected.abs().max(1.0));
+            }
+            assert_eq!(actual.white.index(), white.index());
+        }
+    }
+
+    #[test]
+    fn coloured_noise_changes_relaxation_without_rescaling_or_clearing_history() {
+        let seed = 47;
+        let dt = 1.0 / 48_000.0;
+        let mut actual = ColouredGaussian::new(seed, GLOTTAL_NOISE_KERNEL);
+        let mut white = StreamKey {
+            seed,
+            kernel: GLOTTAL_NOISE_KERNEL,
+            tile: 0,
+        }
+        .stream();
+        // A white-limit step gives an already normalised, nonzero history.
+        let mut expected = white.next_normal();
+        assert_eq!(actual.step(1.0e8, dt).to_bits(), expected.to_bits());
+        let initial = expected;
+        // The old current-cutoff normalisation amplified the retained state by
+        // thousands here, then erased it once 1-exp(-2*pi*fc*dt) rounded to zero.
+        for (fc, interval) in [
+            (0.001, dt),
+            (1.0e-18, dt),
+            (3000.0, 2.0 * dt),
+            (80.0, 0.5 * dt),
+        ] {
+            let r = core::f64::consts::TAU * fc * interval;
+            expected = (-r).exp() * expected + (-(-2.0 * r).exp_m1()).sqrt() * white.next_normal();
+            let observed = actual.step(fc, interval);
+            assert!((observed - expected).abs() <= 2.0e-14 * expected.abs().max(1.0));
+            if fc <= 0.001 {
+                assert!(
+                    (observed - initial).abs() < 0.01,
+                    "cutoff change created a history gain: {observed}"
+                );
+            }
+        }
+        assert_eq!(actual.white.index(), white.index());
+        let mut replay = actual.clone();
+        for fc in [900.0, 1.0e-10, 14_000.0] {
+            assert_eq!(actual.step(fc, dt).to_bits(), replay.step(fc, dt).to_bits());
+        }
+        assert_eq!(actual.skip(), 0.0);
+        let _ = replay.skip();
+        assert_eq!(actual.y, 0.0);
+        assert_eq!(actual.white.index(), replay.white.index());
+        assert_eq!(
+            actual.step(750.0, dt).to_bits(),
+            replay.step(750.0, dt).to_bits()
+        );
+    }
+
+    #[test]
+    fn coloured_noise_prescribed_cutoff_changes_keep_equilibrium_variance() {
+        let dt = 1.0 / 48_000.0;
+        let cutoffs = [0.001, 12_000.0, 1.0e-18, 60.0, 24_000.0, 3.0];
+        let mut mean = [0.0; 6];
+        let mut power = [0.0; 6];
+        let n = 1u64 << 15;
+        for seed in 0..n {
+            let mut source = ColouredGaussian::new(seed, GLOTTAL_NOISE_KERNEL);
+            source.step(1.0e8, dt);
+            for (i, cutoff) in cutoffs.into_iter().enumerate() {
+                let y = source.step(cutoff, dt);
+                mean[i] += y;
+                power[i] += y * y;
+            }
+        }
+        for (i, cutoff) in cutoffs.into_iter().enumerate() {
+            let average = mean[i] / n as f64;
+            let variance = power[i] / n as f64 - average * average;
+            assert!(average.abs() < 0.03, "cutoff {cutoff}: mean {average}");
+            assert!(
+                (variance - 1.0).abs() < 0.04,
+                "cutoff {cutoff}: variance {variance}"
+            );
+        }
     }
 
     #[test]
