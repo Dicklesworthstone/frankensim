@@ -355,6 +355,27 @@ impl LocalMaterialWall {
         Ok(patch)
     }
 
+    // Same source reduction as graph/DG/TMM walls, evaluated at the original
+    // frustum owner's canonical radius and wetted strip length. Keep native
+    // source refusals here rather than translating them through a numeric API.
+    pub(crate) fn acoustic_cell_wall(&self, radius: f64, strip_length: f64)
+        -> Result<fs_phs::acoustic_outlet::AcousticCellWall, AcousticRealizeError>
+    {
+        use fs_phs::acoustic_outlet::{AcousticCellWall, AcousticWallRelaxation};
+        let patch = self.base_patch(radius, strip_length)?;
+        self.load(patch)?; // Original positive-arm geometry/source admission.
+        let relaxation = match &self.loss {
+            WallMaterialLoss::Maxwell(source) => source.material().terms.iter()
+                .filter(|(modulus, _)| *modulus > 0.0)
+                .map(|&(modulus, relaxation_time_s)| AcousticWallRelaxation {
+                    stiffness_per_area: (patch.wall.stiffness_per_area / self.young) * modulus,
+                    relaxation_time_s,
+                }).collect(),
+            _ => Vec::new(),
+        };
+        Ok(AcousticCellWall { wall: patch.wall, relaxation })
+    }
+
     pub(super) fn load(
         &self,
         patch: WallPatch,

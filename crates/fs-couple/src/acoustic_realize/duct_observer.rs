@@ -28,8 +28,8 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 /// members, other excitation and tone holes refuse; none is silently dropped.
 /// The explicit lumped ladder uses the original compression-volume/volume-flow
 /// frustum owner, including for a single widening cone, with regional interior
-/// gases, an independent pressure-matched exterior and its original numerical
-/// wall. The exact same prepared chain supplies passive-pitch admission, reed
+/// gases, an independent pressure-matched exterior and either the original
+/// numerical wall or source-bound local material walls. The exact same prepared chain supplies passive-pitch admission, reed
 /// feedback and terminal flow. The legacy spherical psi-line is not used by
 /// this physical image.
 /// It observes the actual admitted loaded terminal flow;
@@ -42,8 +42,12 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 /// Nonuniform interiors keep at least two cells per authored region within the
 /// exact requested total, refining the greatest local cell travel time first.
 /// Their spatial screening estimate does not certify material-interface mode
-/// error: the measured regional TMM pitch gate remains decisive. Source-bound
-/// walls still require the characteristic line. Side-hole and general body microphones
+/// error: the measured regional TMM pitch gate remains decisive. Source walls
+/// retain their full equilibrium, Kelvin and Maxwell law at each native cell's
+/// actual radius and slanted strip area; the same source supplies the TMM gate.
+/// This is frozen local membrane motion, without axial shell coupling, static
+/// pressure prestress or wall radiation. Source applicability and the original
+/// exact-propagator frequency admission remain binding. Side-hole and general body microphones
 /// retain their existing dedicated owners and are not inferred from this input.
 ///
 /// Frozen gas regions share one static pressure. This is not advective mixing,
@@ -179,18 +183,13 @@ pub(super) fn realize(
         None => regional,
     };
     let regional = match binding.material_wall {
-        Some(MaterialWallLayout::Segments(walls)) => regional
+        Some(MaterialWallLayout::Segments(walls)) if !is_lumped => regional
             .with_material_wall_regions(walls)
             .map_err(AcousticRealizeError::Duct)?,
         _ => regional,
     };
     let exterior = *regional.exterior_gas();
     let interior = *regional.inlet_gas();
-    if is_lumped && binding.material_wall.is_some() {
-        return Err(invalid(
-            "physical lumped outlet observation requires the original numerical wall; source-bound walls need their own spatial owner",
-        ));
-    }
     let [x, y, z] = binding.receiver.position_m;
     let range_m = x.hypot(y).hypot(z);
     if !range_m.is_finite() || range_m <= 0.0 {
@@ -265,7 +264,7 @@ pub(super) fn realize(
             assembly.sample_rate_hz,
             count,
             options.bore,
-            Some((&mut microphone, regional)),
+            Some((&mut microphone, regional, binding.material_wall)),
         )?;
         for pressure in &mut pressure_pa {
             *pressure = observer.process(*pressure);
@@ -282,7 +281,7 @@ pub(super) fn realize(
             duct_observer: Some(BaffledDuctObservation {
                 segment_gases: gases,
                 exterior_gas: exterior,
-                material_wall: None,
+                material_wall: binding.material_wall.cloned(),
                 receiver: binding.receiver,
                 filter,
                 axial_delay_samples: 0,

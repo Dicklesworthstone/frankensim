@@ -1079,8 +1079,8 @@ remains unverified while the required constellation siblings are unavailable.
 `acoustic_realize::duct_observer::BaffledDuctObserver` admits the existing
 `BoreRealization::LumpedLadder` for an unbranched flanged cylinder/frustum bore,
 including a single widening cone, with one coherent gas per authored axial
-segment, an independent pressure-matched exterior and its original numerical
-wall law. Both massive and quasistatic reeds retain their implicit pressure/work
+segment, an independent pressure-matched exterior, and either its original
+numerical wall law or source-bound local material walls. Both massive and quasistatic reeds retain their implicit pressure/work
 junction. The original `fs-phs` terminal-flow row observes the accepted state;
 that flow enters the existing finite-aperture Rayleigh receiver and causal
 atmospheric filter. Internal source pressure is not added to physical microphone
@@ -1097,8 +1097,9 @@ material state remain binding. Legacy source-pressure comparisons retain their
 automatic spherical-cone behavior.
 
 Each region's density, sound speed and transport determine its exact frustum
-compression/inertia and local viscothermal memory; the original numerical wall
-owner remains unchanged. The reed and Bernoulli source use the actual inlet gas.
+compression/inertia and local viscothermal memory. Numerical walls keep their
+original owner; source walls retain each section's original material and full
+local constitutive law. The reed and Bernoulli source use the actual inlet gas.
 The exterior determines only terminal radiation loading, Rayleigh pressure and
 atmospheric propagation. Passive admission uses the original regional TMM with
 the same interface and exterior assignment; its scan follows the original
@@ -1106,6 +1107,24 @@ regional one-way travel time. Frozen regions require coherent gas states and
 equal static pressure; mean flow, mixing and thermal equilibration are not
 modeled. Identical regional profiles retain the original uniform allocation,
 scan arithmetic, physical output and receipts bit for bit.
+
+`MaterialWallLayout::Uniform` and `Segments` bind their original
+`LocalMaterialWall` sources to this same spatial chain. The canonical frustum
+query supplies authored region, midpoint radius and actual slanted strip area;
+axial gas geometry remains separate. The existing material reduction supplies
+equilibrium mass/stiffness, Kelvin resistance and every positive Maxwell arm,
+with original source errors retained. The existing cell junction and Maxwell
+storage carry wall pressure, flow and hereditary work together. The same
+material partition enters the original regional TMM before passive admission,
+and its source layout remains in the physical observation result.
+
+This is frozen small-displacement local membrane motion. It adds no
+static-pressure prestress, axial shell interaction, mean thermal/material
+evolution or exterior wall radiation. Every TMM query retains material frequency
+support, and cell geometry retains the original thin-wall admission. The
+existing exact propagator keeps its frequency gate; graph midpoint-memory
+limits are not applied to that different original propagator. Material
+applicability is not an antialiasing filter or a broadband excitation certificate.
 
 Nonuniform profiles allocate exactly the requested total with at least two cells
 per authored region, refining the greatest local cell travel time first with
@@ -1120,8 +1139,8 @@ observation does not certify its continuum loading accuracy. Axial propagation
 stays in the spatial ODE, so the receipt reports zero separately factored
 axial-delay samples; finite spatial resolution does not claim an exact continuum
 wavefront. Receiver geometry, exterior delay, quadrature band and all media remain
-explicit. Source-bound walls, side openings and separate body receivers require
-their supported owners and refuse on this bounded path.
+explicit. Side openings and separate body receivers require their supported
+owners and refuse on this bounded path.
 
 Authored G1/G3 regressions cover retarded inverse-range pressure for massive and
 quasistatic reeds on cylinders and single cones, absolute-pressure substitution,
@@ -1132,6 +1151,15 @@ independent original-TMM composition across a gas interface, the uniform
 exterior-reference bits, and a cone tolerance that rejects the physical frustum
 even when the legacy psi image would pass. Test presence does not claim native
 execution.
+
+
+Authored source-wall regressions additionally compare a sourced Kelvin cylinder
+with the equivalent original numerical-wall pressure and pitch bits; exercise
+regional Maxwell wall changes in actual frustum microphone pressure for massive
+and quasistatic reeds; retain gas, exterior and source-wall assignments; and
+check the original out-of-band source refusal and duplicate-wall rejection.
+These are synthetic constitutive checks, not measured-material or instrument
+validation. Their presence does not claim native execution.
 
 ## Superfluid mutual-friction heat on the original thermal timeline
 

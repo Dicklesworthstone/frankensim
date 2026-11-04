@@ -59,6 +59,7 @@ impl<'a> PreparedReedOutlet<'a> {
         taps: &[AcousticTap],
         reference: crate::driving_point::regional::RegionalDuct,
         wall: Option<LocallyReactingWall>,
+        material_wall: Option<&crate::driving_point::regional::material_wall::MaterialWallLayout>,
         receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
     ) -> Result<Self, AcousticRealizeError> {
         if !taps.is_empty() {
@@ -66,6 +67,25 @@ impl<'a> PreparedReedOutlet<'a> {
                 what: "physical ODE outlet observation requires separate receivers for side openings",
             });
         }
+        use crate::driving_point::regional::material_wall::MaterialWallLayout;
+        if material_wall.is_some() && wall.is_some() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "source-bound cell walls cannot also select a numerical wall override",
+            });
+        }
+        // Bind the same material source to the continuum admission and the
+        // actual spatial wall before either is used. No wall approximation
+        // can be installed only for rendering after a rigid-bore pitch check.
+        let reference = match material_wall {
+            Some(MaterialWallLayout::Uniform(wall)) => {
+                reference.with_material_wall_regions(&vec![wall.clone(); sections.len()])
+            }
+            Some(MaterialWallLayout::Segments(walls)) => {
+                reference.with_material_wall_regions(walls)
+            }
+            None => Ok(reference),
+        }
+        .map_err(AcousticRealizeError::Duct)?;
         let media: Vec<_> = reference
             .segment_gases()
             .iter()
@@ -76,15 +96,39 @@ impl<'a> PreparedReedOutlet<'a> {
             })
             .collect();
         let exterior = reference.exterior_gas();
-        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_regional_outlet_flow(
-            sections,
-            &media,
-            exterior.density,
-            exterior.sound_speed,
-            outlet,
-            1,
-            wall_pin(wall).as_ref(),
-        )
+        let (line, flow) = if let Some(materials) = material_wall {
+            let geometry = fs_phs::acoustic_outlet::acoustic_cell_geometry(sections)
+                .map_err(render_phs_error)?;
+            let walls = geometry
+                .iter()
+                .map(|cell| {
+                    let source = match materials {
+                        MaterialWallLayout::Uniform(wall) => wall,
+                        MaterialWallLayout::Segments(walls) => &walls[cell.section],
+                    };
+                    source.acoustic_cell_wall(cell.radius, cell.wall_strip_length)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            fs_phs::acoustic_outlet::acoustic_chain_with_regional_outlet_flow_and_cell_walls(
+                sections,
+                &media,
+                exterior.density,
+                exterior.sound_speed,
+                outlet,
+                1,
+                &walls,
+            )
+        } else {
+            fs_phs::acoustic_outlet::acoustic_chain_with_regional_outlet_flow(
+                sections,
+                &media,
+                exterior.density,
+                exterior.sound_speed,
+                outlet,
+                1,
+                wall_pin(wall).as_ref(),
+            )
+        }
         .map_err(render_phs_error)?;
         Ok(Self {
             line,

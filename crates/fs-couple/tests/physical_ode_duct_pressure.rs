@@ -4,6 +4,10 @@ use fs_couple::acoustic_realize::{
     duct_observer::BaffledDuctObserver, realize_assembly_with_options,
 };
 use fs_couple::air_path::GasAbsorptionModel;
+use fs_couple::bernoulli_aperture::wall::material::{
+    AxialConstraint, LocalMaterialWall, WallMaterialLoss, WallRelaxation,
+};
+use fs_couple::driving_point::regional::material_wall::MaterialWallLayout;
 use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
 use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::{
@@ -12,6 +16,104 @@ use fs_scenario::{
 };
 
 const RATE: u32 = 16_000;
+
+// Source-bearing numerical fixture; these coefficients are not measured data.
+fn sourced_wall(relaxation_time_s: Option<f64>, band: [f64; 2]) -> LocalMaterialWall {
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+        PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+    };
+    use fs_material::state_point::{
+        MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+        resolve_material_state_point,
+    };
+    use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec};
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (name, dims, value) in [
+        ("density", Density::DIMS, 1000.0),
+        ("young_modulus", Pressure::DIMS, 3e6),
+        ("poisson_ratio", Dims::NONE, 0.3),
+        ("kelvin_voigt_young_viscosity", DynViscosity::DIMS, 100.0),
+        ("wall_delta_e", Pressure::DIMS, 2e6),
+        (
+            "wall_tau",
+            Dims([0, 0, 1, 0, 0, 0]),
+            relaxation_time_s.unwrap_or(0.001),
+        ),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained()
+                    .with("T", 290.0, 300.0)
+                    .with(
+                        "omega",
+                        core::f64::consts::TAU * band[0],
+                        core::f64::consts::TAU * band[1],
+                    ),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic local wall for native pressure regression".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+        requirements.push(
+            ScalarPropertyRequirement::try_with_quantity(
+                name,
+                QuantitySpec::dimensional(dims),
+                ScalarAdmissibility::Finite,
+            )
+            .unwrap(),
+        );
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic pressure-test wall".into(),
+            phase: "solid".into(),
+            process: "manufactured test".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let material = resolve_material_state_point(
+        &card,
+        &QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with(
+                "omega",
+                core::f64::consts::TAU * f64::midpoint(band[0], band[1]),
+            )
+            .unwrap(),
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let loss = if relaxation_time_s.is_some() {
+        WallMaterialLoss::Maxwell(
+            WallRelaxation::from_state_point(
+                &material,
+                &[("wall_delta_e".into(), "wall_tau".into())],
+                band,
+                0.5,
+                0.5,
+            )
+            .unwrap(),
+        )
+    } else {
+        WallMaterialLoss::KelvinVoigt
+    };
+    LocalMaterialWall::new(material, 0.0001, AxialConstraint::StressFree, loss, band).unwrap()
+}
 
 fn gas(pressure_pa: f64) -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure_pa).unwrap()
@@ -362,6 +464,131 @@ fn identical_regional_profile_preserves_uniform_output_and_receipt_bits() {
     );
     assert_eq!(uniform.bore_receipt, regional.bore_receipt);
     assert_eq!(uniform.duct_observer, regional.duct_observer);
+}
+
+#[test]
+fn sourced_kelvin_wall_preserves_the_equivalent_original_cylinder_pressure_and_pitch() {
+    let gas = gas(101_325.0);
+    let source = sourced_wall(None, [1.0, 8000.0]);
+    let pin = source.base_patch(0.004, 1.0).unwrap().wall;
+    let layout = MaterialWallLayout::Uniform(source);
+    let mut numerical_input = input(0.0);
+    numerical_input.duct.as_mut().unwrap().wall = Some(fs_scenario::LocallyReactingWall {
+        surface_density_kg_m2: pin.surface_density,
+        stiffness_pa_per_m: pin.stiffness_per_area,
+        resistance_pa_s_per_m: pin.resistance,
+    });
+    let numerical_options = options(gas, 16);
+    let numerical = realize_assembly_with_options(&numerical_input, &numerical_options).unwrap();
+    let material_options = RealizeOptions {
+        baffled_duct: Some(BaffledDuctObserver {
+            material_wall: Some(&layout),
+            ..numerical_options.baffled_duct.unwrap()
+        }),
+        ..numerical_options
+    };
+    let sourced = realize_assembly_with_options(&input(0.0), &material_options).unwrap();
+    let bits = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&numerical.pressure_pa), bits(&sourced.pressure_pa));
+    assert_eq!(numerical.bore_receipt, sourced.bore_receipt);
+    assert_eq!(
+        sourced.duct_observer.unwrap().material_wall,
+        Some(layout.clone())
+    );
+    assert!(
+        realize_assembly_with_options(&numerical_input, &material_options).is_err(),
+        "the sourced wall cannot be counted again as an authored numerical wall"
+    );
+}
+
+#[test]
+fn regional_maxwell_wall_sources_change_the_same_loaded_frustum_microphone() {
+    let exterior = gas(101_325.0);
+    let regions = [
+        exterior,
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, exterior.pressure).unwrap(),
+    ];
+    let walls = MaterialWallLayout::Segments(vec![
+        sourced_wall(Some(0.0002), [1.0, 8000.0]),
+        sourced_wall(Some(0.002), [1.0, 8000.0]),
+    ]);
+    let changed = MaterialWallLayout::Segments(vec![
+        sourced_wall(Some(0.0002), [1.0, 8000.0]),
+        sourced_wall(Some(0.01), [1.0, 8000.0]),
+    ]);
+    for mass in [0.0, 1e-4] {
+        let mut input = input(mass);
+        input.duct.as_mut().unwrap().segments = vec![
+            CylinderSegment::cylinder(0.004, 0.12),
+            CylinderSegment::taper(0.004, 0.005, 0.18),
+        ];
+        let render = |wall| {
+            let settings = RealizeOptions {
+                bore: BoreRealization::lumped_ladder_with_tolerance(6, 500.0),
+                observer_absorption: Some(GasAbsorptionModel::Lossless),
+                baffled_duct: Some(BaffledDuctObserver {
+                    segment_gases: Some(&regions),
+                    exterior_gas: Some(exterior),
+                    material_wall: Some(wall),
+                    receiver: receiver(exterior, 16, 0.005),
+                }),
+                ..RealizeOptions::default()
+            };
+            realize_assembly_with_options(&input, &settings).unwrap()
+        };
+        let original = render(&walls);
+        let changed = render(&changed);
+        let receipt = original.duct_observer.as_ref().unwrap();
+        assert_eq!(receipt.material_wall.as_ref(), Some(&walls));
+        assert_eq!(receipt.segment_gases, regions.to_vec());
+        assert_eq!(receipt.exterior_gas, exterior);
+        assert_eq!(receipt.axial_delay_samples, 0);
+        assert!(
+            original.pressure_pa[..15]
+                .iter()
+                .all(|pressure| *pressure == 0.0)
+        );
+        let amplitude = original
+            .pressure_pa
+            .iter()
+            .map(|p| p.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(amplitude > 0.0 && amplitude.is_finite());
+        let difference = original
+            .pressure_pa
+            .iter()
+            .zip(&changed.pressure_pa)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(difference > 1e-8 * amplitude);
+    }
+}
+
+#[test]
+fn original_material_frequency_refusal_survives_physical_lumped_admission() {
+    let layout = MaterialWallLayout::Uniform(sourced_wall(Some(0.001), [1.0, 50.0]));
+    let uniform = options(gas(101_325.0), 16);
+    let settings = RealizeOptions {
+        baffled_duct: Some(BaffledDuctObserver {
+            material_wall: Some(&layout),
+            ..uniform.baffled_duct.unwrap()
+        }),
+        ..uniform
+    };
+    match realize_assembly_with_options(&input(0.0), &settings).unwrap_err() {
+        AcousticRealizeError::Duct(fs_duct::DuctError::BadParameter { what }) => {
+            assert_eq!(
+                what,
+                "material wall frequency lies outside its declared source band"
+            );
+        }
+        other => panic!("source refusal was replaced: {other:?}"),
+    }
 }
 
 #[test]

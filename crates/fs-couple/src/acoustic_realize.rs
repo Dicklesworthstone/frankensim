@@ -329,9 +329,9 @@ pub struct RealizeOptions<'a> {
     pub observer_relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
     /// Physical flanged-outlet microphone for an unbranched reed-driven duct.
     /// Its regional gas, exterior load and causal observation share the existing
-    /// owners. A uniform-medium lumped ladder admits and advances the same
-    /// original volume/flow frustum model, including for a single cone, and
-    /// exports its terminal flow. Other coupled
+    /// owners. A lumped ladder admits and advances the same original regional
+    /// gas/material-wall frustum model, including for a single cone, and exports
+    /// its terminal flow. Other coupled
     /// members and unsupported medium/wall combinations refuse explicitly.
     /// The observer law/relaxation above applies to this path's exterior gas;
     /// the receiver position replaces `assembly.listener.distance_m`.
@@ -4990,11 +4990,12 @@ fn realize_reed_on_duct_with_receiver(
     receiver: Option<(
         &mut crate::pcm_wav::baffled::BaffledPressure,
         crate::driving_point::regional::RegionalDuct,
+        Option<&crate::driving_point::regional::material_wall::MaterialWallLayout>,
     )>,
 ) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
     // The resolved inlet is the source medium even when downstream cells and
     // the exterior differ. No averaged bore gas enters Bernoulli or reed work.
-    let inlet = receiver.as_ref().map(|(_, regional)| *regional.inlet_gas());
+    let inlet = receiver.as_ref().map(|(_, regional, _)| *regional.inlet_gas());
     let gas = inlet.as_ref().unwrap_or(gas);
     let physics = physics_duct(duct)?;
     let termination = match duct.termination {
@@ -5048,7 +5049,7 @@ fn realize_reed_on_duct_with_receiver(
                     what: "duct cannot be sliced into a lumped ladder",
                 },
             )?;
-            let regional = receiver.as_ref().map(|(_, regional)| regional)
+            let regional = receiver.as_ref().map(|(_, regional, _)| regional)
                 .filter(|regional| nonuniform_interior(regional));
             let (dispersion_error_cents, min_admissible_cells) = if let Some(regional) = regional {
                 let (counts, estimate, minimum) = regional_lumped_cells(
@@ -5074,10 +5075,10 @@ fn realize_reed_on_duct_with_receiver(
             // Select the physical frustum once. The passive scan borrows this
             // exact regional chain; the source then consumes it unchanged.
             let receiver = receiver
-                .map(|(receiver, regional)| {
+                .map(|(receiver, regional, material_wall)| {
                     reed_ode::PreparedReedOutlet::new(
                         &sections, duct_outlet(duct.termination), &taps,
-                        regional, duct.wall, receiver,
+                        regional, duct.wall, material_wall, receiver,
                     )
                 })
                 .transpose()?;
@@ -6275,7 +6276,7 @@ mod lumped_ladder_resonance_tests {
         let prepared = reed_ode::PreparedReedOutlet::new(
             &sections, duct_outlet(duct.termination), &taps,
             crate::driving_point::regional::RegionalDuct::new(&physics, &[interior])
-                .unwrap().with_exterior_gas(exterior).unwrap(), None, &mut microphone,
+                .unwrap().with_exterior_gas(exterior).unwrap(), None, None, &mut microphone,
         ).unwrap();
         let (_, admitted_reference) = lumped_ladder_resonances(
             &physics, &sections, &taps, &duct, Termination::FlangedOpen, &interior,
@@ -6355,7 +6356,7 @@ mod lumped_ladder_resonance_tests {
             RayleighMedium { density: exterior.density, sound_speed: exterior.sound_speed },
         ).unwrap();
         let prepared = reed_ode::PreparedReedOutlet::new(
-            &sections, duct_outlet(duct.termination), &taps, regional, None, &mut microphone,
+            &sections, duct_outlet(duct.termination), &taps, regional, None, None, &mut microphone,
         ).unwrap();
         let (_, admitted) = lumped_ladder_resonances(
             &physics, &sections, &taps, &duct, Termination::FlangedOpen, &gases[0], Some(&prepared),
