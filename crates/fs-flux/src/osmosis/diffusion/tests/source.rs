@@ -118,17 +118,11 @@ fn g1_evolving_source_mobility_tracks_independent_unequal_volume_relaxation() {
         build(SolutionDiffusionLink::from_material_sources(0, 1, 0.01, 0.001, sourced).unwrap());
     let mut frozen = build(SolutionDiffusionLink::new(0, 1, 0.01, 0.001, constant).unwrap());
     // Independent scalar ODE uses conserved total amount and unequal volumes.
-    // Unlike an equal-volume pair, its arithmetic face concentration evolves.
+    // The source follows the same logarithmic-mean face as molecular friction.
     let rate = |left: f64| {
         let right = 0.5 * (140.0 - left);
-        let mean = 0.5 * (left + right);
-        -0.01 / VOLUME
-            * 1e-9
-            * (1.0 + mean / 100.0)
-            * mean
-            * (1.0 + mean * VBAR)
-            * (left / right).ln()
-            / 0.001
+        let mean = (left - right) / (left / right).ln();
+        -0.01 / VOLUME * 1e-9 * (1.0 + mean / 100.0) * (left - right) * (1.0 + mean * VBAR) / 0.001
     };
     let mut exact = 100.0;
     let h = 20.0 / 4000.0;
@@ -160,7 +154,8 @@ fn g1_evolving_source_mobility_tracks_independent_unequal_volume_relaxation() {
             || false,
         )
         .unwrap();
-    let mean = 0.5 * (concentration(&system, 0, 0) + concentration(&system, 1, 0));
+    let (a, b) = (concentration(&system, 0, 0), concentration(&system, 1, 0));
+    let mean = (a - b) / (a / b).ln();
     assert!(
         (terminal.pairs()[0].face.properties()[0].value_si() - 1e-9 * (1.0 + mean / 100.0)).abs()
             < 1e-23
@@ -277,11 +272,67 @@ fn g4_source_network_charges_retained_cards_and_refuses_initial_source_gaps() {
         build(system.workspace_bytes() - 1, 80.0),
         Err(OsmoticNetworkError::Workspace { .. })
     ));
-    // Arithmetic face c=90 is admitted, but the endpoint c=120 is not.
+    // The logarithmic-mean face is admitted, but the endpoint c=120 is not.
     assert!(matches!(
         build(1 << 22, 120.0),
         Err(OsmoticNetworkError::SolutionDiffusion(
             SolutionDiffusionError::Material(_)
         ))
     ));
+}
+
+#[test]
+fn g1_source_bound_front_enters_pure_solvent_only_with_supported_zero_coordinates() {
+    let model = source(1.0, vec![0.0], vec![200.0]);
+    let build = |range| {
+        OsmoticNetwork::with_solution_diffusion(
+            vec!["solute-0".into()],
+            vec![cell(&model, &[100.0]), cell(&model, &[0.0])],
+            vec![
+                SolutionDiffusionLink::from_material_sources(
+                    0,
+                    1,
+                    0.01,
+                    0.001,
+                    material(&model, range),
+                )
+                .unwrap(),
+            ],
+            physical(),
+            1 << 22,
+        )
+    };
+    // A material curve that starts at c=1 cannot acquire authority at c=0.
+    assert!(matches!(
+        build([1.0, 200.0]),
+        Err(OsmoticNetworkError::SolutionDiffusion(
+            SolutionDiffusionError::Material(_)
+        ))
+    ));
+    let mut sourced = build([0.0, 200.0]).unwrap();
+    let mut constant = network(&model, &[&[100.0], &[0.0]], &[(0, 1, 0.01)]);
+    let report = sourced.advance(10.0, numerical(1e-4), || false).unwrap();
+    constant.advance(10.0, numerical(1e-4), || false).unwrap();
+    assert!(concentration(&sourced, 1, 0) > concentration(&constant, 1, 0));
+    assert!(report.diffusion_free_energy_change_j.unwrap() < 0.0);
+    assert!(report.solute_balance_residual_mol[0].abs() <= physical().amount_balance_tolerance_mol);
+    let source = sourced.solution_diffusion_links()[0]
+        .material_sources()
+        .unwrap();
+    let left = sourced.compartments()[0].solution();
+    let right = sourced.compartments()[1].solution();
+    let terminal = source
+        .resolve_inventories(
+            [left.solvent_volume_m3(), right.solvent_volume_m3()],
+            [left.solute_moles(), right.solute_moles()],
+            || false,
+        )
+        .unwrap();
+    assert_eq!(
+        terminal.pairs()[0].face.properties()[0]
+            .answer()
+            .receipt
+            .selected,
+        source.sources()[0].selected_claim()
+    );
 }

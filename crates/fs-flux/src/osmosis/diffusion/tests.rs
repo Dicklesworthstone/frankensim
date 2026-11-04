@@ -106,10 +106,13 @@ fn bits(system: &OsmoticNetwork) -> Vec<u64> {
 #[test]
 fn g1_binary_window_refines_to_independent_nonlinear_solvent_frame_relaxation() {
     let model = source(1.0, vec![0.0], vec![200.0]);
-    // Independent scalar ODE: arithmetic face cbar=60 stays constant and
-    // N=D*cbar/x0 * ln(cL/cR)/L. This is not an invented dense Fick oracle.
+    // Independent scalar ODE in the stationary-solvent frame. The logarithmic
+    // chain rule gives N=D*(cL-cR)*(1+c_log*Vbar)/L, retaining the finite-solvent
+    // correction rather than treating a Maxwell--Stefan coefficient as Fick D.
     let rate = |left: f64| {
-        -0.01 / VOLUME * 1e-9 * 60.0 * (1.0 + 60.0 * VBAR) * (left / (120.0 - left)).ln() / 0.001
+        let right = 120.0 - left;
+        let mean = (left - right) / (left / right).ln();
+        -0.01 / VOLUME * 1e-9 * (left - right) * (1.0 + mean * VBAR) / 0.001
     };
     let mut exact = 100.0;
     let h = 50.0 / 10000.0;
@@ -281,10 +284,132 @@ fn g0_closed_face_finishes_time_and_preparation_refuses_unsupported_layouts() {
         OsmoticNetwork::with_solution_diffusion(names, cells, links, physical(), budget)
     };
     assert!(make(vec!["foreign".into()], false, false, 1 << 22).is_err());
-    assert!(make(vec!["solute-0".into()], true, false, 1 << 22).is_err());
+    assert!(make(vec!["solute-0".into()], true, false, 1 << 22).is_ok());
     assert!(make(vec!["solute-0".into()], false, true, 1 << 22).is_err());
     assert!(matches!(
         make(vec!["solute-0".into()], false, false, 1),
         Err(OsmoticNetworkError::Workspace { .. })
     ));
+}
+
+#[test]
+fn g1_pure_solvent_uptake_refines_to_dilute_analytical_diffusion() {
+    let model = source(1.0, vec![0.0], vec![200.0]);
+    let initial = 1e-3;
+    let duration = 50.0;
+    // Two equal, well-mixed volumes coupled by A*D/L. The dilute-limit
+    // concentration difference decays as exp(-2*A*D*t/(V*L)). The retained
+    // finite-solvent correction is bounded here by Vbar*initial < 2e-8.
+    let rate = 2.0 * 0.01 * 1e-9 / (VOLUME * 0.001);
+    let expected = 0.5 * initial * (1.0 - (-rate * duration).exp());
+    let mut errors = Vec::new();
+    for relative in [1e-3, 1e-5] {
+        let mut system = network(&model, &[&[initial], &[0.0]], &[(0, 1, 0.01)]);
+        assert_eq!(concentration(&system, 1, 0), 0.0);
+        let report = system
+            .advance(
+                duration,
+                OsmoticStepControls {
+                    absolute_amount_tolerance_mol: 1e-20,
+                    ..numerical(relative)
+                },
+                || false,
+            )
+            .unwrap();
+        let received = concentration(&system, 1, 0);
+        assert!(received > 0.0 && received < 0.5 * initial);
+        assert!((concentration(&system, 0, 0) + received - initial).abs() < 1e-16);
+        assert!(report.diffusion_free_energy_change_j.unwrap() < 0.0);
+        assert!(report.solute_balance_residual_mol[0].abs() < 1e-20);
+        assert_eq!(report.water_balance_residual_m3, 0.0);
+        assert_eq!(system.time_s(), duration);
+        errors.push((received - expected).abs());
+    }
+    assert!(errors[0] < initial * 0.01, "{errors:?}");
+    assert!(errors[1] < 0.2 * errors[0], "{errors:?}");
+}
+
+#[test]
+fn g0_g3_empty_species_stays_absent_while_a_front_crosses_a_network() {
+    let build = |reference, reversed| {
+        let model = source(reference, vec![0.001, 0.008, 0.008, 0.1], vec![200.0; 2]);
+        let faces = if reversed {
+            vec![(2, 1, 0.01), (1, 0, 0.01)]
+        } else {
+            vec![(0, 1, 0.01), (1, 2, 0.01)]
+        };
+        network(&model, &[&[100.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]], &faces)
+    };
+    let mut system = build(1.0, false);
+    let mut reordered = build(1e200, true);
+    let report = system.advance(20.0, numerical(1e-4), || false).unwrap();
+    let other = reordered.advance(20.0, numerical(1e-4), || false).unwrap();
+    assert_eq!(bits(&system), bits(&reordered));
+    assert_eq!(
+        report.diffusion_free_energy_change_j,
+        other.diffusion_free_energy_change_j
+    );
+    assert!(concentration(&system, 0, 0) < 100.0);
+    assert!(concentration(&system, 1, 0) > 0.0);
+    assert!(concentration(&system, 2, 0) > 0.0);
+    let total: f64 = (0..3).map(|i| concentration(&system, i, 0)).sum();
+    assert!((total - 100.0).abs() < 1e-10);
+    for i in 0..3 {
+        assert_eq!(concentration(&system, i, 1), 0.0);
+        assert_eq!(
+            system.compartments()[i].solution().solvent_volume_m3(),
+            VOLUME
+        );
+    }
+    assert_eq!(report.solute_balance_residual_mol[1], 0.0);
+    assert!(report.diffusion_free_energy_change_j.unwrap() < 0.0);
+
+    // With no solute anywhere, every face is still evaluated but the complete
+    // physical inventory stays exactly empty; no 0/0 withdrawal is manufactured.
+    let model = source(1.0, vec![0.0], vec![200.0]);
+    let mut empty = network(&model, &[&[0.0], &[0.0]], &[(0, 1, 0.01)]);
+    let report = empty.advance(1.0, numerical(1e-4), || false).unwrap();
+    assert_eq!(concentration(&empty, 0, 0), 0.0);
+    assert_eq!(concentration(&empty, 1, 0), 0.0);
+    assert_eq!(report.diffusion_free_energy_change_j, Some(0.0));
+}
+
+#[test]
+fn g4_zero_inventory_window_rolls_back_late_failure_and_retries_cleanly() {
+    let model = source(1.0, vec![0.0], vec![200.0]);
+    let mut system = network(&model, &[&[100.0], &[0.0]], &[(0, 1, 0.01)]);
+    let original = bits(&system);
+    let controls = numerical(1e-4);
+    let mut accepted = system.clone();
+    let mut polls = 0;
+    accepted
+        .advance(20.0, controls, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut visited = 0;
+    assert!(matches!(
+        system.advance(20.0, controls, || {
+            visited += 1;
+            visited == polls
+        }),
+        Err(OsmoticNetworkError::Cancelled)
+    ));
+    assert_eq!(bits(&system), original);
+    assert!(matches!(
+        system.advance(
+            20.0,
+            OsmoticStepControls {
+                maximum_steps: 1,
+                maximum_step_s: 0.01,
+                ..controls
+            },
+            || false,
+        ),
+        Err(OsmoticNetworkError::WorkBudget)
+    ));
+    assert_eq!(bits(&system), original);
+    system.advance(20.0, controls, || false).unwrap();
+    assert_eq!(bits(&system), bits(&accepted));
 }

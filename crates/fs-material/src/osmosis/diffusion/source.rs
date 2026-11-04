@@ -6,7 +6,7 @@
 //! axes must have the matching explicit static quantity declarations. A curve
 //! or surface is evaluated by the original material resolver, including its
 //! joint interpolation support. Every call qualifies both endpoints AND the
-//! arithmetic concentration face against the same originally selected claims.
+//! logarithmic-mean concentration face against the same selected claims.
 //!
 //! Source resolution allocates queries, evidence and receipts. These are
 //! returned to the caller, never cached in the prepared law. The separate
@@ -15,7 +15,7 @@
 use super::{
     AqueousSolution, MAX_OSMOTIC_SOLUTES, MolarMass, OsmosisError, Result, SolutionDiffusionError,
     SolutionDiffusionReport, SolutionDiffusionSolve, SolutionDiffusionWorkspace,
-    SolutionMaxwellStefan, SpeciesId, VirialSolutionModel, poll, positive,
+    SolutionMaxwellStefan, SpeciesId, VirialSolutionModel, logarithmic_mean_concentration, poll,
 };
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
@@ -329,7 +329,7 @@ impl MaterialSolutionMaxwellStefan {
                 .sum::<usize>()
     }
 
-    /// Qualify actual endpoint inventories AND their arithmetic concentration
+    /// Qualify actual endpoint inventories AND their logarithmic-mean concentration
     /// face against every pinned source. Useful for checking a proposed finite
     /// update before publication. Fixed model T and solvent concentration are
     /// read from their original owner; no reference-state coordinate is frozen.
@@ -346,7 +346,7 @@ impl MaterialSolutionMaxwellStefan {
         let b = concentrations(model, volumes_m3[1], amounts_mol[1])?;
         let mut face = [0.0; MAX_OSMOTIC_SOLUTES];
         for i in 0..n - 1 {
-            face[i] = 0.5 * a[i] + 0.5 * b[i];
+            face[i] = logarithmic_mean_concentration(a[i], b[i])?;
         }
         model.evaluate(&face[..n - 1]).map_err(OsmosisError::from)?;
         let queries = [&a, &face, &b].map(|c| {
@@ -462,9 +462,9 @@ fn concentrations(
     let mut c = [0.0; MAX_OSMOTIC_SOLUTES];
     for (slot, amount) in c.iter_mut().zip(amounts) {
         *slot = amount / volume;
-        if !positive(*slot) {
+        if !slot.is_finite() || *slot < 0.0 || (*amount > 0.0 && *slot == 0.0) {
             return Err(SolutionDiffusionError::Invalid(
-                "positive representable source concentrations required",
+                "nonnegative representable source concentrations required",
             ));
         }
     }

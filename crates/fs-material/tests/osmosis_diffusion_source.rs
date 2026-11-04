@@ -159,13 +159,15 @@ fn g1_actual_concentration_changes_pair_flux_and_returns_original_receipts() {
             || false,
         )
         .unwrap();
-    let expected = 1.6e-9 * 60.0 * (1.0 + 60.0 * VBAR) * 5.0_f64.ln() / 0.005;
+    let mean = 80.0 / 5.0_f64.ln();
+    let diffusivity = 1e-9 * (1.0 + mean / 100.0);
+    let expected = diffusivity * 80.0 * (1.0 + mean * VBAR) / 0.005;
     close(flux[0], expected, 2e-18);
     assert_eq!(law.sources()[0].selected_claim(), ids[0]);
     let pair = &report.sources.pairs()[0];
     for (receipt, expected) in [
         (&pair.left, 2e-9),
-        (&pair.face, 1.6e-9),
+        (&pair.face, diffusivity),
         (&pair.right, 1.2e-9),
     ] {
         let property = &receipt.properties()[0];
@@ -185,8 +187,73 @@ fn g1_actual_concentration_changes_pair_flux_and_returns_original_receipts() {
             || false,
         )
         .unwrap();
-    close(flux[0] / frozen[0], 8.0 / 7.0, 1e-14);
-    assert!(report.constitutive.chemical_entropy_production_w_m3_k > 0.0);
+    close(flux[0] / frozen[0], diffusivity / 1.4e-9, 1e-14);
+    assert!(
+        report
+            .constitutive
+            .chemical_entropy_production_w_m3_k
+            .unwrap()
+            > 0.0
+    );
+}
+
+#[test]
+fn g1_zero_endpoint_uses_its_actual_source_support_without_trace_material() {
+    let model = model(1);
+    let (material, ids) = card(vec![curve("D", "c_A", [0.0, 150.0], 1e-9)]);
+    let make = |material: &Arc<MaterialCard>, reference: &AqueousSolution| {
+        MaterialSolutionMaxwellStefan::new(
+            model.clone(),
+            species("water"),
+            vec![species("A")],
+            vec![binding(["water", "A"], material, "D")],
+            axes(&["A"]),
+            reference,
+            || false,
+        )
+        .unwrap()
+    };
+    let empty = solution(&model, &[0.0]);
+    let full = solution(&model, &[100.0]);
+    let law = make(&material, &empty);
+    let mut output = [123.0];
+    let report = law
+        .flux_into(
+            &full,
+            &empty,
+            0.005,
+            controls(),
+            &mut law.workspace().unwrap(),
+            &mut output,
+            || false,
+        )
+        .unwrap();
+    close(output[0], 1e-9 * 100.0 / 0.005, 2e-18);
+    assert_eq!(report.constitutive.chemical_entropy_production_w_m3_k, None);
+    assert_eq!(report.constitutive.friction_entropy_production_w_m3_k, None);
+    let pair = &report.sources.pairs()[0];
+    for (receipt, expected) in [(&pair.left, 2e-9), (&pair.face, 1e-9), (&pair.right, 1e-9)] {
+        close(receipt.properties()[0].value_si(), expected, 1e-24);
+        assert_eq!(receipt.properties()[0].answer().receipt.selected, ids[0]);
+        assert_eq!(receipt.card_identity(), material.content_hash());
+    }
+    // An admitted numerical zero does not extend a measured material domain.
+    let (restricted, _) = card(vec![curve("D", "c_A", [1.0, 150.0], 1e-9)]);
+    let restricted = make(&restricted, &full);
+    output = [123.0];
+    assert!(matches!(
+        restricted.flux_into(
+            &full,
+            &empty,
+            0.005,
+            controls(),
+            &mut restricted.workspace().unwrap(),
+            &mut output,
+            || false,
+        ),
+        Err(SolutionDiffusionError::Material(_))
+    ));
+    assert_eq!(output, [123.0]);
 }
 
 #[test]
@@ -312,7 +379,7 @@ fn g4_actual_joint_surface_support_is_required_beyond_the_validity_box() {
     };
     let (card, _) = card(vec![claim]);
     // At T=298.15 the supported triangle ends at c=67.05, though the declared
-    // rectangular validity permits c=150. A c=60 face cannot qualify c=100.
+    // rectangular validity permits c=150. The admitted face cannot qualify c=100.
     let law = MaterialSolutionMaxwellStefan::new(
         model.clone(),
         species("water"),

@@ -10779,18 +10779,29 @@ Maxwell–Stefan diffusivities [m²/s]. The original virial owner supplies
 reference-cancelled chemical-potential differences. No ideal-gas EOS, inferred
 tracer diffusivity, concentration floor or material authority is introduced.
 Every endpoint must retain the same original model, fixed temperature, solvent
-convention and positive solute concentrations within its declared convex domain.
+convention and nonnegative solute concentrations within its declared convex domain.
 
 The admitted model neglects solute partial volumes and holds solvent stationary:
-`c0=1/Vbar0`; arithmetic face concentrations define x and total c. Solute forces
-are `d_i=x_i Delta(mu_i)/(RT L)`, and the solvent reaction
+`c0=1/Vbar0`; logarithmic-mean face concentrations define x and total c. The
+same symmetric mean supplies source sampling and the shared friction matrix.
+The discrete ideal chain rule `c_log Delta(ln c)=Delta(c)` forms the solute
+forces directly as `d_i=[Delta(c_i)+c_log,i sum_j B_ij Delta(c_j)]/(c L)`.
+This equals `x_i Delta(mu_i)/(RT L)` at positive endpoints and keeps the
+finite limiting force at an exact absent endpoint without a concentration floor.
+The solvent reaction
 `d0=-sum_solutes d_i` closes the constrained force system. The existing shared
 molar Maxwell–Stefan owner performs the sole friction solve;
 `N_i=J_i-(x_i/x0)J0` gives the published solvent-frame flux and exactly `N0=0`.
 Every original friction row is checked again after conversion. Original
-pair-friction entropy and `-sum_solutes N_i grad(mu_i)/T` must agree within
-explicit budgets and remain nonnegative. Solute fluxes retain the caller's
-original order even when the shared solver canonicalizes species differently.
+pair-friction entropy and `-sum_solutes N_i grad(mu_i)/T` must be representable,
+agree within explicit budgets and remain nonnegative for regular endpoints.
+A nonzero concentration jump into an exactly absent species has a singular
+instantaneous endpoint diagnostic, reported as `None` for both entropy fields.
+An identically absent spectator contributes exactly zero and does not disable
+the regular entropy checks. These optional diagnostics do not waive the
+evolution owner's finite-step free-energy and species-conservation checks.
+Solute fluxes retain the caller's original order even when the shared solver
+canonicalizes species differently.
 This is neutral fixed-solvent diffusion, not unrestricted liquid mechanics,
 electrochemical migration, Soret/Dufour transport or an absolute caloric balance.
 
@@ -10801,8 +10812,14 @@ before arithmetic and are limited to closed species-conserving accounting.
 Independent public tests exercise binary solvent-frame reduction, ternary uphill
 diffusion against separate two-unknown elimination, positive dissipation, species
 permutation and concentration-reference invariance, adjacent representable
-concentrations, pair/source/zero-log refusal and atomic cancellation. The dense
-ideal-dilute chemical-potential law is not an exact Fick law.
+concentrations, pure-solvent uptake, absent spectators, disjoint multicomponent
+fronts, bounded means across extreme finite scales, and atomic cancellation.
+The binary ideal flux has the dilute Fick limit `-D Delta(c)/L` for arbitrary
+concentration ratios. Its explicit finite-solvent factor `1/x0` remains; this
+is not exact integration of a finite-concentration steady profile. The
+logarithmic-mean chain rule follows the finite-volume construction of Cancès,
+Ehrlacher and Monasse (https://doi.org/10.1093/imanum/drad032); no theorem for
+their full time discretization is claimed for this constitutive face.
 
 ### Finite gas–adsorbent sensible heat on the original pore timeline
 
@@ -11041,7 +11058,7 @@ source, entropy and cancellation refusals.
 solvent/solute and solute/solute Maxwell–Stefan pair to an explicit immutable
 material card and exact property key. Claims are selected once at an admitted
 reference solution and remain pinned. Each evaluation resolves actual left,
-arithmetic-concentration face and right states against those same claims;
+logarithmic-mean concentration face and right states against those same claims;
 endpoint support cannot be inferred from an admissible midpoint. Curves and
 joint sampled surfaces retain the native resolver's interpolation support,
 units, evidence and refusal behavior. The face matrix enters the existing
@@ -11053,8 +11070,9 @@ concentration from its molar volume. Unowned pressure, missing pairs, ambiguous
 or incompatible quantity declarations and unsupported physical states refuse.
 Binary kinetics are never inferred from virial free energy or substituted with
 tracer coefficients. Original thermodynamic species order and canonical solver
-order are mapped explicitly. This remains the original isothermal, positive-
-concentration, incompressible-solvent description, without pressure evolution.
+order are mapped explicitly. Zero concentrations require actual original source
+support and are never replaced by a seeded trace. This remains the original
+isothermal incompressible-solvent description, without pressure evolution.
 
 Successful face evaluations return complete left/face/right source receipts
 and the current symmetric binary matrix. Source queries allocate transient
@@ -11065,11 +11083,12 @@ retained claims, observations, models, source geometry and indexes, including
 unselected data, and may conservatively count a shared card per pair. It is
 not an allocator-overhead, transient-memory or resident-memory bound.
 
-Six public source regressions check an independent concentration-dependent
+Public source regressions check an independent concentration-dependent
 binary flux, complete original receipts, canonical permutations, pinned
 endpoint and joint-surface refusals, required kinetics/coordinates and retained
-unselected source data. The existing liquid-core regressions also cover
-subnormal positive concentration ratios: the chemical log ratio forms its
+unselected source data, plus source-qualified pure-solvent uptake and explicit
+refusal when zero lies outside the pinned source domain. Liquid-core regressions
+cover subnormal positive concentration ratios: the chemical log ratio forms its
 dimensionless relative change before the atanh argument, preserving dilute
 forces without concentration floors or invented species.
 

@@ -61,17 +61,17 @@ fn g1_binary_uses_dilute_solution_mu_and_exact_solvent_frame() {
             || false,
         )
         .unwrap();
-    let average = 60.0;
+    let average = 80.0 / 5.0_f64.ln();
     let x0 = (1.0 / VBAR) / (1.0 / VBAR + average);
-    let expected = 1e-9 * average / x0 * 5.0_f64.ln() / 0.005;
+    let expected = 1e-9 * 80.0 / x0 / 0.005;
     close(flux[0], expected, 2e-18);
     assert_eq!(report.solvent_molar_flux_mol_m2_s, 0.0);
     close(
-        report.chemical_entropy_production_w_m3_k,
+        report.chemical_entropy_production_w_m3_k.unwrap(),
         flux[0] * R * 5.0_f64.ln() / 0.005,
         1e-13,
     );
-    assert!(report.chemical_entropy_production_w_m3_k > 0.0);
+    assert!(report.chemical_entropy_production_w_m3_k.unwrap() > 0.0);
     law.flux_into(
         &right,
         &left,
@@ -117,8 +117,10 @@ fn g1_g3_cross_interactions_drive_uphill_diffusion_with_positive_friction() {
         )
         .unwrap();
     // Independent elimination of the two solvent-fixed friction rows.
-    let c = 1.0 / VBAR + 20.5 + 50.5;
-    let (x0, x1, x2) = ((1.0 / VBAR) / c, 20.5 / c, 50.5 / c);
+    let mean1 = 1.0 / (21.0_f64 / 20.0).ln();
+    let mean2 = 99.0 / 100.0_f64.ln();
+    let c = 1.0 / VBAR + mean1 + mean2;
+    let (x0, x1, x2) = ((1.0 / VBAR) / c, mean1 / c, mean2 / c);
     let force = [
         (21.0_f64 / 20.0).ln() + 0.001 - 0.008 * 99.0,
         (1.0_f64 / 100.0).ln() + 0.008 - 0.1 * 99.0,
@@ -129,7 +131,7 @@ fn g1_g3_cross_interactions_drive_uphill_diffusion_with_positive_friction() {
         -x2 / d12,
         x0 / d02 + x1 / d12,
     );
-    let rhs = [-20.5 * force[0] / 0.01, -50.5 * force[1] / 0.01];
+    let rhs = [-mean1 * force[0] / 0.01, -mean2 * force[1] / 0.01];
     let determinant = a11 * a22 - a12 * a21;
     let expected = [
         (rhs[0] * a22 - a12 * rhs[1]) / determinant,
@@ -143,8 +145,16 @@ fn g1_g3_cross_interactions_drive_uphill_diffusion_with_positive_friction() {
         "A solute must move into its higher-concentration side"
     );
     let entropy = -R * (flux[0] * force[0] + flux[1] * force[1]) / 0.01;
-    close(report.chemical_entropy_production_w_m3_k, entropy, 1e-11);
-    close(report.friction_entropy_production_w_m3_k, entropy, 1e-11);
+    close(
+        report.chemical_entropy_production_w_m3_k.unwrap(),
+        entropy,
+        1e-11,
+    );
+    close(
+        report.friction_entropy_production_w_m3_k.unwrap(),
+        entropy,
+        1e-11,
+    );
     assert!(entropy > 0.0);
 }
 
@@ -242,7 +252,131 @@ fn g1_positive_dilute_chemical_forces_do_not_lose_subnormal_concentration_ratios
 }
 
 #[test]
-fn g0_missing_pair_source_mismatch_zero_log_and_cancellation_refuse_atomically() {
+fn g1_ideal_fronts_keep_the_fick_limit_from_equal_to_absent_endpoints() {
+    let source = model(1.0, vec![0.0]);
+    let law = SolutionMaxwellStefan::new(
+        source.clone(),
+        species("water", 0.018),
+        vec![species("A", 0.06)],
+        vec![0.0, 1e-9, 1e-9, 0.0],
+    )
+    .unwrap();
+    let mut workspace = law.workspace().unwrap();
+    for (a, b) in [
+        (100.0_f64, 100.0_f64),
+        (100.0, 100.0_f64.next_down()),
+        (100.0, 20.0),
+        (100.0, 1e-12),
+        (100.0, 1e-200),
+        (100.0, 0.0),
+        (1e-10, 1e-200),
+        (0.0, 0.0),
+    ] {
+        // Unit volume retains adjacent concentration inputs exactly.
+        let left = AqueousSolution::nonideal(source.clone(), 1.0, vec![a]).unwrap();
+        let right = AqueousSolution::nonideal(source.clone(), 1.0, vec![b]).unwrap();
+        let mut flux = [f64::NAN];
+        let report = law
+            .flux_into(
+                &left,
+                &right,
+                0.005,
+                controls(),
+                &mut workspace,
+                &mut flux,
+                || false,
+            )
+            .unwrap();
+        let mean = if b == 0.0 {
+            0.0
+        } else if a == b {
+            a
+        } else if a - b < b {
+            (a - b) / ((a - b) / b).ln_1p()
+        } else {
+            (a - b) / (a.ln() - b.ln())
+        };
+        // Independent binary solvent-fixed reduction. The dilute limit is
+        // D Delta(c)/L; the retained finite-solvent factor is explicit.
+        let fick = 1e-9 * (a - b) / 0.005;
+        let expected = fick * (1.0 + VBAR * mean);
+        close(flux[0], expected, expected.abs() * 2e-12 + 1e-34);
+        if a != b && b == 0.0 {
+            assert_eq!(report.chemical_entropy_production_w_m3_k, None);
+            assert_eq!(report.friction_entropy_production_w_m3_k, None);
+        } else {
+            assert!(report.chemical_entropy_production_w_m3_k.unwrap() >= 0.0);
+            assert!(report.friction_entropy_production_w_m3_k.unwrap() >= 0.0);
+        }
+        if a <= 1e-10 {
+            close(flux[0], fick, fick.abs() * 2e-12 + 1e-34);
+        }
+        law.flux_into(
+            &right,
+            &left,
+            0.005,
+            controls(),
+            &mut workspace,
+            &mut flux,
+            || false,
+        )
+        .unwrap();
+        close(flux[0], -expected, expected.abs() * 2e-12 + 1e-34);
+    }
+}
+
+#[test]
+fn g1_absent_spectators_and_counterdiffusing_fronts_never_require_seeded_solute() {
+    let source = model(1.0, vec![0.001, 0.002, 0.002, 0.01]);
+    let law = SolutionMaxwellStefan::new(
+        source.clone(),
+        species("water", 0.018),
+        vec![species("A", 0.06), species("B", 0.04)],
+        vec![0.0, 1e-9, 3e-9, 1e-9, 0.0, 5e-10, 3e-9, 5e-10, 0.0],
+    )
+    .unwrap();
+    let mut workspace = law.workspace().unwrap();
+    let mut flux = [f64::NAN; 2];
+    let report = law
+        .flux_into(
+            &solution(&source, &[100.0, 0.0]),
+            &solution(&source, &[20.0, 0.0]),
+            0.005,
+            controls(),
+            &mut workspace,
+            &mut flux,
+            || false,
+        )
+        .unwrap();
+    let mean = 80.0 / 5.0_f64.ln();
+    let expected = 1e-9 * 80.0 * (1.0 + 0.001 * mean) * (1.0 + VBAR * mean) / 0.005;
+    close(flux[0], expected, 2e-18);
+    assert_eq!(flux[1], 0.0);
+    assert!(report.chemical_entropy_production_w_m3_k.unwrap() > 0.0);
+    assert!(report.friction_entropy_production_w_m3_k.unwrap() > 0.0);
+
+    let report = law
+        .flux_into(
+            &solution(&source, &[100.0, 0.0]),
+            &solution(&source, &[0.0, 20.0]),
+            0.005,
+            controls(),
+            &mut workspace,
+            &mut flux,
+            || false,
+        )
+        .unwrap();
+    // At exact disjoint fronts the log-mean solute mobilities vanish while
+    // their ideal force products retain Delta(c). Solvent drag remains finite.
+    close(flux[0], 1e-9 * 100.0 / 0.005, 2e-18);
+    close(flux[1], -3e-9 * 20.0 / 0.005, 2e-18);
+    assert_eq!(report.chemical_entropy_production_w_m3_k, None);
+    assert_eq!(report.friction_entropy_production_w_m3_k, None);
+    assert_eq!(report.solvent_molar_flux_mol_m2_s, 0.0);
+}
+
+#[test]
+fn g0_missing_pair_source_mismatch_and_cancellation_refuse_atomically() {
     let source = model(1.0, vec![0.0]);
     for pairs in [vec![], vec![0.0, 1e-9, 2e-9, 0.0], vec![0.0, 0.0, 0.0, 0.0]] {
         assert!(
@@ -266,8 +400,8 @@ fn g0_missing_pair_source_mismatch_zero_log_and_cancellation_refuse_atomically()
     let mut workspace = law.workspace().unwrap();
     let mut output = [123.0];
     for right in [
-        solution(&source, &[0.0]),
         solution(&model(2.0, vec![0.0]), &[20.0]),
+        AqueousSolution::nonideal(source.clone(), 2.0, vec![f64::from_bits(1)]).unwrap(),
     ] {
         assert!(
             law.flux_into(

@@ -8,7 +8,7 @@
 
 use super::{
     MAX_COMPARTMENTS, MAX_MEMBRANES, MAX_OSMOTIC_SPECIES, OsmoticCompartment, OsmoticNetwork,
-    OsmoticNetworkError, compensated_add, poll, positive,
+    OsmoticNetworkError, compensated_add, nonnegative, poll, positive,
 };
 use fs_material::osmosis::{
     OsmosisError,
@@ -177,8 +177,9 @@ impl OsmoticNetwork {
     }
 
     /// Prepare a diffusion-only network of the SAME original convex solution
-    /// model, species order and fixed solvent volumes. All solutes must be
-    /// strictly present; this initial law does not invent zero-log limits.
+    /// model, species order and fixed solvent volumes. Exact absent solutes are
+    /// retained: the original logarithmic-mean face supplies a finite limiting
+    /// flux into pure solvent without adding a concentration floor or seed.
     ///
     /// Reuses the existing bounded adaptive timeline. Constant-data links retain
     /// allocation-free advancement. Material-source links allocate original
@@ -244,10 +245,14 @@ pub(super) fn prepare_solution_diffusion(
         "solution diffusion requires the explicit original virial model (zero interactions admit its ideal limit)"))?;
     if cells.iter().any(|cell| {
         cell.solution.nonideal_model() != Some(source)
-            || cell.solution.solute_moles().iter().any(|&n| !positive(n))
+            || cell
+                .solution
+                .solute_moles()
+                .iter()
+                .any(|&n| !nonnegative(n))
     }) {
         return Err(OsmoticNetworkError::Invalid(
-            "one original thermodynamic model and positive inventories required",
+            "one original thermodynamic model and nonnegative inventories required",
         ));
     }
     links.sort_by_key(|link| (link.left, link.right));
@@ -391,7 +396,14 @@ pub(super) fn sweep(
             }
             let (a, b) = (left.solute_moles()[i], right.solute_moles()[i]);
             let donor = if transfer >= 0.0 { a } else { b };
-            let fraction = transfer.abs() / donor;
+            // An absent species with no driving force must stay exactly absent.
+            // Its zero transfer withdraws nothing; 0/0 is not a failed step.
+            // A nonzero withdrawal from an empty donor still refuses below.
+            let fraction = if transfer == 0.0 {
+                0.0
+            } else {
+                transfer.abs() / donor
+            };
             if !fraction.is_finite() || fraction > controls.maximum_species_fraction {
                 return Err(OsmoticNetworkError::DiffusionStep(
                     SolutionDiffusionStepRefusal::Withdrawal {
@@ -406,9 +418,9 @@ pub(super) fn sweep(
             if transfer != 0.0 && next_left[i] == a && next_right[i] == b {
                 return Err(OsmoticNetworkError::StepUnderflow);
             }
-            if !positive(next_left[i]) || !positive(next_right[i]) {
+            if !nonnegative(next_left[i]) || !nonnegative(next_right[i]) {
                 return Err(OsmoticNetworkError::Invalid(
-                    "positive solution endpoint is unrepresentable",
+                    "nonnegative solution endpoint is unrepresentable",
                 ));
             }
             let residual = (next_left[i] - a) + (next_right[i] - b);

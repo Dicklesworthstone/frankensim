@@ -231,13 +231,10 @@ fn g1_coupled_nonideal_water_and_material_mobility_refine_to_independent_ode() {
         let (cl, cr) = (nl / vl, nr / vr);
         let osmotic = R * T * ((cl - cr) + 0.5 * B * (cl * cl - cr * cr));
         let pressure = K * (vl - VL) - K * (vr - VR);
-        let mean = 0.5 * (cl + cr);
-        let molecular = 1e-9
-            * (1.0 + mean / 100.0)
-            * mean
-            * (1.0 + mean * VBAR)
-            * ((cl / cr).ln() + B * (cl - cr))
-            / LENGTH;
+        let mean = (cl - cr) / (cl / cr).ln();
+        let molecular =
+            1e-9 * (1.0 + mean / 100.0) * (cl - cr) * (1.0 + mean * VBAR) * (1.0 + B * mean)
+                / LENGTH;
         [-AREA * LP * (pressure - osmotic), -AREA * molecular]
     };
     let mut exact = [VL, 100.0 * VL];
@@ -321,6 +318,43 @@ fn g1_reverse_osmosis_can_raise_mixing_energy_while_total_potential_decreases() 
     near(account.mixing_free_energy_change_j, mixing, 1e-11);
     near(account.mechanical_potential_change_j, mechanical, 1e-11);
     near(account.total_potential_change_j, mixing + mechanical, 1e-11);
+}
+
+#[test]
+fn g1_joint_water_and_molecular_transport_wets_an_initially_pure_compartment() {
+    let model = model(1.0);
+    let mut system = OsmoticNetwork::with_coupled_solution_transport(
+        vec!["A".into()],
+        vec![
+            cell(&model, VL, 100.0, 1e5, K),
+            cell(&model, VR, 0.0, 1e5, K),
+        ],
+        vec![membrane(0, 1)],
+        vec![SolutionDiffusionLink::new(0, 1, AREA, LENGTH, constant(&model)).unwrap()],
+        physical(),
+        1 << 22,
+    )
+    .unwrap();
+    assert_eq!(system.compartments()[1].solution().solute_moles()[0], 0.0);
+    let report = system.advance(1.0, temporal(1e-5), || false).unwrap();
+    let left = system.compartments()[0].solution();
+    let right = system.compartments()[1].solution();
+    assert!(left.solvent_volume_m3() > VL && right.solvent_volume_m3() < VR);
+    assert!(right.solute_moles()[0] > 0.0 && left.solute_moles()[0] < 100.0 * VL);
+    assert!((left.solute_moles()[0] + right.solute_moles()[0] - 100.0 * VL).abs() < 1e-16);
+    assert!(report.water_balance_residual_m3.abs() <= physical().water_balance_tolerance_m3);
+    assert!(
+        report.solute_balance_residual_mol[0].abs()
+            <= physical().diffusion.amount_balance_tolerance_mol
+    );
+    assert!(
+        report
+            .coupled_potential_change
+            .unwrap()
+            .total_potential_change_j
+            < 0.0
+    );
+    assert!(report.diffusion_free_energy_change_j.is_none());
 }
 
 #[test]

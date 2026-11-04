@@ -565,7 +565,7 @@ impl VirialSolutionModel {
 // preserves adjacent positive concentrations. The convergent atanh identity is
 // used only for ratios in [1/2,2]; otherwise the original deterministic logs
 // have no near-equal subtraction. No concentration floor or platform libm.
-fn log_ratio(numerator: f64, denominator: f64) -> f64 {
+pub(super) fn log_ratio(numerator: f64, denominator: f64) -> f64 {
     if numerator == denominator {
         return 0.0;
     }

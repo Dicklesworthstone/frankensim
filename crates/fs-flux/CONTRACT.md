@@ -2950,8 +2950,14 @@ explicit solute ordering. Each link supplies complete solvent/solute and
 solute/solute binary Maxwell–Stefan coefficients and original molar masses;
 thermodynamics supplies no kinetic data. Canonical endpoint ordering makes
 connection input order and orientation immaterial. Duplicate endpoint pairs
-refuse. All solutes must initially and finally remain positive; singular
-zero-concentration chemical potentials are not replaced by floors or seeds.
+refuse. Exact absent solutes remain part of the original species layout. The
+material owner's logarithmic-mean face admits finite transport into pure solvent
+without concentration floors or seeded trace mass. A species absent at both
+ends has zero transfer and zero withdrawal fraction, and stays exactly absent.
+All proposed inventories remain nonnegative; a nonzero withdrawal from an empty
+donor still refuses. Singular instantaneous endpoint chemical-potential entropy
+is reported as unavailable by the constitutive owner, while the finite network
+still checks its actual reference-cancelled free-energy change at every step.
 
 This constructor admits only fixed-solvent diffusion connections, with no
 membrane water path. Solvent volumes stay exactly unchanged. Original mechanical
@@ -2985,7 +2991,7 @@ partial inventory/time.
 `fs_material::osmosis::diffusion::source::MaterialSolutionMaxwellStefan`.
 Every binary pair retains its original immutable card, exact property and
 selected claim. Source resolution refreshes actual typed temperature and all
-solvent/solute amount concentrations at both endpoints and the arithmetic face;
+solvent/solute amount concentrations at both endpoints and the logarithmic-mean face;
 the face value enters the existing shared friction law. An admissible face
 does not excuse an unsupported endpoint or joint interpolation gap. No source
 is switched, extrapolated or inferred from the thermodynamic model.
@@ -3009,6 +3015,15 @@ observations and models, plus model, mapping and numerical arrays. Shared cards
 may be charged repeatedly. The charge excludes allocator-specific overhead and
 transient queries/receipts; it is not an RSS or peak-memory guarantee. The
 constant-data allocation-free numerical route remains unchanged.
+
+Focused zero-inventory regressions cover uptake into pure solvent against the
+independent dilute two-volume exponential and temporal refinement, multi-edge
+propagation with a permanently absent species, exact empty equilibrium, late
+cancellation/work rollback and retry, and source-qualified zero concentrations.
+The joint water/species owner uses this same molecular sweep: its pure-solvent
+case retains changing solvent volumes, conservative species exchange and the
+combined mixing/mechanical potential gate. No caloric closure or general
+nonideal phase-boundary model is inferred by admitting zero solute inventory.
 
 Focused native tests compare binary relaxation with an independent nonlinear
 solvent-frame ODE, tighten temporal error, demonstrate finite uphill ternary

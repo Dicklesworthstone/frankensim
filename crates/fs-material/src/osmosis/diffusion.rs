@@ -2,16 +2,24 @@
 //!
 //! The original virial free energy supplies the solute chemical potentials.
 //! Solvent concentration is `c0=1/Vbar0`, because the aqueous owner neglects
-//! solute partial volumes. At a face, arithmetic concentrations define x and c.
+//! solute partial volumes. Logarithmic-mean face concentrations define x and c.
 //! For each solute `d_i=x_i Delta(mu_i)/(RT L)`; `d_0=-sum_i d_i` is the
 //! incompressibility/solvent-pressure reaction, not a gas pressure force. The
 //! shared molar-frame friction owner solves these balanced forces. Finally
 //! `N_i=J_i-(x_i/x_0)J_0` enforces stationary solvent, hence zero volume flux.
-//! The conjugate dissipation is exactly `-sum_solutes N_i grad(mu_i)/T`.
+//! The discrete ideal chain rule `c_log Delta(ln c)=Delta(c)` keeps the force
+//! finite at an absent endpoint without evaluating `0 * infinity`. Finite
+//! conjugate dissipation is `-sum_solutes N_i grad(mu_i)/T`; a singular endpoint
+//! diagnostic remains explicitly absent, not a fabricated finite value.
+//!
+//! Logarithmic-mean edge composition: Cancès, Ehrlacher and Monasse,
+//! *Finite volumes for the Stefan–Maxwell cross-diffusion system*,
+//! <https://doi.org/10.1093/imanum/drad032>. This constitutive face does not
+//! establish the positivity or convergence theorem of their time discretization.
 //!
 //! This is neutral, isothermal, fixed-solvent transport on the original convex
 //! concentration domain. It is not unrestricted liquid flow or an ionic current
-//! law. Positive endpoint concentrations are required; no log floor or seeded
+//! law. Nonnegative endpoint concentrations are admitted; no log floor or seeded
 //! trace supplies an absent species. All binary Maxwell–Stefan coefficients,
 //! including solute/solute pairs, are explicit fixed numerical data in m²/s.
 //! Their measurement, temperature/composition applicability and material source
@@ -19,7 +27,8 @@
 //! original material claims without inferring kinetics from the free energy.
 
 use super::{
-    AqueousSolution, MAX_OSMOTIC_SOLUTES, OsmosisError, Sum, nonideal::VirialSolutionModel,
+    AqueousSolution, MAX_OSMOTIC_SOLUTES, OsmosisError, Sum,
+    nonideal::{VirialSolutionModel, log_ratio},
 };
 use fs_qty::{AmountConcentration, MolarMass};
 use fs_thermochem::transport::maxwell_stefan::{
@@ -87,6 +96,82 @@ fn finite(value: f64) -> Result<f64> {
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
+
+// Symmetric logarithmic mean with its continuous equal-state and zero-endpoint
+// limits. The original relative-log helper preserves adjacent/subnormal inputs
+// and avoids overflowing a ratio between widely separated concentrations.
+fn logarithmic_mean_concentration(left: f64, right: f64) -> Result<f64> {
+    if !left.is_finite() || !right.is_finite() || left < 0.0 || right < 0.0 {
+        return Err(SolutionDiffusionError::Invalid(
+            "finite nonnegative face concentrations required",
+        ));
+    }
+    if left == 0.0 || right == 0.0 {
+        return Ok(0.0);
+    }
+    if left == right {
+        return Ok(left);
+    }
+    let (low, high) = (left.min(right), left.max(right));
+    let delta = high - low;
+    let logarithm = log_ratio(high, low);
+    let mean = if delta <= low {
+        // Form the O(1) ratio before restoring the concentration scale. Direct
+        // delta/logarithm can round just below low for adjacent positive inputs.
+        low * ((delta / low) / logarithm)
+    } else {
+        delta / logarithm
+    };
+    if !positive(mean) || mean < low || mean > high {
+        return Err(SolutionDiffusionError::Invalid(
+            "positive logarithmic-mean concentration is unrepresentable",
+        ));
+    }
+    Ok(mean)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::logarithmic_mean_concentration;
+
+    #[test]
+    fn g0_logarithmic_faces_keep_equal_adjacent_and_subnormal_limits() {
+        for value in [1e-300_f64, 1.0, 100.0, 1.1351679650259807e80, 1e300] {
+            assert_eq!(logarithmic_mean_concentration(value, value).unwrap(), value);
+            let high = value.next_up();
+            let mean = logarithmic_mean_concentration(value, high).unwrap();
+            assert!((value..=high).contains(&mean));
+            assert_eq!(mean, logarithmic_mean_concentration(high, value).unwrap());
+        }
+        let low = f64::from_bits(3);
+        let high = f64::from_bits(6);
+        // 3/ln(2) rounds to four least-subnormal units, not five.
+        assert_eq!(
+            logarithmic_mean_concentration(low, high).unwrap().to_bits(),
+            4
+        );
+        assert_eq!(logarithmic_mean_concentration(0.0, high).unwrap(), 0.0);
+        assert_eq!(logarithmic_mean_concentration(0.0, 0.0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn g0_logarithmic_faces_span_extreme_finite_scales_without_ratio_overflow() {
+        for (low, high) in [
+            (1e-300_f64, 1e300_f64),
+            (f64::from_bits(1), f64::MAX),
+            (f64::MAX / 2.0, f64::MAX),
+        ] {
+            let mean = logarithmic_mean_concentration(low, high).unwrap();
+            let expected = (high - low) / (high.ln() - low.ln());
+            assert!((mean / expected - 1.0).abs() < 2e-13);
+            assert!((low..=high).contains(&mean));
+            assert_eq!(mean, logarithmic_mean_concentration(high, low).unwrap());
+        }
+        for invalid in [-1.0, f64::INFINITY, f64::NAN] {
+            assert!(logarithmic_mean_concentration(invalid, 1.0).is_err());
+        }
+    }
+}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(SolutionDiffusionError::Cancelled)
@@ -110,8 +195,14 @@ pub struct SolutionDiffusionReport {
     pub molar_frame_residual_mol_m2_s: f64,
     /// Stationary solvent is an exact constitutive constraint, not net molar flux.
     pub solvent_molar_flux_mol_m2_s: f64,
-    pub chemical_entropy_production_w_m3_k: f64,
-    pub friction_entropy_production_w_m3_k: f64,
+    /// None when a nonzero endpoint jump reaches an absent species. An
+    /// identically absent spectator contributes exact zero. Finite-step
+    /// free-energy checks remain the evolution owner's job.
+    pub chemical_entropy_production_w_m3_k: Option<f64>,
+    /// None at a singular zero-endpoint jump. Otherwise the original shared
+    /// pair-friction diagnostic must be representable and agree with the
+    /// chemical diagnostic within the explicitly declared budgets.
+    pub friction_entropy_production_w_m3_k: Option<f64>,
 }
 
 /// Immutable solution thermodynamics and a complete constant binary-friction law.
@@ -230,9 +321,13 @@ impl SolutionMaxwellStefan {
                 "diffusion requires the same original solution model and ordering",
             ));
         }
-        if solution.solute_moles().iter().any(|&n| !positive(n)) {
+        if solution
+            .solute_moles()
+            .iter()
+            .any(|&n| !n.is_finite() || n < 0.0)
+        {
             return Err(SolutionDiffusionError::Invalid(
-                "finite chemical-potential diffusion requires positive solute amounts",
+                "diffusion requires finite nonnegative solute amounts",
             ));
         }
         Ok(())
@@ -290,11 +385,27 @@ impl SolutionMaxwellStefan {
         self.admit_solution(right)?;
         let mut a = [0.0; MAX_OSMOTIC_SOLUTES];
         let mut b = [0.0; MAX_OSMOTIC_SOLUTES];
-        let mut mu = [0.0; MAX_OSMOTIC_SOLUTES];
+        let mut face = [0.0; MAX_OSMOTIC_SOLUTES];
+        let mut chemical_force = [0.0; MAX_OSMOTIC_SOLUTES];
         left.concentrations_into(&mut a[..count])?;
         right.concentrations_into(&mut b[..count])?;
+        for (solution, concentrations) in [(left, &a[..count]), (right, &b[..count])] {
+            if solution
+                .solute_moles()
+                .iter()
+                .zip(concentrations)
+                .any(|(&amount, &value)| amount > 0.0 && value == 0.0)
+            {
+                return Err(SolutionDiffusionError::Invalid(
+                    "positive inventory concentration is unrepresentable",
+                ));
+            }
+        }
         self.thermodynamics
-            .chemical_potential_differences_into(&a[..count], &b[..count], &mut mu[..count])
+            .evaluate(&a[..count])
+            .map_err(OsmosisError::from)?;
+        self.thermodynamics
+            .evaluate(&b[..count])
             .map_err(OsmosisError::from)?;
         let mut x = [0.0; MAX_OSMOTIC_SOLUTES + 1];
         let mut drive = [0.0; MAX_OSMOTIC_SOLUTES + 1];
@@ -309,20 +420,39 @@ impl SolutionMaxwellStefan {
         let mut total = Sum::default();
         total.add(c0);
         for i in 0..count {
-            let c = 0.5 * a[i] + 0.5 * b[i];
+            let c = logarithmic_mean_concentration(a[i], b[i])?;
+            face[i] = c;
             x[self.original_to_canonical[i + 1]] = c;
             total.add(c);
         }
         let concentration = total.finish()?;
-        let rt = R * self.thermodynamics.temperature_k();
         for value in &mut x[..n] {
             *value /= concentration;
         }
         let mut balance = Sum::default();
-        for (i, &delta) in mu[..count].iter().enumerate() {
+        let mut singular_entropy = false;
+        let interactions = self.thermodynamics.interaction_matrix_m3_mol();
+        for i in 0..count {
+            poll(&mut cancelled)?;
+            let mut excess = Sum::default();
+            for j in 0..count {
+                excess.add(finite(interactions[i * count + j] * (b[j] - a[j]))?);
+            }
+            let excess = excess.finish()?;
             let slot = self.original_to_canonical[i + 1];
-            drive[slot] = finite((x[slot] * (delta / rt)) / distance_m)?;
+            // Form c_log * Delta(mu/RT) directly. The ideal part is exactly
+            // Delta(c), including an absent endpoint; the finite excess part
+            // still comes from the original symmetric virial interaction law.
+            let mut force = Sum::default();
+            force.add(b[i] - a[i]);
+            force.add(finite(face[i] * excess)?);
+            drive[slot] = finite((force.finish()? / concentration) / distance_m)?;
             balance.add(drive[slot]);
+            if a[i] > 0.0 && b[i] > 0.0 {
+                chemical_force[i] = finite(log_ratio(b[i], a[i]) + excess)?;
+            } else if a[i] != b[i] {
+                singular_entropy = true;
+            }
         }
         drive[solvent] = -balance.finish()?;
         let evaluated = self.owner.evaluate_molar_driving_forces(
@@ -334,12 +464,13 @@ impl SolutionMaxwellStefan {
             workspace,
             &mut cancelled,
         )?;
-        let friction_entropy =
-            evaluated
-                .drag_entropy_production_w_m3_k()
-                .ok_or(SolutionDiffusionError::Invalid(
-                    "pair-friction dissipation is unrepresentable",
-                ))?;
+        let friction_entropy = if singular_entropy {
+            None
+        } else {
+            Some(evaluated.drag_entropy_production_w_m3_k().ok_or(
+                SolutionDiffusionError::Invalid("pair-friction dissipation is unrepresentable"),
+            )?)
+        };
         let mut converted = [0.0; MAX_OSMOTIC_SOLUTES + 1];
         let flux = evaluated.molar_fluxes();
         for i in 0..n {
@@ -377,25 +508,29 @@ impl SolutionMaxwellStefan {
                 });
             }
         }
-        let mut dissipation = Sum::default();
-        for i in 0..count {
-            dissipation.add(finite(
-                -converted[self.original_to_canonical[i + 1]]
-                    * (mu[i] / self.thermodynamics.temperature_k())
-                    / distance_m,
-            )?);
-        }
-        let chemical_entropy = dissipation.finish()?;
-        let allowance = controls.entropy_tolerance_w_m3_k
-            + controls.friction.relative_tolerance
-                * chemical_entropy.abs().max(friction_entropy.abs());
-        if chemical_entropy < -controls.entropy_tolerance_w_m3_k
-            || (chemical_entropy - friction_entropy).abs() > allowance
-        {
-            return Err(SolutionDiffusionError::Entropy {
-                chemical_w_m3_k: chemical_entropy,
-                friction_w_m3_k: friction_entropy,
-            });
+        let chemical_entropy = if singular_entropy {
+            None
+        } else {
+            let mut dissipation = Sum::default();
+            for i in 0..count {
+                dissipation.add(
+                    -converted[self.original_to_canonical[i + 1]] * (R * chemical_force[i])
+                        / distance_m,
+                );
+            }
+            Some(dissipation.finish()?)
+        };
+        if let (Some(chemical), Some(friction)) = (chemical_entropy, friction_entropy) {
+            let allowance = controls.entropy_tolerance_w_m3_k
+                + controls.friction.relative_tolerance * chemical.abs().max(friction.abs());
+            if chemical < -controls.entropy_tolerance_w_m3_k
+                || (chemical - friction).abs() > allowance
+            {
+                return Err(SolutionDiffusionError::Entropy {
+                    chemical_w_m3_k: chemical,
+                    friction_w_m3_k: friction,
+                });
+            }
         }
         poll(&mut cancelled)?;
         for (i, value) in output.iter_mut().enumerate() {
