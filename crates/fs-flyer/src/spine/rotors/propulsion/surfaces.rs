@@ -200,6 +200,12 @@ impl<'a> LiftingSurfaces<'a> {
             let frame = self.frames[s];
             let flow = frame.flow(local[s]).map_err(wing_error)?;
             let q = 0.5 * rho * flow.speed_mps * flow.speed_mps;
+            if !q.is_finite() || !fields.strip_alpha_eff_rad[s].is_finite() {
+                return Err(reject(
+                    "lifting-surfaces-invalid",
+                    "nonfinite strip dynamic pressure or effective incidence",
+                ));
+            }
             let section = self.properties[s];
             let cd = crate::sections::section_profile_drag(
                 fields.strip_alpha_eff_rad[s],
