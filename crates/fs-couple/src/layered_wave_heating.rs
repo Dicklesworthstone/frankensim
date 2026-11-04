@@ -45,8 +45,10 @@ pub mod interference;
 /// Accepted-temperature optical refresh on the same spatial thermal timeline.
 pub mod thermo_optical;
 pub use thermo_optical::{
-    SpectralThermoOpticalSource, ThermoOpticalLayer, ThermoOpticalSource,
-    ThermoOpticalWaveHeating, ThermoOpticalWaveStep,
+    BroadbandThermoOpticalLimits, BroadbandThermoOpticalWaveHeating,
+    BroadbandThermoOpticalWaveStep, SpectralThermoOpticalSource, ThermoOpticalLayer,
+    ThermoOpticalSource, ThermoOpticalSpectralLine, ThermoOpticalWaveHeating,
+    ThermoOpticalWaveStep,
 };
 
 /// One monochromatic two-face drive in peak tangential E [V/m]. Both sources
@@ -412,63 +414,83 @@ impl<'p, 'b, 'a, 'm> PreparedLayeredWaveHeating<'p, 'b, 'a, 'm> {
             LayeredThermalStep::new(self.owner.thermal, initial, target_s, conduction, || {
                 checkpoint(&mut cancelled)
             })?;
-        let dt = step.duration_s();
         let n = self.owner.cell_ids.len();
-        let mut energy = [0.0; MAX_LAYERS];
-        let energy = &mut energy[..n];
-        let optical_power = self.cell_power_into(drive, energy, &mut cancelled)?;
-        let mut absorbed = Dd::ZERO;
-        for value in energy.iter_mut() {
-            *value *= dt;
-            if !value.is_finite() {
-                return Err(LayeredWaveHeatingError::Invalid(
-                    "optical cell energy is unrepresentable",
-                ));
-            }
-            absorbed = absorbed + Dd::from_f64(*value);
-        }
-        let convert = |values: [f64; 2]| values.map(|p| p * self.owner.area_m2() * dt);
-        let incoming_j = convert(optical_power.incoming_w_m2);
-        let outgoing_j = convert(optical_power.outgoing_w_m2);
-        let absorbed_j = absorbed.to_f64();
-        let residual_j = (incoming_j
-            .iter()
-            .fold(Dd::ZERO, |s, &v| s + Dd::from_f64(v))
-            - outgoing_j
-                .iter()
-                .fold(Dd::ZERO, |s, &v| s + Dd::from_f64(v))
-            - absorbed)
-            .to_f64();
-        if incoming_j.iter().chain(&outgoing_j).any(|v| !v.is_finite())
-            || !absorbed_j.is_finite()
-            || !residual_j.is_finite()
-        {
-            return Err(LayeredWaveHeatingError::Invalid(
-                "optical interval energy is unrepresentable",
-            ));
-        }
-        let step = step.with_cell_energy_j(energy, || checkpoint(&mut cancelled))?;
-        let (thermal, _, heat_report) =
-            step.solve(controls, workspace, || checkpoint(&mut cancelled))?;
-        poll(&mut cancelled)?;
-        Ok(LayeredWaveStep {
-            thermal,
-            heat_report,
-            optical: LayeredWaveEnergy {
-                incoming_j,
-                outgoing_j,
-                absorbed_j,
-                residual_j,
-            },
+        let mut power = [0.0; MAX_LAYERS];
+        let power = &mut power[..n];
+        let optical_power = self.cell_power_into(drive, power, &mut cancelled)?;
+        solve_held_cell_power(
+            step,
+            self.owner.area_m2(),
             optical_power,
-            cell_energy_j: self
-                .owner
-                .cell_ids
-                .iter()
-                .copied()
-                .zip(energy.iter().copied())
-                .collect(),
-        })
+            power,
+            controls,
+            workspace,
+            &mut cancelled,
+        )
     }
 }
 
+/// Shared monochromatic/broadband handoff. The input buffer contains physical
+/// cell watts and is consumed into joules for exactly one native thermal solve.
+fn solve_held_cell_power<'t>(
+    step: LayeredThermalStep<'_, 't, '_>,
+    area_m2: f64,
+    optical_power: LayerIlluminationPower,
+    cell_power_w: &mut [f64],
+    controls: LayeredThermalSolveControls,
+    workspace: &mut LayeredThermalWorkspace,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<LayeredWaveStep<'t>, LayeredWaveHeatingError> {
+    let dt = step.duration_s();
+    let mut absorbed = Dd::ZERO;
+    for value in cell_power_w.iter_mut() {
+        *value *= dt;
+        if !value.is_finite() || *value < 0.0 {
+            return Err(LayeredWaveHeatingError::Invalid(
+                "optical cell energy is unrepresentable",
+            ));
+        }
+        absorbed = absorbed + Dd::from_f64(*value);
+    }
+    let convert = |values: [f64; 2]| values.map(|p| p * area_m2 * dt);
+    let incoming_j = convert(optical_power.incoming_w_m2);
+    let outgoing_j = convert(optical_power.outgoing_w_m2);
+    let absorbed_j = absorbed.to_f64();
+    let residual_j = (incoming_j
+        .iter()
+        .fold(Dd::ZERO, |s, &v| s + Dd::from_f64(v))
+        - outgoing_j
+            .iter()
+            .fold(Dd::ZERO, |s, &v| s + Dd::from_f64(v))
+        - absorbed)
+        .to_f64();
+    if incoming_j.iter().chain(&outgoing_j).any(|v| !v.is_finite())
+        || !absorbed_j.is_finite()
+        || !residual_j.is_finite()
+    {
+        return Err(LayeredWaveHeatingError::Invalid(
+            "optical interval energy is unrepresentable",
+        ));
+    }
+    let cell_energy_j = step
+        .cell_ids()
+        .iter()
+        .copied()
+        .zip(cell_power_w.iter().copied())
+        .collect();
+    let step = step.with_cell_energy_j(cell_power_w, || checkpoint(cancelled))?;
+    let (thermal, _, heat_report) = step.solve(controls, workspace, || checkpoint(cancelled))?;
+    poll(cancelled)?;
+    Ok(LayeredWaveStep {
+        thermal,
+        heat_report,
+        optical: LayeredWaveEnergy {
+            incoming_j,
+            outgoing_j,
+            absorbed_j,
+            residual_j,
+        },
+        optical_power,
+        cell_energy_j,
+    })
+}

@@ -18,6 +18,13 @@ use fs_material::state_point::{
     VisibleOpticalStatePoint,
 };
 
+/// Mutually incoherent spectral lines sharing one spatial heat update.
+pub mod broadband;
+pub use broadband::{
+    BroadbandThermoOpticalLimits, BroadbandThermoOpticalWaveHeating,
+    BroadbandThermoOpticalWaveStep, ThermoOpticalSpectralLine,
+};
+
 mod sealed {
     pub trait Sealed {}
     impl Sealed for fs_material::state_point::VisibleConductorStatePoint {}
@@ -158,6 +165,66 @@ impl<S: ThermoOpticalSource> Clone for ThermoOpticalLayer<'_, S> {
     }
 }
 
+fn admit_sources<S: ThermoOpticalSource>(
+    thermal: &BoundLayeredThermalBody<'_>,
+    sources: &[ThermoOpticalLayer<'_, S>],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), LayeredWaveHeatingError> {
+    poll(cancelled)?;
+    let body = thermal.prepared_body();
+    let layers = body.conduction().layers();
+    if body.cell_count() > MAX_LAYERS || sources.len() != layers.len() {
+        return Err(LayeredWaveHeatingError::Invalid(
+            "thermo-optical heating needs one original source per layer and at most 64 cells",
+        ));
+    }
+    for (source, layer) in sources.iter().zip(layers) {
+        poll(cancelled)?;
+        let material = source.source.resolved();
+        if source.card.content_hash() != material.card_identity()
+            || material
+                .state_coordinate(layer.temperature_axis())
+                .is_none()
+        {
+            return Err(LayeredWaveHeatingError::Invalid(
+                "optical refresh requires its original card and the original thermal temperature coordinate",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn refresh_cell_sources<S: ThermoOpticalSource>(
+    thermal: &BoundLayeredThermalBody<'_>,
+    sources: &[ThermoOpticalLayer<'_, S>],
+    state: &DepositionSimulation<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<S>, LayeredWaveHeatingError> {
+    let temperatures = thermal.cell_temperatures(state, || checkpoint(cancelled))?;
+    let body = thermal.prepared_body();
+    let mut refreshed = Vec::with_capacity(temperatures.len());
+    for (i, (source, layer)) in sources.iter().zip(body.conduction().layers()).enumerate() {
+        for _ in 0..body.layer_cell_counts()[i] {
+            poll(cancelled)?;
+            let query = source
+                .source
+                .resolved()
+                .query()
+                .with(layer.temperature_axis(), temperatures[refreshed.len()])
+                .map_err(|_| {
+                    LayeredWaveHeatingError::Invalid(
+                        "native cell temperature violates the original optical coordinate",
+                    )
+                })?;
+            // Pin every original selected claim and all remaining coordinates,
+            // including same-state mu and source-backed wavelength properties.
+            refreshed.push(source.source.at_query_point(source.card, &query)?);
+        }
+    }
+    poll(cancelled)?;
+    Ok(refreshed)
+}
+
 /// Fixed physical geometry, spectral drive and original source selections.
 /// Cell temperatures always come from the accepted native thermal state; a
 /// caller cannot supply a separate optical temperature or averaged layer state.
@@ -198,27 +265,10 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
         sources: &[ThermoOpticalLayer<'m, S>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
-        poll(&mut cancelled)?;
-        let body = thermal.prepared_body();
-        let layers = body.conduction().layers();
-        if body.cell_count() > MAX_LAYERS || sources.len() != layers.len() {
-            return Err(LayeredWaveHeatingError::Invalid(
-                "thermo-optical heating needs one original source per layer and at most 64 cells",
-            ));
-        }
+        admit_sources(thermal, sources, &mut cancelled)?;
         let mut responses = Vec::with_capacity(sources.len());
-        for (source, layer) in sources.iter().zip(layers) {
+        for source in sources {
             poll(&mut cancelled)?;
-            let material = source.source.resolved();
-            if source.card.content_hash() != material.card_identity()
-                || material
-                    .state_coordinate(layer.temperature_axis())
-                    .is_none()
-            {
-                return Err(LayeredWaveHeatingError::Invalid(
-                    "optical refresh requires its original card and the original thermal temperature coordinate",
-                ));
-            }
             responses.push(source.source.wave_response(omega_rad_s)?);
         }
         // Reuse the original geometry/source and propagating-port admission.
@@ -255,35 +305,10 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
         state: &DepositionSimulation<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<S>, LayeredWaveHeatingError> {
-        let temperatures = self
-            .thermal
-            .cell_temperatures(state, || checkpoint(cancelled))?;
-        let body = self.thermal.prepared_body();
-        let mut refreshed = Vec::with_capacity(temperatures.len());
-        for (i, (source, layer)) in self
-            .sources
-            .iter()
-            .zip(body.conduction().layers())
-            .enumerate()
-        {
-            for _ in 0..body.layer_cell_counts()[i] {
-                poll(cancelled)?;
-                let query = source
-                    .source
-                    .resolved()
-                    .query()
-                    .with(layer.temperature_axis(), temperatures[refreshed.len()])
-                    .map_err(|_| {
-                        LayeredWaveHeatingError::Invalid(
-                            "native cell temperature violates the original optical coordinate",
-                        )
-                    })?;
-                // Re-evaluation pins every original selected claim and all
-                // remaining query coordinates, including any source-bound mu.
-                let next = source.source.at_query_point(source.card, &query)?;
-                next.wave_response(self.omega_rad_s)?;
-                refreshed.push(next);
-            }
+        let refreshed = refresh_cell_sources(self.thermal, &self.sources, state, cancelled)?;
+        for source in &refreshed {
+            poll(cancelled)?;
+            source.wave_response(self.omega_rad_s)?;
         }
         poll(cancelled)?;
         Ok(refreshed)
@@ -341,4 +366,3 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
         })
     }
 }
-

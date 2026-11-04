@@ -1,5 +1,7 @@
 //! Finite-band source feedback through the existing coherent/thermal owners.
 
+mod broadband;
+
 use super::*;
 use fs_couple::layered_wave_heating::{SpectralThermoOpticalSource, ThermoOpticalSource};
 use fs_em::plane_wave::SpectralOpticalResponse;
