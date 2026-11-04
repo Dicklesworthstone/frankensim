@@ -9,7 +9,7 @@
 pub mod cylinder;
 /// Source-record admission shared by native pressure performers.
 pub mod input;
-/// Explicit classical bulk absorption for any admitted thermoviscous fluid.
+/// Selected bulk absorption and acoustic dispersion for an admitted thermoviscous fluid.
 pub mod fluid;
 
 use fs_fft::{C64 as FftC64, Fft};

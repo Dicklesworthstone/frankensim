@@ -1,8 +1,10 @@
-//! Original Rayleigh surface paths with generic-fluid classical bulk absorption.
+//! Original Rayleigh surface paths with selected generic-fluid bulk propagation.
 //! Every signed quadrature path retains its own distance, attenuation and delay.
 use super::gas::PathFilter;
 use super::{BaffledPressure, RayleighMedium, SurfaceSample};
-use crate::air_path::fluid::{FluidObserverFilter, FluidPropagationReceipt};
+use crate::air_path::fluid::{
+    FluidObserverFilter, FluidPropagationModel, FluidPropagationReceipt,
+};
 use fs_material::fluid_acoustics::thermoviscous::absorption::ClassicalBulkAbsorption;
 
 /// The existing material-path work limits, shared without a second budget law.
@@ -86,6 +88,39 @@ impl BaffledPressure {
         propagation: &FluidPropagation,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Self, FluidPropagationReport), String> {
+        Self::new_multirate_fluid_differentiating_with_model(
+            surface,
+            inputs,
+            mechanics_rate,
+            output_rate,
+            position_m,
+            propagation,
+            FluidPropagationModel::ClassicalMinimumPhase,
+            cancelled,
+        )
+    }
+
+    /// Select classical minimum phase or the original fluid's thermoviscous
+    /// acoustic dispersion on every physical surface-to-receiver path.
+    /// Complex phase, exact-distance caching, signed projection and one shared
+    /// numerical padding retain the same preparation/stepping owner.
+    ///
+    /// The selected path law remains within the observer's supported weak-loss
+    /// band. It does not replace the Rayleigh source normalization or impose
+    /// thermoviscous boundary conditions on the vibrating surface. The `r/c0`
+    /// reference and reported numerical latency do not assert a finite front
+    /// for the parabolic Navier–Stokes–Fourier model.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_multirate_fluid_differentiating_with_model(
+        surface: &[SurfaceSample],
+        inputs: usize,
+        mechanics_rate: u32,
+        output_rate: u32,
+        position_m: [f64; 3],
+        propagation: &FluidPropagation,
+        model: FluidPropagationModel,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, FluidPropagationReport), String> {
         let medium = propagation.rayleigh_medium();
         let (receiver, paths) = Self::new_multirate_material_differentiating(
             surface,
@@ -97,11 +132,12 @@ impl BaffledPressure {
             propagation.limits,
             cancelled,
             |distance| {
-                let filter = FluidObserverFilter::new(
+                let filter = FluidObserverFilter::with_model(
                     propagation.absorption,
                     distance,
                     1.0 / f64::from(output_rate),
                     propagation.maximum_truncated_energy,
+                    model,
                 )
                 .map_err(|error| format!("Rayleigh fluid path at {distance} m: {error}"))?;
                 Ok(PathFilter {

@@ -6,6 +6,7 @@ use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium, MAX_RAYLEIG
 use std::collections::BTreeMap;
 use super::gas::{GasPropagation, GasPropagationReport};
 use super::fluid::{FluidPropagation, FluidPropagationReport};
+use crate::air_path::fluid::FluidPropagationModel;
 use fs_material::gas::GasState;
 
 /// Physical duct-port binding and complete substep traces, shared by wind sources.
@@ -292,12 +293,27 @@ impl BaffledPressure {
         receiver: CircularOutletReceiver, propagation: &FluidPropagation,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Self, FluidPropagationReport), String> {
+        Self::circular_openings_multirate_fluid_differentiating_with_model(
+            openings, mechanics_rate, output_rate, receiver, propagation,
+            FluidPropagationModel::ClassicalMinimumPhase, cancelled,
+        )
+    }
+
+    /// Choose the same fluid propagation model on each original aperture path.
+    /// Thermoviscous selection retains the acoustic branch's physical phase;
+    /// source normalization, aperture quadrature, work limits and common
+    /// numerical padding retain the original Rayleigh assumptions.
+    pub fn circular_openings_multirate_fluid_differentiating_with_model(
+        openings: &[CircularOpening], mechanics_rate: u32, output_rate: u32,
+        receiver: CircularOutletReceiver, propagation: &FluidPropagation,
+        model: FluidPropagationModel, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, FluidPropagationReport), String> {
         let surface = Self::material_opening_surface(
             openings, mechanics_rate, output_rate, receiver,
             propagation.rayleigh_medium(), cancelled,
         )?;
-        Self::new_multirate_fluid_differentiating(&surface, openings.len(),
-            mechanics_rate, output_rate, receiver.position_m, propagation, cancelled)
+        Self::new_multirate_fluid_differentiating_with_model(&surface, openings.len(),
+            mechanics_rate, output_rate, receiver.position_m, propagation, model, cancelled)
     }
 
     // One geometry/admission owner; the selected material supplies only rho/c.

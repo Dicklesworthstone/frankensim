@@ -96,7 +96,7 @@ impl HeterogeneousTimeEnergy {
 /// Different time-step sizes may reuse a state on that same frozen operator.
 #[derive(Clone)]
 pub struct HeterogeneousTimeState<'m, 'f, 'c> {
-    model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
+    pub(super) model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
     potential: Vec<f64>,
     pressure: Vec<f64>,
 }

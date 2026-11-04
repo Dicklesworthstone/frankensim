@@ -310,25 +310,27 @@ fn interface_wave(point: [f64; 3], right: bool, tangential_k: f64) -> (C64, [C64
 fn oblique_refraction_and_evanescent_pressure_converge_to_snell_fields() {
     for tangential_k in [0.6, 1.4] {
         let mut errors = Vec::new();
+        let mut intensity_errors = Vec::new();
         for refinement in [1, 2, 4] {
             let (complex, positions) = brick([2 * refinement, refinement, 1], [1.0, 0.5, 0.2]);
             let geometry = HelmholtzFe::new(&complex, &positions, 2, UNIFORM).unwrap();
+            let mut source = |_: usize, point: [f64; 3]| {
+                Ok::<_, AcousticFeError>(if point[0] < 0.5 {
+                    Medium {
+                        density_kg_m3: 1.0,
+                        sound_speed_m_s: 1.0,
+                    }
+                } else {
+                    Medium {
+                        density_kg_m3: 2.0,
+                        sound_speed_m_s: 2.0,
+                    }
+                })
+            };
             let model = HeterogeneousHelmholtzFe::new(
                 &geometry,
                 4,
-                &mut |_, point| {
-                    Ok::<_, AcousticFeError>(if point[0] < 0.5 {
-                        Medium {
-                            density_kg_m3: 1.0,
-                            sound_speed_m_s: 1.0,
-                        }
-                    } else {
-                        Medium {
-                            density_kg_m3: 2.0,
-                            sound_speed_m_s: 2.0,
-                        }
-                    })
-                },
+                &mut source,
                 &mut || false,
             )
             .unwrap();
@@ -365,10 +367,52 @@ fn oblique_refraction_and_evanescent_pressure_converge_to_snell_fields() {
             let error = max_field_error(&model, &field, |point| {
                 interface_wave(point, point[0] > 0.5, tangential_k).0
             });
+            let normal_k = if tangential_k < 1.0 {
+                C64::from_re(det::sqrt(1.0 - tangential_k * tangential_k))
+            } else {
+                C64::new(0.0, -det::sqrt(tangential_k * tangential_k - 1.0))
+            };
+            let mut intensity_error: f64 = 0.0;
+            for (element, tet) in geometry.tetrahedra().iter().enumerate() {
+                let x = tet.iter().map(|&v| positions[v as usize][0]).sum::<f64>() / 4.0;
+                if x <= 0.5 {
+                    continue;
+                }
+                let probe = model.probe(element, [0.25; 4], &mut source).unwrap();
+                let sample = probe.harmonic(&field.pressure_pa, prepared.frequency_hz()).unwrap();
+                let exact_pressure = interface_wave(probe.position_m(), true, tangential_k).0;
+                // Transmitted complex intensity is |p|² conj(k)/(2 omega rho).
+                // Its evanescent normal component is reactive, while tangential
+                // active flux survives. Zero components use the full-vector scale.
+                let base = exact_pressure.norm_sq() / 8.0;
+                let active = [normal_k.re * base, tangential_k * base, 0.0];
+                let reactive = [-normal_k.im * base, 0.0, 0.0];
+                let defect: f64 = (0..3).map(|axis| {
+                    (sample.active_intensity_w_m2[axis] - active[axis]).powi(2)
+                        + (sample.reactive_intensity_w_m2[axis] - reactive[axis]).powi(2)
+                }).sum();
+                let scale = base * det::sqrt(normal_k.norm_sq() + tangential_k * tangential_k);
+                intensity_error = intensity_error.max(det::sqrt(defect) / scale);
+                if refinement == 4 {
+                    if tangential_k < 1.0 {
+                        let [ix, iy, _] = sample.active_intensity_w_m2;
+                        let along = normal_k.re * ix + tangential_k * iy;
+                        let across = normal_k.re * iy - tangential_k * ix;
+                        assert!(along > 0.0 && across.abs() < 0.12 * along,
+                            "transported power must follow the refracted direction");
+                    } else {
+                        assert!(sample.reactive_intensity_w_m2[0] > 0.0);
+                        assert!(sample.active_intensity_w_m2[1] > 0.0);
+                        assert!(sample.active_intensity_w_m2[0].abs() < 0.2 * reactive[0],
+                            "evanescent normal flow must approach zero active power");
+                    }
+                }
+            }
             println!(
-                "heterogeneous Snell kt={tangential_k} refinement={refinement} error={error:e}"
+                "heterogeneous Snell kt={tangential_k} refinement={refinement} pressure={error:e} intensity={intensity_error:e}"
             );
             errors.push(error);
+            intensity_errors.push(intensity_error);
             assert_eq!(field.boundary_dissipation_w, 0.0);
             assert!(field.input_power_w.abs() < 1e-10);
             if tangential_k > 1.0 && refinement == 4 {
@@ -392,6 +436,9 @@ fn oblique_refraction_and_evanescent_pressure_converge_to_snell_fields() {
             errors[0] > 5.0 * errors[2] && errors[1] > 2.5 * errors[2],
             "kt={tangential_k}: {errors:?}"
         );
+        assert!(intensity_errors[2] < 0.1, "kt={tangential_k}: {intensity_errors:?}");
+        assert!(intensity_errors[2] < intensity_errors[1] && intensity_errors[1] < intensity_errors[0],
+            "gradient/intensity convergence is independent of pressure: kt={tangential_k}: {intensity_errors:?}");
     }
 }
 
