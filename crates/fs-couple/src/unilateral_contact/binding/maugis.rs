@@ -122,13 +122,14 @@ impl ConstitutiveDiscreteGradient for BoundNormalStorage {
         direction: &[f64],
         out: &mut [f64],
     ) -> bool {
-        // Other owners retain their existing numerical route. This action is
-        // complete only when every contact supplies the original JKR derivative.
+        // Maugis retains its numerical route until its original path owner
+        // supplies a derivative. Other source owners compose their own exact
+        // path derivatives, including unilateral and finite-range crossings.
         if !self.component_rule
             || self
                 .contacts
                 .iter()
-                .any(|contact| !matches!(contact.source, NormalLawSource::JkrAttached(_)))
+                .any(|contact| matches!(contact.source, NormalLawSource::MaugisAttached(_)))
         {
             return false;
         }
@@ -165,18 +166,19 @@ impl ConstitutiveDiscreteGradient for BoundNormalStorage {
             }
         }
         for contact in &self.contacts {
-            let NormalLawSource::JkrAttached(source) = &contact.source else {
-                return false;
-            };
             let (Ok(from), Ok(to)) = (contact.raw_approach(a), contact.raw_approach(b)) else {
                 out.fill(f64::NAN);
                 return true;
             };
-            let Ok(derivative) = source.attached_path_end_derivative(from, to) else {
-                // In particular, coincident fold endpoints have no finite
-                // tangent. Do not turn that singularity into a numerical probe.
-                out.fill(f64::NAN);
-                return true;
+            let derivative = match contact.source.mean_force_end_derivative(from, to) {
+                Ok(Some(value)) => value,
+                Ok(None) => return false,
+                Err(_) => {
+                    // In particular, coincident JKR fold endpoints have no
+                    // finite tangent. Do not probe through that singularity.
+                    out.fill(f64::NAN);
+                    return true;
+                }
             };
             let approach_direction: f64 = contact
                 .collocation

@@ -2189,6 +2189,24 @@ Extrapolation, invalid segments, discontinuous public node energy and
 unrepresentable work refuse. Source identities and interpolation estimate
 authority remain unchanged; no table refinement accuracy is newly claimed.
 
+`NormalLawSource::mean_force_end_derivative` differentiates the same signed
+path work with its initial approach held fixed. Hertz/Hunt--Crossley uses the
+original stable polynomial and the exact derivative of the active path
+fraction. DMT integrates its original Hertz contribution and negative cohesive
+tail stiffness, splitting at both original corners. Finite-gap curves integrate
+their original segment slopes with compensated accumulation and retain their
+source support and public-node continuity checks. Coincident piecewise corners
+use an explicitly one-sided Newton representative; this does not grant a smooth
+DMT potential tangent at a corner. The JKR fold remains singular, and Maugis
+returns no analytic derivative until its own path owner supplies one.
+
+All these derivative paths allocate no memory. Frozen Hertz potential queries
+also reuse the conservative owner, avoiding cold pressure/identity receipt
+allocation while retaining original indentation admission. Focused
+`normal_work_derivative` tests check independent energy/force identities,
+negative stiffness, onset and release, reversal, one-ULP paths, corner
+representatives and original domain/continuity refusals.
+
 ## Sustained normal and Coulomb forces through original mechanics
 
 `sustained` evaluates held forces in N against the original mechanical owner's

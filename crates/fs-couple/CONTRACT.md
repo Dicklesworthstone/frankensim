@@ -18384,16 +18384,17 @@ evolving material state and jump heat require separate owners. Focused
 paths, tensile acceleration and reversal, unequal-body energy/momentum,
 prepared/reference agreement, cancellation/retry and atomic branch refusal.
 
-Assemblies consisting entirely of JKR contacts supply an allocation-free
-analytic derivative of this same path effort when the complete inner native
-rule supplies its derivative, or when that inner rule is the exact quadratic
-energy. Each scalar endpoint derivative projects through its contact row's
+JKR assemblies, including mixed Hertz/Hunt--Crossley, DMT and retained
+finite-gap contacts, supply an allocation-free analytic derivative of this same
+path effort when the complete inner native rule supplies its derivative, or
+when that inner rule is the exact quadratic energy. Each original scalar
+endpoint derivative projects through its contact row's
 outer product. Valid near-fold motion therefore does not require central
 numerical probes outside the attached domain. The coincident fold retains its
 singular derivative and refuses; no finite tangent is invented. A native inner
-rule without a derivative is never replaced by its quadratic view. Mixed
-contact assemblies retain their existing numerical derivative route, including
-its possible probe refusal near a branch boundary. Focused checks compare the
+rule without a derivative is never replaced by its quadratic view. Assemblies
+containing Maugis retain their existing numerical derivative route until that
+owner supplies its actual path derivative. Focused checks compare the
 complete analytic action with directional work differences and advance a
 strictly attached near-fold state through both native and prepared execution.
 
@@ -18422,6 +18423,10 @@ retain their existing stepping behavior. The `adhesive_mixed_storage` regression
 all four owners together on three unequal bodies, independent onset work,
 retained BEM source/authority, tiny and reversing paths, native Hertz/table
 closure and reopening, original rate/step refusals and atomic failed-step retry.
+
+The `adhesive_mixed_jacobian` regressions independently check the complete
+mixed-source Newton action and advance native/prepared three-body motion just
+inside the JKR fold with the original energy and momentum accounts.
 
 ## Adhesive junctions on the native modal network
 

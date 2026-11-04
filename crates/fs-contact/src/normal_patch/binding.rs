@@ -11,6 +11,8 @@ use super::{
 };
 use fs_blake3::ContentHash;
 
+mod derivative;
+
 /// Frozen physical normal law; the point coefficient is material/card derived,
 /// while the finite-gap curve retains its explicit interpolation estimate.
 #[derive(Debug, Clone, PartialEq)]
@@ -273,15 +275,21 @@ impl NormalLawSource {
                 Ok((r.reversible_energy_j, r.normal_force_n, tangent))
             }
             Self::HertzPoint(source) => {
+                // The frozen source already admitted this Hertz coefficient
+                // against its original geometry and material envelope. Reuse
+                // its hot conservative owner instead of allocating a new cold
+                // pressure/identity receipt at every mechanical trial.
                 let r = source
-                    .evaluate(
-                        "normal-law-source/potential",
-                        delta_m,
-                        0.0,
-                        source.envelope().maximum_step_s,
-                    )
+                    .conservative_path_average(delta_m, delta_m)
                     .map_err(NormalLawSourceError::Point)?;
-                Ok((r.reversible_energy_j, r.normal_force_n, r.tangent_n_per_m))
+                let energy = 0.4 * r.mean_force_n * delta_m;
+                let tangent = 2.0 * r.endpoint_derivative_n_per_m;
+                if !energy.is_finite() || !tangent.is_finite() {
+                    return Err(NormalLawSourceError::Point(NormalPatchError::Overflow {
+                        field: "mechanical Hertz potential",
+                    }));
+                }
+                Ok((energy, r.mean_force_n, tangent))
             }
             Self::FiniteGap(source) => {
                 let r = source
