@@ -394,6 +394,13 @@ phase law, kinetics and independent prescribed/thermostatted vapor reservoir.
 Future births may carry an authored coating; its mass and sensible energy enter
 the incoming account exactly once.
 
+The material adapter `fs_material::thermal::PureSolidThermalLaw::
+specific_enthalpy_at_temperature` supplies original solid h(T) directly from
+its borrowed curve. It retains exact source knots, varying sensible slopes and
+the melting-onset endpoint, with no constant-Cp surrogate or extrapolation.
+Ambiguous all-solid isothermal states and unrepresentable inverse queries
+refuse; mixed/liquid states never extend the solid branch's support.
+
 Native heat links, ambient and reservoir exchange, source power, contacts,
 separation and boundary events retain their original owner. Heat storage
 includes the coating before the following phase update on every CFL substep.
@@ -428,8 +435,10 @@ The dilute film does not model non-dilute Stefan flow, pore resistance, plumes,
 curvature, nucleation, melt competition, radiation or unresolved gradients.
 Those mechanisms require explicit compatible models, not hidden coefficients.
 
-Returned zero solid mass denotes extinction. A spatial consumer must update
-topology, contacts and conservative remapping or refuse that endpoint.
+For a whole-solid body, returned zero mass denotes extinction. Its spatial
+consumer must update topology, contacts and conservative remapping or refuse
+that endpoint. A supported coating can instead reach zero inventory while
+retaining the substrate and its topology, as described above.
 Reporting recession does not itself move a mesh, alter a level set or change a
 flow/electrical geometry map. Uniform-cell use requires a justified internal
 temperature approximation. Refining time cannot repair an invalid spatial

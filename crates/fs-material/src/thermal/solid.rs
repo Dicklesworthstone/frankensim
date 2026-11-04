@@ -24,6 +24,7 @@ use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 #[derive(Clone, Copy, Debug)]
 pub struct PureSolidThermalLaw<'a> {
     curve: &'a EquilibriumEnthalpyPhaseCurve,
+    solid_knot_count: usize,
     range_j_kg: [f64; 2],
     maximum_slope: f64,
 }
@@ -52,6 +53,7 @@ impl<'a> PureSolidThermalLaw<'a> {
         }
         Ok(Self {
             curve,
+            solid_knot_count: count,
             range_j_kg: [knots[0].specific_enthalpy_j_kg, knots[count - 1].specific_enthalpy_j_kg],
             maximum_slope,
         })
@@ -67,6 +69,79 @@ impl<'a> PureSolidThermalLaw<'a> {
     #[must_use]
     pub const fn enthalpy_range_j_kg(&self) -> [f64; 2] {
         self.range_j_kg
+    }
+
+    /// Original pure-solid specific enthalpy [J/kg] at an admitted temperature.
+    ///
+    /// This is the inverse of the original piecewise-linear `T(h)` chart, not
+    /// a constant or locally frozen heat-capacity approximation. It borrows
+    /// the same authored solid knots and datum, allocates nothing, and finds
+    /// the temperature interval by binary search. The interpolated enthalpy
+    /// is admitted again by the original curve's numeric-state evaluator,
+    /// preserving its density-representability checks as well as its phase.
+    /// It can supply `CoatingSurface::deposit_enthalpy` after mapping errors
+    /// to the receiving surface error type.
+    ///
+    /// Exact, unique solid temperature knots return their authored enthalpy,
+    /// including the melting-onset endpoint. An equal-temperature interval
+    /// within the solid prefix has no unique inverse and refuses only queries
+    /// at that temperature; the existing forward `T(h)` view is unchanged.
+    /// Liquid/mixed-phase knots never extend this inverse's support.
+    ///
+    /// Nonfinite temperatures and extrapolation refuse. An interior query
+    /// whose enthalpy rounds to a bounding knot also refuses. Otherwise the
+    /// original forward temperature must round-trip within 128 machine epsilons
+    /// relative to temperature: an arithmetic consistency allowance, not a
+    /// source-model accuracy claim. This catches unresolved enthalpy increments
+    /// under large independent energy datums without clamping the query.
+    pub fn specific_enthalpy_at_temperature(
+        &self,
+        temperature_k: f64,
+    ) -> Result<f64, PhaseStateError> {
+        if !temperature_k.is_finite() {
+            return Err(PhaseStateError::NonFiniteTemperature);
+        }
+        let knots = &self.curve.knots()[..self.solid_knot_count];
+        let lower_k = knots[0].temperature_k;
+        let upper_k = knots[knots.len() - 1].temperature_k;
+        if temperature_k < lower_k || temperature_k > upper_k {
+            return Err(PhaseStateError::OutsideTemperatureDomain {
+                temperature_k,
+                lower_k,
+                upper_k,
+            });
+        }
+        let upper = knots.partition_point(|knot| knot.temperature_k < temperature_k);
+        let h = if knots[upper].temperature_k == temperature_k {
+            if knots.get(upper + 1).is_some_and(|next| next.temperature_k == temperature_k) {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "queried all-solid temperature has more than one original enthalpy",
+                });
+            }
+            knots[upper].specific_enthalpy_j_kg
+        } else {
+            let a = knots[upper - 1];
+            let b = knots[upper];
+            let alpha = (temperature_k - a.temperature_k) / (b.temperature_k - a.temperature_k);
+            let h = (b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg)
+                .mul_add(alpha, a.specific_enthalpy_j_kg);
+            if !h.is_finite() || h <= a.specific_enthalpy_j_kg || h >= b.specific_enthalpy_j_kg {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "interior solid temperature has no representable interior enthalpy",
+                });
+            }
+            h
+        };
+        let original = self.curve.values_at_specific_enthalpy(h)?;
+        let roundtrip_tolerance = 128.0 * f64::EPSILON * temperature_k.max(original.temperature_k);
+        if original.liquid_mass_fraction != 0.0
+            || (original.temperature_k - temperature_k).abs() > roundtrip_tolerance
+        {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "solid enthalpy cannot reproduce the requested original temperature",
+            });
+        }
+        Ok(h)
     }
 
     fn admit(&self, h: f64) -> Result<(), DepositionError> {

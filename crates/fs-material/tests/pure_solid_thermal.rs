@@ -1,6 +1,6 @@
 //! Whole-solid histories use the original phase chart and thermal/phase solvers.
 use fs_blake3::ContentHash;
-use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, PhaseStateError, SolidLiquidPhase};
 use fs_material::thermal::PureSolidThermalLaw;
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -8,6 +8,7 @@ use fs_thermal::enthalpy::{
     sublimation::{
         ThermalSublimationError,
         chamber::ChamberSurface,
+        coating::{CoatingSimulation, CoatingSurface},
         external::SolidCellExchange,
     },
 };
@@ -219,4 +220,105 @@ fn liquid_only_and_isolated_solid_endpoint_do_not_supply_a_solid_transport_domai
     let mixed = EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([0x93; 32]),
         curve(0.0).knots()[2..].to_vec()).unwrap();
     assert!(mixed.pure_solid_thermal_law().is_err());
+}
+
+// G0/G3: the authored solid branch has different heat capacities on either
+// side of 250 K; its liquid plateau must not become an inverse solid domain.
+fn varying_solid_curve(shift: f64) -> EquilibriumEnthalpyPhaseCurve {
+    let mut knots = curve(shift).knots().to_vec();
+    knots[2].specific_enthalpy_j_kg = 69_000.0 + shift;
+    EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([0x94; 32]), knots).unwrap()
+}
+
+#[test]
+fn solid_temperature_inverse_preserves_original_knots_datums_slopes_and_melting_onset() {
+    for shift in [0.0, -1_048_576.0, 1_048_576.0] {
+        let source = varying_solid_curve(shift);
+        let solid = source.pure_solid_thermal_law().unwrap();
+        for knot in &source.knots()[..3] {
+            assert_eq!(solid.specific_enthalpy_at_temperature(knot.temperature_k).unwrap().to_bits(),
+                knot.specific_enthalpy_j_kg.to_bits());
+        }
+        for (t, expected) in [(195.5, -109_000.0), (240.0, -20_000.0),
+            (250.0, 0.0), (260.0, 30_000.0), (272.5, 67_500.0)] {
+            let h = solid.specific_enthalpy_at_temperature(t).unwrap();
+            assert!((h - (expected + shift)).abs() < 1e-9);
+            assert!((source.temperature_at_specific_enthalpy(h).unwrap() - t).abs() < 1e-12);
+        }
+        assert_eq!(solid.specific_enthalpy_at_temperature(273.0), Ok(69_000.0 + shift));
+        assert_eq!(source.temperature_at_specific_enthalpy(90_000.0 + shift), Ok(273.0));
+        for t in [0.0, 180.0_f64.next_down(), 273.0_f64.next_up(), 275.0] {
+            assert!(matches!(solid.specific_enthalpy_at_temperature(t),
+                Err(PhaseStateError::OutsideTemperatureDomain { .. })));
+        }
+        for t in [f64::NAN, f64::INFINITY, -f64::INFINITY] {
+            assert_eq!(solid.specific_enthalpy_at_temperature(t), Err(PhaseStateError::NonFiniteTemperature));
+        }
+    }
+}
+
+#[test]
+fn inverse_refuses_only_queried_ambiguity_and_preserves_original_numeric_admission() {
+    let knot = |h, t, fraction| EnthalpyPhaseKnot {
+        specific_enthalpy_j_kg: h, temperature_k: t,
+        liquid_mass_fraction: fraction, bulk_density_kg_m3: 917.0,
+    };
+    let source = EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([0x95; 32]), vec![
+        knot(0.0, 180.0, 0.0), knot(1000.0, 200.0, 0.0), knot(2000.0, 200.0, 0.0),
+        knot(4000.0, 220.0, 0.0), knot(5000.0, 220.0, 1.0),
+    ]).unwrap();
+    let solid = source.pure_solid_thermal_law().unwrap();
+    assert_eq!(solid.temperature_k(1500.0), Ok(200.0));
+    assert!(matches!(solid.specific_enthalpy_at_temperature(200.0), Err(PhaseStateError::InvalidCurve { .. })));
+    assert_eq!(solid.specific_enthalpy_at_temperature(199.0), Ok(950.0));
+    assert_eq!(solid.specific_enthalpy_at_temperature(201.0), Ok(2100.0));
+    assert_eq!(solid.specific_enthalpy_at_temperature(220.0), Ok(4000.0));
+
+    let datum = 2.0_f64.powi(60);
+    let quantized = EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([0x96; 32]),
+        SolidLiquidPhase::Solid, vec![knot(datum, 200.0, 0.0), knot(datum + 1024.0, 201.0, 0.0)]).unwrap();
+    let quantized = quantized.pure_solid_thermal_law().unwrap();
+    // One inverse rounds to the endpoint, the other to a wrong interior T.
+    for t in [200.0_f64.next_up(), 200.375] {
+        assert!(matches!(quantized.specific_enthalpy_at_temperature(t), Err(PhaseStateError::InvalidCurve { .. })));
+    }
+    assert_eq!(quantized.specific_enthalpy_at_temperature(200.5), Ok(datum + 512.0));
+
+    let unresolved = EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([0x97; 32]),
+        SolidLiquidPhase::Solid, vec![
+            EnthalpyPhaseKnot { bulk_density_kg_m3: 1e-320, ..knot(0.0, 200.0, 0.0) },
+            EnthalpyPhaseKnot { bulk_density_kg_m3: 2e-320, ..knot(1000.0, 220.0, 0.0) },
+        ]).unwrap();
+    let expected = unresolved.values_at_specific_enthalpy(500.0).unwrap_err();
+    assert_eq!(unresolved.pure_solid_thermal_law().unwrap().specific_enthalpy_at_temperature(210.0), Err(expected));
+}
+
+#[test]
+fn original_material_inverse_drives_deposition_and_heat_on_the_native_coating_timeline() {
+    let substrate_curve = curve(0.0);
+    let substrate = substrate_curve.pure_solid_thermal_law().unwrap();
+    let deposit_curve = varying_solid_curve(1_048_576.0);
+    let deposit = deposit_curve.pure_solid_thermal_law().unwrap();
+    let deposit_h = |t| deposit.specific_enthalpy_at_temperature(t)
+        .map_err(|_| SublimationError::Invalid("original deposit caloric domain"));
+    let thermal = initial(&substrate, vec![cell(1, -1000.0, 700.0)]);
+    let original = CoatingSimulation::new(thermal, &[CoatingSurface {
+        cell_id: CellId(1), law: &Ice, deposit_enthalpy: &deposit_h, kinetics: kinetics(),
+        initial_mass_kg: 0.01,
+        reservoir: VaporReservoir::Prescribed { partial_pressure_pa: 200.0, temperature_k: 250.0 },
+    }], || Ok(())).unwrap();
+    let (after, audit) = original.advance_to(0.1, config(), phase_config(), || Ok(())).unwrap();
+    let t = after.temperature_k(CellId(1)).unwrap();
+    // Heat crosses the source's 250 K knot into its higher deposit capacity.
+    // Before phase exchange, exact piecewise storage predicts 250 + 4/7 K.
+    assert!(t > 250.0 + 4.0 / 7.0 && t < 251.0);
+    assert!(after.coatings()[&CellId(1)].mass_kg > original.coatings()[&CellId(1)].mass_kg);
+    assert!(audit.transferred_mass_kg < 0.0);
+    assert_eq!(after.cells()[&CellId(1)].mass_kg, original.cells()[&CellId(1)].mass_kg);
+    assert!((after.coatings()[&CellId(1)].specific_enthalpy_j_kg - deposit_h(t).unwrap()).abs() < 1e-8);
+    assert!((audit.stored_energy_change_j - 70.0 + audit.vapor_energy_j).abs() < 1e-7);
+    assert!(audit.energy_residual_j.abs() < 1e-7);
+    assert!(audit.mass_balance_residual_kg.abs() < 1e-14);
+    assert_eq!(original.time_s(), 0.0);
+    assert_eq!(original.cells()[&CellId(1)].specific_h_j_kg, -1000.0);
 }
