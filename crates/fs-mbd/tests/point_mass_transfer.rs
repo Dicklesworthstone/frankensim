@@ -41,8 +41,15 @@ fn rotation(axis: Vec3, angle: f64) -> UnitQuaternion {
     .unwrap()
 }
 fn compose(a: UnitQuaternion, b: UnitQuaternion) -> UnitQuaternion {
-    let q = a.multiply(b);
-    UnitQuaternion::new(q.w, q.x, q.y, q.z).unwrap()
+    let [aw, ax, ay, az] = a.components();
+    let [bw, bx, by, bz] = b.components();
+    UnitQuaternion::new(
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by + ay * bw + az * bx - ax * bz,
+        aw * bz + az * bw + ax * by - ay * bx,
+    )
+    .unwrap()
 }
 fn state(p: MassProperties, x: Vec3, q: UnitQuaternion, v: Vec3, w: Vec3) -> RigidBodyState {
     RigidBodyState::new(

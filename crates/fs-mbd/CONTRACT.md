@@ -6346,8 +6346,9 @@ Native per-phase checks and the existing polarized common-frame transfer audit
 check actual final stored mass, linear/angular momentum and kinetic change minus
 source work plus sticking loss. Source and loss accounts remain separate per
 body and globally. Late refusal or final cancellation publishes no endpoint.
-Pinned Rust parsing is distinct from native compilation and numerical tests;
-the latter remain unrun while storage is full and DSR/RCH are unavailable.
+All five rigid-component-network integration tests now pass in the selected
+native source build alongside the prepared local-transfer qualification below.
+Full-workspace Cargo and distributed gates remain unrun.
 
 Five focused G1/G3/G4 regressions cover independent shared-recoil work and
 intrinsic-spin sticking loss, retained packets without artificial leaf loss,
@@ -6411,3 +6412,65 @@ momentum/work admission. The articulated/modal consumer exercises that
 distinction with an admissible combined response and an atomic actual-speed
 refusal, alongside independent coupled-mass and prescribed-support oracles.
 No state is changed by a mobility probe and no finite force duration is inferred.
+
+## Prepared local finite rigid payload transfer between moving bodies
+
+`assembly::transfer::rigid::PreparedRigidPayloadTransfer` prepares a nonempty
+proper subset of an original rigid assembly for local handoff to another finite
+body. The existing rigid-component network API retains its general routing and
+flat inventory interfaces. The prepared local entry accepts a native finite
+receiver directly, caches the two outgoing groups, and admits explicit matching
+material attachments. The existing partition owner retains complete original
+geometry and full central tensors for the remaining donor and payload. Every
+material component belongs to exactly one group, and the donor retains positive
+mass throughout. Preparation is O(parts); an event is O(separation descriptors),
+with two finite bodies in each native solve. There is no per-leaf reassembly, artificial
+release/relatch loss within a retained group, or dense multibody system.
+
+One original native partition release applies all equal/opposite force impulses
+and free couples together. Original component indices and donor-COM application
+points select the two retained groups. Their complete recoil includes shared
+impulse cross terms in the separation work. One original native rigid latch then
+captures the whole payload at its existing pose, preserving intrinsic spin,
+orbital momentum and full inertia. The receiving assembly keeps the original
+receiver axes and contains the original receiver and whole payload as its two
+parts. The prepared partition retains payload leaf geometry and original indices
+for later expansion or subsequent inventory events. No free payload state is
+returned alongside the captured receiver.
+
+Both attachment arms refer to the original body COMs and axes. Compensated
+origin-relative coincidence admission precedes release; the actual released
+payload's local and rounded world points must also pass before latching. Equal
+rounded coordinates at a remote world origin cannot hide different local
+attachments or an unrepresentable released COM. This is an instantaneous rigid
+handoff, with contact discovery, overlap, connectivity, strength, finite grasp
+dynamics, free flight and material identity remaining caller-owned.
+
+The shared transfer envelope admits all original donor components plus one
+receiver before event staging. Every separation descriptor, including a zero
+one, consumes an impulse slot; the receiving latch consumes one further slot.
+Native release and latch gates precede a combined check of actual final mass,
+linear momentum, spin plus orbital momentum and common-frame kinetic balance.
+The shared balance owner accounts for each actual output orientation, including
+native quaternion normalization. Separation work and nonnegative sticking loss
+remain separate: the residual is delta_K - W_separation + E_sticking. A caller
+must debit the work source and select any thermal destination explicitly.
+Cancellation or a late refusal publishes neither endpoint and changes no input.
+
+Six regression groups independently verify finite spin recoil and closed-form
+separation work/sticking loss; off-center multi-part payloads with independently
+assembled full tensors and a cofactor inverse; world spin/orbital conservation
+and all-leaf inventory recovery; rotated, translated and commonly boosted
+scenes; proper subsets, positive retained mass and exact work-cap boundaries;
+remote-origin geometry refusal; and every observed preparation/event
+cancellation point through final publication, late balance refusal and retry.
+The original point-transfer test's quaternion helper now uses the public
+components API, allowing its existing covariance fixtures to compile.
+
+Pinned nightly native compilation and all 37 selected integration fixtures
+passed: six rigid-payload, seven assembly, six partition, seven point-transfer,
+six point-transfer-network, and all five concurrent rigid-component-network
+tests. The native harness uses the actual core and assembly source with
+module-path adaptation and genuine cached dependencies;
+no physical solver is replaced. Full-workspace Cargo and distributed gates
+remain unrun in this session.

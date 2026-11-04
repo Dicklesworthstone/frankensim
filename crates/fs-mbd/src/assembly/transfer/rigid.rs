@@ -15,6 +15,10 @@ use crate::assembly::{
 };
 use crate::{Pose, RigidBodyState, Vec3};
 
+/// Cached two-body handoff with original and represented attachment admission.
+pub mod prepared;
+pub use prepared::{PreparedRigidPayloadTransfer, RigidPayloadTransferResult};
+
 /// One original rigid inventory and its authored simultaneous redistribution.
 #[derive(Clone, Copy, Debug)]
 pub struct RigidTransferInput<'a> {

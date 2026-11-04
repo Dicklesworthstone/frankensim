@@ -1,4 +1,4 @@
-//! Atomic point-material transfer between two finite moving rigid bodies.
+//! Atomic material transfer between two finite moving rigid bodies.
 //!
 //! Release and capture share one instantaneous physical attachment location.
 //! Both bodies recoil, both central inertias change, and canonical parcel
@@ -34,9 +34,11 @@ pub struct PointMassTransfer {
 /// Bounded work and physical acceptance for one two-body transfer event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointMassTransferControls {
-    /// Counts all original bodies plus EVERY descriptor, including zeros.
-    /// Each positive capture and each nonzero separation impulse consumes one
-    /// impulse slot. The same absolute balance gates also apply to each phase.
+    /// Native phase balance gates and work caps. Point-parcel transfers count
+    /// all original bodies plus EVERY descriptor, including zeros; each positive
+    /// capture and nonzero separation impulse consumes one impulse slot. Rigid
+    /// payload transfers count original donor components plus the receiver,
+    /// every separation descriptor, and one receiving latch impulse slot.
     pub assembly: AssemblyControls,
     /// Maximum absolute Cartesian component of attachment mismatch [m].
     /// Both the origin-relative geometry and represented world points must pass.
@@ -292,17 +294,22 @@ fn combined_balance(
         first_moment.add(vector(r0.scale(dm))?);
         let l0 = old.angular_momentum_body();
         let l1 = new.angular_momentum_body();
-        angular.add(vector(
-            old.pose()
-                .orientation()
-                .rotate_body_to_world(vector(l1.sub(l0))?),
-        )?);
+        let q0 = old.pose().orientation();
+        let q1 = new.pose().orientation();
+        if q0 == q1 {
+            angular.add(vector(q0.rotate_body_to_world(vector(l1.sub(l0))?))?);
+        } else {
+            // Native assembly release may normalize the output axes. Account
+            // for the ACTUAL returned frames instead of assuming identical bits.
+            angular.add(vector(q1.rotate_body_to_world(l1))?);
+            angular.add(vector(q0.rotate_body_to_world(l0).scale(-1.0))?);
+        }
         let w0 = old_properties.angular_velocity_body_checked(l0)?;
         let w1 = new_properties.angular_velocity_body_checked(l1)?;
         let v0 = vector(Vec3::new(p0.x / m0, p0.y / m0, p0.z / m0))?;
         let v1 = vector(Vec3::new(p1.x / m1, p1.y / m1, p1.z / m1))?;
-        // Polarized changes avoid subtracting large common spin or kinetic
-        // totals. Both states retain their own original body orientation.
+        // Polarized scalar changes avoid subtracting large common spin or
+        // kinetic totals; each endpoint uses its own admitted central tensor.
         energy.add(finite(0.5 * p1.sub(p0).dot(v1))?);
         energy.add(finite(0.5 * p0.dot(v1.sub(v0)))?);
         energy.add(finite(0.5 * l1.sub(l0).dot(w1))?);
@@ -329,6 +336,20 @@ fn attachment_mismatch(
     receiver: &RigidBodyState,
     transfer: &PointMassTransfer,
 ) -> Result<f64, AssemblyError> {
+    attachment_arm_mismatch(
+        donor,
+        transfer.release.attachment_arm_body_m,
+        receiver,
+        transfer.receiver_attachment_arm_body_m,
+    )
+}
+
+fn attachment_arm_mismatch(
+    donor: &RigidBodyState,
+    donor_arm: Vec3,
+    receiver: &RigidBodyState,
+    receiver_arm: Vec3,
+) -> Result<f64, AssemblyError> {
     let mut gap = VectorSum::default();
     gap.add(vector(
         receiver
@@ -340,13 +361,13 @@ fn attachment_mismatch(
         receiver
             .pose()
             .orientation()
-            .rotate_body_to_world(transfer.receiver_attachment_arm_body_m),
+            .rotate_body_to_world(receiver_arm),
     )?);
     gap.add(vector(
         donor
             .pose()
             .orientation()
-            .rotate_body_to_world(transfer.release.attachment_arm_body_m)
+            .rotate_body_to_world(donor_arm)
             .scale(-1.0),
     )?);
     Ok(maximum(vector(gap.value())?))
