@@ -698,9 +698,11 @@ impl CurvedMovingWallLink2 {
 /// Atomic receipt for a D2Q9 fluid/wall cell-topology transition.
 ///
 /// Newly uncovered fluid cells are initialized by an equal-weight average of
-/// unique, surviving one-ring fluid donors from the pre-transition state.
+/// unique, surviving one-ring fluid donors in the physical Guo frame.
 /// Covered-cell removal and fresh-cell insertion are reported separately so a
-/// caller can ledger the exact active-fluid mass and momentum delta.
+/// caller can ledger the exact active-fluid mass and raw momentum delta.
+/// The raw momentum fields do not include the changed active half-force
+/// inventory; this receipt is not a hydrodynamic body impulse.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[must_use]
 pub struct WallTopologyTransition2 {
@@ -868,10 +870,14 @@ impl Grid {
     /// Atomically replace the D2Q9 wall mask and initialize fresh fluid cells.
     ///
     /// This narrow moving-topology rung accepts only a fluid/wall domain.
-    /// Fresh cells average unique surviving one-ring fluid populations,
-    /// relaxation times, and external forces from the pre-transition state;
-    /// freshly covered cells have their populations cleared. Every donor and
-    /// receipt is validated before any grid field is published.
+    /// Fresh cells average unique surviving one-ring physical populations
+    /// `h = f + S(u,F)/2`, relaxation times, and external forces from the
+    /// pre-transition state. The result is stored in its own Guo force frame.
+    /// Thus differing donor forces do not contaminate the interpolated stress
+    /// with force/velocity covariance. Unforced donor arithmetic is unchanged.
+    /// Freshly covered cells have their populations cleared. Every donor and
+    /// receipt is validated before any grid field is published. This remains
+    /// an initialization, not a conservative mass remap or body-motion solve.
     pub fn transition_wall_topology(&mut self, next_walls: &[bool]) -> WallTopologyTransition2 {
         let cell_count = self.nx * self.ny;
         assert_eq!(
@@ -904,6 +910,10 @@ impl Grid {
         assert!(
             next_walls.iter().any(|&is_wall| !is_wall),
             "wall topology transition must leave at least one fluid cell"
+        );
+        assert!(
+            self.g.into_iter().all(f64::is_finite),
+            "wall topology transition requires finite acceleration"
         );
 
         let mut next_flags = self.flags.clone();
@@ -977,8 +987,30 @@ impl Grid {
                                 self.fext[donor].into_iter().all(f64::is_finite),
                                 "fresh-cell donor external force must be finite"
                             );
+                            let donor_force = core::array::from_fn(|axis| {
+                                self.g[axis].mul_add(donor_mass, self.fext[donor][axis])
+                            });
+                            let donor_velocity = core::array::from_fn(|axis| {
+                                (donor_momentum[axis] + 0.5 * donor_force[axis]) / donor_mass
+                            });
+                            assert!(
+                                donor_force
+                                    .into_iter()
+                                    .chain(donor_velocity)
+                                    .all(f64::is_finite),
+                                "fresh-cell donor force and physical velocity must be finite"
+                            );
+                            let mut physical = self.f[donor];
+                            if donor_force != [0.0; 2] {
+                                crate::thermal::forcing::reframe2(
+                                    &mut physical,
+                                    donor_velocity,
+                                    donor_force,
+                                    [0.0; 2],
+                                );
+                            }
                             for q in 0..Q {
-                                populations[q] += self.f[donor][q];
+                                populations[q] += physical[q];
                             }
                             relaxation_time += self.tau[donor];
                             external_force[0] += self.fext[donor][0];
@@ -992,16 +1024,40 @@ impl Grid {
                         external_force[0] *= inverse_donor_count;
                         external_force[1] *= inverse_donor_count;
 
+                        let (mass, physical_momentum) = raw_population_moments(&populations);
+                        assert!(
+                            populations.into_iter().all(f64::is_finite)
+                                && mass.is_finite()
+                                && mass > 0.0
+                                && physical_momentum.into_iter().all(f64::is_finite)
+                                && relaxation_time.is_finite()
+                                && relaxation_time > 0.5
+                                && external_force.into_iter().all(f64::is_finite),
+                            "fresh-cell averaged state must remain physically admissible"
+                        );
+                        let force = core::array::from_fn(|axis| {
+                            self.g[axis].mul_add(mass, external_force[axis])
+                        });
+                        let velocity = physical_momentum.map(|value| value / mass);
+                        assert!(
+                            force.into_iter().chain(velocity).all(f64::is_finite),
+                            "fresh-cell force and physical velocity must be finite"
+                        );
+                        if force != [0.0; 2] {
+                            crate::thermal::forcing::reframe2(
+                                &mut populations,
+                                velocity,
+                                [0.0; 2],
+                                force,
+                            );
+                        }
                         let (mass, momentum) = raw_population_moments(&populations);
                         assert!(
                             populations.into_iter().all(f64::is_finite)
                                 && mass.is_finite()
                                 && mass > 0.0
-                                && momentum.into_iter().all(f64::is_finite)
-                                && relaxation_time.is_finite()
-                                && relaxation_time > 0.5
-                                && external_force.into_iter().all(f64::is_finite),
-                            "fresh-cell averaged state must remain physically admissible"
+                                && momentum.into_iter().all(f64::is_finite),
+                            "fresh-cell Guo representation must remain physically admissible"
                         );
                         receipt.fresh_fluid_cells += 1;
                         receipt.fresh_donor_samples += donors.len();
