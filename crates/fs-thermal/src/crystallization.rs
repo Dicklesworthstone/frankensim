@@ -272,6 +272,12 @@ impl<'a> CrystallizationLaw<'a> {
         self.amorphous.caloric_identity()
     }
 
+    /// Identity of the original crystalline branch, for adapters that must bind
+    /// both caloric sources rather than infer a phase entropy or mechanical law.
+    pub fn crystalline_caloric_identity(&self) -> Option<[u8; 32]> {
+        self.crystalline.caloric_identity()
+    }
+
     /// Recheck a state against the original law and an explicit caloric budget.
     /// This is useful at cross-module boundaries; states themselves have private
     /// fields and can only be constructed through admitted original-law queries.

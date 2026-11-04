@@ -18,6 +18,9 @@
 /// Prepared source-bound temperature-dependent Nakamura rates.
 pub mod kinetics;
 
+/// Relative entropy and phase driving energy from the original caloric pair.
+pub mod entropy;
+
 use super::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::PropertyUsageReceipt;
