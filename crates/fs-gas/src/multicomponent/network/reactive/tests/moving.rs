@@ -246,6 +246,130 @@ fn stabilized_diffusion_composes_actual_moving_volumes_and_finite_wall_storage()
 }
 
 #[test]
+fn adaptive_diffusion_closes_moving_gas_wall_energy_and_preserves_late_refused_geometry() {
+    use crate::multicomponent::network::dissipation::AdaptiveNetworkDissipationControl;
+    let controls = AdaptiveNetworkDissipationControl::default();
+    let advance = |flow: &mut ReactingNetwork1d,
+                   molecular: &mut Molecular,
+                   wall: &mut NetworkWallOperator<'static>| {
+        flow.step_with_adaptive_dissipation_and_sources(
+            molecular,
+            Time::new(0.003),
+            ReactiveStepControl::default(),
+            controls,
+            sources(wall),
+            None,
+            Some(&[-0.2]),
+            || false,
+        )
+        .unwrap()
+    };
+    let make = || {
+        let (mut flow, mut molecular, mut wall) = fixture(false);
+        advance(&mut flow, &mut molecular, &mut wall);
+        (flow, molecular, wall)
+    };
+    let (mut reference, mut reference_operator, mut reference_wall) = make();
+    let before = inventory(&reference, &reference_wall);
+    let volume = reference.plenums()[0].volume_m3();
+    let report = advance(&mut reference, &mut reference_operator, &mut reference_wall);
+    let after = inventory(&reference, &reference_wall);
+    close(after.0, before.0, 3e-11);
+    close(
+        after.1 - before.1,
+        report.coupled.boundary_work_on_gas_j,
+        3e-10,
+    );
+    close(
+        reference.plenums()[0].volume_m3(),
+        volume - 0.2 * report.coupled.elapsed.value(),
+        3e-14,
+    );
+    assert!(report.coupled.boundary_work_on_gas_j > 0.0);
+    for half in [report.dissipation.first, report.dissipation.second] {
+        assert!(half.maximum_estimated_local_error <= 1.0);
+        assert_eq!(
+            half.stabilized.transport.elapsed.value(),
+            0.5 * report.coupled.elapsed.value()
+        );
+    }
+    assert_eq!(
+        report.dissipation.second.stabilized.transport,
+        report.coupled.dissipation.unwrap().second
+    );
+    assert_eq!(
+        report.coupled.wall.unwrap().second.elapsed,
+        report.dissipation.second.stabilized.transport.elapsed
+    );
+
+    let (mut flow, mut molecular, mut wall) = make();
+    let accepted_fields = fields(&flow);
+    let accepted_volumes: Vec<_> = flow.plenums().iter().map(|p| p.volume_m3()).collect();
+    let accepted_walls = wall_contacts(&flow, &wall);
+    let accepted_report = flow.last_report();
+    let accepted_wall_report = wall.last_report();
+    let accepted_molecular = molecular.last_report();
+    let accepted_time = flow.time();
+    let mut limited = controls;
+    // The identical reference measures the first half exactly. Exhaust only
+    // after the moving wave/source composition has changed private geometry.
+    limited.stabilized.maximum_operator_evaluations =
+        report.dissipation.first.stabilized.operator_evaluations;
+    let error = flow
+        .step_with_adaptive_dissipation_and_sources(
+            &mut molecular,
+            Time::new(0.003),
+            ReactiveStepControl::default(),
+            limited,
+            sources(&mut wall),
+            None,
+            Some(&[-0.2]),
+            || false,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ReactiveNetworkError::Dissipation(
+            crate::multicomponent::dissipation::DissipationError::OperatorWorkLimit { .. }
+        )
+    ));
+    assert_eq!(fields(&flow), accepted_fields);
+    assert_eq!(
+        flow.plenums()
+            .iter()
+            .map(|p| p.volume_m3())
+            .collect::<Vec<_>>(),
+        accepted_volumes
+    );
+    assert_eq!(wall_contacts(&flow, &wall), accepted_walls);
+    assert_eq!(flow.last_report(), accepted_report);
+    assert_eq!(wall.last_report(), accepted_wall_report);
+    assert_eq!(molecular.last_report(), accepted_molecular);
+    assert_eq!(flow.time(), accepted_time);
+    let replay = advance(&mut flow, &mut molecular, &mut wall);
+    assert_eq!(replay.operator_evaluations, report.operator_evaluations);
+    close(
+        replay.coupled.elapsed.value(),
+        report.coupled.elapsed.value(),
+        3e-12,
+    );
+    for (a, b) in fields(&flow).iter().zip(fields(&reference)) {
+        for k in 0..2 {
+            close(a.partial_densities[k], b.partial_densities[k], 3e-11);
+        }
+        close(a.momentum, b.momentum, 3e-11);
+        close(a.energy, b.energy, 3e-10);
+    }
+    for (a, b) in flow.plenums().iter().zip(reference.plenums()) {
+        close(a.volume_m3(), b.volume_m3(), 3e-14);
+    }
+    let actual_inventory = inventory(&flow, &wall);
+    let expected_inventory = inventory(&reference, &reference_wall);
+    close(actual_inventory.0, expected_inventory.0, 3e-11);
+    close(actual_inventory.1, expected_inventory.1, 3e-10);
+}
+
+#[test]
 fn reacting_compression_closes_physical_gas_wall_energy_with_live_molecular_and_heat_paths() {
     let (mut flow, mut molecular, mut wall) = fixture(false);
     let initial = inventory(&flow, &wall);

@@ -87,7 +87,9 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
         )?;
         Ok(StabilizedDissipatingNetworkReport {
             coupled,
-            dissipation: dissipation.expect("both molecular halves used RKL2"),
+            dissipation: dissipation
+                .stabilized
+                .expect("both molecular halves used RKL2"),
             operator_evaluations: evaluations,
         })
     }

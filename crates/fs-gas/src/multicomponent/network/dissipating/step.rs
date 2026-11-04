@@ -32,7 +32,7 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
     ) -> Result<
         (
             DissipatingNetworkReport,
-            Option<SplitStabilizedNetworkDissipationReport>,
+            MolecularDiagnostics,
         ),
         DissipatingNetworkError,
     > {
@@ -84,16 +84,16 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                 }
                 let second_sources = sources.second_half(&mut self.trial, half, &mut cancelled)?;
                 let (wall, valves) = first_sources.pair(second_sources);
-                let (physical, stabilized) = split_halves(first, second);
+                let (physical, diagnostics) = split_halves(first, second);
                 Ok::<_, DissipatingNetworkError>((transport,
-                    Some((physical, stabilized, wall, valves))))
+                    Some((physical, diagnostics, wall, valves))))
             })();
             match attempt {
                 Ok((transport, None)) => {
                     duration = transport.elapsed.value();
                     last = DissipatingNetworkError::Invalid("network transport shortened the molecular composition");
                 }
-                Ok((transport, Some((molecular, stabilized, wall_report, valve_report)))) => {
+                Ok((transport, Some((molecular, diagnostics, wall_report, valve_report)))) => {
                     let after = checked_totals(&self.trial, &mut cancelled)?;
                     let n = self.gas().species_count();
                     let mut boundary_change = NetworkTotals { species_masses: [0.0; MAX_SPECIES], species_count: n,
@@ -131,7 +131,7 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     core::mem::swap(&mut self.molecular_ports, &mut self.trial_molecular_ports);
                     self.last_report = Some(report);
-                    return Ok((report, stabilized));
+                    return Ok((report, diagnostics));
                 }
                 Err(DissipatingNetworkError::Cancelled) => return Err(DissipatingNetworkError::Cancelled),
                 Err(error @ DissipatingNetworkError::Molecular(DissipationError::OperatorWorkLimit { .. })) => return Err(error),

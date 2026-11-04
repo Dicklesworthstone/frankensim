@@ -9,7 +9,7 @@ use super::super::{
     allocated, positive, sum,
 };
 pub use super::coupled::NetworkSources;
-use super::coupled::molecular::{MolecularMethod, split_halves};
+use super::coupled::molecular::{MolecularDiagnostics, MolecularMethod, split_halves};
 use super::coupled::{SourceError, checked_totals, duplicate, initial_duration, reset};
 use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationReport};
 use super::valve::{SplitNetworkValveReport, ValveError};
@@ -19,9 +19,11 @@ use super::{
 };
 use fs_qty::{Length, Time};
 
+mod adaptive;
 mod stabilized;
 mod step;
-pub use super::coupled::molecular::SplitStabilizedNetworkDissipationReport;
+pub use super::coupled::molecular::{SplitAdaptiveNetworkDissipationReport, SplitStabilizedNetworkDissipationReport};
+pub use adaptive::{AdaptiveDissipatingNetworkReport, AdaptiveDissipatingStepControl};
 pub use stabilized::{StabilizedDissipatingNetworkReport, StabilizedDissipatingStepControl};
 
 /// Explicit hyperbolic, molecular and complete-composition work limits.

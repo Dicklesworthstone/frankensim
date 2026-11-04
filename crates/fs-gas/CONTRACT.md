@@ -2495,6 +2495,38 @@ RKL2's extended estimated stability interval does not certify the complete
 composition's time accuracy, positivity or entropy; caller-selected maximum
 macrosteps, original stage admission and refinement remain necessary.
 
+### Adaptive molecular transport in complete network steps
+
+`DissipatingNetwork1d::step_adaptive[_with_sources]` and
+`ReactingNetwork1d::step_with_adaptive_dissipation[_and_sources]` select the
+original network RKL2 full/two-half error controller inside the existing D/A/D
+or D/C/A/C/D transaction. The same physical species-density, temperature,
+velocity and conservative port-transfer tolerances apply to both molecular
+halves. Each half returns its accepted local error estimate and temporal
+rejections alongside the original physical balance. No separate transport,
+chemistry or source implementation is introduced.
+
+One RHS counter spans full and half probes, both accepted molecular intervals,
+failed temporal probes and every discarded complete coupling attempt. Work-limit
+exhaustion is terminal; coupling retries cannot reset the allowance. Only the
+accepted two-half molecular solutions and their original integrated exchanges
+enter branch/plenum inventories and the complete-step species/energy balance.
+Temporary estimator paths cannot publish port transfers or source receipts.
+
+Prescribed baths still reach molecular transport and characteristic advection.
+Moving-plenum molecular intervals use their actual pre/post-advection volumes;
+the existing moving-volume owner applies pressure work once. Finite walls,
+valves, gas fields, geometry and accepted diagnostics retain the original atomic
+publication boundary. The molecular estimator does NOT control or certify
+chemistry, source, advection, spatial, splitting or global time error, and does
+not infer entropy stability for their composition.
+
+Focused G1/G4 regressions compare bath transport with an independent continuous
+three-capacity ODE, resolve a commuting reaction/diffusion decay without a
+manually tuned molecular step, account for discarded heat-release retry work,
+close moving gas-plus-wall energy, and preserve accepted fields/geometry/reports
+under a second-half work refusal and late cancellation with replay.
+
 ## Reacting networks with molecular transport
 
 `ReactingNetwork1d::step_with_dissipation` composes

@@ -40,7 +40,7 @@ impl ReactingNetwork1d {
     ) -> Result<
         (
             ReactiveNetworkReport,
-            Option<SplitStabilizedNetworkDissipationReport>,
+            MolecularDiagnostics,
         ),
         ReactiveNetworkError,
     > {
@@ -77,7 +77,7 @@ impl ReactingNetwork1d {
     ) -> Result<
         (
             ReactiveNetworkReport,
-            Option<SplitStabilizedNetworkDissipationReport>,
+            MolecularDiagnostics,
         ),
         ReactiveNetworkError,
     > {
@@ -174,7 +174,7 @@ impl ReactingNetwork1d {
                         Time::new(duration), controls.transport, &mut cancelled)?,
                 };
                 if transport.elapsed.value() != duration {
-                    return Ok((transport, false, None, None, None, None));
+                    return Ok((transport, false, None, MolecularDiagnostics::default(), None, None));
                 }
                 react_network(&mut self.trial, &mut self.reactor, &mut self.amounts,
                     half.value(), &mut chemistry, &mut cancelled)?;
@@ -220,22 +220,22 @@ impl ReactingNetwork1d {
                             ChemistryLocation::Plenum { plenum }, &mut cancelled)?;
                     }
                 }
-                let (dissipation, stabilized) = match first.zip(second) {
+                let (dissipation, diagnostics) = match first.zip(second) {
                     Some((first, second)) => {
-                        let (physical, stabilized) = split_halves(first, second);
-                        (Some(physical), stabilized)
+                        let (physical, diagnostics) = split_halves(first, second);
+                        (Some(physical), diagnostics)
                     }
-                    None => (None, None),
+                    None => (None, MolecularDiagnostics::default()),
                 };
                 let (wall, valves) = first_sources.pair(second_sources);
-                Ok::<_, ReactiveNetworkError>((transport, true, dissipation, stabilized, wall, valves))
+                Ok::<_, ReactiveNetworkError>((transport, true, dissipation, diagnostics, wall, valves))
             })();
             match attempt {
                 Ok((transport, false, _, _, _, _)) => {
                     duration = transport.elapsed.value();
                     last = ReactiveNetworkError::Invalid("network transport shortened the coupled duration");
                 }
-                Ok((transport, true, dissipation, stabilized, wall_report, valve_report)) => {
+                Ok((transport, true, dissipation, diagnostics, wall_report, valve_report)) => {
                     let after = checked_totals(&self.trial, &mut cancelled)?;
                     let n = self.gas().species_count();
                     let mut boundary_change = transport.boundary_change;
@@ -284,7 +284,7 @@ impl ReactingNetwork1d {
                     }
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     self.last_report = Some(report);
-                    return Ok((report, stabilized));
+                    return Ok((report, diagnostics));
                 }
                 Err(ReactiveNetworkError::Cancelled) => return Err(ReactiveNetworkError::Cancelled),
                 Err(error @ ReactiveNetworkError::Dissipation(DissipationError::OperatorWorkLimit { .. })) => return Err(error),
