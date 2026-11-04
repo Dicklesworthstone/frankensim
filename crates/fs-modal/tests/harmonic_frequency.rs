@@ -846,3 +846,51 @@ fn tiny_off_diagonal_damping_remains_in_the_dc_frequency_derivative() {
         assert!(result.displacement_derivative[1].abs() > 0.0);
     });
 }
+
+#[test]
+fn explicit_diagonal_modal_matches_matrix_input_and_frequency_tangents() {
+    with_cx(&CancelGate::new(), |cx| {
+        let natural = [0.1, 1.0, 2.0, 3.0];
+        let rates = [2e-13, 0.125, 0.0, 0.5];
+        let mut full_damping = [0.0; 16];
+        for i in 0..4 {
+            full_damping[i * 4 + i] = rates[i];
+        }
+        let force = [C64::ONE, C64::new(0.3, -0.7), C64::ONE, C64::new(-0.2, 0.5)];
+        let slope = [C64::new(0.1, -0.05); 4];
+        for w in [0.0, 0.1 - 2e-13, 0.1, 0.1 + 2e-13, 1.5] {
+            let diagonal = PreparedHarmonicResponse::try_diagonal_modal(
+                &natural, &rates, w, controls(), cx,
+            )
+            .unwrap()
+            .solve_with_frequency_derivative(
+                &force, Some(&slope), None, tangent_controls(), cx,
+            )
+            .unwrap();
+            let matrix = PreparedHarmonicResponse::try_modal(
+                &natural, &full_damping, w, controls(), cx,
+            )
+            .unwrap()
+            .solve_with_frequency_derivative(
+                &force, Some(&slope), None, tangent_controls(), cx,
+            )
+            .unwrap();
+            assert_eq!(diagonal.response.displacement, matrix.response.displacement);
+            assert_eq!(diagonal.response.velocity, matrix.response.velocity);
+            assert_eq!(diagonal.displacement_derivative, matrix.displacement_derivative);
+            assert_eq!(diagonal.velocity_derivative, matrix.velocity_derivative);
+            assert_eq!(
+                diagonal.response.average_viscous_power_w.to_bits(),
+                matrix.response.average_viscous_power_w.to_bits()
+            );
+            assert_eq!(
+                diagonal.average_viscous_power_derivative.to_bits(),
+                matrix.average_viscous_power_derivative.to_bits()
+            );
+            assert_eq!(
+                diagonal.relative_derivative_residual.to_bits(),
+                matrix.relative_derivative_residual.to_bits()
+            );
+        }
+    });
+}

@@ -157,6 +157,20 @@ admission and requires `O(n*n)` inspection. Subsequent compact assembly and
 prepared response/tangent evaluations use `O(n)` work and owned storage.
 No mode, damping term or physical coupling is approximated by this dispatch.
 
+`try_diagonal_modal` accepts two length-n vectors for an explicitly independent
+modal model: natural frequencies [rad/s] and viscous damping coefficients
+`c` [1/s] in `q'' + c*q' + omega_i^2*q = F`. These coefficients are damping
+rates, not damping ratios. Its authored input and preparation both use `O(n)`
+space/work. It shares modal frequency validation, M/K assembly, factored
+detuning and the compact physical solver with `try_modal`; it does not project
+or infer off-diagonal damping or a port load. Coordinate/payload admission
+precedes coefficient allocation, and assembly polls cancellation per mode.
+Finite nonnegative rates, representable squared frequencies, zero-frequency
+coordinates and singular-response refusal retain the same physical rules.
+The same `272*n` payload allowance covers its `68*n` preparation peak; retained
+storage and single-response peaks remain `44*n` and `92*n` bytes. Existing
+frequency-derivative payload/work controls apply unchanged.
+
 Exact binary coordinate/time scaling reuses the quadratic-pencil owner. Native
 fs-la complex LU is cached per frequency for multiple force/receiver queries;
 exactly diagonal pencils use scalar division. The response returns original
@@ -196,6 +210,10 @@ free motion, singular limits, PSD refusal, budgets, cancellation and replay.
 Compact-path regressions include a 257-mode bank under its linear payload
 limit and a tiny physical coupling that requires dense admission and produces
 nonzero motion of an unforced coordinate.
+Explicit-vector regressions author 4,097 modes without a dense input, check
+closed-form motion and power, compare response/frequency tangents with the
+matrix-input API, and cover malformed, nonfinite, unrepresentable, singular,
+resource-limited and cancelled requests.
 
 `try_with_port_impedance` and `try_modal_with_port_impedance` attach the complete
 frequency-dependent physical load `Z(omega)` through a real force map B. Flow is

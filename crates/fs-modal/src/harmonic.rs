@@ -455,6 +455,36 @@ impl PreparedHarmonicResponse {
         )
     }
 
+    /// Prepare independent mass-normalized modes from two length-n vectors.
+    /// Each damping entry is the finite nonnegative coefficient c [1/s] in
+    /// q'' + c*q' + omega_i^2*q = F, not a damping ratio. The authored model
+    /// has no off-diagonal damping or port load; no matrix is projected here.
+    ///
+    /// Input, preparation, owned storage, solves and frequency tangents all
+    /// use O(n) space/work. The same `272*n` preparation-payload admission and
+    /// frequency controls apply as for an exactly diagonal `try_modal` owner.
+    /// Coordinate and payload bounds precede allocation; each mode polls
+    /// cancellation. Zero frequencies/damping and singular-response refusal,
+    /// representable squared frequencies, and factored detuning are shared
+    /// with `try_modal`.
+    pub fn try_diagonal_modal(
+        natural_frequencies_rad_s: &[f64],
+        damping_rates_per_s: &[f64],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        Self::prepare_modal_coefficients(
+            natural_frequencies_rad_s,
+            damping_rates_per_s,
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            None,
+            MatrixLayout::Diagonal,
+        )
+    }
+
     /// Mass-normalized modal convenience with the same complete physical load.
     /// Retains factored modal detuning at narrow and exact bare resonances.
     #[allow(clippy::too_many_arguments)] // original modal source and physical ports
@@ -512,39 +542,77 @@ impl PreparedHarmonicResponse {
                 break;
             }
         }
+        let mut diagonal_damping = if layout == MatrixLayout::Diagonal {
+            Vec::with_capacity(n)
+        } else {
+            Vec::new()
+        };
+        if layout == MatrixLayout::Diagonal {
+            for i in 0..n {
+                poll(cx)?;
+                diagonal_damping.push(damping_per_s[i * n + i]);
+            }
+        }
+        Self::prepare_modal_coefficients(
+            natural_frequencies_rad_s,
+            if layout == MatrixLayout::Diagonal {
+                &diagonal_damping
+            } else {
+                damping_per_s
+            },
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            port_load,
+            layout,
+        )
+    }
+
+    // Both authored diagonal vectors and the full-matrix modal convenience
+    // share frequency admission, M/K assembly and the same physical solver.
+    fn prepare_modal_coefficients(
+        natural_frequencies_rad_s: &[f64],
+        damping_per_s: &[f64],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+        port_load: Option<PreparedPortImpedance>,
+        layout: MatrixLayout,
+    ) -> Result<Self, HarmonicResponseError> {
+        let n = natural_frequencies_rad_s.len();
+        poll(cx)?;
         admit_layout(n, controls, layout)?;
         let entries = if layout == MatrixLayout::Diagonal {
             n
         } else {
             n * n
         };
+        if damping_per_s.len() != entries {
+            return Err(invalid(
+                "modal damping dimensions must match its storage layout",
+            ));
+        }
         let mut m = vec![0.0; entries];
         let mut k = vec![0.0; entries];
-        let mut diagonal_damping = if layout == MatrixLayout::Diagonal {
-            Vec::with_capacity(n)
-        } else {
-            Vec::new()
-        };
         for (i, &w) in natural_frequencies_rad_s.iter().enumerate() {
+            poll(cx)?;
             if !w.is_finite() || w < 0.0 || !(w * w).is_finite() || w != 0.0 && w * w == 0.0 {
                 return Err(invalid(
                     "finite nonnegative modal frequencies with representable stiffness required",
                 ));
             }
+            if layout == MatrixLayout::Diagonal
+                && (!damping_per_s[i].is_finite() || damping_per_s[i] < 0.0)
+            {
+                return Err(invalid("finite nonnegative modal damping rates required"));
+            }
             let index = layout.index(i, i, n);
             m[index] = 1.0;
             k[index] = w * w;
-            if layout == MatrixLayout::Diagonal {
-                diagonal_damping.push(damping_per_s[i * n + i]);
-            }
         }
         Self::prepare(
             &m,
-            if layout == MatrixLayout::Diagonal {
-                &diagonal_damping
-            } else {
-                damping_per_s
-            },
+            damping_per_s,
             &k,
             n,
             angular_frequency_rad_s,

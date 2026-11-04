@@ -475,3 +475,132 @@ fn g1_tiny_modal_coupling_keeps_dense_admission_and_nonzero_transfer() {
         assert!(response.displacement[1].abs() > 0.0);
     });
 }
+
+#[test]
+fn g1_explicit_diagonal_modal_bank_uses_only_linear_authored_input() {
+    with_cx(&CancelGate::new(), |cx| {
+        let n = 4097;
+        let natural: Vec<_> = (0..n)
+            .map(|i| if i == 0 { 0.1 } else { 0.5 + i as f64 / 16.0 })
+            .collect();
+        let rates: Vec<_> = (0..n)
+            .map(|i| if i == 0 { 2e-13 } else { 0.04 + (i % 7) as f64 / 32.0 })
+            .collect();
+        let force: Vec<_> = (0..n)
+            .map(|i| C64::new(1.0 + (i % 5) as f64 / 8.0, (i % 3) as f64 / 16.0))
+            .collect();
+        let bounded = HarmonicResponseControls {
+            maximum_coordinates: n,
+            maximum_payload_bytes: 272 * n,
+            ..controls()
+        };
+        // All authored inputs are vectors. A dense damping matrix at this
+        // extent would exceed 128 MiB; the payload budget is about 1 MiB.
+        for w in [0.0, 0.1, 0.1 + 2e-13, 3.0] {
+            let response = PreparedHarmonicResponse::try_diagonal_modal(
+                &natural, &rates, w, bounded, cx,
+            )
+            .unwrap()
+            .solve(&force, cx)
+            .unwrap();
+            let mut expected_power = 0.0;
+            for i in 0..n {
+                let a = C64::new((natural[i] - w) * (natural[i] + w), -w * rates[i]);
+                let q = force[i] / a;
+                let v = C64::new(0.0, -w) * q;
+                close(response.displacement[i], q, 5e-14);
+                close(response.velocity[i], v, 5e-14);
+                expected_power += 0.5 * rates[i] * v.norm_sq();
+            }
+            let power_tolerance = 2e-12 * expected_power.max(1.0);
+            assert!((response.average_viscous_power_w - expected_power).abs() < power_tolerance);
+            assert!(response.power_balance_residual_w.abs() < power_tolerance);
+            assert!(response.relative_residual < 3e-15);
+        }
+    });
+}
+
+#[test]
+fn g0_explicit_diagonal_modal_inputs_and_singular_limits_refuse() {
+    with_cx(&CancelGate::new(), |cx| {
+        let prepare = |natural: &[f64], rates: &[f64], w: f64| {
+            PreparedHarmonicResponse::try_diagonal_modal(natural, rates, w, controls(), cx)
+        };
+        assert!(matches!(
+            prepare(&[], &[], 1.0),
+            Err(HarmonicResponseError::Invalid(_))
+        ));
+        assert!(matches!(
+            prepare(&[2.0], &[], 1.0),
+            Err(HarmonicResponseError::Invalid(_))
+        ));
+        assert!(matches!(
+            prepare(&[2.0], &[0.2, 0.3], 1.0),
+            Err(HarmonicResponseError::Invalid(_))
+        ));
+        for natural in [-1.0, f64::NAN, f64::INFINITY, 1e200, 1e-200] {
+            assert!(matches!(
+                prepare(&[natural], &[0.2], 1.0),
+                Err(HarmonicResponseError::Invalid(_))
+            ));
+        }
+        for rate in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                prepare(&[2.0], &[rate], 1.0),
+                Err(HarmonicResponseError::Invalid(_))
+            ));
+        }
+        for drive in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                prepare(&[2.0], &[0.2], drive),
+                Err(HarmonicResponseError::Invalid(_))
+            ));
+        }
+        assert!(matches!(
+            prepare(&[2.0], &[0.0], 2.0),
+            Err(HarmonicResponseError::Singular { pivot: 0, .. })
+        ));
+        assert!(matches!(
+            prepare(&[0.0], &[0.2], 0.0),
+            Err(HarmonicResponseError::Singular { pivot: 0, .. })
+        ));
+        let rigid = prepare(&[0.0], &[0.0], 2.0)
+            .unwrap()
+            .solve(&[C64::ONE], cx)
+            .unwrap();
+        close(rigid.displacement[0], C64::from_re(-0.25), 2e-15);
+        // The input is c=0.5 /s, so resonant velocity is F/c=2.
+        let resonant = prepare(&[2.0], &[0.5], 2.0)
+            .unwrap()
+            .solve(&[C64::ONE], cx)
+            .unwrap();
+        close(resonant.velocity[0], C64::from_re(2.0), 2e-15);
+        for bounded in [
+            HarmonicResponseControls {
+                maximum_coordinates: 0,
+                ..controls()
+            },
+            HarmonicResponseControls {
+                maximum_payload_bytes: 271,
+                ..controls()
+            },
+        ] {
+            assert!(matches!(
+                PreparedHarmonicResponse::try_diagonal_modal(
+                    &[2.0], &[0.2], 1.0, bounded, cx
+                ),
+                Err(HarmonicResponseError::Budget { .. })
+            ));
+        }
+    });
+    let gate = CancelGate::new();
+    gate.request();
+    with_cx(&gate, |cx| {
+        assert!(matches!(
+            PreparedHarmonicResponse::try_diagonal_modal(
+                &[2.0], &[0.2], 1.0, controls(), cx
+            ),
+            Err(HarmonicResponseError::Cancelled)
+        ));
+    });
+}
