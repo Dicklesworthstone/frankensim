@@ -90,31 +90,45 @@ impl BinaryLiquidCaloricModelV1 {
                 "entropy increment requires the same caloric owner and component inventory",
             ));
         }
+        self.entropy_increment(&[initial], final_state)
+    }
+
+    // The heat owner has already admitted every original parcel and closed the
+    // component inventory. Evaluate only the accepted endpoint, never thermal
+    // root trials. This also admits mixing parcels with different compositions
+    // and temperatures without introducing absolute species entropy datums.
+    pub(super) fn entropy_increment(
+        &self,
+        inputs: &[&BinaryCaloricStateV1],
+        final_state: &BinaryCaloricStateV1,
+    ) -> Result<f64, BinaryCaloricErrorV1> {
         let mut entropy = Sum::default();
-        for (n, source) in initial
-            .component_moles
-            .iter()
-            .zip(&self.owner.heat_capacity)
-        {
-            if *n != 0.0 {
-                entropy.add(scaled_entropy(
-                    *n,
-                    source
-                        .entropy_change_j_per_mol_k(initial.temperature, final_state.temperature)?,
-                    "parcel sensible entropy increment",
-                )?)?;
+        for input in inputs {
+            for (n, source) in input.component_moles.iter().zip(&self.owner.heat_capacity) {
+                if *n != 0.0 {
+                    entropy.add(scaled_entropy(
+                        *n,
+                        source.entropy_change_j_per_mol_k(
+                            input.temperature,
+                            final_state.temperature,
+                        )?,
+                        "parcel sensible entropy increment",
+                    )?)?;
+                }
             }
+            // Symmetric coexistence phases have identical mixing entropies.
+            // Use the same actual accepted phase as the enthalpy owner, not
+            // the unequilibrated feed composition or a transport Cp. This also
+            // avoids lever-rule roundoff between identical phase entropies.
+            // Weight the final-minus-original molar entropy by each incoming
+            // parcel's conserved amount, rather than subtracting large totals.
+            entropy.add(scaled_entropy(
+                input.total_moles,
+                final_state.mixing.mixing_entropy_j_per_mol_k()
+                    - input.mixing.mixing_entropy_j_per_mol_k(),
+                "parcel mixing entropy increment",
+            )?)?;
         }
-        // Symmetric coexistence phases have identical mixing entropies. The
-        // representative is the same accepted phase used by caloric enthalpy;
-        // this avoids introducing lever-rule roundoff into identical states.
-        // Subtract intensive values before scaling by the finite inventory.
-        entropy.add(scaled_entropy(
-            initial.total_moles,
-            final_state.mixing.mixing_entropy_j_per_mol_k()
-                - initial.mixing.mixing_entropy_j_per_mol_k(),
-            "parcel mixing entropy increment",
-        )?)?;
         entropy.value()
     }
 }

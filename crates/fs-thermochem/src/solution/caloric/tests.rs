@@ -113,6 +113,13 @@ fn g1_ideal_unequal_temperature_mixing_uses_species_heat_capacities() {
         1
     );
     near(result.energy_residual_j(), 0.0, 1e-7);
+    // Independent ideal-mixture entropy: sensible equilibration plus mixing
+    // of four moles of initially pure species. Q=0 does not imply delta S=0.
+    let t = (100.0_f64 * 300.0 + 600.0 * 500.0) / 700.0;
+    let expected_entropy = 100.0 * (t / 300.0).ln() + 600.0 * (t / 500.0).ln()
+        - R * (0.25_f64.ln() + 3.0 * 0.75_f64.ln());
+    near(result.entropy_change_j_per_k(), expected_entropy, 2e-9);
+    assert!(result.entropy_change_j_per_k() > 0.0);
     let reverse = model.mix(&right, &left, 0.0, controls(), || false).unwrap();
     assert_eq!(result, reverse);
 }
@@ -163,6 +170,18 @@ fn g1_coexistence_enthalpy_matches_independent_high_precision_thermal_root() {
         2e-8,
     );
     near(result.energy_residual_j(), 0.0, 1e-7);
+    let t = 390.497_105_202_694_2_f64;
+    let x = 0.131_616_441_327_145_56_f64;
+    let sensible = 200.0 * (t / 400.0).ln();
+    let phase_entropy = -2.0 * R * (x * x.ln() + (1.0 - x) * (1.0 - x).ln());
+    near(
+        result.entropy_change_j_per_k(),
+        sensible + phase_entropy,
+        2e-9,
+    );
+    // Substituting the overall x_A=1/2 feed for the accepted phases would
+    // substantially overstate entropy even though it preserves composition.
+    assert!((result.entropy_change_j_per_k() - (sensible + 2.0 * R * 2.0_f64.ln())).abs() > 1.0);
 }
 
 #[test]
@@ -447,9 +466,91 @@ fn g3_adiabatic_demixing_increases_total_entropy_on_the_original_heat_balance() 
             .unwrap()
             > 0.0
     );
+    assert_eq!(
+        result.entropy_change_j_per_k(),
+        model
+            .entropy_change_j_per_k(&initial, result.final_state())
+            .unwrap(),
+    );
     near(
         result.energy_residual_j(),
         0.0,
         controls().energy_tolerance_j,
     );
+}
+
+#[test]
+fn g1_mixing_entropy_retains_both_initial_compositions_and_excess_entropy() {
+    let model = model(0.7, 200.0, [80.0, 120.0]);
+    let left = pure(&model, 300.0, [1.5, 0.5]);
+    let right = pure(&model, 700.0, [0.5, 1.5]);
+    let snapshots = [left.clone(), right.clone()];
+    let initial_molar_entropy =
+        -R * (0.75_f64 * 0.75_f64.ln() + 0.25 * 0.25_f64.ln() + 0.7 * 0.75 * 0.25);
+    let final_molar_entropy = R * (2.0_f64.ln() - 0.7 * 0.25);
+    for t in [250.0_f64, 500.0] {
+        // Original parcel capacities are 180 and 220 J/K; the four-mole
+        // excess-enthalpy increment is R*B*(4/4 - 4*3/16).
+        let heat = 180.0 * (t - 300.0) + 220.0 * (t - 700.0) + R * 200.0 * (1.0 - 0.75);
+        let result = model
+            .mix(&left, &right, heat, controls(), || false)
+            .unwrap();
+        let expected = 180.0 * (t / 300.0).ln()
+            + 220.0 * (t / 700.0).ln()
+            + 4.0 * (final_molar_entropy - initial_molar_entropy);
+        near(result.final_state().temperature().value(), t, 1e-9);
+        near(result.entropy_change_j_per_k(), expected, 2e-9);
+        if t == 250.0 {
+            // Cooling legitimately reduces system entropy; no unknown heat
+            // reservoir or positivity clamp may be folded into this result.
+            assert!(result.entropy_change_j_per_k() < 0.0);
+        }
+        assert_eq!(
+            result,
+            model
+                .mix(&right, &left, heat, controls(), || false)
+                .unwrap(),
+        );
+    }
+    assert_eq!([left, right], snapshots);
+}
+
+#[test]
+fn g0_mixing_entropy_is_invariant_to_common_enthalpy_datum_and_partition() {
+    let original = model(0.7, 200.0, [80.0, 120.0]);
+    let mut capacities = (*original.heat_capacities()).clone();
+    for source in &mut capacities {
+        source.reference_temperature = Temperature::new(900.0);
+    }
+    let rebased =
+        BinaryLiquidCaloricModelV1::new(original.thermodynamics().clone(), capacities).unwrap();
+    let run = |model: &BinaryLiquidCaloricModelV1| {
+        let left = pure(model, 300.0, [1.5, 0.5]);
+        let right = pure(model, 700.0, [0.5, 1.5]);
+        model.mix(&left, &right, 0.0, controls(), || false).unwrap()
+    };
+    let first = run(&original);
+    let second = run(&rebased);
+    assert_eq!(
+        first.entropy_change_j_per_k(),
+        second.entropy_change_j_per_k()
+    );
+    assert_eq!(first.enthalpy_change_j(), second.enthalpy_change_j());
+    assert_eq!(
+        first.final_state().temperature(),
+        second.final_state().temperature()
+    );
+    assert_ne!(
+        first.final_state().enthalpy_j(),
+        second.final_state().enthalpy_j()
+    );
+
+    // Combining identical parcels changes extensive inventory, but neither
+    // temperature nor phase/mixing entropy per mole. It generates no entropy.
+    let parcel = pure(&original, 500.0, [1.0, 3.0]);
+    let joined = original
+        .mix(&parcel, &parcel, 0.0, controls(), || false)
+        .unwrap();
+    assert_eq!(joined.final_state().component_moles(), [2.0, 6.0]);
+    assert_eq!(joined.entropy_change_j_per_k(), 0.0);
 }

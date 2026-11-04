@@ -327,6 +327,18 @@ fn unequal_temperature_mixing_retains_variable_cp_excess_enthalpy_and_actual_tra
                 / (MASSES[0] + 3.0 * MASSES[1]),
         );
         near(final_state.temperature().value(), expected, 2e-9);
+        // Cp=1000+T integrates to 1000 ln(Tf/Ti)+(Tf-Ti) in
+        // entropy. The initial parcels are pure; all ideal mixing entropy
+        // belongs to the accepted four-mole final composition.
+        let entropy = MASSES[0] * (1000.0 * (expected / 300.0).ln() + expected - 300.0)
+            + 3.0 * MASSES[1] * (1000.0 * (expected / 500.0).ln() + expected - 500.0)
+            - R * (0.25_f64.ln() + 3.0 * 0.75_f64.ln());
+        near(result.entropy_change_j_per_k(), entropy, 5e-9);
+        assert!(result.entropy_change_j_per_k() > 0.0);
+        assert_eq!(
+            result.entropy_change_j_per_k(),
+            result.balance().entropy_change_j_per_k(),
+        );
         assert!((final_state.temperature().value() - 450.0).abs() > 20.0);
         assert_eq!(final_state.phases().len(), 1);
         near(
@@ -403,6 +415,16 @@ fn adiabatic_demixing_heats_then_supplied_heat_remixes_the_same_finite_inventory
     verify_inventory_and_sources(cold, &liquid, feed);
     let x = cold.phases()[0].mole_fractions();
     let mass = 2.0 * MASSES[0] + MASSES[1];
+    let ideal_entropy = |x: f64| -R * (x * x.ln() + (1.0 - x) * (1.0 - x).ln());
+    let expected_t = 317.827_033_032_885_9;
+    let expected_x = 0.088_734_605_892_491_94;
+    let demixing_entropy = mass * (1000.0 * (expected_t / 300.0_f64).ln() + expected_t - 300.0)
+        + 3.0 * (ideal_entropy(expected_x) - ideal_entropy(2.0 / 3.0));
+    near(separated.entropy_change_j_per_k(), demixing_entropy, 3e-9);
+    assert!(separated.entropy_change_j_per_k() > 0.0);
+    // Demixing loses ideal configurational entropy, but its released excess
+    // enthalpy heats the same closed inventory enough to increase total S.
+    assert!(ideal_entropy(expected_x) < ideal_entropy(2.0 / 3.0));
     // Direct source equation closes the heat needed to reach a homogeneous
     // 520 K liquid; changing excess enthalpy cannot be omitted or counted twice.
     let heat = mass * (sensible(520.0) - sensible(cold.temperature().value()))
@@ -419,6 +441,9 @@ fn adiabatic_demixing_heats_then_supplied_heat_remixes_the_same_finite_inventory
         controls().energy_tolerance_j,
     );
     verify_inventory_and_sources(warm, &liquid, feed);
+    let warming_entropy = mass * (1000.0 * (520.0 / expected_t).ln() + 520.0 - expected_t)
+        + 3.0 * (ideal_entropy(2.0 / 3.0) - ideal_entropy(expected_x));
+    near(warmed.entropy_change_j_per_k(), warming_entropy, 3e-9);
     let cooled = law
         .add_heat(warmed.final_state(), -heat, controls(), || false)
         .unwrap();
@@ -429,6 +454,12 @@ fn adiabatic_demixing_heats_then_supplied_heat_remixes_the_same_finite_inventory
     );
     assert_eq!(cooled.equilibrium().phases().len(), 2);
     verify_inventory_and_sources(cooled.equilibrium(), &liquid, feed);
+    near(
+        cooled.entropy_change_j_per_k(),
+        -warmed.entropy_change_j_per_k(),
+        5e-9,
+    );
+    assert!(cooled.entropy_change_j_per_k() < 0.0);
     // The new endpoint retains the existing equilibrium and thermal-storage APIs.
     let isothermal = liquid
         .mix_isothermal(cold, cold, controls().coexistence, || false)
@@ -442,6 +473,18 @@ fn adiabatic_demixing_heats_then_supplied_heat_remixes_the_same_finite_inventory
         storage.temperature_k(h).unwrap(),
         cold.temperature().value(),
         3e-9,
+    );
+    let warm_h = storage
+        .specific_enthalpy_j_kg(warm.temperature(), || false)
+        .unwrap();
+    let storage_entropy = storage
+        .specific_entropy_change_j_kg_k(h, warm_h)
+        .unwrap()
+        .unwrap();
+    near(
+        storage_entropy * mass,
+        warmed.entropy_change_j_per_k(),
+        1e-8,
     );
     assert!(initial.caloric_state().equilibrium().is_none());
     assert_eq!(initial.temperature().value(), 300.0);

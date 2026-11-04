@@ -4,6 +4,8 @@
 //! pair law supplies excess mixing enthalpy exactly once. Numeric temperature
 //! trials use the shared L1 caloric owner. Only a completed thermal endpoint
 //! refreshes the original mixture transport sources at each actual phase.
+//! Completed mixing, heating and homogeneous relaxation balances retain the
+//! system entropy change from these original calorics and accepted phases.
 
 /// Fixed-composition enthalpy storage on the existing conservative heat timeline.
 pub mod storage;
@@ -283,6 +285,14 @@ impl BinaryLiquidCaloricBalance {
     }
     pub const fn balance(&self) -> &BinaryCaloricBalanceV1 {
         &self.balance
+    }
+    /// Signed liquid-system entropy change [J/K] over this completed mixing,
+    /// heating or homogeneous-relaxation transaction. The original pure Cp/T
+    /// and mixing phases supply it; transport Cp and entropy datums do not.
+    /// It is entropy production only for a closed adiabatic transaction;
+    /// externally supplied heat requires a separate reservoir entropy account.
+    pub const fn entropy_change_j_per_k(&self) -> f64 {
+        self.balance.entropy_change_j_per_k()
     }
     pub fn into_final_state(self) -> ResolvedBinaryLiquidCaloricState {
         self.final_state

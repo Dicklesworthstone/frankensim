@@ -8,6 +8,9 @@
 //!
 //! Heat balances use direct enthalpy INCREMENTS from each original parcel,
 //! so a large arbitrary reference enthalpy cannot erase a small heat input.
+//! Accepted balances include the corresponding system entropy change from
+//! original Cp/T and actual liquid phases. Heat alone does not specify the
+//! entropy exchanged with an external reservoir or the entropy production.
 //! No vapor, solid, spatial transport, nucleation, or mechanical work beyond
 //! constant-pressure boundary work is included.
 
@@ -427,6 +430,7 @@ impl BinaryLiquidCaloricModelV1 {
                     final_state: best.0.clone(),
                     heat_input_j,
                     enthalpy_change_j: best.1,
+                    entropy_change_j_per_k: self.entropy_increment(inputs, &best.0)?,
                     energy_residual_j: best.2,
                     temperature_bracket: [Temperature::new(lo), Temperature::new(hi)],
                     iterations,
@@ -521,12 +525,14 @@ impl BinaryCaloricStateV1 {
     }
 }
 
-/// Completed energy-balanced equilibrium; no inputs are mutated on refusal.
+/// Completed energy-balanced equilibrium and its signed system entropy change.
+/// No inputs are mutated on refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BinaryCaloricBalanceV1 {
     final_state: BinaryCaloricStateV1,
     heat_input_j: f64,
     enthalpy_change_j: f64,
+    entropy_change_j_per_k: f64,
     energy_residual_j: f64,
     temperature_bracket: [Temperature; 2],
     iterations: usize,
@@ -540,6 +546,18 @@ impl BinaryCaloricBalanceV1 {
     }
     pub const fn enthalpy_change_j(&self) -> f64 {
         self.enthalpy_change_j
+    }
+    /// Final liquid entropy minus the sum of all incoming parcel entropies
+    /// [J/K]. Original pure-component Cp/T and each accepted homogeneous or
+    /// coexisting phase are included; conserved species entropy datums cancel.
+    ///
+    /// For a closed adiabatic transaction this is entropy production. With
+    /// external heat it is a signed system change: the reservoir temperature
+    /// history is needed separately to determine production. Mixing or initial
+    /// nonequilibrium relaxation cannot be replaced by a reversible integral
+    /// of the applied heat divided by the final temperature.
+    pub const fn entropy_change_j_per_k(&self) -> f64 {
+        self.entropy_change_j_per_k
     }
     pub const fn energy_residual_j(&self) -> f64 {
         self.energy_residual_j
