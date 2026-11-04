@@ -14,6 +14,7 @@ layer = "L3"
 fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]

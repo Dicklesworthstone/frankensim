@@ -50,6 +50,9 @@ use fs_math::det;
 /// Positive-time adaptivity on an existing compact diffusion graph.
 pub mod adaptive;
 pub(crate) mod moving;
+/// Original material sources bound to the existing homogeneous PSE law.
+mod material;
+pub use material::{MaterialPseDiffusion, MaterialPseError};
 /// Reusable spatial graphs for fixed-site compact-support diffusion.
 pub mod sparse;
 pub use sparse::{PreparationBudget, PreparationReport, PreparedPse};

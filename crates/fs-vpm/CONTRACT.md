@@ -1524,3 +1524,25 @@ semantics, weight/moment underflow, extreme derivative scales, byte/work caps,
 and final-boundary cancellation with snapshot reuse. These new Rust tests were
 authored and reviewed but native compilation and execution were unavailable
 for this extension; independent mathematical cross-checks are separate evidence.
+
+## Original material viscosity in particle-strength exchange
+
+`diffusion::MaterialPseDiffusion` borrows an original `FluidTransport` source
+and evaluates its coherent transport state once. The existing PSE law uses
+that state's checked SI `nu = mu/rho`. Gaussian width and compact Wendland
+support radius keep their native meanings, independently of the velocity core.
+The binding retains the exact source owner and the immutable transport snapshot;
+raw transport inputs do not acquire material-card authority.
+
+`law()` feeds all existing PSE diffusion, viscous advection, remeshing and
+prepared-graph consumers. Their pair kernels, work/memory budgets, conservation
+and cancellation semantics remain unchanged; no source callbacks or extra
+allocations enter a pair sweep. A changed material state requires a fresh
+binding. Original material and native numerical refusals remain typed.
+
+This is homogeneous Newtonian viscosity frozen at one state. It does not supply
+spatially varying viscosity, non-Newtonian vorticity transport, thermal feedback
+or a validity claim across evolving material conditions.
+`tests/material_diffusion.rs` exercises dry-air temperature/pressure changes
+against the exact two-site diffusion ODE, circulation conservation, compact
+support, native viscous-advection parity, single sampling and source refusals.
