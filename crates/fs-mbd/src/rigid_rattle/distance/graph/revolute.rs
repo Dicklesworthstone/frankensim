@@ -473,9 +473,26 @@ impl NativeReaction for JointReactionImpulse {
             match event {
                 Self::Point(event) => work.add_point(i, event, *impulse, *target, endpoint)?,
                 Self::Couple(event) => {
-                    // Hinges are passive. Only distance rows own prescribed
-                    // rates; retain the physical couple work in their defect.
-                    work.add_work(i, Dd::ZERO, Dd::from_f64(event.impulse_work_j))?;
+                    let mut source = Dd::ZERO;
+                    if let Some((axis, rate)) = target.spin(endpoint) {
+                        let axis = event
+                            .first
+                            .state_before
+                            .pose()
+                            .orientation()
+                            .rotate_body_to_world(axis);
+                        source = components(event.couple_on_second_world_nms)
+                            .into_iter()
+                            .zip(components(axis))
+                            .fold(Dd::ZERO, |sum, (j, axis)| {
+                                sum + Dd::from_f64(j) * Dd::from_f64(axis)
+                            })
+                            * rate;
+                    }
+                    // Passive angular rows retain zero source work. Motor
+                    // rows pair actual world couples with the authored moving
+                    // axis/rate; all ordered cross terms remain in the defect.
+                    work.add_work(i, source, Dd::from_f64(event.impulse_work_j))?;
                 }
             }
         }

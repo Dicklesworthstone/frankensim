@@ -583,6 +583,9 @@ fn passive(joint: DrivenJoint) -> ArticulatedJoint {
         DrivenJoint::Revolute(joint) => ArticulatedJoint::Revolute(joint),
         DrivenJoint::PointPlane(joint) => ArticulatedJoint::PointPlane(joint),
         DrivenJoint::Prismatic(joint) => ArticulatedJoint::Prismatic(joint),
+        DrivenJoint::RevoluteMotor { .. } => {
+            unreachable!("this passive fixture has no angular motor")
+        }
     }
 }
 

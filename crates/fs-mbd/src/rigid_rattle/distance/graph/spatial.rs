@@ -89,12 +89,12 @@ pub fn advance_spatial_articulated_graph(
     revolute::finish(step, joints, bytes, &mut cancelled)
 }
 
-/// Advance the same spatial loads through an actuated rod/ball/hinge graph.
+/// Advance the same spatial loads through a finite actuated mechanism graph.
 ///
 /// This composes [`super::advance_driven_joint_graph`]'s original quadratic
 /// command and work owner with [`advance_spatial_articulated_graph`]'s native
-/// spatial free motion. Source forces/couples, radial actuator work and passive
-/// constraint defects remain distinct in the returned receipts. Every row is
+/// spatial free motion. Source forces/couples, radial/angular actuator work and
+/// passive constraint defects remain distinct in the returned receipts. Every row is
 /// solved simultaneously, with finite recoil for every body.
 ///
 /// The extra live payload is one prepared torque bound per body. The original
@@ -131,7 +131,7 @@ pub fn advance_spatial_driven_joint_graph(
     let mut row_count = 0;
     for &joint in joints {
         poll(&mut cancelled)?;
-        row_count += joint.articulated().row_count();
+        row_count += joint.row_count();
         limit("constraints", row_count as u128, maximum as u128)?;
     }
     let extra = loads.len() as u128 * core::mem::size_of::<f64>() as u128;

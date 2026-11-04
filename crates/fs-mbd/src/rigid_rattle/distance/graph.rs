@@ -3,7 +3,8 @@
 //! The original pair constraint supplies positive-distance geometry. Spherical
 //! joints add three Cartesian closure rows through [`advance_joint_graph`].
 //! [`advance_articulated_graph`] also admits moving point/plane joints and
-//! five-row revolute or prismatic joints. All
+//! five-row revolute or prismatic joints. [`advance_driven_joint_graph`] adds
+//! quadratic radial actuators and six-row finite revolute motors. All
 //! scalar reactions share the native momentum owners and the complete mobility
 //! `J M^-1 J^T`; a chain is never approximated by independent pair solves.
 //! Central rod reactions conserve internal angular momentum; spherical rows
@@ -57,6 +58,10 @@ pub use planes::PointPlaneJoint;
 #[path = "graph/prismatic.rs"]
 mod prismatic;
 pub use prismatic::PrismaticJoint;
+
+#[path = "graph/angular.rs"]
+mod angular;
+pub use angular::{AngularDrive, AngularDriveStep, RevoluteMotorJoint};
 
 /// Maximum simultaneous independent scalar rows in the bounded dense solve.
 pub const MAX_DISTANCE_ROWS: usize = 32;
@@ -230,7 +235,8 @@ pub struct DistanceGraphControls {
     pub maximum_bodies: usize,
     /// Maximum simultaneous scalar rows, at most [`MAX_DISTANCE_ROWS`]. A rod
     /// consumes one row, a spherical joint three, and a revolute hinge or
-    /// prismatic joint five. An independent point/plane joint consumes one.
+    /// prismatic joint five, and a driven revolute motor six. An independent
+    /// point/plane joint consumes one.
     pub maximum_constraints: usize,
     /// Maximum complete nonlinear trial evaluations, including the initial one.
     pub maximum_trial_evaluations: u32,
@@ -495,7 +501,8 @@ fn advance_between_with<E: NativeReaction, F: FreeFlow>(
                 DistanceStepError::Invalid("rod endpoints need distinct existing bodies").into(),
             );
         }
-        let mut g = problem.geometry(link, link.bodies.map(|b| states[b]))?;
+        let spin = targets.and_then(|targets| targets[i].spin(false));
+        let mut g = problem.geometry(link, link.bodies.map(|b| states[b]), spin)?;
         if let Some(targets) = targets
             && matches!(link.kind, RowKind::Distance(_))
         {
@@ -703,15 +710,23 @@ impl<F: FreeFlow> Problem<'_, F> {
         states: [RigidBodyState; 2],
     ) -> Result<Geometry, DistanceStepError> {
         let mut link = self.links.get(index);
-        let target = self
-            .targets
-            .filter(|_| matches!(link.kind, RowKind::Distance(_)))
-            .map(|targets| targets[index]);
+        let target = self.targets.map(|targets| targets[index]);
         if let Some(target) = target {
-            link.kind = RowKind::Distance(target.length);
+            match link.kind {
+                RowKind::Distance(_) => link.kind = RowKind::Distance(target.length),
+                RowKind::FrameLock(mut row) => {
+                    if let Some(angular) = target.angular {
+                        row.frames_body[0] = angular.frame_after;
+                        link.kind = RowKind::FrameLock(row);
+                    }
+                }
+                _ => {}
+            }
         }
-        let mut g = self.geometry(link, states)?;
-        if let Some(target) = target {
+        let mut g = self.geometry(link, states, target.and_then(|target| target.spin(true)))?;
+        if let Some(target) = target
+            && matches!(link.kind, RowKind::Distance(_))
+        {
             // Solve against the original polynomial, retaining the part lost
             // when the endpoint length/rate are rounded for continuation.
             g.gap = (Dd::from_f64(g.gap) + target.length_residual).to_f64();
@@ -747,6 +762,7 @@ impl<F: FreeFlow> Problem<'_, F> {
         &self,
         link: Row,
         states: [RigidBodyState; 2],
+        spin: Option<(Vec3, Dd)>,
     ) -> Result<Geometry, DistanceStepError> {
         match link.kind {
             RowKind::Distance(_) => self.constraint(link)?.geometry(states),
@@ -776,7 +792,12 @@ impl<F: FreeFlow> Problem<'_, F> {
                         "frame-lock length must exceed closure tolerance",
                     ));
                 }
-                prismatic::geometry(states, link.bodies.map(|b| self.properties[b]), row)
+                let properties = link.bodies.map(|b| self.properties[b]);
+                if spin.is_some() {
+                    prismatic::geometry_with_spin(states, properties, row, spin)
+                } else {
+                    prismatic::geometry(states, properties, row)
+                }
             }
         }
     }
@@ -870,13 +891,21 @@ impl<F: FreeFlow> Problem<'_, F> {
         for (i, (link, before)) in self.links.iter().zip(initial).enumerate() {
             poll(cancelled)?;
             let g = self.endpoint_geometry(i, link.bodies.map(|b| out.states[b]))?;
-            // A hinge's normal is a dimensional angular Jacobian. Both body
-            // rotations contribute to its change; the native body-travel
-            // caps and positive-axis branch still apply independently.
+            // Angular Jacobians follow both native bodies. A motor also moves
+            // its commanded frame, with that entire excursion admitted before
+            // stepping. All actual body-travel and local chart caps still apply.
             let normal_travel = norm(g.normal.sub(before.normal));
+            let command_travel =
+                self.targets
+                    .and_then(|targets| targets[i].angular)
+                    .map_or(0.0, |target| {
+                        2.0 * fs_math::det::sin(0.5 * target.report.maximum_excursion_rad)
+                            + target.report.displacement_representation_residual_rad.abs()
+                            + target.report.transverse_frame_residual_rad
+                    });
             let local = link.angular_length().map_or_else(
                 || normal_travel <= chord,
-                |length| normal_travel / length <= 2.0 * chord,
+                |length| normal_travel / length <= 2.0 * chord + command_travel,
             );
             if !local {
                 return Err(DistanceStepError::LocalBranch.into());

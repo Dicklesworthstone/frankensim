@@ -114,7 +114,7 @@ impl PrismaticJoint {
 
 #[derive(Clone, Copy)]
 pub(super) struct AngularConstraint {
-    frames_body: [UnitQuaternion; 2],
+    pub frames_body: [UnitQuaternion; 2],
     pub length_m: f64,
     pub component: usize,
 }
@@ -130,6 +130,18 @@ pub(super) fn geometry(
     states: [RigidBodyState; 2],
     properties: [MassProperties; 2],
     row: AngularConstraint,
+) -> Result<Geometry, DistanceStepError> {
+    geometry_with_spin(states, properties, row, None)
+}
+
+// A revolute actuator advances the first joint frame about its local Z axis.
+// Subtract that commanded motion before the final DD dot product; a large
+// shared or commanded spin must not erase its small hidden-constraint error.
+pub(super) fn geometry_with_spin(
+    states: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    row: AngularConstraint,
+    spin: Option<(Vec3, Dd)>,
 ) -> Result<Geometry, DistanceStepError> {
     let frames = core::array::from_fn::<_, 2, _>(|i| {
         states[i].pose().orientation().multiply(row.frames_body[i])
@@ -161,12 +173,24 @@ pub(super) fn geometry(
             .point_kinematics(properties[1], Vec3::ZERO)?
             .angular_velocity_world,
     ];
+    let command = spin.map(|(axis, rate)| {
+        (
+            states[0].pose().orientation().rotate_body_to_world(axis),
+            rate,
+        )
+    });
+    let axis = command.map_or([0.0; 3], |(axis, _)| [axis.x, axis.y, axis.z]);
     let rate = [angular[0].x, angular[0].y, angular[0].z]
         .into_iter()
         .zip([angular[1].x, angular[1].y, angular[1].z])
         .zip([normal.x, normal.y, normal.z])
-        .fold(Dd::ZERO, |sum, ((before, after), n)| {
-            sum + (Dd::from_f64(after) - Dd::from_f64(before)) * Dd::from_f64(n)
+        .zip(axis)
+        .fold(Dd::ZERO, |sum, (((before, after), n), axis)| {
+            let mut relative = Dd::from_f64(after) - Dd::from_f64(before);
+            if let Some((_, rate)) = command {
+                relative = relative - Dd::from_f64(axis) * rate;
+            }
+            sum + relative * Dd::from_f64(n)
         })
         .to_f64();
     if !normal.is_finite() || !gap.is_finite() || !rate.is_finite() {

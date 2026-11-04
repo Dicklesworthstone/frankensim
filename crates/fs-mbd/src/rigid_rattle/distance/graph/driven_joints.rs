@@ -1,15 +1,15 @@
-//! Prescribed distance actuators within the native articulated joint graph.
+//! Prescribed radial and angular actuators in the native articulated graph.
 
 use super::{
-    ArticulatedJoint, Dd, DistanceDrive, DistanceGraphControls, DistanceGraphError,
-    DistanceGraphStep, DistanceLink, DistanceStepError, FreeFlow, JointReactionImpulse, JointRows,
-    MAX_DISTANCE_ROWS, MassProperties, PointPlaneJoint, PrismaticJoint, RevoluteJoint,
-    RigidBodyIntegrator, RigidBodyState, Row, Rows, SphericalJoint, Vec3, Wrench,
-    advance_between_with, driven, limit, planned_bytes_for_motion, poll, positive, reserved,
-    revolute,
+    AngularDrive, AngularDriveStep, ArticulatedJoint, Dd, DistanceDrive, DistanceGraphControls,
+    DistanceGraphError, DistanceGraphStep, DistanceLink, DistanceStepError, FreeFlow,
+    JointReactionImpulse, JointRows, MAX_DISTANCE_ROWS, MassProperties, PointPlaneJoint,
+    PrismaticJoint, RevoluteJoint, RevoluteMotorJoint, RigidBodyIntegrator, RigidBodyState, Row,
+    Rows, SphericalJoint, Vec3, Wrench, advance_between_with, angular, driven, limit,
+    planned_bytes_for_motion, poll, positive, reserved, revolute,
 };
 
-/// Finite passive joints and prescribed radial actuators in one coupled graph.
+/// Finite passive joints and prescribed radial/angular actuators in one graph.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DrivenJoint {
     /// An ideal internal actuator with a held quadratic range command. A
@@ -28,15 +28,34 @@ pub enum DrivenJoint {
     PointPlane(PointPlaneJoint),
     /// A freely sliding rail coordinate with locked relative joint frames.
     Prismatic(PrismaticJoint),
+    /// A finite hinge with quadratic relative angle and signed source work.
+    /// Zero commanded spin holds the relative angle; it is still a six-row
+    /// actuator, not the five-row passive [`Self::Revolute`] joint.
+    RevoluteMotor {
+        /// Coincident material points and the current commanded joint frames.
+        joint: RevoluteMotorJoint,
+        /// Initial relative spin and held relative angular acceleration.
+        drive: AngularDrive,
+    },
 }
 impl DrivenJoint {
-    pub(super) fn articulated(self) -> ArticulatedJoint {
+    pub(super) fn row_count(self) -> usize {
         match self {
-            Self::Distance { link, .. } => ArticulatedJoint::Distance(link),
-            Self::Spherical(joint) => ArticulatedJoint::Spherical(joint),
-            Self::Revolute(joint) => ArticulatedJoint::Revolute(joint),
-            Self::PointPlane(joint) => ArticulatedJoint::PointPlane(joint),
-            Self::Prismatic(joint) => ArticulatedJoint::Prismatic(joint),
+            Self::Distance { .. } | Self::PointPlane(_) => 1,
+            Self::Spherical(_) => 3,
+            Self::Revolute(_) | Self::Prismatic(_) => 5,
+            Self::RevoluteMotor { .. } => 6,
+        }
+    }
+
+    pub(super) fn write_rows(self, rows: &mut [Row]) {
+        match self {
+            Self::Distance { link, .. } => ArticulatedJoint::Distance(link).write_rows(rows),
+            Self::Spherical(joint) => ArticulatedJoint::Spherical(joint).write_rows(rows),
+            Self::Revolute(joint) => ArticulatedJoint::Revolute(joint).write_rows(rows),
+            Self::PointPlane(joint) => ArticulatedJoint::PointPlane(joint).write_rows(rows),
+            Self::Prismatic(joint) => ArticulatedJoint::Prismatic(joint).write_rows(rows),
+            Self::RevoluteMotor { joint, .. } => joint.write_rows(rows),
         }
     }
 }
@@ -44,17 +63,19 @@ impl DrivenJoint {
 /// Continuation, scalar-row location and work of one authored joint.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrivenJointStep {
-    /// Actuator endpoints with the final represented range/rate, or the
-    /// unchanged passive joint. Use this value for the next accepted interval.
+    /// Actuator endpoints with their represented range/rate or current angular
+    /// frame/rate, or the unchanged passive joint. Continue with this value.
     pub joint_after: DrivenJoint,
     /// Row span in the native step, including every angular lock row.
     pub rows: JointRows,
     /// Represented endpoint range minus the commanded polynomial [m].
-    /// Zero for passive joints.
+    /// Zero for angular actuators and passive joints.
     pub length_representation_residual_m: f64,
     /// Represented final range rate minus the commanded rate [m/s].
-    /// Zero for passive joints.
+    /// Zero for angular actuators and passive joints.
     pub rate_representation_residual_mps: f64,
+    /// Actual angular command representation; absent for radial/passive joints.
+    pub angular: Option<AngularDriveStep>,
     /// Signed actuator source work [J]. Passive joints contribute zero.
     pub actuator_work_j: f64,
     /// Ordered native force/couple work minus actuator source work [J].
@@ -85,7 +106,7 @@ pub struct DrivenJointGraphStep<FreeStep = crate::StepReceipt> {
     pub planned_live_bytes: usize,
 }
 
-/// Advance quadratic distance actuators and finite passive joints together.
+/// Advance quadratic distance/angular actuators and finite passive joints.
 ///
 /// Every row enters the same full-inertia force/couple mobility and bounded
 /// nonlinear solve. Actuator forces can therefore drive attached mechanisms
@@ -97,20 +118,29 @@ pub struct DrivenJointGraphStep<FreeStep = crate::StepReceipt> {
 /// Each distance follows `length(t) = length(0) + rate*t + acceleration*t²/2`.
 /// The existing distance command owner checks the entire interval's positive
 /// range, endpoint representability and separate COM/spin range rates. Only
-/// radial rows receive those commands; point/plane and angular lock rows
+/// radial rows receive those commands; point/plane and passive angular rows
 /// retain their original geometry. Passive joints supply no source work. Their
 /// ordered point/couple work remains in the independently reported defect, so
 /// it cannot be mislabeled as actuator energy or silently erased.
 ///
+/// A revolute motor advances its current first joint frame about joint-local Z
+/// by `rate*t + acceleration*t²/2`. The original full-frame angular Jacobian
+/// subtracts this commanded motion before hidden-rate admission; each actual
+/// pure-couple impulse is paired with that same world axis and command rate.
+/// The complete interval excursion, including interior turning points, and
+/// measured frame/rate representation errors must fit the native local bounds.
+/// Continuation carries the advanced frame, avoiding absolute-angle wrapping.
+///
 /// The 32-scalar-row bound counts one row per rod or point/plane, three per ball
-/// and five per hinge or slider. Two fixed stack banks and one continuation vector
+/// and five per passive hinge or slider, or six per revolute motor. Two fixed
+/// stack banks and one continuation vector
 /// extend the native buffers, with no per-trial allocation. Every refusal or
 /// cancellation leaves all borrowed inputs unchanged. Command errors identify
-/// the actuator's first scalar row, matching the native residual/event order.
+/// the radial row or first motor angular row in native residual/event order.
 ///
 /// This remains an ideal bilateral actuator with an external energy source and
-/// smooth finite-body joints. It adds no motor/storage law, hinge motor,
-/// friction, unilateral contact, global branch or exact energy certificate.
+/// smooth finite-body joints. Finite motor power/storage, efficiency, friction,
+/// unilateral contact, global branches and exact energy remain separate models.
 #[allow(clippy::too_many_arguments)]
 pub fn advance_driven_joint_graph(
     states: &[RigidBodyState],
@@ -158,13 +188,19 @@ pub(super) fn advance_with<F: FreeFlow>(
     let mut row_count = 0;
     for &joint in joints {
         poll(&mut cancelled)?;
-        let geometry = joint.articulated();
-        let width = geometry.row_count();
+        let width = joint.row_count();
         limit("constraints", (row_count + width) as u128, maximum as u128)?;
-        geometry.write_rows(&mut rows[row_count..row_count + width]);
-        if let DrivenJoint::Distance { link, drive } = joint {
-            targets[row_count] =
-                driven::Target::prepare(row_count, link, drive, duration_s, controls)?;
+        joint.write_rows(&mut rows[row_count..row_count + width]);
+        match joint {
+            DrivenJoint::Distance { link, drive } => {
+                targets[row_count] =
+                    driven::Target::prepare(row_count, link, drive, duration_s, controls)?;
+            }
+            DrivenJoint::RevoluteMotor { joint, drive } => {
+                let target = angular::prepare(row_count + 3, joint, drive, duration_s, controls)?;
+                targets[row_count + 3..row_count + 6].fill(target);
+            }
+            _ => {}
         }
         row_count += width;
     }
@@ -190,6 +226,8 @@ pub(super) fn advance_with<F: FreeFlow>(
     finish(
         step,
         joints,
+        properties,
+        controls,
         &targets[..row_count],
         work,
         bytes,
@@ -197,9 +235,12 @@ pub(super) fn advance_with<F: FreeFlow>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finish<FreeStep>(
     step: DistanceGraphStep<JointReactionImpulse, FreeStep>,
     joints: &[DrivenJoint],
+    properties: &[MassProperties],
+    controls: DistanceGraphControls,
     targets: &[driven::Target],
     work: driven::Work,
     planned_live_bytes: u128,
@@ -211,7 +252,7 @@ pub(super) fn finish<FreeStep>(
     let mut defect = Dd::ZERO;
     for &joint in joints {
         poll(cancelled)?;
-        let row_count = joint.articulated().row_count();
+        let row_count = joint.row_count();
         let mut joint_source = Dd::ZERO;
         let mut joint_defect = Dd::ZERO;
         for account in &work.links[first_row..first_row + row_count] {
@@ -235,6 +276,7 @@ pub(super) fn finish<FreeStep>(
             },
             length_representation_residual_m: 0.0,
             rate_representation_residual_mps: 0.0,
+            angular: None,
             actuator_work_j: joint_source.to_f64(),
             constraint_work_defect_j: joint_defect.to_f64(),
         };
@@ -253,6 +295,18 @@ pub(super) fn finish<FreeStep>(
             result.length_representation_residual_m = target.length_residual.to_f64();
             result.rate_representation_residual_mps =
                 (Dd::from_f64(target.final_rate.to_f64()) - target.final_rate).to_f64();
+        }
+        if let DrivenJoint::RevoluteMotor { joint, drive } = joint {
+            let (joint, drive, report) = angular::continuation(
+                joint,
+                drive,
+                targets[first_row + 3],
+                joint.bodies().map(|b| step.states_after[b]),
+                joint.bodies().map(|b| properties[b]),
+                controls,
+            )?;
+            result.joint_after = DrivenJoint::RevoluteMotor { joint, drive };
+            result.angular = Some(report);
         }
         continuation.push(result);
         first_row += row_count;

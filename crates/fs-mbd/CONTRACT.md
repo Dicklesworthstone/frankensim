@@ -5830,6 +5830,90 @@ requirements. Travel stops, friction, unilateral impact/contact, rail motors,
 arbitrary dependent constraints, global branches and exact energy/symplectic
 claims require their own models.
 
+## Finite revolute angular actuation in coupled native mechanisms
+
+`RevoluteMotorJoint`, `AngularDrive` and `DrivenJoint::RevoluteMotor` prescribe
+the remaining axial angle of a finite hinge in both `advance_driven_joint_graph`
+and `advance_spatial_driven_joint_graph`. Two material points coincide, and the
+current first joint frame turns about its local Z by
+`delta(t) = rate*t + acceleration*t*t/2`. Body two follows that moving frame.
+Both bodies retain finite mass, full intrinsic inertia and recoil; the joint
+frames need not coincide with either inertia's principal axes. Motors share
+the same coupled solve with other motors, radial drives, rods, balls, passive
+hinges, moving planes and sliders. An ideal zero-rate motor holds its relative
+angle and has six rows; the passive five-row hinge still rotates freely.
+
+Each motor contributes the original three Cartesian point closures and three
+full-frame angular rows from the prismatic geometry owner. For relative joint
+quaternion `(w,v)`, `g = 2 L w v` and the existing exact world Jacobian is
+`n_i = L Q0 [w*w e_i - v_i v + w (v cross e_i)]`. With current world motor axis
+`a = R_body0 frame0 Z` and commanded relative spin `nu`, its hidden rate is
+`n_i.dot(omega1 - omega0 - a*nu)`. The command is subtracted in compensated
+arithmetic before pairing with the Jacobian. The advanced first frame enters
+endpoint geometry directly; no finite-difference angular Jacobian, new free
+integrator, pose repair, fixed support or sequential pair solve is introduced.
+The existing full-inertia force/couple mobility retains all shared-body cross
+responses, nonlinear backtracks and actual native endpoint impulses.
+
+The quadratic angular increment and final rate use the same compensated
+polynomial owner as radial actuation. Admission checks the maximum absolute
+command excursion over the complete interval, including its interior turning
+point, against twice the native per-body angular-travel cap. A hidden full turn
+or excessive out-and-back command therefore refuses even if its endpoint frame
+would coincide with the start. Actual native body travel, the positive-cosine
+orientation chart, scaled pivots and complete vector impulse bounds still apply.
+Moving-normal admission includes the separately bounded commanded-frame travel.
+
+The original native quaternion exponential prepares the advanced local frame.
+Compensated relative-quaternion products reconstruct its axial phase and any
+unwanted transverse tilt, including canonical sign changes across accumulated
+half turns. `AngularDriveStep` exposes the represented displacement, axial
+representation residual, transverse frame residual, continuation-rate residual
+and complete interval excursion. `L*(abs(phase residual) + transverse tilt)` must
+fit the position tolerance, as must its sum with the final angular gap norm.
+The represented continuation rate and actual advanced frame are also checked
+against the hidden-rate tolerance. An unrepresentable command or nonzero
+displacement that vanishes in its frame refuses. Continuation carries the
+advanced frame and final rate, allowing repeated revolutions without recovering
+an absolute wrapped angle from a body pose.
+
+Signed motor source work pairs each ACTUAL native world couple impulse with
+the prescribed angular velocity of the current motor axis at its impulse
+stage: `couple_on_second.dot(a)*nu`. The source account therefore includes full
+tensor and shared-body effects from the coupled solution. Positive values
+supply energy; negative values recover it. Original native paired reaction work
+minus this source remains `constraint_work_defect_j`, including all ordered
+cross terms and passive point/angular work. Passive joints supply zero actuator
+work. Prepared spatial-load source work and native free-step numerical defects
+remain separate, and all original momentum and impulse receipts are retained.
+No defect is interpreted as physical heat or discarded to enforce energy.
+
+The motor's six actual scalar rows count toward the existing 32-row limit.
+Its three point impulses and summed three-row physical couple have the same
+separate complete-vector caps as the original point and full-frame owners; the
+couple cap is `L*maximum_impulse_ns`. Existing fixed row/target banks stay on the
+stack, current native continuation sizes enter live-byte admission, and original
+trial buffers are reused with no per-trial allocation. Every refusal and
+cancellation publishes no partial state or continuation and leaves borrowed
+inputs intact. Angular command failures identify the first motor angular row.
+
+Six integration groups in `tests/rigid_angular_drive_graph.rs` cover a loaded
+three-rotor chain against independent analytic angular-momentum and torque
+balances, signed supply/recovery, nine-radian continuation and reversal; two
+full non-diagonal tensors against an independent conserved-angular-momentum
+quaternion ODE with second-order state and source-work refinement and reversal;
+an off-center motor/slider/radial mechanism under native spatial loads with
+actual couple-work pairing, free-source receipt identity, repeated P/L/work
+closure and rotation/common-boost covariance; a connected 32-row motor chain,
+exact live-byte boundary and complete physical couple cap; full-interval winding,
+turning-point and hidden-rate admission; and every observed cancellation point
+with identical retry. All six new groups and 82 previous affected integration
+tests pass in the bounded actual-source native build. This is numerical
+source-level evidence, not a full Cargo workspace/DSR gate or experimental
+validation. These are prescribed ideal bilateral actuators; finite motor
+power/storage, efficiency, friction, stops, unilateral contact, arbitrary
+dependent constraints and global branches still require their own models.
+
 ## Finite rigid separation at prescribed relative linear and spin velocities
 
 The native assembly owner exposes

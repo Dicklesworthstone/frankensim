@@ -170,6 +170,7 @@ pub(super) struct Target {
     pub length_residual: Dd,
     pub initial_rate: f64,
     pub final_rate: Dd,
+    pub angular: Option<super::angular::AngularTarget>,
 }
 impl Target {
     pub(super) fn prepare(
@@ -189,13 +190,14 @@ impl Target {
         {
             return Err(error("finite positive length and finite motion required"));
         }
-        let h = Dd::from_f64(duration);
         let start = Dd::from_f64(link.length_m);
         let rate = Dd::from_f64(drive.range_rate_mps);
         let acceleration = Dd::from_f64(drive.range_acceleration_mps2);
-        let delta_rate = acceleration * h;
-        let final_rate = rate + delta_rate;
-        let delta_length = h * (rate + Dd::from_f64(0.5) * delta_rate);
+        let (delta_length, final_rate) = motion_increment(
+            drive.range_rate_mps,
+            drive.range_acceleration_mps2,
+            duration,
+        );
         let final_length = start + delta_length;
         let length = final_length.to_f64();
         let length_residual = Dd::from_f64(length) - final_length;
@@ -233,8 +235,34 @@ impl Target {
             length_residual,
             initial_rate: drive.range_rate_mps,
             final_rate,
+            angular: None,
         })
     }
+
+    pub(super) fn spin(self, endpoint: bool) -> Option<(Vec3, Dd)> {
+        self.angular.map(|angular| {
+            (
+                angular.axis_first_body,
+                if endpoint {
+                    self.final_rate
+                } else {
+                    Dd::from_f64(self.initial_rate)
+                },
+            )
+        })
+    }
+}
+
+// The same compensated polynomial increment serves positive radial commands
+// and bounded relative angular commands; their physical domain checks differ.
+pub(super) fn motion_increment(rate: f64, acceleration: f64, duration: f64) -> (Dd, Dd) {
+    let h = Dd::from_f64(duration);
+    let rate = Dd::from_f64(rate);
+    let delta_rate = Dd::from_f64(acceleration) * h;
+    (
+        h * (rate + Dd::from_f64(0.5) * delta_rate),
+        rate + delta_rate,
+    )
 }
 
 #[derive(Clone, Copy, Default)]
