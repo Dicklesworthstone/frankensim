@@ -3989,6 +3989,42 @@ implicit-connection, bushing, distance-loop and explicit-effort tests also pass.
 These selected-source native runs use the original numerical owners; full
 Cargo/DSR qualification and the broader multibody bead remain outstanding.
 
+### Simultaneous implicit external forcing and internal actuation
+
+`step_free_floating_spatial_implicit_with_forcing` resolves smooth environmental
+forces and joint efforts together with native free-base and joint motion.
+Its callback receives the actual trial pose, body twist, joint coordinates and
+rates at elapsed time h/2. Reusable link-body wrench and effort slices start
+from the held loads on every residual and directional-difference evaluation.
+Wrenches remain about each original link origin in its body frame; internal
+efforts retain equal/opposite carrier recoil and contribute no external impulse.
+Original world point loads and finite axial connections share this trial state.
+
+Three COM world-velocity unknowns augment the original joint/angular solve;
+trial geometry and translational drag therefore participate in the same native
+matrix-free Newton--Krylov equations. The accepted load sample drives ABA,
+momentum and work accounts without another callback. The remaining COM-velocity
+residual is returned explicitly. Its change-of-origin contribution to central
+angular momentum preserves that sample's actual world moment even at finite
+solver tolerance; no endpoint projection or invented force repairs the result.
+Held, effort-only and existing constraint paths retain their original n+3
+unknowns and evaluation arithmetic.
+
+Linear midpoint stability permits stiff drag but is not L-stability or an
+exact relaxation law; nonlinear response still requires timestep refinement.
+Callbacks must be smooth and repeatable, and must stage their own history until
+acceptance. Native physical limits, finite arithmetic, bounded residual work
+and cancellation apply before publication. Constitutive storage, thermal
+allocation, discontinuous contact and callback adjoints remain with their own
+owners; finite-step work defects remain visible.
+
+Seven focused tests cover independently solved stiff COM drag, positional
+force/damping, simultaneous external braking and internal motor recoil,
+second-order nonlinear drag trajectories, original held-connection parity,
+finite-residual world torque and work, and atomic callback/limit/budget/
+cancellation refusals. All seven and five original implicit-effort regressions
+pass with the original native dynamics and numerical solver owners.
+
 ## Rigid bilateral distance-loop motion with native reactions
 
 `articulated::motion::spatial_loads::implicit::distance` advances freely moving

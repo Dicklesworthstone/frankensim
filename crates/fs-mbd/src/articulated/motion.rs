@@ -948,6 +948,33 @@ impl MomentumMap {
         ))
     }
 
+    // Reconstruct a nonlinear trial from COM velocity and body angular rate.
+    // Shape momentum and the moving link origins retain their original owners;
+    // no floating-base ABA acceleration or approximate lumped mass enters here.
+    fn from_com_velocity(
+        &self,
+        rotation: So3,
+        center_world: Vec3,
+        velocity_world: Vec3,
+        angular_body: Vec3,
+    ) -> Result<FreeFloatingBaseState, FreeFloatingMotionError> {
+        validate_vec3(center_world, "free_floating_motion.trial_center")?;
+        validate_vec3(velocity_world, "free_floating_motion.trial_velocity")?;
+        validate_vec3(angular_body, "free_floating_motion.trial_angular")?;
+        let mut linear = VectorSum::from(rotation.inverse().rotate(velocity_world)?);
+        for (value, shape) in linear.0.iter_mut().zip(self.shape_linear_base.0) {
+            *value = *value - shape / Dd::from_f64(self.mass());
+        }
+        linear.add_cross(angular_body.scale(-1.0), self.center_base);
+        let twist = Twist::new(angular_body, linear.finish());
+        validate_twist(twist, "free_floating_motion.trial_twist")?;
+        let position = center_world - rotation.rotate(self.center_base)?;
+        Ok(FreeFloatingBaseState::new(
+            Se3::from_parts(rotation, position)?,
+            twist,
+        ))
+    }
+
     fn loads(
         &self,
         base: FreeFloatingBaseState,

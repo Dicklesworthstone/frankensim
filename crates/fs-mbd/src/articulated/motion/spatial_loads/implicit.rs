@@ -1,9 +1,9 @@
 //! Implicit finite-connection dynamics in the original tree's momentum coordinates.
 //!
-//! Only the midpoint joint rates and base angular rate are nonlinear unknowns.
-//! All external spatial impulses are eliminated through the original locked
-//! inertia map. Thus internal attachment forces never become external momentum
-//! sources, including when many stiff connections share links.
+//! Held loads need only midpoint joint rates and base angular rate as nonlinear
+//! unknowns. State-dependent external forcing also solves the midpoint COM
+//! velocity. The original locked inertia map reconstructs physical momentum;
+//! internal attachment forces never become external momentum sources.
 //!
 //! This is a second-order Lie midpoint scheme, not generalized-alpha, a rigid
 //! constraint solver, or a variational integrator. Its linear oscillator limit
@@ -22,13 +22,13 @@ pub mod distance;
 pub mod constraints;
 
 use super::super::{
-    ArticulatedModel, BaseState, EffortLaw, EvaluatedStep, FreeFloatingBaseState,
-    FreeFloatingMotionError, FreeFloatingMotionState, FreeFloatingMotionStep,
-    MAX_FREE_FLOATING_STEP_LINKS, MomentumCoordinates, MomentumFrame, MomentumMap, Se3, StageLoad,
-    Twist, Vec3, advance, forward_kinematics, free_floating_forward_dynamics,
-    free_floating_momentum, momentum_from_kinematics, physical_increments, poll, rotate,
-    sum_products, validate_external_wrenches, validate_forward_dynamics_header, validate_slice,
-    validate_vec3,
+    ArticulatedModel, BaseState, EffortLaw, EvaluatedStep, ForcingLaw, FreeFloatingBaseState,
+    FreeFloatingMotionError, FreeFloatingMotionLoads, FreeFloatingMotionState,
+    FreeFloatingMotionStep, MAX_FREE_FLOATING_STEP_LINKS, MomentumCoordinates, MomentumFrame,
+    MomentumMap, Se3, StageLoad, Twist, Vec3, VectorSum, Wrench, advance, forward_kinematics,
+    free_floating_forward_dynamics, free_floating_momentum, momentum_from_kinematics,
+    physical_increments, poll, rotate, sum_products, validate_external_wrenches,
+    validate_forward_dynamics_header, validate_slice, validate_vec3,
 };
 use super::{SpatialMotionLoads, SpatialMotionStep, bushing, evaluate, finish_with_bushings};
 use crate::articulated::motion::reconfigure::constraints::ConstraintError;
@@ -96,6 +96,16 @@ pub struct ImplicitSpatialStep {
     pub joint_velocity_residual: Vec<f64>,
     /// Reconstructed minus trial midpoint angular rate in body coordinates, rad/s.
     pub angular_velocity_residual: Vec3,
+}
+
+/// Simultaneous external forcing, including the extra translational equation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplicitForcedSpatialStep {
+    /// Native accepted mechanics, actual force/work sample and solve report.
+    pub step: ImplicitSpatialStep,
+    /// Trial minus momentum-derived midpoint COM velocity in world axes, m/s.
+    /// This finite nonlinear residual is retained, never projected away.
+    pub com_velocity_residual_world: Vec3,
 }
 
 /// No updated state is published on any refusal.
@@ -247,6 +257,59 @@ pub fn step_free_floating_spatial_implicit_with_effort(
     )
 }
 
+/// Solve external loading and internal actuation at one actual implicit stage.
+///
+/// Every residual, Jacobian probe and final verification calls `forcing` at
+/// elapsed time `duration / 2`, with the complete trial midpoint pose and twist.
+/// Per-link external wrenches and joint efforts reset to their held inputs
+/// before each call. Wrenches are about link origins in their own body frames;
+/// world loads require transformation at the supplied stage. Uniform gravity,
+/// held world-point loads and finite internal connections keep their original
+/// owners. Joint effort remains internal and produces native carrier recoil.
+///
+/// The original matrix-free Newton--Krylov solve gains three COM-velocity
+/// unknowns. Thus velocity drag, position-dependent fields and smooth external
+/// feedback participate in the same implicit equations as joint dynamics.
+/// Accepted loads drive the final momentum and work accounts without another
+/// callback. A finite COM-stage residual is reported explicitly; its change of
+/// angular-momentum origin is retained in the endpoint update, rather than
+/// silently changing the applied torque or projecting the final state.
+///
+/// The linear midpoint limit is A-stable, not L-stable or an exact relaxation
+/// law. Resolve nonlinear response and split at discontinuities. No passivity,
+/// heat destination, contact constraint or callback adjoint is inferred. The
+/// callback must be repeatable for identical inputs and must not commit history
+/// during solver trials. Its errors, nonfinite loads, native limits, exhausted
+/// work and cancellation return no state; callback side effects remain its own.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_spatial_implicit_with_forcing(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    mut forcing: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitForcedSpatialStep, ImplicitSpatialError> {
+    step_with_forcing::<bushing::SpatialBushing>(
+        model,
+        state,
+        loads,
+        &[],
+        duration,
+        config,
+        None,
+        None,
+        Some(&mut forcing),
+        cancelled,
+    )
+}
+
 pub(super) fn step_with_bushings<B: bushing::BushingLaw>(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
@@ -293,8 +356,27 @@ fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
     config: ImplicitSpatialConfig,
     effort: Option<&mut EffortLaw<'_>>,
     reaction: Option<&mut ReactionLaw<'_>>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
+    Ok(step_with_forcing(
+        model, state, loads, bushings, duration, config, effort, reaction, None, cancelled,
+    )?
+    .step)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_with_forcing<B: bushing::BushingLaw>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    effort: Option<&mut EffortLaw<'_>>,
+    reaction: Option<&mut ReactionLaw<'_>>,
+    forcing: Option<&mut ForcingLaw<'_>>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitForcedSpatialStep, ImplicitSpatialError> {
     poll(&mut cancelled)?;
     if !duration.is_finite() || duration <= 0.0 {
         return Err(FreeFloatingMotionError::InvalidDuration.into());
@@ -341,6 +423,11 @@ fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
     let mut guess = state.joint_velocity.clone();
     let omega = state.base.twist_body.angular;
     guess.extend([omega.x, omega.y, omega.z]);
+    if forcing.is_some() {
+        scales.extend([config.linear_velocity_scale; 3]);
+        let velocity = initial.linear_world.scale(1.0 / initial_map.mass());
+        guess.extend([velocity.x, velocity.y, velocity.z]);
+    }
     for (value, scale) in guess.iter_mut().zip(&scales) {
         *value /= scale;
     }
@@ -372,6 +459,15 @@ fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
     };
     let effort = RefCell::new((effort, effort_values));
     let reaction = RefCell::new(reaction);
+    let forcing_values = if forcing.is_some() {
+        (
+            loads.held.external_body_wrench.to_vec(),
+            loads.held.generalized_force.to_vec(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let forcing = RefCell::new((forcing, forcing_values));
     let evaluate_stage = |x: &[f64]| {
         let mut cancel = cancelled.borrow_mut();
         poll(&mut *cancel)?;
@@ -383,6 +479,10 @@ fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
             });
         }
         evaluations.set(used + 1);
+        let mut forcing = forcing.borrow_mut();
+        if let (Some(law), (wrenches, efforts)) = &mut *forcing {
+            return equations.evaluate_with_forcing(x, &mut **law, wrenches, efforts, &mut *cancel);
+        }
         let mut effort = effort.borrow_mut();
         let (law, values) = &mut *effort;
         let stage_effort = law.as_deref_mut().map(|law| (law, values.as_mut_slice()));
@@ -394,14 +494,15 @@ fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
             &mut *cancel,
         )
     };
-    let problem = FallibleFiniteDifference::new(n + 3, config.difference_step, |x: &[f64]| {
-        evaluate_stage(x).map(|stage| stage.residual)
-    })
-    .map_err(difference_error)?;
+    let problem =
+        FallibleFiniteDifference::new(scales.len(), config.difference_step, |x: &[f64]| {
+            evaluate_stage(x).map(|stage| stage.residual)
+        })
+        .map_err(difference_error)?;
     let solver_config = NewtonKrylovConfig {
         absolute_tolerance: config.residual_tolerance,
         relative_tolerance: 0.0,
-        linear_restart: config.krylov_restart.min(n + 3),
+        linear_restart: config.krylov_restart.min(scales.len()),
         max_linear_cycles: 8,
         // Numerical directional differences have their own rounding floor.
         // Do not demand an over-solved inner action; every outer residual still
@@ -450,6 +551,7 @@ fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
         -midpoint.residual[n + 2],
     )
     .scale(config.angular_velocity_scale);
+    let com_velocity_residual_world = midpoint.com_velocity_residual_world.unwrap_or_default();
     let mut cancel = cancelled.borrow_mut();
     let midpoint_state = midpoint.state.clone();
     let spatial = finish_midpoint(
@@ -467,14 +569,17 @@ fn step_with_bushings_effort_and_reaction<B: bushing::BushingLaw>(
         bushings,
         &mut *cancel,
     )?;
-    Ok(ImplicitSpatialStep {
-        midpoint_state,
-        spatial,
-        nonlinear: report,
-        residual_evaluations: evaluations.get(),
-        scaled_residual_norm: residual_norm,
-        joint_velocity_residual,
-        angular_velocity_residual,
+    Ok(ImplicitForcedSpatialStep {
+        step: ImplicitSpatialStep {
+            midpoint_state,
+            spatial,
+            nonlinear: report,
+            residual_evaluations: evaluations.get(),
+            scaled_residual_norm: residual_norm,
+            joint_velocity_residual,
+            angular_velocity_residual,
+        },
+        com_velocity_residual_world,
     })
 }
 
@@ -510,10 +615,20 @@ fn finish_midpoint<B: bushing::BushingLaw>(
     )?;
     let center_displacement =
         (initial.linear_world + linear_impulse.scale(0.5)).scale(duration / initial_map.mass());
+    let mut angular_com_world = initial.angular_com_world + load.torque_com_world.scale(duration);
+    if let Some(residual) = midpoint.com_velocity_residual_world {
+        // The accepted force was evaluated at X_h = X_0 + h V_trial/2,
+        // while the endpoint COM uses the actual impulse-derived velocity.
+        // Integrating that SAME world moment therefore requires
+        // (X_h - (X_0+X_1)/2) x impulse in the central angular momentum.
+        let mut angular = VectorSum::from(angular_com_world);
+        angular.add_cross(residual.scale(0.5 * duration), linear_impulse);
+        angular_com_world = angular.finish();
+    }
     let final_coordinates = MomentumCoordinates {
         center_world: initial.center_world + center_displacement,
         linear_world: initial.linear_world + linear_impulse,
-        angular_com_world: initial.angular_com_world + load.torque_com_world.scale(duration),
+        angular_com_world,
     };
     let mut state_after = FreeFloatingMotionState {
         base: state.base,
@@ -665,6 +780,7 @@ struct MidpointEvaluation {
     state: FreeFloatingMotionState,
     center_base: Vec3,
     trial_angular: Vec3,
+    com_velocity_residual_world: Option<Vec3>,
     load: StageLoad,
     actuator_power: Dd,
     constraint_power: Dd,
@@ -796,9 +912,104 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
             state,
             center_base: map.center_base,
             trial_angular: omega,
+            com_velocity_residual_world: None,
             load: stage.load,
             actuator_power,
             constraint_power,
+            residual,
+        })
+    }
+
+    fn evaluate_with_forcing(
+        &self,
+        x: &[f64],
+        forcing: &mut ForcingLaw<'_>,
+        wrenches: &mut [Wrench],
+        efforts: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MidpointEvaluation, ImplicitSpatialError> {
+        let n = self.model.dof_count();
+        let half = 0.5 * self.duration;
+        let velocity: Vec<_> = x[..n].iter().zip(self.scales).map(|(x, s)| x * s).collect();
+        let omega = Vec3::new(x[n], x[n + 1], x[n + 2]).scale(self.scales[n]);
+        let com_velocity = Vec3::new(x[n + 3], x[n + 4], x[n + 5]).scale(self.scales[n + 3]);
+        let rotation = rotate(self.state.base.world_from_base.rotation(), omega, half)?;
+        let mut state = FreeFloatingMotionState {
+            base: self.state.base,
+            joint_position: advance(&self.state.joint_position, &velocity, half),
+            joint_velocity: velocity,
+        };
+        let map = MomentumMap::new(self.model, &state, cancelled)?;
+        state.base = map.from_com_velocity(
+            rotation,
+            self.initial.center_world + com_velocity.scale(half),
+            com_velocity,
+            omega,
+        )?;
+        wrenches.copy_from_slice(self.loads.held.external_body_wrench);
+        efforts.copy_from_slice(self.loads.held.generalized_force);
+        poll(cancelled)?;
+        forcing(half, &state, wrenches, efforts)?;
+        poll(cancelled)?;
+        validate_external_wrenches(wrenches)?;
+        validate_slice(efforts, "implicit_spatial.stage_effort")?;
+        let loads = SpatialMotionLoads {
+            held: FreeFloatingMotionLoads {
+                external_body_wrench: wrenches,
+                generalized_force: efforts,
+                ..self.loads.held
+            },
+            ..self.loads
+        };
+        let stage = bushing::evaluate(&map, state.base, loads, self.bushings, cancelled)?;
+        let dynamics = free_floating_forward_dynamics(
+            self.model,
+            state.base,
+            &state.joint_position,
+            &state.joint_velocity,
+            efforts,
+            self.loads.held.gravity_world,
+            &stage.body_wrench,
+        )?;
+        poll(cancelled)?;
+        let linear_world = self.initial.linear_world + stage.load.force_world.scale(half);
+        let momentum_base = map.reconstruct(
+            rotation,
+            MomentumCoordinates {
+                center_world: self.initial.center_world + com_velocity.scale(half),
+                linear_world,
+                angular_com_world: self.initial.angular_com_world
+                    + stage.load.torque_com_world.scale(half),
+            },
+        )?;
+        let mut residual: Vec<_> = state
+            .joint_velocity
+            .iter()
+            .zip(&self.state.joint_velocity)
+            .zip(&dynamics.generalized_acceleration)
+            .zip(self.scales)
+            .map(|(((mid, old), a), s)| (mid - old - half * a) / s)
+            .collect();
+        let angular = (omega - momentum_base.twist_body.angular).scale(1.0 / self.scales[n]);
+        residual.extend([angular.x, angular.y, angular.z]);
+        let linear_residual = com_velocity - linear_world.scale(1.0 / self.mass);
+        let scaled_linear = linear_residual.scale(1.0 / self.scales[n + 3]);
+        residual.extend([scaled_linear.x, scaled_linear.y, scaled_linear.z]);
+        validate_slice(&residual, "implicit_spatial.forced_equations")?;
+        let actuator_power = sum_products(
+            efforts.iter().copied(),
+            state.joint_velocity.iter().copied(),
+        );
+        validate_slice(&[actuator_power.to_f64()], "implicit_spatial.stage_power")?;
+        poll(cancelled)?;
+        Ok(MidpointEvaluation {
+            state,
+            center_base: map.center_base,
+            trial_angular: omega,
+            com_velocity_residual_world: Some(linear_residual),
+            load: stage.load,
+            actuator_power,
+            constraint_power: Dd::ZERO,
             residual,
         })
     }
