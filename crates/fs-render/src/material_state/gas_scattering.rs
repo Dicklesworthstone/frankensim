@@ -11,6 +11,7 @@ mod refraction;
 pub use refraction::{GasDensityJet, GasDensitySecondOrderField};
 mod composition;
 pub use composition::{
+    AxialGasCompositionError, AxialGasCompositionField,
     GasCompositionGradientField, GasCompositionScatteringError, GasCompositionSecondOrderField,
     GasPartialDensityJet, GasPartialDensitySample, MaterialGasCompositionRefractiveField,
     MaterialGasCompositionScatteringField, PreparedMaterialGasCompositionRefractiveField,

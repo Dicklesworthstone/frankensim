@@ -16,6 +16,9 @@ use fs_material::gas_scattering::composition::{
 mod scattering;
 pub use scattering::{GasCompositionScatteringError, MaterialGasCompositionScatteringField};
 
+mod axial;
+pub use axial::{AxialGasCompositionError, AxialGasCompositionField};
+
 /// One component's partial density and spatial gradient in the declared basis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GasPartialDensitySample {

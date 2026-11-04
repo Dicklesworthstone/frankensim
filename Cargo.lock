@@ -2538,6 +2538,7 @@ dependencies = [
  "fs-solid",
  "fs-substrate",
  "fs-thermal",
+ "fs-thermochem",
 ]
 
 [[package]]

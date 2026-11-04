@@ -40,6 +40,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-propcheck = { path = "../fs-propcheck" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-frep = { path = "../fs-rep-frep" }
+fs-thermochem = { path = "../fs-thermochem" }
 
 [features]
 # [S] The certified sphere-tracing and deterministic scalar-BVH backends are
@@ -91,6 +92,10 @@ required-features = ["photometry"]
 [[example]]
 name = "photometric_stage"
 required-features = ["photometry"]
+
+[[example]]
+name = "thermochemical_refraction"
+required-features = ["material-state", "volumes"]
 
 [[example]]
 name = "photometric_error_budget"

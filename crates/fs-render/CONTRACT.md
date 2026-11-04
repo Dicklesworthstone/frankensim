@@ -3996,6 +3996,40 @@ emission is introduced. Seven focused regressions cover spectral/spatial variati
 all Mueller entries, density bases, source/bound identities, envelope/row/domain
 refusals, vacuum and a real native curved collision with the original snapshot.
 
+`AxialGasCompositionField` binds one original `AxialGasField` linear-primitive
+span to the same molecular refraction, dispersion, angular-bundle and scattering
+owners. Canonical species and exact molar masses must match the explicitly
+assigned optical catalogue, including species that enter from zero at a span
+endpoint. The original `state_at` supplies temperature, active mole fractions,
+source/phase admission and EOS molar volume. At common static pressure the
+adapter forms `N_i = x_i*N_A/V_m`, with analytic axial derivatives
+`N_i' = N*(x_i' - x_i*T'/T)` and `N_i'' = -2*(T'/T)*N_i'`; its explicit world
+axis embeds those derivatives as a gradient and symmetric Hessian. No independent
+density reconstruction, calorically perfect replacement, numerical Hessian or
+absorbing-gas law is inferred. The same borrowed adapter implements
+`TemperatureField`, while the original elastic molecular optical law retains
+exactly zero true absorption and therefore supplies no LTE emission.
+`bind_refraction()` reuses the existing prepared wavelength owner and its exact
+phase/group distinction. Original endpoint extrema give outward-rounded
+component number-density envelopes for `bind_scattering_field`; original
+spectral/dilute admission and runtime bound checks remain binding, without an
+interval-certificate claim. Derivative coefficients and envelopes are prepared
+once, but every query still calls the original thermochemical source evaluator,
+including its allocations and intermediate-state validity checks.
+Only `LinearPrimitives` with `FrozenGas` are admitted. A selected span is an
+explicit closed domain with one-sided endpoint derivatives; queries beyond it
+refuse even when another original station span exists. This prevents an implicit
+smooth Hessian across primitive-gradient jumps. Paths and numerical interface
+collars must stay within source support; multiple spans need explicit domain
+handling. Four focused native regressions cover original-state/temperature/EOS
+jet agreement, zero-species entrance derivatives, coherent wavelength/scattering
+and bound reuse, bent native bundles against neighboring rays, and knot/domain,
+phase/reconstruction/source admission. The `thermochemical_refraction` example
+loads actual normalized species/NASA-9/transport triples and explicit optical
+rows, feeds the original primitive-column reader and this adapter, and reports
+native spectral paths, group delay, local molecular scattering and angular
+footprints without replacing the source laws or treating scattering as heat.
+
 `MaterialGasScatteringBinding::bind_cell_grid` borrows accepted gas states and
 their exact density buffer in the native `VolumeGrid` cell order. Temperature
 and pressure may vary by cell while composition and molecular optical sources
