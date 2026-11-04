@@ -349,6 +349,41 @@ pub(super) fn symmetric_sweep(
     accountant: &mut AdmittedBudget<'_>,
     cx: &Cx<'_>,
 ) -> Result<(), VpmError> {
+    symmetric_sweep_observed(
+        state,
+        areas,
+        law,
+        dt,
+        pair_fraction,
+        visits,
+        meter,
+        accountant,
+        cx,
+        &mut |_, _, _, _| Ok(()),
+    )
+}
+
+// Observe the existing signed transfer and its actual represented update in
+// the same charged pair visit. The no-op specialization retains the original
+// arithmetic/order without extra cloud passes, allocations or dynamic dispatch.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn symmetric_sweep_observed(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    law: PseDiffusion,
+    dt: f64,
+    pair_fraction: f64,
+    visits: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+    observer: &mut impl FnMut(
+        usize,
+        [VortexParticle; 2],
+        [VortexParticle; 2],
+        f64,
+    ) -> Result<(), VpmError>,
+) -> Result<(), VpmError> {
     let kernel = PairKernel::new(law, dt, pair_fraction);
     let n = state.len();
     let mut visit = |i, j| {
@@ -356,7 +391,8 @@ pub(super) fn symmetric_sweep(
             *visits = visits.checked_add(1).ok_or(VpmError::PlanOverflow {
                 resource: "executed diffusion pairs",
             })?;
-            exchange(state, areas, &kernel, i, j)
+            let amount = kernel.fraction(state[i], state[j], [areas[i], areas[j]]);
+            exchange_fraction_observed(state, areas, amount, i, j, observer)
         })
     };
     for i in 0..n {
@@ -452,17 +488,6 @@ fn scaled_distance2(a: VortexParticle, b: VortexParticle, width: f64) -> f64 {
     r2
 }
 
-fn exchange(
-    state: &mut [VortexParticle],
-    areas: &[f64],
-    kernel: &PairKernel,
-    i: usize,
-    j: usize,
-) -> Result<(), VpmError> {
-    let amount = kernel.fraction(state[i], state[j], [areas[i], areas[j]]);
-    exchange_fraction(state, areas, amount, i, j)
-}
-
 // Prepared graphs cache amount once per run and reuse this exact transfer.
 fn exchange_fraction(
     state: &mut [VortexParticle],
@@ -470,6 +495,22 @@ fn exchange_fraction(
     amount: f64,
     i: usize,
     j: usize,
+) -> Result<(), VpmError> {
+    exchange_fraction_observed(state, areas, amount, i, j, &mut |_, _, _, _| Ok(()))
+}
+
+fn exchange_fraction_observed(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    amount: f64,
+    i: usize,
+    j: usize,
+    observer: &mut impl FnMut(
+        usize,
+        [VortexParticle; 2],
+        [VortexParticle; 2],
+        f64,
+    ) -> Result<(), VpmError>,
 ) -> Result<(), VpmError> {
     // An absent or unrepresentably weak interaction is exact identity,
     // including signed zeros; disconnected nodes need no transfer arithmetic.
@@ -498,9 +539,10 @@ fn exchange_fraction(
             particle: i,
         });
     }
+    let before = [state[i], state[j]];
     state[i].circulation = next_i;
     state[j].circulation = next_j;
-    Ok(())
+    observer(i, before, [state[i], state[j]], transfer)
 }
 
 // Only used when small/large is subnormal or has underflowed, so

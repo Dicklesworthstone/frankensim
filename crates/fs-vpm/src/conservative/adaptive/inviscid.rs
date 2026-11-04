@@ -262,24 +262,7 @@ fn run(
             .checked_add(trial_work)
             .ok_or(overflow("adaptive accumulated work"))?;
         admit_count("adaptive work", next_work, budget.run.max_work_units)?;
-        let remaining = end - elapsed;
-        let mut h = dt.min(remaining.to_f64());
-        // A rounded-up endpoint remainder must not advance beyond the window.
-        // Its remaining low part is retained as a final physical interval.
-        if positive(dd(h) - remaining) && h > 0.0 {
-            h = f64::from_bits(h.to_bits() - 1);
-        }
-        let endpoint = elapsed + dd(h);
-        if h <= 0.0
-            || !finite(endpoint)
-            || !positive(endpoint - elapsed)
-            || positive(endpoint - end)
-        {
-            return Err(AdaptiveError::TimeStagnation {
-                elapsed_bits: elapsed.to_f64().to_bits(),
-                dt_bits: h.to_bits(),
-            });
-        }
+        let (h, endpoint) = compensated_trial_time(elapsed, dt, end)?;
         // Fallible map preparation precedes all candidate work. The previous
         // input/trial boundary has flushed the meter, so an unrepresentable
         // source map cannot leave completed copy visits uncharged.
@@ -604,13 +587,38 @@ fn validate_options(duration: f64, core: f64, o: AdaptiveOptions) -> Result<(), 
     Ok(())
 }
 
+// Shared by source-coupled positive viscous windows. Retain every low time
+// part instead of inventing a tiny final source interval from repeated f64
+// addition. The original inviscid arithmetic and refusal boundary are intact.
+pub(super) fn compensated_trial_time(
+    elapsed: Dd,
+    dt: f64,
+    end: Dd,
+) -> Result<(f64, Dd), AdaptiveError> {
+    let remaining = end - elapsed;
+    let mut h = dt.min(remaining.to_f64());
+    // A rounded-up endpoint remainder must not advance beyond the window.
+    // Its remaining low part is retained as a final physical interval.
+    if positive(dd(h) - remaining) && h > 0.0 {
+        h = f64::from_bits(h.to_bits() - 1);
+    }
+    let endpoint = elapsed + dd(h);
+    if h <= 0.0 || !finite(endpoint) || !positive(endpoint - elapsed) || positive(endpoint - end) {
+        return Err(AdaptiveError::TimeStagnation {
+            elapsed_bits: elapsed.to_f64().to_bits(),
+            dt_bits: h.to_bits(),
+        });
+    }
+    Ok((h, endpoint))
+}
+
 fn dd(v: f64) -> Dd {
     Dd::from_f64(v)
 }
 fn finite(v: Dd) -> bool {
     v.hi.is_finite() && v.lo.is_finite() && v.to_f64().is_finite()
 }
-fn positive(v: Dd) -> bool {
+pub(super) fn positive(v: Dd) -> bool {
     v.hi > 0.0 || (v.hi == 0.0 && v.lo > 0.0)
 }
 fn range_error(phase: &'static str, particle: usize) -> VpmError {

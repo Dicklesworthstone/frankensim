@@ -575,7 +575,6 @@ translation/strength solution including rapid initial viscous decay,
 geometry-changing clouds against the original
 refined owner, identities, resource counts and transactional refusal.
 
-
 ### Compact neighbors for adaptive moving diffusion
 
 `conservative::adaptive::simulate_viscous_compact_with_cx` uses the same
@@ -606,8 +605,89 @@ whole-solver scaling and wall-clock speedups are not claimed.
 Four public-API regression groups cover bitwise dense-path parity on separated
 clouds, particles entering support during motion and rejected trials, exact
 aggregate caps and late refusal/replay, and identity/zero-viscosity behavior.
-Rustfmt parsing and source/algorithm review passed. Native compilation and
-execution of these new VPM tests remain unverified in this environment.
+These groups pass the bounded native suite together with the dense and
+source-coupled adaptive owners.
+
+### Adaptive viscous motion in a held affine source
+
+`conservative::adaptive::simulate_viscous_with_affine_flow_cx` joins the held
+incompressible affine owner to the same adaptive viscous clock and positive
+PSE/advection stages. A full trial is
+`F(h/2) D(h/2) A(h) D(h/2) F(h/2)`; its accepted candidate is two original
+half steps. The adjacent fine quarter-source maps coalesce into one half map.
+Both circulation/vorticity and Euclidean position estimates must pass. The
+positive-viscosity reverse-order witness remains
+`F(h/2) A(h/2) D(h) A(h/2) F(h/2)`, preserving the independent check for
+initial induced motion erased by rapid diffusion. No negative diffusion time,
+extrapolation, moment projection or frozen post-motion neighbor graph enters.
+
+`AmbientViscousAdaptiveRun` separates accepted affine moment increments from
+accepted PSE increments. The former reuse `AmbientMomentChange`. The latter
+report actual changes in `sum Gamma*x`, `sum Gamma*y` and `sum Gamma*|x|^2`,
+plus circulation/first/quadratic representation defects relative to each
+original signed pair transfer. A finite irregular PSE cloud generally changes
+vortex impulse even in exact arithmetic; that change is not mislabeled as an
+external source or floating-point loss. The pair observer derives commanded
+increments from relative-position products and defects from local before/after
+circulations, using compensated accumulation. It does not subtract large
+whole-cloud moments. Lost sub-ULP transfers therefore appear as representation
+defects without inventing an actual moment change. Original pair advection
+retains its separate roundoff-level impulse defect.
+
+Only accepted fine paths contribute to the physical accounts. Rejected,
+coarse and stiffness-witness work contributes to execution receipts and caps.
+With P=N(N-1), an active field and positive viscosity with N>=2 use 12P pair
+visits, 7P diffusion-kernel evaluations, 7N source visits and 12P+11N+5 total
+work units per trial. Zero viscosity or a singleton uses 3P pair visits,
+no diffusion evaluations, 5N source visits and 3P+7N+4 work units. Initial
+validation costs N. Zero fields add no source visits and retain the native
+viscous trajectory, adaptive decisions and work counts exactly.
+
+The existing `AmbientAdaptiveBudget` caps source visits over the entire
+window. All attempts/pairs/source/work limits are checked before each complete
+trial. The same three particle banks are reserved once; the witness reuses
+the coarse bank. Generic observer calls occur inside the original metered PSE
+pair unit with constant stack storage, and the unobserved path retains the
+original pair arithmetic and order. There are no per-trial allocations or
+extra moment-scanning cloud passes. Source maps are prepared before candidate
+copy work. Active-source windows share the original inviscid compensated time
+helper, preventing accumulated-time roundoff from inventing a tiny final map;
+the zero-source viscous clock remains unchanged. Empty/zero-duration paths
+remain identities, while a held source transports a singleton. All borrowed
+inputs remain unchanged on invalid data, numerical/moment representation,
+tolerance, execution-budget or cancellation refusal; no partial cloud escapes.
+
+These are temporal error estimators for the stated direct finite-cloud model,
+not a global error certificate or a guarantee for every stiff source transient.
+Gaussian/compact spatial quadrature still needs overlap, domain padding and
+refinement. Fixed incompressible particle areas, held source parameters and
+constant viscosity remain assumptions. No finite carrier recoil, solved wall
+reaction, viscous heating or finite-volume mechanical-work account is claimed.
+`tests/adaptive_affine_viscous.rs` independently integrates the simultaneous
+nonlinear position/strength ODE and six source/PSE moment derivatives for both
+kernels. It also checks a stiff rotating decaying dipole, exact native
+zero-source parity, original fine-map composition, frame/unit covariance,
+singleton/subnormal motion, sub-ULP transfer loss, whole-window caps and
+cancellation inside sources, diffusion and final publication (G0/G1/G3/G4).
+
+`simulate_viscous_compact_with_affine_flow_cx` selects that same moving compact
+backend in the same adaptive source owner. Every active affine stage also
+invalidates cached geometry; source-driven entry into support cannot be missed
+between the adjacent fine diffusion stages. The original per-edge fractions,
+canonical ordering and signed-transfer observer remain shared. The dense and
+compact physical states and accepted source/PSE accounts match bit for bit.
+The report additionally exposes all graph rebuilds and candidate distance
+tests. In an active positive-viscosity source trial, seven geometry rebuilds
+replace the unforced compact path's six; direct advection still costs 5P visits.
+If K is the sum of supported edges over its seven diffusion stages and G the
+charged graph work, the trial costs 5P+2K pair visits, K kernel evaluations,
+7N source visits and 5P+3K+G+11N+5 work units. These costs include rejected
+trials and witnesses. The complete graph payload is reserved before evolution;
+data-dependent work is admitted before each bounded operation. A zero source
+retains the original compact driver's complete physical/execution result.
+The focused source/compact tests check strain-induced support entry, exact
+dense state/account parity, rejected-trial counts, graph/source cap exhaustion
+and deterministic reuse after a late edge or work refusal.
 
 
 ## Prescribed affine flow on conservative 2-D vortices

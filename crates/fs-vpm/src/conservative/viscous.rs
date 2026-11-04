@@ -197,9 +197,47 @@ pub(super) fn weighted_step_with(
     accountant: &mut AdmittedBudget<'_>,
     cx: &Cx<'_>,
 ) -> Result<(), VpmError> {
+    weighted_step_with_observed(
+        state,
+        areas,
+        dt,
+        fraction,
+        core,
+        law,
+        backend,
+        completed_pairs,
+        meter,
+        accountant,
+        cx,
+        &mut |_, _, _, _| Ok(()),
+    )
+}
+
+// The accepted adaptive source path records PSE moments at their actual pair
+// exchanges. Other consumers specialize this original map to a no-op observer.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn weighted_step_with_observed(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    dt: f64,
+    fraction: f64,
+    core: f64,
+    law: PseDiffusion,
+    backend: &mut MovingDiffusion,
+    completed_pairs: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+    observer: &mut impl FnMut(
+        usize,
+        [VortexParticle; 2],
+        [VortexParticle; 2],
+        f64,
+    ) -> Result<(), VpmError>,
+) -> Result<(), VpmError> {
     let diffuse = dt > 0.0 && law.kinematic_viscosity_m2_s() > 0.0;
     if diffuse {
-        backend.sweep(
+        backend.sweep_observed(
             state,
             areas,
             law,
@@ -209,6 +247,7 @@ pub(super) fn weighted_step_with(
             meter,
             accountant,
             cx,
+            observer,
         )?;
     }
     if dt > 0.0 {
@@ -226,7 +265,7 @@ pub(super) fn weighted_step_with(
         backend.invalidate();
     }
     if diffuse {
-        backend.sweep(
+        backend.sweep_observed(
             state,
             areas,
             law,
@@ -236,6 +275,7 @@ pub(super) fn weighted_step_with(
             meter,
             accountant,
             cx,
+            observer,
         )?;
     }
     backend.admit_work(1, meter, accountant)?;

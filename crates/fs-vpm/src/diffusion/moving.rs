@@ -6,7 +6,7 @@
 
 use super::adaptive::{AdaptiveBudget, admit_count, overflow};
 use super::sparse::{CellEntry, SpatialWork, cell_coordinate, heap_sort, visit_candidates};
-use super::{PairKernel, PseDiffusion, exchange_fraction, pair_work};
+use super::{PairKernel, PseDiffusion, exchange_fraction_observed, pair_work};
 use crate::{AdmittedBudget, Cx, VortexParticle, VpmError, WorkMeter, admit_cap, reserved_vec};
 
 /// Storage and aggregate search limits for a moving compact diffusion window.
@@ -155,8 +155,43 @@ impl MovingDiffusion {
         accountant: &mut AdmittedBudget<'_>,
         cx: &Cx<'_>,
     ) -> Result<(), VpmError> {
+        self.sweep_observed(
+            state,
+            areas,
+            law,
+            dt,
+            fraction,
+            completed_pairs,
+            meter,
+            accountant,
+            cx,
+            &mut |_, _, _, _| Ok(()),
+        )
+    }
+
+    // Dense and moving-compact paths observe the SAME original exchange.
+    // Cached fractions and canonical forward/reverse ordering are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sweep_observed(
+        &mut self,
+        state: &mut [VortexParticle],
+        areas: &[f64],
+        law: PseDiffusion,
+        dt: f64,
+        fraction: f64,
+        completed_pairs: &mut u64,
+        meter: &mut WorkMeter,
+        accountant: &mut AdmittedBudget<'_>,
+        cx: &Cx<'_>,
+        observer: &mut impl FnMut(
+            usize,
+            [VortexParticle; 2],
+            [VortexParticle; 2],
+            f64,
+        ) -> Result<(), VpmError>,
+    ) -> Result<(), VpmError> {
         let Method::Compact(workspace) = &mut self.method else {
-            return super::symmetric_sweep(
+            return super::symmetric_sweep_observed(
                 state,
                 areas,
                 law,
@@ -166,6 +201,7 @@ impl MovingDiffusion {
                 meter,
                 accountant,
                 cx,
+                observer,
             );
         };
         if !workspace.geometry_valid {
@@ -213,7 +249,7 @@ impl MovingDiffusion {
                 *completed_pairs = completed_pairs
                     .checked_add(1)
                     .ok_or(overflow("executed moving compact pairs"))?;
-                exchange_fraction(state, areas, value, i, j)
+                exchange_fraction_observed(state, areas, value, i, j, observer)
             })?;
         }
         meter.boundary(accountant, cx, "fs-vpm.pse-moving-sweep-complete")

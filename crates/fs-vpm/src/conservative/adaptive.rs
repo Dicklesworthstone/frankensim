@@ -3,6 +3,8 @@
 //! [`simulate_with_cx`] selects second/fourth-order inviscid pair maps, and
 //! [`simulate_with_affine_flow_cx`] includes one held affine source. These
 //! impulse-preserving paths share the original adaptive execution vocabulary.
+//! [`simulate_viscous_with_affine_flow_cx`] joins the original held-source maps
+//! to the same adaptive viscous owner, with separate source/PSE moment accounts.
 //!
 //! The viscous [`simulate_viscous_with_cx`] path retains positive diffusion:
 //! One original D(h/2) A(h) D(h/2) step is compared with two half steps.
@@ -17,6 +19,7 @@
 //! error. The original direct O(N^2) pair owners remain authoritative. A
 //! changing cloud still needs sufficient kernel overlap and explicit remeshing.
 
+use crate::conservative::ambient::{AffineFlow2, AmbientMomentChange};
 use crate::diffusion::adaptive::{
     AdaptiveOptions as DiffusionAdaptiveOptions, admit_count, count, next_step, overflow,
     scaled_error, trial_time, validate_options,
@@ -27,7 +30,7 @@ use crate::{
     AdmittedBudget, Cx, VortexParticle, VpmError, WorkMeter, admit_cap, invalid_scalar,
     reserved_vec, validate_particle,
 };
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 
 pub use crate::diffusion::adaptive::{AdaptiveBudget, AdaptiveError, AdaptiveRun};
 pub use crate::diffusion::moving::CompactNeighborBudget;
@@ -37,6 +40,13 @@ pub use inviscid::{
     AdaptiveOptions, AmbientAdaptiveBudget, AmbientAdaptiveRun, simulate_with_affine_flow_cx,
     simulate_with_cx,
 };
+
+mod affine_viscous;
+pub use affine_viscous::{
+    AmbientViscousAdaptiveRun, DiffusionMomentChange, simulate_viscous_compact_with_affine_flow_cx,
+    simulate_viscous_with_affine_flow_cx,
+};
+use affine_viscous::{DiffusionMoments, SourceStep, add_source, apply_source};
 
 /// Independent physical tolerances for vorticity and particle trajectories.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,8 +115,20 @@ pub fn simulate_viscous_with_cx(
     options: ViscousAdaptiveOptions,
     budget: AdaptiveBudget,
 ) -> Result<AdaptiveRun, AdaptiveError> {
-    simulate_viscous_impl(
-        cx, particles, areas_m2, duration_s, core, law, options, budget, None,
+    viscous_run::<false>(
+        cx,
+        particles,
+        areas_m2,
+        duration_s,
+        core,
+        law,
+        None,
+        options,
+        AmbientAdaptiveBudget {
+            run: budget,
+            max_source_particle_updates: 0,
+        },
+        None,
     )
     .map(|result| result.run)
 }
@@ -146,31 +168,44 @@ pub fn simulate_viscous_compact_with_cx(
     budget: AdaptiveBudget,
     neighbors: CompactNeighborBudget,
 ) -> Result<CompactAdaptiveRun, AdaptiveError> {
-    simulate_viscous_impl(
+    viscous_run::<false>(
         cx,
         particles,
         areas_m2,
         duration_s,
         core,
         law,
+        None,
         options,
-        budget,
+        AmbientAdaptiveBudget {
+            run: budget,
+            max_source_particle_updates: 0,
+        },
         Some(neighbors),
     )
+    .map(|result| CompactAdaptiveRun {
+        run: result.run,
+        graph_rebuilds: result.graph_rebuilds,
+        candidate_visits: result.candidate_visits,
+    })
 }
 
+// All public entries retain one numerical adaptive owner. Unobserved native
+// calls specialize the optional pair observer away and keep their old counts.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn simulate_viscous_impl(
+fn viscous_run<const TRACK_DIFFUSION: bool>(
     cx: &Cx<'_>,
     particles: &[VortexParticle],
     areas_m2: &[f64],
     duration_s: f64,
     core: f64,
     law: PseDiffusion,
+    flow: Option<AffineFlow2>,
     options: ViscousAdaptiveOptions,
-    budget: AdaptiveBudget,
+    envelope: AmbientAdaptiveBudget,
     neighbors: Option<CompactNeighborBudget>,
-) -> Result<CompactAdaptiveRun, AdaptiveError> {
+) -> Result<AmbientViscousAdaptiveRun, AdaptiveError> {
+    let budget = envelope.run;
     let time = options.time;
     validate_options(duration_s, time)?;
     if neighbors.is_some() && law.kernel() != diffusion::PseKernel::CompactWendland {
@@ -198,8 +233,8 @@ fn simulate_viscous_impl(
     diffusion::validate_inputs(n, areas_m2, duration_s)?;
     admit_cap("particles", n, budget.max_particles)?;
     let n64 = count(n, "adaptive moving particles")?;
-    let active = duration_s > 0.0 && n >= 2;
-    let diffuse = active && law.kinematic_viscosity_m2_s() > 0.0;
+    let active = duration_s > 0.0 && n > 0 && (n >= 2 || flow.is_some());
+    let diffuse = active && n >= 2 && law.kinematic_viscosity_m2_s() > 0.0;
     let compact_neighbors = neighbors.filter(|_| diffuse);
     let compact = compact_neighbors.is_some();
     let pairs_per_trial = if active {
@@ -222,9 +257,16 @@ fn simulate_viscous_impl(
     } else {
         0
     };
+    let sources_per_trial = if active && flow.is_some() {
+        n64.checked_mul(if diffuse { 7 } else { 5 })
+            .ok_or(overflow("adaptive viscous source visits"))?
+    } else {
+        0
+    };
     let trial_work = n64
         .checked_mul(if diffuse { 4 } else { 2 })
         .and_then(|value| value.checked_add(pairs_per_trial))
+        .and_then(|value| value.checked_add(sources_per_trial))
         .and_then(|value| value.checked_add(if diffuse { 5 } else { 4 }))
         .ok_or(overflow("adaptive moving trial work"))?;
     admit_count("adaptive work", n64, budget.max_work_units)?;
@@ -263,16 +305,20 @@ fn simulate_viscous_impl(
         "fs-vpm.viscous-adaptive-input-complete",
     )?;
 
-    let mut elapsed = if active { 0.0 } else { duration_s };
+    let end = Dd::from_f64(duration_s);
+    let mut elapsed = if active { Dd::ZERO } else { end };
     let mut dt = time.initial_dt_s;
     let mut attempts = 0_usize;
     let mut accepted_steps = 0_usize;
     let mut rejected_steps = 0_usize;
     let mut pair_evaluations = 0_u64;
     let mut fraction_evaluations = 0_u64;
+    let mut source_particle_updates = 0_u64;
+    let mut source_moments = [Dd::ZERO; 3];
+    let mut diffusion_moments = DiffusionMoments::default();
     let mut expected_work = n64;
     let mut max_accepted_error_ratio = 0.0_f64;
-    while elapsed < duration_s {
+    while inviscid::positive(end - elapsed) {
         let before_stats = backend.stats();
         let next_attempt = attempts
             .checked_add(1)
@@ -282,11 +328,33 @@ fn simulate_viscous_impl(
             .checked_add(pairs_per_trial)
             .ok_or(overflow("adaptive moving pair work"))?;
         admit_count("pair evaluations", next_pairs, budget.max_pair_evaluations)?;
+        let next_sources = source_particle_updates
+            .checked_add(sources_per_trial)
+            .ok_or(overflow("adaptive viscous accumulated sources"))?;
+        admit_count(
+            "source particle updates",
+            next_sources,
+            envelope.max_source_particle_updates,
+        )?;
         let mut next_work = expected_work
             .checked_add(trial_work)
             .ok_or(overflow("adaptive moving accumulated work"))?;
         admit_count("adaptive work", next_work, budget.max_work_units)?;
-        let (h, endpoint) = trial_time(elapsed, dt, duration_s)?;
+        let (h, endpoint) = if flow.is_some() {
+            inviscid::compensated_trial_time(elapsed, dt, end)?
+        } else {
+            // Zero fields retain the native viscous clock and exact replay.
+            let (h, endpoint) = trial_time(elapsed.to_f64(), dt, duration_s)?;
+            (h, Dd::from_f64(endpoint))
+        };
+        // The previous boundary has flushed the meter. A refused source map
+        // must not leave any completed candidate-copy work pending a charge.
+        let source = flow.map(|flow| SourceStep::new(flow, h)).transpose()?;
+        let half = source.as_ref().map(|source| &source.half);
+        let quarter = source.as_ref().map(|source| &source.quarter);
+        let mut coarse_source = [Dd::ZERO; 3];
+        let mut fine_source = [Dd::ZERO; 3];
+        let mut fine_diffusion = DiffusionMoments::default();
         backend.admit_work(n64, &mut meter, &mut accountant)?;
         coarse.clear();
         fine.clear();
@@ -300,6 +368,16 @@ fn simulate_viscous_impl(
         backend.invalidate();
         // Keep h separate from its fractions so a small physical interval
         // survives multiplication by a large, representable original rate.
+        apply_source(
+            &mut backend,
+            half,
+            &mut coarse,
+            &mut coarse_source,
+            &mut source_particle_updates,
+            &mut meter,
+            &mut accountant,
+            cx,
+        )?;
         super::viscous::weighted_step_with(
             &mut coarse,
             areas_m2,
@@ -313,8 +391,35 @@ fn simulate_viscous_impl(
             &mut accountant,
             cx,
         )?;
+        apply_source(
+            &mut backend,
+            half,
+            &mut coarse,
+            &mut coarse_source,
+            &mut source_particle_updates,
+            &mut meter,
+            &mut accountant,
+            cx,
+        )?;
         backend.invalidate();
-        super::viscous::weighted_step_with(
+        apply_source(
+            &mut backend,
+            quarter,
+            &mut fine,
+            &mut fine_source,
+            &mut source_particle_updates,
+            &mut meter,
+            &mut accountant,
+            cx,
+        )?;
+        let mut observe = |particle, before, after, transfer| {
+            if TRACK_DIFFUSION {
+                fine_diffusion.observe(particle, before, after, transfer)
+            } else {
+                Ok(())
+            }
+        };
+        super::viscous::weighted_step_with_observed(
             &mut fine,
             areas_m2,
             h,
@@ -326,8 +431,20 @@ fn simulate_viscous_impl(
             &mut meter,
             &mut accountant,
             cx,
+            &mut observe,
         )?;
-        super::viscous::weighted_step_with(
+        // The two adjacent quarter-source maps share the same held generator.
+        apply_source(
+            &mut backend,
+            half,
+            &mut fine,
+            &mut fine_source,
+            &mut source_particle_updates,
+            &mut meter,
+            &mut accountant,
+            cx,
+        )?;
+        super::viscous::weighted_step_with_observed(
             &mut fine,
             areas_m2,
             h,
@@ -336,6 +453,17 @@ fn simulate_viscous_impl(
             law,
             &mut backend,
             &mut pair_evaluations,
+            &mut meter,
+            &mut accountant,
+            cx,
+            &mut observe,
+        )?;
+        apply_source(
+            &mut backend,
+            quarter,
+            &mut fine,
+            &mut fine_source,
+            &mut source_particle_updates,
             &mut meter,
             &mut accountant,
             cx,
@@ -374,6 +502,17 @@ fn simulate_viscous_impl(
                     Ok(())
                 })?;
             }
+            coarse_source = [Dd::ZERO; 3];
+            apply_source(
+                &mut backend,
+                half,
+                &mut coarse,
+                &mut coarse_source,
+                &mut source_particle_updates,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
             super::viscous::reverse_step(
                 &mut coarse,
                 areas_m2,
@@ -382,6 +521,16 @@ fn simulate_viscous_impl(
                 law,
                 &mut backend,
                 &mut pair_evaluations,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
+            apply_source(
+                &mut backend,
+                half,
+                &mut coarse,
+                &mut coarse_source,
+                &mut source_particle_updates,
                 &mut meter,
                 &mut accountant,
                 cx,
@@ -444,7 +593,10 @@ fn simulate_viscous_impl(
                 .ok_or(overflow("adaptive moving kernel evaluations"))?;
         }
         expected_work = next_work;
-        if pair_evaluations != next_pairs || meter.completed != expected_work {
+        if pair_evaluations != next_pairs
+            || source_particle_updates != next_sources
+            || meter.completed != expected_work
+        {
             return Err(VpmError::AccountingMismatch {
                 planned: expected_work,
                 completed: meter.completed,
@@ -453,6 +605,10 @@ fn simulate_viscous_impl(
             .into());
         }
         if error_ratio <= 1.0 {
+            add_source(&mut source_moments, fine_source)?;
+            if TRACK_DIFFUSION {
+                diffusion_moments.add(&fine_diffusion)?;
+            }
             core::mem::swap(&mut state, &mut fine);
             elapsed = endpoint;
             accepted_steps += 1;
@@ -460,7 +616,7 @@ fn simulate_viscous_impl(
         } else {
             rejected_steps += 1;
         }
-        dt = next_step(time, h, error_ratio, elapsed)?;
+        dt = next_step(time, h, error_ratio, elapsed.to_f64())?;
     }
     meter.flush(&mut accountant, "fs-vpm.viscous-adaptive-finalize")?;
     if meter.completed != expected_work || accountant.consumption().cost_charged != expected_work {
@@ -473,7 +629,7 @@ fn simulate_viscous_impl(
     }
     accountant.checkpoint("fs-vpm.viscous-adaptive-publication", cx)?;
     let stats = backend.stats();
-    Ok(CompactAdaptiveRun {
+    Ok(AmbientViscousAdaptiveRun {
         run: AdaptiveRun {
             particles: state,
             elapsed_s: duration_s,
@@ -487,6 +643,12 @@ fn simulate_viscous_impl(
             max_accepted_error_ratio,
             budget: accountant.consumption(),
         },
+        ambient_moment_change: AmbientMomentChange {
+            first_moment_m3_s: [source_moments[0].to_f64(), source_moments[1].to_f64()],
+            quadratic_moment_m4_s: source_moments[2].to_f64(),
+        },
+        diffusion_moment_change: diffusion_moments.finish(),
+        source_particle_updates,
         graph_rebuilds: stats.graph_rebuilds,
         candidate_visits: stats.candidate_visits,
     })
