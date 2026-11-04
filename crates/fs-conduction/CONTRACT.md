@@ -1587,8 +1587,8 @@ constant law at an admitted old temperature does not admit arbitrary heating.
 | `ComponentPower` / `PowerMap` | per-component dissipation in W bound to a mesh vertex set, plus the declared system total. Names are unique and sorted; bound vertices are sorted and deduplicated so a repeated binding cannot take a double share while the totals still balance |
 | `PowerMap::volumetric_source` | projects the map onto the nodal `W/m³` source AND returns the audit computed from that same field, so the reported delivered power is what the solve receives rather than a parallel estimate of it |
 | `PowerMap::regional_volumetric_source` | the s93ej.2 generation companion of `from_region_ids`: one finite W/m³ per region id, lumped to nodes so delivered power is exactly `Σ_e f_e V_e`. Unmapped regions and length mismatches refuse. This is generation, not conductivity |
-| `SurfaceComponentPower` / `SurfacePowerMap` | the boundary analogue: dissipation bound to boundary-face SLOTS, projected onto a nodal OUTWARD-flux field for a `ThermalBc::Neumann` region. `region_selector(mesh)` hands back the matching face predicate so the flux and the region cannot describe different face sets |
-| `SurfacePowerAudit` / `SurfacePowerAuditRow` | the surface balance, reporting both the geometric `face_area_m2` and the map-wide `lumped_area_m2` the distribution actually divides by — they differ when footprints share vertices, and the lumped one is what keeps the total exact |
+| `SurfaceComponentPower` / `SurfacePowerMap` | dissipation bound to boundary-face SLOTS; `bind_boundary` attaches a separate uniform Neumann row `-P/A` to each physical footprint, preserving each heater's own power even at shared vertices. `neumann_flux` admits one nodal field only when shared vertices require the same flux; use `region_selector(mesh)` for its exact covered face set |
+| `SurfacePowerAudit` / `SurfacePowerAuditRow` | the surface balance integrates each component's actual face flux; `face_area_m2` and the normalization accessor `lumped_area_m2` both refer to that component's own geometric area, never a neighbouring footprint's area |
 | `PowerAudit` / `PowerAuditRow` | the retained three-number balance — declared total, component sum, delivered total — with a per-component table of bound volume, applied density, and delivered watts. `total_half_width_w()` sums stated bands conservatively and returns `None` if any component is `Unstated` |
 | `SurfaceEmissivity` | one dimensionless hemispherical-total emissivity selected from an `fs-matdb` material card; retains material state, card identity, exact property-use receipt, selected claim's optional closed temperature-validity interval, and the source uncertainty statement |
 | `LinearizedSurfaceRadiation` / `LinearizedRadiationPoint` | a declared `4 ε σ T_mean³` Robin coefficient with a caller-chosen departure budget, enforced emissivity-card validity, full `T⁴` comparison, measured point discrepancy, and first-order emissivity-width propagation |
@@ -1848,14 +1848,16 @@ On the 43,840-tet heatsink ladder rung this proves `||A^-1||_inf <= 9.1e6` over
     refusal, so the reader sees which row is wrong. A forgotten component is
     the commonest data-entry error in a thermal model and the cheapest to
     catch. Evidence: `tests/power.rs`.
-13. **Surface power is delivered exactly too, by the same argument one
-    dimension down.** The exact P1 face load `∫λ_aλ_b dA = A(1+δ_ab)/12` has
-    row sum `A/3`, so the delivered surface power is `Σ_a q_a s_a` with the
-    lumped nodal AREA `s_a = (1/3) Σ_{f ∋ a} A_f`. The weight is computed over
-    the WHOLE map rather than per component, which is what keeps adjacent
-    footprints sharing a vertex exact: the assembled Neumann load integrates
-    over the whole region, so the distribution weight must too.
-    Evidence: `tests/power.rs`.
+13. **Surface power stays on its declared footprint.** Each component owns
+    a separate uniform-flux Neumann row with `q_n = -P/A` over its own area.
+    The native P1 face load integrates the constant exactly: each face adds
+    `-q_n A_face/3` to its three vertices. Temperature remains continuous;
+    prescribed flux may jump across a heater edge. A zero-watt neighbouring
+    footprint receives zero direct heat, regardless of shared vertices.
+    The single-nodal-field entry point refuses conflicting vertex fluxes
+    rather than redistributing power while passing a total-only audit.
+    Evidence: `tests/power.rs`, including per-footprint integrals and native
+    assembly, steady solves, and a transient `P * elapsed` calorimeter.
 14. **Boundary-face SLOTS and canonical FACE indices are different numbering
     spaces.** A component binds slots into `ConductionMesh::boundary`; a
     region predicate is handed a `BoundaryFace` whose `face` field indexes the
@@ -2037,9 +2039,11 @@ None. Everything here is `[S]` solid work on the default path.
   component refuses; one `Unstated` component making the total band `None`;
   the full admission-refusal surface; and declaration-order independence.
   Surface coverage (`f85xj.5.14`): delivered surface power exact at `1e-12`
-  and across refinement; adjacent footprints sharing vertices still balancing,
-  with an assertion that the fixture genuinely exercises the shared-vertex
-  case; the analytic cross-check that a full-face map reproduces the
+  and across refinement; adjacent footprints sharing vertices retain their
+  individual watt inputs, including an off component; independent constant-
+  flux P1 load moments and compatible equal-flux nodal fields; a native
+  steady comparison and an insulated transient `P * elapsed` balance;
+  the analytic cross-check that a full-face map reproduces the
   equivalent uniform `ThermalBc::Neumann` SOLVE, which also pins the sign
   (heating must raise the body above its Dirichlet wall); the region selector
   reproducing exactly the claimed slots; and refusals for a face claimed
@@ -2415,16 +2419,16 @@ authority.
   quarantine concern, not a physics one. The crate validates what it is handed
   and refuses what does not balance; it asserts nothing about where the
   numbers came from or whether the file they came from was well-formed.
-- A SURFACE POWER MAP IS A NEUMANN REGION, AND THE REGION MUST BE THE MAP'S
-  OWN. `SurfacePowerMap::neumann_flux` returns a nodal outward-flux field
-  whose lumping assumes the assembled load integrates over EXACTLY the faces
-  the map claims. Declaring it over any other face set delivers a power the
-  audit does not report, silently, because both halves still look
-  individually reasonable — so derive the region from
-  `SurfacePowerMap::region_selector`. Two components may not claim the same
-  face: a face carries one surface load. Adjacent footprints that share
-  VERTICES are fine and still balance, because the lumped nodal area is
-  map-wide rather than per-component.
+- SURFACE POWER BELONGS TO ITS PHYSICAL FACE SET. `SurfacePowerMap::bind_boundary`
+  attaches separate named Neumann rows to faces of the original mesh left in
+  the boundary's explicit adiabatic remainder. It refuses existing face/name
+  ownership and partition-size mismatch; the caller retains the original
+  mesh/boundary identity. Two components may not claim the same face. The
+  optional `neumann_flux` representation requires equal prescribed fluxes at
+  every shared vertex and refuses otherwise. Its region must still cover
+  EXACTLY the map's faces; derive it from `region_selector(mesh)`. A map-wide
+  nodal normalization that preserves only the summed watts is insufficient:
+  it can heat a switched-off adjacent footprint.
 - SURFACE FLUX IS SIGNED POSITIVE-LEAVING, so a surface heat SOURCE produces a
   NEGATIVE `outward_flux`. `SurfacePowerAuditRow::outward_flux_w_per_m2` is
   therefore negative for a heater, while `declared_w` and `delivered_w` are

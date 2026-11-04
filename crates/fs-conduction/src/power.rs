@@ -615,19 +615,17 @@ impl SurfacePowerAuditRow {
         self.face_area_m2
     }
 
-    /// Lumped nodal area of the component's vertices over the WHOLE map, m².
+    /// Normalization area of this component's own faces, m².
     ///
-    /// This, not [`SurfacePowerAuditRow::face_area_m2`], is the weight the
-    /// distribution divides by. The two differ when a component shares
-    /// vertices with a neighbouring footprint, because the shared vertex
-    /// carries area from both; using the map-wide weight is exactly what
-    /// keeps the delivered total exact in that case.
+    /// Equal to [`SurfacePowerAuditRow::face_area_m2`]. A neighbouring
+    /// footprint must not change this component's heat density or receive a
+    /// share of its power merely because the two traces share vertices.
     #[must_use]
     pub const fn lumped_area_m2(&self) -> f64 {
         self.lumped_area_m2
     }
 
-    /// The OUTWARD flux applied at this component's vertices, W/m².
+    /// Uniform OUTWARD flux applied on this component's own faces, W/m².
     ///
     /// Negative: a surface heat source drives heat INTO the solid, and
     /// [`crate::bc::ThermalBc::Neumann`] is signed positive-leaving.
@@ -817,25 +815,116 @@ impl SurfacePowerMap {
         faces
     }
 
-    /// Project the map onto the nodal OUTWARD-flux field and audit it.
+    /// Bind each component's watts to its own physical boundary footprint.
+    ///
+    /// Each component becomes a separate named, uniform Neumann row with
+    /// outward flux `-P / A`, where `A` is that component's actual face area.
+    /// Adjacent rows may have different fluxes even at a common edge: the
+    /// prescribed load is discontinuous there, while temperature remains in
+    /// the original continuous P1 space. No nodal smoothing transfers power
+    /// to a neighbouring component, including a component that is switched off.
+    ///
+    /// The supplied boundary must belong to this mesh and leave these faces
+    /// in its explicit adiabatic remainder. Existing physical rows and their
+    /// prescribed vertices are retained. The returned boundary is consumed
+    /// directly by the existing steady and transient conduction solvers.
+    /// Selected faces are visited directly; preparation does not rescan the
+    /// whole mesh separately for each heater.
+    ///
+    /// # Errors
+    /// Invalid powers, areas, face slots or total; a different partition size;
+    /// or any name/face already owned by the supplied boundary. Refusal leaves
+    /// the original boundary and map unchanged.
+    pub fn bind_boundary(
+        &self,
+        mesh: &ConductionMesh,
+        boundary: &crate::bc::ThermalBoundary,
+        relative_tolerance: f64,
+    ) -> Result<(crate::bc::ThermalBoundary, SurfacePowerAudit), ConductionError> {
+        if boundary.face_count() != mesh.boundary().len() {
+            return Err(power_error(
+                "<surface-power-map>",
+                "surface power boundary partition differs from the supplied mesh",
+                "retain the original mesh and boundary together",
+            ));
+        }
+        let audit = self.uniform_flux_audit(mesh, relative_tolerance)?;
+        let rows: Vec<_> = self
+            .components
+            .iter()
+            .zip(&audit.rows)
+            .map(|(component, row)| {
+                (
+                    component.name.clone(),
+                    component.faces.clone(),
+                    row.outward_flux_w_per_m2,
+                )
+            })
+            .collect();
+        let bound = boundary.with_uniform_outward_flux_overlays(mesh, &rows)?;
+        Ok((bound, audit))
+    }
+
+    /// Express physically uniform component fluxes as one nodal field.
     ///
     /// The returned field is the `outward_flux` for a
     /// [`crate::bc::ThermalBc::Neumann`] region covering EXACTLY the faces
     /// this map claims. Use [`SurfacePowerMap::region_selector`] to declare
     /// that region.
     ///
-    /// Values are NEGATIVE where the map applies: `ThermalBc::Neumann` is
-    /// signed positive-leaving, and a surface source drives heat inward.
+    /// Values are NEGATIVE for positive heating: `ThermalBc::Neumann` is
+    /// signed positive-leaving. Each footprint retains its own `-P / A`.
+    /// A shared vertex can represent only one flux. If neighbouring components
+    /// require different values, this entry point refuses instead of moving
+    /// heat between them. Use [`Self::bind_boundary`] for that general case.
     ///
     /// # Errors
     /// [`ConductionError::ScenarioRow`] for a face slot outside the mesh
-    /// boundary, a component whose faces carry no lumped area, or a declared
-    /// total disagreeing with the component sum beyond `relative_tolerance`.
+    /// boundary, an unrepresentable flux, a shared vertex requiring different
+    /// fluxes, or a total/projection outside `relative_tolerance`.
     pub fn neumann_flux(
         &self,
         mesh: &ConductionMesh,
         relative_tolerance: f64,
     ) -> Result<(ScalarField, SurfacePowerAudit), ConductionError> {
+        let audit = self.uniform_flux_audit(mesh, relative_tolerance)?;
+        let boundary = mesh.boundary();
+        let vertex_count = mesh.vertex_count();
+        let mut flux = vec![0.0f64; vertex_count];
+        let mut owner: Vec<Option<usize>> = vec![None; vertex_count];
+        for (index, (component, row)) in self.components.iter().zip(&audit.rows).enumerate() {
+            for &slot in &component.faces {
+                for vertex in boundary[slot].vertices {
+                    let vertex = vertex as usize;
+                    if let Some(previous) = owner[vertex] {
+                        if flux[vertex] != row.outward_flux_w_per_m2 {
+                            return Err(power_error(
+                                &component.name,
+                                format!(
+                                    "surface components {:?} and {:?} require different fluxes at shared vertex {vertex}",
+                                    self.components[previous].name, component.name,
+                                ),
+                                "use SurfacePowerMap::bind_boundary to retain separate physical face loads",
+                            ));
+                        }
+                    } else {
+                        flux[vertex] = row.outward_flux_w_per_m2;
+                        owner[vertex] = Some(index);
+                    }
+                }
+            }
+        }
+        let field = ScalarField::nodal("surface power flux", vertex_count, flux)?;
+        Ok((field, audit))
+    }
+
+    /// Prepare one physical constant-flux row per footprint. No map-wide
+    /// nodal projection may redistribute one component's watts to another.
+    fn uniform_flux_audit(
+        &self,
+        mesh: &ConductionMesh,
+        relative_tolerance: f64,
+    ) -> Result<SurfacePowerAudit, ConductionError> {
         if !relative_tolerance.is_finite() || relative_tolerance < 0.0 {
             return Err(power_error(
                 "<surface-power-map>",
@@ -845,54 +934,48 @@ impl SurfacePowerMap {
         }
         let boundary = mesh.boundary();
         self.admit_face_slots(boundary.len())?;
-
-        // ONE map-wide lumped nodal area, used both to distribute and to
-        // deliver. Anything else breaks the identity when two footprints share
-        // a vertex: the assembled load integrates over the whole region, so
-        // the distribution weight has to be the whole region's too.
-        let vertex_count = mesh.vertex_count();
-        let lumped = self.lumped_nodal_areas(mesh);
-
-        let mut flux = vec![0.0f64; vertex_count];
         let mut rows = Vec::with_capacity(self.components.len());
         let mut component_total = 0.0f64;
+        let mut delivered_total = 0.0f64;
         let mut half_width_total = Some(0.0f64);
-
         for component in &self.components {
-            let mut vertices: Vec<usize> = component
-                .faces
-                .iter()
-                .flat_map(|&slot| boundary[slot].vertices)
-                .map(|vertex| vertex as usize)
-                .collect();
-            vertices.sort_unstable();
-            vertices.dedup();
-
             let face_area: f64 = component
                 .faces
                 .iter()
                 .map(|&slot| boundary[slot].area)
                 .sum();
-            let lumped_area: f64 = vertices.iter().map(|&vertex| lumped[vertex]).sum();
-            if !(lumped_area.is_finite() && lumped_area > 0.0) {
+            if !(face_area.is_finite() && face_area > 0.0) {
                 return Err(power_error(
                     &component.name,
-                    "surface component's bound faces carry no lumped area",
+                    "surface component's bound faces carry no finite positive area",
                     "bind the component to boundary faces with positive area",
                 ));
             }
-
-            // Negative: positive Neumann flux LEAVES the domain. The row's
-            // delivered power is RECOMPUTED from that flux against the same
-            // nodal weights the operator integrates, not copied from the
-            // declaration.
-            let outward = -component.watts / lumped_area;
-            let mut delivered = 0.0f64;
-            for &vertex in &vertices {
-                flux[vertex] += outward;
-                delivered = (-outward).mul_add(lumped[vertex], delivered);
+            let outward = -component.watts / face_area;
+            if !outward.is_finite() || (component.watts > 0.0 && outward == 0.0) {
+                return Err(power_error(
+                    &component.name,
+                    "surface component flux is not representable",
+                    "check the component power and its physical footprint area",
+                ));
+            }
+            let delivered: f64 = component
+                .faces
+                .iter()
+                .map(|&slot| -outward * boundary[slot].area)
+                .sum();
+            if !delivered.is_finite()
+                || (delivered - component.watts).abs()
+                    > relative_tolerance * component.watts.max(delivered.abs())
+            {
+                return Err(power_error(
+                    &component.name,
+                    "integrated surface power does not meet the declared tolerance",
+                    "check the footprint and provide a representable power-projection tolerance",
+                ));
             }
             component_total += component.watts;
+            delivered_total += delivered;
             half_width_total = match (half_width_total, component.uncertainty) {
                 (Some(running), PowerUncertainty::HalfWidth { half_width, .. }) => {
                     Some(running + half_width)
@@ -903,17 +986,12 @@ impl SurfacePowerMap {
                 name: component.name.clone(),
                 declared_w: component.watts,
                 face_area_m2: face_area,
-                lumped_area_m2: lumped_area,
+                lumped_area_m2: face_area,
                 outward_flux_w_per_m2: outward,
                 delivered_w: delivered,
             });
         }
 
-        // Delivered power INTO the solid is minus the outward load.
-        let mut delivered_total = 0.0f64;
-        for (value, weight) in flux.iter().zip(lumped.iter()) {
-            delivered_total = (-value).mul_add(*weight, delivered_total);
-        }
         for (value, field) in [
             (component_total, "surface component power sum"),
             (delivered_total, "delivered surface power"),
@@ -949,8 +1027,7 @@ impl SurfacePowerMap {
             ));
         }
 
-        let field = ScalarField::nodal("surface power flux", vertex_count, flux)?;
-        Ok((field, audit))
+        Ok(audit)
     }
 
     /// Refuse any bound face slot outside the mesh boundary.
@@ -971,31 +1048,11 @@ impl SurfacePowerMap {
         Ok(())
     }
 
-    /// Map-wide lumped nodal areas `s_a = (1/3) Σ_{f ∋ a} A_f` over the faces
-    /// this map claims.
-    ///
-    /// Summing the exact P1 face load `∫λ_a λ_b dA = A(1+δ_ab)/12` over `a`
-    /// gives `A/3`, so these are the weights that turn a nodal outward flux
-    /// into a delivered surface power. Slots are assumed already admitted by
-    /// [`SurfacePowerMap::admit_face_slots`].
-    fn lumped_nodal_areas(&self, mesh: &ConductionMesh) -> Vec<f64> {
-        let boundary = mesh.boundary();
-        let mut lumped = vec![0.0f64; mesh.vertex_count()];
-        for &slot in &self.covered_faces() {
-            let face = &boundary[slot];
-            let third = face.area / 3.0;
-            for vertex in face.vertices {
-                lumped[vertex as usize] += third;
-            }
-        }
-        lumped
-    }
-
     /// A face predicate selecting exactly the faces this map claims.
     ///
     /// Pass it straight to [`crate::bc::ThermalBoundaryBuilder::region`]
     /// alongside the flux from [`SurfacePowerMap::neumann_flux`]. The two must
-    /// describe the SAME face set: the lumping weight assumes the assembled
+    /// describe the SAME face set: the physical area assumes the assembled
     /// Neumann load integrates over exactly these faces, and a region
     /// selecting more or fewer would deliver a different power than the audit
     /// reports — silently, because both halves would still look individually

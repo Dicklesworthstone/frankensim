@@ -616,46 +616,123 @@ fn delivered_surface_power_is_exact_across_mesh_refinement() {
 }
 
 #[test]
-fn adjacent_footprints_sharing_vertices_still_balance() {
-    // Two components on the SAME face plane, disjoint face sets but sharing
-    // the vertices along their common edge. The map-wide lumped area is what
-    // keeps this exact; a per-component lumping would double-count the shared
-    // vertices and over-deliver.
-    let mesh = unit_mesh(4);
-    let all = faces_on_x(&mesh, 1.0);
-    assert!(all.len() >= 4, "need several faces to split");
-    let split = all.len() / 2;
-    let (left, right) = all.split_at(split);
+fn adjacent_footprints_preserve_each_components_physical_power() {
+    // G0/G3: total power alone missed heat leaking into a switched-off
+    // neighbour. Integrate EACH physical footprint and independently form
+    // the native P1 boundary load using integral(phi_i) = area / 3.
+    for n in [1, 2, 4] {
+        let mesh = unit_mesh(n);
+        let all = faces_on_x(&mesh, 1.0);
+        let (left, right) = all.split_at(all.len() / 2);
+        let vertices = |slots: &[usize]| -> std::collections::BTreeSet<u32> {
+            slots
+                .iter()
+                .flat_map(|&slot| mesh.boundary()[slot].vertices)
+                .collect()
+        };
+        assert!(!vertices(left).is_disjoint(&vertices(right)));
+        let base = ThermalBoundaryBuilder::new(&mesh)
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        for power_b in [0.0, 5.0] {
+            let map = SurfacePowerMap::new(
+                vec![
+                    SurfaceComponentPower::new("a", 3.0, PowerUncertainty::Unstated, left.to_vec())
+                        .unwrap(),
+                    SurfaceComponentPower::new(
+                        "b",
+                        power_b,
+                        PowerUncertainty::Unstated,
+                        right.to_vec(),
+                    )
+                    .unwrap(),
+                ],
+                3.0 + power_b,
+            )
+            .unwrap();
+            let error = map
+                .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+                .unwrap_err();
+            assert!(error.to_string().contains("bind_boundary"));
+            let (boundary, audit) = map
+                .bind_boundary(&mesh, &base, DEFAULT_POWER_TOLERANCE)
+                .unwrap();
+            let mut expected_load = vec![0.0; mesh.vertex_count()];
+            for (component, row) in map.components().iter().zip(audit.rows()) {
+                let area: f64 = component
+                    .faces()
+                    .iter()
+                    .map(|&s| mesh.boundary()[s].area)
+                    .sum();
+                let inward = component.watts() / area;
+                let mut delivered = 0.0;
+                for &slot in component.faces() {
+                    let face = &mesh.boundary()[slot];
+                    let Some(ThermalBc::Neumann { outward_flux }) = boundary.condition_for(slot)
+                    else {
+                        panic!("physical component must own a Neumann row");
+                    };
+                    assert_eq!(outward_flux, &ScalarField::Uniform(-inward));
+                    delivered += -outward_flux.at(face.vertices[0] as usize) * face.area;
+                    for vertex in face.vertices {
+                        expected_load[vertex as usize] += inward * face.area / 3.0;
+                    }
+                }
+                assert!((delivered - component.watts()).abs() < 1e-12);
+                assert!((row.delivered_w() - delivered).abs() < 1e-12);
+                assert_eq!(row.lumped_area_m2(), row.face_area_m2());
+            }
+            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+            let assembled = with_cx(|cx| {
+                fs_conduction::assemble::assemble_operator(
+                    cx,
+                    &mesh,
+                    &boundary,
+                    &material,
+                    &ScalarField::Uniform(0.0),
+                    &vec![300.0; mesh.vertex_count()],
+                )
+                .unwrap()
+            });
+            for (actual, expected) in assembled.load.iter().zip(&expected_load) {
+                assert!((actual - expected).abs() < 1e-13);
+            }
+            assert!((audit.delivered_total_w() - 3.0 - power_b).abs() < 1e-12);
+        }
+        assert!(
+            base.region_names().is_empty(),
+            "binding must not mutate the original boundary"
+        );
+    }
+}
 
-    let map = SurfacePowerMap::new(
-        vec![
-            SurfaceComponentPower::new("a", 3.0, PowerUncertainty::Unstated, left.to_vec())
-                .expect("a"),
-            SurfaceComponentPower::new("b", 5.0, PowerUncertainty::Unstated, right.to_vec())
-                .expect("b"),
-        ],
-        8.0,
-    )
-    .expect("map admits");
-
-    let (_, audit) = map
-        .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
-        .expect("projection");
-    assert!(
-        (audit.delivered_total_w() - 8.0).abs() < 1e-12,
-        "adjacent footprints delivered {}",
-        audit.delivered_total_w()
-    );
-    // The shared-vertex effect is real: at least one component's lumped area
-    // must exceed its own geometric face area, or the fixture is not actually
-    // exercising the case this test exists for.
-    assert!(
-        audit
-            .rows()
-            .iter()
-            .any(|row| row.lumped_area_m2() > row.face_area_m2() + 1e-15),
-        "the two footprints must actually share vertices"
-    );
+#[test]
+fn equal_adjacent_fluxes_share_one_nodal_value_without_double_heating() {
+    let mesh = unit_mesh(1);
+    let faces = faces_on_x(&mesh, 1.0);
+    assert_eq!(faces.len(), 2);
+    let components = faces
+        .iter()
+        .enumerate()
+        .map(|(i, &slot)| {
+            SurfaceComponentPower::new(
+                format!("heater-{i}"),
+                4.0 * mesh.boundary()[slot].area,
+                PowerUncertainty::Unstated,
+                vec![slot],
+            )
+            .unwrap()
+        })
+        .collect();
+    let map = SurfacePowerMap::new(components, 4.0).unwrap();
+    let (field, audit) = map.neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE).unwrap();
+    for &slot in &faces {
+        for vertex in mesh.boundary()[slot].vertices {
+            assert_eq!(field.at(vertex as usize), -4.0);
+        }
+    }
+    assert_eq!(audit.delivered_total_w(), 4.0);
 }
 
 #[test]
@@ -872,6 +949,10 @@ fn surface_projection_is_deterministic_and_order_independent() {
     let all = faces_on_x(&mesh, 1.0);
     let split = all.len() / 2;
     let (left, right) = all.split_at(split);
+    let base = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
     let build = |reversed: bool| {
         let mut components = vec![
             SurfaceComponentPower::new("alpha", 2.0, PowerUncertainty::Unstated, left.to_vec())
@@ -884,7 +965,7 @@ fn surface_projection_is_deterministic_and_order_independent() {
         }
         SurfacePowerMap::new(components, 5.0)
             .expect("map admits")
-            .neumann_flux(&mesh, DEFAULT_POWER_TOLERANCE)
+            .bind_boundary(&mesh, &base, DEFAULT_POWER_TOLERANCE)
             .expect("projection")
     };
     let (forward_field, forward_audit) = build(false);
@@ -893,4 +974,154 @@ fn surface_projection_is_deterministic_and_order_independent() {
     assert_eq!(forward_audit, reversed_audit);
     let names: Vec<&str> = forward_audit.rows().iter().map(|row| row.name()).collect();
     assert_eq!(names, vec!["alpha", "beta"]);
+}
+
+#[test]
+fn separate_surface_powers_drive_native_steady_and_transient_conduction() {
+    use fs_conduction::transient::{
+        TransientConfig, TransientProblem, VolumetricHeatCapacity, march,
+    };
+
+    let mesh = unit_mesh(2);
+    let top = faces_on_x(&mesh, 1.0);
+    let (left, right): (Vec<_>, Vec<_>) = top
+        .into_iter()
+        .partition(|&s| mesh.boundary()[s].centroid[1] < 0.5);
+    let map = SurfacePowerMap::new(
+        vec![
+            SurfaceComponentPower::new("heater", 3.0, PowerUncertainty::Unstated, left).unwrap(),
+            SurfaceComponentPower::new("off", 0.0, PowerUncertainty::Unstated, right).unwrap(),
+        ],
+        3.0,
+    )
+    .unwrap();
+    let base = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "cold",
+            |face| on_box_face(face.centroid[0], 0.0),
+            ThermalBc::dirichlet(300.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let (boundary, _) = map
+        .bind_boundary(&mesh, &base, DEFAULT_POWER_TOLERANCE)
+        .unwrap();
+    let reference = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "cold",
+            |face| on_box_face(face.centroid[0], 0.0),
+            ThermalBc::dirichlet(300.0).unwrap(),
+        )
+        .unwrap()
+        .region(
+            "heater",
+            |face| on_box_face(face.centroid[0], 1.0) && face.centroid[1] < 0.5,
+            ThermalBc::neumann(-6.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let run = |boundary: &fs_conduction::bc::ThermalBoundary| {
+        with_cx(|cx| {
+            solve(
+                cx,
+                ConductionProblem {
+                    mesh: &mesh,
+                    boundary,
+                    material: &material,
+                    source: &source,
+                    element_materials: None,
+                },
+                config(),
+            )
+            .unwrap()
+        })
+    };
+    let actual = run(&boundary);
+    let expected = run(&reference);
+    for (actual, expected) in actual.temperature.iter().zip(&expected.temperature) {
+        assert!((actual - expected).abs() < 1e-10);
+    }
+
+    // An insulated calorimeter stores exactly P * elapsed regardless of
+    // conduction's internal redistribution. Integrate the final P1 field
+    // independently over the original tetrahedra, not the step's audit.
+    let insulated = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let (heated, _) = map
+        .bind_boundary(&mesh, &insulated, DEFAULT_POWER_TOLERANCE)
+        .unwrap();
+    let transient = TransientConfig::backward_euler(0.25, config().linear).unwrap();
+    let final_state = with_cx(|cx| {
+        march(
+            cx,
+            TransientProblem {
+                mesh: &mesh,
+                boundary: &heated,
+                material: &material,
+                source: &source,
+                capacity: VolumetricHeatCapacity::declared(100.0).unwrap(),
+            },
+            &transient,
+            &vec![300.0; mesh.vertex_count()],
+            4,
+        )
+        .unwrap()
+    });
+    let mut stored = 0.0;
+    for (e, tet) in mesh.complex().tets.iter().enumerate() {
+        for &v in tet {
+            stored += 100.0 * mesh.element_volume(e) / 4.0
+                * (final_state.temperature[v as usize] - 300.0);
+        }
+    }
+    assert!(
+        (stored - 3.0).abs() < 1e-8,
+        "stored {stored} J, expected 3 W * 1 s"
+    );
+}
+
+#[test]
+fn surface_binding_refuses_owned_faces_names_and_foreign_partition_size() {
+    let mesh = unit_mesh(1);
+    let faces = faces_on_x(&mesh, 1.0);
+    let map = SurfacePowerMap::new(
+        vec![SurfaceComponentPower::new("heater", 3.0, PowerUncertainty::Unstated, faces).unwrap()],
+        3.0,
+    )
+    .unwrap();
+    for (name, x) in [("heater", 0.0), ("already-owned", 1.0)] {
+        let base = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                name,
+                |face| on_box_face(face.centroid[0], x),
+                ThermalBc::adiabatic(),
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let original = base.clone();
+        assert!(
+            map.bind_boundary(&mesh, &base, DEFAULT_POWER_TOLERANCE)
+                .is_err()
+        );
+        assert_eq!(base, original);
+    }
+    let other = unit_mesh(2);
+    let foreign = ThermalBoundaryBuilder::new(&other)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    assert!(
+        map.bind_boundary(&mesh, &foreign, DEFAULT_POWER_TOLERANCE)
+            .is_err()
+    );
 }
