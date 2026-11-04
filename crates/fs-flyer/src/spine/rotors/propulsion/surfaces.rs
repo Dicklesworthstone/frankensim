@@ -206,14 +206,42 @@ impl<'a> LiftingSurfaces<'a> {
                 + arm.cross(profile_force)
                 + vec(frame.span_direction()).scale(q * area * strip.chord_m * cm0);
         }
+        // The induced-drag closure has a finite, strictly positive CG
+        // dynamic-pressure domain. Local strip flow may be admissible while
+        // the CG reference is not; never turn a zero/invalid reference speed
+        // into an unbounded or NaN load.
         let speed2 = cg_air.dot(cg_air);
-        let direction = cg_air.scale(1.0 / speed2.sqrt());
         let q = 0.5 * rho * speed2;
+        if !rho.is_finite()
+            || rho <= 0.0
+            || !cg_air.to_array().iter().all(|v| v.is_finite())
+            || !speed2.is_finite()
+            || speed2 <= 1.0
+            || !q.is_finite()
+            || group_forces.len() != self.groups.len()
+        {
+            return Err(reject(
+                "lifting-surfaces-invalid",
+                "finite positive density, CG airspeed above 1 m/s and one force per induced-drag group are required",
+            ));
+        }
+        let direction = cg_air.scale(1.0 / speed2.sqrt());
         for (group, &load) in self.groups.iter().zip(group_forces) {
+            if !load.to_array().iter().all(|v| v.is_finite()) {
+                return Err(reject("lifting-surfaces-invalid", "nonfinite grouped circulatory load"));
+            }
             let transverse = load - direction.scale(load.dot(direction));
             let drag = transverse.dot(transverse)
                 / (q * core::f64::consts::PI * group.oswald_e * group.span_m * group.span_m);
+            if !drag.is_finite() || drag < 0.0 {
+                return Err(reject("lifting-surfaces-invalid", "unrepresentable induced drag"));
+            }
             force = force - direction.scale(drag);
+        }
+        if !force.to_array().iter().all(|v| v.is_finite())
+            || !moment.to_array().iter().all(|v| v.is_finite())
+        {
+            return Err(reject("lifting-surfaces-invalid", "unrepresentable total aerodynamic wrench"));
         }
         Ok(Wrench::new(moment, force))
     }
