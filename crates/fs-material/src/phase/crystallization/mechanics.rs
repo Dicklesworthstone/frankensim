@@ -11,9 +11,11 @@
 //! stateless elastic law at elastic strain. It is directly consumable by native
 //! plane/tetrahedral/hexahedral solvers, with no alternative mechanics solver.
 //! Locking, current phase applicability and the explicit small-strain bounds
-//! need independent material justification. No remelting/reset, plasticity,
-//! anisotropic crystallite growth, evolving stiffness or pressure feedback is
-//! inferred. Updating snapshots supplies one-way mechanics: the associated
+//! need independent material justification. Complete network unlocking has a
+//! separate explicit fixed-strain transition in [`unlocking`]; no universal
+//! melting criterion, plasticity, anisotropic crystallite growth, evolving
+//! stiffness or pressure feedback is inferred. Updating snapshots supplies
+//! one-way mechanics: the associated
 //! elastic/parameter work is NOT included in the thermal crystallization heat
 //! balance, and this adapter makes no closed coupled-energy claim.
 
@@ -22,6 +24,9 @@ use crate::phase::PhaseStateError;
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 use fs_blake3::ContentHash;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
+
+/// Explicit loss of elastic support and its heat/energy-transfer account.
+pub mod unlocking;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CrystallizationMechanicsError {
@@ -252,7 +257,7 @@ impl<L: SmallStrainLaw<State = ()> + ?Sized> SmallStrainLaw
                 core::f64::consts::FRAC_1_SQRT_2 * self.limits.maximum_absolute_total_mandel_strain,
             ),
             vec![
-                "one-way mechanics; no melting/reset or elastic-work thermal feedback".into(),
+                "one-way frozen snapshot; no automatic melting/reset or thermal feedback".into(),
                 "locking and isotropic shrinkage have no calibrated model-discrepancy bound".into(),
             ],
             f64::INFINITY,
