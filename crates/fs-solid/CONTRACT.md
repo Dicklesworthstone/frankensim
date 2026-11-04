@@ -3981,6 +3981,61 @@ coupled-material, full-inertia, rigid-motion and refusal regressions. These
 regression definitions require native integration execution; syntax and source
 review alone do not claim that gate has passed.
 
+### Native frame resonance with complete physical port-load states
+
+`Frame2d::prepare_coupled_resonance` takes the same original M/C/K pencil and
+an existing exact-linear `PortHamiltonian` or `DescriptorPortHamiltonian` load.
+The original native force map B supplies both opposing frame effort `B*y_load`
+and source input `B^T*v`. All mutual load terms, relaxation states, zero-output
+internal modes and algebraic effort multipliers remain in one continuous
+descriptor. Neither an isolated load impedance nor its descriptor mass is
+inverted. Supported native rows have zero velocity; support reactions are
+outside the returned force-port response.
+
+State order is `[frame q, frame p=M*v, original load state]`; frame q/p follow
+the original free-DOF map. The load differential prefix and trailing multipliers
+remain unchanged. Returned effort entries for p are physical frame velocities.
+The full native mass inverse uses equilibrated existing Cholesky solves and an
+independent original-row check after symmetric rounding. Every reported mode or
+AC response additionally checks `q_dot=v`, `p=M*v` and the original full frame
+force equation with the two original port maps. No mass or damping diagonalization
+is introduced. Shared pHS storage/loss observations include each physical owner
+once; internal exchange is not an additional source, heat or radiation debit.
+
+Homogeneous eigenmode residuals use each original coefficient row's one-norm
+times the full original state/physical-velocity/load-effort infinity norm.
+This normwise gate allows roundoff in a physically zero frame block of a dark
+load mode, without an absolute floor. The separate kinematic and momentum rows
+retain their own coefficients. Forced AC keeps componentwise force-relative
+checks. These are numerical backward errors, not invariant physical condition
+numbers or state-error bounds.
+
+The prepared model reuses the existing `fs-phs` harmonic factor, seeded pole
+refinement and contour spectrum owners. `resonance_pole` finds a local isolated
+mode; `resonance_spectrum` searches only its declared Laplace-plane ellipse.
+Numerical count/rank/quadrature agreement is not a rigorous completeness proof.
+Repeated/defective modes can refuse. Stiffness can be semidefinite; no fictitious
+spring removes an energy-null rigid coordinate. Infinite descriptor roots are
+not reported as finite resonances, and a finite mode need not be observable.
+
+The native source-viscosity band gates each actual AC frequency. For complex
+rates, the API explicitly selects the same constant elastic/Kelvin-Voigt law as
+`resonance_poles` and retains its original band as provenance; it neither filters
+real relaxation roots nor claims complex-modulus validity from a real-frequency
+band. The physical load owner must supply its own source-domain and continuation
+admission. A periodic particular response does not erase an existing transient.
+
+Full native-coordinate, port, combined-state, numerical-byte and arithmetic-work
+bounds precede assembly. The prepared model and one AC solve share that envelope;
+pole/contour work has the existing separate query options. Checkpoints bracket
+bounded native mass/material and shared PSD-admission calls and poll inverse
+columns, assembly members, coupling rows and original physical observations.
+No source state or partial result is published on failure or cancellation.
+Six G0/G1/G3/G4 regressions in `tests/frame2d_poles/coupled.rs` specify analytic
+memory-shifted and hidden poles, descriptor inertance/drag, rigid position,
+full consistent mutual inertia and port covariance, original material loss,
+physical work and refusals. Native integration execution remains outstanding.
+
 ## Original material strain domains on frozen modal solid trajectories
 
 `ViscoElements::validate_displacement` evaluates the existing element Mandel

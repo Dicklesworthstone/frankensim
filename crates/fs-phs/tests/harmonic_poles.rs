@@ -28,6 +28,54 @@ fn pole_options(spectral_scale: f64) -> PoleOptions {
 }
 
 #[test]
+fn hidden_mode_accepts_roundoff_in_a_zero_physical_block_but_rejects_a_bad_mode() {
+    use fs_phs::{PortHamiltonian, QuadraticStorage};
+    // One physical oscillator and an unobservable internal relaxation. The
+    // source has no coupling between these blocks; no state is discarded.
+    let source = PortHamiltonian::new(
+        3,
+        1,
+        vec![0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 5.0],
+        vec![0.0, 1.0, 0.0],
+        Box::new(
+            QuadraticStorage::new(vec![4.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], 3).unwrap(),
+        ),
+    )
+    .unwrap();
+    let model = HarmonicModel::from_ode(&source, model_budget(), || false).unwrap();
+    let pole = model
+        .resonance_pole(
+            C64::from_re(-5.0),
+            &[C64::from_re(1e-13), C64::from_re(-1e-13), C64::ONE],
+            &pole_options(4.0),
+            || false,
+        )
+        .unwrap();
+    assert!((pole.laplace_pole_per_s - C64::from_re(-5.0)).abs() < 1e-12);
+    assert!(
+        pole.state[0].abs() > 0.0,
+        "a numerical eigenvector need not have exact zeros"
+    );
+    assert!(pole.port_output[0].abs() < 1e-12);
+    assert!(pole.relative_residual > 0.0 && pole.relative_residual < 1e-12);
+
+    // A deliberately loose Newton request does not override the independent
+    // physical model's original-row gate for a materially wrong eigenvector.
+    let mut loose = pole_options(4.0);
+    loose.residual_tolerance = 0.1;
+    assert!(matches!(
+        model.resonance_pole(
+            C64::from_re(-5.0),
+            &[C64::from_re(0.1), C64::from_re(-0.1), C64::ONE],
+            &loose,
+            || false
+        ),
+        Err(HarmonicPoleError::Residual { .. })
+    ));
+}
+
+#[test]
 fn damped_mechanical_pole_retains_original_coordinates_output_and_decay() {
     let (mass, stiffness, damping) = (2.5_f64, 1600.0_f64, 0.6_f64);
     let system = fs_phs::mass_spring_damper(mass, stiffness, damping).unwrap();

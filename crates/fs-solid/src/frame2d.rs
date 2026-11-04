@@ -59,6 +59,9 @@ mod linear;
 /// Complete damped native frame spectrum under exp(s t).
 pub mod poles;
 
+/// Native frame resonance with all physical boundary-load states and constraints.
+pub mod coupled;
+
 mod mass;
 pub use mass::FrameMassFormulation;
 mod impulse;

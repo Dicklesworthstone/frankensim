@@ -182,8 +182,13 @@ storage, Maxwell memory states, algebraic efforts and original port directions
 remain present. The singular descriptor matrix is never inverted. Fixed row
 conditioning uses the declared spectral scale and retains the analytic
 derivative and original state coordinates; an accepted result must also meet
-the model's existing componentwise residual tolerance in the ORIGINAL split
-pencil.
+the model's residual tolerance in the ORIGINAL split pencil. For homogeneous
+eigenvectors the row denominator is `(abs(s)*||E_row||_1 + ||A_row||_1)` times
+the full original state infinity norm. Roundoff in an otherwise zero physical
+block therefore does not demand exact componentwise zeros. There is no absolute
+floor or clipping; original row equilibration preserves small physical rows.
+This normwise eigenpair check is not a coordinate-invariant conditioning bound.
+Forced AC keeps its componentwise force-relative residual criterion.
 
 `HarmonicPole` returns the Laplace pole `s`, `omega=i*s` under the existing
 `exp(-i omega t)` convention, original state and effort vectors, and original
@@ -1146,8 +1151,8 @@ conditioning, bordered-Newton refinement and physical observation owner as
 singular. All algebraic constraints, mutual storage and material memory remain;
 finite modes with zero port output are retained. E is never inverted.
 
-Every returned `HarmonicPole` passes the unchanged original split-pencil
-componentwise residual gate and reports original coordinates/efforts/ports,
+Every returned `HarmonicPole` passes the original split-pencil homogeneous
+row-norm residual gate and reports original coordinates/efforts/ports,
 physical energy and dissipation, and independent decay-power balance. The
 spectrum reports numerical argument count, resolved rank, unrefined values,
 nested-quadrature indicators and contour margin. Physical result storage and

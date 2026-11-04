@@ -44,7 +44,8 @@ pub struct HarmonicBudget {
     /// Bound `n^2 * (max(n, 16) + ports + 8)` for preparation, factorization or
     /// one response, including at most four same-factor residual corrections.
     pub max_dense_work: u64,
-    /// Maximum componentwise backward residual of the original equations.
+    /// Original-equation residual ceiling: componentwise for forced AC;
+    /// homogeneous poles use row coefficient norms times the full state norm.
     pub relative_residual_tolerance: f64,
 }
 

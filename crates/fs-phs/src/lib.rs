@@ -1021,6 +1021,13 @@ impl PortHamiltonian {
         (&self.j, &self.r, &self.g)
     }
 
+    /// Original storage law and its explicitly declared quadratic part.
+    /// Read-only physical composition never infers this law by probing gradients.
+    #[must_use]
+    pub fn storage(&self) -> &dyn Storage {
+        self.storage.as_ref()
+    }
+
     /// The checked source-square witness for this system's exact `R`, when its
     /// producer retained one ([`Self::with_resistance_witness`] or a physical
     /// composition). Read-only; `None` means `R` carries no source factor and

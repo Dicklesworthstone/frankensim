@@ -1,6 +1,9 @@
 //! Complete native damped-frame spectra against independent mechanical pencils.
 //! Manufactured coefficients keep every expected pole analytic.
 
+#[path = "frame2d_poles/coupled.rs"]
+mod coupled;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

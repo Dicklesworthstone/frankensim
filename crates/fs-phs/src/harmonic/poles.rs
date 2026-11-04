@@ -39,7 +39,11 @@ pub struct HarmonicPole {
     pub dissipated_power_w: f64,
     /// 2 Re(s) H + D, independently evaluated from physical storage and loss.
     pub decay_power_residual_w: f64,
-    /// Maximum componentwise residual of the ORIGINAL split pencil sE-A.
+    /// Maximum original split-pencil row residual divided by
+    /// `(abs(s)*||E_row||_1 + ||A_row||_1) * ||state||_infinity`.
+    /// This homogeneous normwise backward error allows physically zero modal
+    /// components to carry roundoff; it is not a coordinate-invariant condition
+    /// estimate or the componentwise forced-response error.
     pub relative_residual: f64,
     pub iterations: usize,
 }
@@ -168,7 +172,11 @@ impl HarmonicModel {
     /// Constant row equilibration is prepared once using the declared spectral
     /// scale, so the derivative remains analytic and the eigenvector keeps its
     /// original coordinates. Acceptance also checks the unscaled split pencil
-    /// with this model's existing componentwise residual tolerance.
+    /// with this model's residual tolerance and each original split row's
+    /// coefficient envelope times the full state infinity norm. A hidden mode
+    /// may have roundoff-sized components in an otherwise zero physical block;
+    /// dividing only by those components would demand exact zeros from a
+    /// numerical eigenvector. Forced AC keeps its componentwise residual gate.
     ///
     /// This is not a spectrum search, nonlinear limit cycle, complete mode count,
     /// or certificate of a transfer-function pole. Infinite descriptor roots,
@@ -205,6 +213,12 @@ impl HarmonicModel {
         let n = self.n;
         let s = pole.value;
         let state = pole.vector;
+        let state_norm = state.iter().map(|z| z.abs()).fold(0.0_f64, f64::max);
+        if !state_norm.is_finite() || state_norm == 0.0 {
+            return Err(HarmonicPoleError::Invalid {
+                what: "a finite nonzero original eigenvector is required",
+            });
+        }
         let mut relative = 0.0_f64;
         for i in 0..n {
             poll(&mut cancelled)?;
@@ -221,12 +235,13 @@ impl HarmonicModel {
                 C64::ZERO
             };
             let mut residual = diagonal * state[i];
-            let mut denominator = diagonal.abs() * state[i].abs();
+            let mut denominator = diagonal.abs();
             for (j, &x) in state.iter().enumerate() {
                 let a = self.generator[i * n + j] / scale;
                 residual = residual - x.scale(a);
-                denominator += a.abs() * x.abs();
+                denominator += a.abs();
             }
+            denominator *= state_norm;
             let row = if denominator == 0.0 {
                 if residual == C64::ZERO {
                     0.0
