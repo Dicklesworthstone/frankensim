@@ -172,6 +172,22 @@ storage, pressure-work heating or an angular-momentum conservation claim. The
 returned physical receipt covers conversion only, with mass, linear momentum
 and signed numerical kinetic change per depth in kg/m, kg/s and J/m.
 
+Dense gas reconstruction evaluates the even Guo correction with the accepted
+endpoint force `rho_next*g + fext`. The held external force stays in the
+existing gas-equilibrium cache. At each actual missing gas link, gravity adds
+the coefficient `A_q = w_q*(-u_n.g/CS2 + (e_q.u_n)*(e_q.g)/CS2^2)`;
+one scalar closure gives `rho_next = sum(f_base)/(1 + sum(A_q))`, followed by
+`f_next[q] = f_base[q] - rho_next*A_q`. The existing explicit boundary velocity
+is retained. This adds no nonlinear iteration or heap buffer and preserves
+callback order and cache reuse. Invalid positive-density closure refuses the
+transaction. Tracked mass publishes after all gas closures pass, reusing the
+original post-collision populations and cached fill without another buffer.
+This is force evolution across a tick, without a held-load reframe.
+Gravity-driven D2Q9 trajectories intentionally change; zero gravity retains the
+historical population arithmetic, including nonzero external force. Regression
+sources restore the actual endpoint pressure pairs, distinguish source-dependent
+traction from conversion momentum, and pin exact zero-gravity gas populations.
+
 ## Source-backed conservative D2Q9 momentum conversion
 
 `MaterialFreeSurface2::step_with_momentum` and

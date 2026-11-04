@@ -131,6 +131,10 @@ fn g1_g3_loaded_front_separates_traction_from_signed_conversion_momentum() {
                 let rho = initial.grid.f[i].iter().sum::<f64>();
                 let u = physical_momentum(&initial, i).map(|p| p / rho);
                 let u2 = u[0] * u[0] + u[1] * u[1];
+                let density_difference = transported.grid.f[i].iter().sum::<f64>()
+                    - unloaded.grid.f[i].iter().sum::<f64>();
+                let force_difference = initial.grid.g.map(|g| g * density_difference);
+                let udf = u[0] * force_difference[0] + u[1] * force_difference[1];
                 for q in 1..Q {
                     let Some(source) = initial.grid.source(x, y, q) else {
                         continue;
@@ -139,10 +143,13 @@ fn g1_g3_loaded_front_separates_traction_from_signed_conversion_momentum() {
                         continue;
                     }
                     let eu = f64::from(E[q].0) * u[0] + f64::from(E[q].1) * u[1];
-                    // The equal-pressure subtraction cancels the SAME Guo source
-                    // stress. The remaining traction is the paired Hermite load.
-                    let delta =
-                        2.0 * crate::W[q] * (0.0005 * q as f64) * (1.0 + 4.5 * eu * eu - 1.5 * u2);
+                    let edf = f64::from(E[q].0) * force_difference[0]
+                        + f64::from(E[q].1) * force_difference[1];
+                    // Restore the physical paired load at the two actual
+                    // endpoint densities. Held fext cancels; rho*g does not.
+                    let delta = 2.0 * crate::W[q] * (0.0005 * q as f64)
+                        * (1.0 + 4.5 * eu * eu - 1.5 * u2)
+                        - crate::W[q] * (-udf / CS2 + eu * edf / (CS2 * CS2));
                     assert!(
                         (transported.grid.f[i][q] - unloaded.grid.f[i][q] - delta).abs() < 3e-16
                     );

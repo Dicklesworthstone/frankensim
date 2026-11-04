@@ -121,6 +121,80 @@ fn g1_pressure_reconstruction_uses_the_physical_forced_stress_frame() {
 }
 
 #[test]
+fn g3_zero_gravity_keeps_constant_force_gas_population_bits() {
+    let gate = CancelGate::new_clock_free();
+    for force in [[0.0; 2], [0.004, -0.007]] {
+        let mut grid = Grid::uniform(5, 5, 0.8);
+        grid.flags.fill(Cell::Gas);
+        let cell = grid.idx(2, 2);
+        grid.flags[cell] = Cell::Fluid;
+        grid.fext[cell] = force;
+        let velocity = [0.08, -0.03];
+        grid.f[cell] = equilibrium(1.025, velocity[0], velocity[1]);
+        crate::thermal::forcing::reframe2(&mut grid.f[cell], velocity, [0.0; 2], force);
+        let mut flow = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+        let state = flow.grid.moments(cell);
+        let mut post = Vec::new();
+        flow.grid.collide_into(&mut post);
+        let mut expected = post[cell];
+        for q in 1..Q {
+            let pressure = CS2 * 0.001 * q as f64;
+            let mut eq = equilibrium(1.0 + pressure / CS2, state.u[0], state.u[1]);
+            if force != [0.0; 2] {
+                crate::thermal::forcing::reframe2(&mut eq, state.u, [0.0; 2], force);
+            }
+            // Historical constant-force boundary: every moving population of
+            // this isolated wet cell comes from its own gas pressure pair.
+            expected[q] = eq[q] + eq[OPP[q]] - post[cell][OPP[q]];
+        }
+        flow.step_with_gas_link_pressure(&gate, 0.05, |link| {
+            Ok(CS2 * 0.001 * link.incoming_direction as f64)
+        })
+        .unwrap();
+        assert_eq!(
+            flow.grid.f[cell].map(f64::to_bits),
+            expected.map(f64::to_bits)
+        );
+    }
+}
+
+#[test]
+fn g4_late_gravity_pressure_refusal_preserves_populations_and_mass() {
+    let mut grid = Grid::uniform(10, 8, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.flags.fill(Cell::Gas);
+    grid.g = [0.0002, -0.0001];
+    // The earlier pair exchanges real mass. The last isolated cell has
+    // positive initial populations but cannot admit the atmospheric endpoint.
+    for (x, y, rho) in [(2, 2, 1.0), (3, 2, 1.02), (8, 6, 20.0)] {
+        let cell = grid.idx(x, y);
+        grid.flags[cell] = Cell::Fluid;
+        grid.f[cell] = equilibrium(rho, 0.0, 0.0);
+        let force = grid.g.map(|g| rho * g);
+        crate::thermal::forcing::reframe2(&mut grid.f[cell], [0.0; 2], [0.0; 2], force);
+    }
+    let mut flow = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+    let before = flow.clone();
+    let mut post = Vec::new();
+    flow.grid.collide_into(&mut post);
+    let first = flow.grid.idx(2, 2);
+    let next = flow.grid.idx(3, 2);
+    let q = E.iter().position(|&e| e == (1, 0)).unwrap();
+    assert!((post[next][OPP[q]] - post[first][q]).abs() > 1e-5);
+    // Exercise the same direct stream owner used by plain step(), without
+    // relying on the pressure wrapper's protective candidate clone.
+    assert!(matches!(
+        flow.stream_step_with_pressure(None, None),
+        Err(FreeSurfacePressureError2::Invalid {
+            coordinates: Some([8, 6]),
+            ..
+        })
+    ));
+    same(&flow, &before);
+}
+
+#[test]
 fn g3_zero_cell_and_link_pressure_replay_the_original_step() {
     let gate = CancelGate::new_clock_free();
     let mut native = slab(1.0);
@@ -284,16 +358,23 @@ fn g1_combined_pressure_drives_actual_forced_populations_in_the_physical_frame()
     }
     let cell = flow.grid.idx(5, 6);
     let state = flow.grid.moments(cell);
-    let force: [f64; 2] =
-        core::array::from_fn(|d| flow.grid.g[d].mul_add(state.rho, flow.grid.fext[cell][d]));
     let mut post = Vec::new();
     flow.grid.collide_into(&mut post);
     let mut ambient = flow.clone();
     ambient.step_with_momentum(&gate).unwrap();
     flow.step_with_gas_pressure_and_momentum(&gate, 0.05, |_| Ok(0.015 * CS2))
         .unwrap();
+    // Restore the physical pair with the force at the accepted density. An
+    // old-density correction leaves a measurable spurious gas traction here.
+    let endpoint_density: f64 = flow.grid.f[cell].iter().sum();
+    assert!((endpoint_density - state.rho).abs() > 1e-4);
+    let force: [f64; 2] =
+        core::array::from_fn(|d| flow.grid.g[d].mul_add(endpoint_density, flow.grid.fext[cell][d]));
+    let density_difference = endpoint_density - ambient.grid.f[cell].iter().sum::<f64>();
+    let force_difference = flow.grid.g.map(|g| g * density_difference);
     let u2 = state.u[0] * state.u[0] + state.u[1] * state.u[1];
     let uf = state.u[0] * force[0] + state.u[1] * force[1];
+    let udf = state.u[0] * force_difference[0] + state.u[1] * force_difference[1];
     let mut normal_impulse = 0.0;
     for q in 1..Q {
         if E[q].1 != -1 {
@@ -308,9 +389,11 @@ fn g1_combined_pressure_drives_actual_forced_populations_in_the_physical_frame()
         let expected = 2.0 * crate::W[q] * 1.015 * (1.0 + 4.5 * eu * eu - 1.5 * u2);
         assert!((restored_pair - expected).abs() < 5e-15);
         // A higher upper gas load must send real downward momentum into the
-        // liquid. The physical source-frame term cancels between these loads.
+        // liquid. Only held fext cancels: gravity follows each endpoint rho.
         let difference = flow.grid.f[cell][q] - ambient.grid.f[cell][q];
-        let expected_difference = 2.0 * crate::W[q] * 0.015 * (1.0 + 4.5 * eu * eu - 1.5 * u2);
+        let edf = e[0] * force_difference[0] + e[1] * force_difference[1];
+        let expected_difference = 2.0 * crate::W[q] * 0.015 * (1.0 + 4.5 * eu * eu - 1.5 * u2)
+            - crate::W[q] * (-udf / CS2 + eu * edf / (CS2 * CS2));
         assert!((difference - expected_difference).abs() < 5e-15);
         normal_impulse += e[1] * difference;
     }

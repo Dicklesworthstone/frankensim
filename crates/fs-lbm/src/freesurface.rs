@@ -639,6 +639,8 @@ impl FreeSurface {
     /// explicit capillary-wave domain. Refuses before mutating physical state.
     /// Also refuses a changed planar wall topology or a conflicting legacy
     /// contact model after assigning an equilibrium angle.
+    /// An inadmissible density-dependent gas-pressure endpoint also panics
+    /// before publishing populations or tracked liquid mass.
     pub fn step(&mut self) {
         self.stream_step(None).expect("uncancelled free-surface step");
         self.apply_conversions();
@@ -692,8 +694,7 @@ impl FreeSurface {
         self.refresh_fill();
         self.grid.collide_into(&mut self.scratch);
         let post = std::mem::take(&mut self.scratch);
-        // Mass exchange (pairwise antisymmetric, from POST populations)
-        // and streaming with gas reconstruction.
+        // Complete gas reconstruction before publishing populations or mass.
         let mut new_f = self.grid.f.clone();
         for y in 0..ny {
             pressure::check_cancel(gate)?;
@@ -703,40 +704,38 @@ impl FreeSurface {
                 if !matches!(flag, Cell::Fluid | Cell::Interface) {
                     continue;
                 }
-                // Mass exchange along all links (interface only; fluid
-                // cells' Σf tracks their mass through plain streaming).
-                if flag == Cell::Interface {
-                    let mut dm = 0.0f64;
-                    for q in 1..Q {
-                        if let Some(nb) = neighbor(&self.grid, x, y, q) {
-                            let w = match self.grid.flags[nb] {
-                                Cell::Fluid => 1.0,
-                                Cell::Interface => {
-                                    f64::midpoint(self.fill_raw[i], self.fill_raw[nb])
-                                }
-                                _ => 0.0,
-                            };
-                            if w > 0.0 {
-                                dm += w * (post[nb][OPP[q]] - post[i][q]);
-                            }
-                        }
-                    }
-                    self.mass[i] += dm;
-                }
                 // Stream (pull) with reconstruction from gas sources.
                 let mm = self.grid.moments(i);
                 // Curvature, physical velocity and the Guo half-source frame
                 // are common to this cell. Only a distinct link load requires
                 // another gas equilibrium evaluation.
                 let mut gas_equilibrium = pressure::GasEquilibrium2::default();
+                let mut body_pressure_source: Option<[f64; Q]> = None;
                 for q in 0..Q {
                     let src = self.grid.source(x, y, q);
                     new_f[i][q] = match src {
                         Some(s) if self.grid.flags[s] == Cell::Gas => {
+                            // The held external force is already known. Gravity's
+                            // rho*g term must use the streamed endpoint density;
+                            // retain its even source for a single scalar closure.
+                            // Keep the historical constant-force arithmetic exact.
+                            let force = if self.grid.g == [0.0; 2] {
+                                core::array::from_fn(|d| {
+                                    mm.rho * self.grid.g[d] + self.grid.fext[i][d]
+                                })
+                            } else {
+                                let e = [f64::from(E[q].0), f64::from(E[q].1)];
+                                let eu = e[0] * mm.u[0] + e[1] * mm.u[1];
+                                let eg = e[0] * self.grid.g[0] + e[1] * self.grid.g[1];
+                                let ug = mm.u[0] * self.grid.g[0] + mm.u[1] * self.grid.g[1];
+                                body_pressure_source.get_or_insert([0.0; Q])[q] =
+                                    crate::W[q] * (-ug / CS2 + eu * eg / (CS2 * CS2));
+                                self.grid.fext[i]
+                            };
                             let eq = gas_equilibrium.at_link(
                                 || self.reference_density(x, y),
                                 mm.u,
-                                core::array::from_fn(|d| mm.rho * self.grid.g[d] + self.grid.fext[i][d]),
+                                force,
                                 pressure,
                                 GasPressureLink2 {
                                     liquid_cell: [x, y],
@@ -751,6 +750,64 @@ impl FreeSurface {
                         None => post[i][OPP[q]],
                     };
                 }
+                if let Some(coefficients) = body_pressure_source {
+                    // f_next[q] = f_base[q] - rho_next*A_q on gas links only.
+                    // Summing gives rho_next = sum(f_base)/(1 + sum(A)). This
+                    // is physical force evolution, not a held-load reframe.
+                    let denominator = 1.0 + coefficients.iter().sum::<f64>();
+                    let rho = new_f[i].iter().sum::<f64>() / denominator;
+                    if !denominator.is_finite()
+                        || denominator <= 0.0
+                        || !rho.is_finite()
+                        || rho <= 0.0
+                    {
+                        return Err(FreeSurfacePressureError2::Invalid {
+                            coordinates: Some([x, y]),
+                            reason: "density-dependent gas pressure has no positive finite endpoint",
+                        });
+                    }
+                    for (population, coefficient) in new_f[i].iter_mut().zip(coefficients) {
+                        if coefficient != 0.0 {
+                            *population -= rho * coefficient;
+                        }
+                    }
+                    let actual: f64 = new_f[i].iter().sum();
+                    let allowance =
+                        64.0 * f64::EPSILON * new_f[i].iter().map(|value| value.abs()).sum::<f64>();
+                    if !allowance.is_finite() || actual <= 0.0 || (actual - rho).abs() > allowance {
+                        return Err(FreeSurfacePressureError2::Invalid {
+                            coordinates: Some([x, y]),
+                            reason: "density-dependent gas pressure exceeds population roundoff",
+                        });
+                    }
+                }
+            }
+        }
+        pressure::check_cancel(gate)?;
+        // The same antisymmetric exchange uses the frozen post populations
+        // and pre-step fill. No extra buffer or duplicate link work is needed;
+        // a late pressure refusal cannot leave an earlier cell's mass changed.
+        // Fluid cells' Σf tracks their mass through ordinary streaming.
+        for y in 0..ny {
+            for x in 0..nx {
+                let i = self.grid.idx(x, y);
+                if self.grid.flags[i] != Cell::Interface {
+                    continue;
+                }
+                let mut dm = 0.0f64;
+                for q in 1..Q {
+                    if let Some(nb) = neighbor(&self.grid, x, y, q) {
+                        let w = match self.grid.flags[nb] {
+                            Cell::Fluid => 1.0,
+                            Cell::Interface => f64::midpoint(self.fill_raw[i], self.fill_raw[nb]),
+                            _ => 0.0,
+                        };
+                        if w > 0.0 {
+                            dm += w * (post[nb][OPP[q]] - post[i][q]);
+                        }
+                    }
+                }
+                self.mass[i] += dm;
             }
         }
         self.grid.f = new_f;
