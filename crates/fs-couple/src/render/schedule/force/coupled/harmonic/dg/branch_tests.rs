@@ -46,6 +46,17 @@ fn loaded_poles_retain_branch_gap_fields_and_strictly_proper_mutual_closure() {
         let seed = prepared.seed_from_harmonic_response(&response).unwrap();
         let pole = prepared.resonance_pole(C64::new(-3.0, -1800.0), &seed,
             &super::terminal_tests::pole_options(), &gate).unwrap();
+        let spectrum = prepared.resonance_spectrum(super::poles::ResonanceRegion {
+            center: C64::new(-3.0, -1800.0), real_radius: 50.0, imaginary_radius: 150.0,
+        }, &super::terminal_tests::spectrum_options(prepared.dimension()), &gate).unwrap();
+        assert_eq!(spectrum.argument_count, 1);
+        assert_eq!(spectrum.resolved_rank, 1);
+        assert_eq!(spectrum.poles.len(), 1);
+        assert!((spectrum.poles[0].laplace_pole_per_s - pole.laplace_pole_per_s).abs()
+            < 2e-9 * pole.laplace_pole_per_s.abs());
+        // Every field/constraint oracle below now also exercises the mode
+        // discovered without its AC response or an authored state seed.
+        let pole = &spectrum.poles[0];
         let layout = prepared.coordinates();
         let s = pole.laplace_pole_per_s;
         let state = &pole.state;

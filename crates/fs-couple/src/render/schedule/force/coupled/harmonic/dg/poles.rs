@@ -9,11 +9,13 @@ use super::*;
 use core::ops::Range;
 pub use fs_la::nonlinear_eig::PoleOptions;
 use fs_la::nonlinear_eig::{
-    MAX_NONLINEAR_POLE_DIMENSION, NonlinearEigError, newton_pole_with_cancel,
+    MAX_NONLINEAR_POLE_DIMENSION, NonlinearEigError, NonlinearPole, newton_pole_with_cancel,
 };
 
 mod pencil;
 use pencil::Pencil;
+mod spectrum;
+pub use spectrum::{BeynOptions, DgLoadedModalSpectrum, DgLoadedSpectrumError, ResonanceRegion};
 
 /// Cold complete-pencil resources, excluding already owned physical sources.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -489,13 +491,22 @@ impl PreparedModalDgPoles<'_> {
             |s, cancel| self.pencil.evaluate(s, cancel),
             &mut || gate.is_requested(),
         )?;
+        self.observe_pole(pole, options.residual_tolerance, gate)
+    }
+
+    // Local and contour solves use exactly the same source admission,
+    // original-equation residual and physical observations.
+    fn observe_pole(
+        &self,
+        pole: NonlinearPole,
+        residual_tolerance: f64,
+        gate: &CancelGate,
+    ) -> Result<DgLoadedModalPole, DgLoadedPoleError> {
         self.admit_oscillation(pole.value, gate)?;
         let relative = self
             .pencil
             .relative_residual(pole.value, &pole.vector, &mut || gate.is_requested())?;
-        let tolerance = options
-            .residual_tolerance
-            .min(self.source.config.solve_relative_tolerance);
+        let tolerance = residual_tolerance.min(self.source.config.solve_relative_tolerance);
         if relative > tolerance {
             return Err(DgLoadedPoleError::Residual {
                 relative,

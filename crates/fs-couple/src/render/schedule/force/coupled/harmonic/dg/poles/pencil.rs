@@ -1,4 +1,5 @@
 //! Real polynomial entries; fixed row equilibration never changes coordinates.
+use fs_la::nonlinear_eig::beyn::{BeynError, BeynOptions, BeynReport, Ellipse, beyn_with_cancel};
 use fs_la::nonlinear_eig::{NonlinearEigError, PoleEvaluation};
 use fs_math::{c64::C64, dd::Dd, det};
 
@@ -116,6 +117,44 @@ impl Pencil {
         })
     }
 
+    /// The same entire pencil, including all memory and algebraic rows. Reserve
+    /// callback work and complete physical result vectors before the numerical
+    /// owner admits its LU/moment/SVD/QR/refinement resources. Cached real
+    /// coefficients were already admitted at preparation and are excluded here.
+    pub fn discover(
+        &self,
+        region: Ellipse,
+        options: &BeynOptions,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<BeynReport, BeynError> {
+        poll(&mut cancelled)?;
+        let n = self.dimension as u128;
+        let modes = options.probe_columns as u128;
+        if modes == 0 || modes > n {
+            return Err(BeynError::Invalid {
+                what: "joint spectrum probes must lie between one and the complete dimension",
+            });
+        }
+        let bytes = 128 * n * modes + 256 * (n + modes);
+        let callbacks = options.nodes as u128 + modes * options.refinement.max_iterations as u128;
+        let work = (256 * modes + 16 * callbacks) * n * n;
+        if bytes > options.max_dense_bytes as u128 || work > options.max_work as u128 {
+            return Err(BeynError::Invalid {
+                what: "joint spectrum callbacks and observations exceed query resources",
+            });
+        }
+        let mut numerical = *options;
+        numerical.max_dense_bytes -= bytes as usize;
+        numerical.max_work -= work as u64;
+        beyn_with_cancel(
+            self.dimension,
+            region,
+            &numerical,
+            |s, cancel| self.evaluate(s, cancel),
+            &mut cancelled,
+        )
+    }
+
     /// Check uncombined ORIGINAL coefficient rows in double-double arithmetic.
     /// Each row's coefficient envelope multiplies the full vector infinity norm.
     /// Thus a nodal/dark coordinate may contain roundoff without an O(1) defect,
@@ -183,6 +222,10 @@ impl Pencil {
         Ok(relative)
     }
 }
+
+#[cfg(test)]
+#[path = "pencil/spectrum_tests.rs"]
+mod spectrum_tests;
 
 #[cfg(test)]
 mod tests {

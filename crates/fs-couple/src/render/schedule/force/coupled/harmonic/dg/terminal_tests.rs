@@ -30,6 +30,16 @@ pub(super) fn pole_options() -> super::poles::PoleOptions {
         residual_tolerance: 1e-11, max_iterations: 32, max_dimension: 256,
         max_dense_bytes: 64 << 20, max_work: 1_000_000_000 }
 }
+pub(super) fn spectrum_options(dimension: usize) -> super::poles::BeynOptions {
+    super::poles::BeynOptions {
+        nodes: 128, probe_columns: dimension.min(4), rank_relative_tolerance: 1e-9,
+        count_tolerance: 1e-7, quadrature_tolerance: 1e-9,
+        contour_min_reciprocal_condition: 1e-14, linear_residual_tolerance: 1e-11,
+        svd_tolerance: 1e-13, svd_max_sweeps: 100, eigen_max_sweeps: 200,
+        max_dimension: 256, max_dense_bytes: 64 << 20, max_work: 10_000_000_000,
+        refinement: pole_options(),
+    }
+}
 
 #[test]
 fn matched_terminal_pole_converges_to_the_physical_loaded_oscillator() {
@@ -62,6 +72,17 @@ fn matched_terminal_pole_converges_to_the_physical_loaded_oscillator() {
         let seed = prepared.seed_from_harmonic_response(&response).unwrap();
         let pole = prepared.resonance_pole(C64::new(-40.0, expected.im),
             &seed, &pole_options(), &gate).unwrap();
+        // The same loaded mode must be found from a region alone, without an
+        // authored state seed or an AC peak search. Keep the spatial oracle.
+        let spectrum = prepared.resonance_spectrum(super::poles::ResonanceRegion {
+            center: C64::new(-50.0, -1800.0), real_radius: 250.0, imaginary_radius: 400.0,
+        }, &spectrum_options(prepared.dimension()), &gate).unwrap();
+        assert_eq!(spectrum.argument_count, 1);
+        assert_eq!(spectrum.resolved_rank, 1);
+        assert_eq!(spectrum.poles.len(), 1);
+        assert!((spectrum.poles[0].laplace_pole_per_s - pole.laplace_pole_per_s).abs()
+            < 2e-9 * expected.abs());
+        let pole = &spectrum.poles[0];
         let error = (pole.laplace_pole_per_s - expected).abs() / expected.abs();
         let impedance_error = (pole.inlet_pressure_pa - pole.inlet_flow_m3_s.scale(zc)).abs()
             / pole.inlet_pressure_pa.abs();
@@ -78,6 +99,77 @@ fn matched_terminal_pole_converges_to_the_physical_loaded_oscillator() {
     }
     assert!(errors[2].0 < 5e-7);
     assert!(errors[2].1 < 1e-5);
+}
+
+#[test]
+fn contours_discover_unobservable_material_history_and_obey_source_bands() {
+    // G1/G3: no inlet excitation can expose these two positive-storage arms.
+    // A contour of the full model still returns both original memory states.
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator().with_material_relaxation(vec![
+        fs_phs::RelaxationBranch {
+            projection: vec![0.0, 0.0], stiffness: 3.0, relaxation_time_s: 0.002,
+        },
+        fs_phs::RelaxationBranch {
+            projection: vec![0.0, 0.0], stiffness: 2.0, relaxation_time_s: 0.00125,
+        },
+    ], None, &gate).unwrap();
+    let duct = DgDuct::new(&Duct { segments: vec![Segment::Cylinder {
+        radius: RADIUS, length: LENGTH }] }, &gas(), DgMesh { elements: 1, order: 2 },
+        DgBoundary::Port(INLET), DgBoundary::Matched).unwrap();
+    let load = DgPortLoad::new(duct, DT, 1e-11, MAX_DG_PROPAGATOR_DOFS).unwrap();
+    let original = load.state().clone();
+    let prepared = system.prepare_resonance_poles_with_load(
+        &load, &[coefficients().3], pole_preparation(), &gate).unwrap();
+    let region = super::poles::ResonanceRegion {
+        center: C64::from_re(-650.0), real_radius: 300.0, imaginary_radius: 300.0,
+    };
+    let options = spectrum_options(prepared.dimension());
+    let result = prepared.resonance_spectrum(region, &options, &gate).unwrap();
+    assert_eq!(result.argument_count, 2);
+    assert_eq!(result.resolved_rank, 2);
+    assert_eq!(result.poles.len(), 2);
+    let memory = prepared.coordinates().material_memory.clone();
+    for (i, pole) in result.poles.iter().enumerate() {
+        let expected = [-800.0, -500.0][i];
+        assert!((pole.laplace_pole_per_s - C64::from_re(expected)).abs() < 1e-8);
+        let active = memory.start + 1 - i;
+        assert!((pole.state[active].abs() - 1.0).abs() < 1e-10);
+        assert!(pole.state.iter().enumerate().all(|(j, value)| j == active || value.abs() < 1e-9));
+        assert!(pole.relative_residual < 1e-11);
+    }
+    let mut limited = options;
+    limited.max_work = 1;
+    assert!(prepared.resonance_spectrum(region, &limited, &gate).is_err());
+    limited = options; limited.max_dense_bytes = 1;
+    assert!(prepared.resonance_spectrum(region, &limited, &gate).is_err());
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(prepared.resonance_spectrum(region, &options, &cancelled).is_err());
+    assert_eq!(load.state(), &original);
+    assert_eq!(system.samples_rendered(), 0);
+
+    // The contour may be integrated as an entire finite-model continuation,
+    // but a discovered oscillatory mode outside the terminal band refuses the
+    // whole physical result. No silently filtered or apparently empty spectrum.
+    let zc = coefficients().0;
+    let source = MimoModel { ports: 1, poles: vec![], residues: vec![],
+        d: vec![zc], e: vec![0.0], reciprocal: true };
+    let terminal = PreparedMimoLoad::new(&source, DT, MimoLoadLimits {
+        band_rad_s: [2000.0, core::f64::consts::PI / DT],
+        sampled_passivity_points: 33, max_states: 8, max_memory_bytes: 1 << 20,
+    }).unwrap();
+    let duct = DgDuct::new(&Duct { segments: vec![Segment::Cylinder {
+        radius: RADIUS, length: LENGTH }] }, &gas(), DgMesh { elements: 1, order: 2 },
+        DgBoundary::Port(INLET), DgBoundary::Port(TERMINAL)).unwrap();
+    let load = DgPortLoad::new_with_terminal(duct, DT, 1e-11,
+        MAX_DG_PROPAGATOR_DOFS, terminal).unwrap();
+    let prepared = system.prepare_resonance_poles_with_load(
+        &load, &[coefficients().3], pole_preparation(), &gate).unwrap();
+    assert!(matches!(prepared.resonance_spectrum(super::poles::ResonanceRegion {
+        center: C64::new(-50.0, -1800.0), real_radius: 250.0, imaginary_radius: 400.0,
+    }, &spectrum_options(prepared.dimension()), &gate),
+        Err(super::poles::DgLoadedSpectrumError::PhysicalPole(_))));
+    assert_eq!(load.state().step_count(), 0);
 }
 
 #[test]
