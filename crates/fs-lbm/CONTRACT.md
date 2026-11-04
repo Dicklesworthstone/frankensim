@@ -8150,6 +8150,18 @@ Failed source, scaling, collision or cancellation checks publish no step.
 Time-varying force endpoints remain owned by the existing trapezoidal force
 step and are not used to reinterpret incoming strain.
 
+`Grid3::rheology_workspace` and `ForcedGrid3::rheology_workspace` reserve two
+source/collision epochs and one velocity buffer. The corresponding
+`*_with_material_rheology_workspace` steps and force-endpoint advances reuse
+the same preparation kernel as the one-shot APIs, resampling every current
+fluid cell rather than caching its previous viscosity. Successful steps reuse
+all adapter vector allocations. Original material objects and callbacks,
+native pooled scheduling and caller-owned force vectors retain their own
+allocation behavior. Exact grid extents are admitted before source queries;
+matching cell counts alone are insufficient. Source, scaling, native endpoint
+and cancellation refusals preserve both the accepted flow and the previous
+source report. Only native success permits the infallible report-buffer swap.
+
 Five native exact-source serial tests exercise the actual grid owners and real
 execution context: all seven Newtonian collision variants reproduce existing
 population bits; force-centered Carreau queries ignore rigid rotation;
@@ -8157,9 +8169,11 @@ quadratic wall shear is recovered; original source/query ownership and rollback
 are retained; and a CM power-law channel with index 0.75 reduces maximum
 analytic-profile error from 0.723% at 12 fluid rows to 0.190% at 24. Every source
 query stays outside the fixture's explicitly declared low-rate regularization.
-Pooled wrappers reuse the same preparation and existing pool owner, but pooled
-execution was not included in this qualification; no cross-ISA or throughput
-claim is added.
+The workspace regressions cover repeated serial/pooled source refresh across
+D3Q19/D3Q27 collision families, buffer reuse, source and force-endpoint refusals,
+post-stream cancellation and exact retry. The Carreau force-frame oracle and
+power-law channel refinement also use the reusable workspace. No cross-ISA or
+measured-throughput claim is added.
 
 ### Local capillary-interface conversion preserves detached drops
 
