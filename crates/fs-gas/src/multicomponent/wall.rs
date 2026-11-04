@@ -295,7 +295,7 @@ fn accumulate(total: &mut f64, correction: &mut f64, term: f64) {
     *total = next;
 }
 // Preserve weak-wave pressure changes and avoid overflow of a/b.
-fn log_ratio(a: f64, b: f64) -> f64 {
+pub(super) fn log_ratio(a: f64, b: f64) -> f64 {
     if a == b {
         return 0.0;
     }

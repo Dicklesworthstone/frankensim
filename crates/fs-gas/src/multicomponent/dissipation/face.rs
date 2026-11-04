@@ -642,12 +642,9 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
         .expect("nonempty species bank");
     close_simplex(&mut x[..n], pivot)?;
     gradient[pivot] = -sum((0..n).filter(|&k| k != pivot).map(|k| gradient[k]));
-    let ratio = pr.pressure / pl.pressure;
-    let log_pressure = if positive(ratio) {
-        fs_math::det::ln(ratio)
-    } else {
-        fs_math::det::ln(pr.pressure) - fs_math::det::ln(pl.pressure)
-    };
+    // Keep the original pressure difference before rounding a ratio near one.
+    // The shared weak-wave logarithm also preserves exact endpoint reversal.
+    let log_pressure = crate::multicomponent::wall::log_ratio(pr.pressure, pl.pressure);
     let coefficients = law.evaluate(
         Temperature::new(t),
         Pressure::new(p),

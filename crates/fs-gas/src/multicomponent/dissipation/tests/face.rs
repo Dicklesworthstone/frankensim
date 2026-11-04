@@ -49,6 +49,79 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn planar_barodiffusion_preserves_weak_pressure_forces_and_wide_reversal() {
+    let gas = gas(2, 0.0, true);
+    let diffusivity = 0.03;
+    let law = ConstantTransport::new(
+        gas.source().clone(),
+        "manufactured-binary-barodiffusion",
+        1,
+        TransportDomain {
+            minimum_temperature_k: 0.001,
+            maximum_temperature_k: 50.0,
+            minimum_pressure_pa: 1e-200,
+            maximum_pressure_pa: 1e200,
+        },
+        TransportCoefficients {
+            dynamic_viscosity: DynViscosity::new(0.0),
+            bulk_viscosity: DynViscosity::new(0.0),
+            thermal_conductivity: ThermalConductivityQuantityV1::new(0.0),
+        },
+        vec![0.0, diffusivity, diffusivity, 0.0],
+    )
+    .unwrap();
+    let mut op = PlanarTransport::new(gas, law, || false).unwrap();
+    let pressure = 100_000.0_f64;
+    let adjacent = pressure.next_up();
+    let distance = 0.125;
+    for (low, high, logarithm) in [
+        (
+            pressure,
+            adjacent,
+            ((adjacent - pressure) / pressure).ln_1p(),
+        ),
+        (pressure, pressure + 1.0, (1.0 / pressure).ln_1p()),
+        (2.0, 32.0, 16.0_f64.ln()),
+        (1e-200, 1e200, 400.0 * core::f64::consts::LN_10),
+        (2.0, 2.0, 0.0),
+    ] {
+        let mut oriented = [[0.0; 5]; 2];
+        for (orientation, [left, right]) in [[low, high], [high, low]].into_iter().enumerate() {
+            // M_A=R, M_B=2R and rho=[p/4,p/2] give T=2,
+            // x_A=x_B=1/2 and Y_A=1/3 at both endpoints. Thus
+            // j_A=-c D M_A M_B/(x_A M_A+x_B M_B) (x_A-Y_A) grad ln p
+            //    =-p_face D/9 grad ln p; there is no composition force.
+            let left_densities = [left / 4.0, left / 2.0];
+            let right_densities = [right / 4.0, right / 2.0];
+            op.face_from_primitives(
+                input(&left_densities, [0.0; 2], left),
+                input(&right_densities, [0.0; 2], right),
+                distance,
+                [0.0; 2],
+                MaxwellStefanSolveV1::default(),
+                &mut oriented[orientation],
+                || false,
+            )
+            .unwrap();
+            let expected = -((0.5 * low + 0.5 * high) * diffusivity / 9.0)
+                * (logarithm / distance)
+                * if orientation == 0 { 1.0 } else { -1.0 };
+            let actual = oriented[orientation][0];
+            if expected == 0.0 {
+                assert_eq!(actual, 0.0);
+            } else {
+                assert!(
+                    (actual / expected - 1.0).abs() < 3e-12,
+                    "p=[{left:e},{right:e}]: actual={actual:e}, expected={expected:e}"
+                );
+            }
+            assert_eq!(oriented[orientation][1], -actual);
+        }
+        assert_eq!(oriented[0][0], -oriented[1][0]);
+    }
+}
+
+#[test]
 fn planar_binary_diffusion_full_stress_and_referenced_enthalpy_match_independent_flux() {
     let mut op = prepared(1e6);
     let left = input(&[0.8, 0.2], [0.3, -0.4], 1.5);
@@ -358,7 +431,6 @@ fn planar_faces_refuse_foreign_sources_invalid_axes_and_final_cancellation_then_
     .unwrap();
     assert_eq!(out, expected);
 }
-
 
 #[test]
 fn planar_no_slip_wall_carries_shear_heat_and_prescribed_wall_work() {
