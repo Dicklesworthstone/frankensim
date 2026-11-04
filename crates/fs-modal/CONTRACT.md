@@ -213,7 +213,13 @@ duration. The heat owner extends its square-root Gramian to velocity, scaled
 initial force residual and constant force slope. The same resolved eight-point
 quadrature and QR doubling retain all ramp-induced damping; no stored-energy
 subtraction, loss clipping or pole decomposition enters the result. Zero loss
-and explicit free coordinates return exact zero heat. Warm calls allocate
+returns exact zero heat. `try_new_with_damping_rate` accepts the physical
+mass-normalized viscous coefficient `c=b/m` [1/s] in `q''+c*q'+omega^2*q=F`,
+including positive drag at exactly zero stiffness. The same entire transition
+and positive heat Gramian retain the free body's decay distance, terminal
+velocity, ramp work and dissipation without inventing stiffness or forming
+the singular ratio `c/(2*omega)`. The ratio constructor retains its zero-drag
+free-coordinate semantics. Warm calls allocate
 nothing and evaluate no transcendental functions.
 
 `ModalAcousticTimeModel::prepare_linear_forcing` cold-prepares immutable ramp
@@ -244,7 +250,9 @@ continuous load `Fc cos(Omega t) + Fs sin(Omega t)`. It shares the homogeneous
 transition and prepares the exact force convolution by an entire series and
 block composition. No division by detuning or pole separation occurs: exact
 undamped resonance retains secular growth, and free/critical/overdamped modes
-use the same formula. A separately evaluated cosine-minus-constant remainder
+use the same formula. Its `try_new_with_damping_rate` constructor also admits
+explicit viscous drag at zero stiffness under a tone or DC load, with the same
+mass-normalized `c=b/m` units as the ramp owner. A separately evaluated cosine-minus-constant remainder
 retains tiny resolved velocities about static equilibrium near zero forcing
 frequency. Warm motion, phase advancement and zero-state harmonic responses
 allocate nothing and call no transcendentals. Multiple harmonics superpose

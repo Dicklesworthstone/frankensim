@@ -21,6 +21,105 @@ fn close(actual: f64, expected: f64, scale: f64) {
 }
 
 #[test]
+fn g1_explicit_free_drag_retains_decay_distance_and_physical_heat() {
+    // With zero stiffness, v=v0*exp(-c*t), q=q0+v0*(1-exp(-c*t))/c,
+    // and heat is the kinetic-energy loss. expm1 retains the independent
+    // reference at drag rates too small for endpoint-energy subtraction.
+    let h = 0.4;
+    let initial = state(0.0, 0.7);
+    for rate in [1.0e-16_f64, 1.0e-5, 0.3, 20.0, 1.0e6] {
+        let frame = LinearForceTransition::try_new_with_damping_rate(0.0, rate, h)
+            .unwrap()
+            .advance_with_energy(initial, 0.0, 0.0)
+            .unwrap();
+        let velocity = initial.velocity_m_sqrt_kg_per_s * (-rate * h).exp();
+        let distance = -initial.velocity_m_sqrt_kg_per_s * (-rate * h).exp_m1() / rate;
+        let heat = -0.5 * initial.velocity_m_sqrt_kg_per_s.powi(2)
+            * (-2.0 * rate * h).exp_m1();
+        close(frame.state.displacement_m_sqrt_kg, distance, distance.abs());
+        close(frame.state.velocity_m_sqrt_kg_per_s, velocity, velocity.abs());
+        close(frame.viscous_dissipation_j, heat, heat);
+        assert!(frame.viscous_dissipation_j > 0.0);
+        assert_eq!(frame.input_work_j, 0.0);
+    }
+}
+
+#[test]
+fn g1_free_drag_ramp_matches_analytic_motion_work_and_heat() {
+    let (rate, h, f0, f1) = (2.5_f64, 0.7, 1.2, -0.4);
+    let initial = state(-0.2, 0.3);
+    let slope = (f1 - f0) / h;
+    // v(t)=a+b*t+d*exp(-c*t), integrated independently for q, F*v,
+    // and c*v^2. This includes both signs of force within one interval.
+    let a = f0 / rate - slope / rate.powi(2);
+    let b = slope / rate;
+    let d = initial.velocity_m_sqrt_kg_per_s - a;
+    let decay = (-rate * h).exp();
+    let i0 = (1.0 - decay) / rate;
+    let i1 = (1.0 - (1.0 + rate * h) * decay) / rate.powi(2);
+    let i2 = (1.0 - decay * decay) / (2.0 * rate);
+    let expected_q = initial.displacement_m_sqrt_kg + a * h + 0.5 * b * h * h + d * i0;
+    let expected_v = a + b * h + d * decay;
+    let expected_work = f0 * a * h + 0.5 * (f0 * b + slope * a) * h * h
+        + slope * b * h.powi(3) / 3.0 + d * (f0 * i0 + slope * i1);
+    let expected_heat = rate * (a * a * h + a * b * h * h + b * b * h.powi(3) / 3.0
+        + 2.0 * d * (a * i0 + b * i1) + d * d * i2);
+    let step = LinearForceTransition::try_new_with_damping_rate(0.0, rate, h).unwrap();
+    let actual = step.advance_with_energy(initial, f0, f1).unwrap();
+    close(actual.state.displacement_m_sqrt_kg, expected_q, expected_q.abs());
+    close(actual.state.velocity_m_sqrt_kg_per_s, expected_v, expected_v.abs());
+    close(actual.input_work_j, expected_work, expected_work.abs());
+    close(actual.viscous_dissipation_j, expected_heat, expected_heat);
+    close(0.5 * (expected_v.powi(2) - initial.velocity_m_sqrt_kg_per_s.powi(2)),
+        actual.input_work_j - actual.viscous_dissipation_j, expected_heat);
+    let half = LinearForceTransition::try_new_with_damping_rate(0.0, rate, h * 0.5).unwrap();
+    let first = half.advance_with_energy(initial, f0, 0.5 * (f0 + f1)).unwrap();
+    let second = half.advance_with_energy(first.state, 0.5 * (f0 + f1), f1).unwrap();
+    close(second.state.displacement_m_sqrt_kg, expected_q, expected_q.abs());
+    close(second.state.velocity_m_sqrt_kg_per_s, expected_v, expected_v.abs());
+    close(first.input_work_j + second.input_work_j, expected_work, expected_work.abs());
+    close(first.viscous_dissipation_j + second.viscous_dissipation_j, expected_heat, expected_heat);
+}
+
+#[test]
+fn g1_damping_rate_supports_soft_modes_without_an_overflowing_ratio() {
+    // c/(2*omega) cannot be represented, although the physical generator and
+    // its response are finite. The explicit rate needs no such quotient.
+    let rate = 4.0_f64;
+    let omega = 1.0e-310;
+    assert!((rate / (2.0 * omega)).is_infinite());
+    let initial = state(0.1, -0.2);
+    let soft = LinearForceTransition::try_new_with_damping_rate(omega, rate, 0.3)
+        .unwrap().advance_with_energy(initial, 1.2, -0.4).unwrap();
+    let free = LinearForceTransition::try_new_with_damping_rate(0.0, rate, 0.3)
+        .unwrap().advance_with_energy(initial, 1.2, -0.4).unwrap();
+    assert_eq!(soft, free);
+    for (omega, ratio) in [(4.0, 0.0), (4.0, 0.125), (4.0, 1.0), (4.0, 32.0)] {
+        let old = LinearForceTransition::try_new(omega, ratio, 0.25).unwrap()
+            .advance_with_energy(initial, 1.2, -0.4).unwrap();
+        let explicit = LinearForceTransition::try_new_with_damping_rate(omega, 2.0 * ratio * omega, 0.25)
+            .unwrap().advance_with_energy(initial, 1.2, -0.4).unwrap();
+        assert_eq!(old, explicit);
+    }
+}
+
+#[test]
+fn g0_explicit_damping_rate_refuses_invalid_and_unrepresentable_parameters() {
+    for rate in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(LinearForceTransition::try_new_with_damping_rate(0.0, rate, 0.1).is_err());
+    }
+    for omega in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(LinearForceTransition::try_new_with_damping_rate(omega, 1.0, 0.1).is_err());
+    }
+    for duration in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+        assert!(LinearForceTransition::try_new_with_damping_rate(0.0, 1.0, duration).is_err());
+    }
+    assert!(LinearForceTransition::try_new_with_damping_rate(0.0, f64::MAX, 2.0).is_err());
+    // A ratio at zero frequency still does not imply a drag coefficient.
+    assert!(LinearForceTransition::try_new(0.0, 1.0, 0.1).is_err());
+}
+
+#[test]
 fn g1_ramps_match_independent_high_precision_matrix_exponentials() {
     // Independent 100-decimal-digit Decimal matrix exponential of
     // h * [[0,1,0,0],[-omega^2,-2*zeta*omega,1,0],

@@ -215,13 +215,14 @@ pub(super) struct LinearViscousIntegral {
 }
 
 impl LinearViscousIntegral {
-    pub fn new(omega: f64, zeta: f64, dt: f64) -> Self {
-        if zeta == 0.0 || omega == 0.0 {
+    // Receives the same admitted dimensionless stiffness/drag as the motion
+    // owner, including an explicit nonzero drag at zero natural frequency.
+    pub fn new(original_angle: f64, original_drag: f64) -> Self {
+        if original_drag == 0.0 {
             return Self::default();
         }
-        let original_angle = omega * dt;
         let mut angle = original_angle;
-        let mut drag = 2.0 * (zeta * angle);
+        let mut drag = original_drag;
         let ratio = original_angle.min(1.0);
         let mut scaled_time = original_angle.max(1.0);
         let mut doublings = 0;

@@ -16,11 +16,13 @@ pub use modulation::ToneModulationStep;
 pub use runtime::PreparedModalHarmonic;
 pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
 
-/// Cached motion for `q'' + 2*zeta*omega*q' + omega^2*q = F(t)`, where
+/// Cached motion for `q'' + c*q' + omega^2*q = F(t)`, where
 /// `F(t) = cosine_force*cos(Omega*t) + sine_force*sin(Omega*t)` and time is
 /// measured from the supplied initial state. Forces and state use the same
 /// mass-normalized units as [`ModalAcousticState`]. Under `exp(-i Omega t)`,
 /// the complex force amplitude is `cosine_force + i*sine_force`.
+/// Supply `c = 2*zeta*omega` through [`Self::try_new`], or use an explicit
+/// physical rate through [`Self::try_new_with_damping_rate`].
 ///
 /// Preparation uses the existing scalar homogeneous transition and an entire
 /// force convolution. Undamped resonance, both sides of critical damping and
@@ -78,8 +80,61 @@ impl HarmonicForceTransition {
                 "harmonic transition requires finite nonnegative frequencies/damping, positive duration, and zero damping for a free coordinate",
             ));
         }
-        let mut angle = angular_frequency_rad_s * duration_s;
-        let mut drag = 2.0 * (damping_ratio * angle);
+        let angle = angular_frequency_rad_s * duration_s;
+        let drag = 2.0 * (damping_ratio * angle);
+        Self::prepare(
+            angular_frequency_rad_s,
+            forcing_angular_frequency_rad_s,
+            duration_s,
+            angle,
+            drag,
+        )
+    }
+
+    /// Prepare `q'' + c*q' + omega^2*q = F(t)` under a continuous tone with
+    /// explicit viscous damping rate `c` [1/s]. For mass `m` and dimensional
+    /// drag coefficient `b` [kg/s], supply `c = b/m` and mass-normalize state
+    /// and forces. Zero stiffness with positive drag is admitted directly;
+    /// neither a natural-frequency floor nor a singular damping ratio is used.
+    ///
+    /// # Errors
+    /// Invalid parameters or unrepresentable dimensionless coefficients.
+    pub fn try_new_with_damping_rate(
+        angular_frequency_rad_s: f64,
+        damping_rate_per_s: f64,
+        forcing_angular_frequency_rad_s: f64,
+        duration_s: f64,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        if ![
+            angular_frequency_rad_s,
+            damping_rate_per_s,
+            forcing_angular_frequency_rad_s,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value >= 0.0)
+            || !duration_s.is_finite()
+            || duration_s <= 0.0
+        {
+            return Err(invalid(
+                "harmonic transition requires finite nonnegative frequencies/damping rate and positive duration",
+            ));
+        }
+        Self::prepare(
+            angular_frequency_rad_s,
+            forcing_angular_frequency_rad_s,
+            duration_s,
+            angular_frequency_rad_s * duration_s,
+            damping_rate_per_s * duration_s,
+        )
+    }
+
+    fn prepare(
+        angular_frequency_rad_s: f64,
+        forcing_angular_frequency_rad_s: f64,
+        duration_s: f64,
+        mut angle: f64,
+        mut drag: f64,
+    ) -> Result<Self, ModalAcousticTimeError> {
         let full_phase = forcing_angular_frequency_rad_s * duration_s;
         if ![angle, drag, full_phase].into_iter().all(f64::is_finite) {
             return Err(invalid(

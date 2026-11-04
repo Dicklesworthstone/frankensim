@@ -20,6 +20,58 @@ fn close(actual: f64, expected: f64, scale: f64) {
 }
 
 #[test]
+fn g1_free_viscous_drag_under_a_tone_matches_first_order_velocity_solution() {
+    let (rate, drive, h, fc, fs) = (2.5_f64, 3.0, 0.7, 1.2, -0.4);
+    let initial = state(-0.2, 0.3);
+    // Solve v'+c*v=Fc*cos(Omega*t)+Fs*sin(Omega*t) directly, then integrate
+    // v=a*cos+b*sin+d*exp(-c*t) for displacement. No oscillator formula.
+    let denominator = rate * rate + drive * drive;
+    let a = (rate * fc - drive * fs) / denominator;
+    let b = (drive * fc + rate * fs) / denominator;
+    let d = initial.velocity_m_sqrt_kg_per_s - a;
+    let (sine, cosine) = (drive * h).sin_cos();
+    let expected_v = a * cosine + b * sine + d * (-rate * h).exp();
+    let expected_q = initial.displacement_m_sqrt_kg + a * sine / drive
+        + b * (1.0 - cosine) / drive - d * (-rate * h).exp_m1() / rate;
+    let actual = HarmonicForceTransition::try_new_with_damping_rate(0.0, rate, drive, h)
+        .unwrap().advance(initial, fc, fs).unwrap();
+    close(actual.displacement_m_sqrt_kg, expected_q, expected_q.abs());
+    close(actual.velocity_m_sqrt_kg_per_s, expected_v, expected_v.abs());
+    let half = HarmonicForceTransition::try_new_with_damping_rate(0.0, rate, drive, h * 0.5).unwrap();
+    let first = half.advance(initial, fc, fs).unwrap();
+    let (s, c) = (drive * h * 0.5).sin_cos();
+    let second = half.advance(first, fc * c + fs * s, fs * c - fc * s).unwrap();
+    close(second.displacement_m_sqrt_kg, expected_q, expected_q.abs());
+    close(second.velocity_m_sqrt_kg_per_s, expected_v, expected_v.abs());
+}
+
+#[test]
+fn g1_viscous_free_dc_tone_reaches_terminal_velocity() {
+    for (rate, h) in [(2.0_f64, 0.3), (1.0e6, 0.4)] {
+        let force = 1.3;
+        let initial = state(-0.2, 0.3);
+        let terminal = force / rate;
+        let transient = initial.velocity_m_sqrt_kg_per_s - terminal;
+        let expected_v = terminal + transient * (-rate * h).exp();
+        let expected_q = initial.displacement_m_sqrt_kg + terminal * h
+            - transient * (-rate * h).exp_m1() / rate;
+        let actual = HarmonicForceTransition::try_new_with_damping_rate(0.0, rate, 0.0, h)
+            .unwrap().advance(initial, force, 0.0).unwrap();
+        close(actual.displacement_m_sqrt_kg, expected_q, expected_q.abs());
+        close(actual.velocity_m_sqrt_kg_per_s, expected_v, expected_v.abs());
+    }
+}
+
+#[test]
+fn g0_explicit_harmonic_damping_rate_refuses_invalid_parameters() {
+    for rate in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(HarmonicForceTransition::try_new_with_damping_rate(0.0, rate, 3.0, 0.1).is_err());
+    }
+    assert!(HarmonicForceTransition::try_new_with_damping_rate(0.0, f64::MAX, 3.0, 2.0).is_err());
+    assert!(HarmonicForceTransition::try_new(0.0, 1.0, 3.0, 0.1).is_err());
+}
+
+#[test]
 fn g1_matches_independent_high_precision_dimensional_exponentials() {
     // 115-digit Decimal reference: exponentiate h*G for
     // G=[[0,1,0,0],[-w^2,-2*zeta*w,1,0],[0,0,0,Omega],[0,0,-Omega,0]]

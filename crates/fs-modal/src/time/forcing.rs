@@ -9,8 +9,10 @@
 use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 use super::heat::LinearViscousIntegral;
 
-/// Cached transition for `q'' + 2*zeta*omega*q' + omega^2*q = F(t)` with
+/// Cached transition for `q'' + c*q' + omega^2*q = F(t)` with
 /// `F(t) = F_start + (F_end-F_start)*t/duration`.
+/// Supply `c = 2*zeta*omega` through [`Self::try_new`], or specify the physical
+/// damping rate directly through [`Self::try_new_with_damping_rate`].
 ///
 /// Coordinates and forces use the same mass-normalized units as
 /// [`ModalAcousticState`]. This is also the unit-mass acceleration-response
@@ -45,7 +47,7 @@ pub struct LinearForceFrame {
     pub state: ModalAcousticState,
     /// Integral of `F(t)*v(t)` [J], including either sign of supplied work.
     pub input_work_j: f64,
-    /// Integral of `2*zeta*omega*v(t)^2` [J], evaluated as a sum of squares.
+    /// Integral of `c*v(t)^2` [J], evaluated as a sum of squares.
     pub viscous_dissipation_j: f64,
     /// Scale-aware floating-point allowance for the viscous integral [J].
     pub dissipation_roundoff_tolerance_j: f64,
@@ -94,13 +96,59 @@ impl LinearForceTransition {
                 "linear-force transition requires finite nonnegative frequency/damping, positive duration, and zero damping for a free coordinate",
             ));
         }
-        let mut angle = angular_frequency_rad_s * duration_s;
-        let mut drag = 2.0 * (damping_ratio * angle);
+        let angle = angular_frequency_rad_s * duration_s;
+        let drag = 2.0 * (damping_ratio * angle);
+        Self::prepare(angular_frequency_rad_s, duration_s, angle, drag)
+    }
+
+    /// Prepare `q'' + c*q' + omega^2*q = F(t)` with an explicit damping rate
+    /// `c` [1/s]. For a dimensional coordinate of mass `m` with viscous force
+    /// `-b*v`, supply `c = b/m` and mass-normalize the state and forcing.
+    ///
+    /// Unlike a damping ratio, this remains defined at zero stiffness. A free
+    /// coordinate with positive `c` decays under viscous drag and dissipates
+    /// physical heat through [`Self::advance_with_energy`]. Nonzero `omega`
+    /// uses the same transition; no small artificial stiffness or division by
+    /// the natural frequency is introduced.
+    ///
+    /// # Errors
+    /// Invalid parameters or unrepresentable dimensionless transition values.
+    pub fn try_new_with_damping_rate(
+        angular_frequency_rad_s: f64,
+        damping_rate_per_s: f64,
+        duration_s: f64,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        if ![angular_frequency_rad_s, damping_rate_per_s]
+            .into_iter()
+            .all(|value| value.is_finite() && value >= 0.0)
+            || !duration_s.is_finite()
+            || duration_s <= 0.0
+        {
+            return Err(invalid(
+                "linear-force transition requires finite nonnegative frequency/damping rate and positive duration",
+            ));
+        }
+        Self::prepare(
+            angular_frequency_rad_s,
+            duration_s,
+            angular_frequency_rad_s * duration_s,
+            damping_rate_per_s * duration_s,
+        )
+    }
+
+    fn prepare(
+        angular_frequency_rad_s: f64,
+        duration_s: f64,
+        mut angle: f64,
+        mut drag: f64,
+    ) -> Result<Self, ModalAcousticTimeError> {
         if !angle.is_finite() || !drag.is_finite() {
             return Err(invalid(
                 "linear-force dimensionless frequency/damping must be representable",
             ));
         }
+        let original_angle = angle;
+        let original_drag = drag;
         let mut doublings = 0;
         while angle.max(drag) > 0.25 {
             angle *= 0.5;
@@ -142,9 +190,7 @@ impl LinearForceTransition {
                 "linear-force transition coefficients must be representable",
             ));
         }
-        let viscous_integral = LinearViscousIntegral::new(
-            angular_frequency_rad_s, damping_ratio, duration_s,
-        );
+        let viscous_integral = LinearViscousIntegral::new(original_angle, original_drag);
         if !viscous_integral.is_finite() {
             return Err(invalid("linear-force viscous integral must be representable"));
         }
