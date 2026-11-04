@@ -271,3 +271,6 @@ fn late_physical_pressure_failure_does_not_consume_the_healthy_microphone() {
     assert_eq!(originals[0].samples_rendered(), 4);
     assert_eq!(originals[1].samples_rendered(), 0);
 }
+
+#[path = "moving_pressure_frames/decimation.rs"]
+mod decimation;

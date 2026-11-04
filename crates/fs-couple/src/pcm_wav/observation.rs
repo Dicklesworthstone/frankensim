@@ -12,6 +12,10 @@ use crate::render::{RenderError, schedule::ScheduledRenderer};
 /// Latency-aligned acoustic superposition of independently clocked mechanics.
 pub mod ensemble;
 
+/// Shared causal rate conversion of simultaneous physical pressure channels.
+pub mod frame_decimation;
+pub use frame_decimation::DecimatedFrameRenderer;
+
 /// Settled coherent acoustic fields on an explicit, alias-free output clock.
 pub mod harmonic;
 
