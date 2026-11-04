@@ -58,6 +58,29 @@ fn actual_implicit_cell_heat_matches_independent_nonlinear_parallel_plate_root()
     assert_eq!(old.time_s(),0.0);assert_eq!(old.cells()[&id(0)].specific_h_j_kg,150.0);
 }
 #[test]
+fn implicit_radiation_retains_latent_heat_with_unresolvable_solver_coordinates() {
+    let cards=[card(0.4,0.4),card(0.6,0.6)];
+    let curves=[curve(&cards[0],100.0),curve(&cards[1],100.0)];
+    let context=context();let surfaces=bindings(&cards,&curves,&context);
+    let enclosure=enclosure([emissivity(&cards[0],&curves[0],50.0),emissivity(&cards[1],&curves[1],50.0)]);
+    let model=MaterialRadiation {enclosure:&enclosure,cells:&surfaces,
+        power_tolerance_w:1e-8,radiosity_tolerance_w_m2:1e-8};
+    let old=initial(&curves,[50.0,50.0],5.0);
+    let (next,report)=support::with_cx(|cx|
+        model.step_candidate(cx,&old,0.01,controls(),&[1e-20,-1e-20]).unwrap());
+    // Both cells remain on the 400 K plateau. The actual source changes the
+    // hot cell's phase inventory while the enclosure stays in thermal balance.
+    near(next.cells()[&id(0)].specific_h_j_kg,50.05);
+    near(next.cells()[&id(1)].specific_h_j_kg,50.0);
+    assert_eq!(next.temperature_k(id(0)).unwrap(),400.0);
+    assert_eq!(next.temperature_k(id(1)).unwrap(),400.0);
+    near(report.thermal.stored_energy_change_j,0.05);
+    near(report.external_heat_j,0.05);
+    assert!(report.maximum_cell_residual_j<=controls().cell_tolerance_j);
+    assert_eq!(old.time_s(),0.0);
+    assert_eq!(old.cells()[&id(0)].specific_h_j_kg,50.0);
+}
+#[test]
 fn emissivity_data_changes_phase_evolution_at_fixed_kelvin_and_preserves_independent_heat() {
     let run=|scale:f64| {
         let cards=[card(0.2*scale,0.8*scale),card(0.6,0.6)];

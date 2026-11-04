@@ -156,6 +156,44 @@ fn g1_implicit_surface_tiny_capacities_use_actual_mass_without_explicit_cfl() {
 }
 
 #[test]
+fn implicit_surface_resolves_weak_far_field_during_directional_differences() {
+    let initial = simulation(&[1.0, 1.0], &[10.0, 10.0], None);
+    let evaluations = Cell::new(0);
+    let (next, (), audit, nonlinear, _) = solve_interval(
+        &initial,
+        0.1,
+        &[1.0, 1.0],
+        controls(),
+        1e-8,
+        &evaluations,
+        |_| Ok(StepCoefficients {
+            // The weak far-field rate gives a nonzero Krylov direction whose
+            // h perturbation is unrepresentable, despite finite near heating.
+            sources_w: [(CellId(0), 100.0), (CellId(1), 1e-20)].into(),
+            conductances_w_k: BTreeMap::new(),
+            payload: (),
+        }),
+        || false,
+    ).unwrap();
+    assert!(nonlinear.converged);
+    near(next.cells()[&CellId(0)].specific_h_j_kg, 20.0, 1e-8);
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 10.0);
+    near(audit.stored_energy_change_j, 10.0, 1e-8);
+    near(audit.external_heat_j, 10.0, 1e-8);
+    // Projection changes a solver coordinate only. The original owner's
+    // residual continues to charge the weak, unresolved physical input.
+    let trial = BackwardEulerStep::new(&initial, 0.1, || Ok(())).unwrap()
+        .evaluate(&[next.cells()[&CellId(0)].specific_h_j_kg - 10.0, 0.0], |_| {
+            Ok::<_, Error>(StepCoefficients {
+                sources_w: [(CellId(0), 100.0), (CellId(1), 1e-20)].into(),
+                conductances_w_k: BTreeMap::new(),
+                payload: (),
+            })
+        }, || Ok(())).unwrap();
+    assert_eq!(trial.residual_j()[1], -0.1 * 1e-20);
+}
+
+#[test]
 fn g1_implicit_surface_internal_conduction_conserves_and_refines_first_order() {
     let mut errors = Vec::new();
     for count in [16, 32, 64] {

@@ -183,7 +183,10 @@ fn step_counted<'t, F, I, J>(
             bulk: &resolve, link: &resolve_link, last: None },
         interface: &resolve_interface, last: None,
     });
-    let evaluate = |x: &[f64]| step.evaluate(x, |state| {
+    // Krylov/line-search iterates can contain sub-ULP far-field corrections.
+    // Project only those coordinates; the native residual still charges all
+    // Joule work, authored heat and contact exchange at the endpoint.
+    let evaluate = |x: &[f64]| step.evaluate(&step.resolvable_increments_j(x), |state| {
         let evaluated = source.borrow_mut().evaluate(state);
         current_work.set(source.borrow().transport.account.solves);
         let (current, bulk, interfaces) = evaluated?;

@@ -348,7 +348,10 @@ impl MaterialRadiation<'_> {
         controls.newton.validate().map_err(RadiationCellError::Newton)?;
         let step=BackwardEulerStep::new(thermal,target_s,||checkpoint(cx))?;
         let evaluations=Cell::new(0usize);
-        let evaluate=|x:&[f64]| step.evaluate(x,|state| {
+        // Newton coordinates may contain corrections below a cell's stored-h
+        // resolution. Project those coordinates only; all radiative and authored
+        // heat remains in the original local and total energy residuals.
+        let evaluate=|x:&[f64]| step.evaluate(&step.resolvable_increments_j(x),|state| {
             if evaluations.get()>=controls.maximum_evaluations { return Err(RadiationCellError::EvaluationBudget); }
             evaluations.set(evaluations.get()+1);
             let source=self.resolve(cx,state)?;

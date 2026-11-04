@@ -561,8 +561,12 @@ impl<'a> Wall1d<'a> {
         coupled_radiant_power: Power,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<BackwardEulerTrial<'a, Exchange>, WallError> {
+        // A resolved near-surface update can have sub-ULP far-field components.
+        // Project the numerical iterate; every physical flux remains in the
+        // original residual and its independent local/total acceptance gates.
+        let energy = step.resolvable_increments_j(energy);
         step.evaluate(
-            energy,
+            &energy,
             |state| self.coefficients(state, boundary, coupled_radiant_power),
             || checkpoint(cancelled),
         )

@@ -132,6 +132,49 @@ fn original_cells_material_binding_and_conductances_define_the_real_wall() {
 }
 
 #[test]
+fn localized_heating_keeps_unresolved_far_field_without_aborting_the_wall_step() {
+    let cells = 8;
+    let initial_h = 100_000.0;
+    let wall = Wall1d::new(&LAW, geometry(cells), SpecificEnthalpy::new(initial_h), || false)
+        .unwrap();
+    let duration = 0.01;
+    let power = 100.0;
+    let mut boundary = insulated();
+    boundary.external_radiant_power = Power::new(power);
+    let next = wall.candidate(
+        Time::new(duration), boundary, WallSolve::default(),
+        &mut wall.workspace().unwrap(), || false,
+    ).unwrap();
+
+    // Independent cosine eigenmodes of the insulated uniform-cell Laplacian:
+    // (I + r L) delta_h = (dt P/m) e_0. This short interval heats the first
+    // cells measurably while the far-field energy is below stored-h resolution.
+    let mass = 40.0 / cells as f64;
+    let conductance = 0.2 * 2.0 / (0.04 / cells as f64);
+    let r = duration * conductance / (mass * LAW.cp);
+    for (i, cell) in next.wall.simulation().cells().values().enumerate() {
+        let mut response = 1.0 / cells as f64;
+        for mode in 1..cells {
+            let angle = mode as f64 * core::f64::consts::PI / cells as f64;
+            response += 2.0 / cells as f64 * (0.5 * angle).cos()
+                * ((i as f64 + 0.5) * angle).cos()
+                / (1.0 + 2.0 * r * (1.0 - angle.cos()));
+        }
+        let expected = initial_h + duration * power / mass * response;
+        near(cell.specific_h_j_kg, expected, 5e-8);
+    }
+    assert!(next.wall.simulation().cells()[&CellId(1)].specific_h_j_kg > initial_h);
+    assert!(next.wall.simulation().cells()[&CellId(2)].specific_h_j_kg > initial_h);
+    assert_eq!(next.wall.simulation().cells()[&CellId(cells as u64)].specific_h_j_kg, initial_h);
+    near(next.report.audit.stored_energy_change_j, duration * power, 1e-6);
+    assert_eq!(next.report.external_radiant_energy, Energy::new(duration * power));
+    assert_eq!(next.report.gas_heat_power, [Power::new(0.0); 2]);
+    account(&next.report);
+    assert_eq!(wall.time(), Time::new(0.0));
+    assert!(wall.simulation().cells().values().all(|cell|cell.specific_h_j_kg == initial_h));
+}
+
+#[test]
 fn signed_enclosure_radiation_heats_and_cools_without_becoming_external_fire_input() {
     let wall = wall(1);
     for power in [-80.0, 80.0] {

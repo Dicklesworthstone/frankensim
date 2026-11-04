@@ -167,6 +167,7 @@ impl FiniteLoopCore<'_> {
                         "candidate average flow is unrepresentable",
                     ));
                 }
+                let energies = step.resolvable_increments_j(&energies);
                 step.evaluate_with_transport(
                     &energies,
                     |trial| {

@@ -112,6 +112,7 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
                 Ok(joules)
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let energy = step.resolvable_increments_j(&energy);
         let mut payload = (*observer).clone();
         let gas_stored_j = payload
             .finite_atmosphere

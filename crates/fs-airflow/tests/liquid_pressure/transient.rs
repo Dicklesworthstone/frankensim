@@ -307,6 +307,37 @@ fn finite_pipe_heats_from_rest_and_closes_buoyancy_momentum_and_enthalpy() {
 }
 
 #[test]
+fn finite_pipe_heating_accepts_unresolvable_initial_solver_coordinates() {
+    with_finite(&card(false, 1.0), [300.0; 4], |cx, law, source, mut thermal, _| {
+        let mut owner = FiniteLiquidLoop::try_new(
+            cx, law, source, &thermal, &pipe_sections(),
+            SeriesGravity::try_new([0.0; 3], vertices()).unwrap(),
+            0.0, finite_limits(),
+        ).unwrap();
+        let initial_energy = thermal.energy_j();
+        // A hot section can coexist with exactly unchanged remote inventory.
+        // Every guessed component here is smaller than the stored h spacing.
+        let guess = [1e-20, -1e-20, 1e-20, -1e-20];
+        for (cell, &energy) in thermal.cells().values().zip(&guess) {
+            assert_eq!(cell.specific_h_j_kg + energy / cell.mass_kg, cell.specific_h_j_kg);
+        }
+        let report = owner.advance(
+            cx, &mut thermal, 0.5, 0.0,
+            |_, _| Ok::<_, Infallible>(heat([200.0, 0.0, 0.0, 0.0])),
+            finite_controls(), &guess,
+        ).unwrap();
+        let actual = temperatures(&thermal);
+        assert!((actual[0] - 300.5).abs() < 1e-8);
+        assert_eq!(&actual[1..], &[300.0; 3]);
+        assert!((thermal.energy_j() - initial_energy - 100.0).abs() < 1e-6);
+        assert!((report.thermal.external_heat_j - 100.0).abs() < 1e-6);
+        assert!(report.maximum_cell_residual_j <= finite_controls().cell_tolerance_j);
+        assert_eq!(owner.volume_flow_m3_s(), 0.0);
+        assert_eq!(owner.accepted_time_s(), 0.5);
+    });
+}
+
+#[test]
 fn actual_midpoint_transport_survives_endpoint_reversal_and_retains_pipe_energy() {
     let old = [320.0, 310.0, 300.0, 290.0];
     with_finite(&card(false, 1.0), old, |cx, law, source, mut thermal, _| {

@@ -215,6 +215,7 @@ fn solve_interval<'t, T>(
                 Ok(joules)
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let energy = step.resolvable_increments_j(&energy);
         step.evaluate(&energy, &resolve, check)
     };
     let (increments, nonlinear) = solve_nonlinear(

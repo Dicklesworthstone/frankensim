@@ -262,8 +262,9 @@ where
         let step = BackwardEulerStep::new(thermal, target_s, || check())?;
         let work = Cell::new(0usize);
         let evaluate = |x: &[f64]| {
+            let energies = step.resolvable_increments_j(x);
             step.evaluate_with_transport(
-                x,
+                &energies,
                 |state| {
                     let mut proposal = self.clone();
                     proposal.solves = work.get();

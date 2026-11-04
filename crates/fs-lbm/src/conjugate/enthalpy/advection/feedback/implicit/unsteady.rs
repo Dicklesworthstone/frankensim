@@ -120,8 +120,9 @@ where
         let dt = step.duration_s();
         let work = Cell::new(0usize);
         let evaluate = |x: &[f64]| {
+            let energies = step.resolvable_increments_j(x);
             step.evaluate_with_transport(
-                x,
+                &energies,
                 |state| {
                     let (mut proposal, rheology) = self.resolve_unsteady_endpoint(
                         state,

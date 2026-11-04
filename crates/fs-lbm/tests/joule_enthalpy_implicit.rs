@@ -135,6 +135,48 @@ fn g3_material_data_changes_implicit_phase_feedback_at_identical_kelvin_and_surv
 }
 
 #[test]
+fn implicit_latent_heating_accepts_unresolvable_far_field_solver_coordinates() {
+    let law=latent(100.0);
+    let (old,domain,ids)=initial(&law,&[40.0;3],None,0.0);
+    let drive=setup(3,ElectrodeDrive::Current(4.0));
+    // The terminal cells receive no Joule heat. Small Krylov/line-search
+    // components there must resolve to their unchanged physical h, rather
+    // than aborting the jointly solved, finite latent heat in the interior.
+    let guess=[1e-20,-1e-20,1e-20];
+    assert!(guess.iter().all(|&e|40.0+e==40.0));
+    let (next,report)=step_joule_enthalpy_implicit(&old,0.25,
+        input(&domain,&drive,&ids,&[]),&[],&CancelGate::new(),config(),&guess,
+        |_,cell,_| {
+            let phase=law.state_at_specific_enthalpy(cell.specific_h_j_kg).unwrap();
+            EnthalpyTransport::try_new(phase,Some(1.0+phase.liquid_mass_fraction()),0.0)
+        },no_links,no_interfaces,|_|Ok(BTreeMap::new())).unwrap();
+    near(next.cells()[&ids[1]].specific_h_j_kg,45.0);
+    assert_eq!(next.cells()[&ids[0]].specific_h_j_kg,40.0);
+    assert_eq!(next.cells()[&ids[2]].specific_h_j_kg,40.0);
+    for &id in &ids {near(next.temperature_k(id).unwrap(),310.0);}
+    near(report.deposited_joule_j,5.0);
+    near(next.energy_j()-old.energy_j(),report.deposited_joule_j);
+    assert!(report.maximum_cell_residual_j<=config().cell_energy_tolerance_j);
+    assert_eq!(old.time_s(),0.0);
+}
+
+#[test]
+fn implicit_coordinate_projection_cannot_discard_unresolvable_physical_heat() {
+    let law=latent(100.0);
+    let (old,domain,ids)=initial(&law,&[40.0;3],None,0.0);
+    let drive=setup(3,ElectrodeDrive::Voltage(0.0));
+    let result=step_joule_enthalpy_implicit(&old,1.0,
+        input(&domain,&drive,&ids,&[]),&[],&CancelGate::new(),
+        ImplicitJouleConfig {cell_energy_tolerance_j:0.0,total_energy_tolerance_j:0.0,..config()},
+        &[1e-20;3],|_,_,_|EnthalpyTransport::try_new((),Some(1.0),0.0),
+        no_links,no_interfaces,|_|Ok([(ids[1],1e-15)].into()));
+    assert!(matches!(result,Err(ImplicitJouleError::Physical(
+        JouleEnthalpyError::Thermal(DepositionError::EnergyBalance(_))))));
+    assert_eq!(old.time_s(),0.0);
+    assert!(old.cells().values().all(|cell|cell.specific_h_j_kg==40.0));
+}
+
+#[test]
 fn g3_current_contacts_transport_and_other_heat_share_the_converged_endpoint() {
     let law=latent(100.0);let (old,domain,ids)=initial(&law,&[0.0,40.0,40.0,0.0],Some(0.5),0.0);
     let drive=setup(4,ElectrodeDrive::Voltage(6.0));let gate=CancelGate::new();
