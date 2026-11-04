@@ -41,6 +41,11 @@ mod shooting;
 pub use shooting::{
     solve_forced_shooting_variational, solve_forced_shooting_variational_analytic,
 };
+mod variational_feedback;
+pub use variational_feedback::{
+    PhsFeedbackStateJacobian, solve_autonomous_feedback_shooting_variational,
+    solve_autonomous_feedback_shooting_variational_analytic,
+};
 mod autonomous;
 /// Full-state parameter branches of the original self-excited pHS.
 pub use autonomous::continuation as autonomous_continuation;

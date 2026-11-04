@@ -35,7 +35,7 @@ pub trait AutonomousPortFeedback {
     fn input(&self, state: &[f64], flows: &[f64], out: &mut [f64]) -> bool;
 }
 
-fn feedback_problem<'a>(
+pub(super) fn feedback_problem<'a>(
     system: &'a PortHamiltonian,
     feedback: &'a dyn AutonomousPortFeedback,
 ) -> Result<PhsOrbitProblem<'a>, PhsOrbitError> {
