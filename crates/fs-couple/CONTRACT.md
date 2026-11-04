@@ -26851,6 +26851,40 @@ zero heat on smooth tensile/compressive paths, source/history/material refusal,
 every cancellation phase with deterministic retry, strict transfer closure,
 and integrated-work units.
 
+## Finite-time viscous-support heat on the original thermal timeline
+
+`JkrSnapHeat::propose_timed_damped_normal_motion` consumes the original
+`JkrNormalMotionTrace` and a separate `JkrViscousHeatRoute`. The route
+explicitly selects surface shares for the two already-bound caloric cells and
+names any outside destination. It never inherits the adhesive snap partition.
+Sealed support work and smooth-segment timing are distinct from original snap
+release, reversible contact work and spring storage.
+
+A private observer adds each original segment's average dissipative power
+through native `DepositionObserver::step_sources`. The original thermal
+solver clips at power changes and transports/cools heat while it is produced;
+authored sources, boundary schedules, reservoirs and thermal topology retain
+their original owners. All-outside and zero-loss routes add no thermal source
+or segment clipping. Original snap events still split the same timeline and
+retain the native scheduled-event ordering at each timestamp.
+
+The accepted native thermal durations determine actual injected energy.
+Per-segment, aggregate and cumulative absolute transfer gates compare that
+energy with original mechanical work; clock rounding cannot be repaired by a
+manufactured endpoint heat impulse. Relative native transport/snap audits and
+support-transfer residuals compose with compensated accumulation. Reports
+keep both work ledgers and outside destinations separate and identify authored
+transport heat after removing the internal support source. Full continuation,
+receiver identity, the shared transport substep allowance and atomic refusal
+remain binding.
+
+The reconstruction uses the original mechanical midpoint loss and constant
+power within each accepted mechanical segment. It therefore needs mechanical
+and thermal timestep refinement; it is not a resolved within-step viscous
+waveform or a temperature-dependent contact law. Normal source coefficients
+and both explicitly declared heat partitions remain frozen. The implementation
+reuses the existing thermal solver and common event-timed snap engine.
+
 ## Event-timed normal snap heat through original transport
 
 `JkrSnapHeat::propose_timed_normal_motion` advances the original thermal

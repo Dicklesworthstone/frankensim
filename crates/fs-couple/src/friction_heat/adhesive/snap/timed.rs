@@ -11,7 +11,9 @@ use super::{
 };
 use fs_contact::normal_patch::adhesive::{JkrJump, motion::JkrNormalMotionStep};
 use fs_math::dd::Dd;
-use fs_thermal::enthalpy::{DepositionError, DepositionSimulation, EnergyAudit, StepConfig};
+use fs_thermal::enthalpy::{
+    DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, StepConfig,
+};
 use fs_tribo::{DissipationStep, WorkLedger};
 use std::collections::BTreeMap;
 
@@ -132,8 +134,37 @@ impl<'s> JkrSnapHeat<'s> {
         motion: &JkrNormalMotionStep,
         thermal_time_at_motion_zero_s: f64,
         controls: JkrTimedSnapHeatControls,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<JkrTimedSnapHeatCandidate<'s, 'm>, JkrSnapHeatError> {
+        self.propose_timed_normal_motion_observed(
+            thermal,
+            expected,
+            motion,
+            thermal_time_at_motion_zero_s,
+            controls,
+            &(),
+            checkpoint,
+        )
+        .map(|(candidate, ())| candidate)
+    }
+
+    // A narrowly shared transport path for original, source-owned smooth losses.
+    // Public snap-only proposals keep the original no-op observer and arithmetic.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn propose_timed_normal_motion_observed<'m, O>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        expected: JkrSnapHeatStamp,
+        motion: &JkrNormalMotionStep,
+        thermal_time_at_motion_zero_s: f64,
+        controls: JkrTimedSnapHeatControls,
+        observer: &O,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(JkrTimedSnapHeatCandidate<'s, 'm>, O), JkrSnapHeatError>
+    where
+        O: DepositionObserver,
+        JkrSnapHeatError: From<O::Error>,
+    {
         checkpoint()?;
         if expected != self.stamp
             || motion.initial_state().contact_state() != self.state()
@@ -233,24 +264,24 @@ impl<'s> JkrSnapHeat<'s> {
         }
 
         let mut current = None;
+        let mut observer = observer.clone();
+        let mut observer_begun = false;
         let mut events = Vec::with_capacity(planned.len());
         let mut marches = AuditSum::default();
         let mut impulses = AuditSum::default();
         let mut absolute_residual = Dd::ZERO;
         for (offset, time, jump, partition) in planned {
             checkpoint()?;
-            // This is the same native path as advance_to, with its no-op
-            // observer and only the enclosing interval's remaining allowance.
-            let (advanced, (), march) = current
-                .as_ref()
-                .unwrap_or(thermal)
-                .advance_observed_limited(
-                    &(),
-                    time,
-                    controls.transport,
-                    transport_budget(&marches, controls.maximum_transport_substeps)?,
-                    &mut checkpoint,
-                )?;
+            let (advanced, next_observer, march) = advance_transport(
+                current.as_ref().unwrap_or(thermal),
+                &observer,
+                &mut observer_begun,
+                time,
+                controls.transport,
+                transport_budget(&marches, controls.maximum_transport_substeps)?,
+                &mut checkpoint,
+            )?;
+            observer = next_observer;
             self.admit_receivers(&advanced)?;
             marches.add(march)?;
             transport_budget(&marches, controls.maximum_transport_substeps)?;
@@ -284,16 +315,15 @@ impl<'s> JkrSnapHeat<'s> {
             });
             current = Some(heated);
         }
-        let (thermal, (), final_transport) = current
-            .as_ref()
-            .unwrap_or(thermal)
-            .advance_observed_limited(
-                &(),
-                end,
-                controls.transport,
-                transport_budget(&marches, controls.maximum_transport_substeps)?,
-                &mut checkpoint,
-            )?;
+        let (thermal, observer, final_transport) = advance_transport(
+            current.as_ref().unwrap_or(thermal),
+            &observer,
+            &mut observer_begun,
+            end,
+            controls.transport,
+            transport_budget(&marches, controls.maximum_transport_substeps)?,
+            &mut checkpoint,
+        )?;
         self.admit_receivers(&thermal)?;
         marches.add(final_transport)?;
         transport_budget(&marches, controls.maximum_transport_substeps)?;
@@ -357,12 +387,44 @@ impl<'s> JkrSnapHeat<'s> {
             absolute_stage_energy_residual_j: absolute,
         };
         checkpoint()?;
-        Ok(JkrTimedSnapHeatCandidate {
-            history,
-            thermal,
-            report,
-        })
+        Ok((
+            JkrTimedSnapHeatCandidate {
+                history,
+                thermal,
+                report,
+            },
+            observer,
+        ))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_transport<'m, O>(
+    thermal: &DepositionSimulation<'m>,
+    observer: &O,
+    begun: &mut bool,
+    target_s: f64,
+    config: StepConfig,
+    remaining_substeps: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<(DepositionSimulation<'m>, O, EnergyAudit), JkrSnapHeatError>
+where
+    O: DepositionObserver,
+    JkrSnapHeatError: From<O::Error>,
+{
+    let result = if *begun {
+        thermal.advance_observed_continuing_limited(
+            observer,
+            target_s,
+            config,
+            remaining_substeps,
+            checkpoint,
+        )
+    } else {
+        thermal.advance_observed_limited(observer, target_s, config, remaining_substeps, checkpoint)
+    }?;
+    *begun = true;
+    Ok(result)
 }
 
 fn invalid(message: &'static str) -> JkrSnapHeatError {

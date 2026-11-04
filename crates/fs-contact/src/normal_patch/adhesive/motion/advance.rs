@@ -68,7 +68,16 @@ pub(super) fn run(
                 &mut released,
             )?;
         }
-        let mut h = (dt - elapsed).min(law.budget.maximum_substep_s);
+        let remaining = dt - elapsed;
+        let mut h = remaining.min(law.budget.maximum_substep_s);
+        if law.damping_n_s_per_m > 0.0
+            && remaining > law.budget.maximum_substep_s
+            && remaining <= 2.0 * law.budget.maximum_substep_s
+        {
+            // Balance the last pair instead of creating a near-full step plus
+            // an ulp tail whose nonzero loss may vanish on an offset clock.
+            h = 0.5 * remaining;
+        }
         let segment = loop {
             poll(gate)?;
             if trials == law.budget.maximum_substeps {

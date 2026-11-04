@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 mod normal_motion;
 /// Original thermal transport between the sealed normal trajectory's events.
 pub mod timed;
+/// Explicit viscous-support losses on their original smooth mechanical intervals.
+pub mod viscous;
 
 /// Finite work and heat accuracy budgets, all chosen by the caller.
 #[derive(Clone, Copy, Debug, PartialEq)]
