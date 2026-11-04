@@ -1,0 +1,5 @@
+frankensim.matdb-source.v1
+observation	cd97-rubber-mallet	Korogi No. 4 (rubber head), hand-held, on a padouk xylophone bar	Equivalent mass from the transfer function of acceleration to force on an impedance head; about 20 % above the head mass	A. Chaigne and V. Doutaut, Numerical simulations of xylophones. I. Time-domain modeling of the vibrating bars, J. Acoust. Soc. Am. 101(1), 539-557 (1997), Table I p.544
+scalar	equivalent-mass	cd97-rubber-mallet	mallet_equivalent_mass	0.0236	kg	constant
+uncertainty	equivalent-mass	unstated	-	-	-	-
+validity	equivalent-mass	impact_speed	0.05	1.5	m/s

@@ -1,0 +1,8 @@
+frankensim.matdb-contact.v1
+pair	material_a	boxwood-mallet-head-vibrawell-x7	material_b	padouk-xylophone-bar	geometry	mallet-head-on-bar-top-face
+law	penalty-power	k_n_per_m_alpha	1.31e9	alpha	1.5	chi_s_per_m	0.0
+identification	measured-force-duration-regression	Table I p.544: Vibrawell x7 (boxwood), K = 1.31e9 N m^-3/2 and m_e = 26.2 g, from a regression of log F_max on log tau on a real bar (Eq. 16, Fig. 3).
+validity	force_n	0.0	928
+validity	velocity_m_s	0.05	1.5
+graze-advisory	alpha = 1.5 (Hertz) has an unbounded contact Hessian at the boundary; a mallet impact separates after one contact, so this card is for impacts only
+citation	A. Chaigne and V. Doutaut, Numerical simulations of xylophones. I. Time-domain modeling of the vibrating bars, J. Acoust. Soc. Am. 101(1), 539-557 (1997), Table I p.544; K from a regression of log F_max on log tau, Eq. (16), Fig. 3; numerical facts only. Force ceiling: arithmetic from Eq. (A5) with the reduced mass taken as m_e at V0 = 1.5 m/s, an upper bound, not printed.
