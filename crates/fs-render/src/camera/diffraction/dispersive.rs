@@ -12,9 +12,12 @@
 //! These are ideal quadratic phase elements, not finite-thickness spherical
 //! lenses. Surface aberrations, coatings, absorption and polarization are
 //! deliberately not inferred from the supplied material phase-index law.
-//! Geometric cameras may additionally retain an explicit surrounding material:
+//! Cameras may additionally retain an explicit surrounding material:
 //! their inverse focal length is `(n_lens/n_exterior-1)*(Cf-Cb)`. The same
 //! medium occupies both sides, so the usual object/sensor conjugacy survives.
+//! Wave propagation uses `lambda_vac/n_exterior` in both the pupil phase and
+//! angular Fourier scale. The lens's quadratic phase is equivalently
+//! `-pi*(n_lens-n_exterior)*(Cf-Cb)*r^2/lambda_vac`.
 //! See OpenStax, *University Physics III*, section 2.4, lens maker's equation:
 //! <https://openstax.org/books/university-physics-volume-3/pages/2-4-thin-lenses>.
 
@@ -123,15 +126,16 @@ impl DispersiveThinLens {
     }
 
     /// Retain an explicit homogeneous surrounding phase-index law on both
-    /// sides of a geometric thin-lens prescription. Native absolute indices
+    /// sides of a thin-lens prescription. Native absolute indices
     /// determine the relative contrast at each original vacuum wavelength;
     /// neither an air-relative fit nor a group index is substituted.
     ///
     /// The camera's sampled exterior index must equal this law at every lane.
     /// Source bands and table gap limits remain intact. This is a transparent,
     /// unit-transmission ideal lens; exterior absorption/scattering along scene
-    /// paths remains owned by the original transport. Wave diffraction refuses
-    /// this explicit-medium prescription until its pupil propagator supports it.
+    /// paths remains owned by the original transport. Finite-defocus and
+    /// layered diffraction propagate the physical medium wavelength; their
+    /// primary source and pupil must lie in this same homogeneous medium.
     pub fn try_new_in_medium(
         reference_wavelength_nm: f64,
         elements: &[ThinLensElement],
@@ -339,7 +343,6 @@ impl DispersiveThinLens {
         let half_tan = super::super::half_ratio(sensor, distance);
         if camera.aperture.is_pinhole()
             || camera.diffraction.is_some()
-            || (self.exterior_ior().is_some() && camera.has_diffraction())
             || (focal - expected_focal).abs() > tolerance
             || radius / camera.focus_distance_m > Self::MAXIMUM_PARAXIAL_SLOPE
             || radius / distance > Self::MAXIMUM_PARAXIAL_SLOPE
@@ -383,6 +386,8 @@ fn compensated_power(
     Ok(result)
 }
 
+#[cfg(test)]
+mod immersed_wave_tests;
 #[cfg(test)]
 mod immersion_tests;
 
@@ -747,7 +752,7 @@ impl PhysicalCamera {
             };
             // Geometric blur radius is 2|phase| in this wavelength's q.
             // Convert to the proposal's reference-wavelength coordinates.
-            maximum = maximum.max(phase * (wavelength / reference_nm));
+            maximum = maximum.max(phase * (self.pupil_wavelength_nm(wavelength)? / reference_nm));
         }
         Ok(maximum)
     }
@@ -784,7 +789,7 @@ impl PhysicalCamera {
         let mut weights = [0.0; N];
         for (weight, &wavelength) in weights.iter_mut().zip(wavelengths_nm) {
             cx.checkpoint()?;
-            let ratio = reference_nm / wavelength;
+            let ratio = reference_nm / self.pupil_wavelength_nm(wavelength)?;
             let density = self.layered_pupil_density(
                 q.map(|value| value * ratio),
                 self.defocus_phase(policy, wavelength)?,

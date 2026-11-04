@@ -95,7 +95,7 @@ pub struct LayeredCameraRay<'a, const N: usize> {
     ray: Ray,
     q: [f64; 2],
     proposal: f64,
-    reference_nm: f64,
+    reference_pupil_nm: f64,
     wavelengths_nm: [f64; N],
 }
 
@@ -127,7 +127,7 @@ impl<const N: usize> LayeredCameraRay<'_, N> {
         let mut weights = [0.0; N];
         for (weight, &wavelength) in weights.iter_mut().zip(&self.wavelengths_nm) {
             cx.checkpoint()?;
-            let ratio = self.reference_nm / wavelength;
+            let ratio = self.reference_pupil_nm / self.camera.pupil_wavelength_nm(wavelength)?;
             let phase = self.camera.pupil_defocus_phase(1.0 / depth, wavelength)?;
             *weight = ratio
                 * ratio
@@ -238,7 +238,7 @@ impl PhysicalCamera {
             ray,
             q,
             proposal,
-            reference_nm,
+            reference_pupil_nm: reference_nm,
             wavelengths_nm: *wavelengths_nm,
         })
     }
@@ -254,7 +254,8 @@ impl PhysicalCamera {
     ) -> Result<f64, CameraError> {
         self.diffraction_wavelength_range(&[wavelength_nm])?;
         self.admit_layered_depth(source_depth_m, wavelength_nm)?;
-        let scale = (wavelength_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
+        let scale = (self.pupil_wavelength_nm(wavelength_nm)? * 1.0e-9 / self.aperture.radius_m())
+            / (2.0 * PI);
         let q = tangent_offset.map(|value| value / scale);
         let phase = self.pupil_defocus_phase(1.0 / source_depth_m, wavelength_nm)?;
         if !scale.is_finite() || scale <= 0.0 || q.iter().any(|value| !value.is_finite()) {
@@ -298,7 +299,7 @@ impl PhysicalCamera {
             .map(|declared| (1.0 / depth - 1.0 / declared).abs())
             .fold(f64::INFINITY, f64::min);
         let phase_error = PI
-            * (self.aperture.radius_m() / (wavelength_nm * 1.0e-9))
+            * (self.aperture.radius_m() / (self.pupil_wavelength_nm(wavelength_nm)? * 1.0e-9))
             * self.aperture.radius_m()
             * inverse_error;
         if !phase_error.is_finite() || phase_error > policy.maximum_depth_phase_error_rad {

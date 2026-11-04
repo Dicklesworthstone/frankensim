@@ -229,9 +229,12 @@ impl PhysicalCamera {
     /// `generate_geometric_spectral_rays_from_tangent_offsets`: its different
     /// lane directions cannot be represented by this shared-ray result.
     ///
-    /// Wavelengths are in nanometres. Scalar admission requires `lambda/D <=
+    /// Wavelengths are vacuum nanometres. Scalar admission requires `lambda/D <=
     /// 0.01` for every wavelength, using the inscribed pupil diameter for a
-    /// regular polygon and the radial opening width for an annulus.
+    /// regular polygon and the radial opening width for an annulus. An explicit
+    /// homogeneous exterior uses its physical wavelength `lambda_vac/n` in
+    /// this admission, pupil phase and angular PSF; source queries stay in
+    /// vacuum wavelength. The source and pupil must occupy that same medium.
     /// Call [`Self::admit_diffraction_depth`] on the
     /// primary visible surface (or infinite environment) before accepting the
     /// path. Primary surfaces must be opaque diffuse: a mirror/refractor's
@@ -418,7 +421,8 @@ impl PhysicalCamera {
             return Err(CameraError::InvalidDiffraction);
         }
         self.diffraction_wavelength_range(&[wavelength_nm])?;
-        let scale = (wavelength_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
+        let scale = (self.pupil_wavelength_nm(wavelength_nm)? * 1.0e-9 / self.aperture.radius_m())
+            / (2.0 * PI);
         let q = tangent_offset.map(|value| value / scale);
         let radius_squared = q[0] * q[0] + q[1] * q[1];
         if !scale.is_finite() || scale <= 0.0 || !radius_squared.is_finite() {
@@ -447,7 +451,7 @@ impl PhysicalCamera {
 
     /// Evaluate the selected finite-defocus PSF per angular-raster area.
     /// The integral is one; the on-axis value is physical pupil area divided
-    /// by wavelength squared, times `sinc(phase/2)^2` for a circular pupil;
+    /// by physical medium wavelength squared, times `sinc(phase/2)^2` for a circular pupil;
     /// for an annulus the sinc argument includes its clear area fraction;
     /// bladed pupils propagate their actual polygon. No finite image radius
     /// truncates the rings or tails. This stack-only query uses the same
@@ -464,7 +468,8 @@ impl PhysicalCamera {
             return Err(CameraError::InvalidDiffraction);
         }
         self.diffraction_wavelength_range(&[wavelength_nm])?;
-        let scale = (wavelength_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
+        let scale = (self.pupil_wavelength_nm(wavelength_nm)? * 1.0e-9 / self.aperture.radius_m())
+            / (2.0 * PI);
         let q = tangent_offset.map(|value| value / scale);
         let radius = det::hypot(q[0], q[1]);
         if !scale.is_finite() || scale <= 0.0 || !radius.is_finite() {
@@ -492,7 +497,9 @@ impl PhysicalCamera {
 
     /// Admit the actual first visible depth under the selected phase budget.
     /// `None` denotes an infinitely distant environment. The smallest packet
-    /// wavelength supplies the strongest test. The distance is axial, matching
+    /// physical medium wavelength supplies the strongest depth-error test.
+    /// It need not be the smallest vacuum wavelength in a dispersive exterior.
+    /// The distance is axial, matching
     /// the camera's focus definition. The focused policy compares against
     /// focus; single-plane defocus compares against its declared object plane;
     /// layered defocus admits an actual source against its declared depth set,
@@ -510,12 +517,8 @@ impl PhysicalCamera {
         if self.layered_diffraction.is_some() {
             let point = point.ok_or(CameraError::DefocusOutsideDiffractionModel)?;
             let depth = point.delta_from(self.eye).dot(self.forward);
-            self.admit_layered_depth(depth, minimum)?;
-            #[cfg(feature = "tracer")]
-            if self.dispersive_lens.is_some() {
-                for &wavelength in wavelengths_nm {
-                    self.pupil_defocus_phase(1.0 / depth, wavelength)?;
-                }
+            for &wavelength in wavelengths_nm {
+                self.admit_layered_depth(depth, wavelength)?;
             }
             return Ok(());
         }
@@ -534,7 +537,8 @@ impl PhysicalCamera {
             // Chromatic power is not monotone in a compound prescription or
             // a tabulated native material. Admit the actual source at every
             // lane as well as the declared source; shortest lambda alone is
-            // sufficient only for the separate geometric depth-error budget.
+            // sufficient only for the separate geometric depth-error budget
+            // after conversion to physical medium wavelength.
             for &wavelength in wavelengths_nm {
                 self.pupil_defocus_phase(inverse_depth, wavelength)?;
             }
@@ -561,6 +565,19 @@ impl PhysicalCamera {
         Ok(())
     }
 
+    /// Physical pupil wavelength [nm]. The native material law is always
+    /// evaluated at the original vacuum wavelength, including source refusals.
+    fn pupil_wavelength_nm(&self, wavelength_nm: f64) -> Result<f64, CameraError> {
+        #[cfg(feature = "tracer")]
+        if let Some(lens) = &self.dispersive_lens {
+            return Ok(wavelength_nm / lens.exterior_phase_index(wavelength_nm)?);
+        }
+        Ok(wavelength_nm)
+    }
+
+    /// Inclusive range of PHYSICAL pupil wavelengths, after admitting every
+    /// original vacuum lane. Its midpoint is only a proposal coordinate; no
+    /// material evaluation is made at that synthetic wavelength.
     fn diffraction_wavelength_range(
         &self,
         wavelengths_nm: &[f64],
@@ -578,19 +595,8 @@ impl PhysicalCamera {
         };
         let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
         for &wavelength in wavelengths_nm {
-            let lambda_m = wavelength * 1.0e-9;
-            #[cfg(feature = "tracer")]
-            let lambda_m = if !self.has_diffraction() {
-                // Geometric immersed lenses use the physical wavelength in
-                // their surrounding medium for opening-scale admission. An
-                // explicit medium is refused by the wave-imaging policies.
-                match &self.dispersive_lens {
-                    Some(lens) => lambda_m / lens.exterior_phase_index(wavelength)?,
-                    None => lambda_m,
-                }
-            } else {
-                lambda_m
-            };
+            let pupil_nm = self.pupil_wavelength_nm(wavelength)?;
+            let lambda_m = pupil_nm * 1.0e-9;
             let relative = 0.5 * (lambda_m / radius_m);
             if !wavelength.is_finite()
                 || wavelength <= 0.0
@@ -601,8 +607,8 @@ impl PhysicalCamera {
             {
                 return Err(CameraError::InvalidDiffraction);
             }
-            minimum = minimum.min(wavelength);
-            maximum = maximum.max(wavelength);
+            minimum = minimum.min(pupil_nm);
+            maximum = maximum.max(pupil_nm);
             if let Some(policy) = self.defocused_diffraction {
                 self.defocus_phase(policy, wavelength)?;
             }
@@ -644,7 +650,7 @@ impl PhysicalCamera {
             inverse_difference
         };
         let phase = PI
-            * (self.aperture.radius_m() / (wavelength_nm * 1.0e-9))
+            * (self.aperture.radius_m() / (self.pupil_wavelength_nm(wavelength_nm)? * 1.0e-9))
             * self.aperture.radius_m()
             * inverse_difference;
         if !phase.is_finite() || phase.abs() > DefocusedDiffraction::MAXIMUM_DEFOCUS_PHASE_RAD {

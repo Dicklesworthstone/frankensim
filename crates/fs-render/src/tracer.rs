@@ -115,6 +115,8 @@ pub use sharding::{
 };
 mod bdpt;
 mod initial_medium;
+#[cfg(test)]
+mod immersed_wave_tests;
 mod manifold;
 pub use bdpt::{
     BIDIRECTIONAL_TRACER_SEMANTICS_VERSION, BidirectionalExecutionReport,
@@ -9944,37 +9946,48 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         hasher.update(&(lens.elements().len() as u64).to_le_bytes());
         for element in lens.elements() {
             update_continuity_f64s(hasher, element.curvatures_per_m());
-            match element.ior() {
-                DielectricIor::Cauchy(law) => {
-                    hasher.update(&[0]);
-                    update_continuity_f64s(hasher, law.coefficients());
-                }
-                DielectricIor::Sellmeier(law) => {
-                    hasher.update(&[1]);
-                    let (strengths, resonances_um2) = law.coefficients();
-                    update_continuity_f64s(hasher, strengths);
-                    update_continuity_f64s(hasher, resonances_um2);
-                    law.update_identity_band(hasher);
-                }
-                DielectricIor::Tabulated(law) => {
-                    hasher.update(&[2]);
-                    if law.max_knot_span_nm() != crate::dielectric::MAX_DIELECTRIC_KNOT_SPAN_NM {
-                        hasher.update(b"declared-knot-span.v1");
-                        update_continuity_f64(hasher, law.max_knot_span_nm());
-                    }
-                    for sample in law.samples() {
-                        update_continuity_f64(hasher, sample.wavelength_nm());
-                        update_continuity_f64(hasher, sample.index());
-                    }
-                }
-                #[cfg(feature = "material-state")]
-                DielectricIor::Water(law) => {
-                    hasher.update(&[3]);
-                    hasher.update(law.source_identity().as_bytes());
-                    update_continuity_f64(hasher, law.temperature_k());
-                    update_continuity_f64(hasher, law.density_kg_m3());
-                }
+            update_continuity_ior(hasher, element.ior());
+        }
+        if let Some(exterior) = lens.exterior_ior() {
+            // Changing only the surrounding medium changes both lens power
+            // and diffraction. Keep legacy index-one bytes unchanged, while
+            // retaining the complete explicit exterior law and source state.
+            hasher.update(b"native-thin-lens-exterior.v1");
+            update_continuity_ior(hasher, exterior);
+        }
+    }
+}
+
+fn update_continuity_ior(hasher: &mut DomainHasher, ior: &DielectricIor) {
+    match ior {
+        DielectricIor::Cauchy(law) => {
+            hasher.update(&[0]);
+            update_continuity_f64s(hasher, law.coefficients());
+        }
+        DielectricIor::Sellmeier(law) => {
+            hasher.update(&[1]);
+            let (strengths, resonances_um2) = law.coefficients();
+            update_continuity_f64s(hasher, strengths);
+            update_continuity_f64s(hasher, resonances_um2);
+            law.update_identity_band(hasher);
+        }
+        DielectricIor::Tabulated(law) => {
+            hasher.update(&[2]);
+            if law.max_knot_span_nm() != crate::dielectric::MAX_DIELECTRIC_KNOT_SPAN_NM {
+                hasher.update(b"declared-knot-span.v1");
+                update_continuity_f64(hasher, law.max_knot_span_nm());
             }
+            for sample in law.samples() {
+                update_continuity_f64(hasher, sample.wavelength_nm());
+                update_continuity_f64(hasher, sample.index());
+            }
+        }
+        #[cfg(feature = "material-state")]
+        DielectricIor::Water(law) => {
+            hasher.update(&[3]);
+            hasher.update(law.source_identity().as_bytes());
+            update_continuity_f64(hasher, law.temperature_k());
+            update_continuity_f64(hasher, law.density_kg_m3());
         }
     }
 }
@@ -13763,15 +13776,24 @@ fn trace_path_with_regions<'scene>(
                 (spectral_ray.ray, spectral_ray.weights)
             }
         };
+        let medium_stack = lighting
+            .initial_media
+            .stack(scene, cx, ray.origin, ray_time)?;
+        if let Some(camera) = &diffraction_camera
+            && let Some(lens) = camera.dispersive_lens()
+        {
+            for &wavelength in &lambdas {
+                let actual = medium_ior(medium_stack.last().map(|entry| *entry.glass), wavelength)?;
+                lens.admit_exterior_phase_index(wavelength, actual)?;
+            }
+        }
         SpectralPathState {
             ray,
             throughput: camera_weights,
             previous_bsdf: None,
             prev_origin: ray.origin,
             segment_origin: ray.origin,
-            medium_stack: lighting
-                .initial_media
-                .stack(scene, cx, ray.origin, ray_time)?,
+            medium_stack,
             rng,
             next_depth: 0,
             active_lane: None,

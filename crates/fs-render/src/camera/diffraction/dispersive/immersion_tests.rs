@@ -267,22 +267,27 @@ fn g0_immersed_source_support_scene_match_and_wave_policy_are_explicit() {
             .with_defocused_diffraction(defocus)
             .unwrap()
             .with_dispersive_lens(lens.clone())
-            .is_err()
+            .is_ok()
     );
     assert!(
         plain
             .with_layered_diffraction(layers)
             .unwrap()
             .with_dispersive_lens(lens)
-            .is_err()
+            .is_ok()
     );
     assert!(
         geometric
             .clone()
             .with_defocused_diffraction(defocus)
+            .is_ok()
+    );
+    assert!(geometric.clone().with_layered_diffraction(layers).is_ok());
+    assert!(
+        geometric
+            .with_in_focus_diffraction(crate::camera::FocusedDiffraction::try_new(0.01).unwrap())
             .is_err()
     );
-    assert!(geometric.with_layered_diffraction(layers).is_err());
 }
 
 #[test]
