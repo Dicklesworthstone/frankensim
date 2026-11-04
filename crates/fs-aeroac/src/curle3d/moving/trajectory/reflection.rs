@@ -1,6 +1,6 @@
 //! Retarded ideal-wall reflection on an original moving source history.
 //!
-//! For a stationary orthogonal image transform H, the Euclidean Green function
+//! For a stationary isometric image transform H, the Euclidean Green function
 //! obeys G(x,H y)=G(H^-1 x,y). Using a virtual receiver H^-1 x therefore keeps
 //! the ORIGINAL source position, velocity, acceleration, force and force rate.
 //! It is exactly equivalent to transforming every image-source vector, without
@@ -14,7 +14,7 @@
 //! frame. This is the finite ideal-plane image construction of Allen & Berkley,
 //! JASA 65 (1979), 943–950, doi:10.1121/1.382599, with the moving Green-function
 //! derivatives owned by the original compact source operator. Finite impedance,
-//! general wedges, moving walls, dispersion and feedback are absent. Moving
+//! general wedge angles, moving walls, dispersion and feedback are absent. Moving
 //! microphones use the same image law through [`moving`].
 
 use super::{
@@ -23,6 +23,7 @@ use super::{
 };
 use crate::AeroacError;
 use crate::curle3d::IdealAcousticPlane;
+use crate::curle3d::array::wedge::WedgeImages;
 use crate::curle3d::moving::{
     CompactSourceStrength, MovingCompactObserver, PreparedMovingCompactSample,
 };
@@ -38,17 +39,20 @@ pub use moving::{MovingReflectionObserver, PreparedReflectedMovingReceiverSource
 struct ImagePath {
     observer: MovingCompactObserver,
     sign: f64,
+    inverse_jacobian: Option<[[f64; 3]; 3]>,
 }
 
 /// A fixed microphone and the COMPLETE image group of one to three orthogonal
-/// ideal planes. This small fixed-size value is shared by all physical sources.
+/// ideal planes, or the two walls of an admitted pi/m wedge.
+/// Prepared path geometry is shared by all physical sources.
 /// Walls and the microphone are stationary in the original fluid rest frame.
 #[derive(Clone, Debug)]
 pub struct IdealReflectionObserver {
     observer: MovingCompactObserver,
     planes: [IdealAcousticPlane; 3],
     plane_count: usize,
-    paths: [ImagePath; 8],
+    paths: Vec<ImagePath>,
+    wedge_order: Option<usize>,
 }
 
 impl IdealReflectionObserver {
@@ -56,7 +60,7 @@ impl IdealReflectionObserver {
     /// Normals must be perpendicular within 64 machine epsilons; no geometry
     /// is snapped. The microphone may lie on any of the selected ideal walls.
     /// `maximum_source_paths` limits the number of paths PER physical source.
-    /// Construction is bounded constant work with no allocation.
+    /// Construction retains only the bounded image geometry, not trajectories.
     pub fn new(
         observer: MovingCompactObserver,
         planes: &[IdealAcousticPlane],
@@ -73,8 +77,13 @@ impl IdealReflectionObserver {
         let direct = ImagePath {
             observer,
             sign: 1.0,
+            inverse_jacobian: None,
         };
-        let mut paths = [direct; 8];
+        let mut paths = Vec::new();
+        paths
+            .try_reserve_exact(path_count)
+            .map_err(|_| invalid("transient image allocation exceeds available memory"))?;
+        paths.resize(path_count, direct);
         for (mask, path) in paths.iter_mut().enumerate().take(path_count).skip(1) {
             let mut position = observer.observer_position_m();
             let mut sign = 1.0;
@@ -98,6 +107,7 @@ impl IdealReflectionObserver {
                     observer.limits(),
                 )?,
                 sign,
+                inverse_jacobian: None,
             };
         }
         let mut retained_planes = [planes[0]; 3];
@@ -107,6 +117,60 @@ impl IdealReflectionObserver {
             planes: retained_planes,
             plane_count: planes.len(),
             paths,
+            wedge_order: None,
+        })
+    }
+
+    /// Retain every exact dihedral image of an ideal pi/m wedge, m in 2..=128.
+    /// Equal wall conditions admit every supported m; mixed rigid/release walls
+    /// require even m. The harmonic owner's geometry and group admission are
+    /// reused, with no angle snapping or finite reflection-order truncation.
+    /// Direct path zero preserves its original arithmetic. Every other path
+    /// has its own retarded time on the same source history.
+    pub fn new_wedge(
+        observer: MovingCompactObserver,
+        planes: [IdealAcousticPlane; 2],
+        order: usize,
+        maximum_source_paths: usize,
+    ) -> Result<Self, AeroacError> {
+        let images = WedgeImages::new(planes, order)?;
+        if images.path_count() > maximum_source_paths {
+            return Err(invalid("transient wedge exceeds its complete path budget"));
+        }
+        for plane in planes {
+            if plane.distance(observer.observer_position_m())?.to_f64() < 0.0 {
+                return Err(invalid(
+                    "transient microphone is outside the acoustic wedge",
+                ));
+            }
+        }
+        let mut paths = Vec::new();
+        paths
+            .try_reserve_exact(images.path_count())
+            .map_err(|_| invalid("transient wedge allocation exceeds available memory"))?;
+        images.visit_inverse(|index, image, sign| {
+            let microphone = if index == 0 {
+                observer
+            } else {
+                MovingCompactObserver::new(
+                    observer.medium(),
+                    image.position(observer.observer_position_m())?,
+                    observer.limits(),
+                )?
+            };
+            paths.push(ImagePath {
+                observer: microphone,
+                sign,
+                inverse_jacobian: (index != 0).then_some(image.matrix),
+            });
+            Ok(())
+        })?;
+        Ok(Self {
+            observer,
+            planes: [planes[0], planes[1], planes[0]],
+            plane_count: 2,
+            paths,
+            wedge_order: Some(order),
         })
     }
 
@@ -114,13 +178,17 @@ impl IdealReflectionObserver {
     pub const fn observer(&self) -> &MovingCompactObserver {
         &self.observer
     }
-    /// Original ideal boundaries, in their deterministic image-mask order.
+    /// Original ideal boundaries, in the supplied physical order.
     pub fn planes(&self) -> &[IdealAcousticPlane] {
         &self.planes[..self.plane_count]
     }
     /// All paths per physical source; index zero is the original direct path.
     pub const fn path_count(&self) -> usize {
-        1 << self.plane_count
+        self.paths.len()
+    }
+    /// Dihedral order when prepared by `new_wedge`, otherwise orthogonal planes.
+    pub const fn wedge_order(&self) -> Option<usize> {
+        self.wedge_order
     }
 
     /// Geometry and vector frame for one stationary source's reflected field.
@@ -129,9 +197,9 @@ impl IdealReflectionObserver {
     /// Returns the existing virtual receiver, its pressure parity, and a
     /// row-major matrix mapping virtual particle velocity to the physical frame.
     /// The velocity matrix already includes parity. It is the transpose of the
-    /// receiver-image Jacobian: apply selected vector reflections in FORWARD
-    /// plane order, since receiver positions were reflected in REVERSE order.
-    /// This retains the actual rounded plane transforms without assuming they
+    /// receiver-image Jacobian. Orthogonal paths apply vector reflections in
+    /// FORWARD plane order; wedge paths use the cached inverse map's transpose.
+    /// This retains the actual rounded transforms without assuming they
     /// commute. No source history, propagation phase or field is evaluated.
     pub fn stationary_field_path(
         &self,
@@ -145,6 +213,14 @@ impl IdealReflectionObserver {
                     "stationary source must lie strictly inside the fluid half-spaces",
                 ));
             }
+        }
+        if let Some(jacobian) = image.inverse_jacobian {
+            let velocity = core::array::from_fn(|row| {
+                core::array::from_fn(|column| {
+                    (Dd::from_f64(image.sign) * Dd::from_f64(jacobian[column][row])).to_f64()
+                })
+            });
+            return Ok((image.observer, image.sign, velocity));
         }
         let columns: [[Dd; 3]; 3] = core::array::from_fn(|column| {
             let mut vector = [Dd::ZERO; 3];
@@ -207,12 +283,12 @@ fn admit_planes(
 }
 
 /// Additional whole-trajectory admission work. Source storage and root caps
-/// remain with the original trajectory. Reflection retains no heap allocation;
-/// its preparation stack has at most 33 six-control position hulls.
+/// remain with the original trajectory. Only bounded image metadata is retained;
+/// the preparation stack has at most 33 six-control position hulls.
 #[derive(Clone, Copy, Debug)]
 pub struct ReflectedTrajectoryBudget {
     /// Total Bernstein nodes across ALL original source spans. Each checks at
-    /// most three half-spaces and eight virtual-microphone clearances.
+    /// most three half-spaces and the complete admitted virtual-microphone set.
     pub maximum_bound_nodes: usize,
     /// Maximum binary subdivision depth, inclusive, in 0..=32.
     pub maximum_subdivision_depth: usize,
@@ -228,7 +304,7 @@ pub struct ReflectedTrajectoryBudget {
 pub struct PreparedReflectedSourceTrajectory<'a> {
     trajectory: &'a PreparedSourceTrajectory,
     observer: &'a IdealReflectionObserver,
-    arrival_intervals: [[f64; 2]; 8],
+    arrival_intervals: Vec<[f64; 2]>,
     receiver_interval: [f64; 2],
 }
 
@@ -256,7 +332,11 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
         }
         let first = trajectory.segments[0].first;
         let last = trajectory.segments[trajectory.segments.len() - 1].last;
-        let mut arrival_intervals = [[0.0; 2]; 8];
+        let mut arrival_intervals = Vec::new();
+        arrival_intervals
+            .try_reserve_exact(observer.path_count())
+            .map_err(|_| invalid("reflected arrival allocation exceeds available memory"))?;
+        arrival_intervals.resize(observer.path_count(), [0.0; 2]);
         let mut receiver_interval = [f64::NEG_INFINITY, f64::INFINITY];
         for (index, interval) in arrival_intervals
             .iter_mut()
@@ -333,7 +413,8 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
     /// Prepare one physical propagation path at its OWN retarded source time.
     /// Apply ORIGINAL Q/F strengths; ideal-wall parity is already in the eight
     /// pressure coefficients and the monopole velocity uses physical receiver
-    /// axes. Paths are ordered by plane bit mask, direct path first.
+    /// axes. Orthogonal paths use plane bit masks; wedge paths use
+    /// R^k, R^k S1 with R=S2 S1. The direct path is always first.
     /// Queries allocate nothing and share the original safeguarded root solver.
     pub fn prepare_path(
         &self,
@@ -402,6 +483,7 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
             image.sign,
             self.observer.planes(),
             path,
+            image.inverse_jacobian.as_ref(),
         ))
     }
 
@@ -419,6 +501,7 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
             image.sign,
             self.observer.planes(),
             path,
+            image.inverse_jacobian.as_ref(),
         ))
     }
 
@@ -460,6 +543,7 @@ fn apply_image(
     sign: f64,
     planes: &[IdealAcousticPlane],
     mask: usize,
+    inverse_jacobian: Option<&[[f64; 3]; 3]>,
 ) -> PreparedMovingCompactSample {
     if sign < 0.0 {
         sample.coefficients = sample.coefficients.map(|value| -value);
@@ -468,22 +552,37 @@ fn apply_image(
         if sign < 0.0 {
             coefficients = coefficients.map(|row| row.map(|value| -value));
         }
-        // The virtual receiver applies the planes in reverse order. A spatial
-        // gradient follows that map's TRANSPOSE, hence the forward order here.
-        // Force-source pressure columns must stay in the original source frame.
-        for (index, plane) in planes.iter().enumerate() {
-            if mask & (1 << index) == 0 {
-                continue;
-            }
-            let normal = plane.inward_normal();
-            for column in 0..2 {
-                let projection = (0..3).fold(Dd::ZERO, |sum, axis| {
-                    sum + Dd::from_f64(normal[axis]) * Dd::from_f64(coefficients[axis][column])
-                });
-                for axis in 0..3 {
-                    coefficients[axis][column] = (Dd::from_f64(coefficients[axis][column])
-                        - Dd::from_f64(2.0 * normal[axis]) * projection)
-                        .to_f64();
+        // A receiver gradient follows the TRANSPOSE of its inverse image map.
+        // Force-source pressure columns stay in the original source frame.
+        if let Some(jacobian) = inverse_jacobian {
+            let original = coefficients;
+            coefficients = core::array::from_fn(|row| {
+                core::array::from_fn(|column| {
+                    (0..3)
+                        .fold(Dd::ZERO, |sum, axis| {
+                            sum + Dd::from_f64(jacobian[axis][row])
+                                * Dd::from_f64(original[axis][column])
+                        })
+                        .to_f64()
+                })
+            });
+        } else {
+            // Orthogonal virtual receivers apply planes in reverse order;
+            // retain the original forward reflection arithmetic here.
+            for (index, plane) in planes.iter().enumerate() {
+                if mask & (1 << index) == 0 {
+                    continue;
+                }
+                let normal = plane.inward_normal();
+                for column in 0..2 {
+                    let projection = (0..3).fold(Dd::ZERO, |sum, axis| {
+                        sum + Dd::from_f64(normal[axis]) * Dd::from_f64(coefficients[axis][column])
+                    });
+                    for axis in 0..3 {
+                        coefficients[axis][column] = (Dd::from_f64(coefficients[axis][column])
+                            - Dd::from_f64(2.0 * normal[axis]) * projection)
+                            .to_f64();
+                    }
                 }
             }
         }

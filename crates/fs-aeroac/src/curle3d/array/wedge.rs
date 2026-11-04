@@ -26,6 +26,101 @@ type FieldSum = [[ComplexSum; 4]; 4];
 const IDENTITY: Matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 const MAXIMUM_ORDER: usize = 128;
 
+/// The same admitted dihedral group, shared by harmonic and retarded owners.
+/// A group element maps a source by H; a virtual receiver uses H^-1 instead.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WedgeImages {
+    planes: [IdealAcousticPlane; 2],
+    order: usize,
+}
+
+/// One cached inverse affine image. Keeping an anchor avoids cancellation of
+/// a large world translation at every trajectory query. The stored map, not
+/// an assumed exact orthogonal matrix, is used by interval/Doppler admission.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WedgeReceiverImage {
+    pub(crate) origin: [f64; 3],
+    pub(crate) image_origin: [f64; 3],
+    pub(crate) matrix: Matrix,
+}
+
+impl WedgeReceiverImage {
+    pub(crate) fn position(self, position: [f64; 3]) -> Result<[f64; 3], AeroacError> {
+        let result = core::array::from_fn(|row| {
+            (0..3)
+                .fold(Dd::from_f64(self.image_origin[row]), |sum, col| {
+                    sum + Dd::from_f64(self.matrix[row][col])
+                        * (Dd::from_f64(position[col]) - Dd::from_f64(self.origin[col]))
+                })
+                .to_f64()
+        });
+        if result.iter().any(|v| !v.is_finite()) {
+            return Err(nonfinite("wedge virtual microphone position"));
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn vector(self, value: [f64; 3]) -> [f64; 3] {
+        core::array::from_fn(|row| {
+            (0..3)
+                .fold(Dd::ZERO, |sum, col| {
+                    sum + Dd::from_f64(self.matrix[row][col]) * Dd::from_f64(value[col])
+                })
+                .to_f64()
+        })
+    }
+}
+
+impl WedgeImages {
+    pub(crate) fn new(planes: [IdealAcousticPlane; 2], order: usize) -> Result<Self, AeroacError> {
+        if !(2..=MAXIMUM_ORDER).contains(&order) {
+            return Err(invalid("ideal acoustic wedge order must be in 2..=128"));
+        }
+        if planes[0].boundary().sign() * planes[1].boundary().sign() < 0.0 && order % 2 != 0 {
+            return Err(invalid("mixed ideal wedge boundaries require even order"));
+        }
+        check_opening(planes, order)?;
+        Ok(Self { planes, order })
+    }
+
+    pub(crate) const fn path_count(self) -> usize {
+        2 * self.order
+    }
+
+    /// Visit H^-1 for H=R^k and H=R^k S1, R=S2 S1. Index zero is
+    /// identity. This is O(m) preparation; each retained affine map is O(1).
+    pub(crate) fn visit_inverse(
+        self,
+        mut visit: impl FnMut(usize, WedgeReceiverImage, f64) -> Result<(), AeroacError>,
+    ) -> Result<(), AeroacError> {
+        let [first, second] = self.planes;
+        let first_matrix = reflection(first.inward_normal());
+        let inverse_step = multiply(first_matrix, reflection(second.inward_normal()));
+        let mut rotation = WedgeReceiverImage {
+            origin: first.point_m(),
+            image_origin: first.point_m(),
+            matrix: IDENTITY,
+        };
+        let mut sign = 1.0;
+        for index in 0..self.order {
+            visit(2 * index, rotation, sign)?;
+            let mirror = WedgeReceiverImage {
+                image_origin: first.reflected_position(rotation.image_origin)?,
+                matrix: multiply(first_matrix, rotation.matrix),
+                ..rotation
+            };
+            visit(2 * index + 1, mirror, sign * first.boundary().sign())?;
+            if index + 1 < self.order {
+                rotation.image_origin =
+                    first.reflected_position(second.reflected_position(rotation.image_origin)?)?;
+                rotation.matrix = multiply(inverse_step, rotation.matrix);
+                sign *= first.boundary().sign() * second.boundary().sign();
+            }
+        }
+        Ok(())
+    }
+}
+
 impl PreparedCompactSourceObserver {
     /// Add the exact finite image group of two ideal walls opening by pi/m.
     ///
@@ -61,21 +156,15 @@ impl PreparedCompactSourceObserver {
         if !self.reflection_planes.is_empty() {
             return Err(invalid("compact acoustic boundaries are already prepared"));
         }
-        if !(2..=MAXIMUM_ORDER).contains(&order) {
-            return Err(invalid("ideal acoustic wedge order must be in 2..=128"));
-        }
+        let images = WedgeImages::new(planes, order)?;
         let step_sign = planes[0].boundary().sign() * planes[1].boundary().sign();
-        if step_sign < 0.0 && order % 2 != 0 {
-            return Err(invalid("mixed ideal wedge boundaries require even order"));
-        }
         if self
             .source_count()
-            .checked_mul(2 * order)
+            .checked_mul(images.path_count())
             .is_none_or(|count| count > maximum_source_paths)
         {
             return Err(invalid("wedge source paths exceed preparation budget"));
         }
-        check_opening(planes, order)?;
         for wall in planes {
             plane::poll(&mut cancelled)?;
             if wall.distance(self.observer_m)?.to_f64() < 0.0 {

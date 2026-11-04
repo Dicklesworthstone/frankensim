@@ -13,14 +13,15 @@ use super::super::{
 use super::{PositionNode, ReflectedTrajectoryBudget, admit_planes, apply_image};
 use crate::AeroacError;
 use crate::curle3d::IdealAcousticPlane;
+use crate::curle3d::array::wedge::{WedgeImages, WedgeReceiverImage};
 use crate::curle3d::moving::{
     CompactSourceStrength, MovingCompactObserver, PreparedMovingCompactSample,
 };
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
 
-/// One original C2 microphone path and one complete orthogonal ideal-wall
-/// group. Every source in a coherent render borrows this same owner.
+/// One original C2 microphone path and one complete orthogonal or pi/m wedge
+/// ideal-wall group. Every source in a coherent render borrows this same owner.
 ///
 /// The walls are stationary in the homogeneous lossless fluid-rest frame.
 /// Uniform-flow paths refuse: their laboratory walls require a separately
@@ -31,7 +32,9 @@ pub struct MovingReflectionObserver<'a> {
     receiver: &'a PreparedKinematicTrajectory,
     planes: [IdealAcousticPlane; 3],
     plane_count: usize,
-    signs: [f64; 8],
+    signs: Vec<f64>,
+    wedge_images: Vec<WedgeReceiverImage>,
+    wedge_order: Option<usize>,
 }
 
 impl<'a> MovingReflectionObserver<'a> {
@@ -55,7 +58,11 @@ impl<'a> MovingReflectionObserver<'a> {
         admit_halfspaces(receiver, planes, false, budget, cancelled)?;
         let mut retained = [planes[0]; 3];
         retained[..planes.len()].copy_from_slice(planes);
-        let mut signs = [1.0; 8];
+        let mut signs = Vec::new();
+        signs
+            .try_reserve_exact(path_count)
+            .map_err(|_| invalid("moving image allocation exceeds available memory"))?;
+        signs.resize(path_count, 1.0);
         for (mask, sign) in signs.iter_mut().enumerate().take(path_count) {
             for (index, plane) in planes.iter().enumerate() {
                 if mask & (1 << index) != 0 {
@@ -69,6 +76,57 @@ impl<'a> MovingReflectionObserver<'a> {
             planes: retained,
             plane_count: planes.len(),
             signs,
+            wedge_images: Vec::new(),
+            wedge_order: None,
+        })
+    }
+
+    /// Prepare all 2m inverse images of the SAME moving microphone in an
+    /// admitted ideal pi/m wedge. Geometry, boundary signs and mixed-wall
+    /// admissibility share the harmonic owner. Each affine image is cached
+    /// once; no query repeats a sequence of m rotations or copies a history.
+    /// The complete physical receiver trajectory must remain in both walls.
+    pub fn new_wedge(
+        receiver: &'a PreparedKinematicTrajectory,
+        planes: [IdealAcousticPlane; 2],
+        order: usize,
+        maximum_source_paths: usize,
+        budget: ReflectedTrajectoryBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(cancelled)?;
+        let images = WedgeImages::new(planes, order)?;
+        if images.path_count() > maximum_source_paths {
+            return Err(invalid("moving wedge exceeds its complete path budget"));
+        }
+        if receiver.flow_frame().is_some() {
+            return Err(invalid(
+                "moving wall images require paths in the stationary fluid frame",
+            ));
+        }
+        admit_halfspaces(receiver, &planes, false, budget, cancelled)?;
+        let mut signs = Vec::new();
+        let mut wedge_images = Vec::new();
+        signs
+            .try_reserve_exact(images.path_count())
+            .map_err(|_| invalid("moving wedge allocation exceeds available memory"))?;
+        wedge_images
+            .try_reserve_exact(images.path_count())
+            .map_err(|_| invalid("moving wedge allocation exceeds available memory"))?;
+        images.visit_inverse(|_, image, sign| {
+            poll(cancelled)?;
+            wedge_images.push(image);
+            signs.push(sign);
+            Ok(())
+        })?;
+        poll(cancelled)?;
+        Ok(Self {
+            receiver,
+            planes: [planes[0], planes[1], planes[0]],
+            plane_count: 2,
+            signs,
+            wedge_images,
+            wedge_order: Some(order),
         })
     }
 
@@ -81,20 +139,24 @@ impl<'a> MovingReflectionObserver<'a> {
     }
     /// Complete path count per physical source, including direct path zero.
     pub const fn path_count(&self) -> usize {
-        1 << self.plane_count
+        self.signs.len()
+    }
+    /// Dihedral order when prepared by `new_wedge`, otherwise orthogonal planes.
+    pub const fn wedge_order(&self) -> Option<usize> {
+        self.wedge_order
     }
 }
 
 /// All ideal-wall paths from one original source to one moving microphone.
 ///
-/// The small fixed array retains eight borrowed pair views at most. Source
-/// and receiver histories remain singular; preparation and pressure queries
-/// allocate nothing. Each path has its own retarded time and observed Doppler
+/// Bounded storage retains one borrowed pair view per image. Source
+/// and receiver histories remain singular; pressure queries allocate nothing.
+/// Each path has its own retarded time and observed Doppler
 /// rate. Missing source coverage refuses the COMPLETE observation window.
 #[derive(Debug)]
 pub struct PreparedReflectedMovingReceiverSource<'a> {
     observer: &'a MovingReflectionObserver<'a>,
-    paths: [PreparedMovingReceiverSource<'a>; 8],
+    paths: Vec<PreparedMovingReceiverSource<'a>>,
     maximum_source_time_rate: f64,
 }
 
@@ -128,22 +190,26 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
             &mut work,
             cancelled,
         )?;
-        let mut paths = [direct; 8];
+        let mut paths = Vec::new();
+        paths
+            .try_reserve_exact(observer.path_count())
+            .map_err(|_| invalid("reflected pair allocation exceeds available memory"))?;
+        paths.push(direct);
         let mut maximum_source_time_rate = direct.maximum_source_time_rate();
-        for (mask, path) in paths
-            .iter_mut()
-            .enumerate()
-            .take(observer.path_count())
-            .skip(1)
-        {
+        for mask in 1..observer.path_count() {
             poll(cancelled)?;
-            *path = PreparedMovingReceiverSource::new_image(
-                source,
-                observer.receiver,
-                Some(ReceiverImage {
+            let image = if observer.wedge_order.is_some() {
+                ReceiverImage::Wedge(&observer.wedge_images[mask])
+            } else {
+                ReceiverImage::Orthogonal {
                     planes: observer.planes(),
                     mask,
-                }),
+                }
+            };
+            let path = PreparedMovingReceiverSource::new_image(
+                source,
+                observer.receiver,
+                Some(image),
                 config,
                 pair_budget,
                 &mut work,
@@ -151,6 +217,7 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
             )?;
             maximum_source_time_rate =
                 maximum_source_time_rate.max(path.maximum_source_time_rate());
+            paths.push(path);
         }
         poll(cancelled)?;
         Ok(Self {
@@ -163,13 +230,13 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
     pub const fn reflection_observer(&self) -> &'a MovingReflectionObserver<'a> {
         self.observer
     }
-    pub const fn source(&self) -> &'a PreparedKinematicTrajectory {
+    pub fn source(&self) -> &'a PreparedKinematicTrajectory {
         self.paths[0].source()
     }
     pub const fn receiver(&self) -> &'a PreparedKinematicTrajectory {
         self.observer.receiver
     }
-    pub const fn config(&self) -> MovingReceiverConfig {
+    pub fn config(&self) -> MovingReceiverConfig {
         self.paths[0].config()
     }
     pub const fn path_count(&self) -> usize {
@@ -180,7 +247,7 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
     pub const fn maximum_source_time_rate(&self) -> f64 {
         self.maximum_source_time_rate
     }
-    pub const fn maximum_root_iterations(&self) -> usize {
+    pub fn maximum_root_iterations(&self) -> usize {
         self.paths[0].maximum_root_iterations()
     }
     pub fn path_maximum_source_time_rate(&self, path: usize) -> Result<f64, AeroacError> {
@@ -221,6 +288,11 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
             self.observer.signs[path],
             self.observer.planes(),
             path,
+            self.observer
+                .wedge_images
+                .get(path)
+                .filter(|_| path != 0)
+                .map(|image| &image.matrix),
         );
         Ok(sample)
     }
@@ -240,6 +312,11 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
             self.observer.signs[path],
             self.observer.planes(),
             path,
+            self.observer
+                .wedge_images
+                .get(path)
+                .filter(|_| path != 0)
+                .map(|image| &image.matrix),
         ))
     }
 

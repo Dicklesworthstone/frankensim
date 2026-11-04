@@ -44,7 +44,7 @@ mod welch;
 pub use plane::{IdealAcousticPlane, IdealPlaneBoundary, PreparedHalfSpaceObserver};
 /// Coherent volume injection into an explicitly uniform subsonic mean flow.
 pub mod convected;
-mod wedge;
+pub(crate) mod wedge;
 pub(super) use wedge::{multiply as image_matrix_product, reflection as image_reflection_matrix};
 
 /// Applicability of the prescribed three-dimensional source transfer.

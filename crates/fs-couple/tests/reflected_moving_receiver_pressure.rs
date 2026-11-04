@@ -487,3 +487,73 @@ fn reflected_receiver_doppler_is_included_in_audio_bandwidth_admission() {
         .is_ok()
     );
 }
+
+#[test]
+fn complete_wedge_images_reach_the_original_audio_clock_and_coherent_pressure_sink() {
+    let a = path(&[-0.3, -0.04, 0.11, 0.4], source);
+    let b = path(&[0.0, 0.07, 0.2], microphone);
+    let (s, c) = (PI / 3.0).sin_cos();
+    let walls = [
+        IdealAcousticPlane::new(
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            IdealPlaneBoundary::PressureRelease,
+        )
+        .unwrap(),
+        IdealAcousticPlane::new([0.0; 3], [s, -c, 0.0], IdealPlaneBoundary::PressureRelease)
+            .unwrap(),
+    ];
+    let observer =
+        MovingReflectionObserver::new_wedge(&b, walls, 3, 6, bounds(), &mut || false).unwrap();
+    let motion = reflected(&a, &observer);
+    let samples = history(1.0);
+    let tracks = [track(&motion, &samples)];
+    let mut whole = build(&tracks, config());
+    assert_eq!(whole.source_count(), 1);
+    assert_eq!(whole.source_path_count(), 6);
+    assert_eq!(
+        whole.maximum_retarded_iterations(),
+        config().samples * 6 * 96
+    );
+    let mut expected = [0.0; 101];
+    whole.block(&mut expected).unwrap();
+    for (index, actual) in expected.iter().enumerate() {
+        let time = whole.receiver_time_at(index as u64).unwrap();
+        let original = motion
+            .pressure_at(time, &mut |t| Ok(strength(t, 1.0)), &mut || false)
+            .unwrap();
+        assert!((actual - original).abs() < 2e-10 * original.abs().max(1e-10));
+    }
+    let mut split = build(
+        &tracks,
+        MovingPressureConfig {
+            max_block: 7,
+            ..config()
+        },
+    );
+    let mut output = [0.0; 101];
+    for chunk in output.chunks_mut(7) {
+        split.block(chunk).unwrap();
+    }
+    assert_eq!(output.map(f64::to_bits), expected.map(f64::to_bits));
+    assert!(
+        MovingCompactRenderer::with_moving_receiver_reflections(
+            &tracks,
+            config(),
+            MovingPressureBudget {
+                maximum_source_receiver_pairs: config().samples * 6 - 1,
+                ..budget()
+            },
+            &mut || false
+        )
+        .is_err()
+    );
+    let opposite = history(-1.0);
+    let mut coherent = build(
+        &[track(&motion, &samples), track(&motion, &opposite)],
+        config(),
+    );
+    assert_eq!(coherent.source_path_count(), 12);
+    coherent.block(&mut output).unwrap();
+    assert!(output.iter().all(|value| value.abs() < 1e-20));
+}

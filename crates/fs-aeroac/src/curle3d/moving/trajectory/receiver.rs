@@ -91,15 +91,27 @@ pub(super) struct ReceiverPreparationWork {
 /// A borrowed, stationary image of an ORIGINAL receiver trajectory. Geometry
 /// is admitted by the ideal-wall owner; this view changes no retained knots.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ReceiverImage<'a> {
-    pub(super) planes: &'a [IdealAcousticPlane],
-    pub(super) mask: usize,
+pub(super) enum ReceiverImage<'a> {
+    Orthogonal {
+        planes: &'a [IdealAcousticPlane],
+        mask: usize,
+    },
+    Wedge(&'a crate::curle3d::array::wedge::WedgeReceiverImage),
 }
 
 impl ReceiverImage<'_> {
     fn kinematics(self, mut state: SourceKinematics) -> Result<SourceKinematics, AeroacError> {
-        for (index, plane) in self.planes.iter().enumerate().rev() {
-            if self.mask & (1 << index) == 0 {
+        if let Self::Wedge(image) = self {
+            state.position_m = image.position(state.position_m)?;
+            state.velocity_m_s = image.vector(state.velocity_m_s);
+            state.acceleration_m_s2 = image.vector(state.acceleration_m_s2);
+        }
+        let (planes, mask) = match self {
+            Self::Orthogonal { planes, mask } => (planes, mask),
+            Self::Wedge(_) => (&[][..], 0),
+        };
+        for (index, plane) in planes.iter().enumerate().rev() {
+            if mask & (1 << index) == 0 {
                 continue;
             }
             let before = plane.distance(state.position_m)?.to_f64();
@@ -133,8 +145,19 @@ impl ReceiverImage<'_> {
     }
 
     fn point_bounds(self, mut point: [Interval; 3]) -> [Interval; 3] {
-        for (index, plane) in self.planes.iter().enumerate().rev() {
-            if self.mask & (1 << index) == 0 {
+        let (planes, mask) = match self {
+            Self::Wedge(image) => {
+                return core::array::from_fn(|row| {
+                    (0..3).fold(Interval::point(image.image_origin[row]), |sum, col| {
+                        sum + Interval::point(image.matrix[row][col])
+                            * (point[col] - Interval::point(image.origin[col]))
+                    })
+                });
+            }
+            Self::Orthogonal { planes, mask } => (planes, mask),
+        };
+        for (index, plane) in planes.iter().enumerate().rev() {
+            if mask & (1 << index) == 0 {
                 continue;
             }
             let normal = plane.inward_normal();
@@ -150,8 +173,18 @@ impl ReceiverImage<'_> {
     }
 
     pub(super) fn vector_bounds(self, mut vector: [Interval; 3]) -> [Interval; 3] {
-        for (index, plane) in self.planes.iter().enumerate().rev() {
-            if self.mask & (1 << index) == 0 {
+        let (planes, mask) = match self {
+            Self::Wedge(image) => {
+                return core::array::from_fn(|row| {
+                    (0..3).fold(Interval::point(0.0), |sum, col| {
+                        sum + Interval::point(image.matrix[row][col]) * vector[col]
+                    })
+                });
+            }
+            Self::Orthogonal { planes, mask } => (planes, mask),
+        };
+        for (index, plane) in planes.iter().enumerate().rev() {
+            if mask & (1 << index) == 0 {
                 continue;
             }
             let normal = plane.inward_normal();
@@ -174,8 +207,29 @@ impl ReceiverImage<'_> {
         }
         let one = Interval::point(1.0);
         let mut speed = Interval::point(original);
-        for (index, plane) in self.planes.iter().enumerate() {
-            if self.mask & (1 << index) == 0 {
+        let (planes, mask) = match self {
+            Self::Wedge(image) => {
+                // ||A||_2 <= sqrt(1 + ||A^T A - I||_infinity). This
+                // outward bound stays tight for every rounded dihedral map;
+                // an axis-box norm would spuriously inflate rotated speeds.
+                let mut defect = 0.0_f64;
+                for i in 0..3 {
+                    let mut row = Interval::point(0.0);
+                    for j in 0..3 {
+                        let gram = (0..3).fold(Interval::point(0.0), |sum, k| {
+                            sum + Interval::point(image.matrix[k][i])
+                                * Interval::point(image.matrix[k][j])
+                        });
+                        row = row + (gram - Interval::point(if i == j { 1.0 } else { 0.0 })).abs();
+                    }
+                    defect = defect.max(row.hi());
+                }
+                return (speed * (one + Interval::point(defect)).sqrt()).hi();
+            }
+            Self::Orthogonal { planes, mask } => (planes, mask),
+        };
+        for (index, plane) in planes.iter().enumerate() {
+            if mask & (1 << index) == 0 {
                 continue;
             }
             let squared = plane
