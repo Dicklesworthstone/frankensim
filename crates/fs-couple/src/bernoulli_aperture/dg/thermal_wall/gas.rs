@@ -19,10 +19,10 @@ use crate::bernoulli_aperture::wall::material::heated_finite_gas;
 use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
 use crate::cavity_phs::piston::thermal::{ConductanceSample, HeatExchangeSolve, feedback};
 use crate::dg_port::finite_gas::{
-    FiniteGasDgError, FiniteGasDgPortStep, FiniteGasDgSolve, admit_initial as admit_gas,
-    prepare_after_step, refresh_output,
+    FiniteGasDgError, FiniteGasDgHeatBudget, FiniteGasDgPortStep, FiniteGasDgSolve, SourceHeat,
+    admit_initial as admit_gas, prepare_after_step_with_heat, refresh_output,
 };
-use crate::dg_port::{DgPortLoad, DgPortWallUpdate, sum_terminal_work};
+use crate::dg_port::{DgPortLoad, DgPortTrial, DgPortWallUpdate, sum_terminal_work};
 use fs_material::gas_species::input::ThermochemicalPhase;
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStepInput};
 use fs_material::state_point::ResolvedMaterialStatePoint;
@@ -72,7 +72,7 @@ pub struct FiniteGasWallApertureDgStep {
     pub wall_work_residual_j: f64,
     /// Q - dt G(T_body_mid - T_gas_mid) [J].
     pub exchange_residual_j: f64,
-    /// Original total mechanical/acoustic loss less deposited wall heat [J].
+    /// Original total loss less the distinct deposited gas and wall heat [J].
     pub exported_dissipation_j: f64,
     /// Both finite inventories and complete motion, with all external work [J].
     pub combined_energy_residual_j: f64,
@@ -222,6 +222,38 @@ struct Candidate {
     step: FiniteGasWallApertureDgStep,
 }
 
+/// Read both disjoint physical sources on the original solved-port trajectory.
+/// A terminal passage cannot subsidize excess deposition from the main bore.
+fn interval_heats(
+    trial: &DgPortTrial<'_>,
+    controls: FiniteGasWallThermalSolve,
+    budgets: Option<FiniteGasDgHeatBudget>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, SourceHeat), AcousticRealizeError> {
+    let wall = interval_heat(trial, controls.wall, cancelled)?;
+    let Some(budgets) = budgets else {
+        return Ok((wall, SourceHeat::default()));
+    };
+    let gas = trial
+        .finite_gas_heat(controls.gas, budgets, cancelled)
+        .map_err(gas_error)?;
+    let main_gas = gas.main_heat_j().map_err(gas_error)?;
+    let main_heat = wall + main_gas;
+    let remaining = trial.main_dissipated_j() - main_heat;
+    if !main_heat.is_finite()
+        || !remaining.is_finite()
+        || (wall != 0.0 && main_heat == main_gas)
+        || (main_gas != 0.0 && main_heat == wall)
+        || remaining < -controls.exchange.energy_tolerance_j
+    {
+        return Err(invalid(
+            "combined gas and wall heat exceed the original main-bore loss allowance",
+        ));
+    }
+    poll(cancelled)?;
+    Ok((wall, gas))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish(
     original: &DgPortLoad,
@@ -233,12 +265,14 @@ fn finish(
     layers: &MaterialConductionLayers<'_>,
     external_gas_heat_j: f64,
     wall_heat_j: f64,
+    source_heat: SourceHeat,
     controls: FiniteGasWallThermalSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Candidate, AcousticRealizeError> {
     if !external_gas_heat_j.is_finite() {
         return Err(invalid("external gas heat must be finite"));
     }
+    let internal_gas_heat_j = source_heat.total_j().map_err(gas_error)?;
     let mut counts = Trials::default();
     let mut accepted = feedback::solve_scalar(
         controls.exchange.heat_bracket_j,
@@ -254,15 +288,32 @@ fn finish(
             {
                 return Err(invalid("interface or external heat disappears in its finite inventory"));
             }
+            let total_gas_heat = if internal_gas_heat_j == 0.0 {
+                gas_heat
+            } else {
+                gas_heat + internal_gas_heat_j
+            };
+            if !total_gas_heat.is_finite()
+                || (internal_gas_heat_j != 0.0 && total_gas_heat == gas_heat)
+                || (gas_heat != 0.0 && total_gas_heat == internal_gas_heat_j)
+            {
+                return Err(invalid("gas source or exchanged heat disappears in its finite inventory"));
+            }
             // Both nested solves return to their original conserved inventories.
             // Only the zero-duration native interventions are ordered gas, wall.
-            let gas_candidate = prepare_after_step(
+            let gas_candidate = prepare_after_step_with_heat(
                 original, marched, initial_frame.duct.clone(), gas, controls.gas,
+                source_heat,
                 |old, _, work, cancel| {
                     counts.charge(controls.maximum_material_trials)?;
                     counts.gas += 1;
-                    heated_finite_gas(old, gas_heat, work, controls.caloric, cancel)
-                        .map_err(caloric_error)
+                    let mut background = heated_finite_gas(
+                        old, total_gas_heat, work, controls.caloric, cancel,
+                    ).map_err(caloric_error)?;
+                    // Interface heat is external to gas alone, whereas native
+                    // gas dissipation is internal to its acoustic enclosure.
+                    background.supplied_heat_j = gas_heat;
+                    Ok(background)
                 },
                 cancelled,
             ).map_err(gas_error)?;
@@ -323,7 +374,12 @@ fn finish(
             frame.storage_change_j = frame.stored_energy_j - initial_energy_j;
             let intervention_residual = (wall_candidate.load.stored_energy_j()
                 - marched.stored_energy_j()) - frame.parameter_work_j;
-            let exported = frame.inferred_total_dissipation_j - wall_heat_j;
+            let after_wall = frame.inferred_total_dissipation_j - wall_heat_j;
+            let exported = if internal_gas_heat_j == 0.0 {
+                after_wall
+            } else {
+                after_wall - internal_gas_heat_j
+            };
             let body_residual = ((wall_candidate.storage_change_j + wall_work + q)
                 - body.internal_heat_j) - wall_heat_j;
             let combined = ((gas_candidate.step.gas_energy_change_j
@@ -337,8 +393,9 @@ fn finish(
             if ![frame.parameter_work_j, frame.stored_energy_j, frame.storage_change_j,
                 intervention_residual, exported, body_residual, combined, acoustic_residual]
                 .iter().all(|x| x.is_finite())
-                || (wall_heat_j != 0.0 && exported == frame.inferred_total_dissipation_j)
-                || (wall_heat_j > 0.0 && exported < -tolerance)
+                || (wall_heat_j != 0.0 && after_wall == frame.inferred_total_dissipation_j)
+                || (internal_gas_heat_j != 0.0 && exported == after_wall)
+                || ((wall_heat_j > 0.0 || internal_gas_heat_j > 0.0) && exported < -tolerance)
                 || intervention_residual.abs() > tolerance
                 || wall_candidate.body_energy_residual_j.abs()
                     > controls.wall.exchange.energy_tolerance_j
@@ -419,6 +476,60 @@ impl ApertureDg {
         controls: FiniteGasWallThermalSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FiniteGasWallApertureDgStep, AcousticRealizeError> {
+        self.step_with_finite_gas_wall_heat_impl(
+            gas, body_state, body, layers, drive, force_n, external_gas_heat_j,
+            controls, None, cancelled,
+        )
+    }
+
+    /// Joint finite gas/wall feedback including the original gas's physical
+    /// viscous and molecular heating. Both source-positive bore integrals and
+    /// optional solid-wall heat observe ONE native trial under its actual
+    /// solved held flows. Main-inventory terminal passages contribute only
+    /// their resolved viscous term; the gas report retains all three sources.
+    ///
+    /// The gas and wall each receive their own dissipation once, pay their own
+    /// native parameter work, and exchange reciprocal midpoint conduction.
+    /// Numerical, aperture, solid heat not opted in, and thermal-boundary losses
+    /// remain exported. The existing fixed-volume/frozen-medium partition and
+    /// independent-inventory refusals apply. Main gas integrals require the
+    /// held-flow backend, complete state (at most 128 coordinates), and separate
+    /// explicit preparation budgets. No mechanical or acoustic trial repeats
+    /// during the coupled caloric solves; all owners publish atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_wall_viscous_molecular_heat_controlled(
+        &mut self,
+        gas: &mut ClosedGasParcel,
+        body_state: &mut EquilibriumPhaseState,
+        body: UniformEnthalpyStepInput<'_>,
+        layers: &MaterialConductionLayers<'_>,
+        drive: TubeDrive,
+        force_n: f64,
+        external_gas_heat_j: f64,
+        controls: FiniteGasWallThermalSolve,
+        heat_budgets: FiniteGasDgHeatBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FiniteGasWallApertureDgStep, AcousticRealizeError> {
+        self.step_with_finite_gas_wall_heat_impl(
+            gas, body_state, body, layers, drive, force_n, external_gas_heat_j,
+            controls, Some(heat_budgets), cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_finite_gas_wall_heat_impl(
+        &mut self,
+        gas: &mut ClosedGasParcel,
+        body_state: &mut EquilibriumPhaseState,
+        body: UniformEnthalpyStepInput<'_>,
+        layers: &MaterialConductionLayers<'_>,
+        drive: TubeDrive,
+        force_n: f64,
+        external_gas_heat_j: f64,
+        controls: FiniteGasWallThermalSolve,
+        heat_budgets: Option<FiniteGasDgHeatBudget>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FiniteGasWallApertureDgStep, AcousticRealizeError> {
         if *body_state != body.initial {
             return Err(invalid(
                 "joint wall input must begin at the accepted body state",
@@ -436,13 +547,13 @@ impl ApertureDg {
             force_n,
         )?;
         let mut marched = self.load.clone();
-        let (frame, heat) = accept_acoustic_candidate_observed(
+        let (frame, (wall_heat, source_heat)) = accept_acoustic_candidate_observed(
             &mut marched,
             relation,
             mechanical.frame,
             [MaterialPressureFrame::default(); 2],
             drive,
-            |trial| interval_heat(trial, controls.wall, cancelled),
+            |trial| interval_heats(trial, controls, heat_budgets, cancelled),
         )?;
         let candidate = finish(
             &self.load,
@@ -453,7 +564,8 @@ impl ApertureDg {
             body,
             layers,
             external_gas_heat_j,
-            heat,
+            wall_heat,
+            source_heat,
             controls,
             cancelled,
         )?;
@@ -488,6 +600,51 @@ impl ApertureDg<LoadedAperture> {
         controls: FiniteGasWallThermalSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FiniteGasWallApertureDgStep, AcousticRealizeError> {
+        self.step_with_finite_gas_wall_heat_impl(
+            gas, body_state, body, layers, drive, forces_n, pressures_pa,
+            external_gas_heat_j, controls, None, cancelled,
+        )
+    }
+
+    /// The same joint gas/wall viscosity and molecular heating transaction for
+    /// original single, paired or modal mechanics and their solved port flows.
+    /// Force/pressure work and all mechanical losses retain their own accounts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_wall_viscous_molecular_heat_controlled(
+        &mut self,
+        gas: &mut ClosedGasParcel,
+        body_state: &mut EquilibriumPhaseState,
+        body: UniformEnthalpyStepInput<'_>,
+        layers: &MaterialConductionLayers<'_>,
+        drive: TubeDrive,
+        forces_n: [f64; 2],
+        pressures_pa: [f64; 2],
+        external_gas_heat_j: f64,
+        controls: FiniteGasWallThermalSolve,
+        heat_budgets: FiniteGasDgHeatBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FiniteGasWallApertureDgStep, AcousticRealizeError> {
+        self.step_with_finite_gas_wall_heat_impl(
+            gas, body_state, body, layers, drive, forces_n, pressures_pa,
+            external_gas_heat_j, controls, Some(heat_budgets), cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_finite_gas_wall_heat_impl(
+        &mut self,
+        gas: &mut ClosedGasParcel,
+        body_state: &mut EquilibriumPhaseState,
+        body: UniformEnthalpyStepInput<'_>,
+        layers: &MaterialConductionLayers<'_>,
+        drive: TubeDrive,
+        forces_n: [f64; 2],
+        pressures_pa: [f64; 2],
+        external_gas_heat_j: f64,
+        controls: FiniteGasWallThermalSolve,
+        heat_budgets: Option<FiniteGasDgHeatBudget>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FiniteGasWallApertureDgStep, AcousticRealizeError> {
         if *body_state != body.initial {
             return Err(invalid(
                 "joint wall input must begin at the accepted body state",
@@ -506,13 +663,13 @@ impl ApertureDg<LoadedAperture> {
             pressures_pa,
         )?;
         let mut marched = self.load.clone();
-        let (frame, heat) = accept_acoustic_candidate_observed(
+        let (frame, (wall_heat, source_heat)) = accept_acoustic_candidate_observed(
             &mut marched,
             relation,
             mechanical.frame(),
             mechanical.spatial_pressure(),
             drive,
-            |trial| interval_heat(trial, controls.wall, cancelled),
+            |trial| interval_heats(trial, controls, heat_budgets, cancelled),
         )?;
         let candidate = finish(
             &self.load,
@@ -523,7 +680,8 @@ impl ApertureDg<LoadedAperture> {
             body,
             layers,
             external_gas_heat_j,
-            heat,
+            wall_heat,
+            source_heat,
             controls,
             cancelled,
         )?;

@@ -8,6 +8,8 @@ use fs_couple::bernoulli_aperture::performance::gas_wall::{
 use fs_couple::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
+mod viscous_heat;
+
 fn joint_controls() -> FiniteGasWallThermalSolve {
     FiniteGasWallThermalSolve {
         gas: controls(),

@@ -22454,11 +22454,36 @@ own residual.
 The enclosing balance includes gas internal energy, body enthalpy, mechanical
 and acoustic storage, original terminal exchange and external inputs. Deposited
 native wall heat is subtracted once from exported dissipation. Interface heat
-and both native parameter works cancel internally; inferred numerical,
-mechanical, gas or terminal loss is never invented as material heating.
+and both native parameter works cancel internally. The default entry point
+keeps gas and terminal dissipation exported; inferred numerical or mechanical
+loss is never invented as material heating.
+
+`step_with_finite_gas_wall_viscous_molecular_heat_controlled` opts the original
+scalar, paired or modal aperture into the same joint transaction with physical
+gas heating. The original solved-port trial supplies the separate positive
+bore molecular, bore viscosity and optional solid Kelvin/Maxwell integrals;
+main-inventory terminal passages supply their native resolved shear work.
+Neither mechanics nor acoustic history is marched again during caloric,
+material-work or midpoint-conduction trials. Separate explicit gas integral
+budgets cover complete held-flow states of at most 128 native coordinates.
+
+Gas caloric inversion receives its physical loss once, while the finite wall
+receives its own selected solid loss. Gas source heat remains distinct from
+external heat and reciprocal interface conduction in the retained gas report.
+The sum of bore gas and solid deposits is checked against the original main
+bore decrement; terminal-channel dissipation cannot subsidize that allowance.
+The enclosing exported loss removes the gas and solid deposits exactly once.
+Independent inventory, numerical, aperture and unselected solid losses keep
+their original ownership. Absence of a gas source needs no integral budget and
+preserves the default joint trajectory.
+
 A global material-trial limit supplements the existing individual caloric,
 work, interface and energy budgets. Final refusal or cancellation preserves all
 accepted inventories, mechanics, material histories, terminal poles and clocks.
+Focused regressions cover actual solved bore-flow integrals, independent
+terminal shear integration, both caloric balances, absent-source identity,
+separate source-budget refusals and final-cancellation rollback with exact retry.
+These regressions have source-level checks; native execution remains pending.
 
 The gas subreport describes the gas-first intermediate endpoint, while the
 coupled frame describes the final gas-plus-wall endpoint of the same acoustic

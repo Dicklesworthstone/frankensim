@@ -12,6 +12,11 @@ pub(crate) struct SourceHeat {
 }
 
 impl SourceHeat {
+    /// Bore sources alone; terminal passages have a separate native decrement.
+    pub(crate) fn main_heat_j<E>(self) -> Result<f64, FiniteGasDgError<E>> {
+        self.main.total_j()
+    }
+
     pub(crate) fn gas_heat(self) -> FiniteGasDgInternalHeat {
         FiniteGasDgInternalHeat {
             molecular_heat_j: self.main.molecular_heat_j,
