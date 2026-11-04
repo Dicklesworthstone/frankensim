@@ -19,7 +19,8 @@
 //! direction. No derivative is claimed through a fallback, source kink or
 //! unresolved coupled probe rank. Geometry, orientation, physical probe axes,
 //! reference density and mass stay fixed. The separate whole-temperature-box
-//! capacity bound currently admits only the directional Whitney closure.
+//! capacity bound follows either closure and refuses any interval whose smooth
+//! inverse domains cannot be enclosed, independently of these point derivatives.
 
 pub mod bounds;
 pub mod increment;

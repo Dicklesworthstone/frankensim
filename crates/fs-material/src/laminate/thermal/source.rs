@@ -202,8 +202,9 @@ impl LaminateThermalSource {
     /// No closure selection changes the original claims, expansion paths, A/B/D
     /// or reference mass. The shear potential differentiates either selected
     /// closure at fixed geometry and axes, including finite temperature work.
-    /// Whole-temperature-box shear capacity bounds currently admit only
-    /// `DirectionalWhitney`; coupled point derivatives do not certify that bound.
+    /// Whole-temperature-box capacity admission follows that same closure;
+    /// coupled shear additionally requires separated physical probes and
+    /// positive inverse pivots throughout the original source intervals.
     pub fn try_new_with_shear_model(
         inputs: Vec<LaminaSourceInput>,
         reference: ReferenceSurface,

@@ -202,9 +202,10 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
     /// Bind the original thermal cells with an explicitly chosen shear closure.
     /// Each refresh keeps the same physical probe axes in the section frame,
     /// all original sublamina temperatures and the fixed reference inventory.
-    /// This is the same one-way heat-to-mechanics approximation as `try_new`;
-    /// selecting coupled shear does not supply its temperature derivatives for
-    /// a reciprocal heat/work consumer.
+    /// This constructor retains the one-way heat-to-mechanics interface of
+    /// `try_new`. The reciprocal owner can consume either closure's source
+    /// derivatives and finite temperature work after whole-box capacity and
+    /// strain admission, including the coupled probe/inverse-domain proof.
     pub fn try_new_with_shear_model(
         thermal: &'b BoundLayeredThermalBody<'a>,
         layers: Vec<LaminaSourceInput>,

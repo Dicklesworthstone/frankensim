@@ -9,8 +9,8 @@ use fs_couple::laminate_thermal::reciprocal::{
     dynamic::DynamicLaminateState,
 };
 use fs_couple::laminate_thermal::{LaminateShellDiscretization, LayeredThermalShell};
-use fs_material::laminate::ReferenceSurface;
 use fs_material::laminate::thermal::source::ResolvedLaminateThermal;
+use fs_material::laminate::{LaminateShearModel, ReferenceSurface};
 use fs_material::thermal::transport::stack::transient::implicit::{
     LayeredThermalSolveControls, LayeredThermalWorkspace,
 };
@@ -42,6 +42,171 @@ fn field_internal(state: &DynamicLaminateState) -> f64 {
         + state.transverse_shear_internal_energy_j()
         + state.drilling_gauge_energy_j()
         + state.kinetic_energy_j()
+}
+
+#[test]
+fn g1_equilibrated_off_axis_shear_advances_through_original_reciprocal_heat_owner() {
+    use fs_matdb::{InterpolationPolicy, MaterialCard, PropertyKey, PropertyValue};
+    use fs_material::laminate::thermal::source::LaminaElasticSource;
+    use fs_qty::{Dims, Pressure, Temperature};
+    use std::sync::Arc;
+
+    let cards: Vec<_> = [1.0, 0.73]
+        .into_iter()
+        .enumerate()
+        .map(|(i, scale)| {
+            let rate = [-0.002, -0.004][i];
+            let base = card_with_coefficients(
+                &format!("reciprocal off-axis ply {i}"),
+                rate * E,
+                (i + 1) as f64 * ALPHA,
+                0.0,
+                CP,
+            );
+            let mut claims = base.claims().clone();
+            for (name, dims, value) in [
+                ("young_modulus_1", Pressure::DIMS, 2.0 * scale * E),
+                ("young_modulus_2", Pressure::DIMS, 1.2 * scale * E),
+                ("poisson_ratio_12", Dims::NONE, 0.18),
+                ("shear_modulus_12", Pressure::DIMS, 0.6 * scale * E),
+                ("shear_modulus_31", Pressure::DIMS, 0.45 * scale * E),
+                ("shear_modulus_23", Pressure::DIMS, 0.8 * scale * E),
+            ] {
+                let mut claim = base.claims_for("young_modulus")[0].1.clone();
+                claim.key = PropertyKey::new(name, dims);
+                let constant = dims == Dims::NONE;
+                claim.value = if constant {
+                    PropertyValue::Scalar { value, dims }
+                } else {
+                    PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: vec![
+                            (280.0, value * (1.0 - 20.0 * rate)),
+                            (360.0, value * (1.0 + 60.0 * rate)),
+                        ],
+                        dims,
+                    }
+                };
+                claim.interpolation = if constant {
+                    InterpolationPolicy::ConstantWithinValidity
+                } else {
+                    InterpolationPolicy::LinearInside
+                };
+                claims.insert_claim(claim).unwrap();
+            }
+            Arc::new(MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap())
+        })
+        .collect();
+    let body = prepare_body(&cards, &[1, 1], 1.0);
+    let caloric = body.thermal_laws(false).unwrap();
+    let bound = body.bind(&caloric, ids()).unwrap();
+    let heater = [3e5, 1e5];
+    let thermal = initial_with_sources(&bound, &[300.0, 301.0], &heater);
+    let original_cells = thermal.cells().clone();
+    let mut plies = mechanical(&cards);
+    for (ply, angle) in plies.iter_mut().zip([0.27, -0.31]) {
+        ply.elasticity = LaminaElasticSource::OrthotropicPlane12;
+        ply.orientation_rad = angle;
+    }
+    let model = LaminateShearModel::EquilibratedCylindrical {
+        bending_axis_rad: 0.19,
+    };
+    let shell = LayeredThermalShell::try_new_with_shear_model(
+        &bound,
+        plies,
+        ReferenceSurface::Midsurface,
+        model,
+        discretization(),
+        limits(),
+        || false,
+    )
+    .unwrap();
+    // These are the actual original source intervals, not a sampled capacity
+    // repair. Admission proves the complete coupled inverse/entropy envelope.
+    let reciprocal = ReciprocalLayeredThermalShell::try_new(
+        &shell,
+        &thermal,
+        &[0.0; 24],
+        &[[299.5, 300.5], [299.5, 301.5]],
+        0.0005,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let mut coupled = reciprocal
+        .begin_transient(&[0.0; 24], &[[2.0, -1.0], [-0.5, 1.5]], 1e-7, || false)
+        .unwrap();
+    let h = coupled.state().material().prepared().section().shear_pa_m();
+    assert!(
+        h[1].abs() > 1e-6 * h[0],
+        "cross-shear energy must be active"
+    );
+    let initial_energy = thermal.energy_j() + field_internal(coupled.state());
+    let original_motion = observers(&shell, coupled.state().material());
+    let mut workspace = LayeredThermalWorkspace::new(2).unwrap();
+    let target = 1e-4;
+    let step = coupled
+        .advance_to(
+            &thermal,
+            target,
+            &[0.0; 24],
+            conduction(),
+            LayeredThermalSolveControls::default(),
+            controls(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    check_reference_motion(&shell, &original_motion, coupled.state());
+    assert!(coupled.state().temperatures_k()[0] > 300.01);
+    assert!(
+        coupled
+            .state()
+            .transverse_shear_entropy_j_k()
+            .iter()
+            .any(|s| s.abs() > 1e-12)
+    );
+    assert!(
+        step.report
+            .thermoelastic
+            .transverse_shear_reversible_heat_j
+            .abs()
+            > 1e-12
+    );
+    close(
+        step.report.thermoelastic.external_heat_j,
+        heater.iter().sum::<f64>() * target,
+        1e-7,
+    );
+    close(
+        step.report.thermoelastic.external_mechanical_work_j,
+        0.0,
+        1e-12,
+    );
+    close(step.report.native.energy_residual_j, 0.0, 1e-7);
+    close(
+        step.report.thermoelastic.combined_energy_residual_j,
+        0.0,
+        1e-7,
+    );
+    close(
+        step.thermal.energy_j() + field_internal(coupled.state()) - initial_energy,
+        heater.iter().sum::<f64>() * target,
+        2e-7,
+    );
+    let material = coupled.state().material();
+    let section = material.prepared().section();
+    assert_eq!(section.shear_model(), model);
+    for (layer, card) in material.source().layers().iter().zip(&cards) {
+        assert!(Arc::ptr_eq(&layer.input().card, card));
+    }
+    let reference = shell.source().reference_section();
+    assert_eq!(section.i0_kg_m2().to_bits(), reference.i0_kg_m2().to_bits());
+    assert_eq!(section.i1_kg_m().to_bits(), reference.i1_kg_m().to_bits());
+    assert_eq!(section.i2_kg().to_bits(), reference.i2_kg().to_bits());
+    close(step.thermal.mass_kg(), RHO * AREA * H, 1e-12);
+    assert_eq!(thermal.cells(), &original_cells);
 }
 
 /// Reflection in y preserves equal x displacements at the two free nodes.

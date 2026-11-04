@@ -1,7 +1,7 @@
 //! Whole-temperature-box admission for the nonlocal shear entropy operator.
 //!
 //! Interval values and analytic absolute first/second derivative bounds follow
-//! the same Whitney potential. A Hessian ROW SUM is propagated, so preparation
+//! the selected section potential. A Hessian ROW SUM is propagated, so preparation
 //! needs O(n²) scalar work and O(n) storage, without an n-by-n Hessian. Positive
 //! square integrals keep the value enclosure useful without discarding any
 //! derivative term. A failed enclosure refuses; it never becomes a pointwise
@@ -12,14 +12,17 @@ use crate::laminate::LaminateShearModel;
 use crate::laminate::thermal::source::ResolvedLaminateThermal;
 use crate::laminate::thermal::thermoelastic::{AffineLaminaThermoelastic, Interval, Jet};
 
+mod coupled;
+
 /// Conservative fixed-total-shear entropy Hessian bounds over the Cartesian
 /// product of all original temperature intervals and principal strain limits.
 ///
 /// The i-th value bounds sum_j |dS_i/dT_j| PER reference area. Multiply by the
 /// physical area, then add the original caloric and in-plane entropy derivatives
 /// before admitting a positive thermal operator (for example, by Gershgorin).
-/// This bounds the existing directional Whitney approximation, not a new 3-D
-/// warping model, and does not itself certify a coupled thermal time step.
+/// This follows the retained Whitney or equilibrated cylindrical closure and
+/// its declared physical axes. It does not certify unrestricted 3-D warping or
+/// a coupled thermal time step by itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaminateShearCapacityBound {
     entropy_rows: Vec<f64>,
@@ -31,21 +34,15 @@ impl LaminateShearCapacityBound {
     /// `current`. The current state is checked against the native smooth branch;
     /// interval poles, nonfinite bounds and an unresolved positive shear-energy
     /// denominator anywhere in the box refuse before publishing a bound.
-    /// Coupled equilibrated closures refuse: their point derivatives do not
-    /// supply the Whitney interval enclosure used by this capacity proof.
+    /// Equilibrated cylindrical closures additionally require separated probe
+    /// resultants and positive membrane, ply-shear and complementary-energy
+    /// pivots throughout the box. An inconclusive enclosure refuses.
     pub fn try_new(
         laws: &[AffineLaminaThermoelastic],
         current: &ResolvedLaminateThermal,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LaminateShearThermoelasticError> {
         check(&mut cancelled)?;
-        // Coupled point derivatives do not certify this distinct Whitney
-        // interval expression over a temperature box.
-        if current.prepared().section().shear_model() != LaminateShearModel::DirectionalWhitney {
-            return Err(invalid(
-                "whole-temperature-box shear capacity bounds require the directional Whitney closure",
-            ));
-        }
         // Reuse source-identity, current-temperature and native-branch admission.
         ResolvedLaminateShearThermoelastic::try_new(laws, current, &mut cancelled)?;
         let n = laws.len();
@@ -115,7 +112,11 @@ impl LaminateShearCapacityBound {
                 g: rotated_g,
             });
         }
-        let hessian_rows = if n == 1 {
+        let hessian_rows = if let LaminateShearModel::EquilibratedCylindrical { bending_axis_rad } =
+            current.prepared().section().shear_model()
+        {
+            coupled::hessian_rows(laws, bending_axis_rad, &mut cancelled)?
+        } else if n == 1 {
             // For ONE homogeneous layer the native correction is exactly 5/6,
             // including anisotropic off-axis G. Eliminate Q algebraically;
             // independently affine G then has exactly zero thermal curvature.
@@ -255,7 +256,7 @@ fn positive(v: Interval) -> Result<(), LaminateShearThermoelasticError> {
         Ok(())
     } else {
         Err(invalid(
-            "whole temperature box cannot enclose a positive smooth Whitney denominator",
+            "whole temperature box cannot enclose a positive smooth shear denominator",
         ))
     }
 }

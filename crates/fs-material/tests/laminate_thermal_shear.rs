@@ -204,7 +204,7 @@ fn multilayer_inputs(angle: f64) -> Vec<LaminaSourceInput> {
 }
 
 #[test]
-fn coupled_point_potential_does_not_authorize_a_whitney_capacity_bound() {
+fn coupled_capacity_uses_its_own_homogeneous_domain_and_exact_affine_limit() {
     let coupled = source_with_model(
         vec![input(0, 0.04, 0.37)],
         ReferenceSurface::Midsurface,
@@ -213,14 +213,10 @@ fn coupled_point_potential_does_not_authorize_a_whitney_capacity_bound() {
     let current = coupled.at_temperatures(&[321.0], || false).unwrap();
     let laws = laws(&coupled);
     ResolvedLaminateShearThermoelastic::try_new(&laws, &current, || false).unwrap();
-    // Even when both homogeneous values are 5/6 h G, a point potential
-    // cannot authorize the other model's whole-temperature-box proof.
-    assert!(matches!(
-        LaminateShearCapacityBound::try_new(&laws, &current, || false),
-        Err(LaminateShearThermoelasticError::Invalid(
-            "whole-temperature-box shear capacity bounds require the directional Whitney closure"
-        ))
-    ));
+    // The coupled membrane, physical probe and ply shear domains are proved
+    // over the original box before eliminating Q from H=(5/6)hG.
+    let bound = LaminateShearCapacityBound::try_new(&laws, &current, || false).unwrap();
+    assert_eq!(bound.entropy_hessian_absolute_row_sums_j_m2_k2(), &[0.0]);
     assert!(matches!(
         ResolvedLaminateShearThermoelastic::try_new(&laws, &current, || true),
         Err(LaminateShearThermoelasticError::Cancelled)
