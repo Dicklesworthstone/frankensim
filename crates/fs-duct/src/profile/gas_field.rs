@@ -11,6 +11,7 @@ use crate::compose::{
     ComposeOptions, CompositionMode, InputReflection, PreparedChain, PreparedOpenHole, TwoPort,
     compose_chain, compose_chain_reflection, open_hole_flows, prepare_open_hole,
 };
+use crate::hole_lengths::HoleLengths;
 use crate::interaction::{CoupledPort, CoupledSolution, OpenHoleInteraction};
 use crate::{Duct, DuctError, DuctResponse, LossModel, OpenHoleFlow, Segment, Termination};
 use fs_material::MaterialError;
@@ -118,6 +119,8 @@ pub struct GasFieldDuct {
     one_way_time_s: f64,
     /// Opt-in coupling of the open holes' radiation (TMMI); `None` is the original model.
     interaction: Option<OpenHoleInteraction>,
+    /// Opt-in printed thick-wall hole lengths (Lefebvre and Scavone 2012); `Engine` is the original model.
+    hole_lengths: HoleLengths,
 }
 
 impl GasFieldDuct {
@@ -197,6 +200,7 @@ impl GasFieldDuct {
             outlet,
             one_way_time_s: length / inlet.sound_speed,
             interaction: None,
+            hole_lengths: HoleLengths::Engine,
         };
         if field.uniform_state().is_some() {
             return Ok(result);
@@ -386,6 +390,19 @@ impl GasFieldDuct {
         self.interaction = Some(interaction);
         self
     }
+    /// Opt in to the printed thick-wall hole lengths of Lefebvre and Scavone (J. Acoust. Soc. Am.
+    /// 131(4), 2012): the inner, matching and radiation lengths of every hole, and the series
+    /// inertance of open and closed holes, each from its printed equation (see the module
+    /// `hole_lengths`). Feedback, reflection, observed hole flows and the TMMI coupling all use them.
+    #[must_use]
+    pub fn with_printed_hole_lengths(mut self) -> Self {
+        self.hole_lengths = HoleLengths::Printed;
+        self
+    }
+    /// Whether the printed thick-wall hole lengths are on.
+    pub const fn printed_hole_lengths(&self) -> bool {
+        matches!(self.hole_lengths, HoleLengths::Printed)
+    }
     /// The declared open-hole radiation coupling, if any.
     pub const fn open_hole_interaction(&self) -> Option<OpenHoleInteraction> {
         self.interaction
@@ -423,13 +440,13 @@ impl GasFieldDuct {
         let mut open = holes.iter();
         let mut ports = Vec::with_capacity(holes.len());
         for (segment, gas) in gases {
-            let Segment::ToneHole { hole_radius, chimney_height, bore_radius, state } =
+            let Segment::ToneHole { hole_radius, state, .. } =
                 self.duct.segments[segment] else { continue };
             if crate::hole_sigma(state) > 0.0 {
                 let site = open.next().expect("one prepared hole per open hole");
                 ports.push(CoupledPort::open_hole(
-                    site.axial_position_m, &gas, radiation, hole_radius, chimney_height,
-                    bore_radius, omega, loss, wall)?);
+                    site.axial_position_m, &gas, radiation, hole_radius, site.chimney_length_m,
+                    omega, loss, wall)?);
             }
         }
         let length: f64 = self.duct.segments.iter().map(Segment::axial_length).sum();
@@ -572,9 +589,9 @@ impl GasFieldDuct {
             crate::exterior::admit(&self.inlet, exterior)?;
         }
         if self.field.uniform_state().is_some() {
-            return crate::compose::duct_chain_in_exterior(&self.duct, &self.inlet,
+            return crate::compose::duct_chain_in_exterior_lengths(&self.duct, &self.inlet,
                 exterior.unwrap_or(&self.inlet), omega, loss, wall,
-                ComposeOptions::default(), true, cancelled);
+                ComposeOptions::default(), self.hole_lengths, cancelled);
         }
         if !positive(omega) {
             return Err(bad("gas-field frequency must be positive and finite"));
@@ -623,7 +640,7 @@ impl GasFieldDuct {
                         observed_holes.push(prepare_open_hole(
                             &hole.gas, exterior.unwrap_or(&hole.gas), omega, loss, wall,
                             &self.duct.segments[hole.segment], open_sites[open_hole_index],
-                            blocks.len(), hole.extra_series_m, true,
+                            blocks.len(), hole.extra_series_m, self.hole_lengths,
                         )?);
                     }
                     open_hole_index += 1;
@@ -637,7 +654,7 @@ impl GasFieldDuct {
                     wall,
                     reference,
                     hole.extra_series_m,
-                    true,
+                    self.hole_lengths,
                     ComposeOptions::default().maximum_condition,
                 )?);
                 hole_index += 1;
@@ -759,7 +776,12 @@ impl GasFieldDuct {
                 composition: CompositionMode::Scattering,
             }, flows));
         }
-        if self.field.uniform_state().is_some() {
+        // The uniform shortcut is the original smooth-duct owner, whose holes carry the engine's lengths;
+        // with the printed set declared the same chain is built here with the declared lengths. A bore
+        // without a tone hole has no length to declare, so it keeps the shortcut and the flag changes no bit.
+        // (`holes` is not filled for a uniform field, so the segments are asked.)
+        let holed = self.duct.segments.iter().any(|segment| matches!(segment, Segment::ToneHole { .. }));
+        if self.field.uniform_state().is_some() && (self.hole_lengths == HoleLengths::Engine || !holed) {
             if observe_holes {
                 return crate::exterior::input_impedance_and_holes(&self.duct, &self.inlet,
                     radiation, omega, loss, termination, wall);

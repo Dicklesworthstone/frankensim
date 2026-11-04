@@ -99,21 +99,20 @@ impl CoupledPort {
         Self { position_m, chimney: [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE], self_radiation: load }
     }
 
-    /// A fully open tone hole built exactly as `chimney_open_response_with_wall` builds it:
-    /// chimney plus inner matching length, the same loss, wall and flanged self radiation.
+    /// A fully open tone hole built exactly as `chimney_open_response_with_wall` builds it: the
+    /// chimney of the given total `length` (height plus the hole law's lengths, as
+    /// `PreparedOpenHole::chimney_length_m` carries it), the same loss, wall and flanged self radiation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_hole(
         position_m: f64,
         state: &GasState,
         exterior: &GasState,
         hole_radius: f64,
-        chimney_height: f64,
-        bore_radius: f64,
+        length: f64,
         omega: f64,
         loss: LossModel,
         wall: WallModel<'_>,
     ) -> Result<Self, DuctError> {
-        let length = chimney_height + fs_phs::side_hole_inner_length(hole_radius, bore_radius);
         let chimney_loss = if loss == LossModel::WideTube { LossModel::Bessel } else { loss };
         let duct = Duct { segments: vec![Segment::Cylinder { radius: hole_radius, length }] };
         let options = ComposeOptions::default();

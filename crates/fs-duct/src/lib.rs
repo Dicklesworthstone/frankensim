@@ -115,6 +115,8 @@ mod chimney;
 pub use chimney::{
     PROFILED_CHIMNEY_LIMITATION, profiled_tone_hole_junction, profiled_tone_hole_shunt,
 };
+/// Equivalent lengths of a compact tone hole: the engine's and the printed thick-wall set.
+mod hole_lengths;
 /// Opt-in external radiation interaction between open tone holes and the bell (TMMI).
 mod interaction;
 pub use interaction::OpenHoleInteraction;
@@ -1094,14 +1096,11 @@ pub(crate) fn chimney_open_response_with_wall(
     bore_radius: f64,
     omega: f64,
     loss: LossModel,
-    compact_corrections: bool,
+    lengths: hole_lengths::HoleLengths,
     wall: WallModel<'_>,
 ) -> Result<(DuctResponse, f64), DuctError> {
-    let inner = if compact_corrections {
-        side_hole_inner_length(hole_radius, bore_radius)
-    } else {
-        0.0
-    };
+    let inner = lengths.open_extra_m(
+        hole_radius, chimney_height, bore_radius, omega / state.sound_speed);
     let length = chimney_height + inner;
     if !(hole_radius > 0.0 && length > 0.0 && hole_radius.is_finite() && length.is_finite()) {
         return Err(DuctError::BadParameter {

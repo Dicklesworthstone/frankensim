@@ -136,6 +136,21 @@ impl RegionalDuct {
         Ok(self)
     }
 
+    /// Opt in to the printed thick-wall hole lengths of Lefebvre and Scavone (J. Acoust. Soc. Am.
+    /// 131(4), 2012) on every tone hole: feedback, reflection and the observed hole flows use them.
+    /// The receiver's pre-arrival travel times keep the engine's inner length (a fraction of a
+    /// sample at 48 kHz).
+    ///
+    /// # Errors
+    /// Only a continuous gas-field binding carries it; any other binding refuses.
+    pub fn with_printed_hole_lengths(mut self) -> Result<Self, DuctError> {
+        let Some(field) = self.continuous.take() else {
+            return Err(invalid("printed tone-hole lengths need a continuous gas-field binding"));
+        };
+        self.continuous = Some(field.with_printed_hole_lengths());
+        Ok(self)
+    }
+
     /// Apply a supplied axial T/composition field to a bore without changing
     /// its physics code. Each authored cylinder/cone gets exactly
     /// `cells_per_segment` midpoint cells, with at most 64 total records.

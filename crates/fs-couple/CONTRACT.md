@@ -7103,6 +7103,14 @@ wrapper no continuous binding), a vent fraction, an ideal-open end or a baked
 mouth load each refuse by name rather than being ignored. The receiver's
 pre-arrival travel times and each hole's nonlinear orifice port keep the
 independent chimney.
+
+`RegionalDuct::with_printed_hole_lengths` and the optional reed-card record
+`tonehole_lengths lefebvre-scavone-2012` (after `open_hole_interaction` if both
+are given, before `compile_limits`; a `gas_field continuous` binding with no
+molecular bore) opt in to the thick-wall hole lengths of Lefebvre and Scavone
+(2012) that `fs-duct` documents for `GasFieldDuct::with_printed_hole_lengths`.
+It is off unless declared, composes with the interaction, and refuses by name on
+any binding without a continuous operator.
 A focused impulse regression covers the combined wall/field changes to
 both incoming feedback and causal external microphone pressure.
 

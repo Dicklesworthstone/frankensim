@@ -191,6 +191,32 @@ card. An independent plane-wave transfer-matrix model (Zwikker-Kosten losses,
 the same chimney and radiation laws) predicts the passive-peak shift on the
 posted F4 and G4 cards (-8.57 and -8.87 cent in the test gas) and the Rust
 solve agrees to 0.01 cent; D3, with no open hole, is bit-identical.
+`GasFieldDuct::with_printed_hole_lengths()` is a second opt-in, off unless
+declared and independent of the interaction: every hole takes the thick-wall
+equivalent lengths that Lefebvre and Scavone (J. Acoust. Soc. Am. 131(4), 2012)
+print, in place of the engine's inner length alone (module `hole_lengths` lists
+each equation): the open inner length `t_i` (Eq. 31 times the frequency factor
+`G` of Eq. 32), the matching length `t_m` on open and closed holes (Eq. 8), the
+radiation length `t_r` (Eq. 11), and the series inertance `t_a` of open (Eq. 33)
+and closed (Eq. 34) holes, the closed-hole series element being new. The
+engine's open series length `-0.37 b^2/a` is replaced by Eq. 33 (0.78 to 0.95
+`b/a` times as large, because the engine's form is `b d` where the paper prints
+`b d^2`: 0.42 times as large for `b/a = 0.53`). A partly open hole weights the open and closed lengths by `sigma`; the
+Nederveen near-field mutual length between open holes is kept. `t_r` moves only
+the low-frequency mass of the flanged mouth, as a constant length offset; its
+radiation resistance is the engine's. Not applied: the closed-hole `k t_i` of
+Eq. 16 (the paper calls it negligible at low frequency; under 0.01 cent at D3,
+F4 and G4 in the scratch model), the `-t_a/4` of Eq. 13 (Eq. 31 is the fit
+used) and any pad law. The fits are printed for `b/a <= 1` and `ka <= 1`: a hole
+with `b >= a` keeps the engine terms and `G` holds its `ka = 1` value above
+that. Feedback, reflection, the observed hole flows and the coupled solve all
+read one set of lengths; the receiver's pre-arrival travel times keep the
+engine's inner length. Hand-computed single-hole values of every term, the
+symmetric-T block of Eq. 2 for a closed hole to 1e-9 and an open hole to the
+low-frequency Eq. 7 reactance, and the engine terms bit for bit, are tested; the
+independent transfer-matrix model predicts the passive-peak shift of the set on
+the posted D3 (+14.2 cent), F4 (+1.8) and G4 (+1.0) cards, and with the
+interaction F4 -6.8 and G4 -8.0 cent, agreed to 0.3 cent in the tests.
 `GasFieldDuct::response_with_wall_and_holes` retains open/vented chimney flows
 from their actual locations in that same stable cascade. Uniform and varying
 fields share one chimney/series-branch preparation and flow-reconstruction

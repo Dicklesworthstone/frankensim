@@ -73,7 +73,8 @@ fn chimney_ports(positions: &[f64]) -> Vec<CoupledPort> {
     positions
         .iter()
         .map(|&position| {
-            CoupledPort::open_hole(position, &gas, &gas, 0.0025, 0.0065, 0.00735, TAU * 700.0,
+            CoupledPort::open_hole(position, &gas, &gas, 0.0025,
+                0.0065 + fs_phs::side_hole_inner_length(0.0025, 0.00735), TAU * 700.0,
                 LossModel::Bessel, WallModel::Rigid).unwrap()
         })
         .collect()
@@ -87,7 +88,8 @@ fn distant_openings_decouple_to_the_independent_chimney_admittance() {
     let omega = TAU * 700.0;
     let (b, h, a) = (0.0025, 0.0065, 0.00735);
     let (open, _) = crate::chimney_open_response_with_wall(
-        &gas, &gas, b, h, a, omega, LossModel::Bessel, true, WallModel::Rigid).unwrap();
+        &gas, &gas, b, h, a, omega, LossModel::Bessel, crate::hole_lengths::HoleLengths::Engine,
+        WallModel::Rigid).unwrap();
     let ports = chimney_ports(&[0.0, 1.0e7]);
     let coupling = couple(&ports, &gas, omega, interaction(2.0)).unwrap();
     let independent = open.impedance.recip();

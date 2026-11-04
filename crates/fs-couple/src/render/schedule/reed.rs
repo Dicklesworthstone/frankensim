@@ -22,6 +22,9 @@
 //! `gas_field continuous` binding, couples the radiation of the open holes and the
 //! bell through the TMMI mutual impedance (EPSILON 2 as the paper prints it).
 //! The distances are axial, an upper bound; it is off unless declared.
+//! Optional `tonehole_lengths lefebvre-scavone-2012` after it, on the same binding, gives every
+//! tone hole the printed thick-wall lengths of Lefebvre and Scavone (J. Acoust. Soc. Am. 131(4),
+//! 2012) instead of the engine's inner length: `fs_duct`'s `hole_lengths` lists each equation.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
@@ -889,6 +892,20 @@ impl ReedPerformance {
             Some(fs_duct::OpenHoleInteraction::new(epsilon).map_err(|_| bad(line,
                 "open_hole_interaction needs a positive finite radiation-space factor"))?)
         } else { None };
+        let printed_hole_lengths = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("tonehole_lengths") {
+            let mut row = r.row("tonehole_lengths")?;
+            let line = row.line;
+            if row.word()? != "lefebvre-scavone-2012" {
+                return Err(bad(line, "tonehole_lengths names its set: `tonehole_lengths lefebvre-scavone-2012`"));
+            }
+            row.finish()?;
+            if !matches!(&gas_field, Some((_, GasFieldResolution::Continuous(_)))) || molecular.is_some() {
+                return Err(bad(line,
+                    "tonehole_lengths needs a continuous gas_field binding and no molecular bore"));
+            }
+            true
+        } else { false };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -1044,6 +1061,12 @@ impl ReedPerformance {
                 Some(interaction) => regional.with_open_hole_interaction(interaction)
                     .map_err(|source| ReedPerformanceError::Model(AcousticRealizeError::Duct(source)))?,
                 None => regional,
+            };
+            let regional = if printed_hole_lengths {
+                regional.with_printed_hole_lengths()
+                    .map_err(|source| ReedPerformanceError::Model(AcousticRealizeError::Duct(source)))?
+            } else {
+                regional
             };
             segment_gases = regional.segment_gases().to_vec();
             let medium = observer_medium(baffled, &air, regional.outlet_gas());

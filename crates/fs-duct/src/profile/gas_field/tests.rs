@@ -1328,3 +1328,106 @@ fn the_coupled_clarinet_response_is_admitted_at_every_frequency_of_the_line_real
     }
     assert!(worst <= 1.0 + 1.0e-9, "|r| reaches {worst}");
 }
+
+// ---- Opt-in printed thick-wall hole lengths (Lefebvre and Scavone 2012) ----
+
+/// The posted card's owner with the printed lengths, and with the TMMI coupling too when `epsilon` is given.
+fn printed_owner(duct: &Duct, epsilon: Option<f64>) -> GasFieldDuct {
+    let owner = GasFieldDuct::new(duct, &clarinet_field(duct), RiccatiSteps(16))
+        .unwrap()
+        .with_printed_hole_lengths();
+    match epsilon {
+        Some(epsilon) => owner.with_open_hole_interaction(interaction(epsilon)),
+        None => owner,
+    }
+}
+
+#[test]
+fn printed_lengths_are_off_unless_declared_change_nothing_without_a_hole_and_reach_a_holed_bore() {
+    let omega = TAU * 470.0;
+    let exterior_of = |owner: &GasFieldDuct| *owner.outlet_gas();
+    for source in [field([290.0, 390.0], [0.99, 0.45], 101325.0), field([300.0, 300.0], [0.8, 0.8], 101325.0)] {
+        for geometry in [cylinder(), profile()] {
+            let plain = GasFieldDuct::new(&geometry, &source, RiccatiSteps(16)).unwrap();
+            let flagged = plain.clone().with_printed_hole_lengths();
+            assert!(!plain.printed_hole_lengths() && flagged.printed_hole_lengths());
+            let a = plain.response(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior_of(&plain))).unwrap();
+            let b = flagged.response(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior_of(&plain))).unwrap();
+            assert_eq!(a.impedance, b.impedance);
+        }
+        let holed = fingered_bore3([crate::HoleState::Open, crate::HoleState::Closed, crate::HoleState::Open]);
+        let plain = GasFieldDuct::new(&holed, &source, RiccatiSteps(16)).unwrap();
+        let flagged = plain.clone().with_printed_hole_lengths();
+        let a = plain.response(omega, LossModel::Bessel, Termination::FlangedOpen, None).unwrap();
+        let b = flagged.response(omega, LossModel::Bessel, Termination::FlangedOpen, None).unwrap();
+        assert!(relative(b.impedance, a.impedance) > 1.0e-6, "{:?} {:?}", a.impedance, b.impedance);
+    }
+}
+
+#[test]
+fn the_printed_lengths_shift_the_posted_cards_as_the_independent_transfer_matrix_model_predicts() {
+    // Passive |Z| peak, cents re the nominal pitch, on the posted D3 (all holes closed), F4 and G4 cards in this
+    // test's gas. The independent plane-wave transfer-matrix model (same chimney and radiation laws, Zwikker-Kosten
+    // losses, the printed equations coded separately in Python from Lefebvre and Scavone 2012) predicts, in this
+    // exact gas: printed set alone D3 +14.17, F4 +1.84, G4 +0.97 cent; printed set with TMMI (eps 2) against
+    // the independent engine F4 -6.81, G4 -7.95 cent. D3 moves through the closed-hole series length t_a(c)
+    // (+15.43 cent alone) less the closed-hole matching length t_m (-1.28 cent).
+    let tolerance = 0.3;
+    for (note, nominal, alone, together) in
+        [("D3", 146.83, 14.169, None), ("F4", 349.23, 1.838, Some(-6.813)), ("G4", 392.0, 0.965, Some(-7.952))]
+    {
+        let duct = clarinet_card(note);
+        let plain = GasFieldDuct::new(&duct, &clarinet_field(&duct), RiccatiSteps(16)).unwrap();
+        let (lo, hi) = (nominal * (-150.0_f64 / 1200.0).exp2(), nominal * (250.0_f64 / 1200.0).exp2());
+        let base = peak_cents(&plain, lo, hi, nominal);
+        let shift = peak_cents(&printed_owner(&duct, None), lo, hi, nominal) - base;
+        eprintln!("PRINTED {note}: passive peak {base:+.3} cent, printed set shift {shift:+.3}");
+        assert!((shift - alone).abs() < tolerance, "{note}: printed set shifts {shift}, model {alone}");
+        if let Some(together) = together {
+            let both = peak_cents(&printed_owner(&duct, Some(2.0)), lo, hi, nominal) - base;
+            eprintln!("PRINTED {note}: with TMMI {both:+.3}");
+            assert!((both - together).abs() < tolerance, "{note}: printed set with TMMI shifts {both}, model {together}");
+        }
+    }
+}
+
+#[test]
+fn negligible_coupling_with_the_printed_lengths_reproduces_the_independent_printed_response() {
+    // The coupled port must carry the same printed chimney the independent assembly does (inner, matching and
+    // radiation lengths), and the series halves of the printed set.
+    let geometry = fingered_bore3([crate::HoleState::Open, crate::HoleState::Closed, crate::HoleState::Open]);
+    for source in [field([300.0, 340.0], [0.8, 0.4], 101325.0), field([300.0, 300.0], [0.8, 0.8], 101325.0)] {
+        let plain = GasFieldDuct::new(&geometry, &source, RiccatiSteps(16)).unwrap().with_printed_hole_lengths();
+        let coupled = plain.clone().with_open_hole_interaction(interaction(1.0e15));
+        let exterior = *plain.outlet_gas();
+        for frequency in [150.0, 470.0, 2400.0] {
+            let omega = TAU * frequency;
+            let (a, holes_a) = plain.response_with_wall_and_holes(
+                omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior), WallModel::Rigid).unwrap();
+            let (b, holes_b) = coupled.response_with_wall_and_holes(
+                omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior), WallModel::Rigid).unwrap();
+            assert!(relative(b.impedance, a.impedance) < 1.0e-8, "{frequency} {:?} {:?}", b.impedance, a.impedance);
+            for (x, y) in holes_a.iter().zip(&holes_b) {
+                assert!(relative(y.u_hole_over_u_in, x.u_hole_over_u_in) < 1.0e-7, "{frequency}");
+            }
+            let ra = plain.reflection(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior)).unwrap();
+            let rb = coupled.reflection(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior)).unwrap();
+            assert!((rb.reflection - ra.reflection).abs() < 1.0e-8, "{frequency}");
+        }
+    }
+}
+
+#[test]
+fn the_printed_set_with_the_coupling_is_admitted_at_every_frequency_of_the_line_realization() {
+    let duct = clarinet_card("G4");
+    let owner = printed_owner(&duct, Some(2.0));
+    let exterior = *owner.outlet_gas();
+    let mut worst: f64 = 0.0;
+    for step in 1..=480 {
+        let omega = TAU * 50.0 * f64::from(step);
+        let r = owner.reflection(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior))
+            .unwrap_or_else(|error| panic!("{} Hz: {error:?}", 50 * step));
+        worst = worst.max(r.reflection.abs());
+    }
+    assert!(worst <= 1.0 + 1.0e-9, "|r| reaches {worst}");
+}

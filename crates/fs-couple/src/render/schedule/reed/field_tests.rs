@@ -207,3 +207,41 @@ fn the_open_hole_interaction_row_is_validated_and_needs_a_continuous_binding() {
         ObservationPolicy::Diagnostic, None, field(280.0), 8).is_err());
     assert!(continuous_load(&declared, 300.0).is_err());
 }
+
+// ---- `tonehole_lengths lefebvre-scavone-2012` (opt-in printed thick-wall hole lengths) ----
+
+#[test]
+fn the_tonehole_lengths_row_is_off_by_default_and_reaches_the_rendered_pressure() {
+    let base = holed(&source());
+    let plain = pressure_of(&base);
+    let norm = plain.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let printed = pressure_of(&with_row(&base, "tonehole_lengths lefebvre-scavone-2012"));
+    let both = pressure_of(&with_row(&with_row(&base, "open_hole_interaction tmmi 2"),
+        "tonehole_lengths lefebvre-scavone-2012"));
+    let coupled = pressure_of(&with_row(&base, "open_hole_interaction tmmi 2"));
+    assert!(norm > 0.0 && distance(&plain, &printed) > 1.0e-9 * norm);
+    assert!(distance(&printed, &both) > 1.0e-9 * norm, "the coupling still acts with the printed lengths");
+    assert!(distance(&coupled, &both) > 1.0e-9 * norm, "the printed lengths still act with the coupling");
+    assert_eq!(plain, pressure_of(&base));
+}
+
+#[test]
+fn the_tonehole_lengths_row_is_validated_ordered_and_needs_a_continuous_binding() {
+    let base = holed(&source());
+    for bad in [
+        "tonehole_lengths", "tonehole_lengths foo", "tonehole_lengths none",
+        "tonehole_lengths lefebvre-scavone-2012 extra",
+    ] {
+        assert!(continuous_load(&with_row(&base, bad), 280.0).is_err(), "{bad}");
+    }
+    let declared = with_row(&base, "tonehole_lengths lefebvre-scavone-2012");
+    assert!(continuous_load(&declared, 280.0).is_ok());
+    // After the interaction row it is fine; before it, the header order refuses.
+    let ordered = with_row(&with_row(&base, "open_hole_interaction tmmi 2"), "tonehole_lengths lefebvre-scavone-2012");
+    assert!(continuous_load(&ordered, 280.0).is_ok());
+    let swapped = with_row(&with_row(&base, "tonehole_lengths lefebvre-scavone-2012"), "open_hole_interaction tmmi 2");
+    assert!(continuous_load(&swapped, 280.0).is_err());
+    assert!(ReedPerformance::from_bytes_with_gas_field(declared.as_bytes(), 113,
+        ObservationPolicy::Diagnostic, None, field(280.0), 8).is_err());
+    assert!(continuous_load(&declared, 300.0).is_err());
+}

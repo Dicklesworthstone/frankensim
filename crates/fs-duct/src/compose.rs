@@ -21,6 +21,7 @@ use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
 use crate::WallModel;
+use crate::hole_lengths::HoleLengths;
 
 pub const MAX_COMPOSITION_BLOCKS: usize = 131_072;
 pub const MAX_COMPOSITION_MODES: usize = 32;
@@ -910,7 +911,7 @@ pub(crate) fn tone_hole_scattering(
     wall: WallModel<'_>,
     reference: f64,
     extra_series_m: f64,
-    compact_corrections: bool,
+    lengths: HoleLengths,
     maximum_condition: f64,
 ) -> Result<TwoPort, DuctError> {
     let Segment::ToneHole {
@@ -922,19 +923,17 @@ pub(crate) fn tone_hole_scattering(
     let sigma = crate::hole_sigma(hs);
     // p = n X, reference * U = d X; each vent fraction weights flow once.
     let (n, mut d) = if sigma < 1.0 {
+        let sealed = chimney_height + lengths.sealed_extra_m(hole_radius, bore_radius);
         let [p, u] = closed_chimney_coordinates(
-            state, hole_radius, chimney_height, omega, loss, wall, reference,
+            state, hole_radius, sealed, omega, loss, wall, reference,
         )?;
         (p, u.scale(1.0 - sigma))
     } else {
         (C64::ONE, C64::ZERO)
     };
     if sigma > 0.0 {
-        let inner = if compact_corrections {
-            fs_phs::side_hole_inner_length(hole_radius, bore_radius)
-        } else {
-            0.0
-        };
+        let inner = lengths.open_extra_m(
+            hole_radius, chimney_height, bore_radius, omega / state.sound_speed);
         let open = crate::chimney_line_impedance_with_wall(
             state, exterior, hole_radius, chimney_height + inner, omega,
             loss, Termination::FlangedOpen, wall,
@@ -952,11 +951,8 @@ pub(crate) fn tone_hole_scattering(
         [reflection, transmission, transmission, reflection],
         reference,
     )?;
-    let series_length = if sigma > 0.0 && compact_corrections {
-        fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma + extra_series_m
-    } else {
-        0.0
-    };
+    let series_length = lengths.series_m(
+        hole_radius, chimney_height, bore_radius, sigma, extra_series_m);
     if series_length == 0.0 {
         return Ok(shunt);
     }
@@ -983,7 +979,7 @@ pub(crate) fn prepare_open_hole(
     site: crate::OpenHoleSite,
     block_index: usize,
     extra_series_m: f64,
-    compact_corrections: bool,
+    lengths: HoleLengths,
 ) -> Result<PreparedOpenHole, DuctError> {
     let Segment::ToneHole { hole_radius, chimney_height, bore_radius, state: hs } = *geometry else {
         return Err(bad("open-hole observation requires a tone-hole segment"));
@@ -994,13 +990,10 @@ pub(crate) fn prepare_open_hole(
     }
     let (open, chimney_length_m) = crate::chimney_open_response_with_wall(
         state, exterior, hole_radius, chimney_height, bore_radius, omega, loss,
-        compact_corrections, wall,
+        lengths, wall,
     )?;
-    let series_length = if compact_corrections {
-        fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma + extra_series_m
-    } else {
-        0.0
-    };
+    let series_length = lengths.series_m(
+        hole_radius, chimney_height, bore_radius, sigma, extra_series_m);
     let half = if series_length == 0.0 {
         C64::ZERO
     } else {
@@ -1012,7 +1005,8 @@ pub(crate) fn prepare_open_hole(
     let z0_port = state.density * state.sound_speed * (1.0 / area_h + 0.5 * sigma / area_b);
     let closed_return_coordinates = if sigma < 1.0 {
         let [p, u] = closed_chimney_coordinates(
-            state, hole_radius, chimney_height, omega, loss, wall, z0_port,
+            state, hole_radius, chimney_height + lengths.sealed_extra_m(hole_radius, bore_radius),
+            omega, loss, wall, z0_port,
         )?;
         [p, u.scale(1.0 - sigma)]
     } else {
@@ -1101,9 +1095,27 @@ pub(crate) fn duct_chain_in_exterior(
     compact_corrections: bool,
     cancelled: impl FnMut() -> bool,
 ) -> Result<(PreparedChain, Vec<PreparedOpenHole>), DuctError> {
-    duct_chain_with_segment_boundaries(
+    duct_chain_in_exterior_lengths(
         duct, state, exterior, omega, loss, wall, options,
-        compact_corrections, None, cancelled,
+        HoleLengths::from_compact(compact_corrections), cancelled,
+    )
+}
+
+/// [`duct_chain_in_exterior`] with an explicit set of hole lengths.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn duct_chain_in_exterior_lengths(
+    duct: &Duct,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+    lengths: HoleLengths,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(PreparedChain, Vec<PreparedOpenHole>), DuctError> {
+    duct_chain_with_segment_boundaries(
+        duct, state, exterior, omega, loss, wall, options, lengths, None, cancelled,
     )
 }
 
@@ -1118,7 +1130,7 @@ pub(crate) fn duct_chain_with_segment_boundaries(
     loss: LossModel,
     wall: WallModel<'_>,
     options: ComposeOptions,
-    compact_corrections: bool,
+    lengths: HoleLengths,
     mut boundary_indices: Option<&mut Vec<usize>>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<(PreparedChain, Vec<PreparedOpenHole>), DuctError> {
@@ -1185,7 +1197,7 @@ pub(crate) fn duct_chain_with_segment_boundaries(
                 let mut extra = 0.0;
                 if sigma > 0.0 {
                     let site = sites[hole_index];
-                    if compact_corrections {
+                    if lengths != HoleLengths::Uncorrected {
                         for site_j in &sites {
                             extra += fs_phs::side_hole_mutual_length(
                                 site.effective_radius_m,
@@ -1197,7 +1209,7 @@ pub(crate) fn duct_chain_with_segment_boundaries(
                     }
                     open_holes.push(prepare_open_hole(
                         state, exterior, omega, loss, wall, s, site, block_index,
-                        extra, compact_corrections,
+                        extra, lengths,
                     )?);
                     hole_index += 1;
                 }
@@ -1206,7 +1218,7 @@ pub(crate) fn duct_chain_with_segment_boundaries(
                     options.maximum_blocks,
                     tone_hole_scattering(
                         s, state, exterior, omega, loss, wall, reference, extra,
-                        compact_corrections, options.maximum_condition,
+                        lengths, options.maximum_condition,
                     )?,
                 )?;
             }

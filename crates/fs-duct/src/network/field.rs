@@ -295,7 +295,8 @@ impl PreparedNetworkFields {
                     request.loss,
                     crate::WallModel::Rigid,
                     options,
-                    edge.corrections == JunctionCorrections::ChainLocal,
+                    crate::hole_lengths::HoleLengths::from_compact(
+                        edge.corrections == JunctionCorrections::ChainLocal),
                     Some(boundaries),
                     cancelled,
                 )

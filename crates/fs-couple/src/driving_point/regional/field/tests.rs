@@ -738,3 +738,35 @@ fn the_regional_binding_carries_the_open_hole_interaction_and_refuses_a_segment_
     let segment_bound = RegionalDuct::new(&geometry, &gases).unwrap();
     assert!(segment_bound.with_open_hole_interaction(interaction).is_err());
 }
+
+#[test]
+fn the_regional_binding_carries_the_printed_hole_lengths_and_refuses_a_segment_binding() {
+    use fs_duct::{HoleState, RiccatiSteps, WallModel};
+
+    let radius = 0.0075;
+    let hole = |state| Segment::ToneHole { hole_radius: 0.004, chimney_height: 0.006, bore_radius: radius, state };
+    let geometry = Duct { segments: vec![
+        Segment::Cylinder { radius, length: 0.285 }, hole(HoleState::Open),
+        Segment::Cylinder { radius, length: 0.0475 }, hole(HoleState::Closed),
+        Segment::Cylinder { radius, length: 0.2375 },
+    ] };
+    let source = field(360.0);
+    let outside = *source.state_at(0.0).unwrap().state();
+    let plain = RegionalDuct::from_continuous_gas_field(&geometry, &source, RiccatiSteps(16))
+        .unwrap().with_exterior_gas(outside).unwrap();
+    let printed = plain.clone().with_printed_hole_lengths().unwrap();
+    assert!(printed.continuous_gas_field().unwrap().printed_hole_lengths());
+    assert!(!plain.continuous_gas_field().unwrap().printed_hole_lengths());
+    let mut moved = 0;
+    for frequency in [180.0, 430.0, 900.0, 2500.0] {
+        let omega = TAU * frequency;
+        let a = plain.reflection_with_wall(omega, LossModel::Bessel, Termination::FlangedOpen, WallModel::Rigid).unwrap();
+        let b = printed.reflection_with_wall(omega, LossModel::Bessel, Termination::FlangedOpen, WallModel::Rigid).unwrap();
+        assert!(b.abs() <= 1.0 + 1.0e-9);
+        moved += usize::from((a - b).abs() > 1.0e-6);
+    }
+    assert!(moved >= 3, "the printed lengths reach the reflection the reed line is realized from");
+    let gases = vec![outside; geometry.segments.len()];
+    let segment_bound = RegionalDuct::new(&geometry, &gases).unwrap();
+    assert!(segment_bound.with_printed_hole_lengths().is_err());
+}
