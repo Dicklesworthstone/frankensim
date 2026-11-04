@@ -30,6 +30,10 @@ pub struct DensityElasticity {
     cb: Vec<[f64; 72]>,
     /// Cell → 4 vertex ids.
     tets: Vec<[u32; 4]>,
+    /// Original P1 gradients and physical volumes for compatible strain and
+    /// eigenstrain recovery, from the same geometry used for K and mass.
+    gradients: Vec<[[f64; 3]; 4]>,
+    volumes: Vec<f64>,
     /// Vector-dof count (3 per vertex).
     n: usize,
     /// Free-dof mask (false = Dirichlet-fixed).
@@ -163,6 +167,8 @@ impl DensityElasticity {
             me,
             cb,
             tets: complex.tets.clone(),
+            gradients: geo.grads.clone(),
+            volumes: geo.vol_signed.iter().map(|volume| volume.abs()).collect(),
             n,
             free,
             moduli: vec![1.0; complex.tets.len()],

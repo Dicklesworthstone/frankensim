@@ -9,13 +9,17 @@
 //! The element blocks, supports and CG recurrence are the existing production
 //! ones. No global stiffness, Jacobian or Hessian is assembled. Derivatives
 //! are with respect to positive stiffness multipliers, NOT raw/filtered SIMP
-//! densities. This module does not differentiate loads, shape or supports.
+//! densities. This dead-load entry does not differentiate loads, shape or
+//! supports; [`thermal`] includes the prescribed-temperature load derivatives.
 
 use super::DensityElasticity;
 use crate::control::{EvaluationStop, SolveControl};
 use crate::pipeline::LoadCase;
 use fs_solver::LinearOp;
 use fs_sparse::precond::Precond;
+
+/// Source-bound thermal loads and their exact design-dependent derivatives.
+pub mod thermal;
 
 /// Relative true-residual gate and maximum Krylov iterations per solve.
 #[derive(Debug, Clone, Copy)]
