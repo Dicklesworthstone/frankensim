@@ -195,6 +195,12 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
         self.step_impl(maximum_duration, controls, sources, None, cancelled)
     }
     /// Advance molecular/wave transport against prescribed mixture reservoirs.
+    ///
+    /// The same stationary exterior state drives both molecular half steps and
+    /// characteristic advection, with physical half-cell molecular gradients,
+    /// bath enthalpy and zero bath traction work. The complete balance includes
+    /// both owners' distinct transfers; connected finite plenums retain their
+    /// evolving inventories and cannot be replaced by a prescribed bath.
     pub fn step_with_reservoirs(
         &mut self,
         maximum_duration: Time,

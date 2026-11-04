@@ -114,10 +114,10 @@ impl ReactingNetwork1d {
                     Some(operator) => {
                         let report = if volume_rates.is_some() {
                             operator.advance_for_moving_trial(&mut self.trial, half,
-                                dissipation_controls, &mut cancelled)?
+                                dissipation_controls, reservoirs, &mut cancelled)?
                         } else {
                             operator.advance_for_trial(&mut self.trial, half,
-                                dissipation_controls, &mut cancelled)?
+                                dissipation_controls, reservoirs, &mut cancelled)?
                         };
                         for (destination, source) in self.trial_molecular_ports.iter_mut()
                             .zip(operator.trial_port_exchanges())
@@ -150,10 +150,10 @@ impl ReactingNetwork1d {
                     Some(operator) => {
                         let report = if volume_rates.is_some() {
                             operator.advance_for_moving_trial(&mut self.trial, half,
-                                dissipation_controls, &mut cancelled)?
+                                dissipation_controls, reservoirs, &mut cancelled)?
                         } else {
                             operator.advance_for_trial(&mut self.trial, half,
-                                dissipation_controls, &mut cancelled)?
+                                dissipation_controls, reservoirs, &mut cancelled)?
                         };
                         for (destination, source) in self.trial_molecular_ports.iter_mut()
                             .zip(operator.trial_port_exchanges())

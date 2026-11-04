@@ -371,8 +371,10 @@ impl ReactingNetwork1d {
     /// Compose molecular transport and chemistry with prescribed pressure reservoirs.
     ///
     /// Optional wall and valve halves remain in the same complete-duration
-    /// transaction. Reservoir transfer is counted only by the transport boundary
-    /// report; molecular and wall terms retain their existing ownership.
+    /// transaction. The same stationary exterior bath supplies both molecular
+    /// halves and characteristic advection. Molecular species/heat transfer and
+    /// advected donor enthalpy keep distinct reports and enter the complete
+    /// boundary balance once each; finite-plenum ports cannot be overridden.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_dissipation_reservoirs_and_sources<L: TransportLaw>(
         &mut self,

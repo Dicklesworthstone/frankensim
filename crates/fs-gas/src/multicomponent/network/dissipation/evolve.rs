@@ -4,8 +4,9 @@ use super::{
     Totals, TransportLaw, poll, positive,
 };
 use crate::multicomponent::dissipation::evolve as molecular;
+use crate::multicomponent::dissipation::reservoir::ReservoirTrace;
 use crate::multicomponent::evolve::totals;
-use crate::multicomponent::{MAX_SPECIES, sum};
+use crate::multicomponent::{Cell, MAX_SPECIES, sum};
 
 #[derive(Clone, Copy)]
 enum Input {
@@ -18,6 +19,7 @@ pub(super) fn advance<L: TransportLaw>(
     network: &mut MixtureNetwork1d,
     duration: Time,
     controls: DissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<NetworkDissipationReport, DissipationError> {
     poll(cancelled)?;
@@ -38,6 +40,11 @@ pub(super) fn advance<L: TransportLaw>(
             "molecular operator and network ownership differ",
         ));
     }
+    let reservoirs = if owner.admit_reservoirs(reservoirs, cancelled)? {
+        reservoirs
+    } else {
+        None
+    };
     let n = owner.gas.species_count();
     let m = n + 2;
     for (index, (branch, shape)) in network.branches.iter().zip(&owner.branches).enumerate() {
@@ -100,7 +107,7 @@ pub(super) fn advance<L: TransportLaw>(
                     rejected_steps,
                 });
             }
-            let a = spatial(owner, Input::Current, controls, cancelled)?;
+            let a = spatial(owner, Input::Current, controls, reservoirs, cancelled)?;
             if a.rate > 0.0 {
                 step = step.min(controls.parabolic_cfl / a.rate);
             }
@@ -116,7 +123,7 @@ pub(super) fn advance<L: TransportLaw>(
             }
             let attempt = (|| {
                 forward(owner, Input::Current, step, cancelled)?;
-                let b = spatial(owner, Input::Stage, controls, cancelled)?;
+                let b = spatial(owner, Input::Stage, controls, reservoirs, cancelled)?;
                 let number = step * a.rate.max(b.rate);
                 if !number.is_finite()
                     || number > controls.parabolic_cfl * (1.0 + 8.0 * f64::EPSILON)
@@ -335,6 +342,7 @@ fn spatial<L: TransportLaw>(
     owner: &mut NetworkDissipationOperator<L>,
     input: Input,
     controls: DissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<molecular::Stage, DissipationError> {
     let NetworkDissipationOperator {
@@ -363,16 +371,26 @@ fn spatial<L: TransportLaw>(
         gradient_residual: 0.0,
         mass_frame_residual: 0.0,
     };
-    for shape in branches.iter() {
+    for (index, shape) in branches.iter().enumerate() {
         poll(cancelled)?;
         let count = shape.mesh.cell_count();
         let cs = shape.cell_start;
         let fs = shape.face_start;
+        let baths = core::array::from_fn(|end| {
+            reservoirs.and_then(|all| all[index][end]).map(|cell| {
+                let (primitive, heat_capacity_v) = work.reservoir_calorics[index][end];
+                ReservoirTrace {
+                    cell,
+                    primitive,
+                    heat_capacity_v,
+                }
+            })
+        });
         let stage = molecular::spatial(
             gas,
             &shape.mesh,
             shape.molecular_boundaries,
-            [None; 2],
+            baths,
             &shape.widths,
             *mass_ratio,
             law,

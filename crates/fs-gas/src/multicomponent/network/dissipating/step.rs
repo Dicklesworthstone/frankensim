@@ -28,7 +28,7 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
             let attempt = (|| {
                 let half = Time::new(0.5 * duration);
                 let first_sources = sources.first_half(&mut self.trial, half, &mut cancelled)?;
-                let first = self.molecular.advance_for_trial(&mut self.trial, half, controls.molecular, &mut cancelled)?;
+                let first = self.molecular.advance_for_trial(&mut self.trial, half, controls.molecular, reservoirs, &mut cancelled)?;
                 for (destination, source) in self.trial_molecular_ports.iter_mut().zip(self.molecular.trial_port_exchanges()) {
                     poll(&mut cancelled)?;
                     *destination = *source;
@@ -40,7 +40,7 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                         Time::new(duration), controls.transport, &mut cancelled)?,
                 };
                 if transport.elapsed.value() != duration { return Ok((transport, None)); }
-                let second = self.molecular.advance_for_trial(&mut self.trial, half, controls.molecular, &mut cancelled)?;
+                let second = self.molecular.advance_for_trial(&mut self.trial, half, controls.molecular, reservoirs, &mut cancelled)?;
                 for (total, second) in self.trial_molecular_ports.iter_mut().zip(self.molecular.trial_port_exchanges()) {
                     poll(&mut cancelled)?;
                     total.momentum_to_plenum += second.momentum_to_plenum;

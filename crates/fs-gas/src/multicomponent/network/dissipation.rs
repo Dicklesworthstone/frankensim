@@ -16,7 +16,7 @@ use crate::multicomponent::dissipation::{
     DissipationControl, DissipationError, DissipationReport, TransportLaw,
 };
 use crate::multicomponent::{
-    Boundaries, Boundary, MAX_COMPONENTS, Mesh1d, MixtureGas, Primitive, Totals, allocated,
+    Boundaries, Boundary, Cell, MAX_COMPONENTS, Mesh1d, MixtureGas, Primitive, Totals, allocated,
     positive,
 };
 use fs_qty::{Length, Time};
@@ -75,6 +75,8 @@ struct Workspace {
     candidate: Vec<f64>,
     primitive: Vec<Primitive>,
     heat_capacity_v: Vec<f64>,
+    // Prescribed baths are decoded once per interval, never once per RHS.
+    reservoir_calorics: Vec<[(Primitive, f64); 2]>,
     faces: Vec<f64>,
     face_rates: Vec<f64>,
     binary_diffusivities: Vec<f64>,
@@ -246,6 +248,7 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
             candidate: allocated(cells * m, 0.0)?,
             primitive: allocated(cells, Primitive::default())?,
             heat_capacity_v: allocated(cells, 0.0)?,
+            reservoir_calorics: allocated(branch_count, [(Primitive::default(), 0.0); 2])?,
             faces: allocated(faces * m, 0.0)?,
             face_rates: allocated(faces, 0.0)?,
             binary_diffusivities: allocated(n * n, 0.0)?,
@@ -326,7 +329,43 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
         controls: DissipationControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkDissipationReport, DissipationError> {
-        let report = self.advance_for_trial(network, duration, controls, &mut cancelled)?;
+        let report = self.advance_for_trial(network, duration, controls, None, &mut cancelled)?;
+        self.publish_trial_report();
+        Ok(report)
+    }
+
+    /// Advance the network with prescribed molecular baths at exterior ends.
+    ///
+    /// The slice follows branch order, with one optional left/right pair per
+    /// branch. Only unconnected physical ends may have baths; a finite-plenum
+    /// connection retains its existing evolving inventory and mixing length.
+    /// Cells must use this gas's canonical species order and energy gauges,
+    /// exactly as for [`MixtureNetwork1d::step_with_reservoirs`]. The borrowed
+    /// representation carries no source identity token. The original caloric
+    /// source admits each stationary bath before integration.
+    ///
+    /// All SSP stages use the shared axial reservoir face kernel, actual end
+    /// half-widths, bath species enthalpies and zero bath traction work. Signed
+    /// exterior transfers enter the global balance once; internal branch/plenum
+    /// exchanges remain equal and opposite. Bath calorics use prepared scratch
+    /// and the input cells stay borrowed, adding no per-step allocation.
+    /// Complete-duration publication, accepted reports and the unchanged flow
+    /// clock follow [`Self::advance_for`]. All absent baths preserve that path.
+    pub fn advance_with_reservoirs_for(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        controls: DissipationControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkDissipationReport, DissipationError> {
+        let report = self.advance_for_trial(
+            network,
+            duration,
+            controls,
+            Some(reservoirs),
+            &mut cancelled,
+        )?;
         self.publish_trial_report();
         Ok(report)
     }
@@ -336,10 +375,11 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
         network: &mut MixtureNetwork1d,
         duration: Time,
         controls: DissipationControl,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkDissipationReport, DissipationError> {
         self.admit_plenum_volumes(network, cancelled)?;
-        self.advance_for_moving_trial(network, duration, controls, cancelled)
+        self.advance_for_moving_trial(network, duration, controls, reservoirs, cancelled)
     }
     // Only a composing owner that admitted the accepted geometry may request
     // motion. These scratch volumes never rebind the public operator on refusal.
@@ -348,12 +388,57 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
         network: &mut MixtureNetwork1d,
         duration: Time,
         controls: DissipationControl,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkDissipationReport, DissipationError> {
         self.trial_report = None;
-        let report = evolve::advance(self, network, duration, controls, cancelled)?;
+        let report = evolve::advance(self, network, duration, controls, reservoirs, cancelled)?;
         self.trial_report = Some(report);
         Ok(report)
+    }
+
+    fn admit_reservoirs(
+        &mut self,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, DissipationError> {
+        let Some(reservoirs) = reservoirs else {
+            return Ok(false);
+        };
+        if reservoirs.len() != self.branches.len() {
+            return Err(DissipationError::Invalid(
+                "one molecular reservoir pair per network branch required",
+            ));
+        }
+        if reservoirs.iter().flatten().all(Option::is_none) {
+            return Ok(false);
+        }
+        for (index, ends) in reservoirs.iter().copied().enumerate() {
+            poll(cancelled)?;
+            if ends.iter().all(Option::is_none) {
+                continue;
+            }
+            for (end, bath) in ends.iter().enumerate() {
+                if bath.is_some() && self.endpoint_connections[index][end].is_some() {
+                    return Err(DissipationError::Invalid(
+                        "external molecular reservoir cannot replace a finite-plenum port",
+                    ));
+                }
+            }
+            let admitted = crate::multicomponent::dissipation::reservoir::admit(
+                &self.gas,
+                self.branches[index].boundaries,
+                ends,
+                cancelled,
+            )?;
+            for (end, bath) in admitted.into_iter().enumerate() {
+                if let Some(bath) = bath {
+                    self.work.reservoir_calorics[index][end] =
+                        (bath.primitive, bath.heat_capacity_v);
+                }
+            }
+        }
+        Ok(true)
     }
     pub(super) fn admit_plenum_volumes(
         &self,

@@ -11,7 +11,7 @@
 pub(super) mod evolve;
 mod face;
 mod law;
-mod reservoir;
+pub(in crate::multicomponent) mod reservoir;
 mod stabilized;
 
 pub use face::{PlanarTransport, SpatialTransport, TransportFaceReport, WallThermalCondition};

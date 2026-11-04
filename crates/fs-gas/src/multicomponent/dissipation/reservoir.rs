@@ -5,13 +5,13 @@ use super::*;
 
 #[derive(Clone, Copy)]
 pub(in crate::multicomponent) struct ReservoirTrace<'a> {
-    pub(super) cell: Cell<'a>,
-    pub(super) primitive: Primitive,
-    pub(super) heat_capacity_v: f64,
+    pub(in crate::multicomponent) cell: Cell<'a>,
+    pub(in crate::multicomponent) primitive: Primitive,
+    pub(in crate::multicomponent) heat_capacity_v: f64,
 }
 pub(in crate::multicomponent) type ReservoirEnds<'a> = [Option<ReservoirTrace<'a>>; 2];
 
-fn admit<'a>(
+pub(in crate::multicomponent) fn admit<'a>(
     gas: &MixtureGas,
     boundaries: Boundaries,
     reservoirs: [Option<Cell<'a>>; 2],
@@ -99,18 +99,45 @@ impl<L: TransportLaw> DissipationOperator<L> {
         reservoirs: [Option<Cell<'_>>; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedDissipationReport, DissipationError> {
-        if reservoirs.iter().all(Option::is_none) {
-            return self.advance_stabilized_for(flow, duration, controls, cancelled);
-        }
-        let reservoirs = admit(&self.gas, self.boundaries, reservoirs, &mut cancelled)?;
-        stabilized::advance(
-            self,
+        self.advance_stabilized_with_reservoirs_budget(
             flow,
             duration,
             controls,
             reservoirs,
             &mut 0,
             &mut cancelled,
+        )
+    }
+
+    // Coupled retries and full intervals retain every actual RHS evaluation,
+    // including work discarded when another owner shortens the shared step.
+    pub(in crate::multicomponent) fn advance_stabilized_with_reservoirs_budget(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: StabilizedDissipationControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        evaluations: &mut usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StabilizedDissipationReport, DissipationError> {
+        if reservoirs.iter().all(Option::is_none) {
+            return self.advance_stabilized_with_budget(
+                flow,
+                duration,
+                controls,
+                evaluations,
+                cancelled,
+            );
+        }
+        let reservoirs = admit(&self.gas, self.boundaries, reservoirs, cancelled)?;
+        stabilized::advance(
+            self,
+            flow,
+            duration,
+            controls,
+            reservoirs,
+            evaluations,
+            cancelled,
         )
     }
 }

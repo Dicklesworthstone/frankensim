@@ -7,6 +7,92 @@ use crate::multicomponent::network::dissipation::NetworkDissipationOperator;
 use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
+#[test]
+fn prescribed_bath_diffusion_survives_both_reacting_halves_and_finite_plenum_storage() {
+    use crate::multicomponent::network::coupled::NetworkSources;
+    use crate::multicomponent::network::dissipation::tests::law;
+    use crate::multicomponent::network::dissipation::tests::reservoir::{bath_network, bath_step};
+    let rate = 2.0;
+    let mechanism = mechanism(0.0, rate, 0.0);
+    let gas = MixtureGas::new(
+        mechanism.thermodynamics().clone(),
+        CaloricDomain::new(Temperature::new(0.001), Temperature::new(50.0)),
+        || false,
+    )
+    .unwrap();
+    let mut network = bath_network(&gas, false);
+    let rich = gas.conserved(&[0.8, 0.2], 0.0, 2.0).unwrap();
+    for q in network.branches[0].states.chunks_exact_mut(4) {
+        q.copy_from_slice(&[0.8, 0.2, 0.0, rich.energy]);
+    }
+    network.plenums[0].state = gas.conserved(&[0.6, 0.4], 0.0, 2.0).unwrap();
+    let bath = gas.conserved(&[0.9, 0.1], 0.0, 2.0).unwrap();
+    let mut molecular = NetworkDissipationOperator::new(
+        &network,
+        law(&gas, 0.0, 0.0, 0.0, 0.03),
+        vec![Length::new(0.15)],
+        || false,
+    )
+    .unwrap();
+    let mut flow = ReactingNetwork1d::new(network, mechanism, chemistry(), || false).unwrap();
+    let report = flow
+        .step_with_dissipation_reservoirs_and_sources(
+            &mut molecular,
+            Time::new(0.04),
+            ReactiveStepControl::default(),
+            DissipationControl::default(),
+            &[[Some(bath.as_cell()), None]],
+            NetworkSources::default(),
+            || false,
+        )
+        .unwrap();
+    let dt = report.elapsed.value();
+    let (diffused, first) = bath_step([0.8, 0.8, 0.6], 0.5 * dt);
+    // Both isomers have the same calorics: A is stationary and the two C
+    // halves are the exact reversible kinetic map about x_A=.5.
+    let reacted = diffused.map(|a| 0.5 + (a - 0.5) * (-2.0 * rate * dt).exp());
+    let (expected, second) = bath_step(reacted, 0.5 * dt);
+    for (i, &value) in expected[..2].iter().enumerate() {
+        close(
+            flow.branches()[0].cell(i).unwrap().partial_densities[0],
+            value,
+            7e-7,
+        );
+    }
+    close(
+        flow.plenums()[0].state().partial_densities[0],
+        expected[2],
+        7e-7,
+    );
+    let d = report.dissipation.unwrap();
+    assert!(d.first.boundary_change.species_masses[0] > 0.0);
+    assert!(d.second.boundary_change.species_masses[0] > 0.0);
+    assert!(report.chemistry.species_change_kg[0] < 0.0);
+    close(d.first.boundary_change.species_masses[0], first, 3e-12);
+    close(d.second.boundary_change.species_masses[0], second, 5e-9);
+    close(
+        report.transport.boundary_change.species_masses[0],
+        0.0,
+        3e-11,
+    );
+    close(
+        report.boundary_change.species_masses[0],
+        first + second,
+        5e-9,
+    );
+    for k in 0..2 {
+        close(
+            report.after.species_masses[k] - report.before.species_masses[k],
+            report.boundary_change.species_masses[k] + report.chemistry.species_change_kg[k],
+            3e-12,
+        );
+    }
+    close(report.mass_residual_kg, 0.0, 3e-12);
+    close(report.absolute_energy_residual_j, 0.0, 3e-11);
+    assert_eq!(flow.time(), report.elapsed);
+    assert_eq!(molecular.last_report(), Some(d.second));
+}
+
 pub(super) fn operator(
     network: &MixtureNetwork1d,
     diffusion: f64,
@@ -272,9 +358,7 @@ fn late_five_stage_cancellation_preserves_operator_and_network_publication() {
 #[test]
 fn reacting_molecular_wall_composition_closes_independent_gas_and_wall_energy() {
     use crate::multicomponent::network::wall_exchange::NetworkWallOperator;
-    use crate::multicomponent::wall_exchange::{
-        WallContact, WallControl, WallDrag, WallThermal,
-    };
+    use crate::multicomponent::wall_exchange::{WallContact, WallControl, WallDrag, WallThermal};
     let mechanism = mechanism(4.0, 10.0, 2.0);
     let initial = network(&mechanism, 4, true, 1.4);
     let contact = WallContact {
@@ -287,10 +371,21 @@ fn reacting_molecular_wall_composition_closes_independent_gas_and_wall_energy() 
     };
     let mut wall = NetworkWallOperator::new(
         &initial,
-        initial.branches().iter().map(|b| vec![contact; b.cell_count()]).collect(),
-        vec![WallContact { drag: WallDrag::None, ..contact }; initial.plenums().len()],
+        initial
+            .branches()
+            .iter()
+            .map(|b| vec![contact; b.cell_count()])
+            .collect(),
+        vec![
+            WallContact {
+                drag: WallDrag::None,
+                ..contact
+            };
+            initial.plenums().len()
+        ],
         || false,
-    ).unwrap();
+    )
+    .unwrap();
     let mut molecular = operator(&initial, 0.02, 0.001, 0.01);
     let mut flow = ReactingNetwork1d::new(initial, mechanism, chemistry(), || false).unwrap();
     let inventory = |flow: &ReactingNetwork1d, wall: &NetworkWallOperator| {
@@ -305,8 +400,8 @@ fn reacting_molecular_wall_composition_closes_independent_gas_and_wall_energy() 
         }
         for plenum in flow.plenums() {
             mass += plenum.volume_m3() * plenum.state().density();
-            energy += plenum.volume_m3()
-                * flow.gas().absolute_energy_density(plenum.state()).unwrap();
+            energy +=
+                plenum.volume_m3() * flow.gas().absolute_energy_density(plenum.state()).unwrap();
         }
         for contacts in (0..flow.branches().len())
             .map(|i| wall.branch_contacts(i).unwrap())
@@ -314,7 +409,9 @@ fn reacting_molecular_wall_composition_closes_independent_gas_and_wall_energy() 
         {
             for contact in contacts {
                 if let WallThermal::Lumped {
-                    temperature_k, heat_capacity_j_per_k, ..
+                    temperature_k,
+                    heat_capacity_j_per_k,
+                    ..
                 } = contact.thermal
                 {
                     energy += heat_capacity_j_per_k * (temperature_k - 3.0);
@@ -325,15 +422,17 @@ fn reacting_molecular_wall_composition_closes_independent_gas_and_wall_energy() 
     };
     let before = inventory(&flow, &wall);
     for _ in 0..4 {
-        let report = flow.step_with_dissipation_and_wall(
-            &mut molecular,
-            &mut wall,
-            Time::new(0.01),
-            ReactiveStepControl::default(),
-            DissipationControl::default(),
-            WallControl::default(),
-            || false,
-        ).unwrap();
+        let report = flow
+            .step_with_dissipation_and_wall(
+                &mut molecular,
+                &mut wall,
+                Time::new(0.01),
+                ReactiveStepControl::default(),
+                DissipationControl::default(),
+                WallControl::default(),
+                || false,
+            )
+            .unwrap();
         let halves = report.wall.unwrap();
         assert_eq!(halves.first.elapsed.value(), 0.5 * report.elapsed.value());
         assert_eq!(halves.second.elapsed, halves.first.elapsed);
@@ -356,30 +455,68 @@ fn moving_wall_drive_closes_actual_reacting_molecular_network_energy() {
     let mechanism = mechanism(4.0, 10.0, 2.0);
     let initial = network(&mechanism, 4, false, 1.0);
     let drive = WallContact {
-        drag: WallDrag::MovingLinear { rate_per_s: 2.0, wall_velocity_m_s: 0.4 },
+        drag: WallDrag::MovingLinear {
+            rate_per_s: 2.0,
+            wall_velocity_m_s: 0.4,
+        },
         thermal: WallThermal::Adiabatic,
     };
-    let mut wall = NetworkWallOperator::new(&initial,
-        initial.branches().iter().map(|b| vec![drive; b.cell_count()]).collect(),
-        vec![WallContact { drag: WallDrag::None, ..drive }; initial.plenums().len()],
-        || false).unwrap();
+    let mut wall = NetworkWallOperator::new(
+        &initial,
+        initial
+            .branches()
+            .iter()
+            .map(|b| vec![drive; b.cell_count()])
+            .collect(),
+        vec![
+            WallContact {
+                drag: WallDrag::None,
+                ..drive
+            };
+            initial.plenums().len()
+        ],
+        || false,
+    )
+    .unwrap();
     let mut molecular = operator(&initial, 0.02, 0.001, 0.01);
     let mut flow = ReactingNetwork1d::new(initial, mechanism, chemistry(), || false).unwrap();
     let energy = |flow: &ReactingNetwork1d| {
-        flow.branches().iter().flat_map(|b| {
-            b.mesh().volumes().iter().enumerate().map(move |(i, volume)| {
-                volume * flow.gas().absolute_energy_density(b.cell(i).unwrap()).unwrap()
+        flow.branches()
+            .iter()
+            .flat_map(|b| {
+                b.mesh()
+                    .volumes()
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, volume)| {
+                        volume
+                            * flow
+                                .gas()
+                                .absolute_energy_density(b.cell(i).unwrap())
+                                .unwrap()
+                    })
             })
-        }).sum::<f64>() + flow.plenums().iter().map(|p| {
-            p.volume_m3() * flow.gas().absolute_energy_density(p.state()).unwrap()
-        }).sum::<f64>()
+            .sum::<f64>()
+            + flow
+                .plenums()
+                .iter()
+                .map(|p| p.volume_m3() * flow.gas().absolute_energy_density(p.state()).unwrap())
+                .sum::<f64>()
     };
     let before = energy(&flow);
     let mut work = 0.0;
     for _ in 0..4 {
-        let report = flow.step_with_dissipation_and_wall(&mut molecular, &mut wall,
-            Time::new(0.01), ReactiveStepControl::default(), DissipationControl::default(),
-            WallControl::default(), || false).unwrap();
+        let report = flow
+            .step_with_dissipation_and_wall(
+                &mut molecular,
+                &mut wall,
+                Time::new(0.01),
+                ReactiveStepControl::default(),
+                DissipationControl::default(),
+                WallControl::default(),
+                || false,
+            )
+            .unwrap();
         let drive_work = wall.last_report().unwrap().mechanical_work_to_gas_j;
         assert!(drive_work > 0.0);
         assert!(report.chemistry.species_change_kg[0].abs() > 0.0);

@@ -2272,6 +2272,40 @@ this operator. Native source-linked
 checks are supplementary: `dsr quality --tool frankensim` is unavailable here
 (`dsr: command not found`), so no workspace DSR verdict is claimed.
 
+### Exterior molecular baths through complete network transactions
+
+`NetworkDissipationOperator::advance_with_reservoirs_for` supplies one optional
+left/right prescribed bath pair per branch. Only unconnected physical ends may
+use these states; prescribing a bath on a finite-plenum connection is refused.
+The original axial admission and reservoir flux kernel retain source calorics,
+physical end half-widths, bath species enthalpy and zero stationary-bath
+traction work. Bath primitives and volumetric heat capacities are admitted
+once per interval into construction-time scratch; original cells remain
+borrowed, with no new per-step numerical allocation. As with the characteristic
+reservoir API, raw `Cell` values require caller-consistent canonical species
+order and energy gauges; they carry no source identity token.
+
+Both `DissipatingNetwork1d::step_with_reservoirs[_and_sources]` and
+`ReactingNetwork1d::step_with_dissipation_reservoirs_and_sources` pass the same
+baths through both molecular halves and characteristic advection, including
+every coupled retry. Previously those prescribed states reached only advection,
+leaving the end molecular condition unchanged. The complete transaction now
+admits diffusion driven by an exterior composition or temperature difference
+even at zero pressure-driven flow. Advected donor enthalpy and molecular bath
+enthalpy remain separately accounted and enter the complete balance once each.
+Finite-plenum molecular storage and equal-and-opposite internal port exchanges
+continue through their existing owner and declared mixing lengths.
+
+Invalid topology/source states, work exhaustion and late cancellation leave
+all accepted fields, clocks, branch reports, port exchanges and whole-step
+reports unchanged. All absent baths retain the original molecular path and
+cancellation sequence. Six focused regressions cover an independently formed
+three-storage SSP update with a prescribed exterior bath and finite plenum,
+orientation and formation-gauge invariance, Fourier heat/storage balance,
+isobaric D/A/D diffusion and complete rollback, bath replenishment of a species
+consumed by reversible chemistry, and absent-bath/refusal/reuse behavior. They
+are authored physical tests; native execution is not implied by this contract.
+
 ## Reacting networks with molecular transport
 
 `ReactingNetwork1d::step_with_dissipation` composes
@@ -3138,10 +3172,12 @@ halves in one complete-duration retry.
 
 Reservoir states remain prescribed and undepleted during one call. Every
 transport retry recomputes their characteristic flux from the actual branch
-stage state. Reservoir mass/enthalpy appears exactly once in the transport
-boundary report; chemistry reference changes, molecular boundary transfer,
-wall heat, valve-internal exchange and moving-volume work keep their existing
-separate accounts. A shortened acoustic step restarts all chemistry, molecular,
+stage state. Advected reservoir mass/enthalpy appears once in the transport
+boundary report. When molecular evolution is selected, its two halves also
+use those baths and retain their distinct diffusive species/heat transfers.
+Chemistry reference changes, wall heat, valve-internal exchange and
+moving-volume work keep their separate accounts. A shortened acoustic step
+restarts all chemistry, molecular,
 wall and valve owners from accepted storage before replaying the pressure drive.
 Cancellation or source refusal publishes none of those states or receipts.
 
