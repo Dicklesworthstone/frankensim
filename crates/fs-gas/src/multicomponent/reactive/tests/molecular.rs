@@ -1,5 +1,6 @@
 use super::*;
 
+mod reservoir;
 mod stabilized;
 use crate::multicomponent::Boundary;
 use crate::multicomponent::dissipation::{

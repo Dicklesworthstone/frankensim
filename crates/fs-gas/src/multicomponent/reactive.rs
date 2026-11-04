@@ -12,7 +12,7 @@ use super::dissipation::{
     DissipationReport, TransportLaw,
 };
 use super::{
-    Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, StepControl,
+    Cell, Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, StepControl,
     StepReport as TransportStepReport, Totals, allocated, positive, sum,
 };
 use crate::chemistry::{IsochoricKineticsError, IsochoricReactor};
@@ -22,6 +22,7 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod cell;
 pub use cell::CellChemistry;
+mod reservoir;
 mod stabilized;
 pub use stabilized::{
     SplitStabilizedDissipationReport, StabilizedReactiveIntervalControl,
@@ -335,6 +336,7 @@ impl ReactingEuler1d {
             controls,
             None,
             stabilized::MolecularMethod::Explicit(DissipationControl::default()),
+            [None; 2],
             None,
             cancelled,
         ).map(|(report, _)| report)
@@ -360,17 +362,20 @@ impl ReactingEuler1d {
             controls,
             Some(operator),
             stabilized::MolecularMethod::Explicit(dissipation_controls),
+            [None; 2],
             None,
             cancelled,
         ).map(|(report, _)| report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn step_impl<L: TransportLaw>(
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
         mut operator: Option<&mut DissipationOperator<L>>,
         mut molecular: stabilized::MolecularMethod<'_>,
+        reservoirs: [Option<Cell<'_>>; 2],
         mut interval_budget: Option<&mut stabilized::CouplingBudget>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
@@ -381,6 +386,7 @@ impl ReactingEuler1d {
                 "reacting duration, CFL or retry controls",
             ));
         }
+        reservoir::admit(&self.accepted, reservoirs, &mut cancelled)?;
         let before = self.accepted.totals();
         let mut duration = maximum_duration.value();
         // Start within the original acoustic scale before paying for chemistry.
@@ -417,6 +423,7 @@ impl ReactingEuler1d {
                         operator,
                         &mut self.trial,
                         Time::new(0.5 * duration),
+                        reservoirs,
                         &mut cancelled,
                     )?),
                     None => None,
@@ -429,9 +436,9 @@ impl ReactingEuler1d {
                     &mut report,
                     &mut cancelled,
                 )?;
-                let transport =
-                    self.trial
-                        .step(Time::new(duration), controls.transport, &mut cancelled)?;
+                let transport = self.trial.step_with_reservoirs(
+                    Time::new(duration), controls.transport, reservoirs, &mut cancelled,
+                )?;
                 if transport.elapsed.value() != duration {
                     return Ok((transport, false, None, None));
                 }
@@ -448,6 +455,7 @@ impl ReactingEuler1d {
                         operator,
                         &mut self.trial,
                         Time::new(0.5 * duration),
+                        reservoirs,
                         &mut cancelled,
                     )?),
                     None => None,

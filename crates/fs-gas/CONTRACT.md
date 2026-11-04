@@ -2038,6 +2038,38 @@ with maximum/mean conservative-component discrepancies 7.29747e-6 /
 2.36738e-7. These are fixture-specific operation counts and numerical
 accuracy checks, not measured runtime or material-validation claims.
 
+### Stationary reservoir baths through reacting fields
+
+`ReactingEuler1d::step_with_reservoirs` advances the existing C-A-C composition
+against prescribed species-bearing exterior cells.
+`step_with_dissipation_and_reservoirs` and
+`step_with_stabilized_dissipation_and_reservoirs` pass those SAME bath states to
+the advective stage and both molecular halves of the original D-C-A-C-D owner.
+Every whole-step retry starts from the accepted field and replays the baths
+over the actual shortened duration. Chemistry advances only the interior.
+Original characteristic inflow/outflow, half-cell molecular gradients, bath
+enthalpy and stationary traction work retain their constitutive owners.
+
+`advance_stabilized_with_reservoirs_for` and
+`advance_stabilized_with_reservoirs_to` extend the same coupling to complete
+physical windows. Original compensated advective, molecular, chemical and
+left/right boundary accounts include each transfer once. A single molecular
+RHS budget covers both halves, all retries and all accepted steps; the original
+separate coupled-attempt bound and complete-window rollback remain in force.
+Baths are admitted even on a zero-duration window. Two absent baths preserve
+the original state, reports and cancellation sequence.
+
+Bath cells must use the original canonical species order and energy gauges;
+their borrowed representation has no source identity token. Prescribed baths
+are stationary and undepleted, and periodic fields refuse them. The existing
+finite network/plenum owner supplies finite storage. Moving baths, general
+boundary histories within one call and a global splitting-error estimator are
+outside this interface. The new focused regressions cover an independent
+Dirichlet reaction-diffusion eigenmode, characteristic inlet species/enthalpy,
+heat-release retries and shared work budgets, full-window rollback/reuse and
+absent-bath equivalence. These are numerical/source consistency tests, not
+experimental reaction or transport validation.
+
 ## Characteristic ports with distinct local compositions
 
 `MixtureGas::reservoir_flux` connects a conservative duct trace to a stationary

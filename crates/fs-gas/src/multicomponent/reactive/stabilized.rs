@@ -118,21 +118,25 @@ impl MolecularMethod<'_> {
         operator: &mut DissipationOperator<L>,
         flow: &mut MixtureEuler1d,
         duration: Time,
+        reservoirs: [Option<Cell<'_>>; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularHalf, ReactiveError> {
         match self {
             Self::Explicit(controls) => Ok(MolecularHalf {
-                physical: operator.advance_for(flow, duration, *controls, cancelled)?,
+                physical: operator.advance_with_reservoirs_for(
+                    flow, duration, *controls, reservoirs, cancelled,
+                )?,
                 stabilized: None,
             }),
             Self::Stabilized {
                 controls,
                 evaluations,
             } => {
-                let report = operator.advance_stabilized_with_budget(
+                let report = operator.advance_stabilized_with_reservoirs_budget(
                     flow,
                     duration,
                     *controls,
+                    reservoirs,
                     evaluations,
                     cancelled,
                 )?;
@@ -210,6 +214,7 @@ impl ReactingEuler1d {
             maximum_duration,
             controls,
             dissipation_controls,
+            [None; 2],
             &mut 0,
             None,
             &mut cancelled,
@@ -217,12 +222,13 @@ impl ReactingEuler1d {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn stabilized_step<L: TransportLaw>(
+    pub(super) fn stabilized_step<L: TransportLaw>(
         &mut self,
         operator: &mut DissipationOperator<L>,
         maximum_duration: Time,
         controls: ReactiveStepControl,
         dissipation_controls: StabilizedDissipationControl,
+        reservoirs: [Option<Cell<'_>>; 2],
         evaluations: &mut usize,
         budget: Option<&mut CouplingBudget>,
         cancelled: &mut impl FnMut() -> bool,
@@ -236,6 +242,7 @@ impl ReactingEuler1d {
                 controls: dissipation_controls,
                 evaluations,
             },
+            reservoirs,
             budget,
             cancelled,
         )?;
@@ -257,6 +264,17 @@ impl ReactingEuler1d {
         operator: &mut DissipationOperator<L>,
         duration: Time,
         controls: StabilizedReactiveIntervalControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
+        self.advance_stabilized_for_impl(operator, duration, controls, [None; 2], cancelled)
+    }
+
+    pub(super) fn advance_stabilized_for_impl<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        duration: Time,
+        controls: StabilizedReactiveIntervalControl,
+        reservoirs: [Option<Cell<'_>>; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -271,7 +289,13 @@ impl ReactingEuler1d {
                 "reacting duration is not representable at this clock",
             ));
         }
-        self.advance_stabilized_to(operator, Time::new(target), controls, cancelled)
+        self.advance_stabilized_to_impl(
+            operator,
+            Time::new(target),
+            controls,
+            reservoirs,
+            cancelled,
+        )
     }
 
     /// Reach an explicit represented target using molecular/chemistry/advection.
@@ -291,6 +315,17 @@ impl ReactingEuler1d {
         operator: &mut DissipationOperator<L>,
         target: Time,
         controls: StabilizedReactiveIntervalControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
+        self.advance_stabilized_to_impl(operator, target, controls, [None; 2], cancelled)
+    }
+
+    pub(super) fn advance_stabilized_to_impl<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        target: Time,
+        controls: StabilizedReactiveIntervalControl,
+        reservoirs: [Option<Cell<'_>>; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedReactiveIntervalReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -301,6 +336,7 @@ impl ReactingEuler1d {
                 "finite nondecreasing reacting target required",
             ));
         }
+        reservoir::admit(&self.accepted, reservoirs, &mut cancelled)?;
         if self.interval_initial.len() != self.accepted.states.len() {
             self.interval_initial = allocated(self.accepted.states.len(), 0.0)?;
         }
@@ -318,10 +354,11 @@ impl ReactingEuler1d {
         let outcome = (|| {
             if target.value() == start {
                 // A no-op still admits the exact original operator and source.
-                operator.advance_stabilized_with_budget(
+                operator.advance_stabilized_with_reservoirs_budget(
                     &mut self.accepted,
                     Time::new(0.0),
                     controls.dissipation,
+                    reservoirs,
                     &mut evaluations,
                     &mut cancelled,
                 )?;
@@ -335,6 +372,7 @@ impl ReactingEuler1d {
                     Time::new(remaining),
                     controls.step,
                     controls.dissipation,
+                    reservoirs,
                     &mut evaluations,
                     Some(&mut budget),
                     &mut cancelled,
