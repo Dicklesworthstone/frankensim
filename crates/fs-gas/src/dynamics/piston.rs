@@ -14,6 +14,9 @@ use super::{
 };
 use fs_qty::Time;
 
+pub(crate) mod suspension;
+pub use suspension::{PistonSuspension, SuspendedPistonStep};
+
 /// Inertial axial wall. Its position and area belong to the gas geometry.
 /// Positive axial velocity expands a chamber on its left and compresses a
 /// chamber on its right. A shared-piston owner binds both interface endpoints.
@@ -296,10 +299,55 @@ impl Euler1d {
         gas_controls: StepControl,
         load: PistonLoad,
         controls: PistonControl,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep, PistonError> {
+        self.step_with_piston_suspension(
+            piston, maximum_duration, gas_controls, load, None, controls, cancelled,
+        ).map(|step| step.piston)
+    }
+
+    /// Couple a stationary spring and viscous damper to the SAME pressure solve.
+    ///
+    /// Spring force uses the actual midpoint displacement and damping uses the
+    /// solved midpoint velocity. Both enter every native gas/piston trial,
+    /// instead of a delayed force or a separate velocity update. The mesh alone
+    /// owns position. Spring storage and damper loss are independently checked
+    /// against the original gas, piston, pressure and drive work before commit.
+    /// Damper heat leaves this mechanical system; it is not added to the gas.
+    /// The source, CFL, nonlinear-work and cancellation limits of
+    /// [`Self::step_with_piston`] remain authoritative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_suspended_piston(
+        &mut self,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        load: PistonLoad,
+        suspension: PistonSuspension,
+        controls: PistonControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep, PistonError> {
+        self.step_with_piston_suspension(
+            piston, maximum_duration, gas_controls, load, Some(suspension), controls, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_piston_suspension(
+        &mut self,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        load: PistonLoad,
+        suspension: Option<PistonSuspension>,
+        controls: PistonControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep, PistonError> {
         poll(&mut cancelled)?;
         validate(*piston, maximum_duration, gas_controls, load, controls)?;
+        let suspension = suspension.map(|law| {
+            law.bind(self.mesh.positions()[self.states.len()])
+        }).transpose()?;
         let [lo, hi] = controls.midpoint_velocity_bracket_m_s;
         if self.boundaries
             != (Boundaries::Ends {
@@ -381,10 +429,14 @@ impl Euler1d {
                 let exchange = MechanicalExchange::from(&gas);
                 let end = self.states.len();
                 let displacement = moving.mesh.positions()[end] - self.mesh.positions()[end];
-                mechanical_report(gas, exchange, *piston, load, speed, displacement, area)
-            });
+                let trial_load = suspension.map_or(Ok(load), |spring| {
+                    spring.load(load, speed, displacement)
+                })?;
+                mechanical_report(gas, exchange, *piston, trial_load, speed, displacement, area)
+            }).and_then(|report| suspension::finish(suspension, report, load, dt, controls));
             match result {
-                Ok(mut report) => {
+                Ok(mut step) => {
+                    let report = &mut step.piston;
                     report.gas.halvings = halvings;
                     report.gas.first_order_retry =
                         first_order_retry && gas_controls.reconstruction == Reconstruction::Muscl;
@@ -393,8 +445,8 @@ impl Euler1d {
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     core::mem::swap(&mut self.mesh, &mut moving.mesh);
                     self.time += dt;
-                    piston.accept(&report);
-                    return Ok(report);
+                    piston.accept(report);
+                    return Ok(step);
                 }
                 Err(PistonError::Cancelled) => return Err(PistonError::Cancelled),
                 Err(PistonError::Gas(GasError::Allocation)) => {

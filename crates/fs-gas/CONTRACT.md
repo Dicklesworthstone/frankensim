@@ -4137,3 +4137,45 @@ fallback; disconnected cells; and every cancellation checkpoint with exact
 retry and retained workspace storage. All 25 selected-source native tests passed, including
 the existing common-linear, shared, drag and pair regressions. Full Cargo
 and network/material integration execution remain outside this native run.
+
+## Suspended pistons on the original resolved pressure field
+
+`Euler1d::step_with_suspended_piston` and
+`MixtureEuler1d::step_with_suspended_piston` add an explicitly authored
+`PistonSuspension` to the existing moving-volume RK2 and midpoint-inertia
+owners. A stationary axial spring uses nonnegative stiffness, a declared
+zero-force world position and the actual represented displacement midpoint.
+A viscous damper uses nonnegative damping and the same solved midpoint
+velocity. Both loads enter every original pressure/velocity trial; neither
+an explicit force kick nor a uniform chamber approximation replaces the
+resolved pressure field. The gas mesh remains the sole position owner.
+Coefficients and anchor are held over each reported step. Changing stiffness
+or rest position between calls can change spring storage outside that step;
+the caller owns that constitutive or anchor work.
+
+The accepted report retains the complete native gas/piston report and
+separates initial/final spring storage, cancellation-safe quadratic storage
+change, viscous loss `c*w²*dt`, anchor impulse and authored drive work.
+The original nested additional-force work includes spring/damper work;
+`applied_force_work_j` isolates the held external drive. Damper loss leaves
+the mechanical system and is not deposited into gas internal energy.
+Independent gas-plus-kinetic-plus-spring energy and mechanical-work gates
+include the same exterior pressure work and refuse before any publication.
+The time-integrated damping loss is independent of represented displacement,
+so geometry rounding cannot silently manufacture energy closure.
+
+Every trial reuses the native field/source/geometry workspace. CFL and source
+refusals restart the complete attempt at a shortened duration, and a final
+cancellation checkpoint precedes joint gas, mesh, clock and velocity commit.
+The held-force entrypoints retain their original arithmetic; zero stiffness
+and damping reproduce them exactly. Evolving-mixture sources retain each
+species and its original formation-energy reference, including exact absences.
+This supplies a linear stationary suspension, not Coulomb friction, contact
+stops, moving anchors, heat return, reacting-piston composition or an automatic
+mechanical accuracy guarantee. The requested duration must resolve the
+physical spring/damping and gas timescales.
+
+Focused regressions exercise independent midpoint-force solutions, repeated
+pressure-driven trajectories with full gas/kinetic/spring/loss and momentum
+balance, preloaded equilibrium, exact free-piston reduction, variable-Cp
+species and energy-gauge invariance, and early/final cancellation rollback.

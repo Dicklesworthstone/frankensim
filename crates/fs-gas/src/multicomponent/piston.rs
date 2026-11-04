@@ -9,7 +9,7 @@ use super::{
 use crate::dynamics::MovingWorkspace;
 use crate::dynamics::piston::{
     MechanicalExchange, Piston, PistonControl, PistonError, PistonLoad, PistonStep,
-    mechanical_report, solve, validate,
+    PistonSuspension, SuspendedPistonStep, mechanical_report, solve, suspension, validate,
 };
 use fs_qty::Time;
 
@@ -57,10 +57,53 @@ impl MixtureEuler1d {
         gas_controls: StepControl,
         load: PistonLoad,
         controls: PistonControl,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<StepReport>, PistonError> {
+        self.step_with_piston_suspension(
+            piston, maximum_duration, gas_controls, load, None, controls, cancelled,
+        ).map(|step| step.piston)
+    }
+
+    /// Resolve spring/damper feedback with evolving species and pressure waves.
+    ///
+    /// Uses the same suspension, midpoint-speed root and independent storage/
+    /// loss accounting as [`crate::dynamics::Euler1d::step_with_suspended_piston`].
+    /// Each original mixture trial retains all canonical species and formation
+    /// references; spring energy and viscous loss never become chemical or gas
+    /// internal energy. Geometry, source support, CFL and final publication obey
+    /// [`Self::step_with_piston`]. No source update or field clone is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_suspended_piston(
+        &mut self,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        load: PistonLoad,
+        suspension: PistonSuspension,
+        controls: PistonControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<StepReport>, PistonError> {
+        self.step_with_piston_suspension(
+            piston, maximum_duration, gas_controls, load, Some(suspension), controls, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_piston_suspension(
+        &mut self,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        load: PistonLoad,
+        suspension: Option<PistonSuspension>,
+        controls: PistonControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<StepReport>, PistonError> {
         poll(&mut cancelled)?;
         validate(*piston, maximum_duration, gas_controls, load, controls)?;
+        let suspension = suspension.map(|law| {
+            law.bind(self.mesh.positions()[self.mesh.cell_count()])
+        }).transpose()?;
         if self.boundaries
             != (Boundaries::Ends {
                 left: Boundary::Reflecting,
@@ -157,10 +200,14 @@ impl MixtureEuler1d {
                 let gas = reported_step(before, after, [a, b], dt, area, n)?;
                 let exchange = MechanicalExchange::from(&gas);
                 let displacement = moving.mesh.positions()[count] - self.mesh.positions()[count];
-                mechanical_report(gas, exchange, *piston, load, speed, displacement, area)
-            });
+                let trial_load = suspension.map_or(Ok(load), |spring| {
+                    spring.load(load, speed, displacement)
+                })?;
+                mechanical_report(gas, exchange, *piston, trial_load, speed, displacement, area)
+            }).and_then(|report| suspension::finish(suspension, report, load, dt, controls));
             match result {
-                Ok(mut report) => {
+                Ok(mut step) => {
+                    let report = &mut step.piston;
                     report.gas.halvings = halvings;
                     report.gas.first_order_retry =
                         first_order_retry && gas_controls.reconstruction == Reconstruction::Muscl;
@@ -169,8 +216,8 @@ impl MixtureEuler1d {
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     core::mem::swap(&mut self.mesh, &mut moving.mesh);
                     self.time += dt;
-                    piston.accept(&report);
-                    return Ok(report);
+                    piston.accept(report);
+                    return Ok(step);
                 }
                 Err(PistonError::Cancelled) => return Err(PistonError::Cancelled),
                 Err(PistonError::MixtureGas(Error::Allocation)) => {

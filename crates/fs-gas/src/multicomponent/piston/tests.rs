@@ -4,6 +4,8 @@ use crate::multicomponent::{Mesh1d, MixtureGas};
 use fs_qty::{Length, Temperature};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+mod suspension;
+
 const AREA: f64 = 0.7;
 const CLOSED: Boundaries = Boundaries::Ends {
     left: Boundary::Reflecting,

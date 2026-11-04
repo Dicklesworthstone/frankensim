@@ -2,6 +2,8 @@ use super::*;
 use crate::dynamics::tests::gas;
 use fs_qty::Length;
 
+mod suspension;
+
 const AREA: f64 = 0.7;
 const CLOSED: Boundaries = Boundaries::Ends {
     left: Boundary::Reflecting,
