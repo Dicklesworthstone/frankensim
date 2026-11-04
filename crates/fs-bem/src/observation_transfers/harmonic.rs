@@ -484,7 +484,10 @@ impl PreparedMicrophoneArray<'_> {
 }
 
 mod momentum;
-pub use momentum::{HarmonicMomentumFlux, PreparedHarmonicSurfaceMomentum};
+pub use momentum::{
+    HarmonicMomentumFlux, HarmonicMomentumWelchLine, PreparedHarmonicSurfaceMomentum,
+    PreparedWelchSurfaceMomentum,
+};
 
 pub(super) mod welch;
 

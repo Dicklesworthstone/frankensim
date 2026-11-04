@@ -2902,3 +2902,43 @@ partition/common-clock invariance, direct weak wall work and cancellation.
 Their BEM/material declarations are unlinked and supply no substitute physics.
 One additional original passive-wall/retained-solve integration test and the
 point-source refusal extension remain unrun without the sibling constellation.
+
+### Measured broadband radiation momentum
+
+`PreparedHarmonicSurfaceMomentum::evaluate_welch_bin` and
+`PreparedWelchSurfaceMomentum` transport the original shared Welch source
+factors through the retained physical BEM pressure/velocity operator and its
+inviscid radiation-stress law. Source phase, near-field velocity correlations,
+incident/scattered interference, signed oriented traction and torque survive.
+The shared `WelchPeakBin` conversion applies sqrt(2 df) once; the original
+peak-phasor stress supplies the cycle-average factor. Results are N and N m
+integrated over the selected bins, not densities per hertz. Segment factors
+are the estimator's Gram factors, not asserted independent realizations.
+
+The band requires strictly increasing positive interior bins and matching
+frequency-specific transfer owners: producer identity, physical source kinds
+and order, receiver geometry and nondispersive resting fluid. DC/Nyquist,
+duplicate bins, substituted banks and molecular/relaxing stress are refused,
+including for silence. Missing bins remain outside the selected band. This
+spectral-power result supplies neither cross-frequency covariance nor a
+finite-time impulse. Only an appropriately closed outward surface enclosing
+the complete system can identify its cycle-mean reaction as negative flux;
+arbitrary patches do not establish body forces or spatial convergence.
+
+Preparation and queries borrow their inputs and allocate no heap storage.
+One fixed 64 KiB stack buffer converts each segment's source coefficients once;
+selected surface fields then reuse the original compensated reduction and
+stress contraction. A whole-band product limit covers every supplied bin,
+segment, source and quadrature entry. Stress and torque remain compensated
+across frequencies until the final result. Bounded cancellation publishes no
+partial momentum result and leaves the observer reusable.
+
+Four new native tests pass, together with six original momentum and four
+measured-field tests. New cases cover signed standing-wave stress and Hann
+leakage recovery, a two-frequency full-velocity/torque comparison against
+independent real-time quadrature, origin translation, original-owner/band/work
+admission, late cancellation/replay, and a unit field surviving 1e16-scale
+source cancellation. These compile the production retained-field, stress and
+Welch algorithms; they do not execute a BEM boundary solve or validate a
+material model. Full Cargo/DSR integration remains unavailable without the
+sibling constellation dependencies.

@@ -22,6 +22,9 @@
 use super::*;
 use fs_math::dd::Dd;
 
+mod welch;
+pub use welch::{HarmonicMomentumWelchLine, PreparedWelchSurfaceMomentum};
+
 /// Signed outgoing momentum rates through the declared oriented quadrature.
 /// Signs reverse when every area vector reverses. These are whole-cycle means.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
