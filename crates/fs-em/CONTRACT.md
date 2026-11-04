@@ -2710,6 +2710,26 @@ aperture edges, evanescent illumination sources, transient momentum storage,
 thermal state evolution and arbitrary coherence between different frequencies
 are not inferred by this addition.
 
+### Exact depth-integrated heat for monochromatic beams
+
+`PreparedAngularSpectrumLayer::absorbed_power_in_depth_interval_w` and
+`PreparedAngularSpectrumIllumination::layer_absorbed_power_in_depth_interval_w`
+return physical watts over one film depth interval and the complete original
+periodic transverse cell. Each polarization/bin reuses the native analytic
+interval loss, retaining coherent counterbeam and internal standing-wave
+interference before its power is formed. Transverse Fourier orthogonality and
+TE/TM electric-field orthogonality then permit the full-cell power sum.
+These queries allocate nothing, require O(grid points) work, poll cancellation,
+and use neither depth quadrature nor FFTs. Endpoint bounds and original source
+admission remain attached. Refusal leaves the prepared owners unchanged.
+
+The returned watts already include area and depth integration; a thermal
+consumer supplies time and deposits each disjoint interval once. Finite
+transverse apertures, spatial heat maps and finite-window multifrequency
+heating retain their existing field/exposure paths. Focused regressions compare
+independent local Poynting work and refined spatial/depth heat quadrature,
+interval additivity, one-face reduction, invalid cells and cancellation.
+
 ### Spatial partial coherence through the same diffracting films
 
 `angular_spectrum::AngularSpectrumCoherence` borrows original prepared beams

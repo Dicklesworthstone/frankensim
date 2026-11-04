@@ -143,6 +143,52 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
     pub fn absorbed_power_w(&self) -> f64 {
         self.absorbed_power_w
     }
+
+    /// Cycle-mean watts absorbed between two depths in this original film,
+    /// integrated continuously over the beam's complete periodic cell.
+    ///
+    /// The native positive film-loss operator integrates each depth interval
+    /// exactly, including attenuation and counterpropagating interference.
+    /// Distinct transverse Fourier modes are orthogonal on the full cell;
+    /// TE and TM electric fields are orthogonal within each mode. Their powers
+    /// therefore add only AFTER each mode's coherent interior loss is formed.
+    /// This is not a local sample or a finite transverse-aperture average.
+    ///
+    /// Depths are measured from the selected layer's first face and must obey
+    /// `0 <= start <= end <= thickness`. Equal depths absorb exactly zero.
+    /// The query reuses the prepared material/field responses, takes linear
+    /// work in the admitted grid size, and allocates no FFT or depth buffer.
+    pub fn absorbed_power_in_depth_interval_w(
+        &self,
+        start_depth_m: f64,
+        end_depth_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        let grid = self.beam.grid;
+        let area =
+            (grid.width as f64 * grid.spacing_m[0]) * (grid.height as f64 * grid.spacing_m[1]);
+        let mut sum = fs_math::dd::Dd::ZERO;
+        for (index, (mode, prepared)) in self.beam.modes.iter().zip(&self.modes).enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            let amplitudes = polarized(mode.incident_e, basis(mode.kx, mode.ky));
+            for p in 0..2 {
+                let absorbed = prepared[p]
+                    .absorbed_power_in_depth_interval_w_m2(start_depth_m, end_depth_m)?;
+                sum = sum + fs_math::dd::Dd::from_f64(area * (amplitudes[p].norm_sq() * absorbed));
+            }
+        }
+        let power = sum.to_f64();
+        if !power.is_finite() || power < 0.0 {
+            return Err(bad(
+                "selected layer depth-interval absorption is unrepresentable",
+            ));
+        }
+        poll(&mut cancelled)?;
+        Ok(power)
+    }
     pub fn workspace_bytes(&self) -> usize {
         self.workspace_bytes
     }

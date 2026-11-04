@@ -252,6 +252,51 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
     pub fn layer_absorbed_power_w(&self, layer: usize) -> Option<f64> {
         self.layer_power_w.get(layer).copied()
     }
+
+    /// Exact cycle-mean heat in one film depth interval over the complete
+    /// original periodic cell, in watts. Both face amplitudes interfere in
+    /// the native positive loss modes before powers are formed.
+    ///
+    /// Transverse Fourier orthogonality removes cross-bin terms only for the
+    /// full cell. No local heating map, finite transverse aperture or finite
+    /// time-window average is inferred. The interval lies in the selected
+    /// film and is measured from its left face; equal endpoints give zero.
+    /// Work is linear in the already admitted mode count, with no allocation,
+    /// material reevaluation, stack solve, FFT or depth quadrature.
+    pub fn layer_absorbed_power_in_depth_interval_w(
+        &self,
+        layer_index: usize,
+        start_depth_m: f64,
+        end_depth_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        let grid = self.beam.grid;
+        let area =
+            (grid.width as f64 * grid.spacing_m[0]) * (grid.height as f64 * grid.spacing_m[1]);
+        let mut sum = Dd::ZERO;
+        for (index, mode) in self.modes.iter().enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            for p in 0..2 {
+                let interval = mode.prepared[p].prepare_depth_interval(
+                    layer_index,
+                    start_depth_m,
+                    end_depth_m,
+                )?;
+                sum = sum + Dd::from_f64(area * interval.evaluate(mode.input[p])?);
+            }
+        }
+        let power = sum.to_f64();
+        if !power.is_finite() || power < 0.0 {
+            return Err(bad(
+                "two-sided depth-interval absorption is unrepresentable",
+            ));
+        }
+        poll(&mut cancelled)?;
+        Ok(power)
+    }
     pub fn workspace_bytes(&self) -> usize {
         self.workspace_bytes
     }

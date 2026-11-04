@@ -40,6 +40,210 @@ fn close(a: f64, b: f64) {
 }
 
 #[test]
+fn depth_resolved_beam_heat_closes_local_maxwell_work_and_spatial_quadrature() {
+    // G1/G3: multiple transverse modes, both polarizations and two coherent
+    // faces. The independent flux and local-volume oracles use E/H, never
+    // the new interval-loss operator or another sum of per-mode absorptances.
+    let outside = material(E, M);
+    let film = finite_layers::debye(3.0 * E, 4.0 * E, 1.0, 1.0);
+    let thickness = 0.13;
+    let stack = PlanarDielectricLayers::try_new(
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        1e9,
+        &[DielectricLayer {
+            response: DielectricResponse::Debye(&film),
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    let g = grid(3.0);
+    let input: Vec<_> = (0..16)
+        .map(|i| [phase(i as f64 * 0.4), phase(i as f64 * -0.6).scale(0.3)])
+        .collect();
+    let right: Vec<_> = (0..16)
+        .map(|i| [phase(i as f64 * -0.7).scale(0.6), phase(i as f64 * 0.9)])
+        .collect();
+    let beam = PlanarAngularSpectrum::prepare(&stack, g, &input, limits(), || false).unwrap();
+    let single = beam
+        .prepare_layer(
+            0,
+            AngularSpectrumLayerLimits {
+                maximum_layer_mode_pairs: 1024,
+                maximum_workspace_bytes: 2 << 20,
+                maximum_fft_work: 1 << 20,
+            },
+            || false,
+        )
+        .unwrap();
+    let dual = beam
+        .prepare_illumination(&right, dual_limits(), || false)
+        .unwrap();
+    let dark = beam
+        .prepare_illumination(&vec![[C64::ZERO; 2]; 16], dual_limits(), || false)
+        .unwrap();
+    let cuts = [0.0, 0.004, 0.047, 0.09, thickness];
+    let mut total = 0.0;
+    let mut single_total = 0.0;
+    for pair in cuts.windows(2) {
+        let [a, b] = [pair[0], pair[1]];
+        let exact = dual
+            .layer_absorbed_power_in_depth_interval_w(0, a, b, || false)
+            .unwrap();
+        assert!(exact > 0.0);
+        let entering = dual
+            .layer_field(0, a, || false)
+            .unwrap()
+            .field()
+            .normal_power_w();
+        let leaving = dual
+            .layer_field(0, b, || false)
+            .unwrap()
+            .field()
+            .normal_power_w();
+        close(exact, entering - leaving);
+        total += exact;
+        let one_face = single
+            .absorbed_power_in_depth_interval_w(a, b, || false)
+            .unwrap();
+        close(
+            one_face,
+            dark.layer_absorbed_power_in_depth_interval_w(0, a, b, || false)
+                .unwrap(),
+        );
+        single_total += one_face;
+    }
+    close(total, dual.layer_absorbed_power_w(0).unwrap());
+    close(single_total, single.absorbed_power_w());
+
+    // Integrate sigma_eff |E|²/2 over actual volume at independently chosen
+    // depth samples. The full periodic-cell spatial sum is exact for these
+    // cycle-mean represented modes; Simpson error is refined in depth only.
+    let [a, b] = [0.011, 0.103];
+    let exact = dual
+        .layer_absorbed_power_in_depth_interval_w(0, a, b, || false)
+        .unwrap();
+    let mut previous_error = f64::INFINITY;
+    for steps in [8, 32, 128] {
+        let mut integral = 0.0;
+        for i in 0..=steps {
+            let z = a + (b - a) * i as f64 / steps as f64;
+            let field = dual.layer_field(0, z, || false).unwrap();
+            let weight = if i == 0 || i == steps {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            integral += weight * field.absorbed_power_per_depth_w_m();
+        }
+        integral *= (b - a) / (3 * steps) as f64;
+        let error = (integral - exact).abs();
+        assert!(
+            error < previous_error * 0.02,
+            "depth quadrature error {error}, previous {previous_error}"
+        );
+        previous_error = error;
+    }
+    assert!(previous_error < 2e-11 * exact);
+}
+
+#[test]
+fn beam_interval_heat_refuses_invalid_cells_and_cancellation_without_state_change() {
+    let outside = material(E, M);
+    let film = finite_layers::debye(3.0 * E, 4.0 * E, 1.0, 1.0);
+    let thickness = 0.13_f64;
+    let stack = PlanarDielectricLayers::try_new(
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        1e9,
+        &[DielectricLayer {
+            response: DielectricResponse::Debye(&film),
+            thickness_m: thickness,
+        }],
+    )
+    .unwrap();
+    let beam = PlanarAngularSpectrum::prepare(
+        &stack,
+        grid(3.0),
+        &vec![[C64::ONE, C64::ZERO]; 16],
+        limits(),
+        || false,
+    )
+    .unwrap();
+    let single = beam
+        .prepare_layer(
+            0,
+            AngularSpectrumLayerLimits {
+                maximum_layer_mode_pairs: 1024,
+                maximum_workspace_bytes: 2 << 20,
+                maximum_fft_work: 1 << 20,
+            },
+            || false,
+        )
+        .unwrap();
+    let dual = beam
+        .prepare_illumination(&vec![[C64::ZERO, C64::ONE]; 16], dual_limits(), || false)
+        .unwrap();
+    let before = dual
+        .layer_absorbed_power_in_depth_interval_w(0, 0.01, 0.07, || false)
+        .unwrap();
+    for [a, b] in [
+        [-0.01, 0.02],
+        [0.03, 0.02],
+        [0.0, thickness.next_up()],
+        [f64::NAN, 0.02],
+        [0.0, f64::INFINITY],
+    ] {
+        assert!(
+            single
+                .absorbed_power_in_depth_interval_w(a, b, || false)
+                .is_err()
+        );
+        assert!(
+            dual.layer_absorbed_power_in_depth_interval_w(0, a, b, || false)
+                .is_err()
+        );
+    }
+    assert!(
+        dual.layer_absorbed_power_in_depth_interval_w(1, 0.0, 0.0, || false)
+            .is_err()
+    );
+    for z in [0.0, 0.02, thickness] {
+        assert_eq!(
+            single
+                .absorbed_power_in_depth_interval_w(z, z, || false)
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            dual.layer_absorbed_power_in_depth_interval_w(0, z, z, || false)
+                .unwrap(),
+            0.0
+        );
+    }
+    assert!(matches!(
+        single.absorbed_power_in_depth_interval_w(0.01, 0.07, || true),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    let mut polls = 0;
+    assert!(matches!(
+        dual.layer_absorbed_power_in_depth_interval_w(0, 0.01, 0.07, || {
+            polls += 1;
+            polls >= 3
+        }),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    assert_eq!(
+        before.to_bits(),
+        dual.layer_absorbed_power_in_depth_interval_w(0, 0.01, 0.07, || false)
+            .unwrap()
+            .to_bits()
+    );
+}
+
+#[test]
 fn coherent_counterbeams_match_direct_fourier_maxwell_fields_at_both_faces() {
     let left = material(1.0, 1.0);
     let right = material(2.25, 0.8);
@@ -208,11 +412,13 @@ fn coherent_counterbeams_match_direct_fourier_maxwell_fields_at_both_faces() {
             };
             if let Some((epsilon, mu, normal)) = exterior {
                 for i in 0..16 {
-                    let energy = 0.25 * (epsilon * e[i].iter().map(|z| z.norm_sq()).sum::<f64>()
-                        + mu * h[i].iter().map(|z| z.norm_sq()).sum::<f64>());
+                    let energy = 0.25
+                        * (epsilon * e[i].iter().map(|z| z.norm_sq()).sum::<f64>()
+                            + mu * h[i].iter().map(|z| z.norm_sq()).sum::<f64>());
                     for c in 0..3 {
-                        let traction = 0.5 * (epsilon * (e[i][c] * e[i][2].conj()).re
-                            + mu * (h[i][c] * h[i][2].conj()).re)
+                        let traction = 0.5
+                            * (epsilon * (e[i][c] * e[i][2].conj()).re
+                                + mu * (h[i][c] * h[i][2].conj()).re)
                             - if c == 2 { energy } else { 0.0 };
                         integrated_stress[c] += normal * traction * g.spacing_m[0] * g.spacing_m[1];
                     }
