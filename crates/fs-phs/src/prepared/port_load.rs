@@ -48,10 +48,6 @@ impl PortHamiltonian {
         Ok(system)
     }
 
-    /// Read-only constitutive law. Physical histories belong to the explicit x.
-    #[must_use]
-    pub fn storage(&self) -> &dyn Storage { self.storage.as_ref() }
-
     /// Cold-copy J/R/G while sharing the original immutable storage callbacks.
     ///
     /// This permits transactional preparation of a joint owner without moving
