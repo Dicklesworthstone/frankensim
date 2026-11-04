@@ -1,4 +1,7 @@
 //! G0/G1/G3: bare growth, separate inventories, exact storage and datum shifts.
+#[path = "heat_tests.rs"]
+mod heat_tests;
+
 use super::*;
 use crate::sublimation::{MOLAR_GAS_CONSTANT, SublimationProperties};
 

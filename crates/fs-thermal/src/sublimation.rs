@@ -308,7 +308,7 @@ fn validate_surface(solid: SolidSurfaceState, duration_s: f64) -> Result<(), Sub
     Ok(())
 }
 
-fn validate_solver(config: SolverConfig) -> Result<(), SublimationError> {
+pub(crate) fn validate_solver(config: SolverConfig) -> Result<(), SublimationError> {
     if !positive(config.relative_tolerance)
         || config.relative_tolerance >= 1.0
         || !nonnegative(config.absolute_energy_tolerance_j)

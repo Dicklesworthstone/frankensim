@@ -41,6 +41,116 @@ pub struct SupportedSurfaceStep {
     pub deposit_energy_change_j: f64,
 }
 
+/// Accepted heat storage at fixed substrate/deposit masses and exposed area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SupportedHeatStep {
+    /// Original substrate caloric coordinate at the common endpoint temperature.
+    pub state: SupportedSurfaceState,
+    /// Common substrate and deposit temperature [K].
+    pub surface_temperature_k: f64,
+    /// Signed substrate storage change [J] in its own caloric chart.
+    pub substrate_energy_change_j: f64,
+    /// Signed deposit storage change [J] in its independent caloric chart.
+    pub deposit_energy_change_j: f64,
+    /// Actual combined storage change minus the requested heat [J].
+    pub energy_residual_j: f64,
+}
+
+/// Apply signed heat to a substrate and deposit at their shared temperature.
+///
+/// Positive `heat_j` heats the surface and negative heat cools it. The original
+/// continuous, nondecreasing charts `substrate_temperature(h_s)` and
+/// `deposit_enthalpy(T)` determine both heat capacities; the deposit is never
+/// treated as thermally massless. With masses held fixed, the endpoint solves
+///
+/// M_s (h_s1-h_s0) + m_d (h_d(T1)-h_d(T0)) = heat_j.
+///
+/// Each material keeps its independent energy reference. Differences are taken
+/// before mass weighting, rather than subtracting absolute stored energies.
+/// The same solid phase law admits every trial temperature, including on a bare
+/// substrate: heating outside that law's range requires a separate phase owner.
+/// No phase transfer, vapor energy, latent heat or geometry change is added.
+///
+/// Invalid outer trials are backtracked by the shared bounded scalar solver.
+/// A heat increment that cannot change the represented enthalpy is accepted
+/// only if its reported residual is within the absolute/relative tolerance;
+/// otherwise the operation refuses. Cancellation or failure publishes no state.
+pub fn heat_supported_surface<L: SublimationLaw + ?Sized>(
+    law: &L,
+    state: SupportedSurfaceState,
+    heat_j: f64,
+    config: SolverConfig,
+    substrate_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    deposit_enthalpy: impl Fn(f64) -> Result<f64, SublimationError>,
+    mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<SupportedHeatStep, SublimationError> {
+    if !positive(state.substrate_mass_kg)
+        || !state.substrate_specific_enthalpy_j_kg.is_finite()
+        || !nonnegative(state.deposit_mass_kg)
+        || !nonnegative(state.area_m2)
+        || !heat_j.is_finite()
+    {
+        return Err(SublimationError::Invalid(
+            "invalid supported heat, substrate storage or deposit inventory",
+        ));
+    }
+    validate_solver(config)?;
+    checkpoint()?;
+    let initial_t = substrate_temperature(state.substrate_specific_enthalpy_j_kg)?;
+    properties(law, initial_t)?;
+    let initial_deposit_h = finite(deposit_enthalpy(initial_t)?)?;
+    let storage = |h: f64, t: f64| -> Result<(f64, f64), SublimationError> {
+        let substrate =
+            finite(state.substrate_mass_kg * (h - state.substrate_specific_enthalpy_j_kg))?;
+        let deposit_h = finite(deposit_enthalpy(t)?)?;
+        let deposit = if state.deposit_mass_kg == 0.0 {
+            0.0
+        } else {
+            finite(state.deposit_mass_kg * (deposit_h - initial_deposit_h))?
+        };
+        Ok((substrate, deposit))
+    };
+    let mut evaluations = 0;
+    let mut evaluate = |h: f64| -> Result<Endpoint, SublimationError> {
+        checkpoint()?;
+        if evaluations >= config.max_iterations {
+            return Err(SublimationError::NonConverged);
+        }
+        evaluations += 1;
+        finite(h)?;
+        let t = substrate_temperature(h)?;
+        let p = properties(law, t)?;
+        let (substrate, deposit) = storage(h, t)?;
+        Ok(Endpoint {
+            h,
+            t,
+            p,
+            dm: 0.0,
+            residual: finite(substrate + deposit - heat_j)?,
+        })
+    };
+    let initial = evaluate(state.substrate_specific_enthalpy_j_kg)?;
+    let endpoint = solve_endpoint(initial, state.substrate_mass_kg, config, &mut evaluate)?;
+    let (substrate_energy_change_j, deposit_energy_change_j) = storage(endpoint.h, endpoint.t)?;
+    let energy_residual_j = finite(substrate_energy_change_j + deposit_energy_change_j - heat_j)?;
+    let tolerance =
+        finite(config.absolute_energy_tolerance_j + config.relative_tolerance * heat_j.abs())?;
+    if energy_residual_j.abs() > tolerance {
+        return Err(SublimationError::NonConverged);
+    }
+    checkpoint()?;
+    Ok(SupportedHeatStep {
+        state: SupportedSurfaceState {
+            substrate_specific_enthalpy_j_kg: endpoint.h,
+            ..state
+        },
+        surface_temperature_k: endpoint.t,
+        substrate_energy_change_j,
+        deposit_energy_change_j,
+        energy_residual_j,
+    })
+}
+
 /// Grow or sublime a deposit against the original substrate/deposit caloric laws.
 ///
 /// `substrate_temperature(h_s)` must describe the substrate's continuous,
