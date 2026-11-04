@@ -6,7 +6,7 @@ use fs_lbm::d3q27::{
     CollisionConfig27, CollisionModel27, D3q27, Equilibrium27, Rates27, equilibrium27,
 };
 use fs_lbm::lattice3::sources::resistance::{
-    DarcyForchheimer3, LinearResistance3, ResistanceGrid3,
+    DarcyForchheimer3, LinearResistance3, ResistanceEndpointExchange3, ResistanceGrid3,
 };
 use fs_lbm::lattice3::sources::{ForcedGrid3, ForcedLattice3};
 use fs_lbm::lattice3::{D3q19, Grid3, GridBudget3, GridError3};
@@ -551,11 +551,46 @@ fn zero_drag<L: ForcedLattice3<Q>, const Q: usize>(
             assert_eq!(receipt.skeleton_impulse, [0.0; 3]);
             assert_eq!(receipt.relative_dissipation, 0.0);
         }
+        for multiplier in [-2.0, 0.0, 0.5] {
+            let next: Vec<DarcyForchheimer3> = (0..140)
+                .map(|i| {
+                    LinearResistance3 {
+                        body_force: field(cell(i, DIMS))
+                            .linear
+                            .body_force
+                            .map(|b| multiplier * b),
+                        ..LinearResistance3::default()
+                    }
+                    .into()
+                })
+                .collect();
+            let forces = next
+                .iter()
+                .enumerate()
+                .map(|(i, law)| {
+                    if solid(cell(i, DIMS)) {
+                        [0.0; 3]
+                    } else {
+                        law.linear.body_force
+                    }
+                })
+                .collect();
+            reference.advance_serial(cx, &collisions, forces).unwrap();
+            let receipt = implicit
+                .advance_serial(cx, Some(&collisions), next, 0.0)
+                .unwrap();
+            assert_eq!(reference.populations(), implicit.flow().populations());
+            assert_eq!(reference.forces(), implicit.flow().forces());
+            assert_eq!(receipt.skeleton_impulse, [0.0; 3]);
+            assert_eq!(receipt.endpoint_relative_dissipation, 0.0);
+            assert_eq!(receipt.absolute_relative_quadrature_remainder, 0.0);
+            endpoint_work(receipt);
+        }
     });
 }
 
 #[test]
-fn zero_resistance_is_exact_native_spatial_forcing_for_both_lattices() {
+fn zero_resistance_is_exact_native_held_and_evolving_forcing_for_both_lattices() {
     for collision in models() {
         zero_drag::<D3q27, 27>(collision, |r, u| {
             equilibrium27(r, u, Equilibrium27::Factorized)
@@ -618,29 +653,30 @@ fn unresolved_stiff_force_refuses_and_resolved_contrast_retains_actual_source_hi
     }
 }
 
+struct CancelPass {
+    pool: TilePool,
+    calls: AtomicUsize,
+    after: usize,
+}
+impl KernelRunner for CancelPass {
+    fn workers(&self) -> usize {
+        self.pool.workers()
+    }
+    fn run_with_gate<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> (Result<K::Out, RunError>, RunReport) {
+        let result = self.pool.run_with_gate(kernel, gate);
+        if self.calls.fetch_add(1, Ordering::AcqRel) == self.after {
+            gate.request();
+        }
+        result
+    }
+}
+
 #[test]
 fn cancellation_after_either_native_pass_rolls_back_history_and_retries_exactly() {
-    struct CancelPass {
-        pool: TilePool,
-        calls: AtomicUsize,
-        after: usize,
-    }
-    impl KernelRunner for CancelPass {
-        fn workers(&self) -> usize {
-            self.pool.workers()
-        }
-        fn run_with_gate<K: TileKernel>(
-            &self,
-            kernel: &K,
-            gate: &CancelGate,
-        ) -> (Result<K::Out, RunError>, RunReport) {
-            let result = self.pool.run_with_gate(kernel, gate);
-            if self.calls.fetch_add(1, Ordering::AcqRel) == self.after {
-                gate.request();
-            }
-            result
-        }
-    }
     let make = || {
         fixture::<D3q27, 27>(models()[1], [true, false, true], |r, u| {
             equilibrium27(r, u, Equilibrium27::Factorized)
@@ -722,5 +758,461 @@ fn inadmissible_streamed_endpoint_never_publishes_partial_forces_or_step_count()
         };
         assert!(matches!(result, Err(GridError3::Mach { .. })));
         assert_eq!(snapshot(&grid), before);
+    }
+}
+
+fn endpoint_work(receipt: ResistanceEndpointExchange3) {
+    for work in [
+        receipt.external_work,
+        receipt.fluid_drag_work,
+        receipt.skeleton_work,
+    ] {
+        close(
+            work.impulse_work - work.endpoint_work,
+            work.quadrature_remainder,
+            3e-15,
+        );
+    }
+    assert!(receipt.endpoint_relative_dissipation >= 0.0);
+    assert!(
+        receipt.absolute_relative_quadrature_remainder + 1e-18
+            >= receipt.relative_quadrature_remainder.abs()
+    );
+    close(
+        receipt.fluid_drag_work.endpoint_work + receipt.skeleton_work.endpoint_work,
+        -receipt.endpoint_relative_dissipation,
+        3e-15,
+    );
+    close(
+        receipt.fluid_drag_work.impulse_work + receipt.skeleton_work.impulse_work,
+        -receipt.endpoint_relative_dissipation + receipt.relative_quadrature_remainder,
+        3e-15,
+    );
+}
+
+fn time_law(t: f64, h: f64) -> DarcyForchheimer3 {
+    let (s, c) = (0.4 * t).sin_cos();
+    DarcyForchheimer3 {
+        linear: LinearResistance3 {
+            principal: [
+                h * (0.2 + 0.1 * t),
+                h * (0.4 - 0.1 * t),
+                h * (0.7 + 0.2 * t),
+            ],
+            axes: [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]],
+            skeleton_velocity: [0.003 * t, -0.002 * t * t, 0.001 * (1.0 - t)],
+            body_force: [h * 0.001 * t, h * -0.002 * (1.0 - t), h * 0.0005 * t * t],
+        },
+        quadratic: 0.0,
+    }
+}
+
+fn evolving_linear<L: ForcedLattice3<Q>, const Q: usize>(collision: L::Collision, pop: [f64; Q]) {
+    let initial = time_law(0.0, 0.2);
+    let mut grid = uniform::<L, Q>(collision, pop, initial);
+    for i in 1..=5 {
+        let next = time_law(i as f64 / 5.0, 0.2);
+        let (rho, u0) = grid.flow().macroscopic(0).unwrap();
+        let f0 = grid.flow().forces()[0];
+        let rhs = core::array::from_fn(|a| {
+            rho * (u0[a] - next.linear.skeleton_velocity[a])
+                + 0.5 * f0[a]
+                + 0.5 * next.linear.body_force[a]
+        });
+        let projected: [f64; 3] = core::array::from_fn(|k| {
+            dot(next.linear.axes[k], rhs) / (rho + 0.5 * next.linear.principal[k])
+        });
+        let expected: [f64; 3] = core::array::from_fn(|a| {
+            next.linear.skeleton_velocity[a]
+                + (0..3)
+                    .map(|k| next.linear.axes[k][a] * projected[k])
+                    .sum::<f64>()
+        });
+        let receipt = with_cx(|cx| grid.advance_serial(cx, None, vec![next; 8], 1.0).unwrap());
+        let (rho1, u1) = grid.flow().macroscopic(0).unwrap();
+        for a in 0..3 {
+            close(u1[a], expected[a], 3e-15);
+            close(grid.flow().forces()[0][a], force(next, u1)[a], 3e-15);
+            close(
+                8.0 * (rho1 * u1[a] - rho * u0[a]),
+                receipt.external_impulse[a] - receipt.skeleton_impulse[a],
+                5e-14,
+            );
+            close(
+                receipt.external_impulse[a] - receipt.skeleton_impulse[a],
+                4.0 * (f0[a] + grid.flow().forces()[0][a]),
+                4e-15,
+            );
+        }
+        close(
+            4.0 * (rho1 * dot(u1, u1) - rho * dot(u0, u0)),
+            receipt.external_work.impulse_work + receipt.fluid_drag_work.impulse_work,
+            2e-15,
+        );
+        assert_eq!(grid.laws(), vec![next; 8]);
+        endpoint_work(receipt);
+    }
+}
+
+#[test]
+fn evolving_rotated_laws_use_old_collision_force_and_next_endpoint_for_every_model() {
+    for collision in models() {
+        evolving_linear::<D3q27, 27>(
+            collision,
+            equilibrium27(1.3, [0.011, -0.007, 0.005], Equilibrium27::Factorized),
+        );
+    }
+    evolving_linear::<D3q19, 19>(
+        CollisionModel3::Bgk { tau: 0.8 },
+        equilibrium3(1.3, [0.011, -0.007, 0.005]),
+    );
+}
+
+#[test]
+fn identical_endpoint_laws_keep_held_populations_impulses_and_work_bits() {
+    for collision in models() {
+        let law = field([1, 2, 3]);
+        let make = || {
+            uniform::<D3q27, 27>(
+                collision,
+                equilibrium27(1.2, [0.011, -0.007, 0.005], Equilibrium27::Factorized),
+                law,
+            )
+        };
+        let mut held = make();
+        let mut endpoint = make();
+        for _ in 0..3 {
+            let old = with_cx(|cx| held.step_serial(cx, None).unwrap());
+            let new = with_cx(|cx| {
+                endpoint
+                    .advance_serial(cx, None, vec![law; 8], 1.0)
+                    .unwrap()
+            });
+            assert_eq!(snapshot(&held), snapshot(&endpoint));
+            assert_eq!(
+                old.external_impulse.map(f64::to_bits),
+                new.external_impulse.map(f64::to_bits)
+            );
+            assert_eq!(
+                old.skeleton_impulse.map(f64::to_bits),
+                new.skeleton_impulse.map(f64::to_bits)
+            );
+            assert_eq!(
+                old.external_work.to_bits(),
+                new.external_work.impulse_work.to_bits()
+            );
+            assert_eq!(
+                old.fluid_drag_work.to_bits(),
+                new.fluid_drag_work.impulse_work.to_bits()
+            );
+            assert_eq!(
+                old.skeleton_work.to_bits(),
+                new.skeleton_work.impulse_work.to_bits()
+            );
+            assert_eq!(old.walls, new.walls);
+            assert_eq!(old.periodic, new.periodic);
+            close(
+                old.relative_dissipation,
+                new.endpoint_relative_dissipation - new.relative_quadrature_remainder,
+                2e-16,
+            );
+            endpoint_work(new);
+        }
+    }
+}
+
+#[test]
+fn evolving_nonlinear_material_and_prescribed_motion_are_second_order() {
+    let exact = |t: f64| {
+        [
+            0.014 * (-0.7 * t).exp(),
+            -0.009 * (1.0 + 0.3 * t).cos(),
+            0.006 + 0.002 * t * t,
+        ]
+    };
+    let derivative = |t: f64| {
+        [
+            -0.0098 * (-0.7 * t).exp(),
+            0.0027 * (1.0 + 0.3 * t).sin(),
+            0.004 * t,
+        ]
+    };
+    let law = |t: f64, h: f64| {
+        let mut law = time_law(t, h);
+        law.quadratic = h * (12.0 + 3.0 * t);
+        law.linear.body_force = [0.0; 3];
+        let drag = force(law, exact(t));
+        law.linear.body_force = core::array::from_fn(|a| h * derivative(t)[a] - drag[a]);
+        law
+    };
+    let errors = [8, 16, 32].map(|steps| {
+        let h = 1.0 / steps as f64;
+        let first = law(0.0, h);
+        let raw = core::array::from_fn(|a| exact(0.0)[a] - 0.5 * force(first, exact(0.0))[a]);
+        let mut grid = uniform::<D3q27, 27>(
+            models()[5],
+            equilibrium27(1.0, raw, Equilibrium27::Factorized),
+            first,
+        );
+        for n in 1..=steps {
+            let receipt = with_cx(|cx| {
+                grid.advance_serial(cx, None, vec![law(n as f64 * h, h); 8], 1e-3)
+                    .unwrap()
+            });
+            endpoint_work(receipt);
+        }
+        let actual = grid.flow().macroscopic(0).unwrap().1;
+        (0..3)
+            .map(|a| (actual[a] - exact(1.0)[a]).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    });
+    for pair in errors.windows(2) {
+        assert!((3.8..4.2).contains(&(pair[0] / pair[1])), "{errors:?}");
+    }
+}
+
+#[test]
+fn evolving_spatial_laws_retain_native_wall_periodic_transport_and_pool_order() {
+    let periodic = [true, false, true];
+    let make = || {
+        fixture::<D3q27, 27>(models()[1], periodic, |r, u| {
+            equilibrium27(r, u, Equilibrium27::Factorized)
+        })
+    };
+    let laws = |step| {
+        (0..140)
+            .map(|i| {
+                let p = cell(i, DIMS);
+                let mut law = time_law(
+                    step as f64 * 0.15 + (p[0] * p[1] + p[2]) as f64 * 0.005,
+                    0.2,
+                );
+                law.quadratic = 1.0 + p[2] as f64 * 0.3;
+                law
+            })
+            .collect::<Vec<_>>()
+    };
+    let collisions = vec![models()[1]; 140];
+    let mut serial = make();
+    let mut accepted = Vec::new();
+    for step in 1..=3 {
+        let before = totals(&serial);
+        let (pop, angular, crossings) = transport_oracle(&serial, periodic, &collisions);
+        let next = laws(step);
+        let receipt = with_cx(|cx| {
+            serial
+                .advance_serial(cx, Some(&collisions), next.clone(), 1.0)
+                .unwrap()
+        });
+        assert_eq!(serial.flow().populations(), pop);
+        assert_eq!(serial.laws(), next);
+        let after = totals(&serial);
+        close(after.0, before.0, 1e-11);
+        for a in 0..3 {
+            close(
+                after.1[a] - before.1[a],
+                receipt.external_impulse[a] - receipt.skeleton_impulse[a]
+                    + receipt.walls.fluid_population_impulse[a],
+                2e-12,
+            );
+            close(
+                after.2[a] - before.2[a],
+                receipt.external_angular_impulse[a] - receipt.skeleton_angular_impulse[a]
+                    + receipt.walls.fluid_population_angular_impulse[a]
+                    + receipt.periodic.angular_momentum_change[a],
+                5e-12,
+            );
+            close(
+                receipt.periodic.angular_momentum_change[a],
+                angular[a],
+                2e-12,
+            );
+        }
+        assert_eq!(receipt.periodic.face_crossings, crossings);
+        assert!(receipt.walls.measured_links > 0 && crossings > 0);
+        endpoint_work(receipt);
+        accepted.push((snapshot(&serial), receipt));
+    }
+    for workers in [1, 3] {
+        let mut parallel = make();
+        let pool = TilePool::for_host(workers, SEED);
+        for (i, (state, receipt)) in accepted.iter().enumerate() {
+            let actual = parallel
+                .advance_pooled(
+                    &pool,
+                    &CancelGate::new_clock_free(),
+                    Some(&collisions),
+                    laws(i + 1),
+                    1.0,
+                )
+                .unwrap();
+            assert_eq!(snapshot(&parallel), *state);
+            assert_eq!(actual, *receipt);
+        }
+    }
+}
+
+#[test]
+fn work_budget_rejects_underresolved_coefficient_drop_and_spatial_cancellation() {
+    let old: DarcyForchheimer3 = LinearResistance3 {
+        principal: [20.0; 3],
+        ..LinearResistance3::default()
+    }
+    .into();
+    let make = || {
+        uniform::<D3q27, 27>(
+            models()[1],
+            equilibrium27(1.0, [0.022, 0.0, 0.0], Equilibrium27::Factorized),
+            old,
+        )
+    };
+    let next = vec![DarcyForchheimer3::default(); 8];
+    let mut grid = make();
+    let before = snapshot(&grid);
+    assert!(matches!(
+        with_cx(|cx| grid.advance_serial(cx, None, next.clone(), 1e-4)),
+        Err(GridError3::Input(
+            "resistance temporal work budget exceeded"
+        ))
+    ));
+    assert_eq!(snapshot(&grid), before);
+    assert_eq!(grid.laws(), vec![old; 8]);
+    let expected = with_cx(|cx| {
+        make()
+            .advance_serial(cx, None, next.clone(), 0.002)
+            .unwrap()
+    });
+    let receipt = with_cx(|cx| grid.advance_serial(cx, None, next, 0.002).unwrap());
+    assert_eq!(receipt, expected);
+    close(receipt.relative_quadrature_remainder, 0.0016, 2e-16);
+    close(receipt.endpoint_relative_dissipation, 0.00032, 2e-16);
+    close(receipt.fluid_drag_work.impulse_work, 0.00128, 2e-16);
+    close(grid.flow().macroscopic(0).unwrap().1[0], -0.018, 1e-15);
+    endpoint_work(receipt);
+
+    // Both endpoints have the SAME total force in alternating cells, while
+    // their resistance work errors are equal and opposite. Test |R| per cell.
+    let old: DarcyForchheimer3 = LinearResistance3 {
+        principal: [1.0; 3],
+        ..LinearResistance3::default()
+    }
+    .into();
+    let mut grid = uniform::<D3q27, 27>(
+        models()[1],
+        equilibrium27(1.0, [0.015, 0.0, 0.0], Equilibrium27::Factorized),
+        old,
+    );
+    let next: Vec<_> = (0..8)
+        .map(|i| {
+            LinearResistance3 {
+                principal: [(i % 2) as f64; 3],
+                skeleton_velocity: [-0.01, 0.0, 0.0],
+                body_force: [if i % 2 == 0 { 0.01 } else { 0.03 }, 0.0, 0.0],
+                ..LinearResistance3::default()
+            }
+            .into()
+        })
+        .collect();
+    let before = snapshot(&grid);
+    let pool = TilePool::for_host(3, SEED);
+    assert!(matches!(
+        grid.advance_pooled(
+            &pool,
+            &CancelGate::new_clock_free(),
+            None,
+            next.clone(),
+            1e-4
+        ),
+        Err(GridError3::Input(
+            "resistance temporal work budget exceeded"
+        ))
+    ));
+    assert_eq!(snapshot(&grid), before);
+    assert_eq!(grid.laws(), vec![old; 8]);
+    let receipt = grid
+        .advance_pooled(&pool, &CancelGate::new_clock_free(), None, next, 3e-4)
+        .unwrap();
+    close(receipt.relative_quadrature_remainder, 0.0, 1e-17);
+    close(
+        receipt.absolute_relative_quadrature_remainder,
+        0.0002,
+        1e-17,
+    );
+    endpoint_work(receipt);
+}
+
+#[test]
+fn evolving_law_rejections_and_cancellation_preserve_complete_accepted_history() {
+    let make = || {
+        fixture::<D3q27, 27>(models()[1], [true, false, true], |r, u| {
+            equilibrium27(r, u, Equilibrium27::Factorized)
+        })
+    };
+    let next: Vec<_> = (0..140).map(|i| time_law(i as f64 * 0.005, 0.2)).collect();
+    let mut control = make();
+    let expected = with_cx(|cx| control.advance_serial(cx, None, next.clone(), 1.0).unwrap());
+    let mut grid = make();
+    let before = snapshot(&grid);
+    let old_laws = grid.laws().to_vec();
+    for budget in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(with_cx(|cx| grid.advance_serial(cx, None, next.clone(), budget)).is_err());
+        assert_eq!(snapshot(&grid), before);
+        assert_eq!(grid.laws(), old_laws);
+    }
+    for case in 0..6 {
+        let mut invalid = next.clone();
+        match case {
+            0 => {
+                invalid.pop();
+            }
+            1 => invalid[139].linear.principal[2] = -1.0,
+            2 => invalid[139].linear.axes[2] = invalid[139].linear.axes[1],
+            3 => invalid[139].quadratic = f64::NAN,
+            4 => invalid[139].linear.body_force[0] = 100.0,
+            _ => invalid[139].linear.principal = [1e16; 3],
+        }
+        assert!(
+            with_cx(|cx| grid.advance_serial(cx, None, invalid, 1.0)).is_err(),
+            "case={case}"
+        );
+        assert_eq!(snapshot(&grid), before);
+        assert_eq!(grid.laws(), old_laws);
+    }
+    let actual = with_cx(|cx| grid.advance_serial(cx, None, next.clone(), 1.0).unwrap());
+    assert_eq!(snapshot(&grid), snapshot(&control));
+    assert_eq!(actual, expected);
+    assert_eq!(grid.laws(), next);
+    for after in [0, 1] {
+        let mut grid = make();
+        let runner = CancelPass {
+            pool: TilePool::for_host(3, SEED),
+            calls: AtomicUsize::new(0),
+            after,
+        };
+        assert!(matches!(
+            grid.advance_pooled(
+                &runner,
+                &CancelGate::new_clock_free(),
+                None,
+                next.clone(),
+                1.0
+            ),
+            Err(GridError3::Cancelled)
+        ));
+        assert_eq!(snapshot(&grid), before);
+        assert_eq!(grid.laws(), old_laws);
+        let actual = grid
+            .advance_pooled(
+                &runner.pool,
+                &CancelGate::new_clock_free(),
+                None,
+                next.clone(),
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(snapshot(&grid), snapshot(&control));
+        assert_eq!(actual, expected);
+        assert_eq!(grid.laws(), next);
     }
 }

@@ -12,9 +12,9 @@ use super::*;
 /// already including any density factor from its physical constitutive law.
 /// No extra density or factor one half is applied to the force.
 ///
-/// Sample all coefficients, independent body force and prescribed skeleton
-/// motion at the step midpoint and hold them for the tick. Zero quadratic
-/// resistance takes the exact original [`LinearResistance3`] arithmetic.
+/// The step owner selects timing: BoundaryGrid3 holds midpoint coefficients;
+/// the shared ResistanceGrid3 can also advance physical endpoint laws. Zero
+/// quadratic resistance takes the exact original [`LinearResistance3`] arithmetic.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DarcyForchheimer3 {
     /// Linear tensor, material axes, skeleton velocity and independent force.
@@ -118,6 +118,32 @@ impl DarcyForchheimer3 {
         // beta |v_mid|³ is a different time quadrature and is not substituted.
         (self.quadratic * (0.5 * r0 + 0.5 * r1))
             * (dot(midpoint, midpoint) + half_difference * half_difference)
+    }
+
+    // Positive instantaneous relative power, evaluated with this endpoint's
+    // OWN tensor, vector-speed coefficient and prescribed skeleton velocity.
+    // It is distinct from the fixed-law midpoint/trapezoidal impulse work.
+    pub(crate) fn dissipation_power(self, velocity: [f64; 3]) -> f64 {
+        let relative = core::array::from_fn(|a| velocity[a] - self.linear.skeleton_velocity[a]);
+        let mut power = if self
+            .linear
+            .principal
+            .iter()
+            .all(|&d| d == self.linear.principal[0])
+        {
+            self.linear.principal[0] * dot(relative, relative)
+        } else {
+            (0..3)
+                .map(|k| {
+                    let speed = dot(self.linear.axes[k], relative);
+                    (self.linear.principal[k] * speed) * speed
+                })
+                .sum()
+        };
+        if self.quadratic != 0.0 {
+            power += (self.quadratic * norm(relative)) * dot(relative, relative);
+        }
+        power
     }
 }
 

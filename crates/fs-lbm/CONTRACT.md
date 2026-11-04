@@ -307,6 +307,42 @@ all six face normals with spatial traces and corrected stress, mixed wall/open
 edges on all three axes, mass/linear/angular closure, serial/pooled parity,
 weak drag, exact zero-drag reduction, and late refusal with atomic retry.
 
+## Evolving resistance with retained physical force history
+
+`lattice3::sources::resistance::ResistanceGrid3::advance_serial` and
+`advance_pooled` accept the complete resistance field at the next physical
+endpoint. The existing accepted force and separately retained drag drive native
+collision; the next Darcy tensor, nonlinear coefficient, skeleton velocity and
+independent body force enter the original implicit endpoint solve after native
+pull streaming. Laws, populations, force, drag and elapsed steps publish
+together. Updating a law never silently changes the already accepted physical
+momentum frame. Fixed-law `step_*` retains its original arithmetic and receipt.
+
+`ResistanceEndpointExchange3` retains actual endpoint-averaged source impulses,
+native wall impulses and measured periodic-cut angular transport. Each
+`ResistanceWork3` separately reports impulse work, trapezoidal endpoint power
+and their directly evaluated signed temporal difference. For drag d ON fluid
+and relative velocity v=u-v_s, endpoint fluid-drag plus skeleton work equals
+minus the nonnegative endpoint resistance-power quadrature. Their impulse-work
+sum additionally contains R=-(d1-d0).(v1-v0)/4. R can have either sign when the
+law changes and is never physical heating; independent body-force timing has
+its own work remainder.
+
+An explicit finite nonnegative caller limit bounds the sum of absolute local
+relative-work remainders in lattice energy units before publication. Opposite
+cell defects cannot cancel this admission check. This matters for rapid changes
+in resistance: positive endpoint dissipation alone does not prevent an
+underresolved trapezoidal update from amplifying kinetic energy. Callers must
+resolve source histories in time and choose an application-appropriate budget;
+this local source criterion is not a complete fluid-energy certificate.
+
+Complete endpoint-law admission precedes collision, and all original collision,
+Mach, endpoint representability, local force/work and cancellation refusals
+remain atomic, including the law/drag history. Serial and pooled paths share
+fixed64-cell arithmetic and ordered receipts on the original D3Q19/D3Q27
+collision families. This does not evolve porous geometry, material state,
+skeleton inertia or thermal energy.
+
 ## Implicit porous resistance on the shared D3Q19/D3Q27 grid
 
 `lattice3::sources::resistance::ResistanceGrid3<L,Q>` adds frozen spatial

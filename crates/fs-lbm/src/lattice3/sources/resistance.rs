@@ -16,13 +16,17 @@ use std::sync::Mutex;
 
 pub use crate::d3q19::{DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3};
 
-/// A frozen spatial porous medium on native lattice collision and transport.
+mod endpoint;
+pub use endpoint::{ResistanceEndpointExchange3, ResistanceWork3};
+
+/// A spatial porous medium on native lattice collision and transport.
 ///
 /// Each fluid cell obeys `F = b + D(v_s-u) - beta |u-v_s| (u-v_s)` in lattice
-/// units. Resistance, prescribed skeleton velocity and body force stay fixed
-/// for this owner's lifetime. The current solved force drives collision; after
-/// the native pull, the same law and `rho*u = m_raw + F/2` determine the next
-/// force analytically or by the shared monotone scalar speed solve.
+/// units. `step_*` holds the accepted law; `advance_*` supplies its next physical
+/// endpoint, including changing resistance, skeleton velocity and body force.
+/// The accepted force drives collision; after the native pull, the endpoint law
+/// and `rho*u = m_raw + F/2` determine the next force analytically or by the
+/// shared monotone scalar speed solve. There is no same-time force rebinding.
 ///
 /// Stationary exterior/voxel walls and periodic axes retain the supplied grid's
 /// topology. Every wall link is measured. Periodic angular transport is counted
@@ -31,11 +35,13 @@ pub use crate::d3q19::{DarcyForchheimer3, LinearResistance3, ResistanceMomentumE
 /// from a global residual. Populations, force history, receipt and step count
 /// publish only after all collision, endpoint, wall and cancellation checks.
 ///
-/// Work is the shared midpoint force-work identity, not a transported fluid
-/// energy balance; no heat or skeleton inertia evolves. Trapezoidal relaxation
+/// Held-law work retains the shared midpoint force-work identity. Evolving-law
+/// receipts distinguish impulse work, endpoint power and their signed temporal
+/// differences. Neither is a transported fluid energy balance; no heat or
+/// skeleton inertia evolves. Trapezoidal relaxation
 /// is second order when resolved, but stiff steps can reverse relative velocity.
 /// All original collision and Mach checks still apply. Moving/open boundaries
-/// and changing resistance laws require their own source/frame coupling.
+/// require their own geometry coupling.
 /// Endpoints whose drag or local force-work identity is lost to half-force
 /// cancellation refuse; neither resistance nor velocity is clipped.
 pub struct ResistanceGrid3<L: ForcedLattice3<Q>, const Q: usize> {
@@ -49,7 +55,7 @@ pub struct ResistanceGrid3<L: ForcedLattice3<Q>, const Q: usize> {
 }
 
 impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
-    /// Attach a complete immutable law field to an UNSTEPPED zero-uniform-force
+    /// Attach a complete initial law field to an UNSTEPPED zero-uniform-force
     /// grid. One law is supplied per cell in x-fastest order; solid entries are
     /// admitted but apply no force. All wall moments use the finite `origin`.
     ///
@@ -134,7 +140,7 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
     pub const fn flow(&self) -> &ForcedGrid3<L, Q> {
         &self.flow
     }
-    /// Held constitutive coefficients in the grid's x-fastest cell order.
+    /// Constitutive law at the same accepted endpoint as the force/populations.
     pub fn laws(&self) -> &[DarcyForchheimer3] {
         &self.laws
     }
@@ -151,9 +157,10 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
         cx: &Cx<'_>,
         collisions: Option<&[L::Collision]>,
     ) -> Result<ResistanceMomentumExchange3, GridError3<L::Error>> {
-        self.step_inner::<fs_exec::TilePool>(None, collisions, || {
+        self.step_inner::<fs_exec::TilePool>(None, collisions, None, || {
             cx.checkpoint().map_err(|_| GridError3::Cancelled)
         })
+        .map(|(held, _)| held)
     }
 
     /// Same fixed64-cell arithmetic and ordered receipts, independent of the
@@ -164,23 +171,34 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
         gate: &CancelGate,
         collisions: Option<&[L::Collision]>,
     ) -> Result<ResistanceMomentumExchange3, GridError3<L::Error>> {
-        self.step_inner(Some((pool, gate)), collisions, || {
+        self.step_inner(Some((pool, gate)), collisions, None, || {
             if gate.is_requested() {
                 Err(GridError3::Cancelled)
             } else {
                 Ok(())
             }
         })
+        .map(|(held, _)| held)
     }
 
     fn step_inner<P: KernelRunner>(
         &mut self,
         pool: Option<(&P, &CancelGate)>,
         collisions: Option<&[L::Collision]>,
+        next_laws: Option<endpoint::EndpointLaws3>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
-    ) -> Result<ResistanceMomentumExchange3, GridError3<L::Error>> {
+    ) -> Result<(ResistanceMomentumExchange3, ResistanceEndpointExchange3), GridError3<L::Error>>
+    {
         checkpoint()?;
         let grid = &mut self.flow.grid;
+        if let Some(endpoint) = &next_laws {
+            if !endpoint.maximum_absolute_work_remainder.is_finite()
+                || endpoint.maximum_absolute_work_remainder < 0.0
+            {
+                return Err(GridError3::Input("invalid resistance temporal work budget"));
+            }
+            endpoint::admit_laws::<L, Q>(&endpoint.laws, grid.f.len(), &mut checkpoint)?;
+        }
         if let Some(field) = collisions {
             grid.admit_collisions(field, &mut checkpoint)?;
         }
@@ -209,12 +227,14 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
             }
         }
         let mut receipt = ResistanceMomentumExchange3::default();
+        let mut transition = ResistanceEndpointExchange3::default();
         {
             let kernel = EndpointPass {
                 data: &data,
                 initial: &grid.f,
                 post: &grid.post,
                 laws: &self.laws,
+                next_laws: next_laws.as_ref().map(|endpoint| endpoint.laws.as_slice()),
                 initial_drag: &self.drag,
                 origin: self.origin,
                 chunks: grid
@@ -228,6 +248,7 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
                             forces,
                             drag,
                             receipt: ResistanceMomentumExchange3::default(),
+                            transition: ResistanceEndpointExchange3::default(),
                         })
                     })
                     .collect(),
@@ -246,8 +267,12 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
                 }
             }
             for chunk in &kernel.chunks {
-                let contribution = chunk.lock().map_err(|_| GridError3::Poisoned)?.receipt;
+                let chunk = chunk.lock().map_err(|_| GridError3::Poisoned)?;
+                let contribution = chunk.receipt;
                 receipt.add(contribution);
+                if next_laws.is_some() {
+                    transition.add(chunk.transition);
+                }
                 for a in 0..3 {
                     receipt.periodic.angular_momentum_change[a] +=
                         contribution.periodic.angular_momentum_change[a];
@@ -256,6 +281,7 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
             }
         }
         if !receipt.is_finite()
+            || (next_laws.is_some() && !transition.is_finite())
             || !receipt
                 .periodic
                 .angular_momentum_change
@@ -273,12 +299,25 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ResistanceGrid3<L, Q> {
             measured_links: walls.measured_links,
             ..WallMomentumExchange3::default()
         };
+        transition.walls = receipt.walls;
+        transition.periodic = receipt.periodic;
+        if next_laws.as_ref().is_some_and(|endpoint| {
+            transition.absolute_relative_quadrature_remainder
+                > endpoint.maximum_absolute_work_remainder
+        }) {
+            return Err(GridError3::Input(
+                "resistance temporal work budget exceeded",
+            ));
+        }
         checkpoint()?;
         core::mem::swap(&mut grid.f, &mut grid.next);
         core::mem::swap(&mut self.flow.forces, &mut self.next_forces);
         core::mem::swap(&mut self.drag, &mut self.next_drag);
+        if let Some(endpoint) = next_laws {
+            self.laws = endpoint.laws;
+        }
         grid.completed_steps = step;
-        Ok(receipt)
+        Ok((receipt, transition))
     }
 }
 
@@ -287,6 +326,7 @@ struct EndpointChunk<'a, const Q: usize> {
     forces: &'a mut [[f64; 3]],
     drag: &'a mut [[f64; 3]],
     receipt: ResistanceMomentumExchange3,
+    transition: ResistanceEndpointExchange3,
 }
 
 struct EndpointPass<'a, 'b, L: ForcedLattice3<Q>, const Q: usize> {
@@ -294,6 +334,7 @@ struct EndpointPass<'a, 'b, L: ForcedLattice3<Q>, const Q: usize> {
     initial: &'a [[f64; Q]],
     post: &'a [[f64; Q]],
     laws: &'a [DarcyForchheimer3],
+    next_laws: Option<&'a [DarcyForchheimer3]>,
     initial_drag: &'a [[f64; 3]],
     origin: [f64; 3],
     chunks: Vec<Mutex<EndpointChunk<'a, Q>>>,
@@ -307,6 +348,7 @@ impl<L: ForcedLattice3<Q>, const Q: usize> EndpointPass<'_, '_, L, Q> {
             forces,
             drag: stored_drag,
             receipt,
+            transition,
         } = &mut *chunk;
         let base = tile * 64;
         self.data.process_stream_with_endpoint::<true>(
@@ -315,7 +357,7 @@ impl<L: ForcedLattice3<Q>, const Q: usize> EndpointPass<'_, '_, L, Q> {
             base,
             |cell, pop, periodic| {
                 let (rho, momentum) = raw_moments_cell::<L, Q>(pop, cell)?;
-                let law = self.laws[cell];
+                let law = self.next_laws.map_or(self.laws[cell], |field| field[cell]);
                 let (force, drag) = law
                     .endpoint_force(rho, momentum)
                     .ok_or(GridError3::NonFiniteCell { cell })?;
@@ -342,38 +384,36 @@ impl<L: ForcedLattice3<Q>, const Q: usize> EndpointPass<'_, '_, L, Q> {
                     cell,
                     self.data.budget.maximum_mach,
                 )?;
-                let contribution = law
-                    .momentum_exchange(
-                        initial_velocity,
-                        velocity,
-                        self.initial_drag[cell],
-                        drag,
-                        coordinates(cell, self.data.dims),
-                        self.origin,
-                    )
-                    .ok_or(GridError3::NonFiniteCell { cell })?;
-                let defect = contribution.fluid_drag_work
-                    + contribution.skeleton_work
-                    + contribution.relative_dissipation;
-                // Scale the check before subtracting opposing endpoint work.
-                // Stiff trapezoidal reversal can make their net much smaller.
-                let scale = contribution.relative_dissipation
-                    + (0..3)
-                        .map(|a| {
-                            let midpoint = 0.5 * initial_velocity[a] + 0.5 * velocity[a];
-                            (0.5 * self.initial_drag[cell][a].abs() + 0.5 * drag[a].abs())
-                                * (midpoint.abs() + law.linear.skeleton_velocity[a].abs())
-                        })
-                        .sum::<f64>();
-                if !scale.is_finite() || defect.abs() > 4096.0 * f64::EPSILON * scale {
-                    return Err(GridError3::MaterialField {
+                let initial = SourceEndpoint3 {
+                    law: self.laws[cell],
+                    velocity: initial_velocity,
+                    drag: self.initial_drag[cell],
+                };
+                let end = SourceEndpoint3 {
+                    law,
+                    velocity,
+                    drag,
+                };
+                let position = coordinates(cell, self.data.dims);
+                if self.next_laws.is_some() {
+                    transition.add(endpoint::exchange::<L, Q>(
+                        initial,
+                        end,
                         cell,
-                        reason: "resistance work is unresolved in the represented velocity",
-                    });
+                        position,
+                        self.origin,
+                    )?);
+                } else {
+                    receipt.add(held_exchange::<L, Q>(
+                        initial,
+                        end,
+                        cell,
+                        position,
+                        self.origin,
+                    )?);
                 }
                 forces[cell - base] = force;
                 stored_drag[cell - base] = drag;
-                receipt.add(contribution);
                 for a in 0..3 {
                     receipt.periodic.angular_momentum_change[a] +=
                         periodic.angular_momentum_change[a];
@@ -383,6 +423,52 @@ impl<L: ForcedLattice3<Q>, const Q: usize> EndpointPass<'_, '_, L, Q> {
             },
         )
     }
+}
+
+#[derive(Clone, Copy)]
+struct SourceEndpoint3 {
+    law: DarcyForchheimer3,
+    velocity: [f64; 3],
+    drag: [f64; 3],
+}
+
+fn held_exchange<L: ForcedLattice3<Q>, const Q: usize>(
+    initial: SourceEndpoint3,
+    end: SourceEndpoint3,
+    cell: usize,
+    position: [usize; 3],
+    origin: [f64; 3],
+) -> Result<ResistanceMomentumExchange3, GridError3<L::Error>> {
+    let contribution = initial
+        .law
+        .momentum_exchange(
+            initial.velocity,
+            end.velocity,
+            initial.drag,
+            end.drag,
+            position,
+            origin,
+        )
+        .ok_or(GridError3::NonFiniteCell { cell })?;
+    let defect = contribution.fluid_drag_work
+        + contribution.skeleton_work
+        + contribution.relative_dissipation;
+    // Retain the original held-law arithmetic and uncancelled work scale.
+    let scale = contribution.relative_dissipation
+        + (0..3)
+            .map(|a| {
+                let midpoint = 0.5 * initial.velocity[a] + 0.5 * end.velocity[a];
+                (0.5 * initial.drag[a].abs() + 0.5 * end.drag[a].abs())
+                    * (midpoint.abs() + initial.law.linear.skeleton_velocity[a].abs())
+            })
+            .sum::<f64>();
+    if !scale.is_finite() || defect.abs() > 4096.0 * f64::EPSILON * scale {
+        return Err(GridError3::MaterialField {
+            cell,
+            reason: "resistance work is unresolved in the represented velocity",
+        });
+    }
+    Ok(contribution)
 }
 
 // A stiff half-force cancellation can make the true endpoint velocity smaller
