@@ -22,6 +22,8 @@ use crate::CS2;
 
 mod sgs;
 pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
+mod wall_patches;
+pub use wall_patches::WallPatchProbe3;
 mod profile;
 pub use profile::{
     BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3,
@@ -1984,6 +1986,20 @@ impl BoundaryGrid3 {
         gate: Option<&CancelGate>,
     ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
         let mut exchange = WallMomentumExchange3::default();
+        self.visit_wall_momentum(links, gate, |_, link, outgoing, rho, velocity| {
+            exchange.add_link(link, outgoing, rho, velocity, origin);
+        })?;
+        exchange.checked()
+    }
+
+    // The aggregate and spatial probes read one identical post-collision link
+    // state. Keep density caching, moving-wall rules and traversal here.
+    fn visit_wall_momentum(
+        &self,
+        links: &[BoundaryLink3],
+        gate: Option<&CancelGate>,
+        mut visit: impl FnMut(usize, BoundaryLink3, f64, f64, [f64; 3]),
+    ) -> Result<(), BoundaryStepError3> {
         let mut previous_cell = None;
         let mut rho = 0.0;
         let mut exterior_velocity = [0.0; 3];
@@ -2009,18 +2025,18 @@ impl BoundaryGrid3 {
             } else {
                 exterior_velocity
             };
-            exchange.add_link(
+            visit(
+                index,
                 *link,
                 self.post[OPP3[link.direction]][link.tile].0[link.lane],
                 rho,
                 velocity,
-                origin,
             );
         }
         if gate.is_some_and(CancelGate::is_requested) {
             return Err(BoundaryStepError3::Cancelled);
         }
-        exchange.checked()
+        Ok(())
     }
 
     fn addr(&self, x: usize, y: usize, z: usize) -> (usize, usize) {
@@ -2148,6 +2164,43 @@ impl BoundaryGrid3 {
 
     fn stream(&mut self) {
         self.stream_with_boundaries(self.boundaries);
+    }
+
+    // Serial transactional stream owner shared by SGS and spatial wall loads.
+    // Scratch is retained on refusal; only publish_next can accept populations.
+    fn stream_collided_serial(&mut self, gate: &CancelGate) -> Result<(), BoundaryStepError3> {
+        let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
+        let outcome = (|| {
+            let view = StreamView {
+                post: &self.post,
+                pull: &self.pull,
+                link_masks: &self.link_masks,
+                open_link_masks: &self.open_link_masks,
+                stationary_link_masks: &self.stationary_link_masks,
+                boundaries: self.boundaries,
+                dims: [self.nx, self.ny, self.nz],
+            };
+            for tile in 0..self.f[0].len() {
+                if gate.is_requested() {
+                    return Err(BoundaryStepError3::Cancelled);
+                }
+                for lane in 0..TILE_CELLS {
+                    if self.solid[tile] & (1u64 << lane) != 0 {
+                        continue;
+                    }
+                    let values = view.pull_cell(tile, lane);
+                    for (field, value) in next.iter_mut().zip(values) {
+                        field[tile].0[lane] = value;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            self.next = Some(next);
+            return Err(error);
+        }
+        self.publish_next(next, gate, true)
     }
 
     fn stream_with_boundaries(&mut self, boundaries: BoundarySpec3) {

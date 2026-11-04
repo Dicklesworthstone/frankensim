@@ -11594,3 +11594,51 @@ midpoint inertia on all six faces for both lattices, BGK/TRT variants,
 off-center translation-spin response, driven/coasting evolution with varying
 viscosity and prescribed-motion population parity, linear momentum and work,
 worker parity, and post-stream cancellation/refusal with exact retry.
+
+## Dense boundary material rheology with native SGS and spatial wall loads
+
+`material::boundary::sgs` adds a prepared `BoundaryRheologySgsWorkspace3` and
+serial/pooled `MaterialScaling` steps on the original `BoundaryGrid3`. One incoming
+force-centered velocity gradient supplies both the physical resolved material
+shear `sqrt(2 D:D)/dt` and the selected existing SGS closure. Each original material
+response is queried once and its transport state read once. The original scaling
+converts that local molecular viscosity to collision relaxation; its reference
+density must remain unchanged. Eddy/molecular ratio admission and resolved
+viscous dissipation use the local molecular value, and zero SGS still applies
+heterogeneous material transport. Collision family, TRT magic product and
+non-shear controls retain their original owners.
+
+The workspace retains two preallocated source-response epochs, molecular tau and
+the last accepted native SGS/wall-load report. Sampling, unit-binding, source,
+closure, cancellation and native-flow failures preserve accepted samples and
+populations. Source callbacks must not publish external history. Material
+response heap storage remains caller-owned. Native pooled chunk allocations and
+the existing initial stream-buffer allocation retain their own limits.
+
+`WallPatchProbe3` partitions a unique canonical wall-link selection into authored,
+nonempty spatial patches with finite moment origins and an explicit payload byte
+budget. It retains two exchange buffers. Ordinary and SGS patch steps measure
+the actual collision that streams that step, through the same link traversal and
+reflection arithmetic as aggregate wall loads. Every patch receives its force,
+moment, mass exchange and moving-wall work; fluid publication precedes the
+infallible exchange-buffer swap. Native topology and periodic moment-coordinate
+qualifications remain unchanged. Measurement needs no additional collision,
+full-domain force scan or per-step patch allocation. The shared serial stream
+helper preserves the existing transactional publication path.
+
+This material law is evaluated on resolved incoming shear; it does not close the
+nonlinear correlation of unresolved strain with molecular stress. No thermal
+integration, constitutive-memory evolution, immersed-fluid filtering, new wall
+model, stochastic SGS force or turbulent calibration is supplied. Retained
+fictitious interior fluid makes immersed-body LES a separate unresolved physical
+question; this capability is restricted to the original dense wall/open domain.
+
+Five material integration regressions cover all four collision families and
+wall/open boundaries, independent heterogeneous collision/transport with zero
+and nonzero SGS, analytic forced Couette shear and local dissipation, retained
+source epochs on refusal, and serial/pooled replay. Three spatial-load groups
+cover all-axis momentum and aggregate agreement, zero-SGS parity, memory and
+partition refusal, and late cancellation. Full native fs-lbm production/unit
+sources with `turbulent-inflow`, plus `material_boundary_sgs` and `boundary_sgs`
+integration targets, typecheck after merging concurrent boundary changes.
+These runtime tests were not executed in this session.

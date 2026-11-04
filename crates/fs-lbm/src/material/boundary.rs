@@ -1,4 +1,4 @@
-//! Source viscosity on the original curved-wall collision and momentum owner.
+//! Source viscosity on the original curved-wall and native boundary owners.
 //!
 //! Temperature, composition and source-law evaluation remain caller-owned.
 //! One held transport snapshot per fluid cell supplies this step's viscosity;
@@ -6,6 +6,8 @@
 
 /// Original material laws evaluated at self-consistent physical shear rates.
 pub mod rheology;
+/// Incoming resolved-shear material response and explicit native boundary SGS.
+pub mod sgs;
 
 use fs_exec::CancelGate;
 use fs_material::{

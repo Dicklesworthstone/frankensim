@@ -7,8 +7,7 @@
 
 use super::{
     BoundaryGrid3, BoundaryLink3, BoundaryStepError3, CollisionModel3, E3, Face3, FaceBoundary3,
-    Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force, collision_kernel3,
-    effective_wall_velocity,
+    TILE_CELLS, WallMomentumExchange3, cell_force, collision_kernel3, effective_wall_velocity,
 };
 use crate::kinematics::{FlowKinematics3, KinematicsError, KinematicsWorkspace3};
 use crate::lattice3::{D3q19, ViscousLattice3};
@@ -167,21 +166,36 @@ impl BoundaryGrid3 {
         config: SgsConfig,
         workspace: &mut SgsWorkspace3<CollisionModel3>,
     ) -> Result<SgsReport, BoundarySgsError3> {
-        checkpoint(gate)?;
-        config.validate()?;
+        self.prepare_sgs_sampled(gate, config, workspace, |_, _| Ok(self.collision_model))
+    }
+
+    // The same physical gradient supplies molecular rheology and SGS. The
+    // sampler returns an admitted original molecular collision, never an
+    // earlier SGS-augmented field. Source errors keep their original type.
+    fn prepare_sgs_sampled<E: From<BoundarySgsError3>>(
+        &self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+        mut sample: impl FnMut([usize; 3], [[f64; 3]; 3]) -> Result<CollisionModel3, E>,
+    ) -> Result<SgsReport, E> {
+        checkpoint(gate).map_err(BoundarySgsError3::from)?;
+        config.validate().map_err(BoundarySgsError3::from)?;
         let count = self.f[0].len() * TILE_CELLS;
         if workspace.velocity.len() != count
             || workspace.density.len() != count
             || workspace.collisions.len() != count
         {
-            return Err(BoundarySgsError3::Workspace);
+            return Err(BoundarySgsError3::Workspace.into());
         }
-        let nu = self.collision_model.kinematic_viscosity();
-        if !(nu.is_finite() && nu > 0.0) {
-            return Err(SgsError::InvalidMolecularViscosity { cell: 0 }.into());
+        let uniform_nu = self.collision_model.kinematic_viscosity();
+        if !(uniform_nu.is_finite() && uniform_nu > 0.0) {
+            return Err(
+                BoundarySgsError3::from(SgsError::InvalidMolecularViscosity { cell: 0 }).into(),
+            );
         }
         for tile in 0..self.f[0].len() {
-            checkpoint(gate)?;
+            checkpoint(gate).map_err(BoundarySgsError3::from)?;
             for lane in 0..TILE_CELLS {
                 let cell = tile * TILE_CELLS + lane;
                 if self.solid[tile] & (1u64 << lane) != 0 {
@@ -196,7 +210,8 @@ impl BoundaryGrid3 {
                     if !population.is_finite() {
                         return Err(BoundarySgsError3::InvalidState {
                             cell: self.coords(tile, lane),
-                        });
+                        }
+                        .into());
                     }
                     rho += population;
                     momentum[0] += f64::from(e.0) * population;
@@ -208,7 +223,8 @@ impl BoundaryGrid3 {
                 if !(rho.is_finite() && rho > 0.0) || !velocity.iter().all(|v| v.is_finite()) {
                     return Err(BoundarySgsError3::InvalidState {
                         cell: self.coords(tile, lane),
-                    });
+                    }
+                    .into());
                 }
                 workspace.velocity[cell] = velocity;
                 workspace.density[cell] = rho;
@@ -216,32 +232,44 @@ impl BoundaryGrid3 {
         }
         let mut report = SgsReport::default();
         for tile in 0..self.f[0].len() {
-            checkpoint(gate)?;
+            checkpoint(gate).map_err(BoundarySgsError3::from)?;
             for lane in 0..TILE_CELLS {
                 let cell = tile * TILE_CELLS + lane;
                 workspace.collisions[cell] = self.collision_model;
                 if self.solid[tile] & (1u64 << lane) != 0 {
                     continue;
                 }
-                let gradient = self.sgs_gradient(self.coords(tile, lane), &workspace.velocity);
-                let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)?;
+                let coordinate = self.coords(tile, lane);
+                let gradient = self.sgs_gradient(coordinate, &workspace.velocity);
+                let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)
+                    .map_err(BoundarySgsError3::from)?;
+                let molecular = sample(coordinate, gradient)?;
+                let nu = molecular.kinematic_viscosity();
+                if !(nu.is_finite() && nu > 0.0) {
+                    return Err(
+                        BoundarySgsError3::from(SgsError::InvalidMolecularViscosity { cell })
+                            .into(),
+                    );
+                }
                 let ratio = eddy / nu;
                 if !ratio.is_finite() || ratio > config.maximum_eddy_to_molecular {
-                    return Err(SgsError::ViscosityRatioExceeded {
+                    return Err(BoundarySgsError3::from(SgsError::ViscosityRatioExceeded {
                         cell,
                         ratio,
                         maximum: config.maximum_eddy_to_molecular,
-                    }
+                    })
                     .into());
                 }
-                if eddy != 0.0 {
-                    workspace.collisions[cell] =
-                        D3q19::with_shear_relaxation(self.collision_model, 0.5 + 3.0 * (nu + eddy))
-                            .map_err(|source| BoundaryStepError3::Collision {
-                                cell: self.coords(tile, lane),
-                                source,
-                            })?;
-                }
+                workspace.collisions[cell] = if eddy == 0.0 {
+                    molecular
+                } else {
+                    D3q19::with_shear_relaxation(molecular, 0.5 + 3.0 * (nu + eddy))
+                        .map_err(|source| BoundaryStepError3::Collision {
+                            cell: coordinate,
+                            source,
+                        })
+                        .map_err(BoundarySgsError3::from)?
+                };
                 let dilation = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
                 let mut strain2 = 0.0;
                 for i in 0..3 {
@@ -259,9 +287,9 @@ impl BoundaryGrid3 {
                 report.maximum_eddy_to_molecular = report.maximum_eddy_to_molecular.max(ratio);
             }
         }
-        checkpoint(gate)?;
+        checkpoint(gate).map_err(BoundarySgsError3::from)?;
         if !report.resolved_dissipation_lu.is_finite() || !report.sgs_dissipation_lu.is_finite() {
-            return Err(SgsError::NonFiniteViscosity.into());
+            return Err(BoundarySgsError3::from(SgsError::NonFiniteViscosity).into());
         }
         Ok(report)
     }
@@ -279,10 +307,40 @@ impl BoundaryGrid3 {
         workspace: &mut SgsWorkspace3<CollisionModel3>,
         measurement: Option<(&[BoundaryLink3], [f64; 3])>,
     ) -> Result<BoundarySgsReport3, BoundarySgsError3> {
+        let molecular = self.collision_model;
+        self.step_with_sgs_sampled(gate, config, workspace, measurement, |_, _| Ok(molecular))
+    }
+
+    pub(crate) fn step_with_sgs_sampled<E: From<BoundarySgsError3>>(
+        &mut self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+        measurement: Option<(&[BoundaryLink3], [f64; 3])>,
+        sample: impl FnMut([usize; 3], [[f64; 3]; 3]) -> Result<CollisionModel3, E>,
+    ) -> Result<BoundarySgsReport3, E> {
         if let Some((links, origin)) = measurement {
-            self.validate_wall_measurement(links, origin)?;
+            self.validate_wall_measurement(links, origin)
+                .map_err(BoundarySgsError3::from)?;
         }
-        let sgs = self.prepare_sgs(gate, config, workspace)?;
+        let sgs = self.prepare_sgs_sampled(gate, config, workspace, sample)?;
+        let wall_momentum =
+            self.step_sgs_prepared_measured(gate, workspace, |grid| match measurement {
+                Some((links, origin)) => grid.wall_momentum(links, origin, Some(gate)).map(Some),
+                None => Ok(None),
+            })?;
+        Ok(BoundarySgsReport3 { sgs, wall_momentum })
+    }
+
+    // Preparation and measurement admission belong to the calling native
+    // owner. Both aggregate and distributed loads observe these SAME prepared
+    // post-collision populations before the sole stream/publication boundary.
+    pub(super) fn step_sgs_prepared_measured<T>(
+        &mut self,
+        gate: &CancelGate,
+        workspace: &SgsWorkspace3<CollisionModel3>,
+        measure: impl FnOnce(&Self) -> Result<T, BoundaryStepError3>,
+    ) -> Result<T, BoundarySgsError3> {
         self.topology_locked = true;
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
@@ -303,41 +361,9 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        let wall_momentum = match measurement {
-            Some((links, origin)) => Some(self.wall_momentum(links, origin, Some(gate))?),
-            None => None,
-        };
-        let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
-        let outcome: Result<(), BoundaryStepError3> = (|| {
-            let view = StreamView {
-                post: &self.post,
-                pull: &self.pull,
-                link_masks: &self.link_masks,
-                open_link_masks: &self.open_link_masks,
-                stationary_link_masks: &self.stationary_link_masks,
-                boundaries: self.boundaries,
-                dims: [self.nx, self.ny, self.nz],
-            };
-            for tile in 0..self.f[0].len() {
-                checkpoint(gate)?;
-                for lane in 0..TILE_CELLS {
-                    if self.solid[tile] & (1u64 << lane) != 0 {
-                        continue;
-                    }
-                    let values = view.pull_cell(tile, lane);
-                    for (field, value) in next.iter_mut().zip(values) {
-                        field[tile].0[lane] = value;
-                    }
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = outcome {
-            self.next = Some(next);
-            return Err(error.into());
-        }
-        self.publish_next(next, gate, true)?;
-        Ok(BoundarySgsReport3 { sgs, wall_momentum })
+        let measured = measure(self)?;
+        self.stream_collided_serial(gate)?;
+        Ok(measured)
     }
 
     /// Pooled SGS collision/streaming and optional wall loads through the
@@ -351,12 +377,30 @@ impl BoundaryGrid3 {
         workspace: &mut SgsWorkspace3<CollisionModel3>,
         measurement: Option<(&[BoundaryLink3], [f64; 3])>,
     ) -> Result<BoundarySgsReport3, BoundarySgsError3> {
+        let molecular = self.collision_model;
+        self.step_pooled_with_sgs_sampled(pool, gate, config, workspace, measurement, |_, _| {
+            Ok(molecular)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_pooled_with_sgs_sampled<E: From<BoundarySgsError3>, P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+        measurement: Option<(&[BoundaryLink3], [f64; 3])>,
+        sample: impl FnMut([usize; 3], [[f64; 3]; 3]) -> Result<CollisionModel3, E>,
+    ) -> Result<BoundarySgsReport3, E> {
         if let Some((links, origin)) = measurement {
-            self.validate_wall_measurement(links, origin)?;
+            self.validate_wall_measurement(links, origin)
+                .map_err(BoundarySgsError3::from)?;
         }
-        let sgs = self.prepare_sgs(gate, config, workspace)?;
-        let exchange =
-            self.step_pooled_inner(pool, gate, measurement, Some(&workspace.collisions))?;
+        let sgs = self.prepare_sgs_sampled(gate, config, workspace, sample)?;
+        let exchange = self
+            .step_pooled_inner(pool, gate, measurement, Some(&workspace.collisions))
+            .map_err(BoundarySgsError3::from)?;
         Ok(BoundarySgsReport3 {
             sgs,
             wall_momentum: measurement.map(|_| exchange),

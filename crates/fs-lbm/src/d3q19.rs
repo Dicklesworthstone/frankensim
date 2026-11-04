@@ -50,7 +50,7 @@ pub use boundary::{
     PartialSaturationBodyResponse3, PartialSaturationError3, PartialSaturationExchange3,
     PartialSaturationForcing3, PeriodicMomentumTransport3, PlaneLubricationExchange3, RigidFrame3,
     SharedCarrierLubricationExchange3, SharedLubricationSurface3, SphereLubrication3,
-    SphereLubricationExchange3, VelocityProfileReport3, WallMomentumExchange3,
+    SphereLubricationExchange3, VelocityProfileReport3, WallMomentumExchange3, WallPatchProbe3,
     WallRotor3, WallRotorError3, WallRotorExchange3, WallRotorResponse3, WallRotorsExchange3,
 };
 pub use coupled::{
