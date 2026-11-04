@@ -292,5 +292,8 @@ mod wound;
 #[path = "tests/measured.rs"]
 mod measured;
 
+#[path = "tests/measured_loss.rs"]
+mod measured_loss;
+
 #[path = "tests/shear_layers.rs"]
 mod shear_layers;

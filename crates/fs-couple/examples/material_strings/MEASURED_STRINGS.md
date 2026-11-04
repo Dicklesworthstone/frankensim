@@ -220,6 +220,24 @@ calls that term's form and origin open to question, and on its E2 string it is
 2.7 to 12 times the computed drag, so no diameter reproduces it. That remainder
 stays unmodelled and is stated in the instrument's `unknowns.tsv`.
 
+`measured-cello-g-loss.material-strings` is the same card with
+`loss-factors loss_factor_tension_dominant loss_factor_bending_dominant` in
+place of `no-intrinsic-loss`; no other token differs, and the first fixture
+keeps `no-intrinsic-loss`. The two rows are **derived**, not printed. The paper
+prints one loss number for this string, the quality factor averaged over the
+first 30 modes of the breaking-wire pluck decays, 1064; the per-mode values are
+only plotted. The pack's own observation `lampis-jasael-2024-loss-derived`
+says so on its face, and the rows read that mean as a constant loss factor,
+`eta_F = eta_B = 1 / 1064 = 9.3985e-4`. With the two equal, the law above
+gives `zeta = eta / 2` and `Q = 1 / eta = 1064` on every mode number, so the
+one assumption the paper does not state is that the decay does not depend on
+mode number. That is what its plot of Q against mode number would test, and
+the plot is not in the pack. Two property names hold the same number because
+the selection needs two distinct, strictly positive rows (`eta_B = 0` is
+inadmissible). The rows add exactly `eta / 2` to each mode's computed damping;
+the air drag is still computed separately and added, so a render's total decay
+is somewhat faster than `Q = 1064`. Only the Dominant has these rows.
+
 A full cello additionally needs sourced body and bridge geometry/materials,
 cavity and radiation data, support and contact laws, appropriate resolution,
 and comparison with measurements. The laboratory plate does not stand in as a

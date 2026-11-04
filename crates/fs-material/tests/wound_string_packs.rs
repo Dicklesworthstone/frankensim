@@ -112,6 +112,43 @@ fn cello_g_strings_satisfy_the_string_identities() {
     );
 }
 
+/// The Dominant's two loss rows are derived, not printed. The paper prints one loss number for the string, the quality factor averaged
+/// over the first 30 modes of the pluck decays (1064); the rows read it as a constant loss factor, eta_F = eta_B = 1 / 1064. With the two
+/// equal, the friction and bending terms of Woodhouse 2004 eq. (8) give zeta = (T eta_F + EI eta_B k^2) / (2 (T + EI k^2)) = eta / 2 for
+/// every mode number k, so Q_k = 1 / eta = 1064 for all of them.
+#[test]
+fn the_dominant_loss_rows_read_the_printed_mean_q_as_a_constant_loss_factor() {
+    let s = load_pack("cello-g-strings-whole-lampis-2024", "CC-BY-4.0");
+    let q = s["mean_quality_factor_first_30_modes_dominant"];
+    assert_eq!(q, 1064.0);
+    let (eta_f, eta_b) = (s["loss_factor_tension_dominant"], s["loss_factor_bending_dominant"]);
+    // Two distinct property names (the engine's selection needs two) holding the same number, 1 / Q.
+    assert_eq!(eta_f, eta_b);
+    assert!((eta_f * q - 1.0).abs() < 1e-12, "eta = {eta_f:e} is not 1 / {q}");
+    // The law, evaluated from the pack's own tension and bending stiffness for 64 modes: zeta_k = eta / 2, Q_k = 1064.
+    let (t, ei) = (s["tension_dominant"], s["bending_stiffness_dominant"]);
+    for k in 1..=64 {
+        let k2 = f64::from(k * k);
+        let zeta = (t * eta_f + ei * eta_b * k2) / (2.0 * (t + ei * k2));
+        assert!((1.0 / (2.0 * zeta) - q).abs() < 1e-9 * q, "mode {k}: Q = {}", 1.0 / (2.0 * zeta));
+    }
+    // Planted negatives: only the Dominant has the derived rows, and they sit under their own observation, which says so.
+    for other in ["prelude", "helicore", "kaplan"] {
+        assert!(!s.contains_key(&format!("loss_factor_tension_{other}")), "{other}");
+    }
+    let text = std::fs::read_to_string(
+        repo_root().join("data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/properties.tsv"),
+    )
+    .expect("properties");
+    let observation = text
+        .lines()
+        .find(|line| line.starts_with("observation\tlampis-jasael-2024-loss-derived\t"))
+        .expect("the derived rows have their own observation");
+    assert!(observation.contains("DERIVED row, not a measurement"), "{observation}");
+    let rows = text.lines().filter(|line| line.contains("\tlampis-jasael-2024-loss-derived\t")).count();
+    assert_eq!(rows, 3, "the observation and its two scalars");
+}
+
 #[test]
 fn multifilament_core_patents_satisfy_their_identities() {
     let s = load_pack(
