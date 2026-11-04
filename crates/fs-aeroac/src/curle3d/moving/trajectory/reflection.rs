@@ -5,8 +5,10 @@
 //! the ORIGINAL source position, velocity, acceleration, force and force rate.
 //! It is exactly equivalent to transforming every image-source vector, without
 //! cloning or reinterpolating the trajectory. Rigid/release parity multiplies
-//! all eight original pressure coefficients. Each path keeps its own retarded
-//! time; a reflected transient is not a gain applied to the direct waveform.
+//! all eight original pressure coefficients. The monopole velocity gradient
+//! also follows the transpose image map back to the physical receiver axes.
+//! Each path keeps its own retarded time; a reflected transient is not a gain
+//! applied to the direct waveform.
 //!
 //! The medium is homogeneous, lossless and at rest in the stationary walls'
 //! frame. This is the finite ideal-plane image construction of Allen & Berkley,
@@ -282,7 +284,8 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
 
     /// Prepare one physical propagation path at its OWN retarded source time.
     /// Apply ORIGINAL Q/F strengths; ideal-wall parity is already in the eight
-    /// coefficients. Paths are ordered by plane bit mask, direct path first.
+    /// pressure coefficients and the monopole velocity uses physical receiver
+    /// axes. Paths are ordered by plane bit mask, direct path first.
     /// Queries allocate nothing and share the original safeguarded root solver.
     pub fn prepare_path(
         &self,
@@ -346,7 +349,12 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
             maximum_time_residual_s,
             cancelled,
         )?;
-        Ok(apply_parity(prepared, image.sign))
+        Ok(apply_image(
+            prepared,
+            image.sign,
+            self.observer.planes(),
+            path,
+        ))
     }
 
     /// Prepare an original emission event for exact rounded-endpoint
@@ -358,9 +366,11 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
     ) -> Result<PreparedMovingCompactSample, AeroacError> {
         let image = self.observer.path(path)?;
         let motion = self.trajectory.kinematics_at(source_time)?;
-        Ok(apply_parity(
+        Ok(apply_image(
             image.observer.prepare_emission(source_time, motion)?,
             image.sign,
+            self.observer.planes(),
+            path,
         ))
     }
 
@@ -397,9 +407,43 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
     }
 }
 
-fn apply_parity(mut sample: PreparedMovingCompactSample, sign: f64) -> PreparedMovingCompactSample {
+fn apply_image(
+    mut sample: PreparedMovingCompactSample,
+    sign: f64,
+    planes: &[IdealAcousticPlane],
+    mask: usize,
+) -> PreparedMovingCompactSample {
     if sign < 0.0 {
         sample.coefficients = sample.coefficients.map(|value| -value);
+    }
+    if let Some(mut coefficients) = sample.monopole_velocity {
+        if sign < 0.0 {
+            coefficients = coefficients.map(|row| row.map(|value| -value));
+        }
+        // The virtual receiver applies the planes in reverse order. A spatial
+        // gradient follows that map's TRANSPOSE, hence the forward order here.
+        // Force-source pressure columns must stay in the original source frame.
+        for (index, plane) in planes.iter().enumerate() {
+            if mask & (1 << index) == 0 {
+                continue;
+            }
+            let normal = plane.inward_normal();
+            for column in 0..2 {
+                let projection = (0..3).fold(Dd::ZERO, |sum, axis| {
+                    sum + Dd::from_f64(normal[axis]) * Dd::from_f64(coefficients[axis][column])
+                });
+                for axis in 0..3 {
+                    coefficients[axis][column] = (Dd::from_f64(coefficients[axis][column])
+                        - Dd::from_f64(2.0 * normal[axis]) * projection)
+                        .to_f64();
+                }
+            }
+        }
+        sample.monopole_velocity = coefficients
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+            .then_some(coefficients);
     }
     sample
 }

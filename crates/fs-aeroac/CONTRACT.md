@@ -164,6 +164,27 @@ material scaling and domain/representability refusals.
   antialiasing belong to the consumer. This is prescribed compact 3D pressure
   in a quiescent lossless medium, without finite-size validation, scattering,
   absorption, feedback, transient force particle velocity or SPL qualification.
+- `PreparedMovingCompactSample::evaluate_monopole_field` observes the full
+  instantaneous field of physical volume injection on that SAME retarded
+  event. The original potential `phi=-[Q/(4 pi R kappa)]ret` supplies pressure
+  and all three particle-velocity components, including acceleration,
+  transverse motion and `1/R²` induction. Q and Qdot keep the source clock;
+  the microphone's observed Doppler rate is not an input multiplier. Signed
+  intensity is `p u`, with no plane-wave substitution or phasor half-factor.
+  Evaluation is allocation-free, bounded constant work with DD reductions.
+  Nonfinite/unrepresentable velocity or flux refuses without narrowing the
+  existing pressure API. Force-source velocity still requires additional
+  history/initial conditions and is not supplied by this volume-only method.
+  Existing source/receiver trajectory queries return the same prepared type.
+  Ideal reflected paths transform its gradient by the transpose image map
+  into physical receiver axes while pressure retains the original force frame.
+  Coherent paths must sum p and u before forming total intensity. In a shared
+  uniform-flow frame, u is the acoustic perturbation; `p u` excludes mean-flow
+  advection. G1/G3 cases in `moving_compact`, `moving_trajectory`,
+  `moving_receiver` and `moving_reflection` compare independently differentiated
+  retarded potentials, analytic induction/Doppler limits, signed/material
+  scaling, ideal-wall conditions and coordinate covariance. These tests do
+  not qualify source dynamics, finite size, nonlinear sound or measured SPL.
 - `curle3d::moving::flow::UniformFlowCompactObserver` observes fixed laboratory
   sources and microphones in an explicitly supplied uniform subsonic fluid
   velocity. It reuses the original moving-source pressure coefficients after a

@@ -234,6 +234,36 @@ fn accelerating_images_match_independent_green_derivatives_and_both_moving_clock
                 .unwrap();
             near(actual.monopole_pressure_pa, sign * q, 5e-7, 1e-9);
             near(actual.dipole_pressure_pa, sign * f, 5e-7, 1e-9);
+            let history = strength(sample.pressure.source_time_s());
+            let field = sample
+                .pressure
+                .evaluate_monopole_field(history.volume_flow_m3_s, history.volume_flow_rate_m3_s2)
+                .unwrap();
+            assert_eq!(field.sample.pressure_pa, actual.monopole_pressure_pa);
+            for axis in 0..3 {
+                let velocity = -sign
+                    * derivative(
+                        |dx| {
+                            let mut shifted = x;
+                            shifted[axis] += dx;
+                            potential(shifted, time, mask)[0]
+                        },
+                        2e-3,
+                    );
+                near(field.particle_velocity_m_s[axis], velocity, 5e-7, 1e-10);
+                near(
+                    field.instantaneous_intensity_w_m2[axis],
+                    sign * q * velocity,
+                    1e-6,
+                    1e-12,
+                );
+            }
+            let endpoint = reflected
+                .prepare_path_emission(mask, sample.pressure.source_time_s(), time)
+                .unwrap()
+                .evaluate_monopole_field(history.volume_flow_m3_s, history.volume_flow_rate_m3_s2)
+                .unwrap();
+            assert_eq!(field.particle_velocity_m_s, endpoint.particle_velocity_m_s);
             near(actual.source_time_s, emission(x, time, mask), 3e-11, 0.1);
             let rate = derivative(
                 |dt| emission(receiver(time + dt).position_m, time + dt, mask),
@@ -327,14 +357,9 @@ fn moving_microphone_retains_weak_force_after_image_path_cancellation() {
     });
     let weak_force = 2.0_f64.powi(-60);
     for parity in 0..2 {
-        let observer = MovingReflectionObserver::new(
-            &receiver,
-            &walls(parity, 1),
-            2,
-            bounds(),
-            &mut || false,
-        )
-        .unwrap();
+        let observer =
+            MovingReflectionObserver::new(&receiver, &walls(parity, 1), 2, bounds(), &mut || false)
+                .unwrap();
         let reflected = PreparedReflectedMovingReceiverSource::new(
             &source,
             &observer,

@@ -1,4 +1,4 @@
-//! Retarded pressure of prescribed moving compact 3D sources.
+//! Retarded fields of prescribed moving compact 3D sources.
 //!
 //! In a homogeneous quiescent lossless medium, volume injection Q [m³/s] and
 //! force ON the fluid F [N] give
@@ -14,6 +14,10 @@
 //! scattering, absorption and feedback remain caller-owned. Force pressure
 //! has no additional density factor. Transient force particle velocity needs
 //! history/initial conditions; this pressure operator does not invent it.
+//! A volume source instead has the causal potential
+//! `phi = -[Q/(4 pi R kappa)]ret`, so its velocity is the spatial gradient of
+//! that same potential. [`PreparedMovingCompactSample::evaluate_monopole_field`]
+//! retains its full near field and signed instantaneous pressure-work flux.
 
 use super::statistics::{invalid, nonfinite};
 use crate::AeroacError;
@@ -254,6 +258,13 @@ impl MovingCompactObserver {
         }
         Ok(PreparedMovingCompactSample {
             coefficients,
+            // For phi=-Q G_ret, u_i=-partial_i(Q G_ret). These are exactly
+            // the force/Fdot pressure coefficients already derived above.
+            // Keep a separate copy because image paths transform the receiver
+            // gradient while their force-source coordinates stay ORIGINAL.
+            monopole_velocity: Some(core::array::from_fn(|i| {
+                [coefficients[2 + i], coefficients[5 + i]]
+            })),
             sample: MovingCompactSample {
                 source_time_s,
                 receiver_time_s,
@@ -350,6 +361,9 @@ impl MovingCompactObserver {
 #[derive(Clone, Copy, Debug)]
 pub struct PreparedMovingCompactSample {
     coefficients: [f64; 8],
+    // Cartesian receiver gradient, columns Q and Qdot. None means a reflected
+    // gradient is unrepresentable; the original pressure-only domain survives.
+    monopole_velocity: Option<[[f64; 2]; 3]>,
     sample: MovingCompactSample,
 }
 
@@ -392,6 +406,68 @@ impl PreparedMovingCompactSample {
     ) -> Result<MovingCompactSample, AeroacError> {
         let (sample, _) = self.evaluate_with_pressure_dd(strength)?;
         Ok(sample)
+    }
+
+    /// Full instantaneous field of a prescribed moving VOLUME source.
+    ///
+    /// Both inputs belong to [`Self::source_time_s`]: volume injection Q
+    /// [m³/s] and its derivative Qdot [m³/s²] on the ORIGINAL source clock.
+    /// No source-rate or receiver-Doppler multiplier is applied to the inputs.
+    /// The original pressure law and its spatial gradient supply all three
+    /// particle-velocity components, including nonradial motion and induction.
+    /// The signed flux is `p u`, without a harmonic factor of one half or the
+    /// plane-wave replacement `u=n p/(rho c)`.
+    ///
+    /// Equivalently, `phi=-[Q/(4 pi R kappa)]ret`, `p=-rho partial_t phi`
+    /// and `u=grad(phi)`. At rest, this gives
+    /// `u=n [Q/(4 pi R²)+Qdot/(4 pi c R)]`. Source motion retains the same
+    /// Doppler, acceleration and near-field derivatives as the pressure owner.
+    /// Ideal image paths return velocity in the PHYSICAL receiver's Cartesian
+    /// frame, including their rigid/release parity. For coherent paths/sources,
+    /// sum p and u BEFORE forming the total intensity.
+    ///
+    /// This is the perturbation velocity in the shared fluid rest frame, not
+    /// the source or microphone's velocity. A Galilean uniform-flow mapping
+    /// leaves this perturbation unchanged; its pressure-work flux excludes
+    /// advection of acoustic energy by the mean flow. No transient FORCE-source
+    /// velocity is inferred: that needs additional history/initial conditions.
+    /// Original linear, compact, homogeneous lossless model limits remain.
+    ///
+    /// Evaluation is constant-work and allocation-free, with DD products and
+    /// sums. A nonfinite/unrepresentable velocity or flux refuses the whole
+    /// field without narrowing [`Self::evaluate`]'s pressure-only domain.
+    pub fn evaluate_monopole_field(
+        &self,
+        volume_flow_m3_s: f64,
+        volume_flow_rate_m3_s2: f64,
+    ) -> Result<MovingMonopoleField, AeroacError> {
+        let coefficients = self.monopole_velocity.ok_or_else(|| {
+            invalid("moving monopole particle-velocity coefficients are unrepresentable")
+        })?;
+        let (sample, pressure) = self.evaluate_with_pressure_dd(CompactSourceStrength {
+            volume_flow_m3_s,
+            volume_flow_rate_m3_s2,
+            ..CompactSourceStrength::default()
+        })?;
+        let q = Dd::from_f64(volume_flow_m3_s);
+        let qdot = Dd::from_f64(volume_flow_rate_m3_s2);
+        let velocity = coefficients.map(|[a, b]| Dd::from_f64(a) * q + Dd::from_f64(b) * qdot);
+        let particle_velocity_m_s = velocity.map(Dd::to_f64);
+        let instantaneous_intensity_w_m2 = velocity.map(|u| (pressure * u).to_f64());
+        if particle_velocity_m_s
+            .iter()
+            .chain(&instantaneous_intensity_w_m2)
+            .any(|value| !value.is_finite())
+        {
+            return Err(nonfinite(
+                "moving monopole particle velocity or instantaneous intensity",
+            ));
+        }
+        Ok(MovingMonopoleField {
+            sample,
+            particle_velocity_m_s,
+            instantaneous_intensity_w_m2,
+        })
     }
 
     // Keep weak source components available to the coherent image-path sum.
@@ -441,6 +517,22 @@ impl PreparedMovingCompactSample {
         }
         Ok((sample, total))
     }
+}
+
+/// One retarded moving volume-source field, with its original causal clock.
+///
+/// All values are real instantaneous quantities. Near-field flux may point
+/// toward the source. Multiple coherent contributions must be combined at the
+/// pressure/velocity level before their product is taken.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MovingMonopoleField {
+    /// Original emission/arrival metadata and physical monopole pressure [Pa].
+    /// `dipole_pressure_pa` is zero; the total pressure is the monopole pressure.
+    pub sample: MovingCompactSample,
+    /// Acoustic particle velocity [m/s] in the physical receiver's fixed axes.
+    pub particle_velocity_m_s: [f64; 3],
+    /// Signed instantaneous pressure-work flux `p u` [W/m²].
+    pub instantaneous_intensity_w_m2: [f64; 3],
 }
 
 /// Physical pressure with the actual emission/receiver event and its residual.

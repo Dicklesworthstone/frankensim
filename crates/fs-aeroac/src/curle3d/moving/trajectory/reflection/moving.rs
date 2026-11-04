@@ -10,7 +10,7 @@ use super::super::{
     MAX_BOUND_DEPTH, MovingReceiverBudget, MovingReceiverConfig, PreparedKinematicTrajectory,
     PreparedMovingReceiverSample, PreparedMovingReceiverSource, invalid, poll, split_controls,
 };
-use super::{PositionNode, ReflectedTrajectoryBudget, admit_planes, apply_parity};
+use super::{PositionNode, ReflectedTrajectoryBudget, admit_planes, apply_image};
 use crate::AeroacError;
 use crate::curle3d::IdealAcousticPlane;
 use crate::curle3d::moving::{
@@ -203,7 +203,8 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
     }
 
     /// Prepare one image on the ORIGINAL source history. The pressure already
-    /// includes rigid/release parity. Receiver kinematics remain physical;
+    /// includes rigid/release parity; monopole velocity follows the transpose
+    /// image map into the physical receiver axes. Receiver kinematics remain physical;
     /// the observed source-clock rate includes the virtual receiver's velocity.
     pub fn prepare_path(
         &self,
@@ -215,7 +216,12 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
         let mut sample = self
             .path(path)?
             .prepare_receiver(receiver_time, cancelled)?;
-        sample.pressure = apply_parity(sample.pressure, self.observer.signs[path]);
+        sample.pressure = apply_image(
+            sample.pressure,
+            self.observer.signs[path],
+            self.observer.planes(),
+            path,
+        );
         Ok(sample)
     }
 
@@ -229,9 +235,11 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
         receiver_time: f64,
     ) -> Result<PreparedMovingCompactSample, AeroacError> {
         let observer = self.path(path)?.observer_at(receiver_time)?;
-        Ok(apply_parity(
+        Ok(apply_image(
             observer.prepare_emission(source_time, self.source().kinematics_at(source_time)?)?,
             self.observer.signs[path],
+            self.observer.planes(),
+            path,
         ))
     }
 

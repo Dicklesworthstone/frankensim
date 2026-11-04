@@ -100,6 +100,16 @@ fn uniform_approach_and_recession_have_correct_clock_and_amplitude() {
             rho * 2.0 / (4.0 * PI * distance * kappa * kappa),
             3e-14,
         );
+        let field = prepared.evaluate_monopole_field(0.0, 2.0).unwrap();
+        assert_eq!(field.sample, sample);
+        // Qdot belongs to the original source clock: the propagation already
+        // contains both Doppler factors. There is no third rate multiplier.
+        close(
+            field.particle_velocity_m_s[0],
+            2.0 / (4.0 * PI * c * distance * kappa * kappa),
+            3e-14,
+        );
+        assert_eq!(field.particle_velocity_m_s[1..], [0.0, 0.0]);
         assert_eq!(sample.receiver_time_s, receiver_time);
         assert!(sample.retarded_time_residual_s <= 2e-14);
         let next = microphone
@@ -159,6 +169,80 @@ fn transverse_motion_has_convective_pressure_at_a_stationary_dipole_null() {
     );
     assert_eq!(sample.radial_mach, 0.0);
     assert_eq!(sample.source_time_rate, 1.0);
+}
+
+#[test]
+fn moving_monopole_retains_transverse_velocity_and_signed_induction_flux() {
+    let (rho, c, mach, radius, q) = (1.2, 300.0, 0.4, 4.0, 0.002);
+    let prepared = observer(rho, c, [0.0, radius, 0.0])
+        .prepare_emission(
+            0.0,
+            SourceKinematics {
+                velocity_m_s: [mach * c, 0.0, 0.0],
+                ..SourceKinematics::default()
+            },
+        )
+        .unwrap();
+    let field = prepared.evaluate_monopole_field(q, 0.0).unwrap();
+    let scale = q / (4.0 * PI * radius * radius);
+    close(
+        field.sample.pressure_pa,
+        -rho * c * mach * mach * scale,
+        3e-14,
+    );
+    close(field.particle_velocity_m_s[0], -mach * scale, 3e-14);
+    close(
+        field.particle_velocity_m_s[1],
+        (1.0 - mach * mach) * scale,
+        3e-14,
+    );
+    assert_eq!(field.particle_velocity_m_s[2], 0.0);
+    for axis in 0..3 {
+        close(
+            field.instantaneous_intensity_w_m2[axis],
+            field.sample.pressure_pa * field.particle_velocity_m_s[axis],
+            4e-14,
+        );
+    }
+    assert!(field.instantaneous_intensity_w_m2[1] < 0.0);
+    assert!(field.particle_velocity_m_s[1] > 0.0);
+    assert!(field.sample.pressure_pa / (rho * c) < 0.0);
+}
+
+#[test]
+fn stationary_monopole_field_keeps_near_field_material_and_source_scaling() {
+    let x = [0.3, 0.4, 0.0];
+    let r = 0.5;
+    let c = 300.0;
+    let source_time = 0.01;
+    let (q, qdot) = (-0.002, 0.03);
+    let velocity = q / (4.0 * PI * r * r) + qdot / (4.0 * PI * c * r);
+    for rho in [0.125, 1.2, 1000.0] {
+        let prepared = observer(rho, c, x)
+            .prepare_emission(source_time, SourceKinematics::default())
+            .unwrap();
+        let reference = prepared.evaluate_monopole_field(q, qdot).unwrap();
+        for amplitude in [-8.0, 0.0, 1.0, 0.125] {
+            let field = prepared
+                .evaluate_monopole_field(amplitude * q, amplitude * qdot)
+                .unwrap();
+            let p = rho * amplitude * qdot / (4.0 * PI * r);
+            close(field.sample.pressure_pa, p, 3e-14);
+            assert_eq!(field.sample.source_time_s, source_time);
+            assert_eq!(field.sample.dipole_pressure_pa, 0.0);
+            for axis in 0..3 {
+                let u = amplitude * x[axis] / r * velocity;
+                close(field.particle_velocity_m_s[axis], u, 4e-14);
+                close(field.instantaneous_intensity_w_m2[axis], p * u, 5e-14);
+                close(
+                    field.instantaneous_intensity_w_m2[axis],
+                    amplitude * amplitude * reference.instantaneous_intensity_w_m2[axis],
+                    5e-14,
+                );
+            }
+        }
+        assert!(reference.instantaneous_intensity_w_m2[0] < 0.0);
+    }
 }
 
 // Independent manufactured history: the reference below differentiates the
@@ -254,7 +338,71 @@ fn accelerating_source_matches_eulerian_derivatives_of_retarded_potentials() {
         close(sample.dipole_pressure_pa, dipole, 2e-7);
         close(sample.pressure_pa, monopole + dipole, 2e-7);
         close(sample.receiver_time_s, t, 2e-13);
+        let strength = history(tau);
+        let field = observer(1.2, 300.0, x)
+            .prepare_emission(tau, trajectory(tau))
+            .unwrap()
+            .evaluate_monopole_field(strength.volume_flow_m3_s, strength.volume_flow_rate_m3_s2)
+            .unwrap();
+        assert_eq!(field.sample.pressure_pa, sample.monopole_pressure_pa);
+        for axis in 0..3 {
+            let velocity = -derivative(
+                |dx| {
+                    let mut shifted = x;
+                    shifted[axis] += dx;
+                    potentials(shifted, t)[0]
+                },
+                2e-3,
+            );
+            close(field.particle_velocity_m_s[axis], velocity, 2e-7);
+            close(
+                field.instantaneous_intensity_w_m2[axis],
+                monopole * velocity,
+                5e-7,
+            );
+        }
     }
+}
+
+#[test]
+fn moving_monopole_field_refusals_preserve_the_pressure_only_domain() {
+    let prepared = observer(1.2, 300.0, [0.01, 0.0, 0.0])
+        .prepare_emission(0.0, SourceKinematics::default())
+        .unwrap();
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(prepared.evaluate_monopole_field(invalid, 0.0).is_err());
+        assert!(prepared.evaluate_monopole_field(0.0, invalid).is_err());
+    }
+    // Steady injection has zero acoustic pressure but a potentially enormous
+    // induction velocity; adding vector observation must not narrow pressure.
+    assert_eq!(
+        prepared
+            .evaluate(CompactSourceStrength {
+                volume_flow_m3_s: 1e308,
+                ..CompactSourceStrength::default()
+            })
+            .unwrap()
+            .pressure_pa,
+        0.0,
+    );
+    assert!(prepared.evaluate_monopole_field(1e308, 0.0).is_err());
+    // Here pressure and velocity are each finite, but their flux is not.
+    assert!(
+        prepared
+            .evaluate(CompactSourceStrength {
+                volume_flow_m3_s: 1e160,
+                volume_flow_rate_m3_s2: 1e160,
+                ..CompactSourceStrength::default()
+            })
+            .unwrap()
+            .pressure_pa
+            .is_finite()
+    );
+    assert!(prepared.evaluate_monopole_field(1e160, 1e160).is_err());
+    let silence = prepared.evaluate_monopole_field(0.0, 0.0).unwrap();
+    assert_eq!(silence.sample.pressure_pa, 0.0);
+    assert_eq!(silence.particle_velocity_m_s, [0.0; 3]);
+    assert_eq!(silence.instantaneous_intensity_w_m2, [0.0; 3]);
 }
 
 #[test]

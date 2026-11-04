@@ -201,6 +201,31 @@ fn curved_microphone_matches_independently_differentiated_retarded_potentials() 
         near(pressure.monopole_pressure_pa, monopole, 2e-7, 1e-6);
         near(pressure.dipole_pressure_pa, dipole, 2e-7, 1e-6);
         near(pressure.pressure_pa, monopole + dipole, 2e-7, 1e-6);
+        let q = strength(actual.pressure.source_time_s());
+        let field = actual
+            .pressure
+            .evaluate_monopole_field(q.volume_flow_m3_s, q.volume_flow_rate_m3_s2)
+            .unwrap();
+        assert_eq!(field.sample.pressure_pa, pressure.monopole_pressure_pa);
+        // Velocity is a spatial derivative at this physical receiver EVENT,
+        // not a derivative along its trajectory or motion relative to the mic.
+        for axis in 0..3 {
+            let velocity = -derivative(
+                |dx| {
+                    let mut displaced = x;
+                    displaced[axis] += dx;
+                    potentials(displaced, t)[0]
+                },
+                1e-3,
+            );
+            near(field.particle_velocity_m_s[axis], velocity, 2e-7, 1e-10);
+            near(
+                field.instantaneous_intensity_w_m2[axis],
+                monopole * velocity,
+                4e-7,
+                1e-12,
+            );
+        }
         let clock_rate = derivative(
             |dt| emission_at(microphone(t + dt).position_m, t + dt),
             1e-5,

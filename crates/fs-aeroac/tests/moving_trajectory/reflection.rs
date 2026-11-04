@@ -148,8 +148,7 @@ fn weak_force_survives_destructive_interference_between_retarded_paths() {
     );
     let weak_force = 2.0_f64.powi(-60);
     for parity in 0..2 {
-        let images = IdealReflectionObserver::new(*base.observer(), &walls(parity, 1), 2)
-            .unwrap();
+        let images = IdealReflectionObserver::new(*base.observer(), &walls(parity, 1), 2).unwrap();
         let reflected = PreparedReflectedSourceTrajectory::new(
             &base,
             &images,
@@ -157,8 +156,12 @@ fn weak_force_survives_destructive_interference_between_retarded_paths() {
             &mut || false,
         )
         .unwrap();
-        let direct = reflected.prepare_path(0, 0.0, 1e-14, &mut || false).unwrap();
-        let image = reflected.prepare_path(1, 0.0, 1e-14, &mut || false).unwrap();
+        let direct = reflected
+            .prepare_path(0, 0.0, 1e-14, &mut || false)
+            .unwrap();
+        let image = reflected
+            .prepare_path(1, 0.0, 1e-14, &mut || false)
+            .unwrap();
         let sign = if parity == 0 { 1.0 } else { -1.0 };
         let early_time = image.source_time_s();
         let duration = direct.source_time_s() - early_time;
@@ -260,6 +263,29 @@ fn accelerating_images_match_independently_differentiated_retarded_potentials() 
             let observed = path.evaluate(strength(path.source_time_s())).unwrap();
             near(observed.monopole_pressure_pa, sign * monopole, 4e-7, 1e-9);
             near(observed.dipole_pressure_pa, sign * dipole, 4e-7, 1e-9);
+            let source = strength(path.source_time_s());
+            let field = path
+                .evaluate_monopole_field(source.volume_flow_m3_s, source.volume_flow_rate_m3_s2)
+                .unwrap();
+            assert_eq!(field.sample.pressure_pa, observed.monopole_pressure_pa);
+            for axis in 0..3 {
+                let velocity = -sign
+                    * derivative(
+                        |dx| {
+                            let mut shifted = x;
+                            shifted[axis] += dx;
+                            image_potential(shifted, time, mask)[0]
+                        },
+                        2e-3,
+                    );
+                near(field.particle_velocity_m_s[axis], velocity, 4e-7, 1e-10);
+                near(
+                    field.instantaneous_intensity_w_m2[axis],
+                    sign * monopole * velocity,
+                    8e-7,
+                    1e-12,
+                );
+            }
             near(path.source_time_s(), image_time(x, time, mask), 2e-11, 0.1);
             let rate = derivative(|dt| image_time(x, time + dt, mask), 1e-5);
             near(path.source_time_rate(), rate, 2e-8, 1.0);
@@ -269,6 +295,57 @@ fn accelerating_images_match_independently_differentiated_retarded_potentials() 
             .pressure_at(time, 1e-13, &mut |tau| Ok(strength(tau)), &mut || false)
             .unwrap();
         near(actual, expected, 1e-6, 1e-8);
+    }
+}
+
+#[test]
+fn reflected_monopole_gradient_obeys_rigid_and_release_wall_conditions() {
+    let base = source_path([0.0, 9.0, 8.0]);
+    for parity in 0..2 {
+        let images = IdealReflectionObserver::new(*base.observer(), &walls(parity, 1), 2).unwrap();
+        let reflected = PreparedReflectedSourceTrajectory::new(
+            &base,
+            &images,
+            reflection_budget(),
+            &mut || false,
+        )
+        .unwrap();
+        for time in [0.03, 0.12, 0.25] {
+            let fields = [0, 1].map(|mask| {
+                let path = reflected
+                    .prepare_path(mask, time, 1e-13, &mut || false)
+                    .unwrap();
+                let q = strength(path.source_time_s());
+                let field = path
+                    .evaluate_monopole_field(q.volume_flow_m3_s, q.volume_flow_rate_m3_s2)
+                    .unwrap();
+                // Explicit emission reconciliation must transform the SAME
+                // gradient as the receiver-time root path.
+                let endpoint = reflected
+                    .prepare_path_emission(mask, path.source_time_s())
+                    .unwrap()
+                    .evaluate_monopole_field(q.volume_flow_m3_s, q.volume_flow_rate_m3_s2)
+                    .unwrap();
+                assert_eq!(field.particle_velocity_m_s, endpoint.particle_velocity_m_s);
+                field
+            });
+            let [direct, image] = fields;
+            let pressure = direct.sample.pressure_pa + image.sample.pressure_pa;
+            let velocity: [f64; 3] = core::array::from_fn(|i| {
+                direct.particle_velocity_m_s[i] + image.particle_velocity_m_s[i]
+            });
+            if parity == 0 {
+                assert_eq!(velocity[0], 0.0);
+                assert_eq!(pressure, 2.0 * direct.sample.pressure_pa);
+                assert_eq!(velocity[1], 2.0 * direct.particle_velocity_m_s[1]);
+            } else {
+                assert_eq!(pressure, 0.0);
+                assert_eq!(velocity[0], 2.0 * direct.particle_velocity_m_s[0]);
+                assert_eq!(velocity[1], 0.0);
+                assert_eq!(velocity[2], 0.0);
+            }
+            assert_eq!(pressure * velocity[0], 0.0);
+        }
     }
 }
 
@@ -439,6 +516,33 @@ fn reflected_accelerating_sources_keep_coordinate_covariance_and_original_histor
             )
             .unwrap();
         near(actual, expected, 2e-10, 1e-8);
+        for mask in 0..8 {
+            let original = reflected
+                .prepare_path(mask, time, 1e-14, &mut || false)
+                .unwrap();
+            let changed = transformed_reflection
+                .prepare_path(mask, time, 1e-14, &mut || false)
+                .unwrap();
+            let q = strength(original.source_time_s());
+            let qr = strength(changed.source_time_s());
+            let a = original
+                .evaluate_monopole_field(q.volume_flow_m3_s, q.volume_flow_rate_m3_s2)
+                .unwrap();
+            let b = changed
+                .evaluate_monopole_field(qr.volume_flow_m3_s, qr.volume_flow_rate_m3_s2)
+                .unwrap();
+            let velocity = rotate(a.particle_velocity_m_s);
+            let intensity = rotate(a.instantaneous_intensity_w_m2);
+            for axis in 0..3 {
+                near(b.particle_velocity_m_s[axis], velocity[axis], 2e-10, 1e-10);
+                near(
+                    b.instantaneous_intensity_w_m2[axis],
+                    intensity[axis],
+                    3e-10,
+                    1e-12,
+                );
+            }
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-//! Pressure sampled by a moving microphone on its original physical clock.
+//! Acoustic fields sampled by a moving microphone on its original physical clock.
 //!
 //! At each receiver time `t`, solve `t = tau + |x(t)-y(tau)|/c`. The pressure
 //! law is still the Eulerian source field evaluated at `x(t)`: source velocity
@@ -45,11 +45,14 @@ pub struct MovingReceiverBudget {
     pub maximum_root_iterations: usize,
 }
 
-/// One moving-microphone sample, with pressure and clock metadata kept distinct.
+/// One moving-microphone sample, with field and clock metadata kept distinct.
 #[derive(Clone, Copy, Debug)]
 pub struct PreparedMovingReceiverSample {
     /// Original Eulerian pressure coefficients at the microphone's position.
     /// Its `source_time_rate()` remains the fixed-position factor `1/kappa`.
+    /// `evaluate_monopole_field` also returns the acoustic particle velocity in
+    /// physical fixed axes, without subtracting receiver velocity or applying
+    /// the observed-clock factor below to Qdot.
     pub pressure: PreparedMovingCompactSample,
     /// Accepted-knot microphone kinematics in the shared fluid rest frame at
     /// exactly the requested time. Its path also exposes laboratory kinematics.
