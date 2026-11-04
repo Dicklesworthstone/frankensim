@@ -170,15 +170,10 @@ impl PreparedModalTones {
             affine,
         )?;
         let mut modes = Vec::with_capacity(model.modes.len());
-        for mode in &model.modes {
+        for (index, mode) in model.modes.iter().enumerate() {
             let mut motion = Vec::with_capacity(distinct);
             for &frequency in &unique[..distinct] {
-                motion.push(HarmonicForceTransition::try_new(
-                    mode.angular_frequency_rad_s,
-                    mode.damping_ratio,
-                    frequency,
-                    duration_s,
-                )?);
+                motion.push(model.prepare_harmonic_mode(index, frequency, duration_s)?);
             }
             let delta = if affine {
                 Some(
@@ -199,7 +194,7 @@ impl PreparedModalTones {
             };
             let power = prepare_power(
                 mode.angular_frequency_rad_s,
-                mode.damping_ratio,
+                model.damping_over_interval(index, duration_s),
                 &unique[..distinct],
                 duration_s,
             )?;
@@ -582,10 +577,10 @@ fn admit_cost(
         + core::mem::size_of::<PreparedModalTones>();
     let step_work = count * (16 * square + 128 * input_tones);
     let mut preparation = 0usize;
-    for mode in &model.modes {
+    for (index, mode) in model.modes.iter().enumerate() {
         let (_, _, _, _, doublings) = scaling_with_envelope(
             mode.angular_frequency_rad_s,
-            mode.damping_ratio,
+            model.damping_over_interval(index, h),
             frequencies,
             h,
             affine,

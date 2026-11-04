@@ -29505,3 +29505,27 @@ Off-COM hinges, moving supports, general Pfaffian constraints, independent
 obstacle motion, thermal deposition and whole-system passivity remain outside
 this owner. The underlying constant-density rigid-domain and finite-step
 angular-conservation limits are unchanged.
+
+## Physical modal damping rates in coupled consumers
+
+The modal bank's `damping_rates_per_s()` is the physical coefficient in
+`q'' + c q' + omega^2 q = F`, including free coordinates with `omega = 0`.
+Coupled exact and prepared propagators, harmonic response, frequency tangents and pole pencils,
+continuous broadband observation, inverse contact responses and acceleration
+readouts consume that same coefficient. A damping ratio is diagnostic metadata
+and is not sufficient to reconstruct resistance at zero or very small natural
+frequency. Independent ratio-authored source models retain their original law.
+
+Component heat remains `integral(c v^2 dt)`; harmonic peak phasors dissipate
+`c |v|^2/2`. Original signed connection columns and separate material, fluid
+and connection losses retain their ownership. Material heat caches bind the
+actual rates. A source viscosity update replaces only its retained resistance
+rows, preserves other material/ambient drag, and changes no accepted state,
+stored energy, mode ordering or clock. Changed rates invalidate old heat and
+forcing preparations even when a free mode's diagnostic ratio is unchanged.
+
+Focused regressions cover a damped free coordinate's separate component/link
+heat and harmonic force response, source-selective viscosity refresh, and
+held/ramp/harmonic broadband convolutions. These extend the existing finite
+modal approximation; they introduce no damping floor, inferred drag or new
+constitutive source.

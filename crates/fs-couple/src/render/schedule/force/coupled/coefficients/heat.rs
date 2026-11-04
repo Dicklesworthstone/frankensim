@@ -73,7 +73,7 @@ impl Signature {
     }
     fn matches_mobility(&self, network: &CoupledModalSystem,
         rates: &[super::rates::MaterialRelaxationTime],
-        damping: &[super::rates::mobility::ModalDampingRatio],
+        damping: &[super::rates::mobility::ModalDampingRate],
         gate: &CancelGate) -> Result<bool, ModalCouplingError> {
         if network.radiation.is_some() || network.harmonic_only
             || network.offsets != self.offsets || network.dt.to_bits() != self.dt.to_bits()
@@ -82,14 +82,16 @@ impl Signature {
             || network.relaxation_branches.len() != self.branches.len() {
             return Ok(false);
         }
-        for (index, (mode, &(omega, zeta))) in network.models.iter().flat_map(|m| m.modes()).zip(&self.modes).enumerate() {
+        for (index, ((mode, &rate), &(omega, original_rate))) in network.models.iter()
+            .flat_map(|m| m.modes().iter().zip(m.damping_rates_per_s()))
+            .zip(&self.modes).enumerate() {
             poll(Some(gate))?;
             let expected = if let Ok(at) = damping.binary_search_by_key(&index, |u| u.mode) {
-                if damping[at].previous.to_bits() != zeta.to_bits() { return Ok(false); }
+                if damping[at].previous.to_bits() != original_rate.to_bits() { return Ok(false); }
                 damping[at].next
-            } else { zeta };
+            } else { original_rate };
             if mode.angular_frequency_rad_s.to_bits() != omega.to_bits()
-                || mode.damping_ratio.to_bits() != expected.to_bits() { return Ok(false); }
+                || rate.to_bits() != expected.to_bits() { return Ok(false); }
         }
         for (i, law) in network.connections.iter().enumerate() {
             poll(Some(gate))?;
@@ -177,15 +179,16 @@ impl CoupledModalSystem {
             || work.is_none_or(|w| w > budget.max_multiply_terms) {
             return Err(invalid("complete material heat exceeds aggregate dimension/byte/work budget"));
         }
-        let modes: Vec<_> = self.models.iter().flat_map(|model| model.modes())
-            .map(|mode| (mode.angular_frequency_rad_s,mode.damping_ratio)).collect();
+        let modes: Vec<_> = self.models.iter()
+            .flat_map(|model| model.modes().iter().zip(model.damping_rates_per_s()))
+            .map(|(mode, &rate)| (mode.angular_frequency_rad_s,rate)).collect();
         let mut flow = vec![0.0; n*n];
         let mut input = vec![0.0; n*m];
         let mut rest_force = vec![0.0; m];
-        for (i, &(omega,zeta)) in modes.iter().enumerate() {
+        for (i, &(omega,rate)) in modes.iter().enumerate() {
             flow[2*i*n+2*i+1] = 1.0;
             flow[(2*i+1)*n+2*i] = finite(-omega*omega)?;
-            flow[(2*i+1)*n+2*i+1] = finite(-2.0*zeta*omega)?;
+            flow[(2*i+1)*n+2*i+1] = -rate;
             input[(2*i+1)*m+i] = 1.0;
         }
         // These are the ORIGINAL complete signed source columns; no stiffness
@@ -271,7 +274,7 @@ impl MaterialHeatIntegral {
 
     pub(crate) fn prepare_after_material_mobility(&self, network: &CoupledModalSystem,
         rates: &[super::rates::MaterialRelaxationTime],
-        damping: &[super::rates::mobility::ModalDampingRatio],
+        damping: &[super::rates::mobility::ModalDampingRate],
         viscosity: &[MaterialViscousHeatSource], gate: &CancelGate)
         -> Result<Self, ModalCouplingError> {
         if rates.windows(2).any(|pair| pair[0].branch >= pair[1].branch)

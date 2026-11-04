@@ -127,12 +127,12 @@ impl MaterialStringSource {
             twist.append_modes(&card, &mut modes, gate).map_err(|e| ImpactError::Owner(e.to_string()))?;
             // Reuse actual torsional source-band and modal-clock admission. No
             // fake twist frequency or borrowed transverse damping is supplied.
-            ModalAcousticTimeModel::try_new(sample_rate_hz, modes.clone(), ModalAcousticTimeBudget::audible_reference())
+            let admitted = ModalAcousticTimeModel::try_new(sample_rate_hz, modes.clone(), ModalAcousticTimeBudget::audible_reference())
                 .map_err(|e| ImpactError::Owner(format!("torsional modal admission: {e:?}")))?;
             bodies.push(ImpactBody {
                 potential: BodyPotential::Linear(modes.iter().map(|m| m.angular_frequency_rad_s).collect()),
                 initial: initial[transverse_modes..].to_vec(),
-                damping_per_s: modes.iter().map(|m| 2.0 * m.damping_ratio * m.angular_frequency_rad_s).collect(),
+                damping_per_s: admitted.damping_rates_per_s().to_vec(),
             });
         }
         poll(cx, gate)?;

@@ -294,8 +294,9 @@ impl<'m, 'f, F> FrameFluidPlacement<'m, 'f, F> {
                 else { self.source().memory_masses.len() };
             if component.modes().len() != count || component.states().len() != count
                 || component.sample_period_s().to_bits() != self.period_s.to_bits()
+                || component.damping_rates_per_s().iter().any(|&rate| rate != 0.0)
                 || component.modes().iter().any(|m| m.angular_frequency_rad_s != 0.0
-                    || m.damping_ratio != 0.0 || m.pressure_per_modal_velocity != C64::ZERO)
+                    || m.pressure_per_modal_velocity != C64::ZERO)
             {
                 return Err(invalid("frame placement lost its original free coordinates, clock or state dimension"));
             }

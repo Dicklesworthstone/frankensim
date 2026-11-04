@@ -8,7 +8,7 @@
 use super::*;
 
 pub(crate) mod mobility;
-use mobility::ModalDampingRatio;
+use mobility::ModalDampingRate;
 
 /// Replacement relaxation time of an existing material coordinate.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,13 +113,13 @@ impl CoupledModalSystem {
     }
 
     pub(crate) fn prepare_staged_material_mobility(
-        &self, updates: &[MaterialRelaxationTime], damping: &[ModalDampingRatio], gate: &CancelGate,
+        &self, updates: &[MaterialRelaxationTime], damping: &[ModalDampingRate], gate: &CancelGate,
     ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {
         self.prepare_material_mobility(updates, damping, CoefficientEndpoint::Staged, gate)
     }
 
     fn prepare_material_mobility(
-        &self, updates: &[MaterialRelaxationTime], damping: &[ModalDampingRatio],
+        &self, updates: &[MaterialRelaxationTime], damping: &[ModalDampingRate],
         endpoint: CoefficientEndpoint, gate: &CancelGate,
     ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {
         poll(Some(gate))?;

@@ -198,8 +198,11 @@ impl PreparedJointDg {
             .iter()
             .flat_map(|m| m.modes().iter().copied())
             .collect();
+        let damping_rates: Vec<_> = network.models.iter()
+            .flat_map(|model| model.damping_rates_per_s().iter().copied()).collect();
         let base = ExactBlock::new_with_relaxation(
             &modes,
+            &damping_rates,
             &network.columns,
             &network.connections,
             network.relaxation_branches.clone(),

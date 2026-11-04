@@ -66,9 +66,9 @@ impl MaterialStringBankSource {
             .ok_or_else(|| invalid("coating memory lost its original shell component"))?;
         if component.modes().len() != image.mode_count()
             || component
-                .modes()
+                .damping_rates_per_s()
                 .iter()
-                .any(|mode| mode.damping_ratio != 0.0)
+                .any(|&rate| rate != 0.0)
         {
             return Err(invalid(
                 "coating memory requires its unchanged complete equilibrium shell basis",

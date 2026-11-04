@@ -345,7 +345,8 @@ impl BroadbandModalObserver {
         } else {
             Vec::new()
         };
-        for (filter, mode) in self.filters.iter().zip(self.model.modes()) {
+        for ((filter, mode), &damping) in self.filters.iter().zip(self.model.modes())
+            .zip(self.model.damping_rates_per_s()) {
             let ss = filter.model.state_space();
             let mut response = vec![[0.0; 2]; ss.n * groups.len()];
             let mut delta_response = vec![
@@ -365,7 +366,7 @@ impl BroadbandModalObserver {
                 let w = mode.angular_frequency_rad_s;
                 a[1] = filter.q_scale * dt;
                 a[n] = -w * w / filter.q_scale * dt;
-                a[n + 1] = -2.0 * mode.damping_ratio * w * dt;
+                a[n + 1] = -damping * dt;
                 a[n + source] = dt;
                 for i in 0..ss.n {
                     a[(i + 2) * n + 1] = ss.b[i] * dt;

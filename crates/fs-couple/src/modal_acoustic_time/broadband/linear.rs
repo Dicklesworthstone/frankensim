@@ -50,7 +50,8 @@ impl BroadbandModalObserver {
         }
         let dt = self.model.sample_period_s();
         let mut gains = Vec::with_capacity(self.filters.len());
-        for (mode, filter) in self.model.modes().iter().zip(&self.filters) {
+        for ((mode, &damping), filter) in self.model.modes().iter()
+            .zip(self.model.damping_rates_per_s()).zip(&self.filters) {
             let ss = filter.model.state_space();
             let n = ss.n + 4;
             let force = n - 2;
@@ -59,7 +60,7 @@ impl BroadbandModalObserver {
             let w = mode.angular_frequency_rad_s;
             a[1] = filter.q_scale * dt;
             a[n] = -w * w / filter.q_scale * dt;
-            a[n + 1] = -2.0 * mode.damping_ratio * w * dt;
+            a[n + 1] = -damping * dt;
             a[n + force] = dt;
             a[force * n + increment] = 1.0;
             for i in 0..ss.n {

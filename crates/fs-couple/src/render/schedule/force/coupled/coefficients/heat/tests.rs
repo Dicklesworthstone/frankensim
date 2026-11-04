@@ -38,6 +38,49 @@ fn network(prepared: bool) -> CoupledModalSystem {
 fn near(a:f64,b:f64) { assert!((a-b).abs()<=1e-11+1e-8*a.abs().max(b.abs()),"{a:e} != {b:e}"); }
 
 #[test]
+fn free_mode_source_heat_and_rate_refresh_preserve_unowned_drag_and_state() {
+    // G1/G3: the material owns 10/s out of a 30/s drag. Its thermal update
+    // replaces only that contribution; the ambient 20/s and a second mode's
+    // 5/s survive. Infinite diagnostic ratios cannot identify cache validity.
+    let gate = CancelGate::new_clock_free();
+    let mut model = ModalAcousticTimeModel::try_new_with_damping_rates(1000,
+        vec![ModalAcousticMode { angular_frequency_rad_s: 0.0, damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::ZERO }; 2], &[30.0, 5.0],
+        ModalAcousticTimeBudget::audible_reference()).unwrap();
+    model.restore_states(&[
+        ModalAcousticState { displacement_m_sqrt_kg: 0.01, velocity_m_sqrt_kg_per_s: 0.7 },
+        ModalAcousticState { displacement_m_sqrt_kg: -0.02, velocity_m_sqrt_kg_per_s: 0.3 },
+    ]).unwrap();
+    let mut system = CoupledModalSystem::new(vec![model], vec![], config(), &gate).unwrap();
+    let original = [MaterialViscousHeatSource::from_material_region(0, 0, vec![(0, 10.0)])];
+    let proposed = [MaterialViscousHeatSource::from_material_region(0, 0, vec![(0, 40.0)])];
+    let channel = system.prepare_material_heat_with_viscosity(&[], &original, budget(), &gate).unwrap();
+    let heat = channel.evaluate(&system, &[0.0, 0.0], &gate).unwrap()[0];
+    near(heat, 10.0*0.7_f64.powi(2)*(-(-0.06_f64).exp_m1())/60.0);
+    system.stage_inner(&[0.0, 0.0], Some(&gate)).unwrap();
+    let staged = system.candidates[0].states().to_vec();
+    near(channel.evaluate_staged(&system, &gate).unwrap()[0], heat);
+    let damping = system.material_viscosity_updates(original.iter().zip(&proposed), &gate).unwrap();
+    assert_eq!(damping.len(), 1);
+    assert_eq!((damping[0].previous, damping[0].next), (30.0, 60.0));
+    let mut change = system.prepare_staged_material_mobility(&[], &damping, &gate).unwrap();
+    let fresh = system.preview_material_relaxation_times(&mut change, |network|
+        channel.prepare_after_material_mobility(network, &[], &damping, &proposed, &gate)).unwrap();
+    system.publish_staged();
+    let energy = system.total_energy_j().unwrap();
+    system.install_material_relaxation_times(change);
+    assert_eq!(system.components()[0].damping_rates_per_s(), &[60.0, 5.0]);
+    assert_eq!(system.components()[0].states(), staged);
+    assert_eq!(system.samples_rendered(), 1);
+    assert_eq!(system.total_energy_j().unwrap(), energy);
+    assert!(!channel.is_current(&system, &gate).unwrap());
+    assert!(fresh.is_current(&system, &gate).unwrap());
+    let next_heat = fresh.evaluate(&system, &[0.0, 0.0], &gate).unwrap()[0];
+    near(next_heat, 40.0*staged[0].velocity_m_sqrt_kg_per_s.powi(2)
+        *(-(-0.12_f64).exp_m1())/120.0);
+}
+
+#[test]
 fn staged_contact_input_uses_original_group_integrals_without_replaying_or_double_preload() {
     let gate = CancelGate::new_clock_free();
     for prepared in [false, true] {
@@ -195,7 +238,7 @@ fn simultaneous_source_mobilities_keep_warm_state_and_split_native_losses() {
         let times = [MaterialRelaxationTime { branch: 1, relaxation_time_s: 0.03 }];
         let damping = system.material_viscosity_updates(original.iter().zip(&proposed), &gate).unwrap();
         assert_eq!(damping.len(), 1);
-        near(2.0 * damping[0].next * 20.0, 1.1);
+        near(damping[0].next, 1.1);
         let mut change = system.prepare_staged_material_mobility(&times, &damping, &gate).unwrap();
         // A late cache cancellation occurs AFTER both proposed mobilities are
         // installed for preview. Neither native state nor old operator escapes.

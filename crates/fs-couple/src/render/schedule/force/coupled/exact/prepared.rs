@@ -244,8 +244,8 @@ impl PreparedNetwork {
             return Err(invalid("prepared complete mechanical layout/clock"));
         }
         let air_extent = radiation.map(|binding| (binding.model.ports, binding.model.poles.len()));
-        let has_component_loss = models.iter().flat_map(|m| m.modes())
-            .any(|m| m.damping_ratio != 0.0 && m.angular_frequency_rad_s != 0.0);
+        let has_component_loss = models.iter().flat_map(|m| m.damping_rates_per_s())
+            .any(|&rate| rate != 0.0);
         // One integral for the component loss, one for the summed connection loss, and one per dissipative link that an
         // observed port ledger computes: all are admitted here, before anything is allocated.
         let dissipative = links.iter().filter(|c| c.damping_n_s_m != 0.0).count();
@@ -277,8 +277,8 @@ impl PreparedNetwork {
         let mut damping = vec![0.0; count * count];
         let mut component_rates = vec![0.0; count];
         let mut rest_force = vec![0.0; count];
-        for (i, mode) in models.iter().flat_map(|m| m.modes()).enumerate() {
-            component_rates[i] = finite(2.0 * mode.damping_ratio * mode.angular_frequency_rad_s)?;
+        for (i, &rate) in models.iter().flat_map(|m| m.damping_rates_per_s()).enumerate() {
+            component_rates[i] = finite(rate)?;
             damping[i * count + i] = component_rates[i];
         }
         for (column, link) in columns.iter().zip(links) {

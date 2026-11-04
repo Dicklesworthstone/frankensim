@@ -92,6 +92,8 @@ impl PreparedLinearForcing {
             .iter()
             .flat_map(|m| m.modes().iter().copied())
             .collect();
+        let damping_rates: Vec<_> = network.models.iter()
+            .flat_map(|model| model.damping_rates_per_s().iter().copied()).collect();
         let damping: Vec<_> = (0..network.connections.len())
             .map(|i| network.connection_damping_column(i).map(<[f64]>::to_vec))
             .collect();
@@ -114,6 +116,7 @@ impl PreparedLinearForcing {
         });
         let block = ExactBlock::new_with_damping_columns(
             &modes,
+            &damping_rates,
             &network.columns,
             &network.connections,
             network.relaxation_branches.clone(),

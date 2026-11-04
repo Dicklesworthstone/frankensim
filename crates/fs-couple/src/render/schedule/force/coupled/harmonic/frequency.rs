@@ -223,18 +223,15 @@ impl CoupledModalSystem {
         if let Some(force) = force_derivative {
             rhs[..n].copy_from_slice(force);
         }
-        for (index, mode) in self
+        for (index, &damping) in self
             .models
             .iter()
-            .flat_map(|model| model.modes())
+            .flat_map(|model| model.damping_rates_per_s())
             .enumerate()
         {
             poll(Some(gate))?;
             rhs[index] = rhs[index]
-                - pole_derivative(
-                    omega,
-                    2.0 * mode.damping_ratio * mode.angular_frequency_rad_s,
-                ) * state[index];
+                - pole_derivative(omega, damping) * state[index];
         }
         for (index, law) in self.connections.iter().enumerate() {
             poll(Some(gate))?;
@@ -322,10 +319,10 @@ impl CoupledModalSystem {
             relative_derivative_residual: relative_derivative,
             response,
         };
-        for (index, mode) in self
+        for (index, (mode, &damping)) in self
             .models
             .iter()
-            .flat_map(|model| model.modes())
+            .flat_map(|model| model.modes().iter().zip(model.damping_rates_per_s()))
             .enumerate()
         {
             poll(Some(gate))?;
@@ -337,7 +334,7 @@ impl CoupledModalSystem {
             result.mean_stored_energy_derivative +=
                 0.5 * (half_norm_derivative(q.scale(w), dq.scale(w)) + half_norm_derivative(v, dv));
             result.component_dissipation_derivative +=
-                2.0 * mode.damping_ratio * w * half_norm_derivative(v, dv);
+                damping * half_norm_derivative(v, dv);
             let df = force_derivative.map_or(C64::ZERO, |values| values[index]);
             result.external_power_derivative += 0.5 * (df * v.conj() + force[index] * dv.conj()).re;
         }

@@ -127,9 +127,9 @@ impl CoupledModalSystem {
                 total[mode] = finite(total[mode] + rate)?;
             }
         }
-        for (rate, mode) in total.iter().zip(self.models.iter().flat_map(|m| m.modes())) {
+        for (rate, &native) in total.iter()
+            .zip(self.models.iter().flat_map(|m| m.damping_rates_per_s())) {
             poll(Some(gate))?;
-            let native = finite(2.0 * mode.damping_ratio * mode.angular_frequency_rad_s)?;
             let roundoff = 64.0 * f64::EPSILON * native.max(*rate);
             if *rate - native > roundoff {
                 return Err(invalid(
@@ -146,7 +146,7 @@ impl CoupledModalSystem {
     pub(crate) fn material_viscosity_updates<'a>(
         &self, pairs: impl IntoIterator<Item = (&'a MaterialViscousHeatSource, &'a MaterialViscousHeatSource)>,
         gate: &CancelGate,
-    ) -> Result<Vec<super::super::rates::mobility::ModalDampingRatio>, ModalCouplingError> {
+    ) -> Result<Vec<super::super::rates::mobility::ModalDampingRate>, ModalCouplingError> {
         let mut old = vec![0.0; self.mode_count()];
         let mut new = vec![0.0; self.mode_count()];
         let mut changed = vec![false; self.mode_count()];
@@ -171,21 +171,18 @@ impl CoupledModalSystem {
         }
         self.admit_material_viscosity(originals, gate)?;
         let mut updates = Vec::new();
-        for (index, mode) in self.models.iter().flat_map(|m| m.modes()).enumerate() {
+        for (index, &native) in self.models.iter().flat_map(|m| m.damping_rates_per_s()).enumerate() {
             if !changed[index] { continue; }
             poll(Some(gate))?;
-            let native = finite(2.0 * mode.damping_ratio * mode.angular_frequency_rad_s)?;
             let remainder = native - old[index];
             let tolerance = 64.0 * f64::EPSILON * native.max(old[index]);
-            if mode.angular_frequency_rad_s <= 0.0 || remainder < -tolerance {
+            if remainder < -tolerance {
                 return Err(invalid("source viscosity cannot remove unowned native modal resistance"));
             }
             // Only admission-sized floating cancellation can reach this zero.
-            let next_rate = finite(remainder.max(0.0) + new[index])?;
-            let next = finite(next_rate / (2.0 * mode.angular_frequency_rad_s))?;
-            if next_rate > 0.0 && next == 0.0 { return Err(invalid("updated native viscosity is unrepresentable")); }
-            updates.push(super::super::rates::mobility::ModalDampingRatio {
-                mode: index, previous: mode.damping_ratio, next,
+            let next = finite(remainder.max(0.0) + new[index])?;
+            updates.push(super::super::rates::mobility::ModalDampingRate {
+                mode: index, previous: native, next,
             });
         }
         Ok(updates)

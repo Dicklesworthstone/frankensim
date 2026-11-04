@@ -2,8 +2,8 @@
 //! through physical acoustic pressure transfers.
 //!
 //! This module is deliberately geometry- and material-agnostic. An upstream
-//! structural solver supplies `omega` and a damping ratio, a force projector
-//! supplies generalized force in `N / sqrt(kg)`, and an acoustic solver
+//! structural solver supplies `omega` and a damping ratio or physical rate,
+//! a force projector supplies generalized force in `N / sqrt(kg)`, and an acoustic solver
 //! supplies complex pressure per generalized modal velocity. The state then
 //! has the standard mass-normalized units
 //! `q [m sqrt(kg)]`, `qdot [m sqrt(kg) / s]`, and modal energy [J].
@@ -17,8 +17,8 @@
 //! acoustic frequency response.
 //!
 //! Explicit free coordinates use the exact zero-stiffness held-force limit,
-//! not a small artificial natural frequency. They carry kinetic energy and
-//! exchange physical forces through the same modal ports, but have no direct
+//! including a supplied viscous rate, without a small artificial frequency.
+//! They carry kinetic energy and exchange physical forces through the same modal ports, but have no direct
 //! narrow-band pressure transfer. This is translation in a supplied fixed
 //! coordinate, not a rotating six-degree-of-freedom rigid-body model.
 //!
@@ -35,6 +35,7 @@ mod heat;
 use heat::{DampedTransition, ViscousIntegral};
 
 mod impulse;
+mod damping;
 
 /// Prepared exact transitions under linearly interpolated force samples.
 pub mod forcing;
@@ -55,7 +56,11 @@ pub const MAX_TIME_DOMAIN_ACOUSTIC_MODES: usize = 4_096;
 pub struct ModalAcousticMode {
     /// Natural angular frequency [rad/s].
     pub angular_frequency_rad_s: f64,
-    /// Viscous modal damping ratio `zeta`.
+    /// Viscous modal damping ratio `zeta` for ratio-based admission.
+    /// In an explicit-rate bank this is diagnostic: positive infinity marks
+    /// positive drag at zero frequency or an unrepresentable positive ratio.
+    /// Always use [`ModalAcousticTimeModel::damping_rates_per_s`] to recover
+    /// the physical damping coefficients from an admitted model.
     pub damping_ratio: f64,
     /// Complex observer pressure per generalized modal velocity
     /// `[Pa s / (m sqrt(kg))]`, under `exp(-i omega t)`.
@@ -114,13 +119,13 @@ pub struct ModalAcousticFrame {
     pub input_work_j: f64,
     /// Energy removed by viscous damping during this transition [J].
     ///
-    /// Independently integrates `2*zeta*omega*v(t)^2` along the exact forced
+    /// Independently integrates `c*v(t)^2` along the exact forced
     /// trajectory. This is nonnegative physical heat, including losses smaller
     /// than subtraction roundoff in the stored mechanical energy. An
     /// instantaneous impulse has zero duration and exactly zero viscous heat.
     pub viscous_dissipation_j: f64,
     /// Independent mode-local viscous integrals for physical loss routing.
-    /// Their sum is the aggregate heat; undamped and free modes report exact zero.
+    /// Their sum is the aggregate heat; zero physical damping reports exact zero.
     pub modal_viscous_losses: Vec<ModalViscousLoss>,
     /// Scale-aware roundoff allowance attached to the dissipation value [J].
     pub dissipation_roundoff_tolerance_j: f64,
@@ -313,6 +318,8 @@ struct ExactZohKernel {
     sample_period_s: f64,
     full_duration_bits: u64,
     half_duration_bits: u64,
+    damping_rates_per_s: Box<[f64]>,
+    explicit_rates: bool,
     full: Box<[PreparedZohCoefficients]>,
     half: std::sync::OnceLock<Box<[PreparedZohCoefficients]>>,
     linear: std::sync::OnceLock<Box<[LinearForceTransition]>>,
@@ -320,20 +327,58 @@ struct ExactZohKernel {
 
 impl ExactZohKernel {
     fn new(modes: &[ModalAcousticMode], sample_period_s: f64) -> Self {
+        let rates = modes.iter().map(|mode| damping::rate_from_ratio(*mode))
+            .collect::<Vec<_>>().into_boxed_slice();
+        Self::build(modes, sample_period_s, rates, false)
+    }
+
+    fn with_rates(modes: &[ModalAcousticMode], sample_period_s: f64, rates: &[f64]) -> Self {
+        Self::build(modes, sample_period_s, rates.into(), true)
+    }
+
+    fn build(
+        modes: &[ModalAcousticMode],
+        sample_period_s: f64,
+        damping_rates_per_s: Box<[f64]>,
+        explicit_rates: bool,
+    ) -> Self {
         let half_period_s = 0.5 * sample_period_s;
         let full = modes
             .iter()
             .copied()
-            .map(|mode| PreparedZohCoefficients::new(mode, sample_period_s))
+            .enumerate()
+            .map(|(index, mode)| if explicit_rates {
+                PreparedZohCoefficients::with_damping_rate(mode, damping_rates_per_s[index], sample_period_s)
+            } else {
+                PreparedZohCoefficients::new(mode, sample_period_s)
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
             sample_period_s,
             full_duration_bits: sample_period_s.to_bits(),
             half_duration_bits: half_period_s.to_bits(),
+            damping_rates_per_s,
+            explicit_rates,
             full,
             half: std::sync::OnceLock::new(),
             linear: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn prepare(&self, index: usize, mode: ModalAcousticMode, duration_s: f64) -> PreparedZohCoefficients {
+        if self.explicit_rates {
+            PreparedZohCoefficients::with_damping_rate(mode, self.damping_rates_per_s[index], duration_s)
+        } else {
+            PreparedZohCoefficients::new(mode, duration_s)
+        }
+    }
+
+    fn transition(&self, index: usize, mode: ModalAcousticMode, duration_s: f64) -> ExactZohCoefficients {
+        if self.explicit_rates {
+            exact_zoh_coefficients_with_damping_rate(mode, self.damping_rates_per_s[index], duration_s)
+        } else {
+            exact_zoh_coefficients(mode, duration_s)
         }
     }
 
@@ -351,7 +396,8 @@ impl ExactZohKernel {
                 modes
                     .iter()
                     .copied()
-                    .map(|mode| PreparedZohCoefficients::new(mode, half_period_s))
+                    .enumerate()
+                    .map(|(index, mode)| self.prepare(index, mode, half_period_s))
                     .collect::<Vec<_>>()
                     .into_boxed_slice()
             }))
@@ -371,6 +417,13 @@ impl PreparedZohCoefficients {
         Self {
             transition: exact_zoh_coefficients(mode, dt),
             viscous_integral: ViscousIntegral::new(mode, dt),
+        }
+    }
+
+    fn with_damping_rate(mode: ModalAcousticMode, rate_per_s: f64, dt: f64) -> Self {
+        Self {
+            transition: exact_zoh_coefficients_with_damping_rate(mode, rate_per_s, dt),
+            viscous_integral: ViscousIntegral::with_damping_rate(mode, rate_per_s, dt),
         }
     }
 }
@@ -407,13 +460,14 @@ impl ModalAcousticTimeModel {
     ///
     /// # Errors
     /// Refuses invalid sample rate, empty/oversized mode sets, non-finite or
-    /// nonphysical mode parameters, unsafe Nyquist placement, or bad budgets.
+    /// nonphysical/unrepresentable mode parameters, unsafe Nyquist placement,
+    /// or bad budgets.
     pub fn try_new(
         sample_rate_hz: u32,
         modes: Vec<ModalAcousticMode>,
         budget: ModalAcousticTimeBudget,
     ) -> Result<Self, ModalAcousticTimeError> {
-        Self::try_new_impl(sample_rate_hz, modes, budget, false)
+        Self::try_new_impl(sample_rate_hz, modes, budget, false, None)
     }
 
     /// Explicitly admit zero-stiffness, mass-normalized coordinates alongside
@@ -422,6 +476,7 @@ impl ModalAcousticTimeModel {
     /// Positive-frequency admission and transition arithmetic are unchanged.
     /// Initial coordinates are zero; use `restore_states` for supplied motion.
     /// Static-compliance initialization refuses models containing free coordinates.
+    /// Use [`Self::try_new_with_damping_rates`] for physical free-coordinate drag.
     ///
     /// # Errors
     /// All `try_new` limits, or a free coordinate with damping/acoustic transfer.
@@ -430,7 +485,7 @@ impl ModalAcousticTimeModel {
         modes: Vec<ModalAcousticMode>,
         budget: ModalAcousticTimeBudget,
     ) -> Result<Self, ModalAcousticTimeError> {
-        Self::try_new_impl(sample_rate_hz, modes, budget, true)
+        Self::try_new_impl(sample_rate_hz, modes, budget, true, None)
     }
 
     /// Construct one freely translating mass from kilograms, metres and m/s.
@@ -477,9 +532,10 @@ impl ModalAcousticTimeModel {
 
     fn try_new_impl(
         sample_rate_hz: u32,
-        modes: Vec<ModalAcousticMode>,
+        mut modes: Vec<ModalAcousticMode>,
         budget: ModalAcousticTimeBudget,
         allow_free_coordinates: bool,
+        damping_rates_per_s: Option<&[f64]>,
     ) -> Result<Self, ModalAcousticTimeError> {
         if sample_rate_hz == 0 {
             return Err(ModalAcousticTimeError::InvalidInput {
@@ -492,23 +548,35 @@ impl ModalAcousticTimeModel {
             });
         }
         validate_budget(budget)?;
+        if let Some(rates) = damping_rates_per_s {
+            damping::validate_rates(rates, modes.len())?;
+            for (mode, &rate) in modes.iter_mut().zip(rates) {
+                mode.damping_ratio = damping::diagnostic_ratio(mode.angular_frequency_rad_s, rate);
+            }
+        }
         let maximum_hz = 0.5 * f64::from(sample_rate_hz) * budget.nyquist_guard_fraction;
         for (mode_index, mode) in modes.iter().enumerate() {
             if allow_free_coordinates && mode.angular_frequency_rad_s == 0.0 {
-                if mode.damping_ratio != 0.0 || mode.pressure_per_modal_velocity != C64::ZERO {
+                if (damping_rates_per_s.is_none() && mode.damping_ratio != 0.0)
+                    || mode.pressure_per_modal_velocity != C64::ZERO {
                     return Err(ModalAcousticTimeError::InvalidInput {
                         what: "free coordinates require zero damping ratio and zero pressure transfer",
                     });
                 }
             } else if !(mode.angular_frequency_rad_s > 0.0
                 && mode.angular_frequency_rad_s.is_finite()
-                && mode.damping_ratio >= 0.0
-                && mode.damping_ratio.is_finite()
+                && (damping_rates_per_s.is_some()
+                    || (mode.damping_ratio >= 0.0 && mode.damping_ratio.is_finite()))
                 && mode.pressure_per_modal_velocity.re.is_finite()
                 && mode.pressure_per_modal_velocity.im.is_finite())
             {
                 return Err(ModalAcousticTimeError::InvalidInput {
                     what: "modes need positive finite frequency, non-negative finite damping, and finite pressure transfer",
+                });
+            }
+            if damping_rates_per_s.is_none() && !damping::rate_from_ratio(*mode).is_finite() {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "physical modal damping rate must be representable",
                 });
             }
             let frequency_hz = mode.angular_frequency_rad_s / core::f64::consts::TAU;
@@ -522,7 +590,10 @@ impl ModalAcousticTimeModel {
         }
         let states = vec![ModalAcousticState::default(); modes.len()];
         let sample_period_s = f64::from(sample_rate_hz).recip();
-        let transition_kernel = Arc::new(ExactZohKernel::new(&modes, sample_period_s));
+        let transition_kernel = Arc::new(match damping_rates_per_s {
+            Some(rates) => ExactZohKernel::with_rates(&modes, sample_period_s, rates),
+            None => ExactZohKernel::new(&modes, sample_period_s),
+        });
         Ok(Self {
             sample_period_s,
             modes,
@@ -532,7 +603,11 @@ impl ModalAcousticTimeModel {
         })
     }
 
-    /// Borrow the exact admitted modes.
+    /// Borrow admitted frequency/observer metadata and diagnostic damping ratios.
+    /// Physical damping belongs to [`Self::damping_rates_per_s`]; ratios cannot
+    /// represent positive zero-stiffness drag. Explicit-rate banks report
+    /// positive infinity for an undefined or unrepresentable positive ratio,
+    /// rather than presenting a damped coordinate as lossless.
     #[must_use]
     pub fn modes(&self) -> &[ModalAcousticMode] {
         &self.modes
@@ -542,17 +617,23 @@ impl ModalAcousticTimeModel {
     /// Frequency, observer transfers, states, clock and budgets are retained.
     /// The original ZOH kernel is rebuilt; no motion or stored energy changes.
     /// Free coordinates retain their existing zero-damping representation.
+    /// On an explicit-rate bank this replaces the rate law; a zero-frequency
+    /// coordinate must receive ratio zero and thereby loses any previous drag.
+    /// Use [`Self::with_damping_rates`] to preserve or update physical free drag.
     pub fn with_damping_ratios(&self, damping: &[f64]) -> Result<Self, ModalAcousticTimeError> {
         if damping.len() != self.modes.len() || damping.iter().zip(&self.modes)
             .any(|(&ratio, mode)| !ratio.is_finite() || ratio < 0.0
                 || (mode.angular_frequency_rad_s == 0.0 && ratio != 0.0)
-                || !(2.0 * ratio * mode.angular_frequency_rad_s).is_finite()) {
+                || !damping::rate_from_ratio(ModalAcousticMode {
+                    damping_ratio: ratio, ..*mode
+                }).is_finite()) {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "modal mobility needs one representable nonnegative damping ratio per original coordinate",
             });
         }
         let mut candidate = self.clone();
-        if damping.iter().zip(&self.modes).any(|(&ratio, mode)| ratio != mode.damping_ratio) {
+        if self.transition_kernel.explicit_rates
+            || damping.iter().zip(&self.modes).any(|(&ratio, mode)| ratio != mode.damping_ratio) {
             for (mode, &ratio) in candidate.modes.iter_mut().zip(damping) { mode.damping_ratio = ratio; }
             candidate.transition_kernel = Arc::new(ExactZohKernel::new(&candidate.modes, self.sample_period_s));
         }
@@ -664,10 +745,16 @@ impl ModalAcousticTimeModel {
         if self.transition_kernel.linear.get().is_some() {
             return Ok(());
         }
-        let coefficients = self.modes.iter().map(|mode| {
-            LinearForceTransition::try_new(
-                mode.angular_frequency_rad_s, mode.damping_ratio, self.sample_period_s,
-            )
+        let coefficients = self.modes.iter().enumerate().map(|(index, mode)| {
+            if self.transition_kernel.explicit_rates {
+                LinearForceTransition::try_new_with_damping_rate(
+                    mode.angular_frequency_rad_s, self.damping_rate_per_s(index), self.sample_period_s,
+                )
+            } else {
+                LinearForceTransition::try_new(
+                    mode.angular_frequency_rad_s, mode.damping_ratio, self.sample_period_s,
+                )
+            }
         }).collect::<Result<Vec<_>, _>>()?.into_boxed_slice();
         // Another clone may have completed the identical immutable cache first.
         let _ = self.transition_kernel.linear.set(coefficients);
@@ -1134,7 +1221,7 @@ impl ModalAcousticTimeModel {
                 let force = generalized_force_n_per_sqrt_kg[index];
                 let prepared = match transition_coefficients {
                     Some(coefficients) => coefficients[index],
-                    None => PreparedZohCoefficients::new(mode, duration_s),
+                    None => self.transition_kernel.prepare(index, mode, duration_s),
                 };
                 let (next, increment) =
                     advance_exact_zoh_increment(mode, state, force, prepared.transition);
@@ -1206,26 +1293,12 @@ impl ModalAcousticTimeModel {
         let mut port_mobility_m_s_per_n = 0.0;
         for (mode_index, (mode, state)) in self.modes.iter().zip(&self.states).enumerate() {
             let phi = port_shapes[mode_index];
-            let (free, unit) = match transition_coefficients {
-                Some(coefficients) => (
-                    advance_exact_zoh_cached(
-                        *mode,
-                        *state,
-                        0.0,
-                        coefficients[mode_index].transition,
-                    ),
-                    advance_exact_zoh_cached(
-                        *mode,
-                        ModalAcousticState::default(),
-                        1.0,
-                        coefficients[mode_index].transition,
-                    ),
-                ),
-                None => (
-                    advance_exact_zoh(*mode, *state, 0.0, duration_s),
-                    advance_exact_zoh(*mode, ModalAcousticState::default(), 1.0, duration_s),
-                ),
+            let transition = match transition_coefficients {
+                Some(coefficients) => coefficients[mode_index].transition,
+                None => self.transition_kernel.transition(mode_index, *mode, duration_s),
             };
+            let free = advance_exact_zoh_cached(*mode, *state, 0.0, transition);
+            let unit = advance_exact_zoh_cached(*mode, ModalAcousticState::default(), 1.0, transition);
             // Mobility is the force response from rest, independent of the
             // accepted state. Subtracting two large free velocities can erase it.
             let mode_mobility = unit.velocity_m_sqrt_kg_per_s;
@@ -1494,6 +1567,12 @@ fn modal_energy(mode: ModalAcousticMode, state: ModalAcousticState) -> f64 {
 fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficients {
     let omega = mode.angular_frequency_rad_s;
     if omega == 0.0 {
+        if mode.damping_ratio != 0.0 {
+            // An explicit-rate bank deliberately marks a damped free coordinate
+            // with an infinite diagnostic ratio. A copied legacy mode cannot
+            // reconstruct that law; fail visibly instead of silently losing it.
+            return damped_zoh_coefficients(f64::NAN, f64::NAN, dt);
+        }
         return ExactZohCoefficients::Free { duration_s: dt };
     }
     let zeta = mode.damping_ratio;
@@ -1527,8 +1606,24 @@ fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficie
     // under-, critical- and overdamping without root subtraction or a band
     // snapped to critical damping. Only preparation pays this cost. B/h and
     // G/h^2 stay scaled during doubling, including strongly overdamped modes.
-    let mut angle = omega * dt;
-    let mut drag = 2.0 * (zeta * angle);
+    let angle = omega * dt;
+    let drag = 2.0 * (zeta * angle);
+    damped_zoh_coefficients(angle, drag, dt)
+}
+
+fn exact_zoh_coefficients_with_damping_rate(
+    mut mode: ModalAcousticMode,
+    rate_per_s: f64,
+    dt: f64,
+) -> ExactZohCoefficients {
+    if rate_per_s == 0.0 {
+        mode.damping_ratio = 0.0;
+        return exact_zoh_coefficients(mode, dt);
+    }
+    damped_zoh_coefficients(mode.angular_frequency_rad_s * dt, rate_per_s * dt, dt)
+}
+
+fn damped_zoh_coefficients(mut angle: f64, mut drag: f64, dt: f64) -> ExactZohCoefficients {
     if !angle.is_finite() || !drag.is_finite() {
         return ExactZohCoefficients::Damped {
             position_retention: f64::NAN,
@@ -1687,7 +1782,11 @@ fn advance_undamped_zoh(
     )
 }
 
-/// One exact zero-order-hold step of a single mode from `state` under the held generalized `force` over `dt`.
+/// One exact zero-order-hold step for an independently supplied ratio-based mode.
+/// A copied diagnostic mode from an explicit-rate bank does not carry its full
+/// damping law; use [`ModalAcousticTimeModel::advance_exact_zoh_duration_step`]
+/// instead. Undefined/nonfinite ratios produce nonfinite output rather than
+/// silently treating a damped free coordinate as lossless.
 pub fn advance_exact_zoh(
     mode: ModalAcousticMode,
     state: ModalAcousticState,

@@ -24,7 +24,7 @@ impl MaterialStringBankSource {
         let component = system.components().get(body)
             .ok_or_else(|| invalid("substrate memory lost its original body component"))?;
         if component.modes().len() != image.mode_count()
-            || component.modes().iter().any(|mode| mode.damping_ratio != 0.0) {
+            || component.damping_rates_per_s().iter().any(|&rate| rate != 0.0) {
             return Err(invalid("substrate memory needs its unchanged complete equilibrium body basis"));
         }
         let start: usize = system.components()[..body].iter()

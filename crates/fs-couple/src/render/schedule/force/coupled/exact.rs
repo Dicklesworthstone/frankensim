@@ -108,6 +108,8 @@ impl ExactNetwork {
             .iter()
             .flat_map(|m| m.modes().iter().copied())
             .collect();
+        let damping_rates: Vec<_> = models.iter()
+            .flat_map(|m| m.damping_rates_per_s().iter().copied()).collect();
         if count == 0
             || modes.len() != count
             || columns.len() != links.len()
@@ -177,6 +179,7 @@ impl ExactNetwork {
         for indices in groups.into_values() {
             poll(Some(gate))?;
             let local_modes: Vec<_> = indices.iter().map(|&i| modes[i]).collect();
+            let local_rates: Vec<_> = indices.iter().map(|&i| damping_rates[i]).collect();
             let local_columns: Vec<Vec<_>> = columns
                 .iter()
                 .map(|c| indices.iter().map(|&i| c[i]).collect())
@@ -211,7 +214,7 @@ impl ExactNetwork {
                         omega: pole.omega, zeta: pole.zeta, coupling,
                     }
                 }).collect());
-            let mut block = ExactBlock::new_with_extensions(&local_modes, &local_columns,
+            let mut block = ExactBlock::new_with_extensions(&local_modes, &local_rates, &local_columns,
                 links, local_branches, &local_poles, gate)?;
             block.memory_indices = memory_indices;
             block.radiation_indices = radiation_indices;
@@ -505,38 +508,46 @@ impl ChannelVerdicts {
 impl ExactBlock {
     fn new(
         modes: &[crate::modal_acoustic_time::ModalAcousticMode],
+        damping_rates: &[f64],
         columns: &[Vec<f64>],
         links: &[ConnectionLaw],
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_with_relaxation(modes, columns, links, Vec::new(), gate)
+        Self::new_with_relaxation(modes, damping_rates, columns, links, Vec::new(), gate)
     }
 
     fn new_with_relaxation(
         modes: &[crate::modal_acoustic_time::ModalAcousticMode],
+        damping_rates: &[f64],
         columns: &[Vec<f64>],
         links: &[ConnectionLaw],
         branches: Vec<fs_phs::RelaxationBranch>,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_with_extensions(modes, columns, links, branches, &[], gate)
+        Self::new_with_extensions(modes, damping_rates, columns, links, branches, &[], gate)
     }
 
     fn new_with_extensions(
-        modes: &[crate::modal_acoustic_time::ModalAcousticMode], columns: &[Vec<f64>],
+        modes: &[crate::modal_acoustic_time::ModalAcousticMode], damping_rates: &[f64],
+        columns: &[Vec<f64>],
         links: &[ConnectionLaw], branches: Vec<fs_phs::RelaxationBranch>,
         poles: &[crate::render::plate::impact::radiation::Pole], gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_with_damping_columns(modes, columns, links, branches, poles, None, gate)
+        Self::new_with_damping_columns(modes, damping_rates, columns, links, branches, poles, None, gate)
     }
 
     fn new_with_damping_columns(
-        modes: &[crate::modal_acoustic_time::ModalAcousticMode], columns: &[Vec<f64>],
+        modes: &[crate::modal_acoustic_time::ModalAcousticMode], damping_rates: &[f64],
+        columns: &[Vec<f64>],
         links: &[ConnectionLaw], branches: Vec<fs_phs::RelaxationBranch>,
         poles: &[crate::render::plate::impact::radiation::Pole],
         damping_columns: Option<&[Option<Vec<f64>>]>, gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         let count = modes.len();
+        if damping_rates.len() != count
+            || damping_rates.iter().any(|rate| !rate.is_finite() || *rate < 0.0) {
+            return Err(invalid("complete original nonnegative modal damping rates required"));
+        }
         if damping_columns.is_some_and(|rows| rows.len() != links.len()
             || rows.iter().flatten().any(|row| row.len() != count
                 || row.iter().any(|value| !value.is_finite()))) {
@@ -574,7 +585,7 @@ impl ExactBlock {
         let mut source_rows = Vec::with_capacity(source_entries);
         let mut link_loss_rows = Vec::with_capacity(links.len());
         let mut at = 0;
-        for mode in modes {
+        for (mode, &damping) in modes.iter().zip(damping_rates) {
             poll(Some(gate))?;
             let qi = 2 * at;
             let pi = qi + 1;
@@ -583,7 +594,7 @@ impl ExactBlock {
             j[qi * n + pi] = 1.0;
             j[pi * n + qi] = -1.0;
             g[pi * count + at] = 1.0;
-            r[pi * n + pi] = 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s;
+            r[pi * n + pi] = damping;
             if r[pi * n + pi] != 0.0 {
                 let mut row = vec![0.0; n];
                 row[pi] = finite(det::sqrt(r[pi * n + pi]))?;
@@ -1484,6 +1495,8 @@ mod tests {
             .iter()
             .flat_map(|m| m.modes().iter().copied())
             .collect();
+        let damping_rates: Vec<_> = models.iter()
+            .flat_map(|m| m.damping_rates_per_s().iter().copied()).collect();
         let columns = [vec![1.0, 0.0, -0.7, 0.0], vec![0.0, -0.3, 0.0, 1.0]];
         let links = [
             ConnectionLaw {
@@ -1509,7 +1522,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![vec![0, 2], vec![1, 3]]
         );
-        let full = ExactBlock::new(&modes, &columns, &links, &gate).unwrap();
+        let full = ExactBlock::new(&modes, &damping_rates, &columns, &links, &gate).unwrap();
         let dt = 1.0 / 48_000.0;
         let external = [1e-4, -2e-4, 3e-4, -4e-4];
         let (actual, x, u) = islands.advance(&models, &[], &[], &external, dt).unwrap();
@@ -1623,7 +1636,7 @@ mod tests {
                     .any(|(a, b)| (a - b).abs() > 1e-6 * a.abs().max(b.abs()).max(1e-20)),
                 "one cross-term must change the original-coordinate response"
             );
-            let monolithic = ExactBlock::new(&modes, &cross_columns, &cross_links, &gate).unwrap();
+            let monolithic = ExactBlock::new(&modes, &damping_rates, &cross_columns, &cross_links, &gate).unwrap();
             let expected =
                 step_render(&monolithic.system, &monolithic.split, &x, &held, dt).unwrap();
             for (&a, &b) in changed.x.iter().zip(&expected.x) {

@@ -475,12 +475,13 @@ impl CoupledModalSystem {
         let modes: Vec<_> = self.models.iter().flat_map(|m| m.modes()).collect();
         let mut matrix = vec![C64::ZERO; square];
         let mut support = Vec::with_capacity(n);
-        for (i, mode) in modes.iter().enumerate() {
+        for (i, (mode, &damping)) in modes.iter()
+            .zip(self.models.iter().flat_map(|m| m.damping_rates_per_s())).enumerate() {
             poll(Some(gate))?;
             let w = mode.angular_frequency_rad_s;
             matrix[i * dimension + i] = C64::new(
                 frequency_detuning(w, omega_rad_s),
-                -omega_rad_s * (2.0 * mode.damping_ratio * w),
+                -omega_rad_s * damping,
             );
         }
         for (index, (column, law)) in self.columns.iter().zip(&self.connections).enumerate() {
@@ -592,12 +593,13 @@ impl CoupledModalSystem {
             power_residual_w: 0.0,
             solve_relative_residual: relative,
         };
-        for (i, mode) in modes.iter().enumerate() {
+        for (i, (mode, &damping)) in modes.iter()
+            .zip(self.models.iter().flat_map(|m| m.damping_rates_per_s())).enumerate() {
             let q = state[i];
             let v = result.velocity_m_sqrt_kg_per_s[i];
             let w = mode.angular_frequency_rad_s;
             result.mean_stored_energy_j += 0.25 * (q.scale(w).norm_sq() + v.norm_sq());
-            result.component_dissipation_w += mode.damping_ratio * w * v.norm_sq();
+            result.component_dissipation_w += 0.5 * damping * v.norm_sq();
             result.external_power_w += 0.5 * (force[i] * v.conj()).re;
         }
         for (index, (column, law)) in self.columns.iter().zip(&self.connections).enumerate() {

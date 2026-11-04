@@ -94,8 +94,8 @@ pub(crate) fn network_parameters(
     let damping = network
         .models
         .iter()
-        .flat_map(|model| model.modes())
-        .map(|mode| finite(2.0 * mode.damping_ratio * mode.angular_frequency_rad_s))
+        .flat_map(|model| model.damping_rates_per_s())
+        .map(|&rate| finite(rate))
         .collect::<Result<Vec<_>, _>>()?;
     let links = network
         .columns

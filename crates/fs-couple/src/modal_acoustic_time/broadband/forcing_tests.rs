@@ -24,12 +24,18 @@ fn observer(
     delay: usize,
 ) -> BroadbandModalObserver {
     let model = ModalAcousticTimeModel::try_new_with_free_coordinates(RATE, modes, budget).unwrap();
+    observer_from_model(model, delay)
+}
+
+fn observer_from_model(model: ModalAcousticTimeModel, delay: usize) -> BroadbandModalObserver {
     let filters = model
         .modes()
         .iter()
-        .map(|&mode| {
+        .zip(model.damping_rates_per_s())
+        .map(|(&mode, &damping)| {
             ExactFilter::try_new(
                 mode,
+                damping,
                 RationalModel {
                     terms: vec![PoleTerm::Real {
                         pole: FILTER_POLE,
@@ -70,6 +76,64 @@ fn observer(
         },
         forcing_owner: Arc::new(()),
         linear_force_gains: None,
+    }
+}
+
+#[test]
+fn damped_free_mode_observer_retains_drag_for_held_ramp_and_harmonic_forces() {
+    // G1: independent convolution with H(s)=DIRECT+RESIDUE/(s+a).
+    // A rigid coordinate has finite physical drag despite undefined zeta.
+    let damping = 400.0;
+    let initial_velocity = 0.7;
+    let filter_rate = -FILTER_POLE;
+    let drive = 1000.0;
+    for kind in 0..3 {
+        let mut model = ModalAcousticTimeModel::try_new_with_damping_rates(RATE,
+            vec![ModalAcousticMode { angular_frequency_rad_s: 0.0, damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO }], &[damping],
+            ModalAcousticTimeBudget::audible_reference()).unwrap();
+        model.restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: 0.02,
+            velocity_m_sqrt_kg_per_s: initial_velocity }]).unwrap();
+        let mut observed = observer_from_model(model, 0);
+        if kind == 1 { observed.prepare_linear_forcing().unwrap(); }
+        let harmonic = observed.prepare_harmonic(drive).unwrap();
+        let (mut cosine, mut sine) = (100.0, -40.0);
+        for sample in 1..=32 {
+            let t = sample as f64 / f64::from(RATE);
+            let dt = observed.model.sample_period_s();
+            let pressure = match kind {
+                0 => observed.step(&[150.0]).unwrap(),
+                1 => observed.step_linear(&[20.0+30_000.0*(t-dt)], &[20.0+30_000.0*t]).unwrap(),
+                _ => {
+                    let pressure = observed.step_harmonic(&harmonic, &[cosine], &[sine]).unwrap();
+                    (cosine, sine) = harmonic.advance_force_phase(cosine, sine).unwrap();
+                    pressure
+                }
+            };
+            let decay = det::exp(-damping*t);
+            let filter_decay = det::exp(-filter_rate*t);
+            let convolution = (decay-filter_decay)/(filter_rate-damping);
+            let (velocity, filter_state) = if kind == 2 {
+                let amplitude = C64::new(100.0, -40.0)/C64::new(damping, -drive);
+                let phase = C64::new(det::cos(drive*t), -det::sin(drive*t));
+                let transient = initial_velocity-amplitude.re;
+                ((amplitude*phase).re+transient*decay,
+                    (amplitude/C64::new(filter_rate, -drive)
+                        *(phase-C64::from_re(filter_decay))).re+transient*convolution)
+            } else {
+                let (force, slope) = if kind == 0 { (150.0, 0.0) } else { (20.0, 30_000.0) };
+                let a = force/damping-slope/(damping*damping);
+                let b = slope/damping;
+                let transient = initial_velocity-a;
+                let integral = -(-filter_rate*t).exp_m1()/filter_rate;
+                (a+b*t+transient*decay,
+                    a*integral+b*(t-integral)/filter_rate+transient*convolution)
+            };
+            let expected = DIRECT*velocity+FILTER_RESIDUE*filter_state;
+            assert!((pressure-expected).abs() < 2e-11, "forcing {kind}: {pressure} vs {expected}");
+            assert!((observed.model.states()[0].velocity_m_sqrt_kg_per_s-velocity).abs() < 2e-11);
+            assert!(observed.last_modal_frame().viscous_dissipation_j > 0.0);
+        }
     }
 }
 

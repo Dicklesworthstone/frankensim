@@ -415,12 +415,12 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         }
         for i in 0..walls {
             let row = 3 * model.velocity_count + i;
-            let mode = &model
+            let structure = &model
                 .moving_wall
                 .as_ref()
                 .expect("wall source")
-                .structure
-                .modes()[i];
+                .structure;
+            let mode = &structure.modes()[i];
             let displacement = base + i;
             inverse[displacement * n + displacement] = 1.0;
             q[displacement * n + displacement] = if mode.angular_frequency_rad_s > 0.0 {
@@ -432,7 +432,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             physical_j[row * n + displacement] = -coupling;
             physical_j[displacement * n + row] = coupling;
             heat[2][row * n + row] =
-                2.0 * mode.damping_ratio * mode.angular_frequency_rad_s / (scale[row] * scale[row]);
+                structure.damping_rate_per_s(i) / (scale[row] * scale[row]);
             input[row * ports + model.loads.len() + i] = 1.0 / scale[row];
         }
         let j = congruence(&physical_j, &inverse, n, cancelled)?;

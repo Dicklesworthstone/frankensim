@@ -109,8 +109,19 @@ impl ViscousIntegral {
             return Self::default();
         }
         let original_angle = mode.angular_frequency_rad_s * dt;
+        let drag = 2.0 * (mode.damping_ratio * original_angle);
+        Self::prepare(original_angle, drag)
+    }
+
+    pub fn with_damping_rate(mode: ModalAcousticMode, rate_per_s: f64, dt: f64) -> Self {
+        if rate_per_s == 0.0 {
+            return Self::default();
+        }
+        Self::prepare(mode.angular_frequency_rad_s * dt, rate_per_s * dt)
+    }
+
+    fn prepare(original_angle: f64, mut drag: f64) -> Self {
         let mut angle = original_angle;
-        let mut drag = 2.0 * (mode.damping_ratio * angle);
         if !angle.is_finite() || !drag.is_finite() {
             return Self {
                 r00: f64::NAN,

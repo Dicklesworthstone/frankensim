@@ -4524,11 +4524,12 @@ fn linear_accelerations(model: &ModalAcousticTimeModel, force: &[f64]) -> Vec<f6
         .modes()
         .iter()
         .zip(model.states())
+        .zip(model.damping_rates_per_s())
         .zip(force)
-        .map(|((mode, state), &f)| {
+        .map(|(((mode, state), &damping), &f)| {
             let omega = mode.angular_frequency_rad_s;
             f - omega * omega * state.displacement_m_sqrt_kg
-                - 2.0 * mode.damping_ratio * omega * state.velocity_m_sqrt_kg_per_s
+                - damping * state.velocity_m_sqrt_kg_per_s
         })
         .collect()
 }

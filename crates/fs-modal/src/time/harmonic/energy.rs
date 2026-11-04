@@ -39,7 +39,7 @@ pub struct HarmonicForceFrame {
 /// observation or state/energy budget is inferred. This is one frequency:
 /// heats from independent tones cannot be summed to model simultaneous tones,
 /// whose velocities have additional cross terms. Use [`super::PreparedModalTones`]
-/// for simultaneous-tone work and heat in a ratio-parameterized modal bank.
+/// for simultaneous-tone work and heat in an admitted modal bank.
 #[derive(Clone, Debug)]
 pub struct PreparedHarmonicForce {
     motion: HarmonicForceTransition,
@@ -90,7 +90,7 @@ impl PreparedHarmonicForce {
         Self::prepare(motion, forcing_angular_frequency_rad_s)
     }
 
-    fn prepare(
+    pub(super) fn prepare(
         motion: HarmonicForceTransition,
         forcing_angular_frequency_rad_s: f64,
     ) -> Result<Self, ModalAcousticTimeError> {

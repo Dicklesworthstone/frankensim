@@ -129,9 +129,10 @@ impl<'a> AdhesiveElasticEventModalSystem<'a> {
             || !network.relaxation_branches.is_empty()
             || !network.plane_stress_material_points.is_empty()
             || network.radiation.is_some()
+            || network.models.iter().flat_map(|m| m.damping_rates_per_s())
+                .any(|&rate| rate != 0.0)
             || network.models.iter().flat_map(|m| m.modes()).any(|mode| {
                 mode.angular_frequency_rad_s != 0.0
-                    || mode.damping_ratio != 0.0
                     || mode.pressure_per_modal_velocity != C64::ZERO
             })
         {

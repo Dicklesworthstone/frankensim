@@ -24,15 +24,16 @@ pub(super) struct TonePower {
 // x=[v,(sum Fc-omega^2*q)/kappa,Fc_0/kappa,Fs_0/kappa,...],
 // kappa=max(omega,max Omega,1/h). The scaling includes tone count so BOTH
 // generator norms remain resolved even though its residual row sums tones.
+// `drag` is the original dimensionless c*h, formed by the bank's admitted
+// rate/ratio law so motion, cost admission and heat use exactly the same loss.
 pub(super) fn scaling_with_envelope(
     omega: f64,
-    zeta: f64,
+    mut drag: f64,
     frequencies: &[f64],
     h: f64,
     affine: bool,
 ) -> Result<(f64, f64, f64, f64, usize), ModalAcousticTimeError> {
     let mut angle = omega * h;
-    let mut drag = 2.0 * (zeta * angle);
     let mut scale = angle.max(1.0);
     for &frequency in frequencies {
         let phase = frequency * h;
@@ -61,31 +62,31 @@ pub(super) fn scaling_with_envelope(
 impl TonePower {
     pub(super) fn try_new(
         omega: f64,
-        zeta: f64,
+        drag: f64,
         frequencies: &[f64],
         h: f64,
     ) -> Result<Self, ModalAcousticTimeError> {
-        Self::prepare(omega, zeta, frequencies, h, false)
+        Self::prepare(omega, drag, frequencies, h, false)
     }
 
     pub(super) fn try_new_affine(
         omega: f64,
-        zeta: f64,
+        drag: f64,
         frequencies: &[f64],
         h: f64,
     ) -> Result<Self, ModalAcousticTimeError> {
-        Self::prepare(omega, zeta, frequencies, h, true)
+        Self::prepare(omega, drag, frequencies, h, true)
     }
 
     fn prepare(
         omega: f64,
-        zeta: f64,
+        original_drag: f64,
         frequencies: &[f64],
         h: f64,
         affine: bool,
     ) -> Result<Self, ModalAcousticTimeError> {
         let (angle, drag, mut time, scale, doublings) =
-            scaling_with_envelope(omega, zeta, frequencies, h, affine)?;
+            scaling_with_envelope(omega, original_drag, frequencies, h, affine)?;
         let ratio = (omega * h) / scale;
         let width = if affine { 4 } else { 2 };
         let n = 2 + width * frequencies.len();
@@ -107,7 +108,7 @@ impl TonePower {
             h,
             omega,
             scale,
-            heat_scale: det::sqrt(2.0 * (zeta * (omega * h))),
+            heat_scale: det::sqrt(original_drag),
             work_scale: det::sqrt(scale),
             heat_root: vec![0.0; n * n].into_boxed_slice(),
             force_rows: vec![0.0; n * n].into_boxed_slice(),

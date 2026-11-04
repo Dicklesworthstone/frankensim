@@ -7,7 +7,7 @@ use super::{
 };
 use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
-    ModalAcousticWorkspace, advance_exact_zoh,
+    ModalAcousticWorkspace,
 };
 use crate::stribeck_friction::{
     ContactBranch, ImplicitFrictionError, StribeckLoadLine, solve_implicit_friction,
@@ -244,12 +244,13 @@ impl BowedStringState {
         // Probe the linear transition once, rather than copying its oscillator
         // equations or subtracting two nearly equal moving-state predictions.
         // The unit-force response starts at ZERO state; it is not inverse mass.
-        let contact_velocity_rows: Vec<[f64; 3]> = model.modes().iter().map(|&mode| {
-            let velocity = |q, v, force| advance_exact_zoh(mode, ModalAcousticState {
+        let contact_velocity_rows: Vec<[f64; 3]> = (0..model.modes().len()).map(|mode| {
+            let velocity = |q, v, force| model.advance_exact_zoh_duration_step(mode, ModalAcousticState {
                 displacement_m_sqrt_kg: q, velocity_m_sqrt_kg_per_s: v,
-            }, force, sub_dt).velocity_m_sqrt_kg_per_s;
-            [velocity(1.0, 0.0, 0.0), velocity(0.0, 1.0, 0.0), velocity(0.0, 0.0, 1.0)]
-        }).collect();
+            }, force, sub_dt).map(|state| state.velocity_m_sqrt_kg_per_s)
+                .map_err(BowedRunError::Model);
+            Ok([velocity(1.0, 0.0, 0.0)?, velocity(0.0, 1.0, 0.0)?, velocity(0.0, 0.0, 1.0)?])
+        }).collect::<Result<_, BowedRunError>>()?;
         if contact_velocity_rows.iter().flatten().any(|x| !x.is_finite()) {
             return Err(invalid("bow contact response is not finite"));
         }

@@ -15,6 +15,33 @@ fn structure(omega: f64, damping: f64) -> ModalAcousticTimeModel {
     .unwrap()
 }
 
+#[test]
+fn g1_free_wall_drag_survives_harmonic_loading_and_structural_heat() {
+    let size = [0.002, 0.001, 0.001];
+    let (mesh, pos) = box_mesh([1, 1, 1], size);
+    let (medium, thermo) = liquid();
+    let amplitude = 1.0/det::sqrt(medium.density_kg_m3*size.iter().product::<f64>());
+    let damping = 23.0;
+    let source = structure(0.0, 0.0).with_damping_rates(&[damping]).unwrap();
+    assert_eq!(modal_impedance(&source.modes()[0], source.damping_rate_per_s(0), 7.0),
+        C64::new(damping, 7.0));
+    let model = closed(&mesh, &pos, medium, thermo, source, |_| [amplitude, 0.0, 0.0]);
+    let force = C64::new(1.0, 0.3);
+    let field = model.prepare(30.0, &mut || false).unwrap()
+        .response_with_wall_forces(&[], &[force], &mut || false).unwrap();
+    assert_boundary_and_reaction(&model, &field, force, 30.0);
+    let velocity = field.moving_wall.modal_velocity_m_sqrt_kg_per_s[0];
+    let heat = 0.5*damping*velocity.norm_sq();
+    assert!((field.moving_wall.damping_w-heat).abs() < 1e-13*heat);
+    assert!(heat > 0.0);
+    let prepared = model.prepare_time(1e-4,
+        crate::acoustics::thermoviscous::time::ThermoviscousTimeLimits::default(),
+        &mut || false).unwrap();
+    let step = prepared.step(&prepared.zero_state(), &[], &[1.0], &mut || false).unwrap();
+    assert!(step.work.structural_damping_heat_j > 0.0);
+    assert!(step.work.balance_residual_j().abs() < 2e-8*step.work.supplied_j());
+}
+
 fn liquid() -> (ThermoviscousMedium, ThermoviscousThermodynamics) {
     // Manufactured zero-expansion fluid separates mechanical storage from heat.
     (
@@ -116,6 +143,7 @@ fn assert_boundary_and_reaction(
     let fluid = field.moving_wall.fluid_force_n_per_sqrt_kg[0];
     let structural = modal_impedance(
         &wall.structure.modes()[0],
+        wall.structure.damping_rate_per_s(0),
         std::f64::consts::TAU * frequency,
     ) * u;
     assert!(
@@ -191,8 +219,9 @@ fn g1_accelerating_closed_volume_adds_the_actual_fluid_mass_to_structure() {
     // Wavelength >> box length: the liquid translates with the box. Its mass
     // in this mass-normalized trace is rho*V*amplitude^2 = 1.
     assert!((z.im / omega - 1.0).abs() < 2e-5);
-    let unloaded =
-        C64::ONE / modal_impedance(&model.moving_wall().unwrap().structure.modes()[0], omega);
+    let structure = &model.moving_wall().unwrap().structure;
+    let unloaded = C64::ONE / modal_impedance(&structure.modes()[0],
+        structure.damping_rate_per_s(0), omega);
     assert!(u.abs() < 0.51 * unloaded.abs());
 }
 

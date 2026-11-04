@@ -4,7 +4,7 @@ use super::*;
 /// Source-derived replacement of one original modal resistance, after the
 /// geometry owner has retained all unchanged material/ambient contributions.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ModalDampingRatio {
+pub(crate) struct ModalDampingRate {
     pub mode: usize,
     pub previous: f64,
     pub next: f64,
@@ -13,7 +13,7 @@ pub(crate) struct ModalDampingRatio {
 impl CoupledModalSystem {
     pub(super) fn prepare_modal_mobility(
         &self,
-        updates: &[ModalDampingRatio],
+        updates: &[ModalDampingRate],
         gate: &CancelGate,
     ) -> Result<
         Option<(Vec<ModalAcousticTimeModel>, Vec<ModalAcousticTimeModel>)>,
@@ -22,16 +22,16 @@ impl CoupledModalSystem {
         if updates.is_empty() {
             return Ok(None);
         }
-        let modes: Vec<_> = self.models.iter().flat_map(|m| m.modes()).collect();
+        let rates: Vec<_> = self.models.iter().flat_map(|m| m.damping_rates_per_s()).collect();
         let mut previous = None;
         let mut changed = false;
         for update in updates {
             poll(Some(gate))?;
-            let original = modes
+            let original = rates
                 .get(update.mode)
                 .ok_or_else(|| invalid("material mobility names no original modal coordinate"))?;
             if previous.is_some_and(|p| update.mode <= p)
-                || original.damping_ratio.to_bits() != update.previous.to_bits()
+                || original.to_bits() != update.previous.to_bits()
                 || !update.next.is_finite()
                 || update.next < 0.0
             {
@@ -58,19 +58,15 @@ impl CoupledModalSystem {
             if selected.is_empty() {
                 continue;
             }
-            let mut damping: Vec<_> = self.models[component]
-                .modes()
-                .iter()
-                .map(|m| m.damping_ratio)
-                .collect();
+            let mut damping = self.models[component].damping_rates_per_s().to_vec();
             for update in selected {
                 damping[update.mode - begin] = update.next;
             }
             accepted[component] = self.models[component]
-                .with_damping_ratios(&damping)
+                .with_damping_rates(&damping)
                 .map_err(|source| ModalCouplingError::Component { component, source })?;
             staged[component] = self.candidates[component]
-                .with_damping_ratios(&damping)
+                .with_damping_rates(&damping)
                 .map_err(|source| ModalCouplingError::Component { component, source })?;
         }
         Ok(Some((accepted, staged)))

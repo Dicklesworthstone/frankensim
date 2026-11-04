@@ -984,13 +984,14 @@ impl<'c> ThermoviscousFe<'c> {
     fn operator_entry(&self, row: usize, col: usize, omega: f64, cp: C64) -> C64 {
         let fluid = self.fluid_operator_entry(row, col, omega, cp);
         if row == col && row >= 3 * self.velocity_count && row < self.pressure_start {
-            let mode = &self
+            let structure = &self
                 .moving_wall
                 .as_ref()
                 .expect("moving coordinate")
-                .structure
-                .modes()[row - 3 * self.velocity_count];
-            fluid + moving_wall::modal_impedance(mode, omega)
+                .structure;
+            let mode = row - 3 * self.velocity_count;
+            fluid + moving_wall::modal_impedance(&structure.modes()[mode],
+                structure.damping_rate_per_s(mode), omega)
         } else {
             fluid
         }

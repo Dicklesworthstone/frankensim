@@ -66,13 +66,9 @@ impl PreparedModalHarmonic {
             ));
         }
         let mut modes = Vec::with_capacity(model.modes.len());
-        for mode in &model.modes {
-            modes.push(PreparedHarmonicForce::try_new(
-                mode.angular_frequency_rad_s,
-                mode.damping_ratio,
-                forcing_angular_frequency_rad_s,
-                duration_s,
-            )?);
+        for index in 0..model.modes.len() {
+            let motion = model.prepare_harmonic_mode(index, forcing_angular_frequency_rad_s, duration_s)?;
+            modes.push(PreparedHarmonicForce::prepare(motion, forcing_angular_frequency_rad_s)?);
         }
         Ok(Self {
             owner: Arc::clone(&model.transition_kernel),

@@ -81,7 +81,7 @@ impl MaterialStringBankSource {
             let component = system.components().get(body)
                 .ok_or_else(|| invalid("regional memory lost its original body component"))?;
             if component.modes().len() != modes
-                || component.modes().iter().any(|m| m.damping_ratio != 0.0) {
+                || component.damping_rates_per_s().iter().any(|&rate| rate != 0.0) {
                 return Err(invalid("regional body memory requires the unchanged complete elastic body basis"));
             }
             let start: usize = system.components()[..body].iter().map(|c| c.modes().len()).sum();

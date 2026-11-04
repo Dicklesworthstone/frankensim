@@ -848,7 +848,6 @@ pub struct BaffledPlateObserverRadiation {
 pub struct BaffledPlateModalAudioModel<'basis> {
     basis: &'basis RectangularPlateModalBasis,
     runtime: ModalAcousticTimeModel,
-    modal_damping_ratios: Vec<f64>,
     sample_rate_hz: u32,
     maximum_abs_pressure_pa: f64,
     radiation_identity: ContentHash,
@@ -1299,7 +1298,6 @@ pub struct StructuralBroadbandSourceRuntime<'artifact> {
     source: &'artifact StructuralBroadbandRadiationArtifact,
     modes: Vec<StructuralMode>,
     modal_runtime: ModalAcousticTimeModel,
-    modal_damping_ratios: Vec<f64>,
     radiation_runtime: BroadbandRadiationRuntime<'artifact>,
     modal_acceleration: Vec<f64>,
 }
@@ -2685,7 +2683,6 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
             });
         }
         let mut modes = Vec::with_capacity(basis.modes.len());
-        let mut modal_damping_ratios = Vec::with_capacity(basis.modes.len());
         for mode in &basis.modes {
             let damping_ratio = damping.zeta_at(mode.angular_frequency_rad_s);
             if !(damping_ratio.is_finite() && damping_ratio >= 0.0) {
@@ -2700,13 +2697,11 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 // keeping stereo phase exact without duplicating oscillators.
                 pressure_per_modal_velocity: C64::ZERO,
             });
-            modal_damping_ratios.push(damping_ratio);
         }
         let runtime = ModalAcousticTimeModel::try_new(sample_rate_hz, modes, budget)?;
         Ok(Self {
             basis,
             runtime,
-            modal_damping_ratios,
             sample_rate_hz,
             maximum_abs_pressure_pa: budget.maximum_abs_pressure_pa,
             radiation_identity: radiation.identity,
@@ -2819,17 +2814,17 @@ impl<'basis> BaffledPlateModalAudioModel<'basis> {
                 .expect("reconstructed frame count matches plate pressure horizon");
             self.runtime.step_duration(applied_force, sample_period_s)?;
             history_head = (history_head + 1) % history_length;
-            for (mode_index, ((mode, damping_ratio), state)) in self
+            for (mode_index, ((mode, &damping_rate), state)) in self
                 .basis
                 .modes
                 .iter()
-                .zip(&self.modal_damping_ratios)
+                .zip(self.runtime.damping_rates_per_s())
                 .zip(self.runtime.states())
                 .enumerate()
             {
                 let omega = mode.angular_frequency_rad_s;
                 let acceleration = applied_force[mode_index]
-                    - 2.0 * damping_ratio * omega * state.velocity_m_sqrt_kg_per_s
+                    - damping_rate * state.velocity_m_sqrt_kg_per_s
                     - omega * omega * state.displacement_m_sqrt_kg;
                 if !acceleration.is_finite() {
                     return Err(StructuralModalBasisError::InvalidRequest {
@@ -5151,11 +5146,6 @@ impl StructuralBroadbandRadiationArtifact {
             basis,
             source: self,
             modal_runtime: ModalAcousticTimeModel::try_new(self.sample_rate_hz, modes, budget)?,
-            modal_damping_ratios: self
-                .modal_loss_factors
-                .iter()
-                .map(|loss| loss_factor_to_zeta(*loss))
-                .collect(),
             radiation_runtime: self.radiation.try_runtime()?,
             modal_acceleration: vec![0.0; structural_modes.len()],
             modes: structural_modes,
@@ -5340,7 +5330,7 @@ impl StructuralBroadbandSourceRuntime<'_> {
                 .step_duration(force, self.modal_runtime.sample_period_s())?;
             write_closing_modal_acceleration(
                 &self.modes,
-                &self.modal_damping_ratios,
+                self.modal_runtime.damping_rates_per_s(),
                 self.modal_runtime.states(),
                 force,
                 &mut self.modal_acceleration,
@@ -5367,12 +5357,12 @@ impl StructuralBroadbandSourceRuntime<'_> {
 
 fn write_closing_modal_acceleration(
     modes: &[StructuralMode],
-    damping: &[f64],
+    damping_rates_per_s: &[f64],
     states: &[fs_couple::modal_acoustic_time::ModalAcousticState],
     force: &[f64],
     out: &mut [f64],
 ) -> Result<(), StructuralModalBasisError> {
-    if modes.len() != damping.len()
+    if modes.len() != damping_rates_per_s.len()
         || modes.len() != states.len()
         || modes.len() != force.len()
         || modes.len() != out.len()
@@ -5381,14 +5371,14 @@ fn write_closing_modal_acceleration(
             what: "closing modal-acceleration rows must have identical cardinality",
         });
     }
-    for ((((mode, damping_ratio), state), applied), acceleration) in
-        modes.iter().zip(damping).zip(states).zip(force).zip(out)
+    for ((((mode, &damping_rate), state), applied), acceleration) in
+        modes.iter().zip(damping_rates_per_s).zip(states).zip(force).zip(out)
     {
         let omega = mode.angular_frequency_rad_s;
         let equilibrium = applied / (omega * omega);
-        // Algebraically Q - 2*zeta*omega*qdot - omega^2*q. Centering the
+        // Algebraically Q - damping_rate*qdot - omega^2*q. Centering the
         // elastic term preserves an exactly held static equilibrium.
-        *acceleration = (-2.0 * damping_ratio * omega).mul_add(
+        *acceleration = (-damping_rate).mul_add(
             state.velocity_m_sqrt_kg_per_s,
             -omega * omega * (state.displacement_m_sqrt_kg - equilibrium),
         );
@@ -7717,7 +7707,7 @@ mod tests {
         };
         write_closing_modal_acceleration(
             &[mode.clone()],
-            &[0.1],
+            &[0.8],
             &[state],
             &[3.0],
             &mut acceleration,
@@ -7730,7 +7720,7 @@ mod tests {
         };
         write_closing_modal_acceleration(
             &[mode],
-            &[0.1],
+            &[0.8],
             &[static_state],
             &[3.0],
             &mut acceleration,

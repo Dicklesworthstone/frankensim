@@ -201,11 +201,12 @@ impl CoupledModalSystem {
             return Err(invalid("complete joint pole preparation exceeds its explicit dimension, byte or work budget").into());
         }
         let mut pencil = Pencil::new(dimension, budget.reference_rate_per_s);
-        for (i, mode) in self.models.iter().flat_map(|m| m.modes()).enumerate() {
+        for (i, (mode, &damping)) in self.models.iter()
+            .flat_map(|m| m.modes().iter().zip(m.damping_rates_per_s())).enumerate() {
             poll(Some(gate))?;
             let w = mode.angular_frequency_rad_s;
             pencil.constant[i * dimension + i] = w * w;
-            pencil.linear[i * dimension + i] = 2.0 * mode.damping_ratio * w;
+            pencil.linear[i * dimension + i] = damping;
             pencil.quadratic_diagonal[i] = 1.0;
         }
         for (index, (column, law)) in self.columns.iter().zip(&self.connections).enumerate() {

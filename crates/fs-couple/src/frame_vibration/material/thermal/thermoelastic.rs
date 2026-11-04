@@ -517,7 +517,7 @@ impl FrameVibrationComponent {
                 .reference_displacement()
                 .iter()
                 .any(|&u| u != 0.0)
-            || self.model.modes().iter().any(|m| m.damping_ratio != 0.0)
+            || self.model.damping_rates_per_s().iter().any(|&rate| rate != 0.0)
             || self
                 .basis
                 .material_damping()

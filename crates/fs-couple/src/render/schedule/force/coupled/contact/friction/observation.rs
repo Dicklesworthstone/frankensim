@@ -48,12 +48,12 @@ impl FrictionModalSystem {
         let mut index = 0;
         for component in &self.network.candidates {
             poll(gate)?;
-            for (mode, state) in component.modes().iter().zip(component.states()) {
+            for ((mode, state), &damping) in component.modes().iter().zip(component.states())
+                .zip(component.damping_rates_per_s()) {
                 let weight = weights[index];
                 if weight != 0.0 {
                     let acceleration = finite(self.network.forces[index]
-                        - 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s
-                            * state.velocity_m_sqrt_kg_per_s
+                        - damping * state.velocity_m_sqrt_kg_per_s
                         - mode.angular_frequency_rad_s * mode.angular_frequency_rad_s
                             * state.displacement_m_sqrt_kg)?;
                     pressure = finite(pressure + weight * acceleration)?;

@@ -34,6 +34,7 @@ struct ExactFilter {
 impl ExactFilter {
     fn try_new(
         mode: ModalAcousticMode,
+        damping_rate_per_s: f64,
         model: fs_vfit::RationalModel,
         dt: f64,
     ) -> Result<Self, BroadbandModalError> {
@@ -44,7 +45,7 @@ impl ExactFilter {
         let q_scale = if w == 0.0 { 1.0 } else { w };
         a[1] = q_scale * dt;
         a[n] = -w * w / q_scale * dt;
-        a[n + 1] = -2.0 * mode.damping_ratio * w * dt;
+        a[n + 1] = -damping_rate_per_s * dt;
         a[n + n - 1] = dt;
         for i in 0..ss.n {
             a[(i + 2) * n + 1] = ss.b[i] * dt;
@@ -277,8 +278,9 @@ impl BroadbandModalObserver {
             });
         }
         let mut filters = Vec::with_capacity(bank.models.len());
-        for (mode, fit) in model.modes().iter().zip(bank.models) {
-            filters.push(ExactFilter::try_new(*mode, fit, dt)?);
+        for ((mode, &damping), fit) in model.modes().iter()
+            .zip(model.damping_rates_per_s()).zip(bank.models) {
+            filters.push(ExactFilter::try_new(*mode, damping, fit, dt)?);
         }
         // The new receiver owns the pressure ceiling. Retaining an unrelated
         // old narrow-band receiver here would admit/refuse on a second pressure.

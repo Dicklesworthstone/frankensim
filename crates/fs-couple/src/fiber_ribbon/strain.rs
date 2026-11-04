@@ -8,7 +8,7 @@
 //! rate, including normal/axial cross terms. Its linear axial damping is removed
 //! once; bending viscosity remains independent. Thermal evolution is absent.
 
-use super::{FiberRibbonError, ModalAcousticTimeModel, TensionedFiberRibbon};
+use super::{FiberRibbonError, TensionedFiberRibbon};
 use crate::render::schedule::force::coupled::ModalCouplingError;
 use crate::render::schedule::force::coupled::contact::friction::nonlinear::{
     MappedModalPotentialBinding, ModalCoordinate, ModalPotential, NonlinearModalConfig,
@@ -148,24 +148,12 @@ impl TensionedFiberRibbon {
             ));
         }
         if viscosity > 0.0 {
-            let mut modes = self.cell.modes().to_vec();
-            for mode in &mut modes[..self.resolution.axial_modes] {
-                mode.damping_ratio = 0.0;
-            }
-            // This cold source model was constructed from an integer sample
-            // rate. Rebuild only the linear kernel and require its exact clock,
-            // original budgets, complete mode order and original state.
-            let rate = self.cell.sample_period_s().recip().round() as u32;
-            let mut cell = ModalAcousticTimeModel::try_new(rate, modes, self.cell.budget())
+            let mut damping = self.cell.damping_rates_per_s().to_vec();
+            damping[..self.resolution.axial_modes].fill(0.0);
+            // The nonlinear strain owner now supplies axial viscosity; all
+            // other original rates, states, budgets and the exact clock remain.
+            self.cell = self.cell.with_damping_rates(&damping)
                 .map_err(FiberRibbonError::Modal)?;
-            if cell.sample_period_s() != self.cell.sample_period_s() {
-                return Err(FiberRibbonError::Invalid(
-                    "fiber strain must retain its original clock",
-                ));
-            }
-            cell.restore_states(self.cell.states())
-                .map_err(FiberRibbonError::Modal)?;
-            self.cell = cell;
         }
         let strain = FiberStrain {
             model,

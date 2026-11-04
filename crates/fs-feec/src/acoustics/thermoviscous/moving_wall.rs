@@ -63,10 +63,10 @@ pub struct MovingWallField {
     pub power_into_fluid_w: f64,
 }
 
-pub(super) fn modal_impedance(mode: &ModalAcousticMode, omega: f64) -> C64 {
+pub(super) fn modal_impedance(mode: &ModalAcousticMode, damping_rate_per_s: f64, omega: f64) -> C64 {
     let natural = mode.angular_frequency_rad_s;
     C64::new(
-        2.0 * mode.damping_ratio * natural,
+        damping_rate_per_s,
         omega - natural * natural / omega,
     )
 }
@@ -364,7 +364,7 @@ impl PreparedThermoviscous<'_, '_> {
             return Ok(result);
         };
         let omega = std::f64::consts::TAU * self.frequency_hz;
-        for (i, mode) in wall.structure.modes().iter().enumerate() {
+        for (i, &damping) in wall.structure.damping_rates_per_s().iter().enumerate() {
             poll(cancelled)?;
             let row = 3 * model.velocity_count + i;
             let u = x[row];
@@ -392,7 +392,7 @@ impl PreparedThermoviscous<'_, '_> {
             let force = C64::new(re.to_f64(), im.to_f64());
             result.external_input_w +=
                 0.5 * (forces.get(i).copied().unwrap_or(C64::ZERO).conj() * u).re;
-            result.damping_w += mode.damping_ratio * mode.angular_frequency_rad_s * u.norm_sq();
+            result.damping_w += 0.5 * damping * u.norm_sq();
             result.power_into_fluid_w -= 0.5 * (force.conj() * u).re;
             result.modal_velocity_m_sqrt_kg_per_s.push(u);
             result.fluid_force_n_per_sqrt_kg.push(force);

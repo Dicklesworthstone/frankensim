@@ -175,6 +175,8 @@ impl PreparedJointTones {
             .iter()
             .flat_map(|model| model.modes().iter().copied())
             .collect();
+        let damping_rates: Vec<_> = network.models.iter()
+            .flat_map(|model| model.damping_rates_per_s().iter().copied()).collect();
         let poles: Vec<_> = network.radiation.as_ref().map_or_else(Vec::new, |air| {
             air.model
                 .poles
@@ -215,6 +217,7 @@ impl PreparedJointTones {
         }
         let base = ExactBlock::new_with_damping_columns(
             &modes,
+            &damping_rates,
             &network.columns,
             &network.connections,
             network.relaxation_branches.clone(),

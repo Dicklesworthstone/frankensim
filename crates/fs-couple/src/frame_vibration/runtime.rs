@@ -224,7 +224,7 @@ fn fill_response(
         if i % 128 == 0 { poll(cancelled)?; }
         *acceleration = checked_sum([forces[i],
             -mode.angular_frequency_rad_s*mode.angular_frequency_rad_s*state.displacement_m_sqrt_kg,
-            -2.0*mode.damping_ratio*mode.angular_frequency_rad_s*state.velocity_m_sqrt_kg_per_s,
+            -model.damping_rate_per_s(i)*state.velocity_m_sqrt_kg_per_s,
         ].into_iter())?;
     }
     basis.reconstruct_into(model.states(), &mut response.displacement,

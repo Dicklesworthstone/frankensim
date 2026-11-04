@@ -4,7 +4,7 @@ use fs_couple::modal_acoustic_time::{
     ModalAcousticTimeModel, ModalAcousticWorkspace,
 };
 use fs_couple::render::schedule::force::coupled::{
-    CoupledModalSystem, ModalAttachment, ModalCouplingConfig,
+    CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig, PreparedModalBudget,
 };
 use fs_couple::render::schedule::force::coupled::contact::{
     ContactModalSystem, ModalContact, ModalContactConfig,
@@ -74,6 +74,72 @@ fn free_motion_matches_held_force_polynomial_and_physical_work() {
         assert_eq!(drift.states()[0].velocity_m_sqrt_kg_per_s.to_bits(), initial_velocity);
     }
     assert!((drift.states()[0].displacement_m_sqrt_kg/0.5 - 0.03).abs() < 1e-13);
+}
+
+#[test]
+fn explicit_free_mode_drag_survives_exact_network_heat_and_harmonic_response() {
+    // G1: q''+(c_component+c_link)q'=F, without an artificial spring. The
+    // independent closed form distinguishes each physical heat contribution.
+    let gate = CancelGate::new_clock_free();
+    let (component_rate, link_rate, force, q0, v0) = (30.0, 20.0, 1.2, 0.003, 0.7);
+    let rate = component_rate + link_rate;
+    for prepared in [false, true] {
+        let model = ModalAcousticTimeModel::try_free_mass(1000, 1.0, q0, v0, budget())
+            .unwrap().with_damping_rates(&[component_rate]).unwrap();
+        let connections = vec![ModalConnection {
+            left: ModalAttachment { component: 0, shapes: vec![1.0] },
+            right: ModalAttachment { component: 0, shapes: vec![0.0] },
+            stiffness_n_m: 0.0, damping_n_s_m: link_rate, rest_extension_m: 0.0,
+        }];
+        let mut system = if prepared {
+            CoupledModalSystem::new_prepared(vec![model], connections, coupling(),
+                PreparedModalBudget { max_modes: 1, max_dense_bytes: 2_000_000,
+                    max_multiply_terms: 100_000_000 }, &gate).unwrap()
+        } else {
+            CoupledModalSystem::new(vec![model], connections, coupling(), &gate).unwrap()
+        };
+        let mut component_heat = 0.0;
+        let mut connection_heat = 0.0;
+        for sample in 1..=30 {
+            let frame = system.step(&[force]).unwrap().clone();
+            component_heat += frame.component_dissipation_j;
+            connection_heat += frame.connection_dissipation_j;
+            let t = sample as f64 / 1000.0;
+            let terminal = force / rate;
+            let velocity = terminal + (v0-terminal)*det::exp(-rate*t);
+            let position = q0 + terminal*t + (v0-terminal)*(-(-rate*t).exp_m1())/rate;
+            let state = system.components()[0].states()[0];
+            assert!((state.velocity_m_sqrt_kg_per_s-velocity).abs() < 2e-12);
+            assert!((state.displacement_m_sqrt_kg-position).abs() < 2e-13);
+            let heat = force*(position-q0) - 0.5*(velocity*velocity-v0*v0);
+            assert!((component_heat-heat*component_rate/rate).abs() < 2e-12);
+            assert!((connection_heat-heat*link_rate/rate).abs() < 2e-12);
+        }
+        assert!(component_heat > 0.0 && connection_heat > 0.0);
+        for omega in [0.1, 8.0, 90.0] {
+            let response = system.harmonic_response(omega, &[C64::from_re(force)], 1000, &gate).unwrap();
+            let velocity = C64::from_re(force)/C64::new(rate, -omega);
+            let position = velocity/C64::new(0.0, -omega);
+            assert!((response.velocity_m_sqrt_kg_per_s[0]-velocity).abs() < 2e-12);
+            assert!((response.displacement_m_sqrt_kg[0]-position).abs() < 2e-12);
+            assert!((response.component_dissipation_w-0.5*component_rate*velocity.norm_sq()).abs() < 2e-12);
+            assert!((response.connection_dissipation_w-0.5*link_rate*velocity.norm_sq()).abs() < 2e-12);
+            assert!(response.power_residual_w.abs() < 2e-12);
+            let tangent = system.harmonic_response_with_frequency_derivative(omega,
+                &[C64::from_re(force)], None, 1000, &gate).unwrap();
+            let velocity_derivative = C64::new(0.0, 1.0)*velocity/C64::new(rate, -omega);
+            let position_derivative = velocity_derivative/C64::new(0.0, -omega)
+                - position.scale(1.0/omega);
+            let half_speed_squared_derivative = (velocity.conj()*velocity_derivative).re;
+            assert!((tangent.velocity_derivative[0]-velocity_derivative).abs() < 2e-12);
+            assert!((tangent.displacement_derivative[0]-position_derivative).abs() < 2e-12);
+            assert!((tangent.component_dissipation_derivative
+                - component_rate*half_speed_squared_derivative).abs() < 2e-12);
+            assert!((tangent.connection_dissipation_derivative
+                - link_rate*half_speed_squared_derivative).abs() < 2e-12);
+            assert!(tangent.power_residual_derivative.abs() < 2e-12);
+        }
+    }
 }
 
 #[test]

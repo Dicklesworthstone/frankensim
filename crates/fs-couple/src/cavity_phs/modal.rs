@@ -155,9 +155,8 @@ fn admit_clock(
         .iter()
         .map(|m| m.angular_frequency_rad_s.powi(2))
         .fold(0.0, f64::max);
-    let damping = modes
-        .iter()
-        .map(|m| 2.0 * m.damping_ratio * m.angular_frequency_rad_s)
+    let damping = motion.model().damping_rates_per_s()
+        .iter().copied()
         .fold(0.0, f64::max);
     let area2: f64 = motion
         .valve()

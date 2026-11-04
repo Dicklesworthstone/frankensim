@@ -12,7 +12,7 @@ use crate::render::schedule::force::coupled::coefficients::{
     heat::{MaterialHeatIntegral, viscosity::MaterialViscousHeatSource},
     rates::{
         MaterialRelaxationTime, MaterialRelaxationTimeReport, PreparedMaterialRelaxationTimes,
-        mobility::ModalDampingRatio,
+        mobility::ModalDampingRate,
     },
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
@@ -47,7 +47,7 @@ pub(super) struct RateEndpoint {
 }
 struct MobilityProposal {
     times: Vec<MaterialRelaxationTime>,
-    damping: Vec<ModalDampingRatio>,
+    damping: Vec<ModalDampingRate>,
     sources: Vec<(usize, ResolvedMaterialStatePoint)>,
     viscosity: Vec<Vec<MaterialViscousHeatSource>>,
 }

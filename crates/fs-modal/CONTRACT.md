@@ -176,6 +176,38 @@ natural frequency under `exp(-i omega t)`; no material names, digital gains,
 or mastering values occur in this layer. Energy/work diagnostics and
 transactional state/pressure budgets accompany every sample.
 
+`damping_rates_per_s()` is the authoritative physical viscous coefficient
+`c` [1/s] for every admitted coordinate, including ratio-created banks.
+`try_new_with_damping_rates` takes complete finite nonnegative rates in
+`q''+c*q'+omega^2*q=F`; for a dimensional mass and drag coefficient this is
+`c=b/m`. It admits exactly zero stiffness with positive drag and zero direct
+pressure transfer. Full/half/arbitrary held-force steps, port mobility solves,
+linear ramps, harmonic forces, simultaneous tones and affine tone envelopes
+all use that same admitted law and the existing independent positive heat
+owners. No artificial frequency, fitted decay floor or duplicate loss is added.
+
+For an explicit-rate bank, `modes().damping_ratio` is diagnostic metadata:
+`c/(2*omega)` when positive and representable, exact zero only when `c=0`, and
+positive infinity when a positive ratio is undefined or would overflow or
+underflow. This makes a missed legacy consumer fail visibly instead of treating
+a damped free coordinate as lossless. Generator assembly, coefficient equality,
+power evaluation and metadata copying must use `damping_rates_per_s()`, not
+reconstruct rates from those diagnostics. The bank's arbitrary-duration
+`advance_exact_zoh_duration_step` previews its real admitted law; passing a
+diagnostic mode to the standalone ratio-based step does not copy that law.
+
+`with_damping_rates` replaces complete rates without changing state, energy,
+frequencies, observer transfers, clock or budgets. Changed rates receive a new
+shared mechanics kernel and invalidate all preparation bound to the old one;
+identical rates share existing caches. `with_damping_ratios` explicitly restores
+the ratio law and cannot retain drag at zero frequency. Both admission routes
+require representable physical rates. Legacy ratio-created banks retain their
+established transition and heat operation order. `tests/damping_rates.rs`
+checks free decay across drag scales, retained tiny heat, independent work,
+all force laws, mixed free/soft/elastic modes, metadata, mobility, cache identity
+and transactional refusals. Work and heat allowances remain floating-point
+estimates rather than certified enclosures.
+
 `ModalAcousticTimeModel::apply_impulse[_into]` applies already resolved
 generalized impulses in `N s / sqrt(kg)` at fixed modal displacement:
 `v+ = v- + J`, independent of the nominal sample period, stiffness and viscous
