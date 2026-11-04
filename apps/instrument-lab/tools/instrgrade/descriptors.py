@@ -513,6 +513,7 @@ def hnr_band(
     band: tuple[float, float] | float | None = (80.0, 10000.0),
     *,
     sr: int = SR,
+    harmonic_law: tuple[float, float] | None = None,
 ) -> float:
     if band is None:
         raise MissingBandSplitFrequency("IRPGRADE_BAND_SPLIT_MISSING: band cannot be None")
@@ -534,9 +535,12 @@ def hnr_band(
     # HNR_MODULATION_HZ wide whatever the window's length. The warp is kept only where it gathers more of the energy
     # into the partials: a phase jump (a step in a render, a cracked note) reads as a brief pitch excursion, and
     # warping it away would frequency-modulate every upper partial out of its mask.
+    # `harmonic_law` (f0, B) masks every line of f_k = k f0 sqrt(1 + B k^2) in the band, tracked or not (instrgrade-5): the
+    # tracker stops at 30 partials and skips weak ones, and a harmonic it never tracked read as noise (a clarinet D3 with
+    # strong lines from 4.4 to 10 kHz measured 37.5 dB and masks to 66.3 dB, where the recording has 35).
     return max(
-        _hnr_masked(x, 1.0, 0.0, partials, f_lo, f_hi, sr),
-        _hnr_masked(*flatten_pitch(x, partials, sr=sr), partials, f_lo, f_hi, sr),
+        _hnr_masked(x, 1.0, 0.0, partials, f_lo, f_hi, sr, harmonic_law),
+        _hnr_masked(*flatten_pitch(x, partials, sr=sr), partials, f_lo, f_hi, sr, harmonic_law),
     )
 
 
@@ -548,6 +552,7 @@ def _hnr_masked(
     f_lo: float,
     f_hi: float,
     sr: int,
+    harmonic_law: tuple[float, float] | None = None,
 ) -> float:
     win = blackman_harris(len(xw))
     spec = np.abs(np.fft.rfft(xw * win)) ** 2
@@ -567,6 +572,16 @@ def _hnr_masked(
             sel = np.where(np.abs(freqs - fe) <= min(0.45 * f0, max(3.5 * df, 0.01 * fe)))[0]
             fc = float(freqs[sel[int(np.argmax(spec[sel]))]]) if len(sel) else fe
         hm |= np.abs(freqs - fc) <= half
+    if harmonic_law is not None:
+        f1, b = harmonic_law
+        have = {k for k, _ in tracked}
+        k = 1
+        while (fe := k * f1 * math.sqrt(1.0 + b * k * k) * scale) <= f_hi + half:
+            if k not in have:
+                sel = np.where(np.abs(freqs - fe) <= min(0.45 * f1 * scale, max(3.5 * df, 0.01 * fe)))[0]
+                fc = float(freqs[sel[int(np.argmax(spec[sel]))]]) if len(sel) else fe
+                hm |= np.abs(freqs - fc) <= half
+            k += 1
     mask = (freqs >= f_lo) & (freqs <= f_hi)
     h_pow = float(spec[mask & hm].sum()) + 1e-30
     n_pow = float(spec[mask & ~hm].sum()) + 1e-30

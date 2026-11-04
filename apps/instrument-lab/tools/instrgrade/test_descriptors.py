@@ -173,6 +173,21 @@ class BlindSpotsAndDescriptors(unittest.TestCase):
         self.assertGreaterEqual(d_sync["cyclo_coherence_kf0"], 0.5)
         self.assertLessEqual(d_stat["cyclo_coherence_kf0"], 0.1)
 
+    def test_hnr_masks_every_harmonic_in_the_band(self):
+        """instrgrade-5: 110 Hz, 89 equal harmonics to the band's top and quiet noise. The tracker's 30 partials leave lines
+        31-89 reading as noise, whether the lines are harmonic or stiff; the harmonic law gives the tone its due."""
+        rng = np.random.default_rng(20261104)
+        t = np.arange(int(2.5 * ig.SR), dtype=np.float64) / ig.SR
+        f0 = 110.0
+        noise = rng.normal(0.0, 0.002, len(t))
+        for b in (0.0, 2e-5):
+            x = sum(np.sin(2.0 * np.pi * k * f0 * np.sqrt(1.0 + b * k * k) * t) for k in range(1, 90)) / 30.0 + noise
+            parts = desc_mod.track_partials(x, f0, kmax=30, t_window=(0.2, 2.3))
+            seg = x[int(0.2 * ig.SR):int(2.3 * ig.SR)]
+            without, law = desc_mod.hnr_band(seg, parts), desc_mod.hnr_band(seg, parts, harmonic_law=(f0, b))
+            self.assertLess(without, 5.0, (b, without))
+            self.assertGreater(law, 25.0, (b, law))
+
     def test_hnr_holds_through_vibrato_and_window_length(self):
         """G1: 196 Hz, 30 harmonics and stationary noise (37 dB steady) with +-30 c vibrato at 5.5 Hz -> band HNR within
         1.5 dB of the steady tone's and of its own mean over 0.2 s pieces (instrgrade-3: 2.3 dB, 12.2 dB in pieces).
