@@ -23,11 +23,16 @@ use fs_math::dd::Dd;
 pub mod path;
 /// Causal observation of two independently moving, accepted paths.
 pub mod receiver;
+/// Exact ideal-wall paths on the original finite source trajectory and clock.
+pub mod reflection;
 
 pub use path::PreparedKinematicTrajectory;
 pub use receiver::{
     MovingReceiverBudget, MovingReceiverConfig, PreparedMovingReceiverSample,
     PreparedMovingReceiverSource,
+};
+pub use reflection::{
+    IdealReflectionObserver, PreparedReflectedSourceTrajectory, ReflectedTrajectoryBudget,
 };
 
 const MAX_BOUND_DEPTH: usize = 32;
@@ -250,8 +255,31 @@ impl PreparedSourceTrajectory {
             .segments
             .partition_point(|segment| segment.last_arrival < receiver_time);
         let segment = &self.segments[index];
-        if receiver_time == segment.first_arrival {
-            return self.finish(
+        self.prepare_segment(
+            &self.observer,
+            segment,
+            receiver_time,
+            [segment.first_arrival, segment.last_arrival],
+            maximum_time_residual_s,
+            cancelled,
+        )
+    }
+
+    // A reflected path uses the original polynomial with a virtual receiver.
+    // Only its two endpoint arrivals change; root refinement and pressure
+    // evaluation have one owner for direct and reflected propagation.
+    fn prepare_segment(
+        &self,
+        observer: &MovingCompactObserver,
+        segment: &QuinticSegment,
+        receiver_time: f64,
+        [first_arrival, last_arrival]: [f64; 2],
+        maximum_time_residual_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMovingCompactSample, AeroacError> {
+        if receiver_time == first_arrival {
+            return Self::finish(
+                observer,
                 segment,
                 segment.first.source_time_s,
                 receiver_time,
@@ -259,8 +287,9 @@ impl PreparedSourceTrajectory {
                 cancelled,
             );
         }
-        if receiver_time == segment.last_arrival {
-            return self.finish(
+        if receiver_time == last_arrival {
+            return Self::finish(
+                observer,
                 segment,
                 segment.last.source_time_s,
                 receiver_time,
@@ -270,15 +299,15 @@ impl PreparedSourceTrajectory {
         }
         let mut lo = segment.first.source_time_s;
         let mut hi = segment.last.source_time_s;
-        let mut flo = self.arrival_residual(segment, lo, receiver_time)?.0;
-        let mut fhi = self.arrival_residual(segment, hi, receiver_time)?.0;
+        let mut flo = Self::arrival_residual(observer, segment, lo, receiver_time)?.0;
+        let mut fhi = Self::arrival_residual(observer, segment, hi, receiver_time)?.0;
         if !flo.lt(Dd::ZERO) || !Dd::ZERO.lt(fhi) {
             return Err(invalid(
                 "rounded trajectory arrivals do not bracket the receiver query",
             ));
         }
-        let fraction = (Dd::from_f64(receiver_time) - Dd::from_f64(segment.first_arrival))
-            / (Dd::from_f64(segment.last_arrival) - Dd::from_f64(segment.first_arrival));
+        let fraction = (Dd::from_f64(receiver_time) - Dd::from_f64(first_arrival))
+            / (Dd::from_f64(last_arrival) - Dd::from_f64(first_arrival));
         let mut time = (Dd::from_f64(lo) + segment.duration * fraction).to_f64();
         if time <= lo || time >= hi {
             time = lo.midpoint(hi);
@@ -288,7 +317,8 @@ impl PreparedSourceTrajectory {
             poll(cancelled)?;
             if time <= lo || time >= hi {
                 let endpoint = if flo.abs().lt(fhi.abs()) { lo } else { hi };
-                return self.finish(
+                return Self::finish(
+                    observer,
                     segment,
                     endpoint,
                     receiver_time,
@@ -296,11 +326,13 @@ impl PreparedSourceTrajectory {
                     cancelled,
                 );
             }
-            let (value, derivative) = self.arrival_residual(segment, time, receiver_time)?;
+            let (value, derivative) =
+                Self::arrival_residual(observer, segment, time, receiver_time)?;
             let error = value.abs().to_f64();
             best_error = best_error.min(error);
             if error <= maximum_time_residual_s {
-                return self.finish(
+                return Self::finish(
+                    observer,
                     segment,
                     time,
                     receiver_time,
@@ -331,21 +363,20 @@ impl PreparedSourceTrajectory {
     }
 
     fn arrival_residual(
-        &self,
+        observer: &MovingCompactObserver,
         segment: &QuinticSegment,
         time: f64,
         receiver: f64,
     ) -> Result<(Dd, f64), AeroacError> {
         let state = segment.evaluate(time, false)?;
-        let displacement =
-            core::array::from_fn(|i| self.observer.observer_m[i] - state.position_m[i]);
+        let displacement = core::array::from_fn(|i| observer.observer_m[i] - state.position_m[i]);
         let radius = norm(displacement);
-        let c = self.observer.medium.sound_speed_m_s();
+        let c = observer.medium.sound_speed_m_s();
         let delay = radius / c;
         let mach = state.velocity_m_s.map(|v| v / c);
-        self.observer.admit_speed(norm(mach))?;
+        observer.admit_speed(norm(mach))?;
         if !radius.is_finite()
-            || radius < self.observer.limits.minimum_distance_m
+            || radius < observer.limits.minimum_distance_m
             || !delay.is_finite()
             || delay <= 0.0
         {
@@ -362,16 +393,14 @@ impl PreparedSourceTrajectory {
     }
 
     fn finish(
-        &self,
+        observer: &MovingCompactObserver,
         segment: &QuinticSegment,
         time: f64,
         receiver: f64,
         tolerance: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedMovingCompactSample, AeroacError> {
-        let mut prepared = self
-            .observer
-            .prepare_emission(time, segment.evaluate(time, true)?)?;
+        let mut prepared = observer.prepare_emission(time, segment.evaluate(time, true)?)?;
         let error = residual(receiver, time, prepared.propagation_delay_s());
         if !error.is_finite() || error > tolerance {
             return Err(AeroacError::NotConverged {

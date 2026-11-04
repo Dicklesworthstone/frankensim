@@ -17,7 +17,9 @@ pub(super) mod sealed {
 /// Implemented for uniform motion, a borrowed prepared curved trajectory,
 /// [`CompactSourceMotion`] for heterogeneous fixed-receiver ensembles, and a
 /// borrowed prepared moving source/receiver pair, and fixed sources in a
-/// shared uniform-flow receiver. Sealing keeps
+/// shared uniform-flow receiver. Ideal reflected trajectories retain one
+/// physical history with several independently delayed propagation paths.
+/// Sealing keeps
 /// whole-domain speed/clearance guarantees with the original motion owners.
 /// Dispatch is static for homogeneous histories and one enum match for mixed
 /// histories. No trajectory is cloned, evolved, or allocated during callbacks.
@@ -45,7 +47,13 @@ pub trait CompactMotion: sealed::Sealed + Copy {
         Ok(())
     }
     /// Maximum iterative root steps per receiver sample; uniform motion uses 0.
+    /// This is per acoustic path; the renderer budgets every retained path.
     fn maximum_root_iterations(self) -> usize;
+    /// Complete acoustic paths for one physical source. Existing free-space
+    /// owners contribute exactly one; ideal boundaries retain their full group.
+    fn path_count(self) -> usize {
+        1
+    }
     /// Evaluate position and its consistent derivatives on the source clock.
     fn kinematics_at(self, source_time_s: f64) -> Result<SourceKinematics, AeroacError>;
     /// Prepare the same physical pressure operator at one receiver timestamp.
@@ -56,6 +64,28 @@ pub trait CompactMotion: sealed::Sealed + Copy {
         maximum_time_residual_s: f64,
         cancelled: &mut Cancel,
     ) -> Result<PreparedMovingCompactSample, RenderError>;
+    /// Prepare one path on the original physical source history. Wall parity,
+    /// when present, is already folded into the returned pressure coefficients.
+    fn prepare_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &Self::Observer,
+        receiver_time_s: f64,
+        maximum_time_residual_s: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingCompactSample, RenderError> {
+        if path != 0 {
+            return Err(sizing(
+                "free-space motion has only its original direct path",
+            ));
+        }
+        self.prepare_at(
+            observer,
+            receiver_time_s,
+            maximum_time_residual_s,
+            cancelled,
+        )
+    }
     /// Prepare one retained emission endpoint at the requested receiver event.
     /// The history owner still requires an exactly matching rounded arrival
     /// and its original residual budget before accepting this endpoint.
@@ -69,6 +99,22 @@ pub trait CompactMotion: sealed::Sealed + Copy {
         self.observer_at(observer, receiver_time_s)?
             .prepare_emission(source_time_s, kinematics)
             .map_err(acoustic)
+    }
+    /// Original emission endpoint through one path, used ONLY for exact
+    /// rounded-arrival reconciliation by the existing history owner.
+    fn prepare_path_endpoint(
+        self,
+        path: usize,
+        observer: &Self::Observer,
+        source_time_s: f64,
+        receiver_time_s: f64,
+    ) -> Result<PreparedMovingCompactSample, RenderError> {
+        if path != 0 {
+            return Err(sizing(
+                "free-space motion has only its original direct path",
+            ));
+        }
+        self.prepare_endpoint(observer, source_time_s, receiver_time_s)
     }
     /// Admit continuous geometry and return a whole-window Doppler-rate bound.
     fn admit_window<Cancel: FnMut() -> bool>(

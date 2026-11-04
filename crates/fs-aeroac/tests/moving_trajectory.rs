@@ -1,5 +1,8 @@
 //! G1/G3 finite accelerating trajectories, continuous admission and causal clocks.
 
+#[path = "moving_trajectory/reflection.rs"]
+mod reflection;
+
 use fs_aeroac::AeroacError;
 use fs_aeroac::curle3d::moving::trajectory::{
     PreparedSourceTrajectory, TimedSourceKinematics, TrajectoryBudget,

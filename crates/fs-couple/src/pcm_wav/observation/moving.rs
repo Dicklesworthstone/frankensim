@@ -11,6 +11,8 @@
 //! the source's radiation coefficients.
 //! Fixed laboratory sources in a uniform flow reuse this same history owner;
 //! their original convected pressure paths retain a unit observed clock rate.
+//! Ideal-wall trajectories query this SAME accepted history at every path's
+//! own retarded time and sum signed pressures before any audio conversion.
 //!
 //! Input bandwidth, interpolation convergence, finite-source compactness and
 //! pressure linearity remain producer responsibilities. Declared receiver
@@ -31,6 +33,7 @@ use fs_math::{dd::Dd, det};
 mod flow;
 mod motion;
 mod receiver;
+mod reflection;
 /// Native rigid-body attachments and bounded accepted acoustic histories.
 pub mod rigid;
 /// Full stationary compact fields and directional microphones on these histories.
@@ -79,9 +82,10 @@ pub struct MovingPressureBudget {
     /// Logical owned payload: track records, cubic coefficients and scratch.
     /// Borrowed input, allocator metadata and allocator rounding are excluded.
     pub maximum_payload_bytes: usize,
-    /// Sources times output samples. Each uniform pair has one analytic root;
-    /// each curved pair additionally retains its prepared trajectory's explicit
-    /// root-iteration cap. All pairs have a bounded source-history search.
+    /// Acoustic paths times output samples, including every reflected path
+    /// of each physical source. Each uniform pair has one analytic root;
+    /// each curved pair retains its prepared trajectory's root-iteration cap.
+    /// All pairs have a bounded search in the same original source history.
     pub maximum_source_receiver_pairs: u64,
 }
 
@@ -112,6 +116,7 @@ pub struct MovingCompactRenderer<'a, M: CompactMotion = UniformSourceMotion> {
     scratch: Vec<f64>,
     completed: u64,
     maximum_retarded_iterations: u64,
+    source_path_count: usize,
 }
 
 impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
@@ -144,18 +149,9 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
                 "moving pressure requires finite clocks, bandwidth and explicit capacities",
             ));
         }
-        let source_count =
-            u64::try_from(sources.len()).map_err(|_| sizing("source count exceeds u64"))?;
-        if source_count
-            .checked_mul(config.samples)
-            .is_none_or(|pairs| pairs > budget.maximum_source_receiver_pairs)
-        {
-            return Err(sizing(
-                "moving pressure lifetime work exceeds its source/receiver budget",
-            ));
-        }
         let mut endpoint_count = 0_usize;
         let mut root_iterations_per_sample = 0_u64;
+        let mut source_path_count = 0_usize;
         for (index, source) in sources.iter().enumerate() {
             if index % 64 == 0 {
                 check_cancel(cancelled)?;
@@ -166,15 +162,37 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
                 ));
             }
             source.motion.admit_observer(&observer)?;
+            let paths = source.motion.path_count();
+            if paths == 0 {
+                return Err(sizing("a physical source must retain its acoustic paths"));
+            }
+            source_path_count = source_path_count
+                .checked_add(paths)
+                .ok_or_else(|| sizing("combined acoustic path count overflows"))?;
             root_iterations_per_sample = root_iterations_per_sample
                 .checked_add(
-                    u64::try_from(source.motion.maximum_root_iterations())
-                        .map_err(|_| sizing("trajectory root-iteration limit exceeds u64"))?,
+                    u64::try_from(
+                        source
+                            .motion
+                            .maximum_root_iterations()
+                            .checked_mul(paths)
+                            .ok_or_else(|| sizing("source path root work overflows"))?,
+                    )
+                    .map_err(|_| sizing("trajectory root-iteration limit exceeds u64"))?,
                 )
                 .ok_or_else(|| sizing("combined trajectory root work overflows"))?;
             endpoint_count = endpoint_count
                 .checked_add(source.samples.len())
                 .ok_or_else(|| sizing("source endpoint count overflow"))?;
+        }
+        if u64::try_from(source_path_count)
+            .ok()
+            .and_then(|paths| paths.checked_mul(config.samples))
+            .is_none_or(|pairs| pairs > budget.maximum_source_receiver_pairs)
+        {
+            return Err(sizing(
+                "moving pressure lifetime work exceeds its source/receiver budget",
+            ));
         }
         if endpoint_count > budget.maximum_source_samples {
             return Err(sizing("compact source histories exceed the input budget"));
@@ -258,29 +276,33 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
                 }
                 intervals.push(compile_interval(pair[0].strength, pair[1].strength, h)?);
             }
-            let first = prepare_history(
-                &observer,
-                source,
-                config.first_receiver_time_s,
-                config.maximum_time_residual_s,
-                cancelled,
-            )?;
-            let last = prepare_history(
-                &observer,
-                source,
-                last_receiver_time,
-                config.maximum_time_residual_s,
-                cancelled,
-            )?;
-            // Each motion owner supplies the continuous geometry admission and
-            // a Doppler bound valid for the whole requested observation window.
-            let maximum_doppler = source
-                .motion
-                .admit_window(&observer, &first, &last, cancelled)?;
-            if source.source_bandwidth_hz * maximum_doppler > config.receiver_bandwidth_hz {
-                return Err(sizing(
-                    "declared receiver bandwidth does not include source Doppler expansion",
-                ));
+            for path in 0..source.motion.path_count() {
+                let first = prepare_path_history(
+                    &observer,
+                    source,
+                    path,
+                    config.first_receiver_time_s,
+                    config.maximum_time_residual_s,
+                    cancelled,
+                )?;
+                let last = prepare_path_history(
+                    &observer,
+                    source,
+                    path,
+                    last_receiver_time,
+                    config.maximum_time_residual_s,
+                    cancelled,
+                )?;
+                // Each path retains continuous geometry admission and a
+                // Doppler bound valid over its complete observation window.
+                let maximum_doppler = source
+                    .motion
+                    .admit_window(&observer, &first, &last, cancelled)?;
+                if source.source_bandwidth_hz * maximum_doppler > config.receiver_bandwidth_hz {
+                    return Err(sizing(
+                        "declared receiver bandwidth does not include source Doppler expansion",
+                    ));
+                }
             }
             tracks.push(PreparedTrack {
                 source: *source,
@@ -296,6 +318,7 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
             scratch,
             completed: 0,
             maximum_retarded_iterations,
+            source_path_count,
         })
     }
 
@@ -327,6 +350,11 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
     /// Number of retained sources, in deterministic summation order.
     pub fn source_count(&self) -> usize {
         self.tracks.len()
+    }
+    /// Complete direct/reflected paths, without counting images as additional
+    /// physical sources or duplicating their accepted strength interpolation.
+    pub const fn source_path_count(&self) -> usize {
+        self.source_path_count
     }
     /// Completed samples on the receiver clock.
     pub const fn samples_rendered(&self) -> u64 {
@@ -391,16 +419,19 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
                 if j % 64 == 0 {
                     check_cancel(cancelled)?;
                 }
-                let prepared = prepare_history(
-                    &self.observer,
-                    &track.source,
-                    time,
-                    self.config.maximum_time_residual_s,
-                    cancelled,
-                )?;
-                let strength = interpolate(track, &self.intervals, prepared.source_time_s())?;
-                pressure = pressure
-                    + Dd::from_f64(prepared.evaluate(strength).map_err(acoustic)?.pressure_pa);
+                for path in 0..track.source.motion.path_count() {
+                    let prepared = prepare_path_history(
+                        &self.observer,
+                        &track.source,
+                        path,
+                        time,
+                        self.config.maximum_time_residual_s,
+                        cancelled,
+                    )?;
+                    let strength = interpolate(track, &self.intervals, prepared.source_time_s())?;
+                    pressure = pressure
+                        + Dd::from_f64(prepared.evaluate(strength).map_err(acoustic)?.pressure_pa);
+                }
             }
             let value = pressure.to_f64();
             if !value.is_finite() {
@@ -520,11 +551,22 @@ fn prepare_history<M: CompactMotion, Cancel: FnMut() -> bool>(
     tolerance: f64,
     cancelled: &mut Cancel,
 ) -> Result<PreparedMovingCompactSample, RenderError> {
+    prepare_path_history(observer, source, 0, time, tolerance, cancelled)
+}
+
+fn prepare_path_history<M: CompactMotion, Cancel: FnMut() -> bool>(
+    observer: &M::Observer,
+    source: &CompactSourceHistory<'_, M>,
+    path: usize,
+    time: f64,
+    tolerance: f64,
+    cancelled: &mut Cancel,
+) -> Result<PreparedMovingCompactSample, RenderError> {
     let first = source.samples[0].source_time_s;
     let last = source.samples[source.samples.len() - 1].source_time_s;
     let original_error = match source
         .motion
-        .prepare_at(observer, time, tolerance, cancelled)
+        .prepare_path_at(path, observer, time, tolerance, cancelled)
     {
         Ok(prepared) if (first..=last).contains(&prepared.source_time_s()) => return Ok(prepared),
         Ok(_) => sizing("receiver window is outside retained physical source history"),
@@ -537,9 +579,10 @@ fn prepare_history<M: CompactMotion, Cancel: FnMut() -> bool>(
     // This is no extrapolation, tolerance-sized time clamp, or invented history.
     for endpoint_time in [first, last] {
         check_cancel(cancelled)?;
-        if let Ok(endpoint) = source
-            .motion
-            .prepare_endpoint(observer, endpoint_time, time)
+        if let Ok(endpoint) =
+            source
+                .motion
+                .prepare_path_endpoint(path, observer, endpoint_time, time)
             && endpoint.receiver_time_s() == time
             && endpoint.retarded_time_residual_s() <= tolerance
         {

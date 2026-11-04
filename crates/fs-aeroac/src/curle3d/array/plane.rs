@@ -45,7 +45,7 @@ pub enum IdealPlaneBoundary {
 }
 
 impl IdealPlaneBoundary {
-    pub(super) const fn sign(self) -> f64 {
+    pub(crate) const fn sign(self) -> f64 {
         match self {
             Self::Rigid => 1.0,
             Self::PressureRelease => -1.0,
@@ -97,7 +97,7 @@ impl IdealAcousticPlane {
         self.boundary
     }
 
-    pub(super) fn distance(&self, position: [f64; 3]) -> Result<Dd, AeroacError> {
+    pub(crate) fn distance(&self, position: [f64; 3]) -> Result<Dd, AeroacError> {
         let mut distance = Dd::ZERO;
         for axis in 0..3 {
             distance = distance
@@ -128,7 +128,7 @@ impl IdealAcousticPlane {
 
     // A later image in a dihedral group may be on either side of this plane.
     // Only ORIGINAL source admission selects the physical fluid half-spaces.
-    pub(super) fn reflected_position(&self, position: [f64; 3]) -> Result<[f64; 3], AeroacError> {
+    pub(crate) fn reflected_position(&self, position: [f64; 3]) -> Result<[f64; 3], AeroacError> {
         self.reflect_at_distance(position, self.distance(position)?)
     }
 

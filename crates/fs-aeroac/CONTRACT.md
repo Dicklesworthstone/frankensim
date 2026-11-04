@@ -1319,3 +1319,11 @@ source, broadband-regime validation or absolute-SPL authority.
 `slot_jet_3d/tests.rs` covers independently assembled post-collision impulse,
 fluid-plus-wall momentum balance, zero-closure bits, nonzero closure loads,
 chunk partition equivalence, source/closure refusals and material SI scaling.
+
+## Retarded reflection of finite moving compact sources
+
+`curle3d::moving::trajectory::{IdealReflectionObserver,PreparedReflectedSourceTrajectory}` carries the complete 2^m image group of one through three perpendicular ideal rigid/pressure-release walls into moving-source pressure. The original microphone, medium and walls share a stationary fluid-rest frame. Virtual receivers implement `G(x,H y)=G(H^-1 x,y)`, retaining the original source position, velocity, acceleration, force and force rate without cloned trajectories or a second interpolation. Every path has its own retarded emission time and signed pressure coefficients; source strengths remain on their original clock.
+
+A shared fixed-size observer owns at most eight paths. Each borrowed source owner retains eight arrival intervals, reuses the original quintic and safeguarded root solver, and requires complete common receiver coverage. Outward Bernstein subdivision admits source confinement within every physical half-space and clearance from all virtual receivers; work/depth limits and cancellation remain explicit. Queries allocate nothing, preserve the represented-time residual policy, and never drop unsupported image histories. Path zero retains original direct-path arithmetic.
+
+G1/G3 regressions compare accelerating source images with independently differentiated retarded Green potentials, stationary harmonic corner interference, each physical delay, rigid/release boundary conditions, coordinate covariance, whole-span wall crossing, budgets and cancellation. This is prescribed compact-source pressure, without finite-impedance walls, general wedges, enclosed rooms, moving receivers/walls, mean flow, absorption, radiation reaction or inferred source-model/experimental authority.
