@@ -1,5 +1,11 @@
 //! Original material claims for the shared reciprocal thermal-diffusion law.
 
+mod binary_factor;
+pub use binary_factor::{
+    BinaryThermalDiffusionFactorMaterial, MaterialBinarySoretDufourTransport,
+    ResolvedBinaryThermalDiffusionFactor,
+};
+
 use super::{admit_state, material_input, poll, typed};
 use crate::multicomponent::dissipation::{
     DissipationError, TransportCoefficients, TransportLaw, validate_binary,
@@ -122,57 +128,18 @@ impl<L: TransportLaw> MaterialSoretDufourTransport<L> {
         let models = law.source().models();
         let n = models.len();
         sources.sort_by(|a, b| a.species.cmp(&b.species));
-        composition_axes.sort_by(|a, b| a.0.cmp(&b.0));
         if sources.len() != n
-            || composition_axes.len() != n
             || sources
                 .iter()
                 .zip(models)
                 .any(|(s, m)| &s.species != m.species())
-            || composition_axes
-                .iter()
-                .zip(models)
-                .any(|((s, _), m)| s != m.species())
-            || composition_axes.iter().enumerate().any(|(i, (_, axis))| {
-                axis.trim().is_empty()
-                    || axis.len() > 128
-                    || axis == "temperature"
-                    || axis == "pressure"
-                    || composition_axes[..i].iter().any(|(_, prior)| prior == axis)
-            })
         {
             return Err(DissipationError::Invalid(
                 "thermal cross source species or coordinate axis",
             ));
         }
-        let temperature = Temperature::new(coordinate(
-            &reference_query,
-            "temperature",
-            typed(QuantityKind::AbsoluteTemperature),
-        )?);
-        let pressure = Pressure::new(coordinate(
-            &reference_query,
-            "pressure",
-            typed(QuantityKind::Pressure),
-        )?);
-        let mole_quantity = typed(QuantityKind::Composition(CompositionBasis::MoleFraction));
-        let fractions = composition_axes
-            .iter()
-            .map(|(_, axis)| coordinate(&reference_query, axis, mole_quantity))
-            .collect::<Result<Vec<_>, _>>()?;
-        for (axis, quantity) in reference_query.axis_quantities() {
-            if (quantity.dims() == Temperature::DIMS && axis != "temperature")
-                || (quantity.dims() == Pressure::DIMS && axis != "pressure")
-                || (quantity
-                    .semantic_type()
-                    .is_some_and(|q| matches!(q.kind(), QuantityKind::Composition(_)))
-                    && !composition_axes.iter().any(|(_, own)| own == axis))
-            {
-                return Err(DissipationError::Invalid(
-                    "unowned evolving thermal cross coordinate",
-                ));
-            }
-        }
+        let (temperature, pressure, fractions) =
+            reference_state(law.source(), &mut composition_axes, &reference_query)?;
         let (query, canonical) = face_query(
             &reference_query,
             &composition_axes,
@@ -362,6 +329,62 @@ impl<L: TransportLaw> TransportLaw for MaterialSoretDufourTransport<L> {
         }
         Ok(true)
     }
+}
+
+// Both kinetic-heat and binary-factor sources own the same evolving coordinates.
+fn reference_state(
+    source: &IdealGasEquilibriumV1,
+    composition_axes: &mut [(SpeciesId, String)],
+    reference_query: &QueryPoint,
+) -> Result<(Temperature, Pressure, Vec<f64>), DissipationError> {
+    let models = source.models();
+    composition_axes.sort_by(|a, b| a.0.cmp(&b.0));
+    if composition_axes.len() != models.len()
+        || composition_axes
+            .iter()
+            .zip(models)
+            .any(|((s, _), m)| s != m.species())
+        || composition_axes.iter().enumerate().any(|(i, (_, axis))| {
+            axis.trim().is_empty()
+                || axis.len() > 128
+                || axis == "temperature"
+                || axis == "pressure"
+                || composition_axes[..i].iter().any(|(_, prior)| prior == axis)
+        })
+    {
+        return Err(DissipationError::Invalid(
+            "thermal cross source species or coordinate axis",
+        ));
+    }
+    let temperature = Temperature::new(coordinate(
+        reference_query,
+        "temperature",
+        typed(QuantityKind::AbsoluteTemperature),
+    )?);
+    let pressure = Pressure::new(coordinate(
+        reference_query,
+        "pressure",
+        typed(QuantityKind::Pressure),
+    )?);
+    let mole_quantity = typed(QuantityKind::Composition(CompositionBasis::MoleFraction));
+    let fractions = composition_axes
+        .iter()
+        .map(|(_, axis)| coordinate(reference_query, axis, mole_quantity))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (axis, quantity) in reference_query.axis_quantities() {
+        if (quantity.dims() == Temperature::DIMS && axis != "temperature")
+            || (quantity.dims() == Pressure::DIMS && axis != "pressure")
+            || (quantity
+                .semantic_type()
+                .is_some_and(|q| matches!(q.kind(), QuantityKind::Composition(_)))
+                && !composition_axes.iter().any(|(_, own)| own == axis))
+        {
+            return Err(DissipationError::Invalid(
+                "unowned evolving thermal cross coordinate",
+            ));
+        }
+    }
+    Ok((temperature, pressure, fractions))
 }
 
 fn face_query(

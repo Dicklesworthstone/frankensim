@@ -12,8 +12,9 @@ pub mod parcel;
 pub use binary::MaterialBinaryTransport;
 mod thermal_cross;
 pub use thermal_cross::{
-    MaterialSoretDufourTransport, ResolvedMaterialHeatsOfTransport, SpeciesHeatOfTransportMaterial,
-    ThermalConductivityConvention,
+    BinaryThermalDiffusionFactorMaterial, MaterialBinarySoretDufourTransport,
+    MaterialSoretDufourTransport, ResolvedBinaryThermalDiffusionFactor,
+    ResolvedMaterialHeatsOfTransport, SpeciesHeatOfTransportMaterial, ThermalConductivityConvention,
 };
 
 use crate::multicomponent::dissipation::{

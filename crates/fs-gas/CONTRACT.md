@@ -1795,6 +1795,39 @@ Manufactured surface fixtures independently verify the resulting Soret/Dufour
 flux and entropy across changing T,p,x, plus source pinning, absent species,
 typed admission and atomic refusal; they are not measured-material qualification.
 
+For binary source data, `MaterialBinarySoretDufourTransport<L>` accepts one
+`BinaryThermalDiffusionFactorMaterial` with an explicitly ordered species pair,
+a finite signed dimensionless property and its original material claim.
+The local factor is defined by
+`grad ln(x_2/x_1) = alpha_12 grad ln(T)` at zero species flux and constant
+pressure (Van-Brunt, Farrell and Monroe, <https://arxiv.org/pdf/2109.05082>,
+section 6.3). Species order is never inferred from names or masses. Reversing
+the pair requires reversing alpha's sign. An integrated experimental separation
+ratio is admissible only when its source supports this local constitutive use;
+a Soret coefficient with units 1/K is not silently treated as dimensionless.
+
+At each actual T,p,x query the original source resolver pins and refreshes the
+factor claim. The adapter converts it to the same mass-frame kinetic closure:
+`H_1-H_2 = alpha_12 R T Mbar/(M_1 M_2)`, using deterministic gauge `H_2=0`.
+The original shared face then produces both Soret species flux and reciprocal
+Dufour heat, with the original zero-diffusive-flux conductivity convention,
+partial-enthalpy accounting and entropy admission. The underlying law still
+supplies independent diffusivities, viscosity and conductivity. The adapter
+accepts exactly two canonical caloric species including structural zeros; it
+does not extrapolate a binary measurement to a multicomponent bank or seed
+absent species. Material restrictions govern pure-species endpoint support.
+The complete original query, factor and derived heats are available through
+`ResolvedBinaryThermalDiffusionFactor`; failed queries leave outputs and the
+last complete factor receipt unchanged.
+
+The manufactured public tests in
+`tests/material_parcel_transport/binary_factor.rs` check unequal-mass binary
+fluxes and conjugate entropy against independent formulas, the measured
+zero-flux gradient relation, reversed pair orientation, source interpolation
+and claim pinning, structural zeros, unit/assignment/cancellation refusal, and
+actual closed-parcel species/energy updates. These are authored regression
+checks, not measured-material qualification or a native validation claim.
+
 The shared axial/network/planar/spatial face adds the balanced Soret force
 `d_i^T = x_i M_i (H_i-Hbar)/(R T) grad(T)/T`, with `Hbar=sum_i Y_i H_i`,
 to the original ideal chemical/pressure forces before calling the same

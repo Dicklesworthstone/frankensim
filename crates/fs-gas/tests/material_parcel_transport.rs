@@ -3,6 +3,8 @@
 
 #[path = "material_parcel_transport/adaptive.rs"]
 mod adaptive;
+#[path = "material_parcel_transport/binary_factor.rs"]
+mod binary_factor;
 #[path = "material_parcel_transport/closed_window.rs"]
 mod closed_window;
 #[path = "material_parcel_transport/network.rs"]
