@@ -293,3 +293,132 @@ fn pressure_datum_arbitrary_origin_and_incomplete_stream_refusal() {
         Err(PipeLoadError::Cancelled)
     );
 }
+
+#[test]
+fn total_pressure_reducer_closes_work_and_drives_native_mechanical_momentum() {
+    use fs_ga::{Mat3, Se3, Vec3, Wrench};
+    use fs_mbd::articulated::{
+        ArticulatedModel, FreeFloatingBaseState, JointModel, Link, SpatialInertia,
+        apply_free_floating_impulses,
+    };
+    let (q, pressure) = native_startup();
+    let paths = [
+        geometry(vec![[-2.0, 0.0, 0.0], [0.0; 3]], 2.0),
+        geometry(vec![[0.0; 3], [0.0, 1.0, 0.0]], 0.5),
+        geometry(vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]], 1.0),
+    ];
+    // The same original L=(1,2,2) now has genuinely different port speeds.
+    let actual_ports = ports(q, [2.0, 0.5, 1.0]);
+    let mut node = state();
+    node.pressure_pa = pressure;
+    let junction = evaluate_in_chart(
+        node,
+        &actual_ports,
+        super::super::super::PressureChart::Total,
+        || false,
+    )
+    .unwrap();
+    vector_near(junction.load.force_n, [116.0 / 27.0, -70.0 / 27.0, 0.0]);
+    near(junction.kinetic_energy_transport_j, 8.0 / 9.0);
+    // Independent cubic quadrature of pressure work on the point volume.
+    let supplied: f64 = actual_ports
+        .iter()
+        .map(|port| {
+            let f = |q: f64| -(pressure - 0.5 * (q / port.area_m2).powi(2)) * q;
+            let q = port.outflows_m3_s[1];
+            (f(0.0) + 4.0 * f(0.5 * q) + f(q)) / 6.0
+        })
+        .sum();
+    near(supplied, junction.kinetic_energy_transport_j);
+    let total_pressures = [[8.0, pressure], [pressure, 0.0], [pressure, 0.0]];
+    let mut components = Vec::new();
+    let mut external = Vec::new();
+    for branch in 0..3 {
+        // Independent integral of the affine dynamic pressure for traction.
+        let speed = q[branch] / paths[branch].area_m2;
+        let head = speed * speed / 6.0;
+        let pressures = total_pressures[branch].map(|p| p - head);
+        let flow = [0.0, q[branch]];
+        components.push(
+            paths[branch]
+                .evaluate(
+                    pipe_interval(flow, pressures, [true; 2]),
+                    [0.0; 3],
+                    |_| 1.0,
+                    || false,
+                )
+                .unwrap(),
+        );
+        external.push(
+            paths[branch]
+                .evaluate(
+                    pipe_interval(
+                        flow,
+                        pressures,
+                        if branch == 0 {
+                            [true, false]
+                        } else {
+                            [false, true]
+                        },
+                    ),
+                    [0.0; 3],
+                    |_| 1.0,
+                    || false,
+                )
+                .unwrap(),
+        );
+    }
+    components.push(junction.load);
+    let summed = sum_loads(1.0, [0.0; 3], &components).unwrap();
+    let total = sum_loads(1.0, [0.0; 3], &external).unwrap();
+    vector_near(summed.impulse_ns, total.impulse_ns);
+    vector_near(summed.angular_impulse_nms, total.angular_impulse_nms);
+    vector_near(total.impulse_ns, [268.0 / 27.0, -96.0 / 27.0, 0.0]);
+    vector_near(total.angular_impulse_nms, [0.0, 0.0, -44.0 / 27.0]);
+    let inertia = SpatialInertia::new(
+        2.0,
+        Vec3::new(0.0, 0.0, 0.0),
+        Mat3 {
+            m: [3.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 5.0],
+        },
+    )
+    .unwrap();
+    let model = ArticulatedModel::new(vec![Link::new(
+        "total-pressure support",
+        None,
+        Se3::identity(),
+        JointModel::FIXED,
+        inertia,
+    )])
+    .unwrap();
+    let v = |a: [f64; 3]| Vec3::new(a[0], a[1], a[2]);
+    let result = apply_free_floating_impulses(
+        &model,
+        FreeFloatingBaseState::stationary(Se3::identity()),
+        &[],
+        &[],
+        &[],
+        &[Wrench::new(
+            v(total.angular_impulse_nms),
+            v(total.impulse_ns),
+        )],
+    )
+    .unwrap();
+    let a = |v: Vec3| [v.x, v.y, v.z];
+    vector_near(a(result.linear_momentum_change_world), total.impulse_ns);
+    vector_near(
+        a(result.angular_momentum_change_world),
+        total.angular_impulse_nms,
+    );
+    near(result.impulse_work, 102268.0 / 3645.0);
+    near(result.kinetic_work_residual, 0.0);
+    assert_eq!(
+        evaluate_in_chart(
+            node,
+            &actual_ports,
+            super::super::super::PressureChart::Total,
+            || true
+        ),
+        Err(PipeLoadError::Cancelled)
+    );
+}

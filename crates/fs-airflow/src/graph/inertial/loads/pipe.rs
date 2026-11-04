@@ -242,13 +242,13 @@ impl PipeLoadGeometry {
     }
 }
 
-pub(super) fn affine_mean_square([a, b]: [f64; 2]) -> Result<f64> {
+pub(in crate::graph::inertial) fn affine_mean_square([a, b]: [f64; 2]) -> Result<f64> {
     let mean = 0.5 * a + 0.5 * b;
     let half_change = 0.5 * b - 0.5 * a;
     number(mean * mean + half_change * (half_change / 3.0))
 }
 
-pub(super) fn affine_mean_cube([a, b]: [f64; 2]) -> Result<f64> {
+pub(in crate::graph::inertial) fn affine_mean_cube([a, b]: [f64; 2]) -> Result<f64> {
     let mean = 0.5 * a + 0.5 * b;
     let half_change = 0.5 * b - 0.5 * a;
     number(mean * number(mean * mean + half_change * half_change)?)

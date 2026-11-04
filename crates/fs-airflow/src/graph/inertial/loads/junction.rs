@@ -1,4 +1,4 @@
-//! Point-junction momentum balance, using the native common static pressure.
+//! Point-junction momentum balance in the original owner's pressure chart.
 //! The original hydraulic node has no fluid storage. These forces therefore
 //! add no second fluid mass, pressure-work term or transported enthalpy owner.
 
@@ -18,14 +18,16 @@ pub struct JunctionLoad {
     pub node: usize,
     pub load: PipeLoad,
     /// Signed OUTWARD kinetic-energy transport over the original affine-flow
-    /// interval: integral sum(rho*q_out^3/(2*A^2)) dt. Pressure work cancels
-    /// through native volume continuity at the shared static pressure.
+    /// interval: integral sum(rho*q_out^3/(2*A^2)) dt. In the default static
+    /// chart, pressure work cancels through native volume continuity.
     ///
     /// This is an UNRESOLVED energy term in the existing point-junction model,
     /// not a nonnegative loss or an automatic thermal credit. Positive values
     /// require an energy supply or revised pressure/thermal closure; negative
     /// values require a declared destination. Zero net transport during reversal
     /// does not erase the nonzero Q^2 momentum exchange in the same interval.
+    /// The explicit total-pressure owner instead balances this transport with
+    /// per-port pressure work in its retained NodeStreamWork report.
     pub kinetic_energy_transport_j: f64,
 }
 
@@ -52,6 +54,15 @@ pub(super) struct JunctionState {
 pub(super) fn evaluate(
     state: JunctionState,
     ports: &[PortInterval],
+    cancelled: impl FnMut() -> bool,
+) -> Result<JunctionLoad> {
+    evaluate_in_chart(state, ports, super::super::PressureChart::Static, cancelled)
+}
+
+pub(super) fn evaluate_in_chart(
+    state: JunctionState,
+    ports: &[PortInterval],
+    chart: super::super::PressureChart,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<JunctionLoad> {
     check(&mut cancelled)?;
@@ -93,7 +104,17 @@ pub(super) fn evaluate(
         }
         let square = affine_mean_square(port.outflows_m3_s)?;
         let cube = affine_mean_cube(port.outflows_m3_s)?;
-        let pressure_force = number(pressure * port.area_m2)?;
+        let dynamic_head = if chart == super::super::PressureChart::Total {
+            number(0.5 * state.density_kg_m3 * (square / port.area_m2) / port.area_m2)?
+        } else {
+            0.0
+        };
+        let static_pressure = if chart == super::super::PressureChart::Total {
+            number(number(state.pressure_pa - dynamic_head)? - state.exterior_pressure_pa)?
+        } else {
+            pressure
+        };
+        let pressure_force = number(static_pressure * port.area_m2)?;
         let momentum_force = number(state.density_kg_m3 * (square / port.area_m2))?;
         let normal_impulse = number(-state.duration_s * number(pressure_force + momentum_force)?)?;
         for axis in 0..3 {

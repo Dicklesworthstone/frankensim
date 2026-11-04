@@ -80,7 +80,7 @@ impl InertialGraphTrial {
         let position_m = position.ok_or(InertialGraphError::Invalid(
             "junction requires an incident pipe",
         ))?;
-        let result = junction::evaluate(
+        let result = junction::evaluate_in_chart(
             JunctionState {
                 node,
                 position_m,
@@ -91,6 +91,7 @@ impl InertialGraphTrial {
                 exterior_pressure_pa: exterior_pressure.value(),
             },
             &ports,
+            c.pressure_chart,
             || checkpoint(cx).is_err(),
         )?;
         checkpoint(cx)?;

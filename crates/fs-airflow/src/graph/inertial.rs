@@ -17,6 +17,14 @@ use super::{FixedPressure, GraphError, LossGraph, Sum, checkpoint};
 
 /// Vector reaction loads on the original fixed pipe geometry.
 pub mod loads;
+/// Explicit total-pressure junctions, with static traction and kinetic streams.
+pub mod total_pressure;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressureChart {
+    Static,
+    Total,
+}
 
 /// The existing descriptor owner uses bounded dense matrices and a native
 /// analytic quadratic tangent. Large spatial CFD belongs to its field owner.
@@ -91,6 +99,7 @@ impl std::error::Error for InertialGraphError {}
 
 #[derive(Clone, Debug)]
 struct Compiled {
+    pressure_chart: PressureChart,
     topology: LossGraph,
     reference_density: Density,
     branches: Vec<InertialBranch>,
@@ -254,6 +263,31 @@ impl InertialGraph {
         accepted_time_s: f64,
         maximum_states: usize,
     ) -> Result<Self, InertialGraphError> {
+        Self::try_new_in_chart(
+            cx,
+            graph,
+            reference_density,
+            branches,
+            boundaries,
+            initial_flows_m3_s,
+            accepted_time_s,
+            maximum_states,
+            PressureChart::Static,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_in_chart(
+        cx: &Cx<'_>,
+        graph: &LossGraph,
+        reference_density: Density,
+        branches: &[InertialBranch],
+        boundaries: &[FixedPressure],
+        initial_flows_m3_s: &[f64],
+        accepted_time_s: f64,
+        maximum_states: usize,
+        pressure_chart: PressureChart,
+    ) -> Result<Self, InertialGraphError> {
         checkpoint(cx)?;
         let edges = graph.branches().len();
         if !(1..=MAX_INERTIAL_GRAPH_STATES).contains(&maximum_states)
@@ -318,6 +352,7 @@ impl InertialGraph {
             }
         }
         let compiled = Compiled {
+            pressure_chart,
             topology: graph.clone(),
             reference_density,
             branches: branches.to_vec(),
@@ -595,12 +630,26 @@ impl InertialGraph {
                 .max(flow.abs());
             envelope.push(speed);
             if let Some(linear) = &graph.linear_losses()[edge] {
-                linear
-                    .admit_flow(physical[branch.from], physical[branch.to], speed)
-                    .map_err(|reason| GraphError::InvalidBranch {
-                        branch: edge,
-                        reason,
+                let pressures = [physical[branch.from], physical[branch.to]];
+                let bounds = c.pressure_chart.source_pressure_bounds(
+                    pressures,
+                    [initial[edge], final_flows[edge]],
+                    c.reference_density.value(),
+                    c.branches[edge].flow_area_m2,
+                )?;
+                let samples = if c.pressure_chart == PressureChart::Static {
+                    1
+                } else {
+                    2
+                };
+                for [from, to] in bounds.into_iter().take(samples) {
+                    linear.admit_flow(from, to, speed).map_err(|reason| {
+                        GraphError::InvalidBranch {
+                            branch: edge,
+                            reason,
+                        }
                     })?;
+                }
             }
             loss_power.add(finite(loss * flow, "original dissipation")?)?;
             driving_power.add(finite(driving_pressure_pa[edge] * flow, "driving power")?)?;

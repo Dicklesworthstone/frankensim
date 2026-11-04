@@ -3312,3 +3312,62 @@ half-cell, radiation, finite-gas reciprocal balance, thermal interval admission
 and rollback remain owned by fs-lbm. The production adapter's unit tests compare
 with the original correlation and independent plate equation, source-pressure
 response, gravity orientation, equilibrium admission and explicit refusals.
+
+## Reversible total-pressure hydraulic nodes and physical static tractions
+
+`graph::inertial::total_pressure::TotalPressureGraph` is an explicitly selected,
+fixed-geometry incompressible owner. `FixedTotalPressure` is distinct from the
+original `FixedPressure`: it supplies `P = p + rho (Q/A)^2 / 2`, in the original
+source graph's pressure datum. A stagnant reservoir may prescribe this head.
+Finite-speed static boundary pressure is not silently converted.
+
+The original descriptor retains each branch's impulse `rho L Q/A`, quadratic
+kinetic storage, exact zero-storage incidence constraints, held drag and
+hydrostatic reduction. Each branch has uniform area, so the same dynamic head
+is subtracted at both of its ends and cancels from its impulse equation.
+No second momentum solver, pressure penalty, invented capacitance or steady
+flow root is introduced. The original default static-pressure graph is unchanged.
+
+Every incident port has its own static pressure. For the native affine
+trajectory, mean `Q^2` sets interval-average traction, while mean `Q^3` sets
+pressure/kinetic work. The existing stable formulas are shared:
+`mean(Q^2) = qbar^2 + dq_half^2/3` and
+`mean(Q^3) = qbar (qbar^2 + dq_half^2)`.
+Multiplying average static pressure by average flow would give the wrong work
+during acceleration or reversal; the new path does not use that shortcut.
+
+`BranchStreamWork` reports both physical port pressures and signed static,
+kinetic and total-pressure work. `NodeStreamWork` retains each complete
+incident set. At a reversible zero-storage junction, its pressure work supplies
+the outgoing kinetic-energy transport, including unequal areas and reversal.
+The full graph report independently closes original kinetic storage and loss
+against actual external static-pressure work, kinetic-energy inflow, explicit
+drives and full physical gravity. Local node residuals and pressure/kinetic
+identity defects are kept distinct from the native descriptor's own ledger.
+Both those residuals and the original native impulse/work gates must pass
+before acceptance.
+
+The original pipe, junction and assembly load consumers use these actual
+static tractions. Internal pressure and advective cuts cancel before the
+whole-assembly sum; fluid acceleration, full bend angular momentum and weight
+remain exactly once. `accept_with_assembly_loads` publishes the same accepted
+native trajectory and its usable load package together. Explicitly enclosed
+pressure-datum nodes still require complete endpoint flow continuity and their
+own local work acceptance; external streams cannot disappear by declaration.
+
+Material-bound pressure admission checks both static-pressure extrema over the
+affine interval, including its interior maximum when flow crosses zero.
+Original reference-density, source velocity/pressure support, topology,
+gravity, nonlinear closure and neglected thermal-work limits remain in force.
+Rechecking refreshed coefficients audits the same trajectory. Cancellation,
+unsupported source state, incomplete geometry or failed work acceptance leaves
+the initial owner untouched. The bounded native state cap also bounds the
+additional ordered stream reporting; no field resampling occurs.
+
+The total-pressure owner keeps its raw native report private, so its total
+multipliers cannot be passed to existing static-pressure thermal/source
+adapters under the wrong chart. This increment supplies a hydraulic momentum
+and stream-work closure; it does not add finite-speed static-pressure boundary
+conversion, turbulent junction mixing, a dissipation-to-heat credit, acoustic
+storage, variable-density or cavitating flow, swirl, nonuniform section
+profiles, or moving-pipe FSI. Those require their own physical owners.

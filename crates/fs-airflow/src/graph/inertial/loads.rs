@@ -18,7 +18,7 @@ use super::{InertialGraphError, InertialGraphTrial, checkpoint};
 use fs_exec::Cx;
 use fs_qty::Pressure;
 
-mod pipe;
+pub(super) mod pipe;
 pub use pipe::{PipeLoad, PipeLoadError, PipeLoadGeometry};
 mod junction;
 pub use junction::JunctionLoad;
@@ -115,10 +115,18 @@ impl InertialGraphTrial {
                     report.final_flows_m3_s[branch],
                 ],
                 density_kg_m3: rho,
-                pressures_pa: [
-                    report.average_pressures_pa[edge.from],
-                    report.average_pressures_pa[edge.to],
-                ],
+                pressures_pa: c.pressure_chart.static_mean_pressures(
+                    [
+                        report.average_pressures_pa[edge.from],
+                        report.average_pressures_pa[edge.to],
+                    ],
+                    [
+                        report.initial_flows_m3_s[branch],
+                        report.final_flows_m3_s[branch],
+                    ],
+                    rho,
+                    c.branches[branch].flow_area_m2,
+                )?,
                 exterior_pressure_pa: exterior_pressure.value(),
                 exposed_ports,
                 gravity_m_s2: self
