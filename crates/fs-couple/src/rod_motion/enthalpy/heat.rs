@@ -2,7 +2,7 @@
 //!
 //! This adapter replaces only the transport evaluation in the existing finite
 //! enthalpy residual. Native motion, full layer Psi/S/U, reversible exchange,
-//! intrinsic bending/torsional heat and endpoint source refresh keep their one owner.
+//! intrinsic axial/bending/torsional heat and endpoint source refresh keep their one owner.
 use super::*;
 use crate::circuit_enthalpy::{CircuitThermalCoefficients, contacts::heat::{
     HeatAssembly, HeatNetworkError,
@@ -33,9 +33,10 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
     /// radiation, finite-coolant and reservoir heat on the SAME finite cells.
     /// Each original thermal trial resolves the assembly once, retains its
     /// full sample, and refreshes E/G/integrated expansion at the native endpoint.
-    /// Optional intrinsic bending and torsional viscosity enter those same cells
-    /// once. Pass [`RodAngularViscosity`] for either or both mechanisms; the
-    /// original `Option<RodTorsionalViscosity>` argument remains supported.
+    /// Optional intrinsic axial, bending and torsional viscosity enter those
+    /// same cells once. Pass [`RodMaterialViscosity`] for any combination.
+    /// Existing [`RodAngularViscosity`] and `Option<RodTorsionalViscosity>`
+    /// arguments remain supported.
     ///
     /// The prepared assembly must borrow the original material cell/link slices.
     /// Additional finite links require cold admission through
@@ -56,7 +57,7 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
         loads: &[RodNodalWrench],
         assembly: &A,
         cx: &Cx<'_>,
-        viscosity: impl Into<RodAngularViscosity<'v>>,
+        viscosity: impl Into<RodMaterialViscosity<'v>>,
         mechanical_controls: RodMotionControls,
         controls: RodThermoelasticSolve,
         energy_guess_j: &[f64],
@@ -77,7 +78,7 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
         loads: &PreparedRodLoads,
         assembly: &A,
         cx: &Cx<'_>,
-        viscosity: impl Into<RodAngularViscosity<'v>>,
+        viscosity: impl Into<RodMaterialViscosity<'v>>,
         mechanical_controls: RodMotionControls,
         controls: RodThermoelasticSolve,
         energy_guess_j: &[f64],
@@ -91,7 +92,7 @@ impl<I: RodMotionInertia> RodThermoelasticSystem<'_, '_, '_, I> {
     fn step_heat_with_loads<A: HeatAssembly + ?Sized>(
         &mut self, thermal: &mut DepositionSimulation<'_>, target_s: f64,
         loads: StageLoads<'_>, assembly: &A, cx: &Cx<'_>,
-        viscosity: RodAngularViscosity<'_>,
+        viscosity: RodMaterialViscosity<'_>,
         mechanical_controls: RodMotionControls, controls: RodThermoelasticSolve,
         energy_guess_j: &[f64], gate: &CancelGate,
     ) -> core::result::Result<RodThermoelasticReport<A::Sample>, RodHeatError<A::Error>> {

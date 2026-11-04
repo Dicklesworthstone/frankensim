@@ -23829,6 +23829,43 @@ accept the same independent angular selections while retaining compatibility
 with `Option<RodTorsionalViscosity>`. Complete source contact, radiation,
 finite-coolant and reservoir transport therefore shares the original motion,
 finite-cell energy solve and atomic publication with both intrinsic losses.
+
+## Finite-cell heating from intrinsic axial rod loss
+
+`RodThermoelasticSystem::step_material_viscous` and
+`step_spatial_material_viscous` carry axial, bending and torsional viscosity
+through the same native rod interval and caloric transaction.
+`RodMaterialViscosity` selects the mechanisms independently;
+`RodAxialViscosity` identifies the original axial property and one source claim
+selection per layer. Existing angular and torsional-only entrypoints retain
+their semantics. Complete heat-assembly calls accept either the new selection
+or the existing angular/torsional forms.
+
+The original material section supplies both the axial mechanical coefficient
+and its ordered layer contributions `eta_i A_i`. Each segment's actual native
+heat is partitioned by those same stored contributions, with independently
+gated segment and total closure. Reference areas, original material receipts,
+selected isotropic parameter bindings and finite-cell destinations are retained.
+Cell mass, heat capacity and bending inertia never substitute for the loss
+weights. Different finite heat capacities determine the subsequent layer
+temperature rises through the original nonlinear enthalpy solve.
+
+Mechanics runs once at accepted temperatures. The axial source and partition
+stay frozen through thermal trials; endpoint source refresh preserves native
+pose, momentum, mass and clock. The SAME selected viscosity claims must support
+that endpoint before publication. The next interval resolves eta at its actual
+heated state. Explicit zero viscosity deposits zero. Missing or exhausted
+source domains, cancellation, failed heat partition or any late physical gate
+leave both accepted histories unchanged.
+
+`RodThermoelasticReport::axial` retains sources, layer areas/viscosities and
+actual mechanical/deposited heat. `axial_generation_j_k` separately reports
+nonnegative `sum(Q_axial/T_end)`, an endpoint production quadrature under the
+existing first-order thermal split. Axial heat enters the finite stores once
+and is excluded from true external supply. Reversible exchange, physical
+angular heat and signed numerical defects retain their original accounts.
+This adds no alternate thermal integrator, hereditary axial law, transverse
+shear loss, phase change or deformation-dependent heat-transfer geometry.
 Additional-link conductances remain live assembly outputs at every thermal
 trial; their cold admission values are never substituted for evolving physics.
 

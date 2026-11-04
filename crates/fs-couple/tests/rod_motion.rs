@@ -37,6 +37,9 @@ mod bending_loss;
 #[path = "rod_motion/axial_loss.rs"]
 mod axial_loss;
 
+#[path = "rod_motion/axial_enthalpy.rs"]
+mod axial_enthalpy;
+
 #[path = "rod_motion/impulse.rs"]
 mod impulse;
 

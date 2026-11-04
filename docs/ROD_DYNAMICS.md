@@ -230,3 +230,31 @@ Source mismatch, cancellation and a failed energy gate leave the accepted state
 unchanged. The focused integration fixtures cover axial ringdown and heat
 refinement, stiff viscosity, reactions, finite-rotation objectivity, zero-law
 parity and source/refusal behavior.
+
+## Axial loss with finite thermal feedback
+
+`RodThermoelasticSystem::step_material_viscous` connects axial, bending and
+torsional loss to the existing finite-cell heat transaction. Select each
+mechanism explicitly through `RodMaterialViscosity`; `RodAxialViscosity`
+provides the axial property name and original per-layer claim selections.
+`step_spatial_material_viscous` preserves prepared material-point forces, and
+the complete `step_heat_assembly` variants accept the same selections alongside
+contact, radiation, finite-coolant and reservoir transport.
+
+Each interval advances native mechanics once at accepted temperatures.
+Axial segment heat is deposited into its original layer cells according to
+the stored `eta_i A_i / sum(eta_j A_j)` contributions. Those shares stay frozen
+while the original nonlinear caloric solve determines each layer's temperature
+rise. Source-derived mechanical coefficients and integrated expansion refresh
+at the unchanged endpoint pose. The next interval resolves viscosity at its
+actual heated state. The same selected source claims must remain valid at the
+endpoint; a late failure or cancellation changes neither accepted history.
+
+`RodThermoelasticReport::axial` retains the actual native heat, per-layer
+deposits, original sources and partition closure. Axial, bending and torsional
+heat remain separate physical accounts and are excluded from external supply.
+`entropy.axial_generation_j_k` is the nonnegative endpoint quadrature
+`sum(Q_layer/T_end)`. Numerical integration error and reversible thermoelastic
+exchange are not converted into material heat. The coupled thermal split
+remains first order and requires temporal refinement; original solid-layer,
+fixed-reference-geometry and material-domain limits still apply.

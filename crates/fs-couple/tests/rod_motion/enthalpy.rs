@@ -26,34 +26,35 @@ mod heat;
 #[path = "enthalpy/torsional.rs"]
 mod torsional;
 
-const LENGTH: f64 = 0.8;
-const RADIUS: f64 = 0.05;
-const RHO: f64 = 3.0;
-const YOUNG: f64 = 1200.0;
+pub(super) const LENGTH: f64 = 0.8;
+pub(super) const RADIUS: f64 = 0.05;
+pub(super) const RHO: f64 = 3.0;
+pub(super) const YOUNG: f64 = 1200.0;
 const SHEAR: f64 = 480.0;
 
 #[derive(Clone, Copy)]
-struct ViscositySpec {
-    value_pa_s: f64,
-    slope_pa_s_k: f64,
-    lower_k: f64,
-    upper_k: f64,
-    upper_rad_s: f64,
+pub(super) struct ViscositySpec {
+    pub(super) value_pa_s: f64,
+    pub(super) slope_pa_s_k: f64,
+    pub(super) lower_k: f64,
+    pub(super) upper_k: f64,
+    pub(super) upper_rad_s: f64,
 }
 
 #[derive(Clone, Copy)]
-struct Spec {
-    young_scale: f64,
-    young_slope: f64,
-    shear_scale: f64,
-    shear_slope: f64,
-    alpha: f64,
-    cp: f64,
-    conductivity: f64,
-    mechanical_upper_k: f64,
-    kinked_shear: bool,
-    viscosity: Option<ViscositySpec>,
-    bending_viscosity: Option<ViscositySpec>,
+pub(super) struct Spec {
+    pub(super) young_scale: f64,
+    pub(super) young_slope: f64,
+    pub(super) shear_scale: f64,
+    pub(super) shear_slope: f64,
+    pub(super) alpha: f64,
+    pub(super) cp: f64,
+    pub(super) conductivity: f64,
+    pub(super) mechanical_upper_k: f64,
+    pub(super) kinked_shear: bool,
+    pub(super) viscosity: Option<ViscositySpec>,
+    pub(super) bending_viscosity: Option<ViscositySpec>,
+    pub(super) axial_viscosity: Option<ViscositySpec>,
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -69,6 +70,7 @@ impl Default for Spec {
             kinked_shear: false,
             viscosity: None,
             bending_viscosity: None,
+            axial_viscosity: None,
         }
     }
 }
@@ -178,6 +180,7 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
     for (property, eta) in [
         ("shear_viscosity", spec.viscosity),
         ("bending_viscosity", spec.bending_viscosity),
+        ("axial_viscosity", spec.axial_viscosity),
     ] {
         let Some(eta) = eta else { continue };
         let dims = fs_qty::DynViscosity::DIMS;
@@ -216,7 +219,9 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
                 },
                 observations: vec![],
                 provenance: Provenance {
-                    source: if property == "bending_viscosity" {
+                    source: if property == "axial_viscosity" {
+                        "manufactured temperature-dependent axial viscosity".into()
+                    } else if property == "bending_viscosity" {
                         "manufactured temperature-dependent bending viscosity".into()
                     } else {
                         "manufactured temperature-dependent shaft viscosity".into()
@@ -246,11 +251,11 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             temperature_axis: "T",
             lower: &context_point(
                 200.0,
-                spec.viscosity.is_some() || spec.bending_viscosity.is_some(),
+                spec.viscosity.is_some() || spec.bending_viscosity.is_some() || spec.axial_viscosity.is_some(),
             ),
             upper: &context_point(
                 500.0,
-                spec.viscosity.is_some() || spec.bending_viscosity.is_some(),
+                spec.viscosity.is_some() || spec.bending_viscosity.is_some() || spec.axial_viscosity.is_some(),
             ),
             selection: SelectionPolicy::SingleClaimOnly,
         },
@@ -261,7 +266,7 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
     .unwrap();
     (card, curve)
 }
-fn geometry(layer: usize, layers: usize) -> (f64, f64) {
+pub(super) fn geometry(layer: usize, layers: usize) -> (f64, f64) {
     let r0 = RADIUS * layer as f64 / layers as f64;
     let r1 = RADIUS * (layer + 1) as f64 / layers as f64;
     (
@@ -269,7 +274,7 @@ fn geometry(layer: usize, layers: usize) -> (f64, f64) {
         core::f64::consts::PI * (r1.powi(4) - r0.powi(4)) / 4.0,
     )
 }
-fn destinations(layers: usize, segments: usize) -> Vec<RodLayerCell> {
+pub(super) fn destinations(layers: usize, segments: usize) -> Vec<RodLayerCell> {
     (0..segments)
         .flat_map(|segment| {
             (0..layers).map(move |layer| RodLayerCell {
@@ -313,7 +318,7 @@ fn source_with_context<'a>(
     )
     .unwrap()
 }
-fn fixture<R>(
+pub(super) fn fixture<R>(
     specs: &[Spec],
     segments: usize,
     temperatures: &[f64],
@@ -331,7 +336,7 @@ fn fixture<R>(
         300.0,
         specs
             .iter()
-            .any(|s| s.viscosity.is_some() || s.bending_viscosity.is_some()),
+            .any(|s| s.viscosity.is_some() || s.bending_viscosity.is_some() || s.axial_viscosity.is_some()),
     );
     let source = source_with_context(&cards, segments, &context);
     let routes = destinations(specs.len(), segments);
@@ -439,7 +444,7 @@ fn fixture<R>(
     };
     run(&source, thermal, &network)
 }
-fn solve() -> RodThermoelasticSolve {
+pub(super) fn solve() -> RodThermoelasticSolve {
     RodThermoelasticSolve {
         maximum_cells: 8,
         maximum_material_trials: 256,
@@ -488,7 +493,7 @@ fn axial(
     pose.positions_m[1][0] = LENGTH * (1.0 + strain);
     RodMotion::new(model, pose, &[[0.0; 3]; 2], &[[0.0; 3]; 2], 0.0, &gate).unwrap()
 }
-fn total_heat(thermal: &DepositionSimulation<'_>) -> f64 {
+pub(super) fn total_heat(thermal: &DepositionSimulation<'_>) -> f64 {
     thermal
         .cells()
         .values()
