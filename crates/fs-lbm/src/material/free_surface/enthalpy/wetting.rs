@@ -8,7 +8,8 @@
 //! The thermal stage holds the last accepted contact speed while re-evaluating
 //! both pinned angle claims. Its angles drive the same interval's native flow.
 //! The accepted advected temperature and original backward geometric speed then
-//! admit the endpoint history. Sigma remains the admitted native constant.
+//! admit the endpoint history. Equilibrium adhesion also composes with the
+//! exactly uniform sigma(T) owner and uses its same local source coefficient.
 //! This is a first-order local-cell wetting closure, not resolved interface
 //! temperature, Marangoni physics, calibrated pinning or surface-energy closure.
 
@@ -26,7 +27,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// Evolve an explicitly equilibrium wall using its local liquid temperature.
     ///
     /// Choose a sourced equilibrium angle or Young--Dupre from reversible
-    /// adhesion work and the SAME constant liquid/gas tension retained by the
+    /// adhesion work and the SAME liquid/gas tension retained by the
     /// native thermal law. The original ordered interface and selected claim
     /// stay pinned. Every heat, conduction and flow candidate refreshes this
     /// response before publication; a source-domain exit or loss of partial
@@ -34,7 +35,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     ///
     /// This smooth, homogeneous stationary-wall closure supplies no pinning,
     /// contact-line friction or dynamic-angle law. It cannot be combined with
-    /// the separate Cox/hysteresis or thermocapillary geometry owners. Changing
+    /// the separate Cox/hysteresis or nonuniform thermocapillary geometry owners.
+    /// The uniform thermal-capillarity owner can evolve sigma(T), provided all
+    /// actual wet cells agree exactly at every admitted stage. Changing
     /// adhesion alters native capillary momentum, but does not invent surface
     /// heat or establish a closed total surface/mechanical energy balance.
     /// The local liquid-cell temperature approximates the interface temperature;
@@ -49,13 +52,15 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         poll(gate)?;
-        if self.thermocapillary.is_some() || self.wetting.is_some() {
+        let uniform_tension = self.uniform_thermal_capillarity();
+        if self.thermocapillary.is_some() && !uniform_tension || self.wetting.is_some() {
             return Err(Error::Invalid(
-                "thermal equilibrium wetting requires its own constant-tension wall geometry",
+                "thermal equilibrium wetting requires constant or spatially uniform tension",
             ));
         }
         let binding = WettingBinding::try_equilibrium(
             &mut self.flow, wall, card, origin, selection, self.law.temperature_axis(),
+            uniform_tension,
             maximum_wall_cells, gate,
         )?;
         let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
@@ -234,6 +239,8 @@ pub(super) fn temperatures(
             field.insert(position, WettingThermalPoint {
                 temperature_k: temperature(state, axis)?,
                 dynamic_viscosity_pa_s: state.dynamic_viscosity_pa_s(),
+                surface_tension_n_m: state.material().property(SURFACE_TENSION_PROPERTY)
+                    .map(|source| source.value_si()),
             });
         }
     }

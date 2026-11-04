@@ -38,6 +38,8 @@ pub use fs_material::liquid::surface::adhesion::EquilibriumAngleOrigin;
 pub(super) struct WettingThermalPoint {
     pub temperature_k: f64,
     pub dynamic_viscosity_pa_s: f64,
+    /// The same local source coefficient used by native capillary pressure.
+    pub surface_tension_n_m: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -530,13 +532,16 @@ impl WettingBinding<'_> {
         axis: &str,
         temperature_k: f64,
         dynamic_viscosity_pa_s: f64,
+        surface_tension_n_m: Option<f64>,
         gate: &CancelGate,
     ) -> Result<(), Error> {
         if let Some(current) = self.geometry.get(&position) {
             self.physics.sample(
                 current.angle_radians,
                 self.samples[&position].signed_speed_m_s,
-                Some((axis, WettingThermalPoint { temperature_k, dynamic_viscosity_pa_s })),
+                Some((axis, WettingThermalPoint {
+                    temperature_k, dynamic_viscosity_pa_s, surface_tension_n_m,
+                })),
                 gate,
             )?;
         }

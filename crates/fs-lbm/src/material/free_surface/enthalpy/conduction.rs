@@ -150,6 +150,7 @@ struct Conduction<'a, 'm> {
     liquid_cells: Vec<CellId>,
     liquid_coordinates: BTreeMap<CellId, [usize; 3]>,
     wetting: Option<WettingBinding<'m>>,
+    uniform_surface_tension: bool,
     bodies: &'a [FreeSurfaceThermalBody<'m>],
     body_ids: Vec<CellId>,
     contacts: &'a [FreeSurfaceBodyContact],
@@ -246,16 +247,21 @@ impl<'a, 'm> Conduction<'a, 'm> {
     ) -> Result<Samples, Error> {
         let mut states = BTreeMap::new();
         let wetting = self.current_wetting()?;
+        let mut uniform_tension = None;
         for &id in &self.liquid_cells {
             check()?;
             let cell = &thermal.cells()[&id];
             let state = self.sample_liquid(id, cell.specific_h_j_kg, check)?;
             phase_conduction::resolve(&state, self.phase_conduction)?;
+            if self.uniform_surface_tension {
+                super::thermocapillary::admit_uniform_surface_tension(&mut uniform_tension, &state)?;
+            }
             if let Some(wetting) = &wetting {
                 wetting.admit_temperature(
                     self.liquid_coordinates[&id], self.law.temperature_axis(),
                     super::wetting::temperature(&state, self.law.temperature_axis())?,
                     state.dynamic_viscosity_pa_s(),
+                    state.material().property(SURFACE_TENSION_PROPERTY).map(|p| p.value_si()),
                     self.gate,
                 )?;
             }
@@ -1184,6 +1190,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 FreeSurface3::transport_coordinates(location).map(|position| (id, position))
             }).collect(),
             wetting: self.wetting.clone(),
+            uniform_surface_tension: self.uniform_thermal_capillarity(),
             bodies,
             body_ids: body_ids.clone(),
             contacts,

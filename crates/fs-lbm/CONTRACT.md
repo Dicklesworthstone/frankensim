@@ -7564,8 +7564,9 @@ Focused command:
 `with_equilibrium_planar_wetting` adds an explicitly equilibrium alternative
 on that same thermal/native transaction. It selects either an original
 equilibrium-angle claim or the existing Young--Dupre law from reversible
-`equilibrium-work-of-adhesion` W(T) and the SAME source-declared constant
-liquid/gas tension retained by the thermal material bundle. The actual local
+`equilibrium-work-of-adhesion` W(T) and the SAME liquid/gas tension retained
+by the thermal material bundle. Ordinary attachment requires constant sigma;
+the explicit uniform thermal-capillarity entry below can evolve it. The actual local
 liquid caloric temperature refreshes the selected interface claim before
 collision, at conductive substeps, and after advection. Source substitution,
 loss of partial wetting (`0 < W < 2 sigma`), and the original tension source's
@@ -7579,9 +7580,9 @@ receipt, without fabricated hysteresis claims or a contact-speed query.
 This boundary does not need a resolved contact-line velocity, and therefore
 does not reject locally flat filling stencils merely for a zero tangential
 gradient. Adding Cox dynamics refuses rather than turning equilibrium work
-into a measured advancing/receding bracket. The separate thermocapillary
-geometry remains incompatible: varying sigma requires that original owner,
-not freezing a temperature-dependent tension source here. The local-cell
+into a measured advancing/receding bracket. The separate planar, height-graph
+and local thermocapillary geometries remain incompatible with imposed wall
+angles. The local-cell
 interface-temperature approximation, stationary homogeneous-wall assumption
 and absence of closed surface-energy/heat accounting remain explicit.
 
@@ -7591,6 +7592,33 @@ cover constant-source native parity, local W(T) feedback into the same
 momentum step with conserved mass and explicit heat, original-source and
 partial-wetting rollback/retry, and refusal of an implicit Cox extension.
 They are synthetic numerical tests, not experimental wetting validation.
+
+`free_surface3_from_cells_with_uniform_thermal_capillarity` extends that same
+owner to time-varying sigma(T) in the exact zero-Marangoni domain. Every actual
+wet-cell source value must agree exactly in SI units before lattice conversion,
+at initial admission, every conductive thermal substep, and both native step
+endpoints. No tolerance, averaging or suppressed tangential stress admits a
+spatial mismatch. Complete source bundles and original selected claims remain
+pinned. Native capillary-wave/density/pressure admission still applies to the
+resulting field before publication.
+
+The same local sigma(T) reaches native Laplace pressure and Young--Dupre
+W(T)/sigma(T). Storage-free wet-interface ghosts refresh from adjacent real
+liquid using the existing enthalpy extension; difference-first interpolation
+preserves a uniform donor temperature exactly without adding mass or heat.
+Genuinely dry wall ghosts retain their declared reference context. Uniform
+capillarity needs no graph or local PLIC reconstruction and retains ordinary
+native conversion/mass routes. It adds no tangential Guo load and no separate
+surface-energy or heating model. Separately solved surface temperatures still
+require their original geometric stress owner. Nonuniform tension remains
+unsupported with an imposed wall angle and refuses atomically.
+
+Three additional native regressions in the same equilibrium test module
+specify homogeneous W(T)/sigma(T) heating with the actual pressure coefficient,
+nonconstant-ratio hot-state angle, constant-sigma trajectory/receipt parity,
+and complete rollback for local/interior-substep gradients, original tension
+source exit, loss of partial wetting and cancellation. These are authored
+numerical regressions; native execution remains unverified in this environment.
 
 
 ### Source-bound DC current on the free-surface thermal trajectory

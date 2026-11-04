@@ -175,6 +175,11 @@ impl Conduction<'_, '_> {
         gate: &CancelGate,
     ) -> Result<BTreeMap<(u64, usize), f64>, Error> {
         let (normal_axis, graph) = match surface {
+            ThermocapillarySurface::Uniform => {
+                return Err(Error::Invalid(
+                    "solved interface temperature requires a resolved surface geometry",
+                ));
+            }
             ThermocapillarySurface::Planar(plane) => (plane.normal_axis, None),
             ThermocapillarySurface::HeightGraph(graph) => (graph.normal_axis, Some(graph)),
             ThermocapillarySurface::Local(model) => {

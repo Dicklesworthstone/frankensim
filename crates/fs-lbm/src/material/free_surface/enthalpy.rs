@@ -924,7 +924,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     #[allow(clippy::too_many_arguments)]
     fn prepare_enthalpy_tick_with_frame(
         &self,
-        heated: BTreeMap<MassLocation3, f64>,
+        mut heated: BTreeMap<MassLocation3, f64>,
         external: f64,
         viscous: f64,
         body_heat: f64,
@@ -960,6 +960,12 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let before = total(&masses, &self.h, mass_unit)?;
+        if self.uniform_thermal_capillarity() {
+            // Storage-free interface ghosts follow adjacent real liquid; an
+            // old ghost temperature cannot create a fictitious sigma gradient
+            // after homogeneous heating. No physical mass or heat is changed.
+            extend_empty_ghosts(&masses, &mut heated, &self.h, true)?;
+        }
         let mut resolved = self.resolve_states_with_surface(
             &self.flow.lattice, &heated, &masses, &mut surface, gate,
         )?;
@@ -1016,7 +1022,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 None,
             ),
         };
-        if self.thermocapillary.is_some() {
+        if self.thermocapillary.is_some() && !self.uniform_thermal_capillarity() {
             // Resolve native conversion hysteresis through the SAME mass
             // routes before reconstructing geometry or advecting enthalpy.
             // The candidate stays private until all endpoint gates pass.
@@ -1025,7 +1031,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         admit_masses(&trace.after, self.controls.max_cells)?;
         let (mut h, outcome) = transport::advect(&trace, &heated, self.controls, gate)?;
         h.retain(|key, _| trace.after.contains_key(key));
-        extend_empty_ghosts(&trace.after, &mut h, &heated)?;
+        extend_empty_ghosts(
+            &trace.after, &mut h, &heated, self.uniform_thermal_capillarity(),
+        )?;
         let endpoint = self.resolve_states_with_surface(
             &lattice, &h, &trace.after, &mut surface, gate,
         )?;
@@ -1317,6 +1325,7 @@ fn extend_empty_ghosts(
     masses: &BTreeMap<MassLocation3, f64>,
     h: &mut BTreeMap<MassLocation3, f64>,
     old_h: &BTreeMap<MassLocation3, f64>,
+    refresh_existing: bool,
 ) -> Result<(), Error> {
     let donors: BTreeMap<_, _> = masses
         .iter()
@@ -1329,12 +1338,15 @@ fn extend_empty_ghosts(
         })
         .collect();
     for (&key, &mass) in masses {
-        if mass != 0.0 || key == MassLocation3::Carry || h.contains_key(&key) {
+        if mass != 0.0 || key == MassLocation3::Carry
+            || !refresh_existing && h.contains_key(&key)
+        {
             continue;
         }
         let p = FreeSurface3::transport_coordinates(key).expect("cell");
         let mut energy = 0.0;
         let mut weight = 0.0;
+        let mut reference = None;
         for &(dx, dy, dz) in &crate::d3q19::E3[1..] {
             let q = [
                 p[0] as i64 + i64::from(dx),
@@ -1345,12 +1357,14 @@ fn extend_empty_ghosts(
                 continue;
             }
             if let Some(&(m, specific)) = donors.get(&q.map(|v| v as usize)) {
-                energy += m * specific;
+                // Difference-first interpolation preserves a uniform thermal
+                // field exactly even when neighboring liquid masses differ.
+                energy += m * (specific - *reference.get_or_insert(specific));
                 weight += m;
             }
         }
         let value = if weight > 0.0 {
-            energy / weight
+            reference.expect("positive donor weight") + energy / weight
         } else {
             *old_h.get(&key).ok_or(Error::Invalid(
                 "new empty interface has no supported thermal neighbor",
