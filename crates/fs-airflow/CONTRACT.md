@@ -3288,13 +3288,26 @@ the existing stable/unstable horizontal branch. Geometry, source and physical
 driving inputs are admitted even at exact equilibrium, where natural heat is
 zero without inventing a finite-Rayleigh coefficient.
 
+`AidingVerticalPlate` admits laminar aiding mixed convection on that same
+moving-liquid patch. Physical plate-up, actual gas velocity relative to the
+liquid, gravity and a caller-admitted density-departure bound are explicit.
+Plate-up and relative flow must be tangent to the actual face. The shared
+material frame and group admission retain signed axial flow, source-owned
+expansion and the full interface/bulk contrast; oblique gravity, crossflow and
+opposing buoyancy are refused. The original Manning–Qureshi card supplies Nu,
+its pure forced/natural limits, evidence and laminar regime bounds. Exact
+resting equilibrium has zero heat without an invented Re=Ra=0 coefficient.
+Mean-film sampling is this adapter's frozen-property approximation, not a
+source-mandated rule; the explicit density bound does not establish weak
+variation of viscosity, conductivity or other properties.
+
 Characteristic length means the whole physical streamwise plate length, vertical
 height, or horizontal area/perimeter. It is never reset to a mesh-face width.
 Applying the mean isothermal-plate correlation to surface patches assumes an
 approximately isothermal declared physical plate and locally held film
 properties. Relative speed and geometry remain held during the original
-thermal/native-flow split. Inclined, curved, enclosed, evaporating and mixed
-surfaces require other physical models and refuse here. The original liquid
+thermal/native-flow split. Inclined, curved, enclosed and evaporating surfaces,
+and mixed opposing/crossflow cases, require other physical models and refuse. The original liquid
 half-cell, radiation, finite-gas reciprocal balance, thermal interval admission
 and rollback remain owned by fs-lbm. The production adapter's unit tests compare
 with the original correlation and independent plate equation, source-pressure

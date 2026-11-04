@@ -8,6 +8,9 @@ use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 #[path = "../../../../../../tests/finite_gas_convection/source.rs"]
 mod source;
 
+#[path = "mixed_tests.rs"]
+mod mixed;
+
 fn query<'a>(
     wall: f64,
     bulk: &'a ResolvedThermochemicalGasState,

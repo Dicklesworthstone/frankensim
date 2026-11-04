@@ -10,6 +10,7 @@ use fs_lbm::material::free_surface::enthalpy::FreeSurfaceEnthalpyError;
 use fs_lbm::material::free_surface::enthalpy::conduction::surface::convection::{
     FreeSurfaceConvectionQuery, FreeSurfaceGasConvection, FreeSurfaceHeatTransferCoefficient,
 };
+use fs_material::fluid_transport::{AidingVerticalPlateFrame, ThermalFluidTransportState};
 
 /// Explicitly selected average flat-plate forced-convection correlation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,12 +34,31 @@ pub enum PlanarFreeSurfaceHeatLaw {
     /// Quiescent gas and physical gravity; only vertical/horizontal plates.
     /// Source-owned thermal expansion selects hot/cold stable/unstable buoyancy.
     Natural { gravity_m_s2: [f64; 3] },
+    /// Laminar aiding natural/forced flow on an isothermal vertical plate.
+    ///
+    /// All properties come from the actual mean-film state, while buoyancy
+    /// uses the full interface/bulk temperature contrast. This frozen-property
+    /// approximation is an adapter policy; Manning–Qureshi assumes constant
+    /// properties. The density bound does not establish small variation of the
+    /// other properties or extend the original correlation's domain.
+    AidingVerticalPlate {
+        /// Physical plate-up direction, tangent to the actual face. Need not
+        /// be normalized. Nonzero gravity must be opposite this direction.
+        plate_up: [f64; 3],
+        /// Actual gas velocity relative to the moving liquid [m/s], parallel
+        /// to plate-up. Its sign must aid the source-owned buoyant response.
+        relative_velocity_m_s: [f64; 3],
+        /// Physical gravity [m/s²]. Zero retains the pure forced limit.
+        gravity_m_s2: [f64; 3],
+        /// Caller-admitted bound on |beta * (T_surface - T_bulk)| in [0, 1).
+        maximum_relative_density_departure: f64,
+    },
 }
 
 /// A declared physical isothermal plate patch on Cartesian moving-liquid faces.
 ///
 /// `characteristic_length` is the WHOLE physical plate's streamwise length for
-/// forced flow, height for a vertical natural plate, or area/perimeter for a
+/// forced flow, height for a vertical natural/mixed plate, or area/perimeter for a
 /// horizontal natural plate. It must not become a fresh thermal entrance at
 /// each mesh face. A provider can be shared by several faces of that same plate;
 /// every face retains its physical integration area and original liquid owner.
@@ -47,8 +67,9 @@ pub enum PlanarFreeSurfaceHeatLaw {
 /// approximately isothermal with locally held film properties. Spatially varying
 /// wall temperatures require refinement/model assessment; this is not a resolved
 /// gas boundary layer. Unsupported regimes fail instead of switching models.
-/// Curved, inclined, enclosed, evaporating and mixed-convection surfaces are
-/// outside this adapter. Reconstructed free-surface modes refuse in fs-lbm.
+/// Curved, inclined, enclosed and evaporating surfaces are outside this adapter.
+/// Mixed convection admits only the declared aiding vertical-plate model, not
+/// opposing flow or crossflow. Reconstructed free-surface modes refuse in fs-lbm.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlanarFreeSurfaceConvection {
     /// Signed Cartesian unit normal, outward from the liquid into gas.
@@ -63,6 +84,20 @@ fn invalid(what: &'static str) -> FreeSurfaceEnthalpyError {
 
 fn original(error: impl core::fmt::Display) -> FreeSurfaceEnthalpyError {
     FreeSurfaceEnthalpyError::Convection(error.to_string())
+}
+
+fn thermal_film(
+    query: &FreeSurfaceConvectionQuery<'_>,
+) -> Result<ThermalFluidTransportState, FreeSurfaceEnthalpyError> {
+    let thermal = query.film.thermal_transport_state().map_err(original)?;
+    let transport = query.film.transport_state().map_err(original)?;
+    if thermal.transport() != transport || thermal.temperature_k() != query.film.state().temperature
+    {
+        return Err(invalid(
+            "film thermal and momentum views must describe the same source state",
+        ));
+    }
+    Ok(thermal)
 }
 
 fn magnitude(vector: [f64; 3]) -> Result<f64, FreeSurfaceEnthalpyError> {
@@ -179,15 +214,8 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
                         "natural plate convection supports only gravity-aligned horizontal or vertical plates",
                     ));
                 };
-                let thermal = query.film.thermal_transport_state().map_err(original)?;
-                let transport = query.film.transport_state().map_err(original)?;
-                if thermal.transport() != transport
-                    || thermal.temperature_k() != query.film.state().temperature
-                {
-                    return Err(invalid(
-                        "film thermal and momentum views must describe the same source state",
-                    ));
-                }
+                let thermal = thermal_film(&query)?;
+                let transport = thermal.transport();
                 let beta = thermal.volumetric_expansion_per_k().ok_or_else(|| {
                     invalid("natural plate convection requires source-owned thermal expansion")
                 })?;
@@ -213,6 +241,50 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
                     Temperature::new(wall),
                     Temperature::new(bulk),
                     self.characteristic_length,
+                )
+                .map_err(original)?
+            }
+            PlanarFreeSurfaceHeatLaw::AidingVerticalPlate {
+                plate_up,
+                relative_velocity_m_s,
+                gravity_m_s2,
+                maximum_relative_density_departure,
+            } => {
+                if plate_up[axis] != 0.0 || relative_velocity_m_s[axis] != 0.0 {
+                    return Err(invalid(
+                        "aiding vertical-plate axis and relative gas flow must be tangent to the actual face",
+                    ));
+                }
+                let settings = AidingVerticalPlateFrame::try_new(plate_up, gravity_m_s2)
+                    .and_then(|frame| {
+                        frame.settings(relative_velocity_m_s, maximum_relative_density_departure)
+                    })
+                    .map_err(original)?;
+                let thermal = thermal_film(&query)?;
+                let transport = thermal.transport();
+                let beta = thermal.volumetric_expansion_per_k().ok_or_else(|| {
+                    invalid("mixed plate convection requires source-owned thermal expansion")
+                })?;
+                let groups = settings
+                    .groups(
+                        transport,
+                        beta,
+                        Temperature::new(wall),
+                        Temperature::new(bulk),
+                        self.characteristic_length,
+                    )
+                    .map_err(original)?;
+                // Admit frame, source and density policy even at equilibrium.
+                // No coefficient is invented at the card's Re = Ra = 0 point.
+                if wall == bulk && groups.reynolds == 0.0 {
+                    return Ok(None);
+                }
+                finish(
+                    CorrelationId::ManningQureshiAidingVerticalPlate,
+                    query.film,
+                    transport,
+                    self.characteristic_length,
+                    CorrelationInputs::mixed(groups.reynolds, groups.rayleigh, groups.prandtl),
                 )
                 .map_err(original)?
             }
