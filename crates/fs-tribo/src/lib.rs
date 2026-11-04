@@ -682,9 +682,21 @@ impl FrictionLaw {
     }
 
     fn kinetic_mu(&self, speed: f64) -> Result<f64, TriboError> {
+        Ok(self.kinetic_sample::<false>(speed)?.0)
+    }
+
+    // The value-only instantiation does not evaluate a derivative. Keep the
+    // coefficient operation trees unchanged, including their checked sums;
+    // both consumers share the same single exponential/power evaluation.
+    fn kinetic_sample<const WITH_SLOPE: bool>(&self, speed: f64) -> Result<(f64, f64), TriboError> {
+        let mut slope = 0.0;
         let candidate = match *self {
             Self::Coulomb { kinetic_mu, .. } => kinetic_mu,
-            Self::Hyperbolic { static_mu, kinetic_mu, characteristic_speed } => {
+            Self::Hyperbolic {
+                static_mu,
+                kinetic_mu,
+                characteristic_speed,
+            } => {
                 // Keep both quotients <= 1 instead of overflowing v/v0 or
                 // v+v0. No clipping, fitted tail, or numerical speed is used.
                 let fraction = if speed <= characteristic_speed {
@@ -693,6 +705,18 @@ impl FrictionLaw {
                     let inverse = characteristic_speed / speed;
                     inverse / (1.0 + inverse)
                 };
+                if WITH_SLOPE {
+                    // -Delta_mu*v0/(v+v0)^2, without forming a dimensional
+                    // square or losing the derivative when mu rounds to mu_d.
+                    let delta = static_mu - kinetic_mu;
+                    slope = -if speed <= characteristic_speed {
+                        let sum = 1.0 + speed / characteristic_speed;
+                        slope_product_ratio([delta], [characteristic_speed, sum, sum])
+                    } else {
+                        let sum = 1.0 + characteristic_speed / speed;
+                        slope_product_ratio([delta, characteristic_speed], [speed, speed, sum, sum])
+                    };
+                }
                 kinetic_mu + (static_mu - kinetic_mu) * fraction
             }
             Self::ShiftedPower {
@@ -705,6 +729,22 @@ impl FrictionLaw {
                 finite(ratio, "shifted_power_speed_ratio")?;
                 let decay = det::pow(1.0 + ratio, -exponent);
                 finite(decay, "shifted_power_decay")?;
+                if WITH_SLOPE {
+                    let delta = static_mu - kinetic_mu;
+                    let scale = characteristic_speed.max(speed);
+                    let sum = 1.0 + characteristic_speed.min(speed) / scale;
+                    // -n*Delta_mu*(1+v/v0)^-n/(v+v0).
+                    slope = -if decay == 0.0 && delta > 0.0 {
+                        vanished_decay_slope(
+                            det::ln(delta) + det::ln(exponent)
+                                - exponent * det::ln(1.0 + ratio)
+                                - det::ln(scale)
+                                - det::ln(sum),
+                        )?
+                    } else {
+                        slope_product_ratio([delta, decay, exponent], [scale, sum])
+                    };
+                }
                 checked_add(
                     kinetic_mu,
                     checked_mul(static_mu - kinetic_mu, decay, "shifted_power_mu")?,
@@ -715,12 +755,23 @@ impl FrictionLaw {
                 mu_zero,
                 slope_per_speed,
                 ..
-            } => checked_add(
-                mu_zero,
-                checked_mul(slope_per_speed, speed, "velocity_mu")?,
-                "velocity_mu",
-            )?
-            .max(0.0),
+            } => {
+                let unclamped = checked_add(
+                    mu_zero,
+                    checked_mul(slope_per_speed, speed, "velocity_mu")?,
+                    "velocity_mu",
+                )?;
+                if WITH_SLOPE {
+                    slope = if unclamped > 0.0 {
+                        slope_per_speed
+                    } else if unclamped == 0.0 {
+                        slope_per_speed.max(0.0)
+                    } else {
+                        0.0
+                    };
+                }
+                unclamped.max(0.0)
+            }
             Self::Stribeck {
                 static_mu,
                 kinetic_mu,
@@ -731,6 +782,24 @@ impl FrictionLaw {
                 finite(ratio, "stribeck_speed_ratio")?;
                 let decay = det::exp(-(ratio * ratio));
                 finite(decay, "stribeck_decay")?;
+                if WITH_SLOPE {
+                    let delta = static_mu - kinetic_mu;
+                    // mu' = eta - 2*Delta_mu*v*exp(-(v/v0)^2)/v0^2.
+                    // Retain the decay itself, not the rounded mu-mu_d.
+                    let weakening = if decay == 0.0 && delta > 0.0 && speed > 0.0 {
+                        vanished_decay_slope(
+                            det::ln(delta) + core::f64::consts::LN_2 + det::ln(speed)
+                                - 2.0 * det::ln(characteristic_speed)
+                                - ratio * ratio,
+                        )?
+                    } else {
+                        slope_product_ratio(
+                            [delta, decay, 2.0, speed],
+                            [characteristic_speed, characteristic_speed],
+                        )
+                    };
+                    slope = viscous_per_speed - weakening;
+                }
                 checked_add(
                     checked_add(
                         kinetic_mu,
@@ -743,7 +812,8 @@ impl FrictionLaw {
             }
         };
         nonnegative_finite(candidate, "kinetic_coefficient")?;
-        Ok(candidate)
+        finite(slope, "kinetic_coefficient_slope")?;
+        Ok((candidate, slope))
     }
 
     /// Kinetic coefficient `μ(|v|)` at a strictly positive slip speed.
@@ -754,6 +824,30 @@ impl FrictionLaw {
         self.validate()?;
         positive_finite(speed, "slip_speed")?;
         self.kinetic_mu(speed)
+    }
+
+    /// Kinetic coefficient and analytic derivative `d mu / d speed` [s/m].
+    ///
+    /// Speed is a nonnegative magnitude. At zero this returns the right-hand
+    /// sliding limit, not a static reaction or a derivative of a numerical
+    /// regularization. The lower-clamped linear law also uses its right-hand
+    /// derivative at the clamp. Coefficient bits at positive speeds match
+    /// [`Self::kinetic_coefficient`]; an exponential/power decay is shared with
+    /// its derivative, including when adding it to the kinetic floor loses it.
+    ///
+    /// # Errors
+    /// Invalid parameters/speed, unrepresentable results, or a decay that
+    /// rounds to zero before its amplified derivative can be resolved.
+    pub fn kinetic_coefficient_and_slope(&self, speed: f64) -> Result<(f64, f64), TriboError> {
+        self.validate()?;
+        nonnegative_finite(speed, "slip_speed")?;
+        let (coefficient, slope) = self.kinetic_sample::<true>(speed)?;
+        let coefficient = if speed == 0.0 {
+            self.zero_speed_kinetic_coefficient()?
+        } else {
+            coefficient
+        };
+        Ok((coefficient, slope))
     }
 
     /// Regularized 1-D traction for an explicit ODE embedding.
@@ -1970,6 +2064,68 @@ fn nonblank(value: &str, field: &'static str) -> Result<(), TriboError> {
         Ok(())
     }
 }
+
+// Positive factors are already admitted by the constitutive law. Separating
+// binary exponents prevents a speed squared, tiny decay, or large coefficient
+// from overflowing/underflowing before the final representable slope is formed.
+fn slope_product_ratio<const N: usize, const D: usize>(
+    numerators: [f64; N],
+    denominators: [f64; D],
+) -> f64 {
+    if numerators.contains(&0.0) {
+        return 0.0;
+    }
+    let decompose = |value: f64| {
+        let (value, offset) = if value < f64::MIN_POSITIVE {
+            (value * 4_503_599_627_370_496.0, -52)
+        } else {
+            (value, 0)
+        };
+        let bits = value.to_bits();
+        (
+            f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000),
+            ((bits >> 52) & 0x7ff) as i32 - 1023 + offset,
+        )
+    };
+    let (mut mantissa, mut exponent) = (1.0, 0);
+    for value in numerators {
+        let (fraction, power) = decompose(value);
+        mantissa *= fraction;
+        exponent += power;
+    }
+    for value in denominators {
+        let (fraction, power) = decompose(value);
+        mantissa /= fraction;
+        exponent -= power;
+    }
+    let (mantissa, power) = decompose(mantissa);
+    exponent += power;
+    if exponent > 1023 {
+        f64::INFINITY
+    } else if exponent < -1075 {
+        0.0
+    } else if exponent >= -1022 {
+        mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+    } else {
+        // Round into the subnormal range only once, after normal scaling.
+        (mantissa * f64::from_bits(((exponent + 1023 + 54) as u64) << 52))
+            * f64::from_bits((1023 - 54) << 52)
+    }
+}
+
+// A vanished decay is safe only when the complete analytic derivative also
+// rounds away. Do not manufacture a zero tangent from a lost intermediate.
+fn vanished_decay_slope(log_magnitude: f64) -> Result<f64, TriboError> {
+    let half_smallest_log = det::ln(f64::from_bits(1)) - core::f64::consts::LN_2;
+    if log_magnitude < half_smallest_log {
+        Ok(0.0)
+    } else {
+        Err(TriboError::InvalidInput {
+            field: "kinetic_slope_decay_underflow",
+        })
+    }
+}
+
 fn finite(value: f64, field: &'static str) -> Result<(), TriboError> {
     if value.is_finite() {
         Ok(())

@@ -252,3 +252,286 @@ fn g1_effusivity_partition_equalizes_incremental_half_space_temperature_rise() {
         equal
     );
 }
+
+fn slope_laws(scale: f64) -> [FrictionLaw; 5] {
+    [
+        FrictionLaw::Coulomb {
+            static_mu: 0.9,
+            kinetic_mu: 0.3,
+        },
+        FrictionLaw::VelocityDependent {
+            static_mu: 0.9,
+            mu_zero: 0.7,
+            slope_per_speed: -0.1 / scale,
+        },
+        FrictionLaw::Stribeck {
+            static_mu: 0.9,
+            kinetic_mu: 0.3,
+            characteristic_speed: scale,
+            viscous_per_speed: 0.03 / scale,
+        },
+        FrictionLaw::Hyperbolic {
+            static_mu: 0.9,
+            kinetic_mu: 0.3,
+            characteristic_speed: scale,
+        },
+        FrictionLaw::ShiftedPower {
+            static_mu: 0.9,
+            kinetic_mu: 0.3,
+            characteristic_speed: scale,
+            exponent: 0.4,
+        },
+    ]
+}
+
+#[test]
+fn g1_kinetic_slope_has_physical_right_limits_and_closed_form_values() {
+    let expected = [
+        (0.3, 0.0),
+        (0.7, -0.5),
+        (0.9, 0.15),
+        (0.9, -3.0),
+        (0.9, -1.2),
+    ];
+    for (law, (expected_mu, expected_slope)) in slope_laws(0.2).into_iter().zip(expected) {
+        for zero in [0.0, -0.0] {
+            let (mu, slope) = law.kinetic_coefficient_and_slope(zero).unwrap();
+            assert_eq!(
+                mu.to_bits(),
+                law.zero_speed_kinetic_coefficient().unwrap().to_bits()
+            );
+            close(mu, expected_mu);
+            close(slope, expected_slope);
+        }
+    }
+    // det-ok: independent test-only exponential/power closed forms.
+    let decay = (-1.0_f64).exp();
+    let laws = slope_laws(0.2);
+    let (mu, slope) = laws[2].kinetic_coefficient_and_slope(0.2).unwrap();
+    close(mu, 0.3 + 0.6 * decay + 0.03);
+    close(slope, 0.15 - 6.0 * decay);
+    let (mu, slope) = laws[3].kinetic_coefficient_and_slope(0.2).unwrap();
+    close(mu, 0.6);
+    close(slope, -0.75);
+    let (mu, slope) = laws[4].kinetic_coefficient_and_slope(0.2).unwrap();
+    close(mu, 0.3 + 0.6 * 2.0_f64.powf(-0.4));
+    close(slope, -1.2 * 2.0_f64.powf(-1.4));
+
+    let clamped = FrictionLaw::VelocityDependent {
+        static_mu: 0.9,
+        mu_zero: 0.75,
+        slope_per_speed: -0.25,
+    };
+    assert_eq!(
+        clamped.kinetic_coefficient_and_slope(3.0).unwrap(),
+        (0.0, 0.0)
+    );
+    assert_eq!(
+        clamped.kinetic_coefficient_and_slope(4.0).unwrap(),
+        (0.0, 0.0)
+    );
+    assert_eq!(
+        clamped
+            .kinetic_coefficient_and_slope(3.0_f64.next_down())
+            .unwrap()
+            .1,
+        -0.25
+    );
+    for (growth, expected) in [(-0.25, 0.0), (0.25, 0.25)] {
+        let law = FrictionLaw::VelocityDependent {
+            static_mu: 0.9,
+            mu_zero: 0.0,
+            slope_per_speed: growth,
+        };
+        assert_eq!(
+            law.kinetic_coefficient_and_slope(0.0).unwrap(),
+            (0.0, expected)
+        );
+    }
+}
+
+#[test]
+fn g3_kinetic_slope_matches_independent_differences_and_existing_value_bits() {
+    for scale in [1e-12, 1e-4, 1.0, 1e4, 1e12] {
+        for law in slope_laws(scale) {
+            for ratio in [0.01, 0.3, 1.0, 3.0, 8.0] {
+                let speed = scale * ratio;
+                let (mu, slope) = law.kinetic_coefficient_and_slope(speed).unwrap();
+                assert_eq!(
+                    mu.to_bits(),
+                    law.kinetic_coefficient(speed).unwrap().to_bits()
+                );
+                let step = speed * 1e-5;
+                let difference = (law.kinetic_coefficient(speed + step).unwrap()
+                    - law.kinetic_coefficient(speed - step).unwrap())
+                    / (2.0 * step);
+                assert!(
+                    ((slope - difference) * scale).abs() < 2e-8,
+                    "law={law:?}, speed={speed:e}, slope={slope:e}, oracle={difference:e}"
+                );
+            }
+        }
+        let hyperbolic = FrictionLaw::Hyperbolic {
+            static_mu: 0.9,
+            kinetic_mu: 0.3,
+            characteristic_speed: scale,
+        };
+        let power = FrictionLaw::ShiftedPower {
+            static_mu: 0.9,
+            kinetic_mu: 0.3,
+            characteristic_speed: scale,
+            exponent: 1.0,
+        };
+        for ratio in [0.0, 0.01, 1.0, 10.0, 1e6] {
+            let (hm, hs) = hyperbolic
+                .kinetic_coefficient_and_slope(ratio * scale)
+                .unwrap();
+            let (pm, ps) = power.kinetic_coefficient_and_slope(ratio * scale).unwrap();
+            close(hm, pm);
+            assert!((hs - ps).abs() <= 8.0 * f64::EPSILON * hs.abs());
+        }
+    }
+}
+
+#[test]
+fn g3_kinetic_slope_retains_rounded_away_tails_and_dimensional_scaling() {
+    // det-ok: test-only independent closed forms for analytic tail slopes.
+    let tail_cases = [
+        (
+            FrictionLaw::Stribeck {
+                static_mu: 0.8,
+                kinetic_mu: 0.3,
+                characteristic_speed: 0.05,
+                viscous_per_speed: 0.0,
+            },
+            0.4,
+            -160.0 * (-64.0_f64).exp(),
+        ),
+        (
+            FrictionLaw::Hyperbolic {
+                static_mu: 0.8,
+                kinetic_mu: 0.3,
+                characteristic_speed: 0.05,
+            },
+            5e15,
+            -1e-33,
+        ),
+        (
+            FrictionLaw::ShiftedPower {
+                static_mu: 0.8,
+                kinetic_mu: 0.3,
+                characteristic_speed: 0.05,
+                exponent: 3.0,
+            },
+            5e4,
+            -30.0 / 1_000_001.0_f64.powi(4),
+        ),
+    ];
+    for (law, speed, expected) in tail_cases {
+        let (mu, slope) = law.kinetic_coefficient_and_slope(speed).unwrap();
+        assert_eq!(mu, 0.3);
+        assert!(slope < 0.0);
+        assert!(
+            (slope - expected).abs() <= 2e-13 * expected.abs(),
+            "{law:?}: {slope:e} vs {expected:e}"
+        );
+    }
+    // Scaling Delta_mu, v and v0 together leaves the derivative unchanged,
+    // even when dimensional products or v0^2 would overflow or underflow.
+    for scale in [f64::from_bits(1), 1e-300, 1.0, 1e300] {
+        for (law, expected) in [
+            (
+                FrictionLaw::Hyperbolic {
+                    static_mu: scale,
+                    kinetic_mu: 0.0,
+                    characteristic_speed: scale,
+                },
+                -0.25,
+            ),
+            (
+                FrictionLaw::Stribeck {
+                    static_mu: scale,
+                    kinetic_mu: 0.0,
+                    characteristic_speed: scale,
+                    viscous_per_speed: 0.0,
+                },
+                -2.0 * (-1.0_f64).exp(),
+            ),
+            (
+                FrictionLaw::ShiftedPower {
+                    static_mu: scale,
+                    kinetic_mu: 0.0,
+                    characteristic_speed: scale,
+                    exponent: 2.0,
+                },
+                -0.25,
+            ),
+        ] {
+            let (mu, slope) = law.kinetic_coefficient_and_slope(scale).unwrap();
+            assert_eq!(
+                mu.to_bits(),
+                law.kinetic_coefficient(scale).unwrap().to_bits()
+            );
+            close(slope, expected);
+        }
+    }
+}
+
+#[test]
+fn g0_kinetic_slope_refuses_invalid_inputs_and_unresolved_derivatives() {
+    for law in slope_laws(0.2) {
+        for speed in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(law.kinetic_coefficient_and_slope(speed).is_err());
+        }
+    }
+    let invalid = FrictionLaw::Stribeck {
+        static_mu: 0.3,
+        kinetic_mu: 0.8,
+        characteristic_speed: 0.2,
+        viscous_per_speed: 0.0,
+    };
+    assert!(invalid.kinetic_coefficient_and_slope(0.0).is_err());
+    for (law, speed) in [
+        (
+            FrictionLaw::Hyperbolic {
+                static_mu: 1.0,
+                kinetic_mu: 0.0,
+                characteristic_speed: f64::from_bits(1),
+            },
+            f64::from_bits(1),
+        ),
+        (
+            FrictionLaw::Stribeck {
+                static_mu: 0.8,
+                kinetic_mu: 0.3,
+                characteristic_speed: 1e-300,
+                viscous_per_speed: 0.0,
+            },
+            3e-299,
+        ),
+        (
+            FrictionLaw::ShiftedPower {
+                static_mu: 0.8,
+                kinetic_mu: 0.3,
+                characteristic_speed: 1e-300,
+                exponent: 2000.0,
+            },
+            1e-300,
+        ),
+    ] {
+        // Value-only consumers retain their original admission. A derivative
+        // is evaluated only when requested; lost decay cannot be a zero slope.
+        assert!(law.kinetic_coefficient(speed).unwrap().is_finite());
+        assert!(law.kinetic_coefficient_and_slope(speed).is_err());
+    }
+    let far_tail = FrictionLaw::Stribeck {
+        static_mu: 0.8,
+        kinetic_mu: 0.3,
+        characteristic_speed: 0.1,
+        viscous_per_speed: 0.0,
+    };
+    assert_eq!(
+        far_tail.kinetic_coefficient_and_slope(10.0).unwrap(),
+        (0.3, 0.0)
+    );
+}

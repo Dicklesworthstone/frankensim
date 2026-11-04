@@ -254,10 +254,23 @@ reactions, and residual embedding.
 - `ContactFrame` normalizes a finite contact normal. `TangentialSlip` accepts
   only a finite velocity with no material normal component; it refuses rather
   than silently projects a closing/separating velocity into friction.
-- `FrictionLaw` provides Coulomb, velocity-dependent, and Stribeck rungs. At
+- `FrictionLaw` provides Coulomb, velocity-dependent, Stribeck, hyperbolic, and
+  shifted-power rungs. At
   zero slip `evaluate` reports static capacity only; it never invents a stick
   reaction. `kinetic_coefficient` exposes `μ(|v|)` for a strictly positive
-  speed. `regularized_traction_1d` is the declared ODE embedding: a linear
+  speed. `kinetic_coefficient_and_slope` returns the same kinetic value and
+  its analytic speed derivative in s/m, including the right-hand sliding
+  limit at zero and the right derivative of the clamped linear law. It does
+  not differentiate the static cone. Value-only calls retain their original
+  operation order and do not evaluate derivatives; combined calls reuse the
+  single exponential or power decay. Binary-scaled products preserve
+  representable slopes across extreme physical scales and after adding a
+  weakening tail to the kinetic floor rounds that tail away. An unrepresentable
+  slope, or a vanished decay whose amplified derivative remains unresolved,
+  explicitly refuses. G0/G1/G3 checks cover physical limits, independent
+  differences, unchanged coefficient bits, dimensional scaling, and refusal;
+  the retained routed-friction golden remains unchanged.
+  `regularized_traction_1d` is the declared ODE embedding: a linear
   ramp through the origin to the kinetic value at scale `v_reg`, then the kinetic rung,
   with force opposing `v_rel`. That map is a solver regularization (the 1-D
   analogue of the fs-contact smooth adapter), not complementarity. A bow, a
