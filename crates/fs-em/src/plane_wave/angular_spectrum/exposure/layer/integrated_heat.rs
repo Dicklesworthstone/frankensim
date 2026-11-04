@@ -13,6 +13,8 @@ use fs_fft::harmonic_window::{
     MAX_PRODUCT_SPECTRUM_TERMS, PreparedHarmonicProductSpectrum,
 };
 
+mod rectangle;
+
 /// One authored positive depth-quadrature weight, in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AngularSpectrumHeatDepthSample {
@@ -32,6 +34,12 @@ pub enum AngularSpectrumHeatAreaQuadrature<'q> {
     /// transverse product aliasing and requires no spatial synthesis FFTs.
     /// Depth integration still uses the explicitly authored quadrature below.
     ContinuousPeriodicCell,
+    /// Exact continuous integral over a uniform axis-aligned rectangle in the
+    /// original x/y coordinates. Both sum and difference spatial interference
+    /// are retained, including between distinct Fourier modes. The rectangle
+    /// observes the original periodic continuation and may cross cell edges;
+    /// it does not impose a new field/material boundary at the patch edges.
+    ContinuousRectangle(AngularSpectrumAperture),
     /// Per-cell areas [m²], each in [0,dx*dy]. Zero masks a cell; positive
     /// fractions describe partial cells without relocating field samples.
     CellAreasM2(&'q [f64]),
@@ -56,12 +64,14 @@ pub struct AngularSpectrumIntegratedHeatLimits {
     pub maximum_depth_samples: usize,
     /// Depth samples times the original owner's point/source-line work.
     pub maximum_point_line_pairs: usize,
-    /// Repeated field synthesis; zero for ContinuousPeriodicCell. Original
+    /// Repeated field synthesis; zero for either continuous support. Original
     /// beam analysis and layer preparation retain their own admission bounds.
     pub maximum_fft_work: u64,
     /// Depths * original grid points * sum F_r*(F_r+1)/2. Each visits three
     /// vector components, with conjugate and (for real banks) plain products.
     /// ContinuousPeriodicCell visits Fourier modes instead of field samples.
+    /// ContinuousRectangle visits N² ordered mode pairs plus one center-field
+    /// product at each frequency pair and depth; it charges N²+1 rather than N.
     pub maximum_spatial_point_frequency_pairs: usize,
     /// Selected reservoirs * sum F_r*(F_r+1)/2, cached once for all depths.
     pub maximum_reservoir_frequency_pairs: usize,
@@ -77,8 +87,9 @@ pub struct AngularSpectrumIntegratedHeatLimits {
 ///
 /// This retains original material/field ownership, physical support and actual
 /// quadrature weights. ContinuousPeriodicCell integrates the represented
-/// transverse Fourier field exactly; the other area options use the authored
-/// field samples and can alias spatial products. Depth quadrature must resolve
+/// transverse Fourier field exactly. ContinuousRectangle integrates its actual
+/// finite patch exactly and retains cross-mode interference; sampled area
+/// options can alias spatial products. Depth quadrature must resolve
 /// standing waves and attenuation independently. No physical field/depth
 /// convergence certificate or isolated finite-aperture model is inferred.
 /// Reversible field/polarization storage and boundary momentum work are absent.
@@ -107,7 +118,7 @@ impl<'p, 'q, 'e, 'b, 's, 'm> AngularSpectrumExposureLayerHeatLoadSpectrum<'p, 'q
     pub fn channel(&self) -> AngularSpectrumExposureHeatChannel {
         self.channel
     }
-    /// Physical full-cell area or actual sum of authored partial-cell areas [m²].
+    /// Physical full-cell/rectangle area or sum of authored cell areas [m²].
     pub fn represented_area_m2_dd(&self) -> Dd {
         self.area_m2
     }
@@ -186,10 +197,11 @@ struct FrequencyPair {
 
 impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
     /// Integrate actual internal heat over a declared subslab/full film and
-    /// full/partial original cells. One bank-frequency plane is reconstructed
-    /// once per depth, independent of the number of selected reservoirs.
+    /// full/partial original cells or a continuous rectangle. Each bank-frequency
+    /// plane is reconstructed once per depth, independent of the reservoir count.
     /// ContinuousPeriodicCell retains its modal vectors and integrates signed
-    /// Fourier products directly; sampled supports additionally synthesize them.
+    /// Fourier products directly; a continuous rectangle retains all mode pairs
+    /// and their original spatial phases. Sampled supports synthesize fields.
     ///
     /// Reservoir transfer products are cached per frequency pair; spatial
     /// E_f dot conj(E_g) and E_f dot E_g are contracted once and then weighted
@@ -253,7 +265,16 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         let continuous = matches!(
             quadrature.transverse,
             AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
+                | AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(_)
         );
+        let rectangle = match quadrature.transverse {
+            AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(aperture)
+                if active && pair_count != 0 =>
+            {
+                Some(aperture)
+            }
+            _ => None,
+        };
         let original_fft_work = if continuous {
             0
         } else {
@@ -262,8 +283,17 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 .and_then(|d| self.field_fft_work.checked_mul(d))
                 .ok_or_else(|| bad("integrated heat FFT work overflows"))?
         };
+        let spatial_points = if rectangle.is_some() {
+            volume
+                .points
+                .checked_mul(volume.points)
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(|| bad("rectangular heat mode-pair work overflows"))?
+        } else {
+            volume.points
+        };
         let spatial_work = pair_count
-            .checked_mul(volume.points)
+            .checked_mul(spatial_points)
             .and_then(|v| v.checked_mul(depths))
             .ok_or_else(|| bad("integrated heat spatial work overflows"))?;
         let reservoir_work = pair_count
@@ -275,13 +305,36 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         let tone_bytes = generated
             .checked_mul(core::mem::size_of::<HarmonicProductTone>())
             .ok_or_else(|| bad("integrated heat tone storage overflows"))?;
+        let rectangle_bytes = if rectangle.is_some() {
+            rectangle::PreparedRectangle::workspace_bytes(volume.grid)?
+                .checked_add(
+                    volume
+                        .points
+                        .checked_mul(core::mem::size_of::<[[Dd; 2]; 6]>())
+                        .ok_or_else(|| bad("rectangular heat DD field workspace overflows"))?,
+                )
+                .ok_or_else(|| bad("rectangular heat workspace overflows"))?
+        } else {
+            0
+        };
+        let field_bytes = if rectangle.is_some() {
+            core::mem::size_of::<rectangle::Electric>()
+        } else {
+            core::mem::size_of::<[C64; 6]>()
+        };
+        let field_metadata_bytes = if rectangle.is_some() {
+            core::mem::size_of::<rectangle::Plane>()
+        } else {
+            core::mem::size_of::<Vec<[C64; 6]>>()
+        };
         let workspace_bytes = maximum_frequencies
             .checked_mul(volume.points)
-            .and_then(|v| v.checked_mul(core::mem::size_of::<[C64; 6]>()))
+            .and_then(|v| v.checked_mul(field_bytes))
             .and_then(|v| {
-                v.checked_add(maximum_frequencies.checked_mul(
-                    core::mem::size_of::<usize>() + core::mem::size_of::<Vec<[C64; 6]>>(),
-                )?)
+                v.checked_add(
+                    maximum_frequencies
+                        .checked_mul(core::mem::size_of::<usize>() + field_metadata_bytes)?,
+                )
             })
             .and_then(|v| {
                 v.checked_add(maximum_pairs.checked_mul(core::mem::size_of::<FrequencyPair>())?)
@@ -289,6 +342,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             .and_then(|v| v.checked_add(raw_bytes))
             .and_then(|v| v.checked_add(tone_bytes))
             .and_then(|v| v.checked_add(self.workspace_bytes))
+            .and_then(|v| v.checked_add(rectangle_bytes))
             .ok_or_else(|| bad("integrated heat workspace overflows"))?;
         if original_line_work > limits.maximum_point_line_pairs
             || original_fft_work > limits.maximum_fft_work
@@ -302,6 +356,17 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 "integrated heat exceeds its original/spatial/spectral budget",
             ));
         }
+        let rectangle = rectangle
+            .map(|aperture| {
+                rectangle::PreparedRectangle::prepare(
+                    volume.grid,
+                    aperture,
+                    |i| self.anchor.modes[i].kx,
+                    |i| self.anchor.modes[i * volume.grid.width].ky,
+                    &mut cancelled,
+                )
+            })
+            .transpose()?;
         let mut terms = Vec::new();
         terms
             .try_reserve_exact(generated)
@@ -309,6 +374,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         if active {
             for (bank, proper) in ensemble::banks(self.mean, self.factors, self.statistics) {
                 poll(&mut cancelled)?;
+                if bank.frequency_count() == 0 {
+                    continue;
+                }
                 let mut mapping = Vec::new();
                 mapping
                     .try_reserve_exact(bank.frequency_count())
@@ -321,22 +389,46 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                             .map_err(|_| bad("original film frequency cache is missing"))?,
                     );
                 }
+                let reservoir = |i: usize, j: usize, cancelled: &mut _| {
+                    reservoir_pair(
+                        self.law.conductivity,
+                        &self.frequencies[mapping[i]].poles,
+                        &self.frequencies[mapping[j]].poles,
+                        first,
+                        reservoirs,
+                        proper,
+                        cancelled,
+                    )
+                };
+                if let Some(rectangle) = &rectangle {
+                    rectangle.contract_bank(
+                        &bank.frequencies,
+                        proper,
+                        quadrature,
+                        volume,
+                        reservoir,
+                        |group, depth, cancelled| {
+                            let layer = &self.frequencies[mapping[group]].layer;
+                            bank.frequency_modal_parts_with(group, cancelled, |line, cancelled| {
+                                line.modal_layer_field(
+                                    layer.as_ref(),
+                                    self.layer_index,
+                                    depth,
+                                    cancelled,
+                                )
+                            })
+                        },
+                        &mut terms,
+                        &mut cancelled,
+                    )?;
+                    continue;
+                }
                 contract_bank(
                     &bank.frequencies,
                     proper,
                     quadrature,
                     volume,
-                    |i, j, cancelled| {
-                        reservoir_pair(
-                            self.law.conductivity,
-                            &self.frequencies[mapping[i]].poles,
-                            &self.frequencies[mapping[j]].poles,
-                            first,
-                            reservoirs,
-                            proper,
-                            cancelled,
-                        )
-                    },
+                    reservoir,
                     |group, depth, cancelled| {
                         let layer = &self.frequencies[mapping[group]].layer;
                         let mut field = bank.frequency_modal_field_with(
@@ -445,6 +537,10 @@ fn admit_volume(
         | AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell => {
             cell_area_m2 * Dd::from_f64(points as f64)
         }
+        AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(aperture) => {
+            let extent = aperture.extent_m();
+            Dd::from_f64(extent[0]) * Dd::from_f64(extent[1])
+        }
         AngularSpectrumHeatAreaQuadrature::CellAreasM2(areas) => {
             if areas.len() != points {
                 return Err(bad(
@@ -491,6 +587,7 @@ fn area_weight(
     match transverse {
         AngularSpectrumHeatAreaQuadrature::PeriodicCell => volume.cell_area_m2,
         AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell => volume.area_m2,
+        AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(_) => volume.area_m2,
         AngularSpectrumHeatAreaQuadrature::CellAreasM2(areas) => Dd::from_f64(areas[point]),
     }
 }
@@ -527,25 +624,11 @@ fn reservoir_pair(
     Ok(result)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn contract_bank<F: FnMut() -> bool>(
+fn prepare_pairs<F: FnMut() -> bool>(
     frequencies: &[f64],
-    proper: bool,
-    quadrature: AngularSpectrumHeatVolumeQuadrature<'_>,
-    volume: VolumeAdmission,
     mut reservoir: impl FnMut(usize, usize, &mut F) -> Result<PairIntegral, AngularSpectrumError>,
-    mut field: impl FnMut(usize, f64, &mut F) -> Result<Vec<[C64; 6]>, AngularSpectrumError>,
-    terms: &mut Vec<AngularHarmonicSpectrumTerm>,
     cancelled: &mut F,
-) -> Result<(), AngularSpectrumError> {
-    poll(cancelled)?;
-    if frequencies.is_empty() {
-        return Ok(());
-    }
-    let continuous = matches!(
-        quadrature.transverse,
-        AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
-    );
+) -> Result<Vec<FrequencyPair>, AngularSpectrumError> {
     let mut pairs = Vec::new();
     pairs
         .try_reserve_exact(upper_pairs(frequencies.len())?)
@@ -561,6 +644,37 @@ fn contract_bank<F: FnMut() -> bool>(
             });
         }
     }
+    Ok(pairs)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contract_bank<F: FnMut() -> bool>(
+    frequencies: &[f64],
+    proper: bool,
+    quadrature: AngularSpectrumHeatVolumeQuadrature<'_>,
+    volume: VolumeAdmission,
+    reservoir: impl FnMut(usize, usize, &mut F) -> Result<PairIntegral, AngularSpectrumError>,
+    mut field: impl FnMut(usize, f64, &mut F) -> Result<Vec<[C64; 6]>, AngularSpectrumError>,
+    terms: &mut Vec<AngularHarmonicSpectrumTerm>,
+    cancelled: &mut F,
+) -> Result<(), AngularSpectrumError> {
+    poll(cancelled)?;
+    if matches!(
+        quadrature.transverse,
+        AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(_)
+    ) {
+        return Err(bad(
+            "rectangular heat requires its original modal-pair integral",
+        ));
+    }
+    if frequencies.is_empty() {
+        return Ok(());
+    }
+    let continuous = matches!(
+        quadrature.transverse,
+        AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
+    );
+    let mut pairs = prepare_pairs(frequencies, reservoir, cancelled)?;
     let mut fields = Vec::new();
     fields
         .try_reserve_exact(frequencies.len())
@@ -612,6 +726,16 @@ fn contract_bank<F: FnMut() -> bool>(
             }
         }
     }
+    emit_pairs(frequencies, proper, pairs, terms, cancelled)
+}
+
+fn emit_pairs<F: FnMut() -> bool>(
+    frequencies: &[f64],
+    proper: bool,
+    pairs: Vec<FrequencyPair>,
+    terms: &mut Vec<AngularHarmonicSpectrumTerm>,
+    cancelled: &mut F,
+) -> Result<(), AngularSpectrumError> {
     for pair in pairs {
         poll(cancelled)?;
         // Each off-diagonal pair combines its symmetric counterpart:

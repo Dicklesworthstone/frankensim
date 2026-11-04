@@ -122,7 +122,8 @@ fn reference(quadrature: AngularSpectrumHeatVolumeQuadrature<'_>, time: f64) -> 
         for point in 0..4 {
             let area = match quadrature.transverse {
                 AngularSpectrumHeatAreaQuadrature::PeriodicCell => 0.25 * 0.4,
-                AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell => {
+                AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
+                | AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(_) => {
                     unreachable!("this oracle integrates authored field samples")
                 }
                 AngularSpectrumHeatAreaQuadrature::CellAreasM2(areas) => areas[point],

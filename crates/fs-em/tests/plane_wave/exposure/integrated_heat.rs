@@ -7,6 +7,8 @@ use fs_em::plane_wave::angular_spectrum::{
 };
 use fs_fft::harmonic_window::HarmonicWindowProfile;
 
+mod rectangle;
+
 fn integrated_limits() -> AngularSpectrumIntegratedHeatLimits {
     AngularSpectrumIntegratedHeatLimits {
         maximum_depth_samples: 128,

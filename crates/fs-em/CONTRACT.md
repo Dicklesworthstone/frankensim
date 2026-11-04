@@ -3768,3 +3768,32 @@ Refresh retains exact source selection and rechecks the full domain. Original
 interface/layer consumers receive the same monochromatic response; this does
 not introduce a causal time-domain reservoir, inferred permeability, or
 out-of-band material behavior.
+
+### Continuous rectangular support for original film heat
+
+`AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(AngularSpectrumAperture)`
+integrates the represented transverse electric field continuously over the
+authored x/y rectangle, before applying the original Ohmic and Debye reservoir
+products. It retains distinct-mode interference, real-bank sum and difference
+tones, proper-factor difference tones and their original normalization, and the
+physical source clock. The resulting spectrum is already in watts and uses the
+original positive depth weights. The rectangle observes the original periodic
+continuation, including across cell edges; it introduces no patch-edge field or
+material boundary. Depth convergence remains the caller's responsibility.
+
+The implementation reuses original grouped DD modal reconstruction, centered
+harmonic Gram weights, reservoir transfer caches, exponent-scaled contractions
+and tone emission. It sums center fields before products and contracts spatial
+transform decrements separately to retain weak destructive-fringe variation.
+This adds no general relative-error guarantee at an arbitrary cancellation.
+Work admission charges `(N*N+1) * depths * sum(F_r*(F_r+1)/2)` spatial products;
+the axis caches contain `width²+height²` kernels. All caches, retained DD/scaled
+fields and output storage are admitted before allocation, cancellation is
+polled throughout, and empty banks prepare no rectangle cache. Spatial synthesis
+FFT work is zero; source analysis and original film reconstruction retain their
+existing bounds.
+
+Only original causal material reservoirs are admissible: sampled finite-band
+optical n+k remains insufficient for this heat law. Reversible storage is not
+deposited heat. The full-uniform-body coupled heating guard continues to reject
+finite patches until a physical spatial mapping to thermal cells is supplied.
