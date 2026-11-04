@@ -13,6 +13,11 @@ type FieldParts = [[Dd; 2]; 6];
 
 mod polarization;
 mod stress;
+mod control;
+pub use control::{
+    AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
+    PreparedAngularSpectrumApertureEnergyControl,
+};
 pub use stress::AngularSpectrumExposureApertureStress;
 pub use polarization::{
     AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,

@@ -1,6 +1,7 @@
 //! Finite-area shutters through the original Maxwell and covariance owners.
 mod polarization;
 mod stress;
+mod control;
 use super::*;
 use fs_em::plane_wave::angular_spectrum::{
     AngularSpectrumAperture, AngularSpectrumExposureApertureLimits, AngularSpectrumExposurePoint,

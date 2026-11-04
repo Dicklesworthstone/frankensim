@@ -22,6 +22,8 @@ use sources::{ExposureLine, ExposureLines, ExposureSide};
 
 mod aperture;
 pub use aperture::{
+    AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
+    PreparedAngularSpectrumApertureEnergyControl,
     AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,
     AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress,

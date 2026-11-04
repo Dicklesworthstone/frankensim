@@ -3835,3 +3835,70 @@ refusals. Public original-Maxwell/material tests cover cell/patch partition and
 two-face node observation but remain unrun without the constellation checkouts.
 Native material/source declarations are signature-only links; this does not
 establish full material admission, Maxwell assembly or spatial convergence.
+
+### Coherent source control through finite optical apertures and shutters
+
+`PreparedAngularSpectrumApertureEnergyControl` borrows one fixed original
+`AngularSpectrumExposure` and up to 64 original coherent control banks. Its
+dimensionless complex coefficients multiply complete SI peak field banks on
+their existing common phase clock. The fixed illumination is immutable.
+Source materials, layer geometry and transverse grid must match exactly;
+equal numerical material values do not replace original source identity.
+Both one-sided and two-face observations use the original modal reconstruction.
+
+The objective is the aperture/shutter mean of
+`(epsilon E.E + mu H.H)/2`, in J/m³, in the original observed lossless
+nondispersive half-space. It is field energy density, not detector power,
+absorbed heat or a body's integrated energy. The shutter's original normalized
+uniform/triangular profile remains authoritative. A valid left observation
+continues to work with a lossy exit; observation in a medium lacking the
+required storage law refuses through the original material admission.
+
+`value_gradient` returns that objective and Cartesian source derivatives:
+`gradient.re = dJ/dRe(a)` and `gradient.im = dJ/dIm(a)`. `hessian_vector`
+applies the real Cartesian Hessian to a complex direction. Finite shutters
+retain carrier-sum as well as difference-frequency terms, so this Hessian is
+not generally complex-linear. The shared aperture kernels own all temporal
+and spatial normalization; no additional optical-cycle half is inserted.
+
+Preparation freezes sparse original bank/frequency modal fields and existing
+x/y/time kernels. Each query first combines all coherent contributions in DD,
+applies separable even/odd x/y/time contractions, then pulls the covector back
+to the original control order. Small odd-window variances stay separate from
+near-unit even terms. The scalar energy is contracted against the combined
+field, rather than reconstructed from cancelling individual source terms.
+No dense source Hessian, source covariance or mode-pair table is formed.
+Repeated value/gradient and Hessian actions allocate nothing and perform no
+Maxwell/material solve, FFT or trigonometric preparation.
+
+For `N = width*height`, union frequency count `F`, and original bank frequency
+counts `F_s`, the contraction work is
+`O(N*F*(width+height+F) + N*sum_s F_s)`. Explicit limits admit the original
+line reconstruction, sparse source-field entries, total separable kernel
+pairs and complete peak logical workspace before the corresponding allocation.
+Frequency-vector capacity includes duplicates before deduplication. Source
+groups, four union-field work arrays, x/y/time kernels, gradient and original
+reconstruction scratch are included; borrowed owners and allocator overhead
+are excluded. Cancellation polls source/axis/frequency work and buffer tiles.
+An error returns no observation or gradient; the prepared owner can be reused.
+
+This differentiates authored coherent amplitudes with geometry and constitutive
+operators fixed. It does not differentiate materials, geometry or thermal
+feedback, infer coherence between independent stochastic factors, or construct
+a causal broadband controller. The original periodic continuation remains the
+field model. DD arithmetic is not a relative-error certificate at every null.
+
+Validation: six passing native tests execute the production action and original
+harmonic/aperture kernels. Independent space/time integration checks energy and
+both complex source derivatives under uniform and triangular shutters; further
+tests check Hessian symmetry/positivity and finite differences, the genuinely
+real-linear short-shutter Hessian, exact fixed-source cancellation, empty source
+slots, a width-1e-8 node's positive energy and derivative, cancellation/replay,
+invalid coefficients and overflow. A 2-D transverse, two-frequency case matches
+the existing full mode-pair integrator and its directional derivative. Native
+fields are manufactured retained coefficients; original material/Maxwell
+preparation is signature-checked, not executed. Two public original-assembly
+regressions are authored but unrun, covering source perturbations through
+films/evanescent exits, two-face magnetic standing nodes, source identity and
+work/storage admission. Full Cargo/DSR remains blocked by absent constellation
+sibling repositories.
