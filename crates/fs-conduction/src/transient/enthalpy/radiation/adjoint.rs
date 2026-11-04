@@ -260,7 +260,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             problem: physical_problem,
             ..context
         };
-        let system = physical.assemble(&temperature, phase_scales.as_deref())?;
+        let system = physical.assemble(&temperature, phase_scales.as_ref())?;
         let mut transport_w = Vec::with_capacity(n);
         for row in 0..n {
             if row % ASSEMBLY_TILE == 0 {
@@ -275,7 +275,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         }
         // Recheck physical heat separately from the numerically combined Robin
         // reference. This is not inferred from storage or from a small residual.
-        let original = context.assemble(&temperature, phase_scales.as_deref())?;
+        let original = context.assemble(&temperature, phase_scales.as_ref())?;
         let dofs = crate::assemble::DofMap::new_allow_fully_prescribed(problem.boundary, n)?;
         let (energy, _) = crate::solve::energy_balance(
             problem.mesh,

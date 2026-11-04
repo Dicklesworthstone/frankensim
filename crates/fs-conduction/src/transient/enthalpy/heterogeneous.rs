@@ -578,7 +578,10 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         }
     }
 
-    /// Original conductivity/caloric source without a scalar mass assertion.
+    /// Original isotropic or first principal conductivity/caloric source,
+    /// without a scalar mass assertion. For the complete directional source
+    /// set and its shared support use [`Self::phase_conductivity_sources`] and
+    /// [`Self::phase_conductivity_enthalpy_bounds_j_kg`].
     /// Available for both scalar and P1 reference inventories; returns None
     /// for an unknown material ID or storage without bound phase sources.
     #[must_use]
@@ -592,6 +595,36 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                 .as_ref()?
                 .material(material)?
                 .conductivity_source(),
+        )
+    }
+
+    /// Every original directional conductivity source, in its declared order.
+    /// One entry means explicit isotropy; three retain the material's fixed
+    /// principal frame. Scalar and P1 reference inventories share these sources.
+    #[must_use]
+    pub fn phase_conductivity_sources(
+        &self,
+        material: usize,
+    ) -> Option<&'c [&'c PreparedPhaseConductivity<'c>]> {
+        Some(
+            self.inner
+                .sourced_phase
+                .as_ref()?
+                .material(material)?
+                .conductivity_sources(),
+        )
+    }
+
+    /// Complete conductivity support at this material, intersecting all
+    /// principal sources. It is independent of the reference-density profile.
+    #[must_use]
+    pub fn phase_conductivity_enthalpy_bounds_j_kg(&self, material: usize) -> Option<[f64; 2]> {
+        Some(
+            self.inner
+                .sourced_phase
+                .as_ref()?
+                .material(material)?
+                .enthalpy_bounds_j_kg(),
         )
     }
 

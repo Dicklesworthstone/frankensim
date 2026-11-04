@@ -60,6 +60,32 @@ pub struct AssembledSystem {
     pub load: Vec<f64>,
 }
 
+/// Already integrated physical tensors from an original constitutive owner.
+/// Residual-only work stores no unused tangent tensors; Newton reuses its
+/// combined moment pass. These replace the entire bulk conductivity, never
+/// boundary/contact laws or storage, and cannot also carry scalar multipliers.
+#[derive(Clone, Copy)]
+pub(crate) enum ElementTensorField<'a> {
+    Values(&'a [[[f64; 3]; 3]]),
+    Moments(&'a [ElementConductivity]),
+}
+
+impl ElementTensorField<'_> {
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Values(values) => values.len(),
+            Self::Moments(values) => values.len(),
+        }
+    }
+
+    pub(crate) fn tensor(self, element: usize) -> [[f64; 3]; 3] {
+        match self {
+            Self::Values(values) => values[element],
+            Self::Moments(values) => values[element].tensor,
+        }
+    }
+}
+
 /// Free/prescribed degree-of-freedom bookkeeping. Built once per
 /// boundary partition and reused across nonlinear iterations, so the
 /// elimination pattern cannot drift between Newton steps.
@@ -365,6 +391,53 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
     interfaces: Option<&ThermalInterfaces>,
     element_materials: Option<&ElementMaterials>,
 ) -> Result<AssembledSystem, ConductionError> {
+    assemble_operator_with_material_tensors(
+        cx,
+        mesh,
+        boundary,
+        material,
+        source,
+        temperature,
+        element_scale,
+        interfaces,
+        element_materials,
+        None,
+    )
+}
+
+/// The same spatial operator with optional source-integrated bulk tensors.
+/// The material owner has already checked its complete source domains and
+/// positive principal conductivities. Assembly retains the original geometry,
+/// loads, boundary quadrature and contact operators.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_operator_with_material_tensors(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    material: &ConductivityModel,
+    source: &ScalarField,
+    temperature: &[f64],
+    element_scale: Option<&[f64]>,
+    interfaces: Option<&ThermalInterfaces>,
+    element_materials: Option<&ElementMaterials>,
+    tensors: Option<ElementTensorField<'_>>,
+) -> Result<AssembledSystem, ConductionError> {
+    if let Some(tensors) = tensors {
+        if tensors.len() != mesh.element_count() {
+            return Err(ConductionError::FieldLength {
+                field: "source conductivity tensors",
+                expected: mesh.element_count(),
+                found: tensors.len(),
+            });
+        }
+        if element_scale.is_some() || element_materials.is_some() {
+            return Err(ConductionError::Config {
+                parameter: "source conductivity tensors",
+                what: "complete source conductivity cannot be multiplied by another material"
+                    .into(),
+            });
+        }
+    }
     if let Some(interfaces) = interfaces {
         interfaces.validate_for(mesh, boundary)?;
     } else {
@@ -401,9 +474,13 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
         let end = (start + ASSEMBLY_TILE).min(ne);
         for e in start..end {
             let tet = mesh.complex().tets[e];
-            let model = conductivity_model(material, element_materials, e)?;
-            let k =
-                checked_element_conductivity(Some(cx), mesh, e, model, temperature, false)?.tensor;
+            let k = match tensors {
+                Some(tensors) => tensors.tensor(e),
+                None => {
+                    let model = conductivity_model(material, element_materials, e)?;
+                    checked_element_conductivity(Some(cx), mesh, e, model, temperature, false)?.tensor
+                }
+            };
             let mut ke = element_stiffness(mesh, e, &k);
             if let Some(scale) = element_scale {
                 for row in &mut ke {
@@ -638,6 +715,7 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
         None,
         interfaces,
         element_materials,
+        None,
     )
 }
 
@@ -649,6 +727,9 @@ pub(crate) fn assemble_jacobian_with_optional_interfaces(
 /// Robin and contact columns receive `T'_c` only; their transfer laws are
 /// never multiplied by `s_e`. Storage mass and the timestep are not included.
 /// The four scale derivatives follow the element's local vertex order.
+/// Alternatively, an original source supplies the full tensor and its four
+/// nodal enthalpy derivatives. Its material term is already dK/dh and is not
+/// multiplied by dT/dh; this retains changing anisotropy on a latent plateau.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_enthalpy_jacobian_with_optional_interfaces(
     cx: &Cx<'_>,
@@ -661,6 +742,7 @@ pub(crate) fn assemble_enthalpy_jacobian_with_optional_interfaces(
     element_scale_derivatives: Option<&[[f64; 4]]>,
     interfaces: Option<&ThermalInterfaces>,
     element_materials: Option<&ElementMaterials>,
+    enthalpy_moments: Option<&[ElementConductivity]>,
 ) -> Result<Csr, ConductionError> {
     checkpoint(cx, "assemble-enthalpy-jacobian-input", 0)?;
     let n = mesh.vertex_count();
@@ -684,6 +766,22 @@ pub(crate) fn assemble_enthalpy_jacobian_with_optional_interfaces(
             parameter: "enthalpy conductivity scales",
             what: "element scales and their enthalpy derivatives must be supplied together".into(),
         });
+    }
+    if let Some(moments) = enthalpy_moments {
+        if moments.len() != mesh.element_count() {
+            return Err(ConductionError::FieldLength {
+                field: "source conductivity tangent tensors",
+                expected: mesh.element_count(),
+                found: moments.len(),
+            });
+        }
+        if element_scales.is_some() || element_materials.is_some() {
+            return Err(ConductionError::Config {
+                parameter: "source conductivity tangent tensors",
+                what: "complete source conductivity cannot be multiplied by another material"
+                    .into(),
+            });
+        }
     }
     if let (Some(scales), Some(derivatives)) = (element_scales, element_scale_derivatives) {
         for (field, found) in [
@@ -737,6 +835,7 @@ pub(crate) fn assemble_enthalpy_jacobian_with_optional_interfaces(
         element_scale_derivatives,
         interfaces,
         element_materials,
+        enthalpy_moments,
     )
 }
 
@@ -755,6 +854,7 @@ fn assemble_transport_jacobian(
     element_scale_derivatives: Option<&[[f64; 4]]>,
     interfaces: Option<&ThermalInterfaces>,
     element_materials: Option<&ElementMaterials>,
+    enthalpy_moments: Option<&[ElementConductivity]>,
 ) -> Result<Csr, ConductionError> {
     if let Some(interfaces) = interfaces {
         interfaces.validate_for(mesh, boundary)?;
@@ -781,9 +881,13 @@ fn assemble_transport_jacobian(
         let end = (start + ASSEMBLY_TILE).min(ne);
         for e in start..end {
             let tet = mesh.complex().tets[e];
-            let model = conductivity_model(material, element_materials, e)?;
-            let moments =
-                checked_element_conductivity(Some(cx), mesh, e, model, temperature, true)?;
+            let moments = match enthalpy_moments {
+                Some(moments) => moments[e],
+                None => {
+                    let model = conductivity_model(material, element_materials, e)?;
+                    checked_element_conductivity(Some(cx), mesh, e, model, temperature, true)?
+                }
+            };
             let ke = element_stiffness(mesh, e, &moments.tensor);
             let scale = element_scales.map_or(1.0, |scales| scales[e]);
             for a in 0..4 {
@@ -837,7 +941,12 @@ fn assemble_transport_jacobian(
                     let mut entry = volume * ga_kpg;
                     if let Some(slopes) = temperature_derivatives {
                         entry *= scale;
-                        entry *= slopes[tet[c] as usize];
+                        // Original phase moments already differentiate K with
+                        // respect to h. Multiplying them by T'(h) would erase
+                        // the conductivity response on a latent plateau.
+                        if enthalpy_moments.is_none() {
+                            entry *= slopes[tet[c] as usize];
+                        }
                         crate::require_finite("enthalpy conductivity Jacobian", entry)?;
                     }
                     coo.push(tet[a] as usize, tet[c] as usize, entry);

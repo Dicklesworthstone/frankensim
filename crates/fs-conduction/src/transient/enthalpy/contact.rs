@@ -113,7 +113,7 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
         let context = self.context(contacts.frozen_interfaces());
         let scales = context.phase_scales(h).map_err(recoverable)?;
         let system = context
-            .assemble(&temperature, scales.as_deref())
+            .assemble(&temperature, scales.as_ref())
             .map_err(recoverable)?;
         context
             .assembled_residual_with_source(h, &temperature, &system, output, self.source_j)

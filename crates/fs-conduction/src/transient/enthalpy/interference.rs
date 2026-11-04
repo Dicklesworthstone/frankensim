@@ -608,7 +608,7 @@ fn finish_interval(
     context.check_prescribed_values(&h)?;
     let temperature = context.temperatures(&h)?;
     let scales = context.phase_scales(&h)?;
-    let system = context.assemble(&temperature, scales.as_deref())?;
+    let system = context.assemble(&temperature, scales.as_ref())?;
     let radiation = context
         .pointwise_radiation
         .map(|owner| owner.load_and_report(context.cx, &temperature, &h))

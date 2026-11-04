@@ -279,8 +279,9 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
                 .ok_or_else(|| invalid("reference chart is missing for an admitted vertex"))?;
             let state = curve.values_at_specific_enthalpy(h)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
-            if let Some(source) = storage.phase_conductivity_source(storage.vertex_material_ids()[vertex]) {
-                let [lower_j_kg, upper_j_kg] = source.enthalpy_bounds_j_kg();
+            if let Some([lower_j_kg, upper_j_kg]) = storage
+                .phase_conductivity_enthalpy_bounds_j_kg(storage.vertex_material_ids()[vertex])
+            {
                 if h < lower_j_kg || h > upper_j_kg {
                     return Err(EnthalpyError::SourceEnthalpyOutsideDomain {
                         vertex, specific_enthalpy_j_kg: h, lower_j_kg, upper_j_kg,

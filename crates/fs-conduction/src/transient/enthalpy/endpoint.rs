@@ -246,7 +246,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             ..context
         };
         let phase_scales = physical.phase_scales(candidate_specific_h)?;
-        let system = physical.assemble(&temperature, phase_scales.as_deref())?;
+        let system = physical.assemble(&temperature, phase_scales.as_ref())?;
         let mut residual = vec![0.0; n];
         physical.assembled_residual(candidate_specific_h, &temperature, &system, &mut residual)?;
         let residual_norm_j = finite(norm2(&residual))?;

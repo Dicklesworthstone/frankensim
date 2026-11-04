@@ -270,6 +270,7 @@ fn integrated_temperature_and_enthalpy_jacobians_match_perturbed_residuals() {
             Some(&[scale_derivative]),
             None,
             None,
+            None,
         )
         .unwrap();
         for enthalpy in [false, true] {

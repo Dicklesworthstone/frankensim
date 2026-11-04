@@ -81,11 +81,11 @@ use crate::{
     ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, RobinFlux,
     ThermalInterfaces,
     assemble::{
-        ASSEMBLY_TILE, AssembledSystem, DofMap,
+        ASSEMBLY_TILE, AssembledSystem, DofMap, ElementTensorField,
         assemble_enthalpy_jacobian_with_optional_interfaces,
-        assemble_operator_scaled_with_interfaces,
+        assemble_operator_with_material_tensors,
     },
-    material::LiquidMassFractionConductivity,
+    material::{ElementConductivity, LiquidMassFractionConductivity},
     solve::energy_balance,
 };
 
@@ -324,6 +324,40 @@ struct PhaseConductivity {
     // A fraction-slope corner matters only where an incident element actually
     // changes conductivity with that fraction. Constant multipliers do not.
     variable_vertices: Vec<bool>,
+}
+
+/// A candidate's complete material conductivity or its explicitly declared
+/// scalar multiplier. Full source tensors replace the numerical unit basis.
+/// Residuals retain only values; a Newton stage retains its combined source
+/// moment pass so it does not integrate the same three paths twice.
+enum EnthalpyConductivity {
+    Scales(Vec<f64>),
+    Tensors(Vec<[[f64; 3]; 3]>),
+    Moments(Vec<ElementConductivity>),
+}
+
+impl EnthalpyConductivity {
+    fn scales(&self) -> Option<&[f64]> {
+        match self {
+            Self::Scales(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    fn tensors(&self) -> Option<ElementTensorField<'_>> {
+        match self {
+            Self::Tensors(values) => Some(ElementTensorField::Values(values)),
+            Self::Moments(values) => Some(ElementTensorField::Moments(values)),
+            Self::Scales(_) => None,
+        }
+    }
+
+    fn moments(&self) -> Option<&[ElementConductivity]> {
+        match self {
+            Self::Moments(values) => Some(values),
+            _ => None,
+        }
+    }
 }
 
 fn reference_mass_node_count(
@@ -970,7 +1004,7 @@ impl StepContext<'_, '_, '_, '_> {
         }
         let temperature = self.temperatures(h)?;
         let scales = self.phase_scales(h)?;
-        let system = self.assemble(&temperature, scales.as_deref())?;
+        let system = self.assemble(&temperature, scales.as_ref())?;
         self.prescribed_heat_input_w(h, &temperature, &system)
     }
 
@@ -992,10 +1026,10 @@ impl StepContext<'_, '_, '_, '_> {
         Ok(temperature)
     }
 
-    fn phase_scales(&self, h: &[f64]) -> Result<Option<Vec<f64>>, EnthalpyError> {
+    fn phase_scales(&self, h: &[f64]) -> Result<Option<EnthalpyConductivity>, EnthalpyError> {
         if let Some(source) = self.storage.sourced_phase.as_ref() {
-            return source.assemble(self.cx, self.storage.mesh, h, false)
-                .map(|(values, _)| Some(values));
+            return source.assemble_tensors(self.cx, self.storage.mesh, h)
+                .map(|values| Some(EnthalpyConductivity::Tensors(values)));
         }
         if let Some(source) = self.storage.sourced_melting.as_ref() {
             let mut nodal = Vec::with_capacity(h.len());
@@ -1015,7 +1049,7 @@ impl StepContext<'_, '_, '_, '_> {
                 let mean = vertices.iter().map(|&v| nodal[v as usize] / 4.0).sum();
                 scales.push(finite(mean)?);
             }
-            return Ok(Some(scales));
+            return Ok(Some(EnthalpyConductivity::Scales(scales)));
         }
         let Some(policy) = &self.storage.phase_conductivity else {
             return Ok(None);
@@ -1056,7 +1090,7 @@ impl StepContext<'_, '_, '_, '_> {
             }
             scales.push(law.multiplier_at(fraction)?);
         }
-        Ok(Some(scales))
+        Ok(Some(EnthalpyConductivity::Scales(scales)))
     }
 
     fn phase_scale_derivatives(&self, h: &[f64]) -> Result<Option<Vec<[f64; 4]>>, EnthalpyError> {
@@ -1133,18 +1167,19 @@ impl StepContext<'_, '_, '_, '_> {
     fn assemble(
         &self,
         temperature: &[f64],
-        phase_scales: Option<&[f64]>,
+        conductivity: Option<&EnthalpyConductivity>,
     ) -> Result<AssembledSystem, EnthalpyError> {
-        Ok(assemble_operator_scaled_with_interfaces(
+        Ok(assemble_operator_with_material_tensors(
             self.cx,
             self.storage.mesh,
             self.problem.boundary,
             self.problem.material,
             self.problem.source,
             temperature,
-            phase_scales,
+            conductivity.and_then(EnthalpyConductivity::scales),
             self.interfaces,
             self.problem.element_materials,
+            conductivity.and_then(EnthalpyConductivity::tensors),
         )?)
     }
 
@@ -1155,12 +1190,12 @@ impl StepContext<'_, '_, '_, '_> {
         // The exact source moment pass returns values and derivatives together;
         // do not walk crossed source knots twice during a Newton linearization.
         let (phase_scales, phase_derivatives) = if let Some(source) = self.storage.sourced_phase.as_ref() {
-            let (values, derivatives) = source.assemble(self.cx, self.storage.mesh, h, true)?;
-            (Some(values), derivatives)
+            let values = source.assemble(self.cx, self.storage.mesh, h, true)?;
+            (Some(EnthalpyConductivity::Moments(values)), None)
         } else {
             (self.phase_scales(h)?, self.phase_scale_derivatives(h)?)
         };
-        let picard = self.assemble(&temperature, phase_scales.as_deref())?;
+        let picard = self.assemble(&temperature, phase_scales.as_ref())?;
         let mut slope = Vec::with_capacity(h.len());
         let mut inverse = Vec::with_capacity(h.len());
         for (vertex, &value) in h.iter().enumerate() {
@@ -1197,10 +1232,11 @@ impl StepContext<'_, '_, '_, '_> {
             self.problem.material,
             &temperature,
             &slope,
-            phase_scales.as_deref(),
+            phase_scales.as_ref().and_then(EnthalpyConductivity::scales),
             phase_derivatives.as_deref(),
             self.interfaces,
             self.problem.element_materials,
+            phase_scales.as_ref().and_then(EnthalpyConductivity::moments),
         )?;
         poll(self.cx, h.len())?;
         Ok(NewtonStage {
@@ -1227,7 +1263,7 @@ impl StepContext<'_, '_, '_, '_> {
     ) -> Result<(), EnthalpyError> {
         let temperature = self.temperatures(h)?;
         let phase_scales = self.phase_scales(h)?;
-        let system = self.assemble(&temperature, phase_scales.as_deref())?;
+        let system = self.assemble(&temperature, phase_scales.as_ref())?;
         self.assembled_residual_with_source(h, &temperature, &system, out, source_j)
     }
 
@@ -1301,7 +1337,7 @@ impl StepContext<'_, '_, '_, '_> {
         self.check_prescribed_values(&h)?;
         let temperature = self.temperatures(&h)?;
         let phase_scales = self.phase_scales(&h)?;
-        let system = self.assemble(&temperature, phase_scales.as_deref())?;
+        let system = self.assemble(&temperature, phase_scales.as_ref())?;
         let mut liquid_mass_fraction = Vec::with_capacity(h.len());
         let mut storage = 0.0;
         for (vertex, &value) in h.iter().enumerate() {

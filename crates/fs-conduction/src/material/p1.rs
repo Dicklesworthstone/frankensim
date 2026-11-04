@@ -7,10 +7,13 @@ use crate::ConductionError;
 
 mod moments;
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ElementConductivity {
-    /// Volume-normalized integral of K(T_h).
+    /// Volume-normalized integral of the physical conductivity tensor.
     pub(crate) tensor: [[f64; 3]; 3],
-    /// Volume-normalized integral of lambda_c K'(T_h), in local vertex order.
+    /// Nodal derivatives in local vertex order. The temperature owner supplies
+    /// <lambda_c dK/dT>; the original phase owner supplies <lambda_c dK/dh>.
+    /// The consuming assembler must retain that coordinate distinction.
     pub(crate) derivatives: [[[f64; 3]; 3]; 4],
 }
 

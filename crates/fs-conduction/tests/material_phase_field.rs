@@ -1,5 +1,9 @@
 //! Original source k(T,f) reaches the native P1 enthalpy field and its tangent.
 //! Constitutive numbers below are manufactured; they are not measured material data.
+#[path = "material_phase_field/orthotropic.rs"]
+mod orthotropic;
+#[path = "material_phase_field/orthotropic_coupling.rs"]
+mod orthotropic_coupling;
 mod support;
 
 use fs_conduction::material::LiquidMassFractionConductivity;
@@ -43,35 +47,62 @@ fn card(values: [f64; 3]) -> MaterialCard {
 }
 
 fn conductivity_card(value: PropertyValue) -> MaterialCard {
-    let mut claims = ClaimSet::new();
-    claims
-        .insert_claim(PropertyClaim {
-            key: PropertyKey::new("k", KD),
-            value,
-            validity: ValidityDomain::unconstrained()
-                .with_quantity(
-                    "T",
-                    QuantitySpec::dimensional(Temperature::DIMS),
-                    300.0,
-                    800.0,
+    conductivity_card_properties([("k", value)])
+}
+
+fn orthotropic_card(values: [[f64; 3]; 3]) -> MaterialCard {
+    conductivity_card_properties(
+        ["k0", "k1", "k2"]
+            .into_iter()
+            .zip(values)
+            .map(|(key, values)| {
+                (
+                    key,
+                    PropertyValue::Curve {
+                        abscissa: "f".into(),
+                        abscissa_dims: Dims::NONE,
+                        knots: vec![(0.0, values[0]), (0.5, values[1]), (1.0, values[2])],
+                        dims: KD,
+                    },
                 )
-                .with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0)
-                .with_quantity(
-                    "p",
-                    QuantitySpec::dimensional(PRESSURE),
-                    100_000.0,
-                    200_000.0,
-                ),
-            interpolation: InterpolationPolicy::LinearInside,
-            uncertainty: UncertaintyModel::Unstated,
-            observations: vec![],
-            provenance: Provenance {
-                source: "manufactured source-bound phase-field fixture".into(),
-                license: "CC0-1.0".into(),
-                artifact: None,
-            },
-        })
-        .unwrap();
+            }),
+    )
+}
+
+fn conductivity_card_properties(
+    properties: impl IntoIterator<Item = (&'static str, PropertyValue)>,
+) -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    for (key, value) in properties {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(key, KD),
+                value,
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(
+                        "T",
+                        QuantitySpec::dimensional(Temperature::DIMS),
+                        300.0,
+                        800.0,
+                    )
+                    .with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0)
+                    .with_quantity(
+                        "p",
+                        QuantitySpec::dimensional(PRESSURE),
+                        100_000.0,
+                        200_000.0,
+                    ),
+                interpolation: InterpolationPolicy::LinearInside,
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "manufactured source-bound phase-field fixture".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
     MaterialCard::assemble(
         MaterialStateId {
             chemistry: "synthetic phase transport".into(),
@@ -112,12 +143,22 @@ fn prepare<'a>(
     curve: &'a EquilibriumEnthalpyPhaseCurve,
     range: [f64; 2],
 ) -> PreparedPhaseConductivity<'a> {
+    prepare_direction(card, curve, "k", range, 150_000.0)
+}
+
+fn prepare_direction<'a>(
+    card: &MaterialCard,
+    curve: &'a EquilibriumEnthalpyPhaseCurve,
+    key: &str,
+    range: [f64; 2],
+    pressure: f64,
+) -> PreparedPhaseConductivity<'a> {
     let context = QueryPoint::new()
         .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 300.0)
         .unwrap()
         .with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0)
         .unwrap()
-        .with_quantity("p", QuantitySpec::dimensional(PRESSURE), 150_000.0)
+        .with_quantity("p", QuantitySpec::dimensional(PRESSURE), pressure)
         .unwrap();
     PreparedPhaseConductivity::new(
         curve,
@@ -127,7 +168,7 @@ fn prepare<'a>(
             temperature_axis: "T",
             liquid_fraction_axis: Some("f"),
         },
-        &PropertyKey::new("k", KD),
+        &PropertyKey::new(key, KD),
         ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
         range,
         || Ok(()),

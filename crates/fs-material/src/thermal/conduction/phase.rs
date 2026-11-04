@@ -140,6 +140,8 @@ pub struct PreparedPhaseConductivity<'a> {
     knots: Vec<[f64; 2]>,
     intervals: Vec<Interval>,
     source_paths: Vec<PropertyPathSlice>,
+    temperature_axis: String,
+    liquid_fraction_axis: Option<String>,
     selected: ClaimId,
     identity: ContentHash,
 }
@@ -322,6 +324,8 @@ impl<'a> PreparedPhaseConductivity<'a> {
             knots,
             intervals,
             source_paths,
+            temperature_axis: point.temperature_axis.to_owned(),
+            liquid_fraction_axis: point.liquid_fraction_axis.map(str::to_owned),
             selected,
             identity: hash.finalize(),
         })
@@ -390,6 +394,18 @@ impl<'a> PreparedPhaseConductivity<'a> {
     /// Exact source paths and point receipts, in increasing caloric-interval order.
     pub fn source_paths(&self) -> &[PropertyPathSlice] {
         &self.source_paths
+    }
+
+    /// Original named temperature coordinate that evolves on the caloric path.
+    /// Consumers composing directional laws can compare fixed external state
+    /// without inferring coordinate roles from names or numerical coincidences.
+    pub fn temperature_axis(&self) -> &str {
+        &self.temperature_axis
+    }
+
+    /// Original explicitly evolving liquid mass fraction coordinate, if any.
+    pub fn liquid_fraction_axis(&self) -> Option<&str> {
+        self.liquid_fraction_axis.as_deref()
     }
 
     /// Evaluate without allocation, hashing, source selection or extrapolation.

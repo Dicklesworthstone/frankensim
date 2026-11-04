@@ -1,7 +1,9 @@
 //! Conductivity scales of the accepted enthalpy endpoint.
-//! The retained local loads include its actual phase multiplier, but no
+//! The retained local loads include its actual phase multiplier or complete
+//! source-resolved directional tensor, but no
 //! boundary, contact or source terms and no second state derivative.
 
+use super::super::EnthalpyConductivity;
 use crate::assemble::{checked_element_conductivity, element_stiffness};
 
 use super::{
@@ -9,18 +11,22 @@ use super::{
     poll, vector,
 };
 
-/// Reuse the production constitutive integral and stiffness scaling order. Phase scales
-/// come only from StepContext's typed laws at the accepted nodal enthalpies.
+/// Reuse the production constitutive integral and stiffness scaling order.
+/// Source tensors and phase scales come only from StepContext's typed laws at
+/// the accepted nodal enthalpies, including all directional phase responses.
 pub(super) fn element_loads(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     temperature: &[f64],
-    phase_scales: Option<&[f64]>,
-) -> Result<Vec<[f64; 4]>, EnthalpyAdjointError> {
+    conductivity: Option<&EnthalpyConductivity>,
+) -> Result<Vec<[f64; 4]>, EnthalpyAdjointError>{
     poll(cx, 0)?;
     let mesh = problem.mesh;
     let elements = mesh.element_count();
+    let phase_scales = conductivity.and_then(EnthalpyConductivity::scales);
+    let tensors = conductivity.and_then(EnthalpyConductivity::tensors);
     if phase_scales.is_some_and(|scales| scales.len() != elements)
+        || tensors.is_some_and(|tensors| tensors.len() != elements)
         || elements
             .checked_mul(std::mem::size_of::<[f64; 4]>())
             .is_none_or(|bytes| isize::try_from(bytes).is_err())
@@ -38,13 +44,17 @@ pub(super) fn element_loads(
         if element % ASSEMBLY_TILE == 0 {
             poll(cx, element)?;
         }
-        let model = match problem.element_materials {
-            Some(materials) => materials.model_for(element)?,
-            None => problem.material,
+        let tensor = match tensors {
+            Some(tensors) => tensors.tensor(element),
+            None => {
+                let model = match problem.element_materials {
+                    Some(materials) => materials.model_for(element)?,
+                    None => problem.material,
+                };
+                checked_element_conductivity(Some(cx), mesh, element, model, temperature, false)?
+                    .tensor
+            }
         };
-        let tensor =
-            checked_element_conductivity(Some(cx), mesh, element, model, temperature, false)?
-                .tensor;
         let mut stiffness = element_stiffness(mesh, element, &tensor);
         if let Some(scales) = phase_scales {
             let scale = finite(scales[element])?;

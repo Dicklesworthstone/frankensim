@@ -8,7 +8,8 @@ use super::super::super::{
 };
 use super::MaterialPhaseTransport;
 use crate::{
-    ConductionMesh, ConductionProblem, ConductivityModel, material::integrate_scalar_path,
+    ConductionMesh, ConductionProblem, ConductivityModel,
+    material::{ElementConductivity, integrate_scalar_path},
 };
 
 /// Assignments share the heterogeneous storage owner's admitted immutable maps.
@@ -99,7 +100,7 @@ impl<'c> PhaseFieldTransport<'c> {
                     "finite nodal enthalpy required for phase conductivity",
                 ));
             }
-            let [lo, hi] = self.for_vertex(vertex).source.enthalpy_bounds_j_kg();
+            let [lo, hi] = self.for_vertex(vertex).enthalpy_bounds_j_kg();
             if value < lo || value > hi {
                 return Err(EnthalpyError::SourceEnthalpyOutsideDomain {
                     vertex,
@@ -112,16 +113,37 @@ impl<'c> PhaseFieldTransport<'c> {
         Ok(())
     }
 
-    /// Integrate original k(h_h) and its consistent derivatives in one pass.
+    /// Integrate original K(h_h) and its consistent enthalpy derivatives.
     /// No material table is copied into per-element objects. Residual-only
-    /// work skips derivative moments; allocated buffers remain O(elements).
+    /// consumers use [`Self::assemble_tensors`] to avoid derivative storage.
     pub(in crate::transient::enthalpy) fn assemble(
         &self,
         cx: &Cx<'_>,
         mesh: &ConductionMesh,
         h: &[f64],
         with_derivatives: bool,
-    ) -> Result<(Vec<f64>, Option<Vec<[f64; 4]>>), EnthalpyError> {
+    ) -> Result<Vec<ElementConductivity>, EnthalpyError> {
+        self.map_elements(cx, mesh, h, with_derivatives, |moments| moments)
+    }
+
+    /// Complete physical tensor means with no allocated derivative buffer.
+    pub(in crate::transient::enthalpy) fn assemble_tensors(
+        &self,
+        cx: &Cx<'_>,
+        mesh: &ConductionMesh,
+        h: &[f64],
+    ) -> Result<Vec<[[f64; 3]; 3]>, EnthalpyError> {
+        self.map_elements(cx, mesh, h, false, |moments| moments.tensor)
+    }
+
+    fn map_elements<T>(
+        &self,
+        cx: &Cx<'_>,
+        mesh: &ConductionMesh,
+        h: &[f64],
+        with_derivatives: bool,
+        mut output: impl FnMut(ElementConductivity) -> T,
+    ) -> Result<Vec<T>, EnthalpyError> {
         poll(cx, 0)?;
         if h.len() != mesh.vertex_count() {
             return Err(EnthalpyError::InvalidInput(
@@ -141,24 +163,18 @@ impl<'c> PhaseFieldTransport<'c> {
         }
         self.admit_enthalpies(cx, h)?;
         let mut values = Vec::with_capacity(mesh.element_count());
-        let mut derivatives = with_derivatives.then(|| Vec::with_capacity(mesh.element_count()));
         for (element, vertices) in mesh.complex().tets.iter().enumerate() {
             if element % ASSEMBLY_TILE == 0 {
                 poll(cx, element)?;
             }
-            let (average, tangent) = integrate_scalar_path(
-                Some(cx),
-                &self.for_element(element).knots,
+            values.push(output(self.for_element(element).element_moments(
+                cx,
                 vertices.map(|v| h[v as usize]),
                 with_derivatives,
-            )?;
-            values.push(average);
-            if let Some(derivatives) = &mut derivatives {
-                derivatives.push(tangent);
-            }
+            )?));
         }
         poll(cx, mesh.element_count())?;
-        Ok((values, derivatives))
+        Ok(values)
     }
 
     pub(in crate::transient::enthalpy) fn element_heat_flux(
@@ -166,8 +182,8 @@ impl<'c> PhaseFieldTransport<'c> {
         cx: &Cx<'_>,
         mesh: &ConductionMesh,
         h: &[f64],
-    ) -> Result<Vec<[f64; 3]>, EnthalpyError>{
-        let (conductivity, _) = self.assemble(cx, mesh, h, false)?;
+    ) -> Result<Vec<[f64; 3]>, EnthalpyError> {
+        let conductivity = self.assemble_tensors(cx, mesh, h)?;
         let mut temperature = Vec::with_capacity(h.len());
         for (vertex, &value) in h.iter().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
@@ -183,7 +199,7 @@ impl<'c> PhaseFieldTransport<'c> {
             );
         }
         let mut flux = Vec::with_capacity(mesh.element_count());
-        for (element, (vertices, &k)) in mesh.complex().tets.iter().zip(&conductivity).enumerate() {
+        for (element, (vertices, k)) in mesh.complex().tets.iter().zip(&conductivity).enumerate() {
             if element % ASSEMBLY_TILE == 0 {
                 poll(cx, element)?;
             }
@@ -194,9 +210,18 @@ impl<'c> PhaseFieldTransport<'c> {
                 }
             }
             flux.push([
-                finite(-k * gradient[0])?,
-                finite(-k * gradient[1])?,
-                finite(-k * gradient[2])?,
+                finite(-k[0][0].mul_add(
+                    gradient[0],
+                    k[0][1].mul_add(gradient[1], k[0][2] * gradient[2]),
+                ))?,
+                finite(-k[1][0].mul_add(
+                    gradient[0],
+                    k[1][1].mul_add(gradient[1], k[1][2] * gradient[2]),
+                ))?,
+                finite(-k[2][0].mul_add(
+                    gradient[0],
+                    k[2][1].mul_add(gradient[1], k[2][2] * gradient[2]),
+                ))?,
             ]);
         }
         poll(cx, mesh.element_count())?;
@@ -218,7 +243,7 @@ impl<'c> PhaseFieldTransport<'c> {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(cx, vertex)?;
             }
-            let [lo, hi] = self.for_vertex(vertex).source.enthalpy_bounds_j_kg();
+            let [lo, hi] = self.for_vertex(vertex).enthalpy_bounds_j_kg();
             if value == lo || value == hi {
                 return Err(EnthalpyAdjointError::MaterialKink);
             }
@@ -231,18 +256,71 @@ impl<'c> PhaseFieldTransport<'c> {
             if nodal.iter().any(|&value| value != nodal[0]) {
                 continue;
             }
-            let knots = &self.for_element(element).knots;
-            if let Ok(index) = knots.binary_search_by(|k| k.0.total_cmp(&nodal[0])) {
-                if index > 0 && index + 1 < knots.len() {
-                    let a = knots[index - 1];
-                    let b = knots[index];
-                    let c = knots[index + 1];
-                    if (b.1 - a.1) / (b.0 - a.0) != (c.1 - b.1) / (c.0 - b.0) {
-                        return Err(EnthalpyAdjointError::MaterialKink);
+            let material = self.for_element(element);
+            for knots in &material.knots[..material.conductivity_sources().len()] {
+                if let Ok(index) = knots.binary_search_by(|k| k.0.total_cmp(&nodal[0])) {
+                    if index > 0 && index + 1 < knots.len() {
+                        let a = knots[index - 1];
+                        let b = knots[index];
+                        let c = knots[index + 1];
+                        if (b.1 - a.1) / (b.0 - a.0) != (c.1 - b.1) / (c.0 - b.0) {
+                            return Err(EnthalpyAdjointError::MaterialKink);
+                        }
                     }
                 }
             }
         }
         Ok(())
+    }
+}
+
+impl MaterialPhaseTransport<'_> {
+    fn element_moments(
+        &self,
+        cx: &Cx<'_>,
+        nodal: [f64; 4],
+        with_derivatives: bool,
+    ) -> Result<ElementConductivity, EnthalpyError> {
+        let mut moments = ElementConductivity {
+            tensor: [[0.0; 3]; 3],
+            derivatives: [[[0.0; 3]; 3]; 4],
+        };
+        let Some(axes) = self.principal_axes else {
+            // Preserve the single scalar integration and its exact diagonal
+            // entries for the original isotropic API.
+            let (average, tangent) =
+                integrate_scalar_path(Some(cx), &self.knots[0], nodal, with_derivatives)?;
+            for i in 0..3 {
+                moments.tensor[i][i] = average;
+                if with_derivatives {
+                    for c in 0..4 {
+                        moments.derivatives[c][i][i] = tangent[c];
+                    }
+                }
+            }
+            return Ok(moments);
+        };
+        for (axis, knots) in axes.iter().zip(&self.knots) {
+            let (average, tangent) =
+                integrate_scalar_path(Some(cx), knots, nodal, with_derivatives)?;
+            for i in 0..3 {
+                for j in i..3 {
+                    let value = finite((average * axis[i]).mul_add(axis[j], moments.tensor[i][j]))?;
+                    moments.tensor[i][j] = value;
+                    moments.tensor[j][i] = value;
+                    if with_derivatives {
+                        for c in 0..4 {
+                            let value = finite(
+                                (tangent[c] * axis[i])
+                                    .mul_add(axis[j], moments.derivatives[c][i][j]),
+                            )?;
+                            moments.derivatives[c][i][j] = value;
+                            moments.derivatives[c][j][i] = value;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(moments)
     }
 }

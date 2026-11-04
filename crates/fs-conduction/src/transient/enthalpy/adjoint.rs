@@ -397,7 +397,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         }
         let conductive_loads = {
             let phase_scales = context.phase_scales(&primal.specific_enthalpy_j_kg)?;
-            conductivity::element_loads(cx, problem, &primal.temperature, phase_scales.as_deref())?
+            conductivity::element_loads(cx, problem, &primal.temperature, phase_scales.as_ref())?
         };
         let mut prescribed = vec![false; n];
         for &(vertex, _) in problem.boundary.dirichlet() {

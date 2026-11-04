@@ -157,10 +157,14 @@ Temperature-only evolution refuses material-state bindings explicitly.
 
 `transient::enthalpy::material::phase::MaterialPhaseTransport` binds an original
 `PreparedPhaseConductivity` to the existing 3D enthalpy FEM owner. The caller
-explicitly declares the scalar source isotropic and supplies a positive fixed
-reference density. The adapter retains the exact prepared source and its
-borrowed caloric chart, including original source paths, selected claims, fixed
-coordinates and enthalpy support.
+declares either one isotropic source or three ordered principal-direction
+sources in a fixed orthonormal frame, and supplies a positive fixed reference
+density. The adapter retains every exact prepared source and their shared
+original caloric chart, including source paths, selected claims and fixed
+coordinates. Orthotropic sources must share that exact chart and compatible
+nonthermal state; their admitted enthalpy interval is the intersection of the
+three original supports. The ordered sources, frame and reference density are
+part of the transport identity.
 
 Each element uses the volume-normalized integral of `k(h_h)` over its P1
 enthalpy field, with consistent nodal derivatives given by the integral of
@@ -168,7 +172,14 @@ enthalpy field, with consistent nodal derivatives given by the integral of
 knots and integrates the retained piecewise-linear law without geometric
 subdivision or reinterpreting enthalpy as temperature. Residual-only evaluation
 skips derivative moments; a Newton stage computes values and derivatives
-together. Exact source endpoints and interpolation from the nearer endpoint
+together. In the orthotropic case each principal path retains its own source
+knots. The physical tensor is the sum of the three integrated principal values
+times their axis dyads; all four nodal derivative tensors use the same rotation.
+The spatial tangent includes both `K grad(N_j) dT_j/dh_j` and
+`(dK/dh_j) grad(T)`. The second term remains active during a latent plateau;
+it is not multiplied by `dT/dh` a second time. Residual-only evaluation stores
+only tensor values, and Newton reuses its combined constitutive moment pass.
+Exact source endpoints and interpolation from the nearer endpoint
 preserve positive conductivity across large source contrasts.
 
 Temperature remains the native P1 interpolation of nodal chart temperatures.
@@ -185,18 +196,28 @@ numerical bases, element material overrides and additional phase multipliers
 are refused. A finite Newton trial leaving the source enthalpy interval is a
 dedicated recoverable domain refusal in the existing line search; nonfinite
 values remain fatal. Classical adjoint admission conservatively rejects source
-domain endpoints and a uniform element exactly at a true source slope corner;
+domain endpoints and a uniform element exactly at a true slope corner in any
+participating principal source;
 nonuniform elements may cross internal source knots. Existing caloric-chart
 differentiability guards remain active.
 
-The uniform adapter retains one original scalar source and caloric chart.
+The uniform adapter retains its original isotropic or orthotropic sources and
+one caloric chart.
 `HeterogeneousEnthalpyBackwardEuler::from_phase_materials` binds one explicitly
-isotropic `MaterialPhaseTransport` per admitted material identity, retaining
+declared `MaterialPhaseTransport` per admitted material identity, retaining
 each original chart, enthalpy datum, source support and fixed reference density.
 Storage and source assembly share immutable element and vertex assignment maps.
 The shared uniform/assigned source-moment resolver feeds the existing residual,
 Newton, adaptive, contact and adjoint owners; material tables are not copied
 into per-element source objects.
+
+The physical element-average flux and the accepted conductivity-scale pullback
+use the same complete tensors as the residual. A full-law scale multiplies all
+principal responses together; it does not differentiate frame orientation,
+source selection or individual source knots. Neither directional conductivity
+nor changing anisotropy adds another mass or latent-energy account. Geometry
+and principal frames remain fixed; deformation-driven rotation and an inferred
+phase-mixture rule are outside this binding.
 
 Distinct material IDs require separate traces and declared contact. Neither
 enthalpy datums nor phase charts are averaged across materials. Material-local
@@ -3837,8 +3858,8 @@ A broken nested test-module path was corrected so the four earlier material
 ambient-history regressions actually execute. DSR and the required sibling
 checkouts were unavailable: these are focused native fallback results, not a
 full workspace/DSR verdict, a continuum Stefan bound or experimental validation.
-The existing stationary isotropic source interpretation and contact/radiation
-domain limits remain authoritative.
+The stationary source interpretation (explicitly isotropic or fixed-frame
+orthotropic) and contact/radiation domain limits remain authoritative.
 
 ## Material enclosure radiation throughout enthalpy histories
 
