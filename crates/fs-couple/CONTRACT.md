@@ -1,5 +1,20 @@
 # CONTRACT: fs-couple
 
+## Exact-ramp work and heat in deposited layers
+
+`strip_enthalpy::step_candidate` uses the solid owner's native work-conjugate
+resultants at prescribed strain/curvature constraints and the caller's explicit
+mean force/moment for mean-load controls. Endpoint reactions stay available but
+are not substituted for interval-mean work. The existing material histories,
+source identities, reversible heat and physical dashpot loss feed the same
+thermal cells and nonlinear transaction. Backward-Euler loads retain their
+original work and numerical-loss convention.
+
+G1/G3 coupled tests compare exact Maxwell ramp heat against an independent
+two-cell heat-network solve and check mean-load work and the combined first law.
+Exact-ramp material coefficients are still frozen at the proposed temperature;
+spatial heat transfer retains its original backward-Euler discretization.
+
 ## Original elastic sources across live material coupling
 
 Modal wet-frame temperature refresh and native rod enthalpy/viscosity preparation

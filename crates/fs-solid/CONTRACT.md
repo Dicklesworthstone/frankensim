@@ -1,5 +1,27 @@
 # fs-solid CONTRACT
 
+## Native interval work in deposited strips
+
+`deposition::LayeredStrip` integrates each original material point's
+`work_conjugate_stress_pa` into axial force and bending moment for work. Actual
+endpoint resultants and reactions remain separate outputs. Prescribed strain
+and curvature therefore support the original `ExactStrainRamp` history without
+inventing backward-Euler numerical dissipation or replacing physical dashpot
+heat. New layers retain their stress-free reference at the accepted shape;
+existing branch strains and stored energy survive birth unchanged.
+
+`MeanForceN` and `MeanMomentNm` prescribe interval means through the original
+affine mean-stress tangent and require exact-ramp integration in every layer.
+They do not prescribe a constant load throughout the interval. Existing
+`ForceN`/`MomentNm` retain backward-Euler endpoint-work semantics and explicitly
+refuse exact-ramp sources. Material coefficients remain frozen at the proposed
+temperature; no exact continuously varying-temperature solution is claimed.
+The existing bridge's endpoint dead-load convention is unchanged.
+
+G1/G3 regressions check analytic elastic/Maxwell ramp work and heat, mean-load
+response, later stress-free birth and relaxation, incompatible load-history
+refusals, and unchanged backward-Euler force/work identities.
+
 ## Native quadratic Maxwell force, contact and pressure drift
 
 `MixedViscoTetMotion::force_kick_candidate` integrates the accepted original

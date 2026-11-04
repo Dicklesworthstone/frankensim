@@ -29,9 +29,13 @@ fn finite(value: f64) -> Result<f64, DepositionError> {
 /// `CaloricPoint` owns admission of affine modulus and free thermal strain,
 /// and its getters include the actual retained branch history at each point.
 pub(super) fn layer_exchange<E>(
-    old: &Layer<'_>, next: &Layer<'_>, old_heat: &DepositedCell,
-    next_heat: &DepositedCell, binding: &LayerThermalBinding<'_>,
-    length_m: f64, energy: Energy,
+    old: &Layer<'_>,
+    next: &Layer<'_>,
+    old_heat: &DepositedCell,
+    next_heat: &DepositedCell,
+    binding: &LayerThermalBinding<'_>,
+    length_m: f64,
+    energy: Energy,
 ) -> Result<LayerThermalExchange, StripEnthalpyError<E>> {
     if old.geometry != next.geometry || old.birth_time_s != next.birth_time_s
         || old_heat.id != binding.cell || next_heat.id != binding.cell
@@ -71,7 +75,8 @@ pub(super) fn layer_exchange<E>(
         let next_ts = finite(after.mechanical().temperature_k()*after.mechanical_entropy_j_k())?;
         entropy_energy_change = finite(entropy_energy_change + finite(next_ts-old_ts)?)?;
     }
-    // Native identity: Δpsi + D + N = W + Cpsi + Wth, Wth=-sigma_new*Δf.
+    // Native identity: Δpsi + D + N = W + Cpsi + Wth, Wth=-sigma_work*Δf.
+    // sigma_work is the exact-ramp mean or backward-Euler endpoint stress.
     // Hence Qrev=-Cpsi-Wth-Δ(T*s), including the actual thermal eigenstrain work,
     // closes ΔU + ΔH + N = W + Qexternal without thermalizing numerical loss.
     let reversible_heat = finite(-energy.modulus_work-energy.thermal_strain_work

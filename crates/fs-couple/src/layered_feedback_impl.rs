@@ -63,9 +63,13 @@ pub(super) fn admit_bindings<'b, 'm, E>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn step_candidate<'t, 'm, S, E>(
-    thermal: &DepositionSimulation<'t>, strip: &LayeredStrip<'m>,
-    bindings: &[LayerThermalBinding<'_>], target_s: f64, control: Control,
-    config: StripEnthalpyConfig, initial_energy_increments_j: &[f64],
+    thermal: &DepositionSimulation<'t>,
+    strip: &LayeredStrip<'m>,
+    bindings: &[LayerThermalBinding<'_>],
+    target_s: f64,
+    control: Control,
+    config: StripEnthalpyConfig,
+    initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'t>) -> Result<ThermalCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<StripEnthalpyCandidate<'t, 'm, S>, StripEnthalpyError<E>> {
@@ -149,8 +153,14 @@ pub fn step_candidate<'t, 'm, S, E>(
     let (thermal_next, (strip_next, mechanical, layer_energy_j, source, deposited_heat_j,
         non_mechanical_heat_j, exchange), audit) = trial.accept(config.cell_energy_tolerance_j,
             config.thermal_energy_tolerance_j, checkpoint)?;
-    let force = match control.axial { AxialControl::Strain(_) => mechanical.axial_force_n, AxialControl::ForceN(n) => n };
-    let moment = match control.bending { BendingControl::CurvaturePerM(_) => mechanical.bending_moment_nm, BendingControl::MomentNm(m) => m };
+    let force = match control.axial {
+        AxialControl::Strain(_) => mechanical.work_conjugate_axial_force_n,
+        AxialControl::ForceN(n) | AxialControl::MeanForceN(n) => n,
+    };
+    let moment = match control.bending {
+        BendingControl::CurvaturePerM(_) => mechanical.work_conjugate_bending_moment_nm,
+        BendingControl::MomentNm(m) | BendingControl::MeanMomentNm(m) => m,
+    };
     let work = finite(strip.length_m() * finite(force * (strip_next.axial_strain()-strip.axial_strain())
         + moment * (strip_next.curvature_per_m()-strip.curvature_per_m()))?)?;
     let total = finite(exchange.mechanical_internal_energy_change_j

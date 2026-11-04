@@ -53,6 +53,129 @@ fn actual_layer_heat_enters_a_conservative_two_cell_transport_solve() {
 }
 
 #[test]
+fn exact_strain_ramp_work_and_physical_heat_reach_the_original_thermal_cells() {
+    use fs_material::thermovisco::HistoryIntegration;
+    let materials =
+        [material(5.0, 3e8, 1.0, 0.0), material(10.0, 1e8, 1.0, 0.0)].map(|m| Material {
+            mechanical: m
+                .mechanical
+                .with_history_integration(HistoryIntegration::ExactStrainRamp),
+            ..m
+        });
+    let conductance = 0.002;
+    let dt = 0.2;
+    let strain = 0.01;
+    let (heat, strip) = initial(&materials, conductance, vec![]);
+    let result = step_candidate(
+        &heat,
+        &strip,
+        &bindings(&materials),
+        dt,
+        stretched(strain),
+        config(),
+        &[0.0; 2],
+        coefficients,
+        || false,
+    )
+    .unwrap();
+    // Independent exact Maxwell ramp and conservative 2x2 heat-network solve.
+    // tau=1 s, modulus/shift fixed and no thermal eigenstrain in this fixture.
+    let decay_average = -(-dt).exp_m1() / dt;
+    let mean_factor = (1.0 - decay_average) / dt;
+    let losses = [3e8, 1e8].map(|e| {
+        VOLUME * e * strain * strain * (mean_factor - 0.5 * decay_average * decay_average)
+    });
+    let capacities = [MASS * 5.0, MASS * 10.0];
+    let gdt = conductance * dt;
+    let determinant = (capacities[0] + gdt) * (capacities[1] + gdt) - gdt * gdt;
+    let rise = [
+        ((capacities[1] + gdt) * losses[0] + gdt * losses[1]) / determinant,
+        (gdt * losses[0] + (capacities[0] + gdt) * losses[1]) / determinant,
+    ];
+    for i in 0..2 {
+        near(
+            result.thermal().temperature_k(CELLS[i]).unwrap(),
+            300.0 + rise[i],
+            1e-6,
+        );
+        near(
+            result.report().layer_energy_j[&LAYERS[i]].dissipated,
+            losses[i],
+            1e-12,
+        );
+    }
+    let expected_work = VOLUME * strain * strain * (1e8 + 4e8 * mean_factor);
+    near(
+        result.report().external_mechanical_work_j,
+        expected_work,
+        1e-12,
+    );
+    near(
+        result.report().deposited_heat_j,
+        losses.into_iter().sum(),
+        1e-12,
+    );
+    near(
+        result.report().total_energy_residual_j,
+        0.0,
+        config().total_energy_tolerance_j,
+    );
+    assert_eq!(
+        result.report().mechanical.energy_j.numerical_dissipation,
+        0.0
+    );
+    assert!(
+        result.report().mechanical.axial_force_n
+            > result.report().mechanical.work_conjugate_axial_force_n
+    );
+    assert_eq!(heat.time_s(), 0.0);
+    assert_eq!(strip.axial_strain(), 0.0);
+}
+
+#[test]
+fn mean_loads_close_coupled_work_using_mean_resultants_not_endpoint_reactions() {
+    use fs_material::thermovisco::HistoryIntegration;
+    let materials =
+        [material(5.0, 3e8, 1.0, 0.0), material(10.0, 1e8, 1.0, 0.0)].map(|m| Material {
+            mechanical: m
+                .mechanical
+                .with_history_integration(HistoryIntegration::ExactStrainRamp),
+            ..m
+        });
+    let (heat, strip) = initial(&materials, 0.002, vec![]);
+    let force = 1.0;
+    let moment = 0.0002;
+    let result = step_candidate(
+        &heat,
+        &strip,
+        &bindings(&materials),
+        0.2,
+        Control {
+            axial: AxialControl::MeanForceN(force),
+            bending: BendingControl::MeanMomentNm(moment),
+        },
+        config(),
+        &[0.0; 2],
+        coefficients,
+        || false,
+    )
+    .unwrap();
+    let mechanical = &result.report().mechanical;
+    near(mechanical.work_conjugate_axial_force_n, force, 1e-8);
+    near(mechanical.work_conjugate_bending_moment_nm, moment, 1e-10);
+    let work = LENGTH
+        * (force * result.strip().axial_strain() + moment * result.strip().curvature_per_m());
+    near(result.report().external_mechanical_work_j, work, 1e-12);
+    near(mechanical.energy_j.mechanical_work, work, 1e-12);
+    near(
+        result.report().total_energy_residual_j,
+        0.0,
+        config().total_energy_tolerance_j,
+    );
+    assert_eq!(mechanical.energy_j.numerical_dissipation, 0.0);
+}
+
+#[test]
 fn affine_modulus_and_retained_bending_history_share_the_original_two_cell_solve() {
     let slopes = [-0.002,0.001];
     let branches = [3e8,1e8];

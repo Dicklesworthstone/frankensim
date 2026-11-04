@@ -17,8 +17,8 @@
 //! Resolve a prescribed unloading ramp when its work matters: an instantaneous
 //! force jump can leave finite algorithmic dissipation even as dt approaches zero.
 
+use fs_material::thermovisco::{Energy, HistoryIntegration, Point, ThermoMaxwell};
 use std::collections::BTreeMap;
-use fs_material::thermovisco::{Energy, Point, ThermoMaxwell};
 
 /// Rectangle dimensions in the strip's local section frame (x along the strip).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,18 +37,33 @@ impl LayerGeometry {
     }
 }
 
-/// Axial displacement/strain restraint or applied tensile force.
+/// Axial displacement/strain restraint or explicitly timed tensile force.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AxialControl { Strain(f64), ForceN(f64) }
+pub enum AxialControl {
+    Strain(f64),
+    /// Endpoint force with the backward-Euler work convention.
+    ForceN(f64),
+    /// Interval-mean force conjugate to a linear strain ramp. Every active
+    /// layer must use `ExactStrainRamp`; the endpoint force remains an output.
+    /// This does not prescribe a constant force throughout the interval.
+    MeanForceN(f64),
+}
 /// Bending restraint or applied work-conjugate section moment.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BendingControl { CurvaturePerM(f64), MomentNm(f64) }
+pub enum BendingControl {
+    CurvaturePerM(f64),
+    /// Endpoint moment with the backward-Euler work convention.
+    MomentNm(f64),
+    /// Interval-mean moment conjugate to a linear curvature ramp. Every active
+    /// layer must use `ExactStrainRamp`; this is not an endpoint moment.
+    MeanMomentNm(f64),
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Control { pub axial: AxialControl, pub bending: BendingControl }
 impl Control {
     /// Fixed reference length and zero curvature. Reactions are outputs.
     pub const HELD: Self = Self { axial: AxialControl::Strain(0.0), bending: BendingControl::CurvaturePerM(0.0) };
-    /// No axial force or bending moment. This does not predict when adhesion fails.
+    /// Backward-Euler zero axial force and moment. This does not predict when adhesion fails.
     pub const RELEASED: Self = Self { axial: AxialControl::ForceN(0.0), bending: BendingControl::MomentNm(0.0) };
 }
 
@@ -108,13 +123,23 @@ pub struct LayeredStrip<'a> {
     budget: Budget,
 }
 
-/// Actual endpoint resultants, reactions and extensive work in joules.
+/// Actual endpoint resultants, work-conjugate resultants and extensive work in joules.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Report {
+    /// Actual endpoint section resultants, independently of the work convention.
     pub axial_force_n: f64,
     pub bending_moment_nm: f64,
+    /// Native stress integrated over area: interval mean for exact ramps and
+    /// endpoint for backward Euler. Multiply by length and strain increment
+    /// for axial work; never infer this force by dividing by a zero increment.
+    pub work_conjugate_axial_force_n: f64,
+    /// Native stress integrated with `-z`: multiply by length and curvature
+    /// increment for bending work. This may differ from the endpoint moment.
+    pub work_conjugate_bending_moment_nm: f64,
+    /// Endpoint reactions at prescribed strain/curvature constraints.
     pub axial_reaction_n: f64,
     pub bending_reaction_nm: f64,
+    /// Residual in the selected endpoint or interval-mean load equation.
     pub force_residual_n: f64,
     pub moment_residual_nm: f64,
     pub material_point_updates: usize,
@@ -166,13 +191,22 @@ impl<'a> LayeredStrip<'a> {
     /// linearization used by LayeredStrip::advance_to without aging history.
     /// Thermal/history offsets and axial/bending coupling are retained.
     /// Geometric stiffness is a beam-level effect and is not added here.
-    pub fn bending_response_at_force(&self, target_s: f64,
-        temperatures_k: &BTreeMap<u64, f64>, axial_force_n: f64,
-        mut checkpoint: impl FnMut() -> Result<(), Error>) -> Result<BendingResponse, Error> {
+    pub fn bending_response_at_force(
+        &self,
+        target_s: f64,
+        temperatures_k: &BTreeMap<u64, f64>,
+        axial_force_n: f64,
+        mut checkpoint: impl FnMut() -> Result<(), Error>,
+    ) -> Result<BendingResponse, Error> {
         checkpoint()?;
         if self.layers.is_empty() { return Err(Error::Invalid("unborn section has no bending compliance")); }
         let axial_force_n = finite(axial_force_n)?;
-        let (scale, k, history) = self.linearization(target_s-self.time_s, temperatures_k, &mut checkpoint)?;
+        let (scale, k, history) = self.linearization(
+            target_s - self.time_s,
+            temperatures_k,
+            false,
+            &mut checkpoint,
+        )?;
         let free = solve(k, [finite(axial_force_n-history[0])?, -history[1]], [None, None])?;
         let unit = solve(k, [0.0, 1.0], [None, None])?;
         let compliance = finite(unit[1]/scale/scale)?;
@@ -182,9 +216,9 @@ impl<'a> LayeredStrip<'a> {
             compliance_per_n_m2: compliance })
     }
 
-    fn linearization(&self, dt: f64, temperatures_k: &BTreeMap<u64, f64>,
+    fn linearization(&self, dt: f64, temperatures_k: &BTreeMap<u64, f64>, work_conjugate: bool,
         checkpoint: &mut impl FnMut() -> Result<(), Error>)
-        -> Result<(f64, [[f64; 2]; 2], [f64; 2]), Error> {
+    -> Result<(f64, [[f64; 2]; 2], [f64; 2]), Error>{
         positive(dt)?;
         if temperatures_k.len() != self.layers.len() || self.layers.keys().any(|id| !temperatures_k.contains_key(id)) {
             return Err(Error::Invalid("one endpoint temperature per active layer required"));
@@ -196,7 +230,8 @@ impl<'a> LayeredStrip<'a> {
         for (&id, layer) in &self.layers {
             checkpoint()?;
             for (point, z) in layer.points.iter().zip(layer.geometry.points()) {
-                let affine = point.linearize(temperatures_k[&id], dt)?;
+                let affine = if work_conjugate { point.linearize_work(temperatures_k[&id], dt)? }
+                    else { point.linearize(temperatures_k[&id], dt)? };
                 let b = [1.0, -z/scale]; let area = 0.5*layer.geometry.area_m2;
                 for i in 0..2 {
                     history[i] = finite(history[i]+area*b[i]*affine.offset_pa)?;
@@ -245,8 +280,10 @@ impl<'a> LayeredStrip<'a> {
             finite(z_m+0.5*self.curvature_per_m*x_m*x_m)?])
     }
 
-    /// One physical backward-Euler mechanics interval, using endpoint cell
-    /// temperatures. Exactly one temperature per active layer is required.
+    /// One mechanics interval with each original law's history integration and
+    /// endpoint-frozen material coefficients. Exactly one temperature per active
+    /// layer is required. Exact strain ramps admit prescribed kinematics or
+    /// explicit mean loads; endpoint dead-load work needs backward Euler.
     /// No accepted state is mutated by trials, refusals or cancellation.
     /// `checkpoint` can be bound directly to an executor Cx cancellation gate.
     pub fn advance_to(&self, target_s: f64, temperatures_k: &BTreeMap<u64, f64>,
@@ -271,10 +308,15 @@ impl<'a> LayeredStrip<'a> {
         Ok((next, report, layers))
     }
 
-    fn advance_recorded(&self, target_s: f64, temperatures_k: &BTreeMap<u64, f64>,
-        control: Control, config: Config, mut layer_reports: Option<&mut BTreeMap<u64, Energy>>,
-        mut checkpoint: impl FnMut() -> Result<(), Error>)
-        -> Result<(Self, Report), Error> {
+    fn advance_recorded(
+        &self,
+        target_s: f64,
+        temperatures_k: &BTreeMap<u64, f64>,
+        control: Control,
+        config: Config,
+        mut layer_reports: Option<&mut BTreeMap<u64, Energy>>,
+        mut checkpoint: impl FnMut() -> Result<(), Error>,
+    ) -> Result<(Self, Report), Error> {
         checkpoint()?;
         let dt = target_s-self.time_s; positive(dt)?;
         positive(config.force_tolerance_n)?; positive(config.moment_tolerance_nm)?;
@@ -282,14 +324,36 @@ impl<'a> LayeredStrip<'a> {
         if config.max_strain > 0.05 || config.max_rotation_rad > 0.1 {
             return Err(Error::Regime("small-strain/rotation ceiling cannot exceed 0.05 / 0.1 rad"));
         }
-        let (scale, k, history) = self.linearization(dt, temperatures_k, &mut checkpoint)?;
+        let mean_force = matches!(control.axial, AxialControl::MeanForceN(_));
+        let mean_moment = matches!(control.bending, BendingControl::MeanMomentNm(_));
+        let mean_load = mean_force || mean_moment;
+        let endpoint_load = matches!(control.axial, AxialControl::ForceN(_))
+            || matches!(control.bending, BendingControl::MomentNm(_));
+        for layer in self.layers.values() {
+            checkpoint()?;
+            match layer.points[0].law().history_integration() {
+                HistoryIntegration::ExactStrainRamp if endpoint_load => {
+                    return Err(Error::Invalid(
+                        "exact strain-ramp history requires kinematics or mean loads; endpoint load work is a different boundary history",
+                    ));
+                }
+                HistoryIntegration::BackwardEuler if mean_load => {
+                    return Err(Error::Invalid(
+                        "mean loads require exact strain-ramp integration in every active layer",
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let (scale, k, history) =
+            self.linearization(dt, temperatures_k, mean_load, &mut checkpoint)?;
         let (prescribed0, force) = match control.axial {
             AxialControl::Strain(e) => (Some(finite(e)?), 0.0),
-            AxialControl::ForceN(n) => (None, finite(n)?),
+            AxialControl::ForceN(n) | AxialControl::MeanForceN(n) => (None, finite(n)?),
         };
         let (prescribed1, moment) = match control.bending {
             BendingControl::CurvaturePerM(c) => (Some(finite(c*scale)?), 0.0),
-            BendingControl::MomentNm(m) => (None, finite(m)?),
+            BendingControl::MomentNm(m) | BendingControl::MeanMomentNm(m) => (None, finite(m)?),
         };
         let rhs = [finite(force-history[0])?, finite(moment/scale-history[1])?];
         let x = if self.layers.is_empty() {
@@ -314,6 +378,8 @@ impl<'a> LayeredStrip<'a> {
                 let step = layer.points[q].advance(temperatures_k[&id], strain-z*curvature, dt, tolerance)?;
                 report.axial_force_n += area*step.stress_pa;
                 report.bending_moment_nm -= area*z*step.stress_pa;
+                report.work_conjugate_axial_force_n += area*step.work_conjugate_stress_pa;
+                report.work_conjugate_bending_moment_nm -= area*z*step.work_conjugate_stress_pa;
                 add_energy(&mut report.energy_j, step.energy, volume);
                 if layer_reports.is_some() { add_energy(&mut layer_energy, step.energy, volume); }
                 report.material_point_updates += 1; updated.points[q] = step.point;
@@ -323,18 +389,25 @@ impl<'a> LayeredStrip<'a> {
         }
         next.time_s = target_s; next.strain = strain; next.curvature_per_m = curvature;
         if prescribed0.is_some() { report.axial_reaction_n = report.axial_force_n; }
-        else { report.force_residual_n = finite(report.axial_force_n-force)?; }
+        else { report.force_residual_n = finite((if mean_force {
+            report.work_conjugate_axial_force_n
+        } else { report.axial_force_n })-force)?; }
         if prescribed1.is_some() { report.bending_reaction_nm = report.bending_moment_nm; }
-        else { report.moment_residual_nm = finite(report.bending_moment_nm-moment)?; }
+        else { report.moment_residual_nm = finite((if mean_moment {
+            report.work_conjugate_bending_moment_nm
+        } else { report.bending_moment_nm })-moment)?; }
         finite(report.axial_force_n)?; finite(report.bending_moment_nm)?;
+        finite(report.work_conjugate_axial_force_n)?;
+        finite(report.work_conjugate_bending_moment_nm)?;
         if report.force_residual_n.abs() > config.force_tolerance_n
             || report.moment_residual_nm.abs() > config.moment_tolerance_nm {
             return Err(Error::Equilibrium { force_n: report.force_residual_n, moment_nm: report.moment_residual_nm });
         }
         // Independent global storage and work-conjugacy checks, not just a sum
         // of constitutive defects that could cancel or omit a material point.
-        let work = self.length_m*(report.axial_force_n*(strain-self.strain)
-            +report.bending_moment_nm*(curvature-self.curvature_per_m));
+        let work = self.length_m
+            * (report.work_conjugate_axial_force_n * (strain - self.strain)
+                + report.work_conjugate_bending_moment_nm * (curvature - self.curvature_per_m));
         let storage = finite(next.stored_energy_j()-self.stored_energy_j())?;
         let e = &mut report.energy_j;
         let defect = finite(storage+e.dissipated+e.numerical_dissipation
