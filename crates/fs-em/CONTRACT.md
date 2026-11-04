@@ -3726,3 +3726,29 @@ Snell refraction, coherent film/beam phase, source-owner compatibility, original
 alpha interpolation, evolving SI wavelength support and retained gap limits.
 Those complete material/FFT integration tests remain unexecuted without the
 constellation dependency checkouts.
+
+### Polarization correlations through finite optical apertures and shutters
+
+The same exposure/ensemble owners expose `measure_aperture_moments` and
+`measure_illumination_aperture_moments`: all 21 unique real uncentered field
+second moments, comprising symmetric EE/HH and full EH in the original
+Cartesian frame. The antisymmetric EH terms recover signed Poynting flux.
+These are not analytic coherency, Stokes parameters or absorbed detector power.
+
+`AngularSpectrumExposureApertureProjection` authors finite dimensionless real
+electric/magnetic analyzer weights without implicit normalization. Direct
+projection queries apply them to the original grouped double-double fields
+before center rotation and quadratic products. This retains weak crossed-
+analyzer signals that may vanish in post-hoc moment contractions; no general
+relative-error guarantee near every null is implied. Longitudinal/evanescent
+components, real/proper statistics, both illumination faces, source clocks,
+spatial/shutter kernels and original admission/cancellation remain shared.
+
+The original reading, full moments and direct projection require respectively
+12, 21 and 3 scalar products per ordered mode/frequency pair. Direct field
+projection costs O(NF), with no new material solve or FFT. Five new numerical
+tests pass alongside the original 12 aperture regressions, including independent
+space/time/phase quadrature, linear-analyzer scaling, basis rotation and a
+crossed-analyzer mean square near `5e-41`. Two additional original-source
+integration tests are committed but unrun without the sibling constellation;
+the native numerical probes do not execute Maxwell/material reconstruction.

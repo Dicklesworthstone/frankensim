@@ -56,6 +56,8 @@ pub use two_sided::{
 mod exposure;
 pub use exposure::{
     AngularSpectrumExposure, AngularSpectrumExposureApertureLimits,
+    AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
+    AngularSpectrumExposureApertureProjectionReading,
     AngularSpectrumExposureApertureReading, AngularSpectrumExposureEnsemble,
     AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureField,
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,

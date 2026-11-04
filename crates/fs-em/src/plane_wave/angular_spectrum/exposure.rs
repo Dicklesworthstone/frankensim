@@ -22,7 +22,9 @@ use sources::{ExposureLine, ExposureLines, ExposureSide};
 
 mod aperture;
 pub use aperture::{
-    AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureReading,
+    AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureMoments,
+    AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,
+    AngularSpectrumExposureApertureReading,
 };
 
 mod stress;

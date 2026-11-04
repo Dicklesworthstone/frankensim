@@ -11,6 +11,12 @@ use super::*;
 
 type FieldParts = [[Dd; 2]; 6];
 
+mod polarization;
+pub use polarization::{
+    AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
+    AngularSpectrumExposureApertureProjectionReading,
+};
+
 /// Additional bounds for a joint aperture/shutter observation.
 ///
 /// Pair work is N² times the sum of F² across the mean and factor banks, where
@@ -59,6 +65,7 @@ impl AngularSpectrumExposure<'_, '_, '_> {
             aperture,
             window,
             limits,
+            [Dd::ZERO; 9],
             &mut cancelled,
         )
     }
@@ -83,6 +90,7 @@ impl AngularSpectrumExposure<'_, '_, '_> {
             aperture,
             window,
             limits,
+            [Dd::ZERO; 9],
             &mut cancelled,
         )
     }
@@ -109,6 +117,7 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
             aperture,
             window,
             limits,
+            [Dd::ZERO; 9],
             &mut cancelled,
         )
     }
@@ -132,13 +141,14 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
             aperture,
             window,
             limits,
+            [Dd::ZERO; 9],
             &mut cancelled,
         )
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn measure<'e, 'b: 'e, 's: 'b, 'm: 's, I>(
+fn measure<'e, 'b: 'e, 's: 'b, 'm: 's, I, A: Accumulator>(
     anchor: &PlanarAngularSpectrum<'s, 'm>,
     banks: impl Fn() -> I,
     side: ExposureSide,
@@ -146,8 +156,9 @@ fn measure<'e, 'b: 'e, 's: 'b, 'm: 's, I>(
     aperture: AngularSpectrumAperture,
     window: HarmonicWindow,
     limits: AngularSpectrumExposureApertureLimits,
+    mut sum: A,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<AngularSpectrumExposureApertureReading, AngularSpectrumError>
+) -> Result<A::Output, AngularSpectrumError>
 where
     I: Iterator<Item = (&'e AngularSpectrumExposure<'b, 's, 'm>, bool)>,
 {
@@ -188,7 +199,7 @@ where
         real |= f != 0 && !is_proper;
         proper |= f != 0 && is_proper;
     }
-    admit(
+    admit::<A>(
         anchor.grid(),
         frequency_pairs,
         bank_workspace,
@@ -204,7 +215,6 @@ where
     let spatial_proper = proper
         .then(|| Spatial::<ProperKernel>::prepare(anchor, aperture, cancelled))
         .transpose()?;
-    let mut sum = [Dd::ZERO; 9];
     for (bank, is_proper) in banks() {
         poll(cancelled)?;
         if bank.frequency_count() == 0 {
@@ -236,26 +246,12 @@ where
             )?;
         }
     }
-    let values = sum.map(Dd::to_f64);
-    let normal_power_w = (sum[8] * Dd::from_f64(aperture.area_m2())).to_f64();
-    if values.iter().any(|v| !v.is_finite())
-        || values[..6].iter().any(|v| *v < 0.0)
-        || !normal_power_w.is_finite()
-    {
-        return Err(bad("aperture exposure moment is unrepresentable"));
-    }
+    let result = sum.finish(aperture)?;
     poll(cancelled)?;
-    Ok(AngularSpectrumExposureApertureReading {
-        mean: AngularSpectrumExposurePoint {
-            electric_mean_squared_v2_m2: [values[0], values[1], values[2]],
-            magnetic_mean_squared_a2_m2: [values[3], values[4], values[5]],
-            poynting_w_m2: [values[6], values[7], values[8]],
-        },
-        normal_power_w,
-    })
+    Ok(result)
 }
 
-fn admit(
+fn admit<A: Accumulator>(
     grid: AngularSpectrumGrid,
     frequency_pairs: usize,
     bank_workspace: usize,
@@ -292,8 +288,8 @@ fn admit(
             v.checked_add(
                 core::mem::size_of::<Spatial<RealKernel>>()
                     + core::mem::size_of::<Spatial<ProperKernel>>()
-                    + core::mem::size_of::<[Dd; 9]>()
-                    + core::mem::size_of::<AngularSpectrumExposureApertureReading>(),
+                    + core::mem::size_of::<A>()
+                    + core::mem::size_of::<A::Output>(),
             )
         })
         .ok_or_else(|| bad("aperture workspace overflow"))?;
@@ -310,6 +306,59 @@ trait Kernel: Copy {
     fn prepare(window: HarmonicWindow, a: f64, b: f64) -> Result<Self, AngularSpectrumError>;
     fn compose(self, other: Self) -> Self;
     fn product(self, a: [Dd; 2], b: [Dd; 2]) -> Dd;
+}
+
+// Each observation selects only its required contractions. The original
+// nine-moment query keeps its twelve products per pair; full correlations and
+// authored projections share all source, phase, area and shutter preparation.
+trait Accumulator {
+    type Output;
+    fn prepare_field(
+        &self,
+        _field: &mut [FieldParts],
+        _cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AngularSpectrumError> {
+        Ok(())
+    }
+    fn add<K: Kernel>(&mut self, kernel: K, a: &FieldParts, b: &FieldParts);
+    fn finish(
+        self,
+        aperture: AngularSpectrumAperture,
+    ) -> Result<Self::Output, AngularSpectrumError>;
+}
+
+impl Accumulator for [Dd; 9] {
+    type Output = AngularSpectrumExposureApertureReading;
+    fn add<K: Kernel>(&mut self, kernel: K, a: &FieldParts, b: &FieldParts) {
+        for c in 0..3 {
+            self[c] = self[c] + kernel.product(a[c], b[c]);
+            self[c + 3] = self[c + 3] + kernel.product(a[c + 3], b[c + 3]);
+            let (u, v) = ((c + 1) % 3, (c + 2) % 3);
+            self[c + 6] =
+                self[c + 6] + kernel.product(a[u], b[v + 3]) - kernel.product(a[v], b[u + 3]);
+        }
+    }
+    fn finish(
+        self,
+        aperture: AngularSpectrumAperture,
+    ) -> Result<Self::Output, AngularSpectrumError> {
+        let values = self.map(Dd::to_f64);
+        let normal_power_w = (self[8] * Dd::from_f64(aperture.area_m2())).to_f64();
+        if self.iter().any(|&v| !finite_dd(v))
+            || values[..6].iter().any(|v| *v < 0.0)
+            || !normal_power_w.is_finite()
+        {
+            return Err(bad("aperture exposure moment is unrepresentable"));
+        }
+        Ok(AngularSpectrumExposureApertureReading {
+            mean: AngularSpectrumExposurePoint {
+                electric_mean_squared_v2_m2: [values[0], values[1], values[2]],
+                magnetic_mean_squared_a2_m2: [values[3], values[4], values[5]],
+                poynting_w_m2: [values[6], values[7], values[8]],
+            },
+            normal_power_w,
+        })
+    }
 }
 
 /// Centered <cos(a)cos(b)> and <sin(a)sin(b)>; centered mixed means vanish.
@@ -447,13 +496,13 @@ fn pair_kernels<K: Kernel>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn accumulate_bank<K: Kernel>(
+fn accumulate_bank<K: Kernel, A: Accumulator>(
     bank: &AngularSpectrumExposure<'_, '_, '_>,
     spatial: &Spatial<K>,
     side: ExposureSide,
     distance: f64,
     window: HarmonicWindow,
-    sum: &mut [Dd; 9],
+    sum: &mut A,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
     let f = bank.frequency_count();
@@ -465,6 +514,7 @@ fn accumulate_bank<K: Kernel>(
         .map_err(|_| bad("aperture frequency field allocation failed"))?;
     for group in 0..f {
         let mut field = bank.frequency_modal_parts(group, side, distance, cancelled)?;
+        sum.prepare_field(&mut field, cancelled)?;
         if K::CENTER_FIELDS {
             center_fields(
                 &mut field,
@@ -481,11 +531,11 @@ fn accumulate_bank<K: Kernel>(
     integrate(spatial, &temporal, &fields, sum, cancelled)
 }
 
-fn integrate<K: Kernel>(
+fn integrate<K: Kernel, A: Accumulator>(
     spatial: &Spatial<K>,
     temporal: &[K],
     fields: &[Vec<FieldParts>],
-    sum: &mut [Dd; 9],
+    sum: &mut A,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
     let n = spatial.grid.width * spatial.grid.height;
@@ -500,14 +550,7 @@ fn integrate<K: Kernel>(
                         poll(cancelled)?;
                     }
                     let kernel = space.compose(temporal[a * f + b]);
-                    let (a, b) = (left[i], right[j]);
-                    for c in 0..3 {
-                        sum[c] = sum[c] + kernel.product(a[c], b[c]);
-                        sum[c + 3] = sum[c + 3] + kernel.product(a[c + 3], b[c + 3]);
-                        let (u, v) = ((c + 1) % 3, (c + 2) % 3);
-                        sum[c + 6] = sum[c + 6] + kernel.product(a[u], b[v + 3])
-                            - kernel.product(a[v], b[u + 3]);
-                    }
+                    sum.add(kernel, &left[i], &right[j]);
                 }
             }
         }

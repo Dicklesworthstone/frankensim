@@ -74,7 +74,7 @@ fn wave(amplitude: C64, backwards: bool) -> [C64; 6] {
 // Independent three-dimensional Simpson integration of the actual real field.
 // Proper factors are averaged over z={1,-1,i,-i}, whose joint moments are
 // exactly E[z]=E[z²]=0 and E[|z|²]=1. No analytic kernel is used by this oracle.
-fn reference(
+pub(super) fn reference_matrix(
     kx: &[f64],
     ky: &[f64],
     omega: &[f64],
@@ -82,7 +82,7 @@ fn reference(
     area: AngularSpectrumAperture,
     time: HarmonicWindow,
     proper: bool,
-) -> [f64; 9] {
+) -> [[f64; 6]; 6] {
     let steps = 24;
     let phases = if proper {
         vec![
@@ -103,7 +103,7 @@ fn reference(
             4.0
         }
     };
-    let mut sum = [0.0; 9];
+    let mut sum = [[0.0; 6]; 6];
     for ix in 0..=steps {
         let x = area.origin_m()[0] + area.extent_m()[0] * ix as f64 / steps as f64;
         for iy in 0..=steps {
@@ -129,18 +129,37 @@ fn reference(
                 }
                 for z in &phases {
                     let real = phasor.map(|v| (v * *z).re);
-                    for c in 0..3 {
-                        sum[c] += w * real[c] * real[c];
-                        sum[c + 3] += w * real[c + 3] * real[c + 3];
-                        let (a, b) = ((c + 1) % 3, (c + 2) % 3);
-                        sum[c + 6] += w * (real[a] * real[b + 3] - real[b] * real[a + 3]);
+                    for i in 0..6 {
+                        for j in 0..6 {
+                            sum[i][j] += w * real[i] * real[j];
+                        }
                     }
                 }
             }
         }
     }
     let normalization = (3.0 * steps as f64).powi(3) * phases.len() as f64;
-    sum.map(|v| v / normalization)
+    sum.map(|row| row.map(|v| v / normalization))
+}
+
+fn reference(
+    kx: &[f64],
+    ky: &[f64],
+    omega: &[f64],
+    fields: &[Vec<[C64; 6]>],
+    area: AngularSpectrumAperture,
+    time: HarmonicWindow,
+    proper: bool,
+) -> [f64; 9] {
+    let matrix = reference_matrix(kx, ky, omega, fields, area, time, proper);
+    let mut result = [0.0; 9];
+    for c in 0..3 {
+        result[c] = matrix[c][c];
+        result[c + 3] = matrix[c + 3][c + 3];
+        let (a, b) = ((c + 1) % 3, (c + 2) % 3);
+        result[c + 6] = matrix[a][b + 3] - matrix[b][a + 3];
+    }
+    result
 }
 
 #[test]
@@ -329,9 +348,9 @@ fn query_budgets_overflow_and_cancellation_are_bounded() {
         maximum_mode_frequency_pairs: 64,
         maximum_workspace_bytes: 1 << 20,
     };
-    assert!(admit(grid(2, 2), 4, 128, true, true, limits).is_ok());
+    assert!(admit::<[Dd; 9]>(grid(2, 2), 4, 128, true, true, limits).is_ok());
     assert!(
-        admit(
+        admit::<[Dd; 9]>(
             grid(2, 2),
             4,
             128,
@@ -345,7 +364,7 @@ fn query_budgets_overflow_and_cancellation_are_bounded() {
         .is_err()
     );
     assert!(
-        admit(
+        admit::<[Dd; 9]>(
             grid(2, 2),
             4,
             128,
@@ -358,7 +377,7 @@ fn query_budgets_overflow_and_cancellation_are_bounded() {
         )
         .is_err()
     );
-    assert!(admit(grid(usize::MAX, 2), 4, 128, true, true, limits).is_err());
+    assert!(admit::<[Dd; 9]>(grid(usize::MAX, 2), 4, 128, true, true, limits).is_err());
     let area = AngularSpectrumAperture::try_new([0.0; 2], [1.0; 2]).unwrap();
     assert!(matches!(
         Spatial::<RealKernel>::from_axes(grid(2, 1), area, |i| i as f64, |_| 0.0, &mut || true),
