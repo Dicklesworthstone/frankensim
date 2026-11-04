@@ -78,7 +78,7 @@ pub(super) fn append_groups(
             }
             let next_end = next + bindings[next..end].partition_point(|row| row.channel == channel);
             let route = inner.film_routes.iter().position(|route|
-                route.sliding_layers.is_none() && route.film == film_index
+                route.is_squeeze() && route.film == film_index
                     && route.channel == Some(channel) && route.layers.is_some()
             ).ok_or_else(|| invalid(
                 "layer feedback requires an existing retained profile and heat route for every channel",

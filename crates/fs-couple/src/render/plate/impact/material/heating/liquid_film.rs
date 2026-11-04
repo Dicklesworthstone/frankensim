@@ -249,7 +249,7 @@ impl<'m> LiquidFilmImpactSystem<'m> {
         let maximum_layers: usize = inner
             .film_routes
             .iter()
-            .filter(|route| route.sliding_layers.is_none())
+            .filter(|route| route.is_squeeze())
             .filter_map(|route| route.layers.as_ref())
             .map(|route| route.profile.layers().len())
             .sum();
@@ -322,7 +322,7 @@ impl<'m> LiquidFilmImpactSystem<'m> {
         }
         if groups.iter().any(|group| {
             inner.film_routes.iter().any(|route| {
-                route.sliding_layers.is_none() && route.film == group.film && route.layers.is_some()
+                route.is_squeeze() && route.film == group.film && route.layers.is_some()
             })
         }) {
             return Err(invalid(

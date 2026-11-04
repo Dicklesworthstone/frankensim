@@ -19,8 +19,11 @@ pub mod liquid_film;
 pub mod layered_film;
 /// Complete pressure/shear layer heat on the original sliding-film clock.
 pub mod sliding_film;
+/// Generalized-Newtonian passage work on the original mechanical/thermal step.
+pub mod power_law_film;
 pub use layered_film::SqueezeFilmLayerHeatRoute;
 pub use sliding_film::SlidingFilmLayerHeatRoute;
+pub use power_law_film::PowerLawFilmHeatRoute;
 use layered_film::LayerHeatRoute;
 use fs_exec::CancelGate;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
@@ -116,9 +119,15 @@ pub struct SqueezeFilmHeatRoute {
 }
 #[derive(Clone)]
 struct FilmRoute {
+    kind: FilmRouteKind,
     film: usize, channel: Option<usize>, a: usize, b: usize, fraction: f64,
     layers: Option<LayerHeatRoute>,
     sliding_layers: Option<Vec<usize>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FilmRouteKind { Squeeze, Sliding, PowerLaw }
+impl FilmRoute {
+    fn is_squeeze(&self) -> bool { self.kind == FilmRouteKind::Squeeze }
 }
 
 /// Explicit destinations for ONE hydraulic passage's actual viscous work.
@@ -306,14 +315,43 @@ impl<'a> HeatedImpactSystem<'a> {
         sliding_routes: Vec<SlidingFilmLayerHeatRoute>,
         memory_routes: Vec<RelaxationHeatRoute>, heat_tolerance_j: f64,
     ) -> Result<Self, ImpactError> {
+        Self::new_with_power_law_losses(mechanics, stores, routes, film_routes,
+            channel_routes, layer_routes, sliding_routes, Vec::new(), memory_routes,
+            heat_tolerance_j)
+    }
+
+    /// Route actual generalized-Newtonian film work alongside existing losses.
+    ///
+    /// Power-law film indices retain their own original insertion order. Each
+    /// selected island is evaluated once at the SAME midpoint geometry and
+    /// work-conjugate velocity used by mechanics. Whole-island and individual
+    /// channel routes cannot overlap. Their heat is native physical Q*delta_p;
+    /// the nonlinear work residual is never added to it or clipped away.
+    ///
+    /// The original laws and source coefficients remain frozen during a step.
+    /// The existing adiabatic, coupled-transport and thermal-network owners
+    /// publish all stores and mechanical histories together. This adds no new
+    /// fluid inventory, wall partition, thermal clock or rheology-temperature
+    /// feedback. Selected losses are transferred internally, not charged twice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_power_law_losses(mechanics: PreparedImpactSystem,
+        stores: Vec<CaloricReservoir<'a>>, routes: Vec<ContactHeatRoute>,
+        film_routes: Vec<SqueezeFilmHeatRoute>, channel_routes: Vec<SqueezeFilmChannelHeatRoute>,
+        layer_routes: Vec<SqueezeFilmLayerHeatRoute>,
+        sliding_routes: Vec<SlidingFilmLayerHeatRoute>,
+        power_law_routes: Vec<PowerLawFilmHeatRoute>,
+        memory_routes: Vec<RelaxationHeatRoute>, heat_tolerance_j: f64,
+    ) -> Result<Self, ImpactError> {
         if stores.is_empty() || stores.len()>64
             || (routes.is_empty() && film_routes.is_empty() && channel_routes.is_empty()
-                && layer_routes.is_empty() && sliding_routes.is_empty() && memory_routes.is_empty())
+                && layer_routes.is_empty() && sliding_routes.is_empty()
+                && power_law_routes.is_empty() && memory_routes.is_empty())
             || routes.len()>32 || film_routes.len()>4 || memory_routes.len()>256
             || channel_routes.len().saturating_add(layer_routes.len()).saturating_add(sliding_routes.len())
+                .saturating_add(power_law_routes.len())
                 >4*fs_tribo::resistive_film::MAX_CHANNELS
             || !positive(heat_tolerance_j) {
-            return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts, four normal/sliding films with bounded channels and 256 material arms, at least one route and a positive joule allowance"));
+            return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts, four incompressible films with bounded channels and 256 material arms, at least one route and a positive joule allowance"));
         }
         for (i,s) in stores.iter().enumerate() {
             if stores[..i].iter().any(|old|old.key==s.key) {
@@ -334,10 +372,10 @@ impl<'a> HeatedImpactSystem<'a> {
         }
         // Canonical contact order makes input route ordering immaterial.
         compiled.sort_by_key(|r|r.contact);
-        let mut compiled_films: Vec<FilmRoute> = Vec::with_capacity(film_routes.len()+channel_routes.len()+layer_routes.len()+sliding_routes.len());
+        let mut compiled_films: Vec<FilmRoute> = Vec::with_capacity(film_routes.len()+channel_routes.len()+layer_routes.len()+sliding_routes.len()+power_law_routes.len());
         for route in film_routes {
             if route.film >= mechanics.squeeze_film_count()
-                || compiled_films.iter().any(|r| r.sliding_layers.is_none() && r.film == route.film) {
+                || compiled_films.iter().any(|r| r.is_squeeze() && r.film == route.film) {
                 return Err(invalid("film heat must name an existing pressure island exactly once"));
             }
             if !route.fraction_to_a.is_finite() || !(0.0..=1.0).contains(&route.fraction_to_a) {
@@ -345,13 +383,13 @@ impl<'a> HeatedImpactSystem<'a> {
             }
             let a=stores.iter().position(|s|s.key==route.to_a).ok_or_else(||invalid("unknown first film heat store"))?;
             let b=stores.iter().position(|s|s.key==route.to_b).ok_or_else(||invalid("unknown second film heat store"))?;
-            compiled_films.push(FilmRoute {film:route.film,channel:None,a,b,fraction:route.fraction_to_a,layers:None,sliding_layers:None});
+            compiled_films.push(FilmRoute {kind:FilmRouteKind::Squeeze,film:route.film,channel:None,a,b,fraction:route.fraction_to_a,layers:None,sliding_layers:None});
         }
         for route in channel_routes {
             let film=mechanics.squeeze_film(route.film)
                 .ok_or_else(||invalid("channel heat names an absent pressure island"))?;
             if route.channel>=film.channel_count() || compiled_films.iter().any(|r|
-                r.sliding_layers.is_none() && r.film==route.film
+                r.is_squeeze() && r.film==route.film
                     && (r.channel.is_none() || r.channel==Some(route.channel))) {
                 return Err(invalid("channel heat must name an existing passage once without a whole-film overlap"));
             }
@@ -360,27 +398,30 @@ impl<'a> HeatedImpactSystem<'a> {
             }
             let a=stores.iter().position(|s|s.key==route.to_a).ok_or_else(||invalid("unknown first channel heat store"))?;
             let b=stores.iter().position(|s|s.key==route.to_b).ok_or_else(||invalid("unknown second channel heat store"))?;
-            compiled_films.push(FilmRoute {film:route.film,channel:Some(route.channel),a,b,fraction:route.fraction_to_a,layers:None,sliding_layers:None});
+            compiled_films.push(FilmRoute {kind:FilmRouteKind::Squeeze,film:route.film,channel:Some(route.channel),a,b,fraction:route.fraction_to_a,layers:None,sliding_layers:None});
         }
         for route in layer_routes {
             let film=mechanics.squeeze_film(route.film)
                 .ok_or_else(||invalid("layer heat names an absent pressure island"))?;
             if route.channel>=film.channel_count() || compiled_films.iter().any(|r|
-                r.sliding_layers.is_none() && r.film==route.film
+                r.is_squeeze() && r.film==route.film
                     && (r.channel.is_none() || r.channel==Some(route.channel))) {
                 return Err(invalid("layer heat must name an existing passage once without another film/channel route"));
             }
             let index=route.film;let channel=route.channel;
             let layers=LayerHeatRoute::compile(film,route,&stores)?;
             let first=layers.destinations[0];
-            compiled_films.push(FilmRoute {film:index,channel:Some(channel),a:first,b:first,
+            compiled_films.push(FilmRoute {kind:FilmRouteKind::Squeeze,film:index,channel:Some(channel),a:first,b:first,
                 fraction:1.0,layers:Some(layers),sliding_layers:None});
         }
         for route in sliding_routes {
             compiled_films.push(sliding_film::compile(&mechanics,route,&stores,&compiled_films)?);
         }
-        // Keep independent normal/sliding index spaces canonical and contiguous.
-        compiled_films.sort_by_key(|r|(r.sliding_layers.is_some(),r.film,r.channel));
+        for route in power_law_routes {
+            compiled_films.push(power_law_film::compile(&mechanics,route,&stores,&compiled_films)?);
+        }
+        // Keep each original constitutive owner's index space contiguous.
+        compiled_films.sort_by_key(|r|(r.kind,r.film,r.channel));
         let mut compiled_memory: Vec<MemoryRoute> = Vec::with_capacity(memory_routes.len());
         for route in memory_routes {
             if route.branch >= mechanics.relaxation_branch_count()
@@ -402,7 +443,7 @@ impl<'a> HeatedImpactSystem<'a> {
     /// Exact prescribed viscosity profile retained by a selected layered route.
     pub fn layer_heat_profile(&self, film: usize, channel: usize)
         -> Option<&fs_tribo::resistive_film::stratified::GapViscosityProfile> {
-        self.film_routes.iter().find(|r|r.sliding_layers.is_none()
+        self.film_routes.iter().find(|r|r.is_squeeze()
             && r.film==film && r.channel==Some(channel))
             .and_then(|r|r.layers.as_ref()).map(|r|&r.profile)
     }
@@ -429,7 +470,7 @@ impl<'a> HeatedImpactSystem<'a> {
         let Self {mechanics,stores,routes,film_routes,memory_routes,candidate,next_received,next_correction,heat,heat_tolerance_j}=self;
         let mut deposited=0.0; let mut thermal_change=0.0;
         let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,effort,record| {
-            deposited=stage_heat(system,next,velocity,effort,record,routes,film_routes,memory_routes,heat)?;
+            deposited=stage_heat(system,next,velocity,effort,record,routes,film_routes,memory_routes,heat,gate)?;
             thermal_change=0.0;
             for (i,store) in stores.iter().enumerate() {
                 if gate.is_requested() {return Err(ImpactError::Cancelled);}
@@ -475,7 +516,8 @@ fn positive(v:f64)->bool {v.is_finite() && v>0.0}
 fn key_valid(key:&str)->bool {!key.trim().is_empty() && key.len()<=128}
 
 fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], effort:&[f64], record:PreparedStepRecord,
-    routes:&[Route], film_routes:&[FilmRoute], memory_routes:&[MemoryRoute], heat:&mut[f64]) -> Result<f64,ImpactError> {
+    routes:&[Route], film_routes:&[FilmRoute], memory_routes:&[MemoryRoute], heat:&mut[f64],
+    gate:&CancelGate) -> Result<f64,ImpactError> {
     let n=system.modes;
     let mut midpoint=[0.0;2*MAX_IMPACT_MODES];let mut power=[0.0;32];
     for i in 0..2*n {midpoint[i]=0.5*(system.x[i]+next[i]);}
@@ -493,7 +535,7 @@ fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], effort:&[f64],
         }
         heat[r.a]+=a;heat[r.b]+=b;deposited+=q;
     }
-    if film_routes.iter().any(|route|route.sliding_layers.is_none()) {
+    if film_routes.iter().any(FilmRoute::is_squeeze) {
         let mut configuration=[0.0;MAX_IMPACT_MODES];
         let mut force=[0.0;MAX_IMPACT_MODES];
         let mut pressure=[0.0;fs_tribo::resistive_film::MAX_CELLS];
@@ -502,7 +544,7 @@ fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], effort:&[f64],
         let mut current_film=None;
         let mut total_power=0.0;
         for i in 0..n {configuration[i]=midpoint[2*i];}
-        for r in film_routes.iter().filter(|route|route.sliding_layers.is_none()) {
+        for r in film_routes.iter().filter(|route|route.is_squeeze()) {
             let film=&system.squeeze_films[r.film];
             if current_film!=Some(r.film) {
                 let report=if r.channel.is_some() {
@@ -531,6 +573,9 @@ fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], effort:&[f64],
     }
     if film_routes.iter().any(|route|route.sliding_layers.is_some()) {
         deposited+=sliding_film::stage(system,&midpoint[..2*n],velocity,film_routes,heat)?;
+    }
+    if film_routes.iter().any(|route|route.kind==FilmRouteKind::PowerLaw) {
+        deposited+=power_law_film::stage(system,&midpoint[..2*n],velocity,film_routes,heat,gate)?;
     }
     if !memory_routes.is_empty() {
         let memory=system.relaxation.as_ref()

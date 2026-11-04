@@ -10,7 +10,7 @@ use fs_tribo::resistive_film::shear::{MAX_LAYER_REPORTS, ShearChannelReport};
 use fs_tribo::resistive_film::{MAX_CELLS, MAX_CHANNELS};
 
 use super::{
-    CaloricReservoir, FilmRoute, ImpactError, ImpactSystem, MAX_IMPACT_MODES, PreparedImpactSystem,
+    CaloricReservoir, FilmRoute, FilmRouteKind, ImpactError, ImpactSystem, MAX_IMPACT_MODES, PreparedImpactSystem,
     invalid,
 };
 
@@ -63,6 +63,7 @@ pub(super) fn compile(
     }
     let first = destinations[0];
     Ok(FilmRoute {
+        kind: FilmRouteKind::Sliding,
         film: route.film,
         channel: Some(route.channel),
         a: first,

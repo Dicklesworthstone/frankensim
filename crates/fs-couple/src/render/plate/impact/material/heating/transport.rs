@@ -137,7 +137,7 @@ impl<'a> HeatedImpactSystem<'a> {
         let mut inventories=Vec::with_capacity(stores.len());
         let (mut deposited,mut change,mut boundary)=(0.0,0.0,0.0);
         let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,effort,record| {
-            deposited=stage_heat(system,next,velocity,effort,record,routes,film_routes,memory_routes,heat)?;
+            deposited=stage_heat(system,next,velocity,effort,record,routes,film_routes,memory_routes,heat,gate)?;
             if gate.is_requested() {return Err(ImpactError::Cancelled);}
             let inputs:Vec<_>=stores.iter().enumerate().map(|(i,s)|ReservoirThermalInput {
                 key:&s.key,thermal:UniformEnthalpyStepInput {

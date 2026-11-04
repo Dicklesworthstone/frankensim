@@ -39,8 +39,10 @@ impl ImpactSystem {
     /// bounded work and closure controls. Original mechanical cancellation
     /// and final endpoint admission remain authoritative.
     ///
-    /// This stationary-wall, full-film reduction does not add heat routing,
-    /// sliding entrainment, temperature feedback, cavitation or fluid inertia.
+    /// Its physical work can be routed through the existing material heating
+    /// owner with `PowerLawFilmHeatRoute`. This stationary-wall, full-film
+    /// reduction retains frozen laws; it adds no sliding entrainment,
+    /// temperature feedback, cavitation or fluid inertia.
     pub fn with_power_law_film(mut self, film: PowerLawFilm) -> Result<Self, ImpactError> {
         self.require_recomposition_without_mapped_memory()?;
         let geometry = film.pressure_operator();

@@ -26294,9 +26294,39 @@ The native owner refuses sealed pockets, invalid geometry, excessive
 pressure, unrepresentable terms, or failed flow/work convergence before
 the mechanical transaction publishes. Original cancellation and mechanical
 force/energy gates continue to govern accepted state and time. This is a
-stationary-wall, full-film reduction with prescribed laws; heat routing,
-temperature evolution, cavitation, inertia, and non-Newtonian sliding are
-separate capabilities.
+stationary-wall, full-film reduction with prescribed laws. Physical film work
+can be routed into finite material enthalpy as described below; temperature
+feedback, cavitation, inertia, and non-Newtonian sliding remain separate.
+
+### Generalized-Newtonian film work in finite material enthalpy
+
+`HeatedImpactSystem::new_with_power_law_losses` adds explicit
+`PowerLawFilmHeatRoute` destinations for a complete original power-law pressure
+island or selected original channels. Squeeze, sliding, and power-law insertion
+indices remain distinct. Duplicate channels, whole-island/channel overlap,
+absent constitutive owners, and invalid thermal destinations or partitions
+refuse before stepping.
+
+Each selected island uses its original nonlinear evaluator once during heat
+staging, at the same midpoint geometry and actual discrete-gradient velocity
+as mechanics. Physical heat is `dt * Q * delta_p`; the separate numerical work
+defect is not deposited. Original iteration/work controls and bounded
+cancellation checks remain active. The common finite-enthalpy, coupled-transport,
+and thermal-network paths retain one accepted mechanical/thermal clock and
+publish all owners together.
+
+Unselected work retains its mechanical-loss ownership. Selected heat transfers
+internally once and is deducted once from remaining mechanical loss. Rheology
+coefficients remain frozen; this does not infer temperature feedback, wall/fluid
+partition, fluid inventory, sliding entrainment, or cavitation.
+
+Four focused regression groups cover independently integrated thinning,
+Newtonian and thickening shear work, finite caloric and momentum balances,
+selected-channel ownership and canonical ordering, thermal-carrier continuation,
+and late-cancellation/domain rollback. New files passed source formatting and
+scoped whitespace checks before an executor outage. Recovered manual patches
+were reviewed and read back through GitHub; native compilation and execution
+remain unverified.
 
 Focused regressions exercise an above-core thinning law against independently
 integrated stress profiles and a scalar discrete-gradient step, reference
