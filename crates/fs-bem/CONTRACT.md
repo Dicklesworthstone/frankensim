@@ -563,6 +563,22 @@ with a left-preconditioned norm. No SPAI, Calderon or transpose-solve claim is
 made. FMM's existing kD<=10, translation, coefficient and near-pair caps remain
 in force, with typed refusals and no dense fallback.
 
+Each iterative source solve divides its actual assembled `Bq` by the largest
+absolute real or imaginary component before entering the unchanged GMRES
+recurrence. This scalar normalization prevents a nonzero weak source from
+falsely converging to silence through squared-norm underflow, and avoids norm
+overflow for strong representable drives. It does not change the operator,
+relative tolerance or iteration budget. Every checkpoint retains the scale;
+both accepted and unconverged pressures restore it after right preconditioning.
+Original boundary velocities stay in m/s, and Robin velocity recovery and
+radiated-work accounting consume physical pressure. An exactly zero RHS keeps
+its zero-iteration, zero-residual path. No physical amplitude floor or clipping
+is introduced; overflow/underflow already incurred while assembling the RHS
+is not recovered, and linear acoustics does not acquire a large-signal claim.
+Focused G0/G3/G5 regressions in `tests/iterative.rs` cover complex-drive
+homogeneity, tiny and large RHS ranges, quadratic power, Robin velocity,
+unconverged physical previews, exact silence and checkpoint replay.
+
 `IterativeOptions::near_field_cache_bytes` caches the double and mixed
 operators' adjacent-leaf pair values once per prepared operator, half the
 budget each. The default is 512 MiB.

@@ -1,5 +1,6 @@
 //! G0/G1/G2/G3/G4/G5 qualification of the actual FMM Burton-Miller solve.
 //! Large tests are intentional: run release, --test-threads=1, on ts1/trj.
+use fs_bem::helmholtz::bc::{Admittance, PreparedIterativeBoundary};
 use fs_bem::helmholtz::iterative::{
     IterativeError, IterativeOptions, IterativeRadiation, Preconditioner, ResourceReceipt,
     solve_radiation_iterative,
@@ -400,6 +401,129 @@ fn bem_gmres_resume_bitwise() {
 }
 
 #[test]
+fn bem_iterative_preserves_complex_drive_amplitude_and_robin_work() {
+    let surface = SpherePanels::icosphere(1.0, 1).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let o = IterativeOptions {
+        tol: 1e-10,
+        max_iters: 120,
+        ..opts()
+    };
+    let v = velocity(&surface);
+    let beta = vec![C64::new(0.2, 0.1); v.len()];
+    for law in [
+        Admittance::Rigid,
+        Admittance::Local {
+            beta: &beta,
+            declared_active: false,
+        },
+    ] {
+        let op = PreparedIterativeBoundary::new(
+            &surface,
+            1.0,
+            Medium::air(),
+            law,
+            Formulation::BurtonMiller,
+            &o,
+            &gate,
+        )
+        .unwrap();
+        let (reference, _, _) = op.solve(&v, &gate).unwrap();
+        // Squaring the tiny RHS underflows; summing the large squared RHS
+        // overflows even though its physical pressures AND powers are finite.
+        // These test floating-point range, not a large-signal acoustic model.
+        for scale in [2.0_f64.powi(-600), 0.25, -2.0, 2.0_f64.powi(504)] {
+            let driven: Vec<_> = v.iter().map(|value| value.scale(scale)).collect();
+            let (actual, report, _) = op.solve(&driven, &gate).unwrap();
+            assert!(report.converged_euclidean() && report.iters > 0);
+            let field = &actual.radiation;
+            let expected = &reference.radiation;
+            let unscale = |values: &[C64]| -> Vec<C64> {
+                values
+                    .iter()
+                    .map(|value| C64::new(value.re / scale, value.im / scale))
+                    .collect()
+            };
+            assert!(field.pressure.iter().any(|value| *value != C64::ZERO));
+            assert!(relative(&unscale(&field.pressure), &expected.pressure) < 2e-9);
+            // Robin velocity must use physical pressure, not normalized GMRES
+            // coordinates. A rigid boundary retains its exact supplied drive.
+            assert!(relative(&unscale(&field.velocity), &expected.velocity) < 2e-9);
+            if matches!(law, Admittance::Rigid) {
+                assert_eq!(bits(&field.velocity), bits(&driven));
+            }
+            for (power, expected_power) in [
+                (field.radiated_power, expected.radiated_power),
+                (actual.absorbed_power_w, reference.absorbed_power_w),
+                (actual.driving_power_w, reference.driving_power_w),
+                (
+                    field.power_diagnostics.apparent_power,
+                    expected.power_diagnostics.apparent_power,
+                ),
+            ] {
+                assert!(power.is_finite());
+                if scale.abs() >= 0.25 {
+                    if expected_power == 0.0 {
+                        assert_eq!(power, 0.0);
+                    } else {
+                        assert!((power / scale / scale / expected_power - 1.0).abs() < 4e-9);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bem_iterative_tiny_drive_keeps_physical_preview_and_checkpoint() {
+    let surface = SpherePanels::icosphere(1.0, 1).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let o = IterativeOptions {
+        restart: 1,
+        tol: 1e-10,
+        max_iters: 600,
+        ..opts()
+    };
+    let op = IterativeRadiation::prepare(
+        &surface,
+        1.0,
+        Medium::air(),
+        Formulation::BurtonMiller,
+        &o,
+        &gate,
+    )
+    .unwrap();
+    let v = velocity(&surface);
+    let mut unit = op.start(&v, &gate).unwrap();
+    op.advance(&mut unit, 1, &gate).unwrap();
+    let Err(IterativeError::NotConverged { pressure: unit, .. }) = op.finish(&unit) else {
+        panic!("one Arnoldi update must leave this nonuniform source unresolved");
+    };
+    let scale = 2.0_f64.powi(-600);
+    let driven: Vec<_> = v.iter().map(|value| value.scale(scale)).collect();
+    let initial = op.start(&driven, &gate).unwrap();
+    let mut resumed = initial.clone();
+    op.advance(&mut resumed, 1, &gate).unwrap();
+    let Err(IterativeError::NotConverged { pressure, .. }) = op.finish(&resumed) else {
+        panic!("a tiny source must not falsely converge to silence");
+    };
+    let preview: Vec<_> = pressure
+        .iter()
+        .map(|value| C64::new(value.re / scale, value.im / scale))
+        .collect();
+    assert!(relative(&preview, &unit) < 1e-12);
+    op.advance(&mut resumed, 599, &gate).unwrap();
+    let mut uninterrupted = initial;
+    op.advance(&mut uninterrupted, 600, &gate).unwrap();
+    let (a, ar, _) = op.finish(&resumed).unwrap();
+    let (b, br, _) = op.finish(&uninterrupted).unwrap();
+    assert_eq!(bits(&a.pressure), bits(&b.pressure));
+    assert_eq!(bits(&a.velocity), bits(&driven));
+    assert_eq!(ar.iters, br.iters);
+    assert_eq!(ar.history, br.history);
+}
+
+#[test]
 fn bem_near_field_cache_is_bitwise() {
     // The default caches both matvec operators' adjacent-leaf pairs; zero and
     // a budget below the cache disable it. All three solves are bit-identical.
@@ -690,6 +814,11 @@ fn bem_iterative_input_and_near_storage_boundaries() {
             .unwrap()
             .converged_euclidean()
     );
+    assert_eq!(zero.iterations(), 0);
+    let (silent, report, _) = op.finish(&zero).unwrap();
+    assert_eq!(report.rel_residual, 0.0);
+    assert_eq!(silent.radiated_power, 0.0);
+    assert!(silent.velocity.iter().all(|v| *v == C64::ZERO));
     assert!(
         op.finish(&zero)
             .unwrap()

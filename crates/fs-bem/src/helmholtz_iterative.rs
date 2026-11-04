@@ -16,9 +16,9 @@
 
 use super::triangle_rule::{NearRule, triangle_rule_pair};
 use super::{
-    Formulation, GL4_W, GL4_X, HelmholtzError, MAX_DENSE_PANELS, Medium,
-    PanelRule, RadiationSolution, admit_iterative_resolution, alpha_for, evaluate_radiated_power,
-    kernels, self_terms, surface_fingerprint, triangle_is_near, triangle_self_terms,
+    Formulation, GL4_W, GL4_X, HelmholtzError, MAX_DENSE_PANELS, Medium, PanelRule,
+    RadiationSolution, admit_iterative_resolution, alpha_for, evaluate_radiated_power, kernels,
+    self_terms, surface_fingerprint, triangle_is_near, triangle_self_terms,
     triangle_weak_influence, triangle_weak_influence_with_rule,
 };
 use crate::{BemError, panel3d::SpherePanels};
@@ -588,6 +588,9 @@ pub struct IterativeRadiation<'a> {
 pub struct IterativeState {
     gmres: GmresState,
     rhs: Vec<f64>,
+    // RHS and GMRES coordinates are divided by this positive physical scale.
+    // Retain it in every checkpoint and restore it AFTER right preconditioning.
+    rhs_scale: f64,
     velocity: Vec<C64>,
     stamp: u64,
     matvecs: usize,
@@ -1171,20 +1174,36 @@ impl<'a> IterativeRadiation<'a> {
     }
 
     /// Compute Bq, with q=i*k*c*rho*v, using the original dense B signs.
+    /// Scale the actual RHS before GMRES's squared norms, without changing the
+    /// operator, relative tolerance or retained physical boundary velocity.
     pub fn start(
         &self,
         velocity: &[C64],
         gate: &CancelGate,
     ) -> Result<IterativeState, IterativeError> {
         let started = Instant::now();
-        let rhs = stack(&self.boundary_rhs(velocity, gate)?);
+        let mut rhs = stack(&self.boundary_rhs(velocity, gate)?);
+        let mut maximum = 0.0_f64;
+        for chunk in rhs.chunks(256) {
+            poll(gate)?;
+            maximum = chunk.iter().fold(maximum, |a, b| a.max(b.abs()));
+        }
+        let rhs_scale = if maximum == 0.0 { 1.0 } else { maximum };
+        for chunk in rhs.chunks_mut(256) {
+            poll(gate)?;
+            for value in chunk {
+                // Division avoids an overflowing reciprocal for a tiny source.
+                *value /= rhs_scale;
+            }
+        }
         let mut gmres = GmresState::new(&rhs, self.options.restart.min(rhs.len()));
-        if rhs.iter().all(|&v| v == 0.0) {
+        if maximum == 0.0 {
             gmres.run(&ZeroOp(rhs.len()), &rhs, self.options.tol, 1, false);
         }
         Ok(IterativeState {
             gmres,
             rhs,
+            rhs_scale,
             velocity: velocity.to_vec(),
             stamp: self.stamp,
             matvecs: 0,
@@ -1375,7 +1394,10 @@ impl<'a> IterativeRadiation<'a> {
                 what: "checkpoint belongs to a different prepared operator",
             });
         }
-        let pressure = self.inverse(&unstack(&state.gmres.x));
+        let mut pressure = self.inverse(&unstack(&state.gmres.x));
+        for value in &mut pressure {
+            *value = value.scale(state.rhs_scale);
+        }
         let report = state.report(self.options.tol);
         let receipt = self.receipt(state);
         if !report.converged_euclidean() || pressure.iter().any(|v| !finite(*v)) {
