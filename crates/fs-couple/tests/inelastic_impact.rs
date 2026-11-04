@@ -60,6 +60,9 @@ mod sustained;
 #[path = "inelastic_impact/quadratic_sustained.rs"]
 mod quadratic_sustained;
 
+#[path = "inelastic_impact/linear_visco.rs"]
+mod linear_visco;
+
 const NODES: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],

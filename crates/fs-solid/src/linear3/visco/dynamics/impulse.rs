@@ -27,6 +27,43 @@ pub struct ViscoDynamicImpulse {
     pub balance_residual_j: f64,
 }
 
+/// Admitted impulse staging with exclusive access to the accepted trajectory.
+/// Outer contact checks can inspect both endpoints without cloning material
+/// histories. Dropping this handle leaves the original trajectory unchanged.
+#[must_use]
+pub struct ViscoDynamicImpulseProposal<'s, 'p, 'a> {
+    original: &'s mut ViscoDynamicState<'p, 'a>,
+    velocity_mps: Vec<f64>,
+    external_work_j: f64,
+    support_work_j: f64,
+    report: ViscoDynamicImpulse,
+}
+
+impl<'p, 'a> ViscoDynamicImpulseProposal<'_, 'p, 'a> {
+    pub fn original(&self) -> &ViscoDynamicState<'p, 'a> {
+        self.original
+    }
+
+    pub fn velocity_mps(&self) -> &[f64] {
+        &self.velocity_mps
+    }
+
+    pub fn report(&self) -> &ViscoDynamicImpulse {
+        &self.report
+    }
+
+    /// Publish the already checked velocity and work, then release the borrow.
+    /// This performs no solve, allocation, history copy or cancellation check.
+    /// A coupled owner completes all partner checks before publishing either.
+    pub fn publish(self) -> ViscoDynamicImpulse {
+        self.original.velocity_mps = self.velocity_mps;
+        self.original.kinetic_j = self.report.kinetic_after_j;
+        self.original.external_work_j = self.external_work_j;
+        self.original.support_work_j = self.support_work_j;
+        self.report
+    }
+}
+
 // Reuse the native sparse solve while borrowing its original mass. No mass
 // assembly, matrix copy, dense inverse or constitutive evaluation is needed.
 struct BorrowedMass<'a>(&'a Csr);
@@ -56,7 +93,7 @@ fn work(before: &[f64], after: &[f64], impulse: &[f64]) -> Result<f64, ViscoElem
     finite(sum.to_f64())
 }
 
-impl ViscoDynamicState<'_, '_> {
+impl<'p, 'a> ViscoDynamicState<'p, 'a> {
     /// Original admitted nodes; current positions add `material_history()`'s
     /// full displacement. Impulse geometry never comes from unrelated nodes.
     pub fn reference_nodes_m(&self) -> &[[f64; 3]] {
@@ -143,6 +180,22 @@ impl ViscoDynamicState<'_, '_> {
         maximum_impulse_error_kg_m_s: f64,
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicImpulse, ViscoElementError> {
+        Ok(self
+            .prepare_momentum_impulse(nodal_impulse_kg_m_s, maximum_impulse_error_kg_m_s, cx)?
+            .publish())
+    }
+
+    /// Prepare the same native impulse without changing accepted motion.
+    /// The exclusive borrow prevents state changes while outer contact or
+    /// partner audits inspect the original and proposed endpoints. Every
+    /// native solve, momentum, work and cancellation gate finishes here.
+    /// Dropping the proposal discards it; publishing is infallible.
+    pub fn prepare_momentum_impulse<'s>(
+        &'s mut self,
+        nodal_impulse_kg_m_s: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicImpulseProposal<'s, 'p, 'a>, ViscoElementError> {
         checkpoint(cx)?;
         if !maximum_impulse_error_kg_m_s.is_finite() || maximum_impulse_error_kg_m_s < 0.0 {
             return Err(invalid("finite nonnegative impulse allowance required"));
@@ -220,10 +273,12 @@ impl ViscoDynamicState<'_, '_> {
             balance_residual_j,
         };
         checkpoint(cx)?;
-        self.velocity_mps = velocity;
-        self.kinetic_j = kinetic_after_j;
-        self.external_work_j = external_work;
-        self.support_work_j = support_work;
-        Ok(report)
+        Ok(ViscoDynamicImpulseProposal {
+            original: self,
+            velocity_mps: velocity,
+            external_work_j: external_work,
+            support_work_j: support_work,
+            report,
+        })
     }
 }

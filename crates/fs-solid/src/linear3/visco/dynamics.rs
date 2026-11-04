@@ -22,7 +22,7 @@ mod source;
 pub use source::ViscoDynamicMaterialChange;
 
 mod impulse;
-pub use impulse::ViscoDynamicImpulse;
+pub use impulse::{ViscoDynamicImpulse, ViscoDynamicImpulseProposal};
 
 /// Explicit trajectory, sparse solve and energy-balance limits.
 #[derive(Clone, Copy, Debug)]

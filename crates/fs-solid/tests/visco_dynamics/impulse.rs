@@ -278,3 +278,67 @@ fn opposing_impulses_retain_kinetic_work_below_the_velocity_midpoint_ulp() {
         assert_eq!(state.material_history().energy().dissipated_j, 0.0);
     });
 }
+
+#[test]
+fn prepared_impulse_discards_or_publishes_without_restarting_the_original_trajectory() {
+    with_cx(|cx, _| {
+        let law = coupled();
+        let solid = system(&law, &(0..12).collect::<Vec<_>>(), cx);
+        let prepared = solid.dynamic_operator(0.002, config(), cx).unwrap();
+        let mut history = solid.state(cx).unwrap();
+        let mut preload = [0.0; 12];
+        preload[3] = 1e-4;
+        history.step_internal_force(&preload, 0.01, cx).unwrap();
+        let mut state = prepared.start(history, &[0.0; 12], cx).unwrap();
+        state.advance(&[0.0; 12], cx).unwrap();
+        let before_velocity = state.velocity_mps().to_vec();
+        let before_displacement = state.material_history().displacement_m().to_vec();
+        let before_energy = state.material_history().energy();
+        let before_time = state.time_s();
+        let before_steps = state.steps();
+        let before_kinetic = state.kinetic_energy_j();
+        let before_work = state.external_work_j();
+        let mut impulse = [0.0; 12];
+        impulse[3] = 0.25;
+        {
+            let proposal = state.prepare_momentum_impulse(&impulse, 1e-12, cx).unwrap();
+            assert_eq!(
+                proposal.original().velocity_mps(),
+                before_velocity.as_slice()
+            );
+            assert_eq!(
+                proposal.original().material_history().energy(),
+                before_energy
+            );
+            assert_eq!(proposal.original().time_s(), before_time);
+            assert_eq!(proposal.original().steps(), before_steps);
+            assert_eq!(proposal.report().kinetic_before_j, before_kinetic);
+            assert_ne!(proposal.velocity_mps(), before_velocity.as_slice());
+        }
+        assert_eq!(state.velocity_mps(), before_velocity.as_slice());
+        assert_eq!(state.kinetic_energy_j(), before_kinetic);
+        assert_eq!(state.external_work_j(), before_work);
+        assert_eq!(
+            state.material_history().displacement_m(),
+            before_displacement.as_slice()
+        );
+        assert_eq!(state.material_history().energy(), before_energy);
+        let proposal = state.prepare_momentum_impulse(&impulse, 1e-12, cx).unwrap();
+        let expected_velocity = proposal.velocity_mps().to_vec();
+        let expected_kinetic = proposal.report().kinetic_after_j;
+        let report = proposal.publish();
+        assert_eq!(state.velocity_mps(), expected_velocity.as_slice());
+        assert_eq!(state.kinetic_energy_j(), expected_kinetic);
+        assert_eq!(
+            state.external_work_j(),
+            before_work + report.external_work_j
+        );
+        assert_eq!(
+            state.material_history().displacement_m(),
+            before_displacement.as_slice()
+        );
+        assert_eq!(state.material_history().energy(), before_energy);
+        assert_eq!(state.time_s(), before_time);
+        assert_eq!(state.steps(), before_steps);
+    });
+}

@@ -20,6 +20,9 @@ pub mod surface;
 /// Native viscoelastic flight, bounded affine sweeps and continuing impacts.
 pub mod trajectory;
 
+/// Nodal impacts on continuing linear tensor-Prony dynamics.
+pub mod linear_visco;
+
 use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,
 };
