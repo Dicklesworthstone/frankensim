@@ -26,8 +26,9 @@ pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
 pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
 pub const MAX_MODES: usize = 128;
 /// Retained body modes a `body` record may request: the shell owner's own ceiling, `MAX_SHELL_MODES`. Flat plate
-/// bodies keep [`MAX_PLATE_BODY_MODES`].
-pub const MAX_BODY_MODES: usize = 256;
+/// bodies keep [`MAX_PLATE_BODY_MODES`]. The complete instrument (strings, cavity, body) still has to fit
+/// [`MAX_TOTAL_MODES`], so the body count that a card can use is what remains of 1024 after its other coordinates.
+pub const MAX_BODY_MODES: usize = 1024;
 pub const MAX_PLATE_BODY_MODES: usize = 16;
 /// Modal coordinates of one complete instrument (strings, twist, body, cavity, gas memory). The shared exact
 /// propagation holds at most 42 of them as one dense block; a larger network needs the explicit

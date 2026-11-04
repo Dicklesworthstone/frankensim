@@ -570,10 +570,21 @@ fn shell_profile_admits_exactly_the_triangle_ceiling_and_refuses_one_more() {
 fn shell_profile_admits_exactly_the_mode_ceiling_and_refuses_one_more() {
     let profile = shell_profile();
     let mut spec = shell_spec();
-    spec.body.modes = MAX_MODES;
+    // The shell owner's ceiling is the complete instrument's (1024 modal coordinates), and the card's strings and cavity
+    // share them: the body count a card reaches is what remains of MAX_MODES after its other coordinates.
+    assert_eq!(MAX_MODES, input::MAX_TOTAL_MODES);
+    let others = spec.network_dimensions(true).unwrap().0 - spec.body.modes;
+    let fits = MAX_MODES - others;
+    spec.body.modes = fits;
     assert!(profile.preflight(&spec).is_ok());
-    spec.body.modes = MAX_MODES + 1;
+    spec.body.modes = fits + 1;
+    let refusal = profile.preflight(&spec).unwrap_err().to_string();
+    assert!(refusal.contains("exceeds 1024 modes"), "{refusal}");
+    spec.body.modes = MAX_MODES;
     assert!(profile.preflight(&spec).is_err());
+    spec.body.modes = MAX_MODES + 1;
+    let refusal = profile.preflight(&spec).unwrap_err().to_string();
+    assert!(refusal.contains("1..=1024 retained body modes"), "{refusal}");
     spec.body.modes = 0;
     assert!(profile.preflight(&spec).is_err());
     // A flat plate still admits no more than its own 16.
@@ -1741,9 +1752,12 @@ fn drilling_alpha_leaves_no_undamped_mode_in_the_band_and_moves_physical_modes_l
             Profile::parse(text.as_bytes()).unwrap()
                 .project_shell(&spec, &mut Catalog::new(), &mut |name| Ok(esteso_pack(name).into()), gate)
         };
+        // The shell ceiling is the complete instrument's and the card's strings and cavity share it, so the largest
+        // request the instrument admits is what remains of MAX_MODES; the fixture window holds far fewer.
+        let fits = { let s = shell_spec(); MAX_MODES - (s.network_dimensions(true).unwrap().0 - s.body.modes) };
         let basis = |alpha: f64| {
-            let refusal = match solve(alpha, MAX_MODES) {
-                Ok(_) => panic!("drilling {alpha:e}: the fixture window holds {MAX_MODES} modes or more"),
+            let refusal = match solve(alpha, fits) {
+                Ok(_) => panic!("drilling {alpha:e}: the fixture window holds {fits} modes or more"),
                 Err(e) => e.to_string(),
             };
             let held: usize = refusal.split("it holds ").nth(1).and_then(|s| s.split(',').next())

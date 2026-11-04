@@ -723,14 +723,16 @@ be declared explicitly in the resulting body profile.
 ### Shell resource bounds
 
 The file admits at most 3072 nodes and 6144 triangles per component, 16 regions, eight string
-attachments and 256 retained shell modes, within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
+attachments and 1024 retained shell modes (the complete instrument's strings and cavity share the 1024 modal coordinates of the prepared network, so a card retains what remains), within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
 `consistent` or `lumped` inertia. `drilling` supplies positive numerical
 drilling stabilization; `director-min-dot` declares the incident-facet alignment
 floor in `(0,1]`. The spectral window contains squared angular frequencies.
 `projection-work` declares a separate cold shell-projection budget, at most
-2,199,023,255,552 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
-force and pressure projections, about 1.4e11 for a cap-sized component; a v4 assembly adds the owner's
-conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`, about 2.0e12 in all at the v4 caps).
+17,592,186,044,416 terms, 2^44 (the count is `triangles * (10^6 + 324 modes + 18 modes^2) + 6 nodes modes` plus
+force and pressure projections; a v4 assembly adds the owner's
+conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`: 1.06e13 for the 11216-node cello at 1024 modes,
+about 1.3e13 at the v4 caps and 1024 modes, about 2.0e12 at 256 modes). The eigenvalue window is sliced whole whatever the retained count is; the count sets the
+projection and modal-network work, not the eigensolve.
 It does not enlarge the existing complete-network limits.
 These discretization choices require mesh, mode, stabilization and time-step
 refinement for the intended specimen.
@@ -1456,7 +1458,7 @@ as v3. The other string controls, material bow interfaces, afterlength, torsion,
 preloads and shared gas continue through the original performer.
 
 Profiles take the 4 MiB shell limit and admit at most 64 components, 12288 total
-nodes, 24576 total triangles, 157 ties and 256 shared body modes. Per-component v3
+nodes, 24576 total triangles, 157 ties and 1024 shared body modes. Per-component v3
 mesh limits still apply. Material/interface source bytes and every damping
 channel remain under the existing complete-performance budgets. At least one
 region across the assembly must retain `@body`; other regions can select

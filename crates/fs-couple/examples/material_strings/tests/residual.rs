@@ -138,6 +138,8 @@ fn bow_residual_requires_the_matching_support_tail_and_refuses_unwired_stops() {
     scoped(|cx,gate| {
         let error=stopped(cx,gate,bowed_residual(&bowed())).err().unwrap().to_string();
         assert!(error.contains("normal contacts"),"{error}");
+        // The pairing is refused from the two declarations, before any network is prepared.
+        assert!(error.contains("stop profile that has stop rows"),"{error}");
     });
     for record in ["bow-residual-flexibility exact-static-green","residual-flexibility exact-static-green\nbow-residual-flexibility guessed",
         "residual-flexibility exact-static-green\nbow-residual-flexibility exact-static-green extra"] {

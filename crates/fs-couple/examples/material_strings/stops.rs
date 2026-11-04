@@ -368,6 +368,8 @@ impl Profile {
         Ok(())
     }
 
+    /// Whether the profile declares any stop row (each one is a normal contact in the friction set).
+    pub fn has_stop_rows(&self) -> bool { !self.entries.is_empty() }
     pub fn motion_program(&self) -> Option<&StopMotionProgram> { self.motion.as_ref() }
     pub fn station_program(&self) -> Option<&StopStationProgram> { self.station_motion.as_ref() }
     pub fn bow_contacts(&self) -> &[BowContactLoad] { &self.bow_contacts }
@@ -477,7 +479,7 @@ impl Profile {
         // from equilibrium and reappear only after a pluck has been initialized.
         let bank = bank.with_bow_body_surfaces(surfaces, gate)?;
         let bank = bank.with_string_stops(stops, FrictionObstacleConfig {
-            max_contacts: MAX_STOPS, max_setup_terms: 1_048_576,
+            max_contacts: MAX_STOPS, max_setup_terms: 8_388_608,
         }, gate)?.with_string_stop_sources(sources, gate)?;
         // Actual material geometry owns co-location, perpendicular directions and
         // torsional handedness; this adapter never reconstructs its modal maps.

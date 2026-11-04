@@ -93,6 +93,11 @@ impl ShearShellViscosity {
     }
 }
 
+/// Largest number of physical modes one viscosity projection admits. It bounds the stored element actions and the
+/// dense `modes x modes` result; `max_projection_terms` still governs cost. fs-couple ties its shell ceiling to this
+/// constant at compile time, so a body that fits the shell ceiling never reaches this refusal.
+pub const MAX_VISCOSITY_MODES: usize = 1024;
+
 /// Checked conservative operation count for condensation and modal projection.
 /// This is cold computation, not a wall-clock promise.
 pub fn projection_terms(nodes: usize, triangles: usize, modes: usize) -> Option<usize> {
@@ -126,7 +131,7 @@ pub fn project_viscosity(
     }
     directors.validate(mesh)?;
     if sections.len() != mesh.tris.len() || viscosity.len() != mesh.tris.len()
-        || modes.is_empty() || modes.len() > 512
+        || modes.is_empty() || modes.len() > MAX_VISCOSITY_MODES
         || modes.iter().any(|p| p.len() != 6*mesh.nodes.len() || p.iter().any(|x| !x.is_finite())) {
         return Err(bad("shell viscosity requires complete sections and bounded physical mode vectors"));
     }

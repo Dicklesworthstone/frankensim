@@ -356,6 +356,11 @@ impl input::Spec {
             return Err("a torsion-measured row is the open string's measurement; a stop profile changes the twisting span".into());
         }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
+        // The friction residual's own admission (a stop is a normal contact) fires only after the
+        // network is prepared; the pairing is known from the two declarations, so refuse it here.
+        if self.bow_residual_flexibility && stop_profile.as_ref().is_some_and(stops::Profile::has_stop_rows) {
+            return Err("friction residual compliance requires fixed ports without normal contacts: bow-residual-flexibility cannot be combined with a stop profile that has stop rows".into());
+        }
         if let Some(radiation) = self.body_radiation {
             radiation.validate(self.rate)?;
             if matches!(preparation, ModalPreparation::Prepared(_))
@@ -591,7 +596,7 @@ impl input::Spec {
             None => (bank, None),
         };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
-            max_setup_terms:1_048_576 };
+            max_setup_terms:8_388_608 };
         let mut bank=if let Some(fibers)=&self.bow_fibers {
             let ribbon=fibers.compile(&self,&mut catalog,&mut loader,gate)?;
             bank.with_tensioned_fiber_ribbon(ribbon,fibers.station_fraction,joint,gate)?
