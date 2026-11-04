@@ -2222,6 +2222,25 @@ homogenization, the P2 milestone.
   nonnegative extinction and fixed external source conditions; missing knots,
   substituted quantities and unowned dynamic coordinates refuse atomically.
 
+- `state_point::SpectralComplexIndexStatePoint` adopts 2–16 explicitly supplied
+  vacuum-wavelength/full-property-key pairs from that same complete material
+  bundle. It retains density, auxiliary properties, exact quantity conventions
+  and all original receipts. Real n requires a dimension-only scalar; k also
+  admits the existing static optical-extinction quantity. Tensor, hardness and
+  unowned dynamic/spectral contexts cannot fill those roles. Every source key
+  occupies one declared knot role, with finite positive increasing wavelengths,
+  positive n and nonnegative k. No visible table is implicitly extended to IR.
+  The projection identity binds the original bundle plus wavelength/key roles.
+  `at_wavelength` returns exact source knots or nominal piecewise-linear n/k
+  within the closed support, without allocations or source queries. It refuses
+  extrapolation; it does not certify unresolved spectral features or propagate
+  marginal source uncertainty. `at_query_point` refreshes every retained optical
+  and auxiliary property under its original claim pin before publishing the
+  candidate. Synthetic G0/G1/G3 regressions cover IR interpolation, exact keys,
+  full-bundle thermal refresh, competing sources, passivity and atomic refusal.
+  The wavelength attribution is an explicit caller declaration; this adapter
+  supplies no additional measured-data authority or thermal-emissivity model.
+
 - `state_point::VisibleOpticalStatePoint::at_query_point` and the conductor /
   dielectric variants continue the original visible optical law at a new
   complete physical condition. They reuse the shared pinned-claim refresh,

@@ -39,6 +39,9 @@ pub use shear_layer::*;
 mod sellmeier;
 pub use sellmeier::*;
 
+mod spectral_complex_index;
+pub use spectral_complex_index::*;
+
 mod thermal_expansion;
 pub use thermal_expansion::*;
 mod hygroscopic_expansion;
