@@ -487,6 +487,78 @@ fn dot_2d(x: &[f64], y: &[f64]) -> f64 {
 }
 
 #[test]
+fn shell_time_static_preload_preserves_damped_increment_forces() {
+    // Linear superposition gives the same rate update about a force-balanced
+    // static displacement. The old absolute predictor rounded away K*du, so
+    // changing only that preload changed the damping/vibration dynamics.
+    let mass = [2.0, 0.25, 0.25, 1.0];
+    let stiffness = [6.0, -2.0, -2.0, 4.0];
+    let config = ShellTimeConfig {
+        dt_s: 0.1,
+        ..Default::default()
+    };
+    for damping_scale in [0.0, 1.0, 100.0] {
+        let damping = [
+            0.4 * damping_scale,
+            0.1 * damping_scale,
+            0.1 * damping_scale,
+            0.3 * damping_scale,
+        ];
+        let velocity = [0.75, -0.25];
+        let cv = action_2d(&damping, &velocity);
+        let det = mass[0] * mass[3] - mass[1] * mass[2];
+        let acceleration = [
+            (-mass[3] * cv[0] + mass[1] * cv[1]) / det,
+            (-mass[0] * cv[1] + mass[2] * cv[0]) / det,
+        ];
+        let state = DynamicState {
+            time_s: 0.0,
+            step: 0,
+            displacement: vec![0.0; 2],
+            velocity: velocity.to_vec(),
+            acceleration: acceleration.to_vec(),
+            kinetic_energy_j: 0.0,
+            strain_energy_j: 0.0,
+            total_energy_j: 0.0,
+        };
+        let mut prepared =
+            PreparedNewmark::new(2, &mass, Some(&damping), &stiffness, &config).unwrap();
+        let reference = prepared.step(&state, &[0.0; 2]).unwrap();
+        for offset in [1.0e4, 1.0e16] {
+            let mut preloaded = state.clone();
+            preloaded.displacement = vec![offset, -2.0 * offset];
+            let force = action_2d(&stiffness, &preloaded.displacement);
+            let shifted = prepared.step(&preloaded, &force).unwrap();
+            for (actual, expected) in shifted
+                .acceleration
+                .iter()
+                .chain(&shifted.velocity)
+                .zip(reference.acceleration.iter().chain(&reference.velocity))
+            {
+                let tolerance = 8.0 * f64::EPSILON * expected.abs().max(1.0);
+                assert!(
+                    (actual - expected).abs() <= tolerance,
+                    "preload {offset:e}, damping scale {damping_scale:e}: rate {actual:e} differs from {expected:e}"
+                );
+            }
+            assert_eq!(
+                shifted,
+                step_newmark(
+                    2,
+                    &mass,
+                    Some(&damping),
+                    &stiffness,
+                    &preloaded,
+                    &force,
+                    &config,
+                )
+                .unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn shell_time_full_matrices_balance_forcing_work_and_damping_loss() {
     let mass = [2.0, 0.25, 0.25, 1.0];
     let stiffness = [6.0, -2.0, -2.0, 4.0];

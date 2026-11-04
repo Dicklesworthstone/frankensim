@@ -1210,6 +1210,13 @@ force-work balance includes internal viscous dissipation. Other Newmark
 parameters do not inherit those conservation or unconditional stability claims.
 The G0/G3 `shell_time` tests cover free drift, applied impulses, off-diagonal
 mass, internal spring/damper reactions, work and physical coefficient scaling.
+The stiffness action retains the Newmark predictor increment separately from
+the accepted absolute displacement, subtracting the static preload before its
+small restoring force. This prevents a rounded absolute predictor from changing
+the damped rate update about an equilibrated preload. The regression checks
+linear superposition with coupled mass and nonproportional viscosity, including
+strong damping. It does not recover displacement increments already below the
+precision of the stored absolute position or certify a long unresolved motion.
 
 `shell_time::PreparedNewmark` borrows fixed operators and factors the effective
 mass once through the same `fs-la::LuWorkspace` owner. Repeated steps reuse that

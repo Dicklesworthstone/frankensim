@@ -417,16 +417,28 @@ impl<'a> PreparedNewmark<'a> {
 
         // The predictors exclude the unknown acceleration. Off-diagonal inertia,
         // viscous coupling and elastic forces remain in the original operators.
-        let mut u_predict = vec![0.0; n];
+        // Keep the displacement predictor as an increment. Adding it to a
+        // preloaded absolute displacement first can erase its restoring force
+        // before the mass solve, and thus corrupt the measured damping decay.
+        let mut du_predict = vec![0.0; n];
         let mut v_predict = vec![0.0; n];
         for i in 0..n {
-            u_predict[i] = current.displacement[i]
-                + dt * (current.velocity[i] + dt * (0.5 - beta) * current.acceleration[i]);
+            du_predict[i] =
+                dt * (current.velocity[i] + dt * (0.5 - beta) * current.acceleration[i]);
             v_predict[i] = current.velocity[i] + dt * (1.0 - gamma) * current.acceleration[i];
         }
-        let mut rhs = mat_vec(n, self.stiffness, &u_predict);
+        let mut rhs = f_next.to_vec();
         for i in 0..n {
-            rhs[i] = f_next[i] - rhs[i];
+            let mut static_force = 0.0;
+            let mut increment_force = 0.0;
+            for j in 0..n {
+                let entry = self.stiffness[i * n + j];
+                static_force += entry * current.displacement[j];
+                increment_force += entry * du_predict[j];
+            }
+            // Subtract the static preload before adding the small force. The
+            // two stiffness actions share a row pass and need no extra vector.
+            rhs[i] = (rhs[i] - static_force) - increment_force;
         }
         if let Some(c) = self.damping {
             let viscous = mat_vec(n, c, &v_predict);
