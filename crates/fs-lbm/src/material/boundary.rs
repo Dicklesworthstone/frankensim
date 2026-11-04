@@ -4,6 +4,9 @@
 //! One held transport snapshot per fluid cell supplies this step's viscosity;
 //! no thermal state, material interpolation or second flow solver is added.
 
+/// Original material laws evaluated at self-consistent physical shear rates.
+pub mod rheology;
+
 use fs_exec::CancelGate;
 use fs_material::{
     MaterialError,
@@ -48,6 +51,12 @@ pub enum MaterialBoundaryError3 {
         cell: [usize; 3],
         source: MaterialLbmError,
     },
+    /// The original material law did not close its local stress/rate relation.
+    RheologyConvergence {
+        cell: [usize; 3],
+        iterations: usize,
+        relaxation_defect: f64,
+    },
     /// Original collision, geometry, momentum-exchange or cancellation refusal.
     Flow(BoundaryStepError3),
 }
@@ -59,6 +68,14 @@ impl core::fmt::Display for MaterialBoundaryError3 {
             Self::State { cell, source } => {
                 write!(f, "material boundary at {cell:?}: {source}")
             }
+            Self::RheologyConvergence {
+                cell,
+                iterations,
+                relaxation_defect,
+            } => write!(
+                f,
+                "material boundary rheology at {cell:?} did not converge in {iterations} evaluations (tau defect {relaxation_defect})"
+            ),
             Self::Flow(error) => write!(f, "material boundary: {error}"),
         }
     }
@@ -113,6 +130,34 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
         gate: &CancelGate,
         mut resolve: impl FnMut([usize; 3]) -> Result<M, MaterialError>,
     ) -> Result<MaterialCurvedWallStep3<M>, MaterialBoundaryError3> {
+        self.step_curved_walls_with_sampler(
+            grid,
+            wall,
+            velocity,
+            moment_origin,
+            max_cells,
+            gate,
+            |cell| {
+                resolve(cell).map_err(|source| MaterialBoundaryError3::State {
+                    cell,
+                    source: source.into(),
+                })
+            },
+        )
+    }
+
+    // Both source paths prepare their samples before the sole native swap.
+    #[allow(clippy::too_many_arguments)]
+    fn step_curved_walls_with_sampler<M: FluidTransport>(
+        &self,
+        grid: &mut BoundaryGrid3,
+        wall: &CurvedWall3,
+        velocity: impl FnMut(CurvedWallLink3) -> [f64; 3],
+        moment_origin: [f64; 3],
+        max_cells: usize,
+        gate: &CancelGate,
+        mut resolve: impl FnMut([usize; 3]) -> Result<M, MaterialBoundaryError3>,
+    ) -> Result<MaterialCurvedWallStep3<M>, MaterialBoundaryError3> {
         poll(gate)?;
         let [nx, ny, nz] = grid.dimensions();
         let cells = nx
@@ -141,26 +186,13 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
                 continue;
             }
             let error = |source| MaterialBoundaryError3::State { cell, source };
-            let material = resolve(cell).map_err(|source| error(source.into()))?;
+            let material = resolve(cell)?;
             let transport = material
                 .transport_state()
                 .map_err(|source| error(source.into()))?;
-            if transport.density_kg_m3().to_bits() != self.transport.density_kg_m3().to_bits() {
-                return Err(error(MaterialLbmError::Invalid(
-                    "curved material viscosity requires unchanged reference density",
-                )));
-            }
             // Momentum conversion consumes this snapshot, not the source a
             // second time. Thermal diffusion imposes no extra lattice bound.
-            *tau = plan_momentum_scaling(
-                transport.kinematic_viscosity_m2_s(),
-                self.cell_size_m,
-                self.timestep_s,
-                0.0,
-            )
-            .map_err(error)?
-            .0
-            .tau;
+            *tau = self.boundary_relaxation(cell, transport)?;
             applied.push(MaterialBoundarySample3 {
                 cell,
                 material,
@@ -177,6 +209,29 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
             gate,
         )?;
         Ok(MaterialCurvedWallStep3 { momentum, applied })
+    }
+
+    // Shared admission for held coefficients and every local rheology trial.
+    fn boundary_relaxation(
+        &self,
+        cell: [usize; 3],
+        transport: FluidTransportState,
+    ) -> Result<f64, MaterialBoundaryError3> {
+        let error = |source| MaterialBoundaryError3::State { cell, source };
+        if transport.density_kg_m3().to_bits() != self.transport.density_kg_m3().to_bits() {
+            return Err(error(MaterialLbmError::Invalid(
+                "curved material viscosity requires unchanged reference density",
+            )));
+        }
+        Ok(plan_momentum_scaling(
+            transport.kinematic_viscosity_m2_s(),
+            self.cell_size_m,
+            self.timestep_s,
+            0.0,
+        )
+        .map_err(error)?
+        .0
+        .tau)
     }
 }
 

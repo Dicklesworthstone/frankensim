@@ -10273,6 +10273,46 @@ source retention and single evaluation, and budget/source/density/rate/late
 wall/cancellation rollback. These new regressions await native execution;
 no new measured convergence or performance claim is made here.
 
+### Source shear-dependent viscosity at curved moving walls
+
+`MaterialScaling::step_curved_walls_with_material_rheology` resolves each
+incoming fluid cell through the original Guo-corrected D3Q19 stress estimator
+and shared safeguarded `RheologySolve`. The held physical force supplies
+`A = gamma*tau`; the same source query closes
+`tau = 1/2 + 3 (mu(gamma)/rho0) dt/dx^2` with `gamma = A/(tau*dt)`.
+The constructor rate is only an initial iterate. All six symmetric stress
+components participate, and a held acceleration is not inserted as strain.
+
+The complete stress field is prepared once before source work. Each source
+response is read once per bounded constitutive evaluation; its accepted
+concrete value, physical query, iteration count and tau defect remain in
+`MaterialBoundaryRheology`. Cached transport then passes through the SAME
+material boundary sampler and native curved step. No second collision,
+streaming, wall law or publication path is introduced. BGK/TRT/central-moment/
+reduced-cumulant non-shear controls and open-reservoir accounts remain intact.
+
+Every trial keeps the original reference density and momentum scaling.
+Temperature, composition and claim selection stay with the original source
+producer. The callback must not advance external state. Source-domain refusal,
+exhausted root/cell budgets, invalid native stress or late cancellation preserve
+accepted flow; the original sole population swap remains final. No arbitrary
+viscosity floor/cap or unsupported source extrapolation is supplied.
+
+This is low-Mach incoming-time generalized-Newtonian constitutive splitting,
+not implicit time integration or a thermal, yield-history or viscoelastic
+model. Next-time material admission belongs to the next call. Physical-rate
+and SI-source queries coexist with the original lattice-unit wall/momentum
+accounts; fixed-occupancy geometry, interpolation mass drift and the native
+bulk/shear tie are unchanged.
+
+Four focused regressions cover constant-source identity for every collision
+family, independent full Guo-frame stress and a two-axis material-law quadratic,
+Carreau Couette velocity/wall work, and source/density/root/cancellation refusal
+with exact retry. Product-source parsing passed before the executor outage;
+the reconstructed final payload and new tests remain uncompiled/unexecuted,
+and the tests have not passed a parser check. No measured nonlinear-flow
+accuracy, performance or arbitrary constitutive convergence claim is made.
+
 ## Source-backed gas convection on planar moving-liquid interfaces
 
 `MaterialFreeSurfaceEnthalpy3::step_with_surface_convection` and

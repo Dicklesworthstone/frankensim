@@ -1,5 +1,8 @@
 //! G1/G3: source-temperature viscosity reaches native curved-wall mechanics.
 
+#[path = "material/rheology.rs"]
+mod rheology;
+
 use super::*;
 use fs_evidence::ValidityDomain;
 use fs_lbm::d3q19::BoundaryStepError3;
