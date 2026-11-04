@@ -12,7 +12,35 @@ use super::*;
 
 const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
 
+#[path = "sdirk/adaptive.rs"]
+mod time_control;
+
 impl ImplicitConductionChain<'_> {
+    // Check the complete requested window BEFORE an adaptive controller can
+    // process events. A short first comparison must not admit a later source,
+    // boundary or topology transition outside this source-free method's scope.
+    fn admit_sdirk2_window(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        target_s: f64,
+    ) -> Result<(), ImplicitConductionError> {
+        if self.advection.is_some()
+            || thermal
+                .cells
+                .values()
+                .any(|cell| cell.boundary.source_w != 0.0)
+            || thermal
+                .schedule
+                .get(thermal.cursor)
+                .is_some_and(|event| event.time_s <= target_s)
+        {
+            return Err(ImplicitConductionError::Invalid(
+                "SDIRK2 requires source-free fixed cells and constant baths without advection or pending events",
+            ));
+        }
+        Ok(())
+    }
+
     fn solve_sdirk2_step<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -113,20 +141,7 @@ impl ImplicitConductionChain<'_> {
             workspace.cells(),
         )?;
         self.admit(thermal, &mut checkpoint)?;
-        if self.advection.is_some()
-            || thermal
-                .cells
-                .values()
-                .any(|cell| cell.boundary.source_w != 0.0)
-            || thermal
-                .schedule
-                .get(thermal.cursor)
-                .is_some_and(|event| event.time_s <= target_s)
-        {
-            return Err(ImplicitConductionError::Invalid(
-                "SDIRK2 requires source-free fixed cells and constant baths without advection or pending events",
-            ));
-        }
+        self.admit_sdirk2_window(thermal, target_s)?;
         let mut next = thermal.clone();
         let mut report = empty_report();
         let mut supplied = Sum::default();

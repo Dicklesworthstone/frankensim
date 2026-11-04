@@ -1241,8 +1241,9 @@ This entry point admits fixed-mass source-free chains/graphs, including their
 existing nonlinear bulk, contact and integrated interface laws, with constant
 ambient/reservoir temperatures. Attached implicit advection, nonzero authored
 sources and pending events at or before the requested target refuse explicitly;
-no observer or mass-advection hook is exposed. Nonlinear failure may halve a
-complete two-stage interval, but this is not an error-controlled adaptive method. Second-order time accuracy
+no observer or mass-advection hook is exposed. Complete-interval halving in
+`advance_sdirk2_to` handles nonlinear failure; it does not estimate temporal
+accuracy. Second-order time accuracy
 requires a smooth admitted solution and independent timestep refinement;
 constitutive/phase corners may lower it. L-stability is not unconditional
 positivity, monotonicity or a maximum-principle guarantee: every stage retains
@@ -1254,6 +1255,40 @@ entropy. Periodic graph Fourier decay and nonlinear `k(T)` cooling demonstrate
 second-order temporal refinement. Stiff modal damping, latent-plateau storage,
 second-stage domain/work rollback and unsupported source/event refusal exercise
 the stated admission boundary.
+
+#### Adaptive second-order network diffusion
+
+`advance_sdirk2_adaptive_to` on the same chain and graph owners adds local
+h/T/phase error control through the existing `AdaptiveConductionStepper`.
+Each comparison uses one full and two half native SDIRK2 intervals, sharing
+all six stages' residual/linear work budgets. Only the conservative fine pair
+contributes accepted heat, entropy and physical step counts; no Richardson
+state or rejected/coarse history is published. The original independent local,
+interval-total and whole-call energy gates remain active.
+
+`ConductionTimeOrder` defaults to first order, preserving the backward-Euler
+factor and IEEE square-root controller for existing adapters. SDIRK2 selects
+second order: actual representable half spans `a,b` use fine-error factor
+`(a³+b³)/(3ab(a+b))`, equal to `1/3` for equal halves, and cubic local-error
+scaling with the existing safety/growth/reduction bounds. The factor uses a
+dimensionless ratio to avoid cubing seconds. Bounded deterministic bisection
+within the existing controller limits avoids platform cube-root/transcendental
+arithmetic and overflow from multiplying a large normalized error.
+
+The complete requested window is checked before the generic controller can
+process an event or compute a comparison. Attached implicit advection, authored
+sources and pending events through the target remain outside SDIRK2's admitted
+scope even if an initial comparison would end sooner. The new adapter shares
+the original material observables and change-based, caloric-datum-invariant
+error scales. It adds no phase proxy, source splitting or global accuracy bound;
+constitutive corners and spatial error still require independent refinement.
+
+Focused native regressions cover accuracy/tolerance refinement, latent inventory
+at constant temperature, caloric datum shifts, sparse graph conservation,
+unequal representable half spans, shared six-stage work ceilings, late rollback
+and complete-window refusal. The production order arithmetic also has directly
+executable standalone tests for first-order compatibility, second-order scaling,
+extreme finite spans and invalid controller inputs.
 
 ## Additional material conductances on the native explicit timeline
 

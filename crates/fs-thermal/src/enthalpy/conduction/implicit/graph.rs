@@ -214,6 +214,24 @@ impl<'a> ImplicitConductionGraph<'a> {
         self.inner
             .advance_adaptive_to(thermal, target_s, controls, workspace, checkpoint)
     }
+
+    /// Native SDIRK2 with the shared h/T/phase error controller and sparse
+    /// linear work budget. The entire window must satisfy the chain method's
+    /// source-free, fixed-cell, constant-bath scope before any event processing.
+    pub fn advance_sdirk2_adaptive_to<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        controls: adaptive::AdaptiveImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (DepositionSimulation<'m>, adaptive::AdaptiveImplicitConductionReport),
+        adaptive::AdaptiveImplicitConductionError,
+    > {
+        self.inner
+            .advance_sdirk2_adaptive_to(thermal, target_s, controls, workspace, checkpoint)
+    }
 }
 
 // The physical Jacobian has one diagonal and two off-diagonals per link, even

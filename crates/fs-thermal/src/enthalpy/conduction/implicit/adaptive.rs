@@ -1,4 +1,4 @@
-//! Enthalpy-aware temporal accuracy around the original backward-Euler owner.
+//! Enthalpy-aware temporal accuracy around the original implicit heat owner.
 //!
 //! One full interval is compared with two half intervals. Only the original
 //! conservative half steps are accepted; comparison heat and entropy are never
@@ -13,6 +13,10 @@
 
 use super::*;
 
+#[path = "adaptive/order.rs"]
+mod order;
+pub use order::ConductionTimeOrder;
+
 /// Local temporal estimates, separate from algebraic joule acceptance gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdaptiveImplicitConductionControls {
@@ -23,7 +27,8 @@ pub struct AdaptiveImplicitConductionControls {
     /// At least the step floor; capped at the maximum and the next exact event.
     pub initial_dt_s: f64,
     /// Whole-call comparisons, including failed or rejected work. Each attempts
-    /// at most three original endpoint solves; their residual budget is shared.
+    /// three method intervals (six native implicit stages for SDIRK2); all
+    /// residual and linear work shares the original budgets.
     pub maximum_trials: usize,
     /// Absolute error allowance on the original specific stored-energy
     /// coordinate, J/kg. Its inherited h label does not change the law's basis.
@@ -49,7 +54,7 @@ impl Default for AdaptiveImplicitConductionControls {
     }
 }
 
-/// Actual coarse/fine discrepancies. `normalized` includes the first-order
+/// Actual coarse/fine discrepancies. `normalized` includes the method-order
 /// correction for unequal representable half spans; it is not a global bound.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ImplicitConductionTimeError {
@@ -105,7 +110,7 @@ impl std::error::Error for AdaptiveImplicitConductionError {}
 /// Endpoint adapter for the shared conservative step-doubling controller.
 ///
 /// An implementation retains the original fixed cell identities, masses and
-/// caloric laws. It supplies complete backward-Euler endpoints, their original
+/// caloric laws. It supplies complete endpoints of its declared order, their original
 /// energy/entropy accounts and source-owned observables, never an alternative
 /// temperature evolution. Every residual evaluation and Newton iteration,
 /// including failed trials, must be charged to `work` by `solve_interval`.
@@ -118,6 +123,13 @@ pub trait AdaptiveConductionStepper: Sized {
     fn cell_ids(&self) -> &[CellId];
     fn workspace_cells(workspace: &Self::Workspace) -> usize;
     fn observer(&self) -> Self::Observer;
+
+    /// Local error order of the supplied native endpoint method. Existing
+    /// backward-Euler adapters retain their original estimator and controller.
+    fn time_order(&self) -> ConductionTimeOrder {
+        ConductionTimeOrder::First
+    }
+
     fn admit(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -197,6 +209,7 @@ pub trait AdaptiveConductionStepper: Sized {
             ));
         }
         self.admit(thermal, &mut checkpoint)?;
+        let order = self.time_order();
         let mut next = thermal.clone();
         let mut observer = self.observer();
         let mut old_observables = self.time_observables(&next, controls, &mut checkpoint)?;
@@ -288,10 +301,12 @@ pub trait AdaptiveConductionStepper: Sized {
                         self.time_observables(&coarse, controls, &mut checkpoint)?;
                     let fine_observables =
                         self.time_observables(&fine, controls, &mut checkpoint)?;
-                    // First-order fine error / (coarse-fine) =
-                    // (h1²+h2²)/(2*h1*h2), exactly one for equal halves.
+                    // Actual representable spans determine the accepted fine
+                    // trajectory's local-error correction for this method.
                     let (h1, h2) = (middle - start, end - middle);
-                    let correction = finite(0.5 * (h1 / h2 + h2 / h1))?;
+                    let correction = order
+                        .fine_error_correction(h1, h2)
+                        .ok_or(DepositionError::Arithmetic)?;
                     let error = self.time_error(
                         &next,
                         &coarse,
@@ -314,11 +329,9 @@ pub trait AdaptiveConductionStepper: Sized {
                             .maximum_accepted_normalized_error
                             .max(error.normalized);
                         report.last_error = Some(error);
-                        let growth = if error.normalized == 0.0 {
-                            2.0
-                        } else {
-                            (0.9 / error.normalized.sqrt()).clamp(0.5, 2.0)
-                        };
+                        let growth = order
+                            .accepted_growth_factor(error.normalized)
+                            .ok_or(DepositionError::Arithmetic)?;
                         let suggested = if growth >= 1.0 {
                             dt.min(controls.step.maximum_dt_s / growth) * growth
                         } else {
@@ -339,7 +352,8 @@ pub trait AdaptiveConductionStepper: Sized {
                             span_s: dt,
                             error,
                         },
-                        (0.9 / error.normalized.sqrt()).clamp(0.1, 0.5),
+                        order.rejected_reduction_factor(error.normalized)
+                            .ok_or(DepositionError::Arithmetic)?,
                     )
                 }
                 Err(
