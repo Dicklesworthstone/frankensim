@@ -9,6 +9,9 @@ use fs_thermochem::{Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_
 #[path = "../../src/render/schedule/reed/field_input/tests/support.rs"]
 mod gas_support;
 
+#[path = "atmosphere/pair.rs"]
+mod pair;
+
 #[path = "atmosphere/shared.rs"]
 mod shared;
 

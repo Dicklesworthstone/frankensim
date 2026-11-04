@@ -15,6 +15,8 @@
 //! represented, so the gas energy change below is not a total heat balance.
 //! There is no condensation, hysteresis, gas momentum or moving interface.
 
+pub mod pair;
+
 use super::cartesian::{MoistureCartesian, MoistureCartesianReport};
 use super::reservoir::{ReservoirField, ReservoirParticipant};
 use super::surface::{DryBasisSurfaceTransfer, ResolvedMoistureFace, admit_environment};
@@ -149,6 +151,7 @@ pub enum AtmosphereMoistureError {
     Unbracketed { residual_kg: [f64; 2] },
     NotConverged { residual_kg: f64, iterations: usize },
     MassBalance { residual_kg: f64, tolerance_kg: f64 },
+    EvaluationBudget { evaluations: usize, maximum: usize },
 }
 impl core::fmt::Display for AtmosphereMoistureError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

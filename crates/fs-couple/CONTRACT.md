@@ -31525,3 +31525,42 @@ exponential cell integrals against native finite-volume temperatures, 96-cell
 refinement and partial coherence, lossless/TIR refusal to invent heat, weak
 positive heat below endpoint-flux roundoff, and source/geometry/work/cancellation
 admission. Rust execution remains unverified: the authoring runtime is unavailable.
+
+## Two finite vapor chambers across one native moisture field (MR46)
+
+`moisture::atmosphere::pair` couples one original slab or Cartesian field to
+two independent original `FiniteMoistureAtmosphere` inventories. Every exposed
+face explicitly names its first or second chamber and retains its source-pinned
+dry-basis sorption and optional finite surface-transfer law; absent faces are
+sealed. The gas owners retain separate volumes, carriers, composition, pressure,
+transport and caloric source catalogs. Water species/molar mass and prescribed
+temperature must agree. No second gas or dry-skeleton inventory is fabricated.
+
+Each chamber balance uses only the signed native face transfers assigned to it.
+Consequently, water may traverse a specimen whose net uptake is zero. The final
+actual vapor changes plus represented solid-water change, and the actual total
+gas-mass changes plus solid-water change, must each fit one explicit global
+budget. Original per-chamber carrier/mass gates and native diffusion/source
+gates remain in force. Failed trials and cancellation publish no endpoint.
+
+The original scalar finite-reservoir solver is nested: first-chamber RH is
+solved at every second-chamber RH probe, and every native field proposal starts
+from the accepted field. A cumulative evaluation cap spans all nested trials;
+the original native linear/nonlinear budgets still bound each proposal. All
+inner roots and source states must remain admissible throughout the outer
+bracket. This deterministic construction can refuse when a coupled solution
+exists outside those admitted probe paths; it is not a general globally
+convergent two-dimensional root solver. Worst work is the product of the scalar
+trial counts, explicitly bounded by the cumulative cap.
+
+This is isothermal, fixed-reference-geometry transport at prescribed gas
+volumes. Carrier permeation, condensation, moving boundaries and temperature
+feedback are not added; reported gas internal-energy changes are not total
+sorption heat or thermostat duty. Focused authored G1/G3/G4 regressions cover
+the independently eliminated three-inventory backward-Euler equations,
+through-transfer with zero uptake, port/owner reversal, continuation, all slab
+schemes, six-face Cartesian accounting, sealed/single-chamber limits, and
+budget/source/cancellation/global-conservation refusal. These added native
+Rust tests have not been executed in this session: DSR and the executor are
+unavailable. Source review and independent floating-point balance algebra do
+not establish a native compilation or test pass.
