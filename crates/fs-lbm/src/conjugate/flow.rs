@@ -24,9 +24,10 @@ pub use density_projection::{
     DensityForceControls, DensityForceInput, DensityForcePrediction, DensityForceReport,
     DensityMomentumReconstruction, DensityMomentumReconstructionControls,
     DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls,
-    DensityProjectionReport, ForcedDensityProjection, ForcedDensityProjectionReport,
-    MaterialDensityMomentumControls, MaterialDensityMomentumInput, MaterialDensityMomentumReport,
-    MaterialDensityMomentumStep, ReservoirPressure, StaggeredBoundaryPressure,
+    DensityProjectionReport, DensityResistanceReport, ForcedDensityProjection,
+    ForcedDensityProjectionReport, MaterialDensityMomentumControls, MaterialDensityMomentumInput,
+    MaterialDensityMomentumReport, MaterialDensityMomentumStep, ReservoirPressure,
+    ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep, StaggeredBoundaryPressure,
 };
 mod density_transport;
 pub use density_transport::{
@@ -47,9 +48,9 @@ pub use phase_volume::{
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
     ConductiveViscousThermalVolumeMomentumStep, PiecewiseThermalVolumeControls,
-    ResolvedViscousThermalVolumeMomentumStep,
-    ThermalVolumeControls, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,
-    ThermalVolumeMomentumStep, ThermalVolumeStep, ViscousThermalVolumeMomentumStep,
+    ResolvedViscousThermalVolumeMomentumStep, ThermalVolumeControls, ThermalVolumeMomentumControls,
+    ThermalVolumeMomentumInput, ThermalVolumeMomentumStep, ThermalVolumeStep,
+    ViscousThermalVolumeMomentumStep,
 };
 
 /// Mass-flow role of one domain face for flux construction and projection.

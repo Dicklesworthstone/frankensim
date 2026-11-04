@@ -465,6 +465,7 @@ fn independent_energy_readback_refuses_inconsistent_pressure() {
         .unwrap();
     let model = FrozenDensity {
         density_kg_m3: &[2.0, 6.0],
+        resistance_pa_s_m2: None,
         target_outflow_m3_s: &[0.2, 0.5],
         duration_s: 0.4,
         uniform_density: None,

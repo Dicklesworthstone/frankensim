@@ -665,6 +665,7 @@ fn independent_field_impulse_and_cell_readbacks_refuse_tampering_without_mutatio
         controls: controls(),
         reconstructed: &reconstructed,
         projection: &result.evolution.projection,
+        resistance_pa_s_m2: None,
     };
     exchange.admit(&gate).unwrap();
     assert!(matches!(

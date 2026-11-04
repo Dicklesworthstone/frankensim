@@ -8,7 +8,7 @@ use super::{finite, finite_positive, poll, poll_every};
 mod feedback;
 pub use feedback::{
     MaterialDensityMomentumControls, MaterialDensityMomentumInput, MaterialDensityMomentumReport,
-    MaterialDensityMomentumStep,
+    MaterialDensityMomentumStep, ResistiveMaterialDensityMomentumStep,
 };
 pub(super) use feedback::{admit_feedback_controls, scatter_projected_material_momentum};
 mod forcing;
@@ -22,6 +22,8 @@ pub use reconstruction::{
     DensityMomentumReconstruction, DensityMomentumReconstructionControls,
     DensityMomentumReconstructionReport,
 };
+mod resistance;
+pub use resistance::{DensityResistanceReport, ResistiveDensityProjection};
 
 /// Physical step and independent readback budgets for a density projection.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -204,8 +206,15 @@ pub struct DensityProjectionReport {
     /// Nonnegative `sum(M_face delta_u^2 / 2)`, joules. This numerical
     /// projection loss is reported separately and is never converted to heat.
     pub projection_loss_j: f64,
-    /// `delta_K + projection_loss - source_work + fixed_boundary_work
-    /// + open_boundary_work`, joules, in the common component gauge.
+    /// Signed `dt sum(B_face delta_u u_after)`, joules, when pressure acts
+    /// through implicit stationary resistance. `B_face` is the integral of
+    /// resistance over the face dual volume, in kg/s. This pressure-stage
+    /// correction to resistance work is not the full physical Darcy heat.
+    /// Exactly zero for the original projection entry points.
+    pub resistance_correction_work_j: f64,
+    /// `delta_K + projection_loss + resistance_correction_work - source_work
+    /// + fixed_boundary_work + open_boundary_work`, joules, in the common
+    /// component gauge. Kinetic terms always use the actual physical mass.
     pub energy_defect_j: f64,
 }
 
@@ -253,6 +262,7 @@ impl PressureReadback {
 
 pub(super) struct FrozenDensity<'a> {
     density_kg_m3: &'a [f64],
+    resistance_pa_s_m2: Option<&'a [f64]>,
     pub(super) target_outflow_m3_s: &'a [f64],
     duration_s: f64,
     pub(super) uniform_density: Option<f64>,
@@ -275,6 +285,13 @@ impl FrozenDensity<'_> {
         face_dual_mass(domain, self.density_kg_m3, c, f, nb)
     }
 
+    fn mobility_mass(&self, domain: &VoxelDomain, c: usize, f: usize, nb: Option<usize>) -> f64 {
+        let mass = self.face_mass(domain, c, f, nb);
+        self.resistance_pa_s_m2.map_or(mass, |resistance| {
+            mass + self.duration_s * face_resistance_kg_s(domain, resistance, c, f, nb)
+        })
+    }
+
     pub(super) fn conductance(
         &self,
         domain: &VoxelDomain,
@@ -283,7 +300,7 @@ impl FrozenDensity<'_> {
         nb: Option<usize>,
     ) -> f64 {
         let area = domain.face_area(c, f / 2);
-        self.duration_s * area * (area / self.face_mass(domain, c, f, nb))
+        self.duration_s * area * (area / self.mobility_mass(domain, c, f, nb))
     }
 }
 
@@ -299,6 +316,56 @@ pub(super) fn face_dual_mass(
     let half_nb = nb.map_or(0.0, |n| 0.5 * domain.widths(n)[axis]);
     let mass_per_area = density_kg_m3[c] * half_c + nb.map_or(0.0, |n| density_kg_m3[n] * half_nb);
     domain.face_area(c, axis) * mass_per_area
+}
+
+/// Integrate stationary linear resistance over the actual two half-cell
+/// volumes. Resistance is in Pa s/m^2 = kg/(m^3 s); this integral is in kg/s.
+/// Exterior faces contain only the adjacent half-cell. Physical inertia is
+/// still supplied independently by `face_dual_mass`.
+pub(super) fn face_resistance_kg_s(
+    domain: &VoxelDomain,
+    resistance_pa_s_m2: &[f64],
+    c: usize,
+    f: usize,
+    nb: Option<usize>,
+) -> f64 {
+    let axis = f / 2;
+    let half_c = 0.5 * domain.widths(c)[axis];
+    let half_nb = nb.map_or(0.0, |n| 0.5 * domain.widths(n)[axis]);
+    let resistance_per_area =
+        resistance_pa_s_m2[c] * half_c + nb.map_or(0.0, |n| resistance_pa_s_m2[n] * half_nb);
+    domain.face_area(c, axis) * resistance_per_area
+}
+
+/// Admit before indexing any face or allocating a candidate. A zero field is
+/// identified explicitly so the original geometric/uniform-density arithmetic
+/// remains unchanged. Solids use their exact blocked-face treatment, never a
+/// large finite resistance surrogate.
+pub(super) fn admit_resistance_field(
+    domain: &VoxelDomain,
+    resistance_pa_s_m2: &[f64],
+    gate: &CancelGate,
+) -> Result<bool, ChtError> {
+    poll(gate)?;
+    if resistance_pa_s_m2.len() != domain.cell_count() {
+        return Err(refuse(
+            "flow.resistance_shape",
+            "resistance must contain one value per domain cell",
+        ));
+    }
+    let mut nonzero = false;
+    for (c, &resistance) in resistance_pa_s_m2.iter().enumerate() {
+        poll_every(gate, c)?;
+        nonnegative("flow.resistance_pa_s_m2", resistance)?;
+        if !domain.is_fluid(c) && resistance != 0.0 {
+            return Err(refuse(
+                "flow.resistance_solid",
+                "solid-cell resistance must be zero; solid faces remain exactly blocked",
+            ));
+        }
+        nonzero |= resistance != 0.0;
+    }
+    Ok(nonzero)
 }
 
 impl FlowField {
@@ -484,11 +551,62 @@ impl FlowField {
         controls: DensityProjectionControls,
         gate: &CancelGate,
     ) -> Result<(DensityProjection, PressureReadback), ChtError> {
+        self.project_density_volume_source_with_mobility_readback(
+            domain,
+            faces,
+            boundary_pressure,
+            density_kg_m3,
+            target_outflow_m3_s,
+            None,
+            controls,
+            gate,
+        )
+    }
+
+    /// Correct a predictor already damped by the same stationary resistance.
+    /// Pressure uses `dt A^2 / (M + dt B)`, while energy uses physical `M`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn project_density_volume_source_with_resistance_readback<'a>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: BoundaryPressure<'a>,
+        density_kg_m3: &'a [f64],
+        target_outflow_m3_s: &'a [f64],
+        resistance_pa_s_m2: &'a [f64],
+        controls: DensityProjectionControls,
+        gate: &CancelGate,
+    ) -> Result<(DensityProjection, PressureReadback), ChtError> {
+        self.project_density_volume_source_with_mobility_readback(
+            domain,
+            faces,
+            boundary_pressure,
+            density_kg_m3,
+            target_outflow_m3_s,
+            Some(resistance_pa_s_m2),
+            controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_density_volume_source_with_mobility_readback<'a>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: BoundaryPressure<'a>,
+        density_kg_m3: &'a [f64],
+        target_outflow_m3_s: &'a [f64],
+        resistance_pa_s_m2: Option<&'a [f64]>,
+        controls: DensityProjectionControls,
+        gate: &CancelGate,
+    ) -> Result<(DensityProjection, PressureReadback), ChtError> {
         let mut density = self.admit_density_projection(
             domain,
             faces,
             density_kg_m3,
             target_outflow_m3_s,
+            resistance_pa_s_m2,
             controls,
             gate,
         )?;
@@ -545,6 +663,7 @@ impl FlowField {
         faces: [FlowFace; 6],
         density_kg_m3: &'a [f64],
         target_outflow_m3_s: &'a [f64],
+        resistance_pa_s_m2: Option<&'a [f64]>,
         controls: DensityProjectionControls,
         gate: &CancelGate,
     ) -> Result<FrozenDensity<'a>, ChtError> {
@@ -559,15 +678,25 @@ impl FlowField {
             "flow.maximum_energy_defect_j",
             controls.maximum_energy_defect_j,
         )?;
-        let uniform_density = self.admit_density_field(
+        let mut uniform_density = self.admit_density_field(
             domain,
             faces,
             density_kg_m3,
             Some(target_outflow_m3_s),
             gate,
         )?;
+        let resistance_pa_s_m2 = match resistance_pa_s_m2 {
+            Some(resistance) if admit_resistance_field(domain, resistance, gate)? => {
+                // The geometric shortcut scales by one rho/dt. Even a uniform
+                // rho must use the full metric once any resistance is present.
+                uniform_density = None;
+                Some(resistance)
+            }
+            _ => None,
+        };
         let density = FrozenDensity {
             density_kg_m3,
+            resistance_pa_s_m2,
             target_outflow_m3_s,
             duration_s: controls.duration_s,
             uniform_density,
@@ -588,6 +717,12 @@ impl FlowField {
                         "flow.face_dual_mass_kg",
                         density.face_mass(domain, c, f, nb),
                     )?;
+                    if resistance_pa_s_m2.is_some() {
+                        finite_positive(
+                            "flow.pressure_mobility_mass_kg",
+                            density.mobility_mass(domain, c, f, nb),
+                        )?;
+                    }
                     finite_positive(
                         "flow.pressure_conductance",
                         density.conductance(domain, c, f, nb),
@@ -706,6 +841,7 @@ fn audit(
     let mut final_energy = Sum::default();
     let mut change = Sum::default();
     let mut loss = Sum::default();
+    let mut resistance_work = Sum::default();
     let mut source_work = Sum::default();
     let mut boundary_work = Sum::default();
     let mut open_work = Sum::default();
@@ -736,6 +872,14 @@ fn audit(
             final_energy.add(0.5 * mass * u1 * u1);
             change.add(mass * (u0 + 0.5 * du) * du);
             loss.add(0.5 * mass * du * du);
+            if let Some(resistance) = density.resistance_pa_s_m2 {
+                resistance_work.add(
+                    controls.duration_s
+                        * face_resistance_kg_s(domain, resistance, c, f, nb)
+                        * du
+                        * u1,
+                );
+            }
             if nb.is_none() && faces[f] == FlowFace::Fixed {
                 boundary_work.add(controls.duration_s * pressure[c] * q1);
             } else if nb.is_none() && faces[f] == FlowFace::Free {
@@ -753,14 +897,21 @@ fn audit(
         final_energy.value,
         change.value,
         loss.value,
+        resistance_work.value,
         source_work.value,
         boundary_work.value,
         open_work.value,
     ] {
         finite("flow.projection_energy", value)?;
     }
-    let energy_defect =
-        change.value + loss.value - source_work.value + boundary_work.value + open_work.value;
+    let inertial_work = change.value + loss.value;
+    // Retain the original arithmetic, including signed zero, for no drag.
+    let corrected_work = if density.resistance_pa_s_m2.is_some() {
+        inertial_work + resistance_work.value
+    } else {
+        inertial_work
+    };
+    let energy_defect = corrected_work - source_work.value + boundary_work.value + open_work.value;
     finite("flow.projection_energy_defect", energy_defect)?;
     if max_after > controls.maximum_volume_defect_m3_s {
         return Err(refuse(
@@ -791,6 +942,7 @@ fn audit(
         fixed_boundary_pressure_work_j: boundary_work.value,
         open_boundary_pressure_work_j: open_work.value,
         projection_loss_j: loss.value,
+        resistance_correction_work_j: resistance_work.value,
         energy_defect_j: energy_defect,
     })
 }
@@ -811,5 +963,7 @@ fn refuse(field: &'static str, reason: &str) -> ChtError {
     }
 }
 
+#[cfg(test)]
+mod resistance_projection_tests;
 #[cfg(test)]
 mod tests;

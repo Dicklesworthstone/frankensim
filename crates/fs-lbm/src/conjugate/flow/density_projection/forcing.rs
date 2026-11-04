@@ -368,7 +368,7 @@ impl FlowField {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn admit(
+pub(super) fn admit(
     field: &FlowField,
     domain: &VoxelDomain,
     faces: [FlowFace; 6],
@@ -418,21 +418,26 @@ fn admit(
     Ok(())
 }
 
-fn fluid_neighbor(domain: &VoxelDomain, c: usize, f: usize) -> Option<usize> {
+pub(super) fn fluid_neighbor(domain: &VoxelDomain, c: usize, f: usize) -> Option<usize> {
     domain.neighbor(c, f).filter(|&n| domain.is_fluid(n))
 }
 
-fn owns_face(f: usize, fluid_neighbor: Option<usize>) -> bool {
+pub(super) fn owns_face(f: usize, fluid_neighbor: Option<usize>) -> bool {
     fluid_neighbor.is_none() || f % 2 == 1
 }
 
-fn corrected_face(domain: &VoxelDomain, faces: [FlowFace; 6], c: usize, f: usize) -> bool {
+pub(super) fn corrected_face(
+    domain: &VoxelDomain,
+    faces: [FlowFace; 6],
+    c: usize,
+    f: usize,
+) -> bool {
     domain
         .neighbor(c, f)
         .map_or(faces[f] == FlowFace::Free, |n| domain.is_fluid(n))
 }
 
-fn face_impulse(
+pub(super) fn face_impulse(
     domain: &VoxelDomain,
     input: DensityForceInput<'_>,
     duration_s: f64,

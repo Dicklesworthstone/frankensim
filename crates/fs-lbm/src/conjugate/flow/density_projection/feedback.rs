@@ -5,9 +5,10 @@ use super::{
     DensityMomentumReconstruction, DensityMomentumReconstructionControls,
     DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls, FlowFace,
     FlowField, ForcedDensityProjection, PressureReadback, ReservoirPressure,
-    StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass, finite, finite_positive,
-    nonnegative, poll, poll_every, refuse,
+    ResistiveDensityProjection, StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass,
+    face_resistance_kg_s, finite, finite_positive, nonnegative, poll, poll_every, refuse,
 };
+use fs_math::dd::Dd;
 
 /// Original extensive material state and authored sources for one fresh kick.
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +45,8 @@ pub struct MaterialDensityMomentumControls {
 /// Actual returned cell momentum against the independently read native stages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaterialDensityMomentumReport {
-    /// Held reconstruction reaction plus fresh body/pressure impulse, kg m/s.
+    /// Held reconstruction reaction plus fresh body/pressure/resistance impulse,
+    /// kg m/s. Resistance is present only in the resistance-aware entry points.
     /// The component accounts remain in `reconstruction` and `evolution`.
     pub face_impulse_kg_m_s: [f64; 3],
     /// Actual `sum(P_returned-P_input)`, kg m/s.
@@ -79,6 +81,9 @@ pub struct MaterialDensityMomentumReport {
     /// + fixed_boundary_pressure_work + open_boundary_pressure_work
     /// - mass_representation_work`, J.
     /// Initial reconstruction Jensen loss cancels; it is NOT debited again.
+    /// For the implicit resistance entries, replace pressure projection loss
+    /// and force/pressure split work by native backward-Euler loss plus physical
+    /// resistance heat. Their body and constraint work use final face velocity.
     pub composed_energy_defect_j: f64,
     pub absolute_energy_defect_j: f64,
 }
@@ -93,6 +98,17 @@ pub struct MaterialDensityMomentumStep {
     pub reconstruction: DensityMomentumReconstructionReport,
     /// Actual native pressure-corrected face field and original physical reports.
     pub evolution: ForcedDensityProjection,
+    pub report: MaterialDensityMomentumReport,
+}
+
+/// Actual-density implicit stationary resistance and conservative cell feedback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResistiveMaterialDensityMomentumStep {
+    pub momentum_kg_m_s: Vec<[f64; 3]>,
+    /// The original current M/V, never the resistance-modified pressure metric.
+    pub density_kg_m3: Vec<f64>,
+    pub reconstruction: DensityMomentumReconstructionReport,
+    pub evolution: ResistiveDensityProjection,
     pub report: MaterialDensityMomentumReport,
 }
 
@@ -205,6 +221,169 @@ impl FlowField {
         )
     }
 
+    /// Apply stationary Darcy resistance implicitly in the native pressure
+    /// solve, then scatter its accepted impulse to the original material P.
+    /// `resistance_pa_s_m2` is one nonnegative frozen beta per fluid cell and
+    /// zero in solids. Face resistance integrates the original half-cell
+    /// volumes. Pressure mobility uses M + dt B; inertia, kinetic energy and
+    /// impulse shares continue to use the actual M/V and authoritative M/2.
+    ///
+    /// Drag impulse is -dt B u_final, with equal support for held velocities.
+    /// Physical resistance heat remains in `evolution.report`; this momentum
+    /// entry does not insert it into material enthalpy. Numerical reconstruction,
+    /// backward-Euler and scatter losses are separately audited and never heat.
+    ///
+    /// # Errors
+    /// Invalid resistance or any fresh reconstruction, native solve, impulse,
+    /// work, scatter or cancellation refusal leaves all supplied inputs unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_project_material_momentum_with_resistance(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        input: MaterialDensityMomentumInput<'_>,
+        resistance_pa_s_m2: &[f64],
+        controls: MaterialDensityMomentumControls,
+        gate: &CancelGate,
+    ) -> Result<ResistiveMaterialDensityMomentumStep, ChtError> {
+        self.force_project_material_momentum_with_optional_resistance_pressure(
+            domain,
+            faces,
+            None,
+            input,
+            resistance_pa_s_m2,
+            controls,
+            gate,
+        )
+    }
+
+    /// The same implicit-resistance transfer with authored plane or spatial
+    /// reservoir pressures. Component-relative pressure differences reach each
+    /// boundary half-cell once. Opening work remains mechanical; it is not
+    /// added to resistance heat or represented as a material source.
+    ///
+    /// # Errors
+    /// Invalid pressure or any refusal of
+    /// [`Self::force_project_material_momentum_with_resistance`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_project_material_momentum_with_resistance_and_reservoir_pressure<'p>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        reservoir_pressure: impl Into<ReservoirPressure<'p>>,
+        input: MaterialDensityMomentumInput<'_>,
+        resistance_pa_s_m2: &[f64],
+        controls: MaterialDensityMomentumControls,
+        gate: &CancelGate,
+    ) -> Result<ResistiveMaterialDensityMomentumStep, ChtError> {
+        self.force_project_material_momentum_with_optional_resistance_pressure(
+            domain,
+            faces,
+            Some(reservoir_pressure.into().admit(faces, gate)?),
+            input,
+            resistance_pa_s_m2,
+            controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn force_project_material_momentum_with_optional_resistance_pressure(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: Option<BoundaryPressure<'_>>,
+        input: MaterialDensityMomentumInput<'_>,
+        resistance_pa_s_m2: &[f64],
+        controls: MaterialDensityMomentumControls,
+        gate: &CancelGate,
+    ) -> Result<ResistiveMaterialDensityMomentumStep, ChtError> {
+        poll(gate)?;
+        admit_feedback_controls(controls)?;
+        let reconstructed = self.reconstruct_material_momentum(
+            domain,
+            faces,
+            input.mass_kg,
+            input.momentum_kg_m_s,
+            controls.reconstruction,
+            gate,
+        )?;
+        let (evolution, pressure_readback) = reconstructed
+            .field
+            .force_and_project_density_with_resistance_readback(
+                domain,
+                faces,
+                boundary_pressure,
+                DensityForceInput {
+                    density_kg_m3: &reconstructed.density_kg_m3,
+                    acceleration_m_s2: input.acceleration_m_s2,
+                    force_density_n_m3: input.force_density_n_m3,
+                },
+                resistance_pa_s_m2,
+                input.target_outflow_m3_s,
+                controls.projection,
+                controls.forcing,
+                gate,
+            )?;
+        let exchange = Exchange {
+            held: self,
+            domain,
+            faces,
+            boundary_pressure,
+            pressure_readback: Some(&pressure_readback),
+            input,
+            controls,
+            reconstructed: &reconstructed,
+            projection: &evolution.projection,
+            resistance_pa_s_m2: Some(resistance_pa_s_m2),
+        };
+        exchange.admit(gate)?;
+        let momentum = exchange.scatter(gate)?;
+        let mut report = exchange.audit(&momentum, gate)?;
+        // Independently combine actual cell energy with the fresh physical
+        // resistance account. The exchange's local centered identity above
+        // treats body plus accepted drag as one algebraic impulse; that is not
+        // a claim that physical drag is a midpoint-work body-force predictor.
+        let native = &evolution.report;
+        let pressure = &evolution.projection.report;
+        let terms = [
+            report.kinetic_energy_change_j,
+            report.numerical_scatter_loss_j,
+            reconstructed.report.numerical_constraint_loss_j,
+            native.backward_euler_loss_j,
+            native.resistance_heat_j,
+            -reconstructed.report.constraint_reservoir_work_j,
+            -native.body_endpoint_work_j,
+            -native.constraint_endpoint_work_j,
+            -pressure.pressure_source_work_j,
+            pressure.fixed_boundary_pressure_work_j,
+            pressure.open_boundary_pressure_work_j,
+            -report.mass_representation_work_j,
+        ];
+        let composed = terms
+            .into_iter()
+            .fold(Dd::ZERO, |sum, value| sum + Dd::from_f64(value))
+            .to_f64();
+        finite("flow.resistance_feedback_composed_energy", composed)?;
+        let absolute =
+            (Dd::from_f64(report.absolute_energy_defect_j) + Dd::from_f64(composed.abs())).to_f64();
+        check_budget(
+            "flow.resistance_feedback_energy_budget",
+            absolute,
+            controls.maximum_feedback_energy_defect_j,
+        )?;
+        report.composed_energy_defect_j = composed;
+        report.absolute_energy_defect_j = absolute;
+        poll(gate)?;
+        Ok(ResistiveMaterialDensityMomentumStep {
+            momentum_kg_m_s: momentum,
+            density_kg_m3: reconstructed.density_kg_m3,
+            reconstruction: reconstructed.report,
+            evolution,
+            report,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn force_project_material_momentum_with_optional_pressure(
         &self,
@@ -312,6 +491,7 @@ pub(in crate::conjugate::flow) fn scatter_projected_material_momentum(
         controls,
         reconstructed,
         projection,
+        resistance_pa_s_m2: None,
     };
     exchange.admit(gate)?;
     let momentum = exchange.scatter(gate)?;
@@ -330,6 +510,7 @@ struct Exchange<'a> {
     controls: MaterialDensityMomentumControls,
     reconstructed: &'a DensityMomentumReconstruction,
     projection: &'a DensityProjection,
+    resistance_pa_s_m2: Option<&'a [f64]>,
 }
 
 struct FaceImpulse {
@@ -357,6 +538,7 @@ impl Exchange<'_> {
             || self.input.target_outflow_m3_s.len() != n
             || self.reconstructed.density_kg_m3.len() != n
             || self.projection.pressure_correction_pa.len() != n
+            || self.resistance_pa_s_m2.is_some_and(|beta| beta.len() != n)
         {
             return Err(refuse(
                 "flow.feedback_shape",
@@ -441,7 +623,7 @@ impl Exchange<'_> {
         };
         let dt = self.controls.projection.duration_s;
         let (force, pressure) = if held {
-            // Native body forcing is exactly balanced by its held reaction.
+            // Native body force and drag are balanced by the held reaction.
             (0.0, 0.0)
         } else {
             let force_per_area =
@@ -449,8 +631,13 @@ impl Exchange<'_> {
                     + neighbor.map_or(0.0, |n| {
                         0.5 * self.domain.widths(n)[axis] * self.input.force_density_n_m3[n][axis]
                     });
-            let force =
+            let body =
                 dt * (native_mass * self.input.acceleration_m_s2[axis] + area * force_per_area);
+            // This is the accepted native drag, not a second drag predictor.
+            // Its exact impulse joins the same authoritative half-mass shares.
+            let force = self.resistance_pa_s_m2.map_or(body, |beta| {
+                body - dt * face_resistance_kg_s(self.domain, beta, c, f, neighbor) * (q1 / area)
+            });
             let difference = self.pressure_readback.map_or_else(
                 || {
                     self.projection.pressure_correction_pa[c]

@@ -1,5 +1,32 @@
 # CONTRACT: fs-lbm
 
+## Density-aware implicit stationary resistance
+
+The staggered `FlowField` resistance entries solve
+`(M + dt B) u1 = M u0 + I_body + dt A delta_p`, with both M and B integrated
+over the original graded half-cells. Caller-supplied nonnegative isotropic
+`beta` has units Pa s/m²; B is its volume integral in kg/s. The pressure
+operator uses `dt A²/(M + dt B)`. Actual density supplies inertia, kinetic
+energy and material impulse shares; resistance never becomes fictitious mass.
+
+The accepted endpoint provides physical `dt B u1²` heat, partitioned by
+each contributing cell's own beta and half-volume. Separate backward-Euler,
+reconstruction and scatter losses are numerical and never heat. Fixed
+normal flux retains its controller reaction and endpoint work against drag.
+Relative pressure readback preserves small heads under large common gauges;
+volume sources and reservoirs retain the original pressure-work convention.
+Cell feedback scatters accepted body, pressure and drag impulses once into
+the original extensive momentum using authoritative half-cell mass.
+
+Shape, finite coefficients, positive representable mobility, native volume
+and residual budgets, non-cancelling impulse/work defects, heat-partition
+roundoff and cancellation all gate publication. Zero beta retains the old
+face arithmetic. G0/G2/G3 regressions cover analytic transient/Darcy limits,
+graded density/resistance, source flow, held-flux work and gauge changes.
+This is frozen linear resistance against a stationary matrix, with no
+constitutive permeability inference, exact solid locking, moving skeleton,
+phase evolution or nonlinear resistance convergence claim.
+
 ## Physical impulses on source-bound liquid trajectories
 
 The original `MaterialFreeSurface2`, `MaterialFreeSurface3`,

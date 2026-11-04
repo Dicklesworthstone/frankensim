@@ -92,8 +92,8 @@ use crate::d3q19::Face3;
 /// Face-local material/reservoir exchange with a resolved surface temperature.
 pub mod boundary_exchange;
 mod buoyant;
-mod conductance;
 mod compact_storage;
+mod conductance;
 mod domain;
 mod electric;
 mod energy;
@@ -124,22 +124,20 @@ pub use electric::{
 };
 pub use energy::{
     AdvectiveEnthalpyField, AffineSpecificEnthalpy, CellSink, CompactComponent, ContactResistance,
-    ConvectionScheme, EnergyBalance, EnergyConfig,
-    EnergyReport, EnergySolution, FaceContactResistance, JunctionSolution, SourceContactControls,
-    SourceContactState, SourceFaceContact, ThermalFace,
-    ThermalSetup, solve_energy,
+    ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport, EnergySolution,
+    FaceContactResistance, JunctionSolution, SourceContactControls, SourceContactState,
+    SourceFaceContact, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
     AdvectedMaterial, CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveThermalVolumeControls,
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
-    ConductiveThermalVolumeReport, ConductiveThermalVolumeStep, DensityForceControls,
-    ConductiveViscousThermalVolumeMomentumStep,
-    ResolvedViscousThermalVolumeMomentumStep,
-    DensityForceInput, DensityForcePrediction, DensityForceReport, DensityMomentumReconstruction,
+    ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
+    ConductiveViscousThermalVolumeMomentumStep, DensityForceControls, DensityForceInput,
+    DensityForcePrediction, DensityForceReport, DensityMomentumReconstruction,
     DensityMomentumReconstructionControls, DensityMomentumReconstructionReport, DensityProjection,
-    DensityProjectionControls, DensityProjectionReport, FlowFace, FlowField,
-    ForcedDensityProjection, ForcedDensityProjectionReport, LbmCollisionChoice, LbmFlow,
+    DensityProjectionControls, DensityProjectionReport, DensityResistanceReport, FlowFace,
+    FlowField, ForcedDensityProjection, ForcedDensityProjectionReport, LbmCollisionChoice, LbmFlow,
     LbmFlowConfig, LbmFlowReport, MaterialAdvectionControls, MaterialAdvectionInput,
     MaterialAdvectionReport, MaterialAdvectionStep, MaterialDensityMomentumControls,
     MaterialDensityMomentumInput, MaterialDensityMomentumReport, MaterialDensityMomentumStep,
@@ -147,9 +145,11 @@ pub use flow::{
     MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport, MaterialMomentumStep,
     MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
     MaterialVolumeSource, PiecewiseThermalVolumeControls, ProjectionReport, ReservoirPressure,
-    StaggeredBoundaryPressure, ThermalVolumeControls, ThermalVolumeMomentumControls,
-    ThermalVolumeMomentumInput, ThermalVolumeMomentumStep, ThermalVolumeStep,
-    ViscousMaterialMomentumAdvance, ViscousThermalVolumeMomentumStep, lbm_duct_flow,
+    ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep,
+    ResolvedViscousThermalVolumeMomentumStep, StaggeredBoundaryPressure, ThermalVolumeControls,
+    ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
+    ThermalVolumeStep, ViscousMaterialMomentumAdvance, ViscousThermalVolumeMomentumStep,
+    lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{
@@ -161,13 +161,13 @@ pub use simple::sgs::FvSgsConfig;
 pub use simple::viscous_heat::{UnsteadyHeatingAudit, UnsteadyMechanicalStep};
 pub use simple::viscous_heat::{
     ViscousHeatControls, ViscousPower, creeping_flow_with_body_force_heat,
-    creeping_flow_with_darcy_heat, creeping_flow_with_pressure_work_heat, creeping_flow_with_viscous_heat,
+    creeping_flow_with_darcy_heat, creeping_flow_with_pressure_work_heat,
+    creeping_flow_with_viscous_heat,
 };
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,
     InternalFan, MomentumReconstruction, PressureSolver, SimpleConfig, SimpleReport, TimeScheme,
-    Turbulence, simple_flow,
-    simple_flow_with_material_resistance, simple_flow_with_viscosity,
+    Turbulence, simple_flow, simple_flow_with_material_resistance, simple_flow_with_viscosity,
     simple_flow_with_viscosity_and_force,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
@@ -355,4 +355,3 @@ fn finite(field: &'static str, value: f64) -> Result<(), ChtError> {
         })
     }
 }
-
