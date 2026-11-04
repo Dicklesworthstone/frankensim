@@ -1058,7 +1058,6 @@ fn mixed_vibration_refuses_exact_constraints_storage_caps_and_cancellation() {
     });
 }
 
-
 // Independent unit-tetra polynomial model. Every P2 vector field that vanishes
 // on z=0 and has zero divergence is spanned by
 // (z,0,0), (xz,0,-z²/2), (yz,0,0), (z²,0,0),
@@ -1102,8 +1101,8 @@ fn clamped_face_solenoidal_pencil(mu: f64, rho: f64) -> (Vec<f64>, Vec<f64>) {
             for a in 0..3 {
                 for p in 0..4 {
                     for q in 0..4 {
-                        mass[8 * i + j] += rho * fields[i][a][p]
-                            * fields[j][a][q] * quadratic[p][q];
+                        mass[8 * i + j] +=
+                            rho * fields[i][a][p] * fields[j][a][q] * quadratic[p][q];
                         for b in 0..3 {
                             let ei = 0.5 * (gradients[i][a][b][p] + gradients[i][b][a][p]);
                             let ej = 0.5 * (gradients[j][a][b][q] + gradients[j][b][a][q]);
@@ -1129,11 +1128,13 @@ fn exact_incompressible_modes_match_independent_polynomials_and_objectivity() {
         for (cosine, sine, bulk) in [(1.0, 0.0, 20.0), (0.8, 0.6, 2e8)] {
             let initial: Vec<_> = nodes
                 .iter()
-                .map(|x| [
-                    (cosine - 1.0) * x[0] - sine * x[1],
-                    sine * x[0] + (cosine - 1.0) * x[1],
-                    0.0,
-                ])
+                .map(|x| {
+                    [
+                        (cosine - 1.0) * x[0] - sine * x[1],
+                        sine * x[0] + (cosine - 1.0) * x[1],
+                        0.0,
+                    ]
+                })
                 .collect();
             let fixed: Vec<_> = nodes
                 .iter()
@@ -1147,7 +1148,11 @@ fn exact_incompressible_modes_match_independent_polynomials_and_objectivity() {
             let card = modal_source_card(mu, bulk);
             let material = ResolvedHyperelastic::try_from_model_card(&card).unwrap();
             let mut p = problem(
-                &nodes, &elements, &material, &fixed, &[],
+                &nodes,
+                &elements,
+                &material,
+                &fixed,
+                &[],
                 VolumetricTreatment::ExactIncompressible,
             );
             p.settings.load_steps = 1;
@@ -1155,9 +1160,14 @@ fn exact_incompressible_modes_match_independent_polynomials_and_objectivity() {
                 p.solve_incompressible_vibration(&[rho], modal_settings(), cx)
             } else {
                 p.solve_incompressible_vibration_from(
-                    &initial, &[0.0; 4], &[rho], modal_settings(), cx,
+                    &initial,
+                    &[0.0; 4],
+                    &[rho],
+                    modal_settings(),
+                    cx,
                 )
-            }.unwrap();
+            }
+            .unwrap();
             assert_eq!(spectrum.free_dofs().len(), 12);
             assert_eq!(spectrum.dimension(), 8);
             assert_eq!(spectrum.independent_pressure_indices(), &[0, 1, 2, 3]);
@@ -1173,15 +1183,20 @@ fn exact_incompressible_modes_match_independent_polynomials_and_objectivity() {
             for (mode, oracle) in spectrum.modes().iter().zip(&expected) {
                 near(mode.coordinates.lambda, oracle.lambda, 2e-8 * oracle.lambda);
                 assert!(mode.coordinates.interval.0 > 0.0);
-                assert!(mode.constraint_relative_residual
-                    <= modal_settings().pressure_residual_tolerance);
-                assert!(mode.momentum_relative_residual
-                    <= modal_settings().spectrum.relative_residual_tolerance);
+                assert!(
+                    mode.constraint_relative_residual
+                        <= modal_settings().pressure_residual_tolerance
+                );
+                assert!(
+                    mode.momentum_relative_residual
+                        <= modal_settings().spectrum.relative_residual_tolerance
+                );
                 let mut physical_norm = 0.0;
                 for i in 0..12 {
                     for j in 0..12 {
                         physical_norm += mode.displacement_shape[i]
-                            * spectrum.mass_kg()[12 * i + j] * mode.displacement_shape[j];
+                            * spectrum.mass_kg()[12 * i + j]
+                            * mode.displacement_shape[j];
                     }
                 }
                 near(physical_norm, 1.0, 2e-11);
@@ -1206,7 +1221,11 @@ fn exact_incompressible_modes_preserve_the_original_pressure_gauge() {
         let (mu, rho) = (2.0, 7.0);
         let material = law(mu, 20.0);
         let mut p = problem(
-            &nodes, &elements, &material, &fixed, &[],
+            &nodes,
+            &elements,
+            &material,
+            &fixed,
+            &[],
             VolumetricTreatment::ExactIncompressible,
         );
         p.settings.load_steps = 1;
@@ -1250,11 +1269,20 @@ fn exact_incompressible_modes_preserve_the_original_pressure_gauge() {
                     assert_eq!(full.get(nu + row, nu + col), 0.0);
                 }
             }
-            normalized_pressures.push(mode.pressure_shape.iter().map(|p| p / a).collect::<Vec<_>>());
+            normalized_pressures.push(
+                mode.pressure_shape
+                    .iter()
+                    .map(|p| p / a)
+                    .collect::<Vec<_>>(),
+            );
         }
         let shift = normalized_pressures[1][0] - normalized_pressures[0][0];
         for i in 1..4 {
-            near(normalized_pressures[1][i] - normalized_pressures[0][i], shift, 2e-8);
+            near(
+                normalized_pressures[1][i] - normalized_pressures[0][i],
+                shift,
+                2e-8,
+            );
         }
     });
 }
@@ -1265,18 +1293,26 @@ fn exact_incompressible_vibration_retains_domain_capacity_and_gauge_refusals() {
     with_cx(|cx| {
         let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
-        let fixed: Vec<_> = nodes.iter().enumerate()
+        let fixed: Vec<_> = nodes
+            .iter()
+            .enumerate()
             .filter(|(_, x)| x[2] == 0.0)
             .flat_map(|(node, _)| (0..3).map(move |a| (3 * node + a, 0.0)))
             .collect();
         let material = law(2.0, 20.0);
         let mut p = problem(
-            &nodes, &elements, &material, &fixed, &[],
+            &nodes,
+            &elements,
+            &material,
+            &fixed,
+            &[],
             VolumetricTreatment::OriginalMaterial,
         );
         assert!(matches!(
             p.solve_incompressible_vibration(&[1.0], modal_settings(), cx),
-            Err(MixedVibrationError::Mixed(MixedUpError::InvalidInput { .. }))
+            Err(MixedVibrationError::Mixed(
+                MixedUpError::InvalidInput { .. }
+            ))
         ));
         p.volumetric = VolumetricTreatment::ExactIncompressible;
         for kind in 0..3 {
@@ -1288,14 +1324,18 @@ fn exact_incompressible_vibration_retains_domain_capacity_and_gauge_refusals() {
             }
             assert!(matches!(
                 p.solve_incompressible_vibration(&[1.0], settings, cx),
-                Err(MixedVibrationError::Mixed(MixedUpError::InvalidInput { .. }))
+                Err(MixedVibrationError::Mixed(
+                    MixedUpError::InvalidInput { .. }
+                ))
             ));
         }
         // With free face traction the mean pressure is physical, not a gauge.
         p.pressure_gauge = Some((0, 0.0));
         assert!(matches!(
             p.solve_incompressible_vibration(&[1.0], modal_settings(), cx),
-            Err(MixedVibrationError::Mixed(MixedUpError::IncompatiblePressureGauge { node: 0 }))
+            Err(MixedVibrationError::Mixed(
+                MixedUpError::IncompatiblePressureGauge { node: 0 }
+            ))
         ));
         p.pressure_gauge = None;
         let gate = CancelGate::new();
@@ -1306,5 +1346,248 @@ fn exact_incompressible_vibration_retains_domain_capacity_and_gauge_refusals() {
                 Err(MixedVibrationError::Mixed(MixedUpError::Cancelled))
             ));
         });
+    });
+}
+
+#[test]
+fn uniform_closed_pressure_recovers_hydrostatic_volume_and_separate_load_work() {
+    with_cx(|cx| {
+        let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let supports = rollers(&nodes);
+        let (mu, bulk) = (2.0, 30.0);
+        let material = law(mu, bulk);
+        let p = problem(
+            &nodes,
+            &elements,
+            &material,
+            &supports,
+            &[],
+            VolumetricTreatment::OriginalMaterial,
+        );
+        // The original four-step continuation must ramp pressure along with
+        // the native loads, while preserving its separate internal p field.
+        for q in [5.0, -3.0] {
+            let loaded = p.prepare_with_uniform_boundary_pressure(q, cx).unwrap();
+            let solved = loaded.solve(cx).unwrap();
+            let equilibrium = solved.equilibrium();
+            let j = 1.0 - q / bulk;
+            let stretch = j.cbrt();
+            let reference_volume = 1.0 / 6.0;
+            assert_eq!(solved.boundary_pressure().pressure_pa(), q);
+            assert_eq!(equilibrium.steps.len(), p.settings.load_steps);
+            assert_eq!(solved.problem().volumetric, p.volumetric);
+            near(loaded.reference_volume_m3(), reference_volume, 2e-14);
+            near(solved.volume_m3(), j * reference_volume, 2e-9);
+            near(solved.loading_potential_j(), q * j * reference_volume, 2e-8);
+            near(
+                equilibrium.potential_j,
+                0.5 * bulk * (j - 1.0).powi(2) * reference_volume,
+                2e-8,
+            );
+            for (x, u) in nodes.iter().zip(&equilibrium.displacement_m) {
+                for axis in 0..3 {
+                    near(u[axis], (stretch - 1.0) * x[axis], 2e-8);
+                }
+            }
+            for &pressure in &equilibrium.pressure_pa {
+                near(pressure, -q, 2e-7);
+            }
+            for &(_, reaction) in &equilibrium.reactions_n {
+                near(reaction, 0.0, 2e-8);
+            }
+            let evaluated = loaded
+                .evaluate(
+                    &equilibrium.displacement_m,
+                    &equilibrium.pressure_pa,
+                    false,
+                    cx,
+                )
+                .unwrap();
+            near(evaluated.potential_j, equilibrium.potential_j, 2e-14);
+            assert!(
+                evaluated
+                    .pressure_residual_m3
+                    .iter()
+                    .all(|r| r.abs() < 2e-10)
+            );
+        }
+        assert!(matches!(
+            p.prepare_with_uniform_boundary_pressure(f64::NAN, cx),
+            Err(MixedUpError::InvalidInput { .. })
+        ));
+        // Shared midside admission alone does not rule out duplicated volume
+        // cells. A pressure domain must also have a closed oriented exterior.
+        let duplicated = [elements[0], elements[0]];
+        let duplicated_problem = problem(
+            &nodes,
+            &duplicated,
+            &material,
+            &supports,
+            &[],
+            VolumetricTreatment::OriginalMaterial,
+        );
+        assert!(matches!(
+            duplicated_problem.prepare_with_uniform_boundary_pressure(1.0, cx),
+            Err(MixedUpError::InvalidInput { .. })
+        ));
+    });
+}
+
+#[test]
+fn sourced_pressure_loaded_modes_include_true_follower_hessian() {
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    with_cx(|cx| {
+        let (mu, bulk, rho, length, stretch) = (2.0, 30.0, 7.0, 0.4_f64, 0.85_f64);
+        let p1 = [
+            [0.0; 3],
+            [length, 0.0, 0.0],
+            [0.0, length, 0.0],
+            [0.0, 0.0, length],
+        ];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let initial: Vec<_> = nodes
+            .iter()
+            .map(|x| x.map(|v| (stretch - 1.0) * v))
+            .collect();
+        // Two distinct corner gradients/components are essential: the
+        // determinant Hessian vanishes on a single corner's self block.
+        let fixed: Vec<_> = (0..3 * nodes.len())
+            .filter(|d| ![3, 7].contains(d))
+            .map(|d| (d, initial[d / 3][d % 3]))
+            .collect();
+        let card = modal_source_card(mu, bulk);
+        let material = ResolvedHyperelastic::try_from_model_card(&card).unwrap();
+        let mut p = problem(
+            &nodes,
+            &elements,
+            &material,
+            &fixed,
+            &[],
+            VolumetricTreatment::OriginalMaterial,
+        );
+        p.settings.load_steps = 1;
+        let q = bulk * (1.0 - stretch.powi(3));
+        let loaded = p.prepare_with_uniform_boundary_pressure(q, cx).unwrap();
+        let spectrum = loaded
+            .solve_vibration_from(&initial, &[-q; 4], &[rho], modal_settings(), cx)
+            .unwrap();
+        assert_eq!(spectrum.free_dofs(), &[3, 7]);
+        assert_eq!(spectrum.boundary_pressure().unwrap().pressure_pa(), q);
+        assert_eq!(spectrum.reference_density_kg_m3(), &[rho]);
+        let MixedLawField::Uniform(retained) = spectrum.problem().material else {
+            panic!("original material was replaced")
+        };
+        assert!(core::ptr::eq(retained, &material));
+        assert_eq!(retained.model_card(), &card);
+        // For F=sI and p=-q, the material p Hess(J) and follower q Hess(J)
+        // cancel. Original finite compliance contributes kappa cof(F)^2.
+        // Independent affine-Tet10 integrals: integral(t_i^2)=3V/(5L^2),
+        // integral(t_1*t_2)=-V/(5L^2), integral(N_corner^2)=V/70.
+        let longitudinal = bulk * stretch.powi(4) + 4.0 * mu / (3.0 * stretch.powi(2));
+        let cross = bulk * stretch.powi(4) - 2.0 * mu / (3.0 * stretch.powi(2));
+        let volume = length.powi(3) / 6.0;
+        let factor = volume / (5.0 * length.powi(2));
+        let expected_k = [
+            3.0 * longitudinal * factor,
+            -cross * factor,
+            -cross * factor,
+            3.0 * longitudinal * factor,
+        ];
+        let expected_m = [rho * volume / 70.0, 0.0, 0.0, rho * volume / 70.0];
+        for i in 0..4 {
+            near(
+                spectrum.stiffness_n_m()[i],
+                expected_k[i],
+                2e-8 * factor * bulk,
+            );
+            near(spectrum.mass_kg()[i], expected_m[i], 2e-13 * rho * volume);
+        }
+        for (mode, expected) in spectrum.modes().iter().zip([
+            14.0 * (3.0 * longitudinal - cross) / (rho * length.powi(2)),
+            14.0 * (3.0 * longitudinal + cross) / (rho * length.powi(2)),
+        ]) {
+            near(mode.displacement.lambda, expected, 3e-8 * expected);
+            assert!(
+                mode.pressure_equation_relative_residual
+                    <= modal_settings().pressure_residual_tolerance
+            );
+        }
+        // This direct raw-block difference isolates the follower load from
+        // the original material Hessian and the later pressure condensation.
+        let unloaded = p
+            .prepare(cx)
+            .unwrap()
+            .evaluate(&initial, &[-q; 4], true, cx)
+            .unwrap();
+        near(
+            spectrum.mixed_tangent().get(3, 7) - unloaded.tangent.unwrap().get(3, 7),
+            -q * stretch * factor,
+            2e-10 * q * factor,
+        );
+        for &pressure in &spectrum.equilibrium().pressure_pa {
+            near(pressure, -q, 2e-8);
+        }
+    });
+}
+
+#[test]
+fn exact_incompressible_modes_are_invariant_to_held_uniform_ambient_pressure() {
+    with_cx(|cx| {
+        let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let fixed: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x[2] == 0.0)
+            .flat_map(|(node, _)| (0..3).map(move |axis| (3 * node + axis, 0.0)))
+            .collect();
+        let (mu, rho) = (2.0, 7.0);
+        let material = law(mu, 2e8);
+        let mut p = problem(
+            &nodes,
+            &elements,
+            &material,
+            &fixed,
+            &[],
+            VolumetricTreatment::ExactIncompressible,
+        );
+        p.settings.load_steps = 1;
+        let (k, m) = clamped_face_solenoidal_pencil(mu, rho);
+        let expected = fs_modal::eigh_gen_dense(&k, &m, 8).unwrap();
+        for q in [2.5, -1.5] {
+            let loaded = p.prepare_with_uniform_boundary_pressure(q, cx).unwrap();
+            let spectrum = loaded
+                .solve_incompressible_vibration_from(
+                    &vec![[0.0; 3]; nodes.len()],
+                    &[-q; 4],
+                    &[rho],
+                    modal_settings(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(spectrum.dimension(), 8);
+            assert_eq!(spectrum.boundary_pressure().unwrap().pressure_pa(), q);
+            assert_eq!(spectrum.problem().pressure_gauge, None);
+            assert_eq!(spectrum.mass_kg().len(), 12 * 12);
+            near(spectrum.equilibrium().potential_j, 0.0, 2e-12);
+            for &pressure in &spectrum.equilibrium().pressure_pa {
+                near(pressure, -q, 2e-8);
+            }
+            // The original weak constraints include total volume. Holding
+            // uniform ambient q adds a constant potential on this manifold;
+            // its geometric Hessian cancels the equilibrium pressure shift.
+            for (mode, oracle) in spectrum.modes().iter().zip(&expected) {
+                near(mode.coordinates.lambda, oracle.lambda, 2e-8 * oracle.lambda);
+                assert!(
+                    mode.constraint_relative_residual
+                        <= modal_settings().pressure_residual_tolerance
+                );
+                assert!(
+                    mode.momentum_relative_residual
+                        <= modal_settings().spectrum.relative_residual_tolerance
+                );
+            }
+        }
     });
 }

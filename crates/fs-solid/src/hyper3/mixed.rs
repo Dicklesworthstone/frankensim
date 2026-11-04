@@ -47,6 +47,9 @@ pub mod impulse;
 /// Finite-compliance physical modes with consistent pressure elimination.
 pub mod vibration;
 
+/// Held uniform pressure on the entire original material-domain boundary.
+pub mod pressure;
+
 #[cfg(test)]
 mod pressure_tests;
 
@@ -155,11 +158,15 @@ impl<L: MixedFiniteStrainPotential> Clone for MixedUpProblem<'_, L> {
 /// Raw physical residual and consistent tangent, including constrained rows.
 #[derive(Clone, Debug)]
 pub struct MixedUpEvaluation {
+    /// Material force minus the external follower force when evaluated through
+    /// the held-boundary-pressure adapter; otherwise the material force alone.
     pub internal_forces_n: Vec<f64>,
     pub pressure_residual_m3: Vec<f64>,
     /// All displacement DOFs followed by pressures in `pressure_nodes()` order.
     pub tangent: Option<Csr>,
-    /// Mixed saddle potential [J], not necessarily physical stored energy.
+    /// Original material mixed saddle potential [J], not necessarily physical
+    /// stored energy. The boundary pressure's separate loading potential q V
+    /// is never included here.
     pub potential_j: f64,
     pub min_det_f: f64,
 }
@@ -268,6 +275,7 @@ pub struct PreparedMixedUpProblem<'a, L: MixedFiniteStrainPotential = Hyperelast
     gauge_pressure: Option<usize>,
     gauge_component: Vec<bool>,
     work_scale_j: f64,
+    boundary_pressure: Option<pressure::UniformBoundaryPressure>,
 }
 
 impl<'a, L: MixedFiniteStrainPotential> MixedUpProblem<'a, L> {
@@ -450,6 +458,7 @@ impl<'a, L: MixedFiniteStrainPotential> MixedUpProblem<'a, L> {
             gauge_pressure,
             gauge_component,
             work_scale_j,
+            boundary_pressure: None,
         })
     }
 
@@ -516,6 +525,18 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<MixedUpEvaluation, MixedUpError> {
+        self.evaluate_at_load(displacement_m, pressure_pa, with_tangent, inertia, 1.0, cx)
+    }
+
+    fn evaluate_at_load(
+        &self,
+        displacement_m: &[[f64; 3]],
+        pressure_pa: &[f64],
+        with_tangent: bool,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        load: f64,
+        cx: &Cx<'_>,
+    ) -> Result<MixedUpEvaluation, MixedUpError> {
         checkpoint(cx)?;
         self.validate_state(displacement_m, pressure_pa)?;
         let nu = self.mesh.nodes_count * 3;
@@ -554,7 +575,7 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
                 } else {
                     None
                 };
-                let state = match &response {
+                let mut state = match &response {
                     Some(r) => r.state.clone(),
                     None => law
                         .mixed_state(&f, p, self.problem.volumetric)
@@ -566,6 +587,15 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
                 };
                 potential_j += point.weight_m3 * state.potential_pa;
                 min_det_f = min_det_f.min(state.volume_ratio);
+                if let Some(pressure) = self.boundary_pressure {
+                    // q V is an external loading potential. Keep the original
+                    // material/pressure-dual energy and source domain intact.
+                    pressure::add_volume_gradient(
+                        &f,
+                        load * pressure.pressure_pa(),
+                        &mut state.first_piola_pa,
+                    );
+                }
                 for a in 0..10 {
                     for i in 0..3 {
                         local_r[3 * a + i] += point.weight_m3
@@ -578,7 +608,14 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
                     local_r[30 + a] +=
                         point.weight_m3 * point.pressure_shapes[a] * state.pressure_residual;
                 }
-                if let Some(r) = response {
+                if let Some(mut r) = response {
+                    if let Some(pressure) = self.boundary_pressure {
+                        pressure::add_volume_hessian(
+                            &f,
+                            load * pressure.pressure_pa(),
+                            &mut r.tangent_pa,
+                        );
+                    }
                     // Contract A with one shape gradient once, then reuse it
                     // for all test functions (3510 rather than 8100 products).
                     let a_gradient: [[f64; 30]; 9] = core::array::from_fn(|ij| {
@@ -846,7 +883,7 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
             // Zero-residual initial states also need the stability/gauge gate.
             endpoint.ensure_linearization(&newton.x)?;
             let (next_u, next_p) = endpoint.physical_state(&newton.x)?;
-            let state = self.evaluate_with_inertia(&next_u, &next_p, false, inertia, cx)?;
+            let state = self.evaluate_at_load(&next_u, &next_p, false, inertia, load, cx)?;
             let force_residual: Vec<_> = self
                 .free
                 .iter()
@@ -988,7 +1025,7 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
             self.prepared.pressure_tangent(&u, &p, self.cx)?
         } else {
             self.prepared
-                .evaluate_with_inertia(&u, &p, true, self.inertia, self.cx)?
+                .evaluate_at_load(&u, &p, true, self.inertia, self.load, self.cx)?
                 .tangent
                 .expect("requested original tangent")
         };
@@ -1076,7 +1113,7 @@ impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
         let result = self.physical_state(x).and_then(|(u, p)| {
             self.prepared
-                .evaluate_with_inertia(&u, &p, false, self.inertia, self.cx)
+                .evaluate_at_load(&u, &p, false, self.inertia, self.load, self.cx)
         });
         match result {
             Ok(state) => {

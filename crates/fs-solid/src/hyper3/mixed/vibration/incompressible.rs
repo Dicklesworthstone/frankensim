@@ -21,8 +21,12 @@
 //! projected-pencil intervals are retained; unstable/singular equilibria still
 //! refuse through the original static owner.
 
+use super::super::pressure::UniformBoundaryPressure;
+use super::super::{
+    MixedUpError, MixedUpProblem, MixedUpSolution, PreparedMixedUpProblem, checkpoint,
+    inertia_error, invalid,
+};
 use super::{MixedVibrationError, MixedVibrationSettings, symmetric_dense, tolerance};
-use super::super::{MixedUpError, MixedUpProblem, MixedUpSolution, checkpoint, inertia_error, invalid};
 use crate::hyper3::vibration::MAX_DENSE_FREE_DOFS;
 use crate::inertia::ReferenceMass;
 use fs_exec::Cx;
@@ -62,6 +66,7 @@ pub struct IncompressibleMixedVibration<
     L: HyperelasticMaterial + MixedFiniteStrainPotential = Hyperelastic,
 > {
     problem: MixedUpProblem<'a, L>,
+    boundary_pressure: Option<UniformBoundaryPressure>,
     settings: MixedVibrationSettings,
     reference_density_kg_m3: Vec<f64>,
     equilibrium: MixedUpSolution,
@@ -114,8 +119,7 @@ fn project(
         checkpoint(cx)?;
         for j in 0..n {
             for k in 0..r {
-                action[i * r + k] =
-                    matrix[i * n + j].mul_add(basis[j * r + k], action[i * r + k]);
+                action[i * r + k] = matrix[i * n + j].mul_add(basis[j * r + k], action[i * r + k]);
             }
         }
     }
@@ -145,7 +149,8 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         settings: MixedVibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<IncompressibleMixedVibration<'a, L>, MixedVibrationError> {
-        self.solve_incompressible_vibration_impl(None, density, settings, cx)
+        self.prepare(cx)?
+            .solve_incompressible_vibration_impl(None, density, settings, cx)
     }
 
     /// Re-equilibrate a starting iterate under the original absolute supports,
@@ -158,15 +163,17 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         settings: MixedVibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<IncompressibleMixedVibration<'a, L>, MixedVibrationError> {
-        self.solve_incompressible_vibration_impl(
+        self.prepare(cx)?.solve_incompressible_vibration_impl(
             Some((displacement_m, pressure_pa)),
             density,
             settings,
             cx,
         )
     }
+}
 
-    fn solve_incompressible_vibration_impl(
+impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpProblem<'a, L> {
+    pub(in crate::hyper3::mixed) fn solve_incompressible_vibration_impl(
         &self,
         initial: Option<(&[[f64; 3]], &[f64])>,
         density: &[f64],
@@ -174,8 +181,12 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         cx: &Cx<'_>,
     ) -> Result<IncompressibleMixedVibration<'a, L>, MixedVibrationError> {
         checkpoint(cx)?;
-        if self.volumetric != VolumetricTreatment::ExactIncompressible {
-            return Err(invalid("nullspace vibration requires the original exact constraint").into());
+        let prepared = self;
+        let problem = &self.problem;
+        if problem.volumetric != VolumetricTreatment::ExactIncompressible {
+            return Err(
+                invalid("nullspace vibration requires the original exact constraint").into(),
+            );
         }
         if !tolerance(settings.spectrum.relative_residual_tolerance)
             || !tolerance(settings.pressure_residual_tolerance)
@@ -184,7 +195,6 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
                 invalid("modal and pressure tolerances must be finite and in (0,1)").into(),
             );
         }
-        let prepared = self.prepare(cx)?;
         let n = prepared.free_displacements;
         let nu = 3 * prepared.mesh.nodes_count;
         let np = prepared.mesh.pressure_nodes.len();
@@ -311,7 +321,9 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         checkpoint(cx)?;
         for i in 0..m {
             if !factor.r(i, i).is_finite() || factor.r(i, i) == 0.0 {
-                return Err(invalid("native constraint QR cannot represent all admitted rows").into());
+                return Err(
+                    invalid("native constraint QR cannot represent all admitted rows").into(),
+                );
             }
         }
         let r = n - m;
@@ -339,9 +351,8 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         let projected_stiffness_n_m = project(&stiffness_n_m, &basis, n, r, cx)?;
         let projected_mass_kg = project(&mass_kg, &basis, n, r, cx)?;
         checkpoint(cx)?;
-        let projected_modes =
-            eigh_gen_dense(&projected_stiffness_n_m, &projected_mass_kg, r)
-                .map_err(MixedVibrationError::Modal)?;
+        let projected_modes = eigh_gen_dense(&projected_stiffness_n_m, &projected_mass_kg, r)
+            .map_err(MixedVibrationError::Modal)?;
         checkpoint(cx)?;
         if projected_modes.len() != r {
             return Err(invalid("incomplete constrained modal basis").into());
@@ -442,7 +453,8 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
             });
         }
         let result = IncompressibleMixedVibration {
-            problem: *self,
+            problem: *problem,
+            boundary_pressure: prepared.boundary_pressure,
             settings,
             reference_density_kg_m3: density.to_vec(),
             equilibrium,
@@ -464,6 +476,13 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
 impl<L: HyperelasticMaterial + MixedFiniteStrainPotential> IncompressibleMixedVibration<'_, L> {
     pub const fn problem(&self) -> &MixedUpProblem<'_, L> {
         &self.problem
+    }
+    /// Held load on the complete material-domain boundary, if selected. Its
+    /// q Hessian(V) is retained in Kuu, while equilibrium.potential_j remains
+    /// the original material mixed potential. The constraint and pressure
+    /// convention are unchanged.
+    pub const fn boundary_pressure(&self) -> Option<UniformBoundaryPressure> {
+        self.boundary_pressure
     }
     pub const fn settings(&self) -> MixedVibrationSettings {
         self.settings

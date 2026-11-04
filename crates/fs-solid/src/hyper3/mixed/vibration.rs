@@ -13,14 +13,19 @@
 //! adapter bypasses that gate. Returned eigenvalues remain signed, with their
 //! residual intervals, without frequency clipping.
 //!
-//! Constitutive/source conditions and dead loads are held fixed. The original
+//! Constitutive/source conditions and dead loads are held fixed. The pressure
+//! adapter also retains its held boundary load and exact q Hessian(V). The original
 //! P2/P1 weak pressure space, geometry and quadrature remain authoritative;
 //! curved geometry and nonlinear coefficients still require quadrature and
 //! mesh convergence. This route is not an inf-sup or continuum-stability proof.
 
 pub mod incompressible;
 
-use super::{MixedUpError, MixedUpProblem, MixedUpSolution, checkpoint, inertia_error, invalid};
+use super::pressure::UniformBoundaryPressure;
+use super::{
+    MixedUpError, MixedUpProblem, MixedUpSolution, PreparedMixedUpProblem, checkpoint,
+    inertia_error, invalid,
+};
 use crate::hyper3::vibration::{MAX_DENSE_FREE_DOFS, VibrationSettings};
 use crate::inertia::ReferenceMass;
 use fs_exec::Cx;
@@ -97,6 +102,7 @@ pub struct MixedVibrationMode {
 pub struct MixedUpVibration<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential = Hyperelastic>
 {
     problem: MixedUpProblem<'a, L>,
+    boundary_pressure: Option<UniformBoundaryPressure>,
     settings: MixedVibrationSettings,
     reference_density_kg_m3: Vec<f64>,
     equilibrium: MixedUpSolution,
@@ -167,7 +173,8 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         settings: MixedVibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<MixedUpVibration<'a, L>, MixedVibrationError> {
-        self.solve_vibration_impl(None, density, settings, cx)
+        self.prepare(cx)?
+            .solve_vibration_impl(None, density, settings, cx)
     }
 
     /// Re-equilibrate an initial displacement/pressure iterate before forming
@@ -181,10 +188,17 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         settings: MixedVibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<MixedUpVibration<'a, L>, MixedVibrationError> {
-        self.solve_vibration_impl(Some((displacement_m, pressure_pa)), density, settings, cx)
+        self.prepare(cx)?.solve_vibration_impl(
+            Some((displacement_m, pressure_pa)),
+            density,
+            settings,
+            cx,
+        )
     }
+}
 
-    fn solve_vibration_impl(
+impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpProblem<'a, L> {
+    pub(super) fn solve_vibration_impl(
         &self,
         initial: Option<(&[[f64; 3]], &[f64])>,
         density: &[f64],
@@ -192,7 +206,10 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
         cx: &Cx<'_>,
     ) -> Result<MixedUpVibration<'a, L>, MixedVibrationError> {
         checkpoint(cx)?;
-        if self.volumetric != VolumetricTreatment::OriginalMaterial || self.pressure_gauge.is_some()
+        let prepared = self;
+        let problem = &self.problem;
+        if problem.volumetric != VolumetricTreatment::OriginalMaterial
+            || problem.pressure_gauge.is_some()
         {
             return Err(invalid("mixed modal condensation requires original finite pressure compliance without a gauge").into());
         }
@@ -203,7 +220,6 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
                 invalid("modal and pressure tolerances must be finite and in (0,1)").into(),
             );
         }
-        let prepared = self.prepare(cx)?;
         let n = prepared.free_displacements;
         let np = prepared.mesh.pressure_nodes.len();
         let nu = 3 * prepared.mesh.nodes_count;
@@ -226,7 +242,8 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
             .and_then(|v| np.checked_mul(16).and_then(|q| v.checked_add(q)))
             .and_then(|v| v.checked_mul(core::mem::size_of::<f64>()))
             .and_then(|v| {
-                self.elements
+                problem
+                    .elements
                     .len()
                     .checked_mul(16 * 128)
                     .and_then(|q| v.checked_add(q))
@@ -314,7 +331,7 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
             .factor(
                 &h,
                 &LdltOptions {
-                    max_factor_bytes: Some(self.settings.maximum_factor_bytes),
+                    max_factor_bytes: Some(problem.settings.maximum_factor_bytes),
                     ..LdltOptions::default()
                 },
             )
@@ -438,7 +455,8 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
             });
         }
         let result = MixedUpVibration {
-            problem: *self,
+            problem: *problem,
+            boundary_pressure: prepared.boundary_pressure,
             settings,
             reference_density_kg_m3: density.to_vec(),
             equilibrium,
@@ -457,6 +475,13 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
 impl<L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpVibration<'_, L> {
     pub const fn problem(&self) -> &MixedUpProblem<'_, L> {
         &self.problem
+    }
+    /// A held uniform load on the entire material-domain boundary. Its q V
+    /// loading potential is separate from equilibrium.potential_j, which keeps
+    /// the original material mixed potential. The retained tangent includes
+    /// its follower Hessian exactly once; no pressure inertia is introduced.
+    pub const fn boundary_pressure(&self) -> Option<UniformBoundaryPressure> {
+        self.boundary_pressure
     }
     pub const fn settings(&self) -> MixedVibrationSettings {
         self.settings
