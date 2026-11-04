@@ -42,6 +42,13 @@ pub use frictional_impact::{
     ShellFrictionalImpactError, ShellFrictionalImpactReport, ShellFrictionalImpactSite,
 };
 
+#[path = "moving_load/reciprocal_impact.rs"]
+mod reciprocal_impact;
+pub use reciprocal_impact::{
+    PreparedShellReciprocalImpacts, ShellReciprocalImpactControls, ShellReciprocalImpactReport,
+    ShellReciprocalImpactSite,
+};
+
 /// A reference material location on one original triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLoadPoint {

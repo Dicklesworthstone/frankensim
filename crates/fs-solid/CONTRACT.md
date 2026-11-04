@@ -907,6 +907,51 @@ contact with input-order and tangent-frame invariance, and independent finite
 payload momentum/energy with moving planes, driven pins, late refusal,
 cancellation/retry and unchanged force-continuation behavior.
 
+### Reciprocal Coulomb impacts between finite shell trajectories
+
+`prepare_reciprocal_impacts` combines two original `MovingShellMotion` point
+responses into the complete relative mobility
+`J_A M_A,ff^-1 J_A^T + J_B M_B,ff^-1 J_B^T`. Both finite inertias, payloads,
+supports and cross-contact blocks remain active. Each original body matrix is
+retained for independent endpoint checks; their sum enters the same native
+Coulomb multicontact owner. Preparation reuses both original mass LUs and checks
+the aggregate storage for all three matrices against each model's matrix budget,
+alongside existing point and native 21-contact limits.
+
+Prepared pairs bind both model identities, original material witnesses and
+fixed reference-world frames. Reference attachments must agree within the
+explicit componentwise length allowance. At an event, accepted times must match,
+actual deformed witnesses must agree along both tangents, and their observed
+normal separation supplies the original activation/penetration law. Neither
+attachment is relocated and no compensating couple is added. Nonzero common
+displacement and prior deformation are admitted; this is the original linearized
+shell interface, not a finite-rotation spatial-angular closure.
+
+`apply_reciprocal_impacts` solves all paired contacts once and stages equal/opposite
+point impulses through both native full-mass owners. Each body's actual rounded
+point increment, momentum residual and energy residual is checked independently,
+so opposing endpoint errors cannot cancel. Combined momentum excludes only the
+actual external support impulses. The net commanded reference contact couple is
+reported and independently gated, even when the reference-position allowance
+would admit a finite offset. Both actual support-work accounts remain external;
+there is no prescribed infinite-inertia obstacle supply.
+
+Actual relative midpoint work, native Coulomb residuals/passivity, total kinetic
+change and the combined support-work balance gate a final infallible double
+acceptance. Any first/second trial refusal, accounting failure or cancellation
+leaves both complete accepted trajectories and held inputs unchanged. Native
+determinacy and total-work witnesses are retained; redundant individual loads and
+support-work shares remain representative. Contact discovery, sustained friction,
+finite rigid motion and per-contact heat remain separate owners.
+
+The three groups in `tests/moving_load/reciprocal_impact.rs` check analytic unequal
+finite-mass restitution/recoil, simultaneous off-center spin and tangential
+transfer with ID/frame invariance, and independent two-body payload inventories.
+Deformed trajectories at nonzero accepted time retain different driven-support
+work and native force continuation. Permissive geometry cannot hide a reference
+couple; strict late audits, final cancellation/retry and an unrepresentable
+second-body recoil all preserve both accepted states.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

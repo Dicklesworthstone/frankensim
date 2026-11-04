@@ -21,6 +21,9 @@ mod normal_impact;
 #[path = "moving_load/frictional_impact.rs"]
 mod frictional_impact;
 
+#[path = "moving_load/reciprocal_impact.rs"]
+mod reciprocal_impact;
+
 fn plate() -> ShellPlate {
     ShellPlate {
         nodes: vec![

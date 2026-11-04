@@ -122,8 +122,8 @@ pub struct ShellFrictionalImpactReport {
 pub struct PreparedShellFrictionalImpacts<'a> {
     model: &'a MovingShellModel,
     sites: Vec<ShellFrictionalImpactSite>,
-    order: Vec<usize>,
-    delassus: Vec<f64>,
+    pub(super) order: Vec<usize>,
+    pub(super) delassus: Vec<f64>,
     controls: ShellFrictionalImpactControls,
 }
 impl PreparedShellFrictionalImpacts<'_> {
@@ -461,7 +461,7 @@ impl<'a> MovingShellMotion<'a> {
     }
 }
 
-fn measured_law(
+pub(super) fn measured_law(
     contacts: &[FrictionalContact],
     law: &FrictionalContactResult,
     after: &[[f64; 3]],
@@ -508,17 +508,17 @@ fn measured_law(
     }
     Ok(r)
 }
-fn dot(a: [f64; 3], b: [f64; 3]) -> Dd {
+pub(super) fn dot(a: [f64; 3], b: [f64; 3]) -> Dd {
     a.into_iter().zip(b).fold(Dd::ZERO, |sum, (a, b)| {
         sum + Dd::from_f64(a) * Dd::from_f64(b)
     })
 }
-fn rounded(value: Dd) -> Result<f64> {
+pub(super) fn rounded(value: Dd) -> Result<f64> {
     let result = value.to_f64();
     finite(&[value.hi, value.lo, result])?;
     Ok(result)
 }
-fn audit(quantity: &'static str, error: f64, tolerance: f64) -> Result<()> {
+pub(super) fn audit(quantity: &'static str, error: f64, tolerance: f64) -> Result<()> {
     finite(&[error, tolerance])?;
     if error.abs() > tolerance {
         Err(ShellFrictionalImpactError::Audit {
