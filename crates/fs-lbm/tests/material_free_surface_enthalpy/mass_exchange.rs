@@ -5,8 +5,11 @@ use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls, MaterialFreeSurfaceEnthalpy3,
 };
 
+#[path = "mass_exchange/inflow.rs"]
 mod inflow;
+#[path = "mass_exchange/outflow.rs"]
 mod outflow;
+#[path = "mass_exchange/throughflow.rs"]
 mod throughflow;
 
 #[allow(dead_code)]

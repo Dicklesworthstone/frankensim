@@ -39,8 +39,7 @@ impl BoussinesqLiquid {
         flow: &MaterialFreeSurface3<'_>,
         state: &ResolvedLiquidState,
     ) -> Result<[f64; 3], Error> {
-        let departure = (state.density_kg_m3() - self.reference.density_kg_m3())
-            / self.reference.density_kg_m3();
+        let departure = self.density_departure(state);
         let mut total = flow.lattice.reference_force();
         for axis in 0..3 {
             let acceleration = departure * self.config.gravity_m_s2[axis];
@@ -58,6 +57,12 @@ impl BoussinesqLiquid {
             }
         }
         Ok(total)
+    }
+
+    // Keep the same source/reference convention when apparent gravity changes.
+    // The source tuple has already passed the original Boussinesq admission.
+    pub(super) fn density_departure(self, state: &ResolvedLiquidState) -> f64 {
+        (state.density_kg_m3() - self.reference.density_kg_m3()) / self.reference.density_kg_m3()
     }
 }
 

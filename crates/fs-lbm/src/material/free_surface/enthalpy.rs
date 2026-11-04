@@ -6,7 +6,9 @@
 //! the native face and conversion/carry routes. The existing sparse Krylov
 //! owner solves that transport; no velocity-derived second mass flux exists.
 //!
-//! This is the single-liquid, constant-density rung. Optional `motion` applies
+//! This is the single-liquid, constant-density rung. Prescribed rigid-frame
+//! entries compose acceleration with the same thermal/buoyancy state and native
+//! mass routes. Optional `motion` applies
 //! nonuniform tangential wall forcing on the same thermal trajectory. A sourced
 //! validity-wide constant surface tension retains the native capillary mechanics.
 //! Capillary work and surface-energy accuracy remain the native model's scope;
@@ -43,6 +45,7 @@ use crate::d3q19::freesurface3::transport::MassLocation3;
 use crate::d3q19::freesurface3::{ConversionRedistribution3, FreeSurface3, FreeSurfaceError3};
 use crate::material::plan_momentum_scaling;
 
+mod frame;
 mod impulse;
 mod transport;
 
@@ -880,6 +883,13 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             heated, external, viscous, body_heat, absolute_heat, additional_forces,
             surface, wetting_outer_gas, gas_pressure, wall, gate,
         )?;
+        Ok(self.accept_enthalpy_tick(prepared))
+    }
+
+    fn accept_enthalpy_tick(
+        &mut self,
+        prepared: PreparedEnthalpyTick<'m>,
+    ) -> (FreeSurfaceEnthalpyReport, Option<motion::ThermalWallReport>) {
         self.flow.lattice = prepared.lattice;
         self.h = prepared.h;
         self.states = prepared.states;
@@ -887,7 +897,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         self.wetting = prepared.wetting;
         self.surface_temperature_forces = prepared.surface_temperature_forces;
         self.accepted_steps = prepared.accepted_steps;
-        Ok((prepared.report, prepared.wall))
+        (prepared.report, prepared.wall)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -899,10 +909,32 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         body_heat: f64,
         absolute_heat: f64,
         additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
+        surface: Option<&mut SurfaceTensionResolver<'_>>,
+        wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
+        wall: Option<motion::ThermalWallBoundary<'_>>,
+        gate: &CancelGate,
+    ) -> Result<PreparedEnthalpyTick<'m>, Error> {
+        self.prepare_enthalpy_tick_with_frame(
+            heated, external, viscous, body_heat, absolute_heat, additional_forces,
+            surface, wetting_outer_gas, gas_pressure, wall, None, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_enthalpy_tick_with_frame(
+        &self,
+        heated: BTreeMap<MassLocation3, f64>,
+        external: f64,
+        viscous: f64,
+        body_heat: f64,
+        absolute_heat: f64,
+        additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
         mut surface: Option<&mut SurfaceTensionResolver<'_>>,
         wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
         gas_pressure: Option<(f64, GasPressureField<'_>)>,
         wall: Option<motion::ThermalWallBoundary<'_>>,
+        frame: Option<frame::ThermalRigidFrame>,
         gate: &CancelGate,
     ) -> Result<PreparedEnthalpyTick<'m>, Error> {
         poll(gate)?;
@@ -956,6 +988,12 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         // private candidate. No accepted populations, carry or source state move
         // until every endpoint query and conservation gate has passed.
         let mut lattice = self.flow.lattice.clone();
+        if let Some(frame) = frame {
+            self.prepare_frame_forces(&mut lattice, &resolved, frame, gate)?;
+            // The shared frame owner has already installed the COMPLETE force;
+            // do not bind the original gravity/buoyancy a second time below.
+            resolved.forces = None;
+        }
         if let Some(surface_tensions) = resolved.surface_tensions {
             lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
@@ -998,13 +1036,15 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         if let Some(core) = &self.electrical {
             core.admit(&lattice, &endpoint.states, gate)?;
         }
-        let endpoint_forces = endpoint.forces.or_else(|| additional_forces.map(|_| {
-            let reference = lattice.reference_force();
-            trace.after.keys().filter_map(|location| {
-                if let MassLocation3::Cell(key, lane) = *location { Some(((key, lane), reference)) }
-                else { None }
-            }).collect()
-        }));
+        let endpoint_forces = endpoint.forces.or_else(|| {
+            (additional_forces.is_some() || frame.is_some()).then(|| {
+                let reference = lattice.reference_force();
+                trace.after.keys().filter_map(|location| {
+                    if let MassLocation3::Cell(key, lane) = *location { Some(((key, lane), reference)) }
+                    else { None }
+                }).collect()
+            })
+        });
         if let Some(forces) = endpoint_forces {
             // This changes the Guo population frame without adding an impulse.
             // The accepted force now belongs to the accepted advected h state.

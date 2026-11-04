@@ -41,24 +41,49 @@ impl RigidFrame3 {
         acceleration: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceError3> {
+        self.prepare_free_surface_step_with_acceleration(
+            surface,
+            acceleration,
+            |_, _, _| Ok(acceleration),
+            gate,
+        )
+    }
+
+    // Constitutive owners can supply already-resolved local body acceleration
+    // without duplicating tile traversal, frame inertia, or the Guo transform.
+    // The nominal value is admitted even for an empty surface. Callback refusal
+    // publishes no part of the new force field or its population representation.
+    pub(crate) fn prepare_free_surface_step_with_acceleration<E>(
+        self,
+        surface: &mut FreeSurface3,
+        nominal_acceleration: [f64; 3],
+        mut acceleration_at: impl FnMut(u64, usize, f64) -> Result<[f64; 3], E>,
+        gate: &CancelGate,
+    ) -> Result<(), E>
+    where
+        E: From<FreeSurfaceError3>,
+    {
         check_cancel(gate)?;
         let denominator = self
-            .midpoint_denominator(acceleration)
+            .midpoint_denominator(nominal_acceleration)
             .map_err(FreeSurfaceError3::Transport)?;
         if surface.redistribution == ConversionRedistribution3::LegacyGlobal {
             return Err(FreeSurfaceError3::Transport(
                 "rigid-frame flow requires current free-surface force semantics",
-            ));
+            )
+            .into());
         }
         if surface.body_acceleration().is_some() {
             return Err(FreeSurfaceError3::Transport(
                 "rigid-frame forcing cannot replace an independent body-acceleration owner",
-            ));
+            )
+            .into());
         }
         if !surface.collision_model().supports_body_force() {
             return Err(FreeSurfaceError3::Transport(
                 "rigid-frame free surface requires a forcing-compatible collision model",
-            ));
+            )
+            .into());
         }
         let mut forces = BTreeMap::new();
         for (&key, tile) in &surface.tiles {
@@ -73,6 +98,7 @@ impl RigidFrame3 {
                 let velocity = core::array::from_fn(|axis| raw[axis] + 0.5 * previous[axis] / rho);
                 let (x, y, z) = FreeSurface3::global_of(key, lane);
                 let position = [x, y, z].map(|coordinate| coordinate as f64 + 0.5);
+                let acceleration = acceleration_at(key, lane, rho)?;
                 let effective =
                     self.effective_acceleration(position, velocity, acceleration, denominator);
                 let next = effective.map(|value| rho * value);
@@ -86,12 +112,14 @@ impl RigidFrame3 {
                 {
                     return Err(FreeSurfaceError3::Transport(
                         "unrepresentable rigid-frame free-surface cell",
-                    ));
+                    )
+                    .into());
                 }
                 forces.insert((key, lane), next);
             }
         }
-        surface.rebind_force_field(forces, gate)
+        surface.rebind_force_field(forces, gate)?;
+        Ok(())
     }
 
     /// Enclose source preparation and the native timestep in one transaction.

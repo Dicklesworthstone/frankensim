@@ -10220,6 +10220,42 @@ SI source equation, a changing source-viscosity trajectory against its closed
 quadratic constitutive root, free fall and uniform acceleration without false
 shear, and atomic source/convergence/ownership/cancellation refusal.
 
+`MaterialFreeSurfaceEnthalpy3::step_in_rigid_frame_si` now joins prescribed SI
+frame motion and authored heat to that same source-owned VOF trajectory.
+The original thermal split resolves heated viscosity and optional rheology
+before one native collision; the actual mass/conversion routes carry extensive
+enthalpy once. The existing frame kernel admits locally resolved acceleration,
+so no second frame integrator, constitutive query or sparse fluid candidate is
+introduced. Source pressure, caloric mass and collision scaling remain owned by
+the original material binding.
+
+Constant-density thermal/rheological liquid admits arbitrary-axis rotation.
+Bounded Boussinesq liquid admits translation: the original full gravity plus
+density-departure load is removed exactly, and its departure multiplies
+`g - a_origin`. The frame kernel subtracts origin acceleration once, yielding
+`(1 + density_departure) * (g - a_origin)` before numerical-density conversion.
+Already-resolved non-gravitational forces retain their force-density convention.
+Rotating Boussinesq liquid refuses either nonzero angular velocity or nonzero
+angular acceleration, including startup from rest: this reference-inertia
+model does not own the additional density-dependent inertial couplings.
+
+At acceptance, the original thermal Guo force representation is restored
+without a second impulse or strain change; callers supply frame motion again
+on every driven interval. `step_in_rigid_frame_with_viscous_heating_si` deposits
+only the original accepted molecular strain power. Frame work, Coriolis work,
+pressure work and numerical kinetic loss do not become heat. Electrical and
+surface-heat bindings still require their complete original boundary timelines.
+The existing first-order thermal/upwind split, low-Mach limits and prescribed
+vessel/gas assumptions remain. No total mechanical-plus-thermal energy theorem
+is asserted. All material, transport, mass, enthalpy, speed and cancellation
+gates precede joint force/population/source/enthalpy/clock publication.
+
+Four focused definitions in `material_free_surface_enthalpy/frame.rs` check an
+independent SI midpoint solve and all incoming heated BGK/Guo populations,
+repeated free fall without spurious molecular heat, changed sourced density and
+effective gravity, exact endpoint force restoration, actual interface heat
+transport, and complete rollback including a late native mass-route refusal.
+
 ### Finite-inertia planar missing-film surfaces
 
 `FiniteLubricationPlane3` and
