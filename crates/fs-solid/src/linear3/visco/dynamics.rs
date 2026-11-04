@@ -294,24 +294,25 @@ impl ViscoDynamicState<'_, '_> {
     }
 
     /// Advance the original inertial trajectory while imposing source-integrated
-    /// elementwise thermal strain. The mean tangent, consistent reference mass,
+    /// thermal strain at elements or original quadrature points. The mean
+    /// tangent, consistent reference mass,
     /// source-domain checks and original quadrature memories are unchanged.
     /// Free strain interpolates affinely over the interval and its exact signed
     /// work enters the existing energy gate separately from nodal loading.
     /// This does not transport constitutive coefficients or solve caloric heat.
-    pub fn advance_with_thermal_strain(
+    pub fn advance_with_thermal_strain<'t>(
         &mut self,
         mean_force_n: &[f64],
-        thermal: super::super::TetThermalStrainField<'_>,
+        thermal: impl Into<super::super::QuadraticThermalStrainField<'t>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
-        self.advance_impl(mean_force_n, Some(thermal), cx)
+        self.advance_impl(mean_force_n, Some(thermal.into()), cx)
     }
 
     fn advance_impl(
         &mut self,
         mean_force_n: &[f64],
-        thermal: Option<super::super::TetThermalStrainField<'_>>,
+        thermal: Option<super::super::QuadraticThermalStrainField<'_>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
         checkpoint(cx)?;
@@ -329,15 +330,20 @@ impl ViscoDynamicState<'_, '_> {
                 "dynamic step budget, representable time and complete finite mean load required",
             ));
         }
-        self.material.validate_thermal_field(thermal, cx)?;
+        let thermal = thermal
+            .map(|field| self.material.prepare_thermal_field(field, cx))
+            .transpose()?;
         let free = &system.equilibrium.free_dofs;
         let mut held = {
             let mut trial = self.material.clone();
             trial.step_internal_force(self.material.displacement_m(), h, cx)?
         };
         self.material.add_thermal_mean_force(
-            thermal, &prepared.mean_tangents, &prepared.reduced,
-            &mut held.reduced_mean_force_n, cx,
+            thermal.as_deref(),
+            &prepared.mean_tangents,
+            &prepared.reduced,
+            &mut held.reduced_mean_force_n,
+            cx,
         )?;
         let velocity: Vec<_> = free.iter().map(|&d| self.velocity_mps[d]).collect();
         let mut momentum = vec![0.0; free.len()];
@@ -373,7 +379,8 @@ impl ViscoDynamicState<'_, '_> {
             next_velocity[d] = finite(2.0 * actual_mean - self.velocity_mps[d])?;
         }
         let mut candidate = self.material.clone();
-        let constitutive = candidate.step_internal_force_impl(&displacement, h, thermal, cx)?;
+        let constitutive =
+            candidate.step_internal_force_impl(&displacement, h, thermal.as_ref(), cx)?;
         let delta_velocity: Vec<_> = free
             .iter()
             .map(|&d| next_velocity[d] - self.velocity_mps[d])
@@ -395,7 +402,8 @@ impl ViscoDynamicState<'_, '_> {
                 .sum(),
         )?;
         let defect = finite(
-            work + constitutive.step_eigenstrain_work_j - (kinetic_j - self.kinetic_j)
+            work + constitutive.step_eigenstrain_work_j
+                - (kinetic_j - self.kinetic_j)
                 - (constitutive.energy.stored_j - self.material.energy.stored_j)
                 - constitutive.step_dissipated_j,
         )?;
@@ -417,9 +425,8 @@ impl ViscoDynamicState<'_, '_> {
             });
         }
         let external_work = finite(self.external_work_j + work)?;
-        let eigenstrain_work = finite(
-            self.eigenstrain_work_j + constitutive.step_eigenstrain_work_j,
-        )?;
+        let eigenstrain_work =
+            finite(self.eigenstrain_work_j + constitutive.step_eigenstrain_work_j)?;
         checkpoint(cx)?;
         self.material = candidate;
         self.velocity_mps = next_velocity;

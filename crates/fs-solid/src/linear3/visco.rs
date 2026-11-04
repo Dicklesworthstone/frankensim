@@ -22,7 +22,7 @@
 //! domain. Inertia keeps the elastic owner's consistent reference quadrature.
 //! This is small-strain, elementwise-material B-bar, not exact incompressibility
 //! or an evolving-temperature constitutive model.
-//! Prescribed elementwise thermal expansion is a separate work input. It acts
+//! Prescribed thermal expansion at the original quadrature is a separate work input. It acts
 //! on these same histories with fixed constitutive coefficients and reference
 //! mass; neither a reciprocal caloric law nor coefficient transport is inferred.
 
@@ -44,8 +44,8 @@ use fs_material::visco::tensor::{Mandel6, TensorProny, TensorPronyState};
 use fs_sparse::{Coo, Csr};
 
 mod hex8;
-mod thermal;
 mod project;
+mod thermal;
 pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
 mod quasistatic;
 pub use quasistatic::{ViscoQuasistaticOperator, ViscoQuasistaticStep};
@@ -166,7 +166,7 @@ impl TetViscoField<'_> {
 }
 
 /// Mandatory history allocation cap, counted as six scalars per point/branch.
-/// Optional thermal endpoints retain one state per admitted mesh element;
+/// Optional thermal endpoints retain one state per admitted element or stiffness point;
 /// those source snapshots are separate from this branch-strain scalar count.
 #[derive(Debug, Clone, Copy)]
 pub struct ViscoStateBudget {
@@ -1028,7 +1028,7 @@ pub struct ViscoElementState<'a> {
     histories: Vec<Vec<TensorPronyState>>,
     energy: ViscoEnergy,
     displacement_m: Vec<f64>,
-    thermal_strains: Option<Vec<super::TetThermalStrainState>>,
+    thermal_strains: Option<std::sync::Arc<thermal::ThermalSnapshot>>,
     eigenstrain_work_j: f64,
 }
 
@@ -1089,7 +1089,7 @@ impl ViscoElementState<'_> {
         &mut self,
         u_new: &[f64],
         dt_s: f64,
-        thermal: Option<super::TetThermalStrainField<'_>>,
+        thermal: Option<&std::sync::Arc<thermal::ThermalSnapshot>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoForceStep, ViscoElementError> {
         checkpoint(cx)?;
@@ -1103,7 +1103,6 @@ impl ViscoElementState<'_> {
                 what: "finite positive dt_s required",
             });
         }
-        self.validate_thermal_field(thermal, cx)?;
         let mut histories = Vec::with_capacity(self.histories.len());
         for states in &self.histories {
             let mut candidate = Vec::with_capacity(states.len());
@@ -1119,14 +1118,23 @@ impl ViscoElementState<'_> {
         let mut step_work_j = 0.0;
         let mut step_dissipated_j = 0.0;
         let mut step_eigenstrain_work_j = 0.0;
+        let target = thermal
+            .map(|s| s.as_ref())
+            .or(self.thermal_strains.as_deref());
         for (element, (e, states)) in self.system.elements.iter().zip(&mut histories).enumerate() {
-            let target = self.target_thermal_strain(element, thermal);
-            let delta_free = self.thermal_increment(element, thermal);
-            for (p, state) in e.points.iter().zip(states) {
+            for (point, (p, state)) in e.points.iter().zip(states).enumerate() {
                 checkpoint(cx)?;
+                let delta_free =
+                    self.thermal_increment(element, point, thermal.map(|s| s.as_ref()));
                 let strain = p.strain(&e.dofs, u_new);
                 let strain = if let Some(thermal) = target {
-                    p.thermal_mechanical_strain(e, u_new, strain, thermal)?
+                    p.thermal_mechanical_strain(
+                        e,
+                        u_new,
+                        strain,
+                        *thermal.at(element, point),
+                        thermal.free_strain(element, point),
+                    )?
                 } else {
                     p.validate_compatible_strain(&e.law, &e.dofs, u_new, strain)?;
                     strain
@@ -1157,12 +1165,19 @@ impl ViscoElementState<'_> {
                 step_work_j += p.volume_m3 * response.step_work;
                 step_dissipated_j += p.volume_m3 * response.step_dissipated;
                 step_eigenstrain_work_j -= p.volume_m3
-                    * response.mean_stress.iter().zip(delta_free).map(|(s, e)| s * e).sum::<f64>();
+                    * response
+                        .mean_stress
+                        .iter()
+                        .zip(delta_free)
+                        .map(|(s, e)| s * e)
+                        .sum::<f64>();
             }
         }
-        let step_mechanical_work_j = mean_force.iter()
+        let step_mechanical_work_j = mean_force
+            .iter()
             .zip(u_new.iter().zip(&self.displacement_m))
-            .map(|(f, (new, old))| f * (new - old)).sum::<f64>();
+            .map(|(f, (new, old))| f * (new - old))
+            .sum::<f64>();
         let eigenstrain_work_j = self.eigenstrain_work_j + step_eigenstrain_work_j;
         if force.iter().chain(&mean_force).any(|v| !v.is_finite())
             || [
@@ -1180,7 +1195,6 @@ impl ViscoElementState<'_> {
         {
             return Err(ViscoElementError::NonFiniteResult);
         }
-        let thermal_strains = self.copy_thermal_field(thermal, cx)?;
         checkpoint(cx)?;
         let reduced_force_n = self
             .system
@@ -1199,8 +1213,8 @@ impl ViscoElementState<'_> {
         self.histories = histories;
         self.energy = energy;
         self.displacement_m.copy_from_slice(u_new);
-        if let Some(strains) = thermal_strains {
-            self.thermal_strains = Some(strains);
+        if let Some(strains) = thermal {
+            self.thermal_strains = Some(std::sync::Arc::clone(strains));
         }
         self.eigenstrain_work_j = eigenstrain_work_j;
         Ok(ViscoForceStep {

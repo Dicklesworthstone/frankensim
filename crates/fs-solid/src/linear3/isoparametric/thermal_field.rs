@@ -4,7 +4,7 @@ use crate::linear3::{
     TetElasticError, TetElasticMaterial, TetThermalStrainField, TetThermalStrainState,
 };
 
-/// Integrated thermal eigenstrain on TET10, HEX20 or HEX27 elements.
+/// Integrated thermal eigenstrain on the original solid quadrature.
 ///
 /// The elementwise variant retains the original constant-strain fast path.
 /// Pointwise input resolves thermal gradients without replacing them by an
@@ -20,7 +20,8 @@ pub enum QuadraticThermalStrainField<'a> {
     /// One state per stiffness quadrature point, in element-major order.
     ///
     /// Within each element, use `duffy_quadrature` order for TET10 and
-    /// `HexQuadrature::points` order for HEX20/HEX27. Samples must be recomputed
+    /// `HexQuadrature::points` order for HEX20/HEX27, and the native tensor Gauss
+    /// order for HEX8. Samples must be recomputed
     /// when changing the integration rule. Each state must reference its
     /// element's exact elastic material identity and already contain the
     /// source-integrated mesh-frame Mandel strain at that point.
@@ -51,7 +52,7 @@ impl<'a> From<TetThermalStrainField<'a>> for QuadraticThermalStrainField<'a> {
 }
 
 impl QuadraticThermalStrainField<'_> {
-    pub(super) fn validate(
+    pub(in crate::linear3) fn validate(
         &self,
         element_count: usize,
         quadrature_points: usize,
@@ -94,7 +95,7 @@ impl QuadraticThermalStrainField<'_> {
         }
     }
 
-    pub(super) fn at(&self, element: usize, point: usize) -> &TetThermalStrainState {
+    pub(in crate::linear3) fn at(&self, element: usize, point: usize) -> &TetThermalStrainState {
         match self {
             Self::Elementwise(field) => field.at(element),
             Self::AtQuadrature {

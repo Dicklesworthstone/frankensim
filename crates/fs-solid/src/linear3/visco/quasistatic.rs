@@ -123,27 +123,38 @@ impl<'a> ViscoElementState<'a> {
         cx: &Cx<'_>,
     ) -> Result<ViscoQuasistaticStep, ViscoElementError> {
         self.step_quasistatic_impl(
-            prepared, applied_force_n, support_displacement_m, None, config, cx,
+            prepared,
+            applied_force_n,
+            support_displacement_m,
+            None,
+            config,
+            cx,
         )
     }
 
-    /// Solve the same endpoint equilibrium while imposing a new elementwise
-    /// free-strain field. The original fixed-coefficient tangent is reused;
+    /// Solve the same endpoint equilibrium while imposing a new free-strain
+    /// field, elementwise or at original quadrature points. The
+    /// original fixed-coefficient tangent is reused;
     /// thermal forcing, support motion and accepted branch memories share one
     /// solve. Admission and the prescribed-eigenstrain work account are exactly
     /// those of `step_internal_force_with_thermal_strain`.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_quasistatic_with_thermal_strain(
+    pub fn step_quasistatic_with_thermal_strain<'t>(
         &mut self,
         prepared: &ViscoQuasistaticOperator<'a>,
         applied_force_n: &[f64],
         support_displacement_m: &[f64],
-        thermal: super::super::TetThermalStrainField<'_>,
+        thermal: impl Into<super::super::QuadraticThermalStrainField<'t>>,
         config: TetStaticSolveConfig,
         cx: &Cx<'_>,
     ) -> Result<ViscoQuasistaticStep, ViscoElementError> {
         self.step_quasistatic_impl(
-            prepared, applied_force_n, support_displacement_m, Some(thermal), config, cx,
+            prepared,
+            applied_force_n,
+            support_displacement_m,
+            Some(thermal.into()),
+            config,
+            cx,
         )
     }
 
@@ -153,7 +164,7 @@ impl<'a> ViscoElementState<'a> {
         prepared: &ViscoQuasistaticOperator<'a>,
         applied_force_n: &[f64],
         support_displacement_m: &[f64],
-        thermal: Option<super::super::TetThermalStrainField<'_>>,
+        thermal: Option<super::super::QuadraticThermalStrainField<'_>>,
         config: TetStaticSolveConfig,
         cx: &Cx<'_>,
     ) -> Result<ViscoQuasistaticStep, ViscoElementError> {
@@ -186,7 +197,9 @@ impl<'a> ViscoElementState<'a> {
             }
             .into());
         }
-        self.validate_thermal_field(thermal, cx)?;
+        let thermal = thermal
+            .map(|field| self.prepare_thermal_field(field, cx))
+            .transpose()?;
         let free = &self.system.equilibrium.free_dofs;
         let mut history_force = vec![0.0; free.len()];
         for (index, ((element, histories), tangent)) in self
@@ -197,9 +210,9 @@ impl<'a> ViscoElementState<'a> {
             .zip(&prepared.tangents)
             .enumerate()
         {
-            let delta_free = self.thermal_increment(index, thermal);
-            for (point, accepted) in element.points.iter().zip(histories) {
+            for (q, (point, accepted)) in element.points.iter().zip(histories).enumerate() {
                 checkpoint(cx)?;
+                let delta_free = self.thermal_increment(index, q, thermal.as_deref());
                 // Hold the admitted previous strain through the original
                 // constitutive owner. The tangent then supplies the exact
                 // affine offset for moving supports and imposed expansion.
@@ -265,7 +278,10 @@ impl<'a> ViscoElementState<'a> {
         }
         let mut candidate = self.clone();
         let constitutive = candidate.step_internal_force_impl(
-            &displacement_m, prepared.dt_s, thermal, cx,
+            &displacement_m,
+            prepared.dt_s,
+            thermal.as_ref(),
+            cx,
         )?;
         let reaction_force_n: Vec<_> = constitutive
             .full_force_n
