@@ -98,8 +98,63 @@ pub fn propagate_seeded_bundle_to_boundary_with_control<
     max_distance_m: f64,
     departure: Option<GradientDeparture>,
     options: BundleEventOptions,
-    mut control: impl FnMut() -> bool,
+    control: impl FnMut() -> bool,
 ) -> Result<BundleBoundaryPropagation, BundleError> {
+    propagate_in_coordinates(
+        field,
+        oracle,
+        seed,
+        max_distance_m,
+        departure,
+        options,
+        control,
+        None,
+    )
+    .map(|(result, _)| result)
+}
+
+/// Internal continuous-plane adapter. The physical owner must establish that
+/// n is continuous at the original plane and supply its original one-sided
+/// gradients/Hessians on both sides. The oracle still proves finite departure
+/// geometry. Returned derivatives always refer to equal TOTAL arc length.
+/// The boolean reports an endpoint still inside the departure coordinate collar.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn propagate_seeded_bundle_across_continuous_plane_with_control<
+    F: SecondOrderIndexField + ?Sized,
+    O: BoundaryOracle + ?Sized,
+>(
+    field: &F,
+    oracle: &mut O,
+    seed: &BundleContinuation,
+    max_distance_m: f64,
+    departure: GradientDeparture,
+    options: BundleEventOptions,
+    control: impl FnMut() -> bool,
+) -> Result<(BundleBoundaryPropagation, bool), BundleError> {
+    let plane = continuous::PlaneCoordinates::new(departure, options.boundary)?;
+    propagate_in_coordinates(
+        field,
+        oracle,
+        seed,
+        max_distance_m,
+        Some(departure),
+        options,
+        control,
+        Some(plane),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_in_coordinates<F: SecondOrderIndexField + ?Sized, O: BoundaryOracle + ?Sized>(
+    field: &F,
+    oracle: &mut O,
+    seed: &BundleContinuation,
+    max_distance_m: f64,
+    departure: Option<GradientDeparture>,
+    options: BundleEventOptions,
+    mut control: impl FnMut() -> bool,
+    plane: Option<continuous::PlaneCoordinates>,
+) -> Result<(BundleBoundaryPropagation, bool), BundleError> {
     let bundle_options = options.bundle();
     bundle_options.validate()?;
     let (event, stepper) = propagate_with_stepper(
@@ -111,19 +166,19 @@ pub fn propagate_seeded_bundle_to_boundary_with_control<
         departure,
         options.boundary,
         &mut control,
-        |ray, axis| BundleStepper::new(field, seed, ray, axis, bundle_options),
+        |ray, axis| BundleStepper::new(field, seed, ray, axis, bundle_options, plane),
     )?;
-    let derivatives = core::array::from_fn(|i| AngularDerivative {
-        position_m_per_rad: read_vec(&stepper.state, 12 + 6 * i),
-        direction_per_rad: read_vec(&stepper.state, 15 + 6 * i),
-    });
-    Ok(BundleBoundaryPropagation {
-        bundle: seed.append_segment(event.propagation, derivatives)?,
-        segment: event.propagation,
-        termination: event.termination,
-        boundary_evaluations: event.boundary_evaluations,
-        contact_resolution_m: event.contact_resolution_m,
-    })
+    let derivatives = stepper.fixed_arc_columns()?;
+    Ok((
+        BundleBoundaryPropagation {
+            bundle: seed.append_segment(event.propagation, derivatives)?,
+            segment: event.propagation,
+            termination: event.termination,
+            boundary_evaluations: event.boundary_evaluations,
+            contact_resolution_m: event.contact_resolution_m,
+        },
+        stepper.plane.is_some(),
+    ))
 }
 
 struct BundleStepper<'a, F: SecondOrderIndexField + ?Sized> {
@@ -138,6 +193,9 @@ struct BundleStepper<'a, F: SecondOrderIndexField + ?Sized> {
     columns: [AngularDerivative; 2],
     state: BundleState,
     derivative: BundleState,
+    plane: Option<continuous::PlaneCoordinates>,
+    clock: [f64; 2],
+    clock_derivative: [f64; 2],
 }
 
 impl<'a, F: SecondOrderIndexField + ?Sized> BundleStepper<'a, F> {
@@ -147,6 +205,7 @@ impl<'a, F: SecondOrderIndexField + ?Sized> BundleStepper<'a, F> {
         ray: Ray,
         axis: Vec3,
         options: BundleOptions,
+        plane: Option<continuous::PlaneCoordinates>,
     ) -> Result<Self, BundleError> {
         let wavelength_nm = seed.previous().wavelength_nm();
         let initial = field.sample_second_order(ray.origin, wavelength_nm)?;
@@ -160,6 +219,10 @@ impl<'a, F: SecondOrderIndexField + ?Sized> BundleStepper<'a, F> {
         {
             return Err(GradientIndexError::InvalidSample.into());
         }
+        // A plane-coordinate collar uses its two arc-length variations even
+        // for constant optics. The original uniform shortcut resumes on the
+        // next ordinary request, without changing its original fast path.
+        let uniform = uniform && plane.is_none();
         let track_group = initial.optical.group_index.is_some();
         let mut columns = seed.angular_derivatives();
         // The shared event entry normalizes the central tangent. Differentiate
@@ -176,6 +239,17 @@ impl<'a, F: SecondOrderIndexField + ?Sized> BundleStepper<'a, F> {
             write_vec(&mut state, 12 + 6 * i, column.position_m_per_rad);
             write_vec(&mut state, 15 + 6 * i, column.direction_per_rad);
         }
+        let (clock, derivative, clock_derivative) = if let Some(coordinates) = plane {
+            let clock = coordinates.enter(&mut state, initial)?;
+            let (derivative, clock_derivative) = coordinates.rhs(&state, initial, track_group)?;
+            (clock, derivative, clock_derivative)
+        } else {
+            (
+                [0.0; 2],
+                bundle_rhs(&state, initial, track_group)?,
+                [0.0; 2],
+            )
+        };
         Ok(Self {
             field,
             ray,
@@ -186,9 +260,23 @@ impl<'a, F: SecondOrderIndexField + ?Sized> BundleStepper<'a, F> {
             uniform,
             track_group,
             columns,
-            derivative: bundle_rhs(&state, initial, track_group)?,
+            derivative,
             state,
+            plane,
+            clock,
+            clock_derivative,
         })
+    }
+
+    fn fixed_arc_columns(&self) -> Result<[AngularDerivative; 2], GradientIndexError> {
+        if let Some(plane) = self.plane {
+            plane.fixed_arc(&self.state, self.jet, self.clock)
+        } else {
+            Ok(core::array::from_fn(|i| AngularDerivative {
+                position_m_per_rad: read_vec(&self.state, 12 + 6 * i),
+                direction_per_rad: read_vec(&self.state, 15 + 6 * i),
+            }))
+        }
     }
 }
 
@@ -218,7 +306,7 @@ impl<F: SecondOrderIndexField + ?Sized> EventStepper for BundleStepper<'_, F> {
         evaluations: &mut u32,
     ) -> Result<BundleTrial, GradientIndexError> {
         if !self.uniform {
-            return bundle_step(
+            return bundle_step_in_coordinates(
                 self.field,
                 self.ray.origin,
                 self.wavelength_nm,
@@ -228,6 +316,8 @@ impl<F: SecondOrderIndexField + ?Sized> EventStepper for BundleStepper<'_, F> {
                 self.track_group,
                 guard,
                 evaluations,
+                self.plane
+                    .map(|plane| (plane, self.clock, self.clock_derivative)),
             );
         }
         let mut next = self.state;
@@ -258,6 +348,7 @@ impl<F: SecondOrderIndexField + ?Sized> EventStepper for BundleStepper<'_, F> {
             projection_error: 0.0,
             column_projection_error: [0.0; 2],
             jet: self.initial,
+            plane_clock: None,
         })
     }
     fn normalized_error(
@@ -266,12 +357,38 @@ impl<F: SecondOrderIndexField + ?Sized> EventStepper for BundleStepper<'_, F> {
         step: f64,
         _: GradientIndexOptions,
     ) -> Result<f64, GradientIndexError> {
-        bundle_error(&self.state, trial, step, self.options)
+        let mut error = bundle_error(&self.state, trial, step, self.options)?;
+        if let Some(plane) = self.plane {
+            error =
+                error.max(plane.error(&self.state, self.jet, self.clock, trial, self.options)?);
+        }
+        Ok(error)
     }
     fn accept(&mut self, trial: BundleTrial) -> Result<(), GradientIndexError> {
         self.state = trial.state;
         self.jet = trial.jet;
-        self.derivative = bundle_rhs(&self.state, self.jet, self.track_group)?;
+        if let Some(plane) = self.plane {
+            self.clock = trial
+                .plane_clock
+                .ok_or(GradientIndexError::InvalidSample)?
+                .value;
+            if plane.has_left_collar(self.ray.origin.offset(read_vec(&self.state, 0))) {
+                let columns = self.fixed_arc_columns()?;
+                for (i, column) in columns.iter().enumerate() {
+                    write_vec(&mut self.state, 12 + 6 * i, column.position_m_per_rad);
+                    write_vec(&mut self.state, 15 + 6 * i, column.direction_per_rad);
+                }
+                self.plane = None;
+                self.clock = [0.0; 2];
+            }
+        }
+        if let Some(plane) = self.plane {
+            (self.derivative, self.clock_derivative) =
+                plane.rhs(&self.state, self.jet, self.track_group)?;
+        } else {
+            self.derivative = bundle_rhs(&self.state, self.jet, self.track_group)?;
+            self.clock_derivative = [0.0; 2];
+        }
         Ok(())
     }
 }

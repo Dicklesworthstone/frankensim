@@ -32,6 +32,7 @@ use super::*;
 use fs_ivl::Interval;
 
 pub mod continuation;
+mod continuous;
 pub mod event;
 pub mod interface;
 pub use continuation::{
@@ -824,6 +825,9 @@ struct BundleTrial {
     projection_error: f64,
     column_projection_error: [f64; 2],
     jet: IndexJet,
+    /// Present only while variations use the coordinate normal to an admitted
+    /// continuous-index plane. Ordinary smooth segments keep the original state.
+    plane_clock: Option<continuous::PlaneClockTrial>,
 }
 fn read_vec(state: &BundleState, i: usize) -> Vec3 {
     Vec3::new(state[i], state[i + 1], state[i + 2])
@@ -885,10 +889,41 @@ fn bundle_step<F: SecondOrderIndexField + ?Sized>(
     first: BundleState,
     step: f64,
     track_group: bool,
-    mut admits_stage: impl FnMut(Point3, Vec3) -> bool,
+    admits_stage: impl FnMut(Point3, Vec3) -> bool,
     field_evaluations: &mut u32,
 ) -> Result<BundleTrial, GradientIndexError> {
+    bundle_step_in_coordinates(
+        field,
+        origin,
+        wavelength,
+        state,
+        first,
+        step,
+        track_group,
+        admits_stage,
+        field_evaluations,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bundle_step_in_coordinates<F: SecondOrderIndexField + ?Sized>(
+    field: &F,
+    origin: Point3,
+    wavelength: f64,
+    state: &BundleState,
+    first: BundleState,
+    step: f64,
+    track_group: bool,
+    mut admits_stage: impl FnMut(Point3, Vec3) -> bool,
+    field_evaluations: &mut u32,
+    plane: Option<(continuous::PlaneCoordinates, [f64; 2], [f64; 2])>,
+) -> Result<BundleTrial, GradientIndexError> {
     let mut k = [[0.0; 24]; 7];
+    let mut clock_derivatives = [[0.0; 2]; 7];
+    if let Some((_, _, first_clock)) = plane {
+        clock_derivatives[0] = first_clock;
+    }
     k[0] = first;
     let mut stage = *state;
     let mut last = None;
@@ -915,7 +950,11 @@ fn bundle_step<F: SecondOrderIndexField + ?Sized>(
         }
         *field_evaluations += 1;
         let jet = field.sample_second_order(point, wavelength)?;
-        k[i + 1] = bundle_rhs(&stage, jet, track_group)?;
+        if let Some((coordinates, _, _)) = plane {
+            (k[i + 1], clock_derivatives[i + 1]) = coordinates.rhs(&stage, jet, track_group)?;
+        } else {
+            k[i + 1] = bundle_rhs(&stage, jet, track_group)?;
+        }
         last = Some(jet);
     }
     let mut error = [0.0; 24];
@@ -940,6 +979,12 @@ fn bundle_step<F: SecondOrderIndexField + ?Sized>(
     }
     write_vec(&mut stage, 3, direction);
     write_vec(&mut stage, 6, axis);
+    let jet = last.ok_or(GradientIndexError::NumericalRange)?;
+    let plane_clock = if let Some((coordinates, initial_clock, _)) = plane {
+        Some(coordinates.clock_trial(&mut stage, jet, initial_clock, clock_derivatives, step)?)
+    } else {
+        None
+    };
     if stage[9] < state[9]
         || stage[10] < state[10]
         || stage[11] < state[11]
@@ -952,7 +997,8 @@ fn bundle_step<F: SecondOrderIndexField + ?Sized>(
         error,
         projection_error,
         column_projection_error,
-        jet: last.ok_or(GradientIndexError::NumericalRange)?,
+        jet,
+        plane_clock,
     })
 }
 

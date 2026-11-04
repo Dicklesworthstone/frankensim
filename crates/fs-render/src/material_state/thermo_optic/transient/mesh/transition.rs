@@ -117,6 +117,29 @@ impl<'a> MeshBoundary<'a> {
             transition: Some(transition),
         }
     }
+
+    /// A fixed-distance bundle ending on an unresolved gradient-jump plane
+    /// has no admitted one-sided derivative. The caller charges this final
+    /// geometric query to the same whole-path budget.
+    pub(super) fn admit_bundle_endpoint(&self, position: Point3) -> Result<(), GradientIndexError> {
+        let transition = self
+            .transition
+            .as_ref()
+            .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
+        if transition.previous.gradient == transition.next.gradient {
+            return Ok(());
+        }
+        let (_, witness) = triangle_proximity(
+            position,
+            transition.previous.faces_m()[transition.witness.feature_id],
+            transition.witness.feature_id as u32,
+        )
+        .map_err(|_| GradientIndexError::InvalidBoundaryQuery)?;
+        if witness.side == ProximitySide::Unresolved {
+            return Err(GradientIndexError::BoundaryResolutionLimit);
+        }
+        Ok(())
+    }
 }
 
 impl BoundaryOracle for MeshBoundary<'_> {

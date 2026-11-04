@@ -1,4 +1,4 @@
-//! Native primal-ray traversal through a continuous P1 thermal mesh.
+//! Native ray and bundle traversal through a continuous P1 thermal mesh.
 //!
 //! Faces join only through the original vertex IDs. One reference glass and
 //! thermo-optic law apply throughout; shared nodal temperatures therefore give
@@ -15,9 +15,9 @@
 //!
 //! This does not locate an arbitrary launch, certify global mesh embedding,
 //! cross duplicated contact nodes, or supply other scene-object geometry.
-//! Native local ODE error estimates remain local numerical estimates. Bundle
-//! traversal is deliberately absent: a gradient jump also needs the correct
-//! crossing-time variation (saltation), not merely piecewise interior Hessians.
+//! Native local ODE error estimates remain local numerical estimates. The
+//! [`bundle`] owner retains crossing-time variations through each actual
+//! departure collar, including the saltation caused by a gradient jump.
 
 use super::{
     ConductionElementBoundary, P1ConductionElement, P1ConductionTemperatureSnapshot,
@@ -40,6 +40,8 @@ use fs_math::dd::Dd;
 
 mod transition;
 use transition::{MeshBoundary, Transition};
+/// Original angular coordinates across unsmoothed thermal gradient jumps.
+pub mod bundle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ElementFace {
@@ -394,12 +396,18 @@ impl TemperatureGradientField for MeshTemperature<'_> {
         Ok(self.sample(p)?.1.sample)
     }
 }
+impl super::TemperatureSecondOrderField for MeshTemperature<'_> {
+    fn temperature_jet(&self, p: Point3) -> Result<TemperatureJet, GradientIndexError> {
+        Ok(self.sample(p)?.1)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum P1MeshError {
     Temperature(TransientTemperatureFieldError),
     Material(ThermoOpticFieldError),
     Propagation(GradientIndexError),
+    Bundle(crate::gradient_index::bundle::BundleError),
     ForeignSnapshot,
     InvalidTopology { element: usize, local_face: usize },
     FaceBudgetExceeded,
@@ -418,6 +426,11 @@ impl From<ThermoOpticFieldError> for P1MeshError {
 impl From<GradientIndexError> for P1MeshError {
     fn from(error: GradientIndexError) -> Self {
         Self::Propagation(error)
+    }
+}
+impl From<crate::gradient_index::bundle::BundleError> for P1MeshError {
+    fn from(error: crate::gradient_index::bundle::BundleError) -> Self {
+        Self::Bundle(error)
     }
 }
 impl core::fmt::Display for P1MeshError {
