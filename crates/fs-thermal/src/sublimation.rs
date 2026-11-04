@@ -14,6 +14,8 @@
 //! owner; this module's executed repeatability evidence is same-ISA only.
 /// Joint phase exchange between several surfaces and one finite vapor chamber.
 pub mod chamber;
+/// Deposition onto an existing substrate, including an initially bare surface.
+pub mod coating;
 /// Opposing molecular streams for a nonisothermal interface energy owner.
 pub mod molecular;
 
@@ -305,6 +307,20 @@ fn validate_surface(solid: SolidSurfaceState, duration_s: f64) -> Result<(), Sub
     }
     Ok(())
 }
+
+fn validate_solver(config: SolverConfig) -> Result<(), SublimationError> {
+    if !positive(config.relative_tolerance)
+        || config.relative_tolerance >= 1.0
+        || !nonnegative(config.absolute_energy_tolerance_j)
+        || config.max_iterations == 0
+        || config.max_iterations > 4096
+    {
+        return Err(SublimationError::Invalid(
+            "invalid sublimation nonlinear budget",
+        ));
+    }
+    Ok(())
+}
 // Frozen-T exact relaxation. expm1 preserves tiny steps. Limit mass once;
 // all energy and geometry accounts are derived from that accepted transfer.
 fn transfer(
@@ -403,16 +419,7 @@ pub fn advance_surface<L: SublimationLaw + ?Sized>(
     mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
 ) -> Result<SurfaceStep, SublimationError> {
     validate_surface(solid, duration_s)?;
-    if !positive(config.relative_tolerance)
-        || config.relative_tolerance >= 1.0
-        || !nonnegative(config.absolute_energy_tolerance_j)
-        || config.max_iterations == 0
-        || config.max_iterations > 4096
-    {
-        return Err(SublimationError::Invalid(
-            "invalid sublimation nonlinear budget",
-        ));
-    }
+    validate_solver(config)?;
     let mut evaluations = 0;
     let mut evaluate = |h: f64| -> Result<Endpoint, SublimationError> {
         checkpoint()?;
@@ -435,6 +442,19 @@ pub fn advance_surface<L: SublimationLaw + ?Sized>(
         })
     };
     let initial = evaluate(solid.specific_enthalpy_j_kg)?;
+    let endpoint = solve_endpoint(initial, solid.mass_kg, config, &mut evaluate)?;
+    finish_surface_step(solid, reservoir, endpoint)
+}
+
+// Both a free solid and a supported deposit use the same bracketed endpoint
+// solve. `thermal_mass` only scales the first enthalpy trial; the callback owns
+// the complete original storage residual and its evaluation/checkpoint budget.
+fn solve_endpoint(
+    initial: Endpoint,
+    thermal_mass: f64,
+    config: SolverConfig,
+    evaluate: &mut impl FnMut(f64) -> Result<Endpoint, SublimationError>,
+) -> Result<Endpoint, SublimationError> {
     let tolerance = finite(
         config.absolute_energy_tolerance_j + config.relative_tolerance * initial.residual.abs(),
     )?;
@@ -442,7 +462,7 @@ pub fn advance_surface<L: SublimationLaw + ?Sized>(
         initial
     } else {
         let mut near = initial;
-        let mut trial_h = finite(initial.h - initial.residual / solid.mass_kg)?;
+        let mut trial_h = finite(initial.h - initial.residual / thermal_mass)?;
         let mut invalid_bound: Option<f64> = None;
         let far = loop {
             if trial_h == near.h {
@@ -495,6 +515,14 @@ pub fn advance_surface<L: SublimationLaw + ?Sized>(
             }
         }
     };
+    Ok(endpoint)
+}
+
+fn finish_surface_step(
+    solid: SolidSurfaceState,
+    reservoir: VaporReservoir,
+    endpoint: Endpoint,
+) -> Result<SurfaceStep, SublimationError> {
     let remaining = finite(solid.mass_kg - endpoint.dm)?;
     let new_reservoir = match reservoir {
         VaporReservoir::Finite {

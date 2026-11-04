@@ -209,6 +209,37 @@ and these unsupported conditions. This does not add transient species storage.
 
 ## Sublimation and deposition
 
+### Deposited coatings on curved substrates
+
+`phase_geometry::RetreatGeometry::{spherical_coating,cylindrical_coating}`
+extend the existing mass-owned front with a fixed inert substrate. The phase
+mass and `FrontGeometry::volume_m3` describe only the coating; `extent_m` is
+its thickness and the exchange area is the outer shell area. Cylinder end
+caps remain inert. `occupied_volume_m3` additionally includes the substrate
+and is the volume needed for dilute-body/gas-displacement admission.
+
+The geometry follows the shell identities
+`V = 4*pi*t*(r*r + r*rc + rc*rc)/3` and
+`V = pi*L*t*(2*rc+t)`, where `r=rc+t`. Inversion and recession use factored
+forms so a thin deposit is not lost by subtracting nearly equal radii or
+total volumes. Each query uses constant storage and bounded scalar work;
+there is no measured hardware-speed claim.
+
+The original thermostatted front integrates coating thickness at
+`dt_thickness/dt = -j/rho`, refreshes area from the same conserved mass, and
+reports extinction exactly at the substrate. After extinction, phase area
+is zero and unused time is returned to the caller. This does not remove the
+substrate or assign it a replacement boundary law. Existing finite-energy
+moving-chamber consumers can use the same geometry without a second front
+integrator.
+
+G0/G1/G3 tests in `phase_geometry` cover analytical shell mass/area/tangents,
+thicknesses below one ULP of the substrate radius, deposition heat and mass
+closure, subdivision invariance and coating-only extinction. These are
+uniform constant-density, shape-preserving coatings with an existing seed;
+they do not infer nucleation, porosity, substrate thermal storage, curvature
+corrections to equilibrium pressure, or gas-volume work.
+
 `sublimation::SublimationLaw` supplies a bounded immutable saturation-pressure,
 latent-enthalpy, density and molecular-mass chart. The material crate supplies
 reference ice/CO2 correlations and an explicitly parameterized
@@ -249,6 +280,29 @@ unsupported temperatures and failed convergence rather than clamping them.
 The default budget permits 96 evaluations; callers may select 1 through 4096.
 Each evaluation polls the supplied checkpoint. Functions return candidate
 values and mutate no caller state on failure.
+
+### Deposition on an initially bare thermal substrate
+
+`sublimation::coating::advance_supported_surface` separately conserves the
+substrate and deposited-solid inventories while sharing one interface
+temperature. The deposit may start at exactly zero mass when the caller
+explicitly admits heterogeneous deposition. Only the deposit can sublime;
+exhaustion leaves the substrate intact and permits later regrowth. The
+substrate's original T(h) chart and deposit's original h(T) chart remain
+authoritative, with independent enthalpy reference levels. The bounded solve
+closes `M_s*(h_s1-h_s0) + m_d0*(h_d1-h_d0) + dm*L(T1) = 0`, where positive
+dm enters the vapor. The vapor carries the deposit's `h_d1+L`; substrate,
+deposit and vapor energy changes close one common account.
+
+This is a thin, isothermal deposit approximation with frozen exchange area
+and the existing prescribed-temperature reservoir semantics. It supplies no
+nucleation barrier, porosity, resolved coating temperature gradient or
+contact-resistance model. A timeline/spatial consumer must explicitly apply
+the returned substrate/deposit transaction and own its geometry and contacts;
+the existing whole-cell sublimation timeline is not silently reinterpreted.
+Six focused tests cover seed-free growth, finite-vapor inventory and energy,
+extinction/regrowth, inactive boundaries, independent caloric reference shifts,
+invalid charts/inventories, cancellation and bounded nonlinear work.
 
 ## Numerical and physical limits
 
