@@ -275,3 +275,6 @@ fn late_local_refusal_and_cancellation_preserve_the_entire_patch_and_replay() {
     );
     assert_eq!(owner.last_point_frames(), reference.last_point_frames());
 }
+
+#[path = "patch/temperature.rs"]
+mod temperature;

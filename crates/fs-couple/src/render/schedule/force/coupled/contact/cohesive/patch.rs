@@ -19,6 +19,9 @@ use crate::cohesive_contact::patch::{
 /// Joint progressive-damage friction with actual-body work and atomic history.
 pub mod frictional_damage;
 
+/// Atomic per-site source continuation on the original native patch.
+pub mod temperature;
+
 /// One original bonded area and its work-conjugate local motion on all modes.
 /// Geometry, quadrature weight and bonding are explicit caller declarations.
 #[derive(Debug)]
@@ -210,8 +213,9 @@ pub struct CohesivePatchModalFrame {
 ///
 /// All contact scratch and observations are allocated at construction. The
 /// original network retains its own propagation allocation and capacity rules.
-/// Source coefficients and reference frames stay fixed; failure does not heal
-/// on closure. Post-failure compression remains with the original material law.
+/// Reference frames stay fixed; source coefficients change only through the
+/// explicit temperature continuation transaction. Failure does not heal on
+/// closure. Post-failure compression remains with the original material law.
 pub struct CohesivePatchModalSystem<'a> {
     network: CoupledModalSystem,
     sites: Vec<CohesiveModalSite<'a>>,

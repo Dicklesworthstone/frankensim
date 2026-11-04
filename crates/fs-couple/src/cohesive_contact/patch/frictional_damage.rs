@@ -33,6 +33,9 @@ use fs_matdb::MaterialStateId;
 use fs_material::cohesive::CohesivePoint;
 use fs_material::cohesive::source::ResolvedBilinearCohesive;
 
+// Crate-private preparation keeps source changes in the native transaction.
+pub(crate) mod temperature;
+
 #[derive(Clone, Copy)]
 pub struct DamageFrictionPatchSite<'a> {
     pub cohesive: &'a ResolvedBilinearCohesive,

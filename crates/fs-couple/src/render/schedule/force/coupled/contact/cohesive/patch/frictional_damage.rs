@@ -16,6 +16,43 @@ pub(super) struct DamageFrictionPatchBinding<'a> {
     previous: Vec<DamageFrictionState<'a>>,
     staged: Vec<DamageFrictionState<'a>>,
 }
+impl<'a> DamageFrictionPatchBinding<'a> {
+    pub(super) fn prepare_temperature_successors(
+        &self,
+        points: &[CohesivePoint<'a>],
+        next_cohesive: &[&'a ResolvedBilinearCohesive],
+        next_friction: &[&'a ResidualCoulombSource],
+        temperature_axis: &str,
+        material_tolerance_j_m2: f64,
+        gate: &CancelGate,
+    ) -> Result<
+        crate::cohesive_contact::patch::frictional_damage::temperature::PreparedPatchTemperature<'a>,
+        CohesivePatchModalError,
+    > {
+        if points.len() != self.states.len()
+            || self.states.iter().zip(points).any(|(state, point)| state.point() != *point)
+        {
+            return Err(DamageFrictionPatchError::Invalid(
+                "temperature continuation requires canonical patch histories",
+            ).into());
+        }
+        self.load_line.prepare_temperature_successors(
+            &self.states, next_cohesive, next_friction, temperature_axis,
+            material_tolerance_j_m2, || !gate.is_requested(),
+        ).map_err(Into::into)
+    }
+
+    pub(super) fn publish_temperature_successors(
+        &mut self,
+        candidate: crate::cohesive_contact::patch::frictional_damage::temperature::PreparedPatchTemperature<'a>,
+    ) {
+        let states = self.load_line.publish_temperature_successors(candidate);
+        self.states.copy_from_slice(&states);
+        self.previous.copy_from_slice(&states);
+        self.staged.copy_from_slice(&states);
+    }
+}
+
 impl<'a> CohesivePatchModalSystem<'a> {
     /// Select the same damaged-area rigid friction law at EVERY original site.
     /// Reference quadrature and body compliance are retained. Sources and actual
