@@ -134,9 +134,9 @@ impl LinearImpactSystem {
     /// solved contact points, with original weights, gaps and constitutive data.
     ///
     /// # Errors
-    /// Refuses nonlinear bodies, malformed data
-    /// and every downstream owner budget. Nonzero free-coordinate drag consumes
-    /// one bilateral connection per coordinate; it is never silently dropped.
+    /// Refuses nonlinear bodies, malformed data and every downstream owner
+    /// budget. Intrinsic body damping retains its physical rate, including on
+    /// free coordinates, without consuming bilateral connection slots.
     /// Felt is deliberately absent from this signature: no history is discarded.
     pub fn new(
         bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volumes: Vec<VolumeConnection>,
@@ -147,12 +147,10 @@ impl LinearImpactSystem {
 
     /// Compile spatial drag into the existing simultaneous bilateral port solve.
     /// A port may span every original body component without losing its cross
-    /// terms or changing the component budgets. Diagonal drag on a
-    /// zero-frequency coordinate is also lowered to a grounded viscous link.
-    /// Its reaction is solved simultaneously with all volume/contact reactions,
-    /// not split or evaluated on the previous velocity. This retains the free
-    /// inertia without inventing a small resonance. The drag discretization is
-    /// second-order and passive, not the exact damped free-body exponential.
+    /// terms or changing the component budgets. Intrinsic diagonal drag stays
+    /// in the component's physical damping rates, including at zero frequency.
+    /// Both losses enter the same exact retained linear evolution; contact
+    /// reactions use that damped mobility without splitting or lagging drag.
     pub fn new_with_dampers(
         bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volumes: Vec<VolumeConnection>,
         dampers: Vec<ViscousDamper>, config: LinearImpactConfig, gate: &CancelGate,
@@ -180,11 +178,7 @@ impl LinearImpactSystem {
             return Err(invalid("linear impact distributed contacts exceed the original contact budget"));
         }
         let mut models = Vec::with_capacity(bodies.len());
-        let mut free_drag = Vec::new();
-        // The checked sum above bounds this subtraction. Derived diagonal
-        // links share the caller's budget with volumes and spatial attachments.
-        let remaining_links = config.coupling.max_connections - volumes.len() - active_dampers;
-        for (component, body) in bodies.into_iter().enumerate() {
+        for body in bodies {
             if gate.is_requested() { return Err(ImpactError::Cancelled); }
             let BodyPotential::Linear(omega) = body.potential else {
                 return Err(invalid("nonlinear shell storage cannot be compiled into the linear impact image"));
@@ -195,28 +189,19 @@ impl LinearImpactSystem {
             {
                 return Err(invalid("linear impact body state/damping dimensions or coefficients are invalid"));
             }
-            let mut modes = Vec::with_capacity(omega.len());
-            for (mode, (&w, &d)) in omega.iter().zip(&body.damping_per_s).enumerate() {
-                if w == 0.0 && d != 0.0 {
-                    if free_drag.len() >= remaining_links {
-                        return Err(invalid("free-coordinate drag exceeds the remaining bilateral connection budget"));
-                    }
-                    free_drag.push((component, mode, d));
-                }
-                let zeta = if w == 0.0 { 0.0 } else { 0.5 * (d / w) };
-                if w > 0.0 && d > 0.0 && zeta == 0.0 {
-                    return Err(invalid("linear impact modal damping underflow"));
-                }
-                modes.push(ModalAcousticMode { angular_frequency_rad_s: w, damping_ratio: zeta,
-                    pressure_per_modal_velocity: C64::ZERO });
-            }
-            let mut model = ModalAcousticTimeModel::try_new_with_free_coordinates(
-                config.sample_rate_hz, modes, config.component,
+            // The mass-normalized equation already supplies c in q''+c*q'+w²q=F.
+            // Keep that rate authoritative even when c/(2w) cannot represent it.
+            let modes = omega.into_iter().map(|w| ModalAcousticMode {
+                angular_frequency_rad_s: w, damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO,
+            }).collect();
+            let mut model = ModalAcousticTimeModel::try_new_with_damping_rates(
+                config.sample_rate_hz, modes, &body.damping_per_s, config.component,
             ).map_err(|e| ImpactError::Owner(e.to_string()))?;
             model.restore_states(&body.initial).map_err(|e| ImpactError::Owner(e.to_string()))?;
             models.push(model);
         }
-        let mut links = Vec::with_capacity(volumes.len()+active_dampers+free_drag.len());
+        let mut links = Vec::with_capacity(volumes.len()+active_dampers);
         for volume in volumes {
             let v = volume.spring;
             let area = volume.reference_area_m2;
@@ -240,19 +225,6 @@ impl LinearImpactSystem {
             if damper.damping_n_s_m == 0.0 { continue; }
             links.push(ModalColumnConnection { column: damper.weights, stiffness_n_m: 0.0,
                 damping_n_s_m: damper.damping_n_s_m, rest_extension_m: 0.0 });
-        }
-        for (component, mode, drag) in free_drag {
-            // q,p are already mass-normalized and H_kin=p^2/2. Choosing the
-            // port's REFERENCE mass as 1 kg gives b=1/sqrt(1 kg), c=drag*1 kg,
-            // so c*b*b^T is exactly the supplied diagonal resistance [1/s].
-            // This changes units only: no physical mass or coordinate is added.
-            // The same b maps velocity and reaction, dissipating drag*p^2.
-            let mut column = vec![0.0; count];
-            column[counts[..component].iter().sum::<usize>() + mode] = 1.0;
-            links.push(ModalColumnConnection {
-                column,
-                stiffness_n_m: 0.0, damping_n_s_m: drag, rest_extension_m: 0.0,
-            });
         }
         let network = CoupledModalSystem::new_with_columns(models, links, config.coupling, gate).map_err(owner)?;
         let mut points = Vec::with_capacity(point_count);
@@ -406,8 +378,9 @@ mod free_drag_tests {
         for drag in [0.0, 100.0, 10_000.0, 100_000.0] {
             let (mut body, tip) = ImpactBody::free_mass(0.04, 0.0, 0.03).unwrap();
             body.damping_per_s[0] = drag;
+            let mut cfg = config(20_000); cfg.coupling.max_connections = 0;
             let mut system =
-                LinearImpactSystem::new(vec![body], vec![], vec![], config(20_000), &gate).unwrap();
+                LinearImpactSystem::new(vec![body], vec![], vec![], cfg, &gate).unwrap();
             let initial = system.frame().stored_energy_j;
             let (mut q, mut p, mut work, mut loss) = (0.0, 0.006, 0.0, 0.0);
             for step in 0..100 {
@@ -608,19 +581,18 @@ mod free_drag_tests {
     }
 
     #[test]
-    fn derived_drag_consumes_connection_budget_without_displacing_spatial_ports() {
+    fn intrinsic_drag_preserves_connection_budget_for_spatial_ports() {
         let gate = CancelGate::new_clock_free();
         let (mut body, _) = ImpactBody::free_mass(1.0, 0.0, 0.01).unwrap();
         body.damping_per_s[0] = 20.0;
         let pad = ViscousDamper { weights: vec![1.0], damping_n_s_m: 10.0 };
         let mut cfg = config(20_000); cfg.coupling.max_connections = 1;
         assert!(LinearImpactSystem::new_with_dampers(vec![body.clone()], vec![], vec![],
-            vec![pad.clone()], cfg, &gate).is_err());
-        cfg.coupling.max_connections = 2;
-        assert!(LinearImpactSystem::new_with_dampers(vec![body.clone()], vec![], vec![],
-            vec![pad], cfg, &gate).is_ok());
+            vec![pad.clone()], cfg, &gate).is_ok());
         cfg.coupling.max_connections = 0;
-        assert!(LinearImpactSystem::new(vec![body.clone()], vec![], vec![], cfg, &gate).is_err());
+        assert!(LinearImpactSystem::new_with_dampers(vec![body.clone()], vec![], vec![],
+            vec![pad], cfg, &gate).is_err());
+        assert!(LinearImpactSystem::new(vec![body.clone()], vec![], vec![], cfg, &gate).is_ok());
         body.damping_per_s[0] = 0.0;
         assert!(LinearImpactSystem::new(vec![body.clone()], vec![], vec![], cfg, &gate).is_ok());
         for drag in [-1.0, f64::NAN, f64::INFINITY] {

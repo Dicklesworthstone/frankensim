@@ -91,6 +91,25 @@ fn distributed_air_exchanges_work_and_drag_removes_only_acoustic_momentum_energy
 }
 
 #[test]
+fn soft_cavity_mode_keeps_its_pressure_coordinate_when_the_drag_ratio_overflows() {
+    let air = basis(vec![1e-310,700.0]);
+    let model = CavityCoupling::new(&air,1,&[0.08,0.04],&[40.0,30.0]).unwrap();
+    assert_eq!(model.total_modes(),3);
+    let mut cavity = model.prepare_exchange(48_000,budget()).unwrap();
+    let mut velocity = [0.04];
+    let initial = 0.5*velocity[0]*velocity[0];
+    let mut loss = 0.0;
+    for _ in 0..1000 {
+        loss += cavity.before(&mut velocity).unwrap();
+        loss += cavity.after(&mut velocity).unwrap();
+        assert!((cavity.energy()+0.5*velocity[0]*velocity[0]+loss-initial).abs() < 1e-12);
+    }
+    let mut pressure = [0.0;2]; cavity.pressures_into(&mut pressure).unwrap();
+    assert!(pressure.iter().all(|p| p.is_finite() && p.abs() > 1e-3));
+    assert!(loss > 0.0, "the finite-frequency mode retains its original acoustic drag");
+}
+
+#[test]
 fn impedance_retains_uniform_compliance_and_the_declared_momentum_drag_numerator() {
     let uniform = basis(vec![0.0]);
     let a = uniform.rho0*uniform.c0*uniform.c0/uniform.lambdas[0];

@@ -24,13 +24,13 @@ impl CavityCoupling {
     /// with the same budget. The whole-system modal, port, contact and energy
     /// limits still apply. Initial body states and contact loss are unchanged.
     ///
-    /// Acoustic/neck momentum drag is retained through the linear impact
-    /// owner's simultaneous grounded viscous links, consuming one connection
-    /// per nonzero drag in addition to the cavity springs and any solid ports.
+    /// Acoustic/neck momentum drag remains intrinsic physical damping in the
+    /// linear impact owner. Only cavity springs and solid ports consume
+    /// connection slots; diagonal drag adds no synthetic links.
     /// No loss is substituted onto the heads, counted twice, or omitted.
     /// Nonlinear body potentials and felt pads (absent from this signature)
-    /// still require the reference image. Finite-step ports need refinement;
-    /// it is not the exact full coupled exponential or a real-time certificate.
+    /// still require the reference image. Nonlinear contact needs time
+    /// refinement; no real-time certificate is claimed.
     pub fn build_linear(self, bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
         reference_area_m2: f64, config: LinearImpactConfig, gate: &CancelGate)
         -> Result<(LinearImpactSystem, Self), ImpactError>

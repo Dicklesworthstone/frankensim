@@ -50,6 +50,66 @@ fn reference(rate:u32, steps:u64) -> ImpactSystem {
 }
 
 #[test]
+fn free_and_soft_coordinates_retain_physical_rates_without_synthetic_links() {
+    let gate = CancelGate::new_clock_free();
+    let count = 16;
+    let dt = 1.0 / 20_000.0;
+    let rates: Vec<_> = (0..count).map(|i| 100.0 * (i + 1) as f64).collect();
+    let initial: Vec<_> = (0..count).map(|i| ModalAcousticState {
+        displacement_m_sqrt_kg: -1e-5 * (i + 1) as f64,
+        velocity_m_sqrt_kg_per_s: 0.002 * (i + 1) as f64,
+    }).collect();
+    let body = ImpactBody {
+        potential: BodyPotential::Linear((0..count).map(|i| if i % 2 == 0 { 0.0 } else { 1e-310 }).collect()),
+        damping_per_s: rates.clone(), initial: initial.clone(),
+    };
+    let mut cfg = config(20_000, 1);
+    cfg.coupling.max_connections = 0;
+    cfg.coupling.max_setup_terms = count;
+    let mut system = LinearImpactSystem::new(vec![body], vec![], vec![], cfg, &gate).unwrap();
+    assert_eq!(system.mode_count(), count);
+    // Positive soft frequencies have an overflowing ratio; their finite
+    // physical drag still determines the full motion and heat integral.
+    let frame = system.step(&vec![0.0;count], &gate).unwrap();
+    let mut expected_heat = 0.0;
+    for ((state, &drag), original) in system.state().chunks_exact(2).zip(&rates).zip(&initial) {
+        let v = original.velocity_m_sqrt_kg_per_s;
+        let decay = (-drag * dt).exp();
+        let displacement = -v * (-drag * dt).exp_m1() / drag;
+        assert!((state[0] - original.displacement_m_sqrt_kg - displacement).abs() < 1e-16);
+        assert!((state[1] - v * decay).abs() < 1e-14);
+        expected_heat += -0.5 * v * v * (-2.0 * drag * dt).exp_m1();
+    }
+    assert!(expected_heat > 0.0);
+    assert!((frame.dissipated_energy_j - expected_heat).abs() < 1e-12 * expected_heat);
+    assert_eq!(frame.supplied_work_j, 0.0);
+}
+
+#[test]
+fn intrinsic_drag_reserves_connection_slots_for_actual_spatial_dampers() {
+    let gate = CancelGate::new_clock_free();
+    let mut damped = body(0.0, 0.0, 0.1); damped.damping_per_s[0] = 20.0;
+    let pad = ViscousDamper { weights: vec![1.0], damping_n_s_m: 10.0 };
+    let mut cfg = config(20_000, 50); cfg.coupling.max_connections = 0;
+    assert!(LinearImpactSystem::new_with_dampers(vec![damped.clone()], vec![], vec![],
+        vec![pad.clone()], cfg, &gate).is_err());
+    cfg.coupling.max_connections = 1;
+    let mut system = LinearImpactSystem::new_with_dampers(vec![damped], vec![], vec![],
+        vec![pad], cfg, &gate).unwrap();
+    let mut heat = 0.0;
+    for step in 1..=50 {
+        let frame = system.step(&[0.0], &gate).unwrap();
+        heat += frame.dissipated_energy_j;
+        let t = step as f64 / 20_000.0;
+        let decay = (-30.0 * t).exp();
+        assert!((system.state()[0] + 0.1 * (-30.0 * t).exp_m1() / 30.0).abs() < 1e-15);
+        assert!((system.state()[1] - 0.1 * decay).abs() < 1e-13);
+        assert!((heat + 0.005 * (-60.0 * t).exp_m1()).abs() < 1e-14);
+        assert!((frame.stored_energy_j + heat - 0.005).abs() < 1e-14);
+    }
+}
+
+#[test]
 fn volume_coordinate_scale_preserves_physical_energy_and_two_way_motion() {
     let mut a = Vec::new();
     for reference_area_m2 in [0.005,0.02,0.08] {
@@ -218,7 +278,8 @@ fn distributed_contacts_are_solved_together_without_direct_receiver_drive() {
 fn flexible_contact_rows_preserve_all_bodies_and_joint_reactions() {
     let gate = CancelGate::new_clock_free();
     for points in [1, 2] {
-        let parts = vec![body(0.0,-0.0002,0.8),body(1200.0,0.0,0.0),body(2300.0,0.0,0.0)];
+        let mut parts = vec![body(0.0,-0.0002,0.8),body(1200.0,0.0,0.0),body(2300.0,0.0,0.0)];
+        parts[0].damping_per_s[0] = 250.0;
         let grouped = ImpactBody {
             potential: BodyPotential::Linear(vec![0.0,1200.0,2300.0]),
             initial: parts.iter().flat_map(|b| b.initial.iter().copied()).collect(),

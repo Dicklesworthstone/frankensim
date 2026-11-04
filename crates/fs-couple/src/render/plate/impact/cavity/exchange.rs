@@ -96,10 +96,11 @@ impl CavityCoupling {
         if !dynamic.is_empty() {
             let modes = dynamic.iter().map(|&j| ModalAcousticMode {
                 angular_frequency_rad_s: self.omegas[j],
-                damping_ratio: 0.5*self.damping[j]/self.omegas[j],
+                damping_ratio: 0.0,
                 pressure_per_modal_velocity: C64::ZERO,
             }).collect();
-            let mut oscillator = ModalAcousticTimeModel::try_new(half_rate, modes,
+            let rates: Vec<_> = dynamic.iter().map(|&j| self.damping[j]).collect();
+            let mut oscillator = ModalAcousticTimeModel::try_new_with_damping_rates(half_rate, modes, &rates,
                 ModalAcousticTimeBudget::audible_reference())
                 .map_err(|e| ImpactError::Owner(e.to_string()))?;
             // Bounded probing also admits sub-radian frequencies without an

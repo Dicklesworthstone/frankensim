@@ -280,11 +280,12 @@ fn broader_prepared_budget_never_weakens_reference_or_loss_admission() {
         assert!(CavityCoupling::new_with_mode_budget(&air, 2, &[0.1; 4], &[0.0; 2], maximum).is_err());
     }
     let lossy = CavityCoupling::new(&air, 1, &[0.1; 2], &[0.0, 5.0]).unwrap();
-    let mut starved = config(500_000); starved.coupling.max_connections = 2;
+    let mut starved = config(500_000); starved.coupling.max_connections = 1;
     assert!(lossy.clone().build_linear(vec![body(800.0, 0.0, 0.0)], vec![], 0.1,
-        starved, &gate).is_err(), "two springs leave no port for acoustic drag");
+        starved, &gate).is_err(), "both physical cavity springs need connection slots");
+    starved.coupling.max_connections = 2;
     assert!(lossy.build_linear(vec![body(800.0, 0.0, 0.0)], vec![], 0.1,
-        config(500_000), &gate).is_ok());
+        starved, &gate).is_ok(), "intrinsic acoustic drag requires no extra connection");
     let large = CavityCoupling::new_with_mode_budget(&air, 80, &vec![0.0; 160], &[0.0; 2], 256).unwrap();
     let parts = || (0..80).map(|_| body(800.0, 0.0, 0.0)).collect();
     let cfg = ImpactConfig { dt_s: 2e-6, max_steps: 10, maximum_energy_j: 20.0,
@@ -444,9 +445,10 @@ fn necks_preserve_the_callers_large_state_budget_and_all_original_coordinates() 
         energy_absolute_tolerance_j: 1e-10, energy_relative_tolerance: 1e-7,
         maximum_generalized_force: 10_000.0 };
     assert_eq!(expanded.clone().build(parts(),vec![],vec![],reference,&gate).unwrap().0.state().len(),2*(n+2));
-    let mut starved = config(500_000); starved.coupling.max_connections = 3;
+    let mut starved = config(500_000); starved.coupling.max_connections = 1;
     assert!(expanded.clone().build_linear(parts(),vec![],0.1,starved,&gate).is_err());
-    let (mut s, probe) = expanded.build_linear(parts(),vec![],0.1,config(500_000),&gate).unwrap();
+    starved.coupling.max_connections = 2;
+    let (mut s, probe) = expanded.build_linear(parts(),vec![],0.1,starved,&gate).unwrap();
     assert_eq!(s.mode_count(),n+2); assert_eq!(s.state()[0],1e-5);
     assert!(s.state()[2..2*n].iter().all(|v| *v==0.0));
     assert_eq!(probe.neck_observation(s.state(),0).unwrap().coordinate,n+1);

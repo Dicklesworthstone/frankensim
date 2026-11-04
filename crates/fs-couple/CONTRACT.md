@@ -30771,6 +30771,10 @@ continuous broadband observation, inverse contact responses and acceleration
 readouts consume that same coefficient. A damping ratio is diagnostic metadata
 and is not sufficient to reconstruct resistance at zero or very small natural
 frequency. Independent ratio-authored source models retain their original law.
+The linear impact and cavity exchange compilers preserve their supplied physical
+rates directly. Intrinsic body, acoustic and neck drag consumes no synthetic
+bilateral connection slots; actual volume springs and spatial dampers retain
+their existing connection budgets and complete signed columns.
 
 Component heat remains `integral(c v^2 dt)`; harmonic peak phasors dissipate
 `c |v|^2/2`. Original signed connection columns and separate material, fluid
