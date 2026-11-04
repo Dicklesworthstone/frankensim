@@ -6,16 +6,19 @@
 //! complete dense displacement spectrum. No pressure penalty, bulk replacement,
 //! lumped quadratic mass or additional initial-stress matrix is introduced.
 //!
-//! Only OriginalMaterial on its admitted positive bulk-curvature branch is
-//! supported. Exact incompressibility requires a constraint/nullspace treatment
-//! and refuses here. The original static owner also refuses unstable/singular
-//! KKT equilibria; this adapter does not bypass that gate. Returned eigenvalues
-//! remain signed, with their residual intervals, without frequency clipping.
+//! The condensation methods support OriginalMaterial on its admitted positive
+//! bulk-curvature branch. The separate [incompressible] route supplies physical
+//! modes of the original exact constraint through its displacement nullspace.
+//! The original static owner refuses unstable/singular KKT equilibria; neither
+//! adapter bypasses that gate. Returned eigenvalues remain signed, with their
+//! residual intervals, without frequency clipping.
 //!
 //! Constitutive/source conditions and dead loads are held fixed. The original
 //! P2/P1 weak pressure space, geometry and quadrature remain authoritative;
 //! curved geometry and nonlinear coefficients still require quadrature and
 //! mesh convergence. This route is not an inf-sup or continuum-stability proof.
+
+pub mod incompressible;
 
 use super::{MixedUpError, MixedUpProblem, MixedUpSolution, checkpoint, inertia_error, invalid};
 use crate::hyper3::vibration::{MAX_DENSE_FREE_DOFS, VibrationSettings};
@@ -34,12 +37,15 @@ pub struct MixedVibrationSettings {
     pub spectrum: VibrationSettings,
     /// Native full signed P2 reference-mass assembly payload, separate from KKT.
     pub maximum_mass_assembly_bytes: usize,
-    /// Conservative pressure-block staging, dense work and retained modal
-    /// payload. Excludes the original mixed assembly and native sparse factor,
+    /// Conservative pressure reduction (finite-compliance condensation or
+    /// exact-constraint nullspace), dense work and retained modal payload.
+    /// Excludes the original mixed assembly and native sparse factor,
     /// which retain their own budgets; this is not an OS memory/RSS limit.
     pub maximum_condensation_bytes: usize,
     /// Relative backward-error gate for pressure elimination and recovered
-    /// pressure equations, finite and strictly between zero and one.
+    /// pressure equations, or all original exact-constraint rows. Finite and
+    /// strictly between zero and one. Exact-constrained momentum uses the
+    /// spectrum relative tolerance as its separate backward-error gate.
     pub pressure_residual_tolerance: f64,
 }
 

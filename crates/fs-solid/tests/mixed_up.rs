@@ -1057,3 +1057,254 @@ fn mixed_vibration_refuses_exact_constraints_storage_caps_and_cancellation() {
         });
     });
 }
+
+
+// Independent unit-tetra polynomial model. Every P2 vector field that vanishes
+// on z=0 and has zero divergence is spanned by
+// (z,0,0), (xz,0,-z²/2), (yz,0,0), (z²,0,0),
+// (0,z,0), (0,xz,0), (0,yz,-z²/2), (0,z²,0).
+// The integrals below use exact simplex monomials, not native shapes, pressure
+// matrices, quadrature, QR or the production projected stiffness/mass.
+fn clamped_face_solenoidal_pencil(mu: f64, rho: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut fields = [[[0.0; 4]; 3]; 8]; // coefficients of z, xz, yz, z²
+    for axis in 0..2 {
+        for monomial in 0..4 {
+            fields[4 * axis + monomial][axis][monomial] = 1.0;
+        }
+    }
+    fields[1][2][3] = -0.5;
+    fields[6][2][3] = -0.5;
+    // Integral products of (1,x,y,z), then (z,xz,yz,z²), over the unit tetra.
+    let linear = [
+        [1.0 / 6.0, 1.0 / 24.0, 1.0 / 24.0, 1.0 / 24.0],
+        [1.0 / 24.0, 1.0 / 60.0, 1.0 / 120.0, 1.0 / 120.0],
+        [1.0 / 24.0, 1.0 / 120.0, 1.0 / 60.0, 1.0 / 120.0],
+        [1.0 / 24.0, 1.0 / 120.0, 1.0 / 120.0, 1.0 / 60.0],
+    ];
+    let quadratic = [
+        [1.0 / 60.0, 1.0 / 360.0, 1.0 / 360.0, 1.0 / 120.0],
+        [1.0 / 360.0, 1.0 / 1260.0, 1.0 / 2520.0, 1.0 / 840.0],
+        [1.0 / 360.0, 1.0 / 2520.0, 1.0 / 1260.0, 1.0 / 840.0],
+        [1.0 / 120.0, 1.0 / 840.0, 1.0 / 840.0, 1.0 / 210.0],
+    ];
+    let mut gradients = [[[[0.0; 4]; 3]; 3]; 8];
+    for i in 0..8 {
+        for a in 0..3 {
+            let p = fields[i][a];
+            gradients[i][a][0] = [0.0, 0.0, 0.0, p[1]];
+            gradients[i][a][1] = [0.0, 0.0, 0.0, p[2]];
+            gradients[i][a][2] = [p[0], p[1], p[2], 2.0 * p[3]];
+        }
+    }
+    let (mut stiffness, mut mass) = (vec![0.0; 64], vec![0.0; 64]);
+    for i in 0..8 {
+        for j in 0..8 {
+            for a in 0..3 {
+                for p in 0..4 {
+                    for q in 0..4 {
+                        mass[8 * i + j] += rho * fields[i][a][p]
+                            * fields[j][a][q] * quadratic[p][q];
+                        for b in 0..3 {
+                            let ei = 0.5 * (gradients[i][a][b][p] + gradients[i][b][a][p]);
+                            let ej = 0.5 * (gradients[j][a][b][q] + gradients[j][b][a][q]);
+                            stiffness[8 * i + j] += 2.0 * mu * ei * ej * linear[p][q];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (stiffness, mass)
+}
+
+#[test]
+fn exact_incompressible_modes_match_independent_polynomials_and_objectivity() {
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    with_cx(|cx| {
+        let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let (mu, rho) = (2.0, 7.0);
+        let (k, m) = clamped_face_solenoidal_pencil(mu, rho);
+        let expected = fs_modal::eigh_gen_dense(&k, &m, 8).unwrap();
+        for (cosine, sine, bulk) in [(1.0, 0.0, 20.0), (0.8, 0.6, 2e8)] {
+            let initial: Vec<_> = nodes
+                .iter()
+                .map(|x| [
+                    (cosine - 1.0) * x[0] - sine * x[1],
+                    sine * x[0] + (cosine - 1.0) * x[1],
+                    0.0,
+                ])
+                .collect();
+            let fixed: Vec<_> = nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| x[2] == 0.0)
+                .flat_map(|(node, _)| {
+                    let initial = &initial;
+                    (0..3).map(move |a| (3 * node + a, initial[node][a]))
+                })
+                .collect();
+            let card = modal_source_card(mu, bulk);
+            let material = ResolvedHyperelastic::try_from_model_card(&card).unwrap();
+            let mut p = problem(
+                &nodes, &elements, &material, &fixed, &[],
+                VolumetricTreatment::ExactIncompressible,
+            );
+            p.settings.load_steps = 1;
+            let spectrum = if sine == 0.0 {
+                p.solve_incompressible_vibration(&[rho], modal_settings(), cx)
+            } else {
+                p.solve_incompressible_vibration_from(
+                    &initial, &[0.0; 4], &[rho], modal_settings(), cx,
+                )
+            }.unwrap();
+            assert_eq!(spectrum.free_dofs().len(), 12);
+            assert_eq!(spectrum.dimension(), 8);
+            assert_eq!(spectrum.independent_pressure_indices(), &[0, 1, 2, 3]);
+            assert_eq!(spectrum.basis().len(), 12 * 8);
+            assert_eq!(spectrum.modes().len(), 8);
+            assert_eq!(spectrum.mass_kg().len(), 12 * 12, "no pressure inertia");
+            assert_eq!(spectrum.reference_density_kg_m3(), &[rho]);
+            let MixedLawField::Uniform(retained) = spectrum.problem().material else {
+                panic!("original source material was replaced")
+            };
+            assert!(core::ptr::eq(retained, &material));
+            assert_eq!(retained.model_card(), &card);
+            for (mode, oracle) in spectrum.modes().iter().zip(&expected) {
+                near(mode.coordinates.lambda, oracle.lambda, 2e-8 * oracle.lambda);
+                assert!(mode.coordinates.interval.0 > 0.0);
+                assert!(mode.constraint_relative_residual
+                    <= modal_settings().pressure_residual_tolerance);
+                assert!(mode.momentum_relative_residual
+                    <= modal_settings().spectrum.relative_residual_tolerance);
+                let mut physical_norm = 0.0;
+                for i in 0..12 {
+                    for j in 0..12 {
+                        physical_norm += mode.displacement_shape[i]
+                            * spectrum.mass_kg()[12 * i + j] * mode.displacement_shape[j];
+                    }
+                }
+                near(physical_norm, 1.0, 2e-11);
+                assert_eq!(mode.pressure_shape.len(), 4);
+            }
+            // Neither the unused declared finite bulk modulus nor a rigid
+            // superposed rotation changes this exact-constraint shear spectrum.
+            // This is a one-element polynomial identity, not a locking study.
+        }
+    });
+}
+
+#[test]
+fn exact_incompressible_modes_preserve_the_original_pressure_gauge() {
+    with_cx(|cx| {
+        let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let fixed: Vec<_> = (0..3 * nodes.len())
+            .filter(|d| ![0, 3, 7, 11].contains(d))
+            .map(|d| (d, 0.0))
+            .collect();
+        let (mu, rho) = (2.0, 7.0);
+        let material = law(mu, 20.0);
+        let mut p = problem(
+            &nodes, &elements, &material, &fixed, &[],
+            VolumetricTreatment::ExactIncompressible,
+        );
+        p.settings.load_steps = 1;
+        // Every P2 corner shape has zero integrated gradient. Constant pressure
+        // is therefore a true gauge for these four free DOFs. The remaining
+        // three independent constraints leave phi proportional to [1,-1,-1,-1].
+        let mut normalized_pressures = Vec::new();
+        for pin in [0, 1] {
+            p.pressure_gauge = Some((pin, 0.0));
+            let spectrum = p
+                .solve_incompressible_vibration(&[rho], modal_settings(), cx)
+                .unwrap();
+            assert_eq!(spectrum.problem().pressure_gauge, Some((pin, 0.0)));
+            assert_eq!(spectrum.free_dofs(), &[0, 3, 7, 11]);
+            assert_eq!(spectrum.dimension(), 1);
+            assert_eq!(spectrum.equilibrium().kkt_inertia.positive, 4);
+            assert_eq!(spectrum.equilibrium().kkt_inertia.negative, 3);
+            assert!(!spectrum.independent_pressure_indices().contains(&pin));
+            let mode = &spectrum.modes()[0];
+            // Independent exact integrals for this solenoidal shape:
+            // stiffness=26 mu V/5; mass=11 rho V/210.
+            near(mode.coordinates.lambda, 1092.0 * mu / (11.0 * rho), 2e-8);
+            let a = mode.displacement_shape[0];
+            for &value in &mode.displacement_shape[1..] {
+                near(value / a, -1.0, 2e-11);
+            }
+            near(a * a * 11.0 * rho / 1260.0, 1.0, 2e-11);
+            assert_eq!(mode.pressure_shape[pin], 0.0);
+            let full = spectrum.mixed_tangent();
+            let nu = 3 * nodes.len();
+            for row in 0..4 {
+                let mut residual = 0.0;
+                let mut magnitude = 0.0;
+                for (&dof, &value) in spectrum.free_dofs().iter().zip(&mode.displacement_shape) {
+                    let term = full.get(nu + row, dof) * value;
+                    residual += term;
+                    magnitude += term.abs();
+                }
+                assert!(residual.abs() <= 1e-10 * magnitude);
+                for col in 0..4 {
+                    assert_eq!(full.get(nu + row, nu + col), 0.0);
+                }
+            }
+            normalized_pressures.push(mode.pressure_shape.iter().map(|p| p / a).collect::<Vec<_>>());
+        }
+        let shift = normalized_pressures[1][0] - normalized_pressures[0][0];
+        for i in 1..4 {
+            near(normalized_pressures[1][i] - normalized_pressures[0][i], shift, 2e-8);
+        }
+    });
+}
+
+#[test]
+fn exact_incompressible_vibration_retains_domain_capacity_and_gauge_refusals() {
+    use fs_solid::hyper3::mixed::vibration::MixedVibrationError;
+    with_cx(|cx| {
+        let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let fixed: Vec<_> = nodes.iter().enumerate()
+            .filter(|(_, x)| x[2] == 0.0)
+            .flat_map(|(node, _)| (0..3).map(move |a| (3 * node + a, 0.0)))
+            .collect();
+        let material = law(2.0, 20.0);
+        let mut p = problem(
+            &nodes, &elements, &material, &fixed, &[],
+            VolumetricTreatment::OriginalMaterial,
+        );
+        assert!(matches!(
+            p.solve_incompressible_vibration(&[1.0], modal_settings(), cx),
+            Err(MixedVibrationError::Mixed(MixedUpError::InvalidInput { .. }))
+        ));
+        p.volumetric = VolumetricTreatment::ExactIncompressible;
+        for kind in 0..3 {
+            let mut settings = modal_settings();
+            match kind {
+                0 => settings.spectrum.maximum_free_dofs = 8, // 12 before reduction
+                1 => settings.maximum_condensation_bytes = 0,
+                _ => settings.maximum_mass_assembly_bytes = 0,
+            }
+            assert!(matches!(
+                p.solve_incompressible_vibration(&[1.0], settings, cx),
+                Err(MixedVibrationError::Mixed(MixedUpError::InvalidInput { .. }))
+            ));
+        }
+        // With free face traction the mean pressure is physical, not a gauge.
+        p.pressure_gauge = Some((0, 0.0));
+        assert!(matches!(
+            p.solve_incompressible_vibration(&[1.0], modal_settings(), cx),
+            Err(MixedVibrationError::Mixed(MixedUpError::IncompatiblePressureGauge { node: 0 }))
+        ));
+        p.pressure_gauge = None;
+        let gate = CancelGate::new();
+        gate.request();
+        with_gate(&gate, |cancelled| {
+            assert!(matches!(
+                p.solve_incompressible_vibration(&[1.0], modal_settings(), cancelled),
+                Err(MixedVibrationError::Mixed(MixedUpError::Cancelled))
+            ));
+        });
+    });
+}
