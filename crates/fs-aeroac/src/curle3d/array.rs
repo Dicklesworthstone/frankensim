@@ -25,7 +25,8 @@
 //! Both constructors use homogeneous, stationary, free-space point sources.
 //! [`PreparedCompactSourceObserver::with_orthogonal_planes`] adds the finite
 //! image group of up to three ideal perpendicular boundaries to this same
-//! transfer. Source size, motion and mutual fluid loading are not resolved.
+//! transfer. [`PreparedCompactSourceObserver::with_wedge`] supplies exact
+//! pi/m ideal wedges. Source size, motion and mutual fluid loading are not resolved.
 //! In particular, an integrated force from a periodic flow cell is not
 //! automatically an isolated radiator. These SI transfers do not turn 2D
 //! force-per-span data into 3D sources or validate a physical source model.
@@ -43,6 +44,7 @@ mod welch;
 pub use plane::{IdealAcousticPlane, IdealPlaneBoundary, PreparedHalfSpaceObserver};
 /// Coherent volume injection into an explicitly uniform subsonic mean flow.
 pub mod convected;
+mod wedge;
 
 /// Applicability of the prescribed three-dimensional source transfer.
 pub const COMPACT_FIELD_SCOPE: &str = "Prescribed compact 3D volume flow [m³/s] and force on fluid [N]; \
@@ -138,6 +140,8 @@ pub struct PreparedCompactSourceObserver {
     // Empty for the original free field. Image coefficients are folded into
     // each ORIGINAL source transfer; images never become statistical sources.
     reflection_planes: Vec<IdealAcousticPlane>,
+    // The exact pi/m wedge class, otherwise independent perpendicular planes.
+    reflection_wedge_order: Option<usize>,
 }
 
 impl PreparedCompactSourceObserver {
@@ -334,6 +338,7 @@ impl PreparedCompactSourceObserver {
             observer_m,
             transfers,
             reflection_planes: Vec::new(),
+            reflection_wedge_order: None,
         })
     }
 
@@ -359,7 +364,13 @@ impl PreparedCompactSourceObserver {
     /// Physical propagation model and its explicit applicability boundary.
     #[must_use]
     pub const fn scope(&self) -> &'static str {
-        if !self.reflection_planes.is_empty() {
+        if self.reflection_wedge_order.is_some() {
+            if self.molecular.is_some() {
+                wedge::MOLECULAR_SCOPE
+            } else {
+                wedge::LOSSLESS_SCOPE
+            }
+        } else if !self.reflection_planes.is_empty() {
             if self.molecular.is_some() {
                 plane::ORTHOGONAL_MOLECULAR_SCOPE
             } else {
@@ -395,6 +406,13 @@ impl PreparedCompactSourceObserver {
     #[must_use]
     pub fn reflection_planes(&self) -> &[IdealAcousticPlane] {
         &self.reflection_planes
+    }
+
+    /// Exact wedge opening pi/m, or None for free space/perpendicular planes.
+    /// A wedge has 2m paths per original source, folded during preparation.
+    #[must_use]
+    pub const fn reflection_wedge_order(&self) -> Option<usize> {
+        self.reflection_wedge_order
     }
 
     /// Original source position [m], or None for an index outside the array.

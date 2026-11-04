@@ -254,6 +254,26 @@ material scaling and domain/representability refusals.
   `tests/compact_interference/corner.rs` checks independent image pressure and
   momentum, all rigid/release wall conditions, edges/vertices, rotated frames,
   source statistics, molecular propagation and bounded/cancelled admission.
+- `PreparedCompactSourceObserver::with_wedge` adds the exact finite dihedral
+  group for two infinite ideal walls opening by pi/m, with integer m in 2..=128.
+  Equal rigid or pressure-release walls admit every supported order; mixed
+  conditions require even m because the boundary signs must close after m
+  double reflections. Geometry is admitted within 64 machine epsilons in the
+  normal dot product and relative cross-product magnitude, without snapping.
+  The complete 2m images carry both affine source positions and their full
+  Cartesian force transforms, with source and receiver inside the physical
+  wedge. Both wall conditions include reactive near-field velocity and the
+  common edge. Preparation bounds all 2mN paths, uses O(N) scratch and folds
+  sixteen coefficients per original source with compensated sums; runtime
+  remains allocation-free O(N), including independent-source statistics that
+  retain every source's own image interference. Original material relaxation,
+  direct-path delays, source clock and statistical source count survive.
+  General angles, odd mixed wedges, finite impedance and room reverberation
+  require other Green functions and are not approximated by truncated images.
+  `tests/compact_interference/wedge.rs` checks an independent polar image oracle,
+  near-field momentum, all four source components on both walls and the edge,
+  pi/2 parity with the corner owner, rigid frame and wall-order covariance,
+  molecular dispersion, source coherence, cancellation and admission budgets.
 - `observation::PreparedHarmonicField` observes deterministic lines on a common
   receiver clock over an explicit rectangular interval. The existing 2D/3D
   prepared observers export `evaluate_harmonic_line` with the propagation delay

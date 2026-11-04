@@ -20,6 +20,9 @@ mod plane;
 #[path = "compact_interference/corner.rs"]
 mod corner;
 
+#[path = "compact_interference/wedge.rs"]
+mod wedge;
+
 fn medium(rho: f64, c: f64) -> FluidAcousticState {
     FluidAcousticState::try_new(rho, c).unwrap()
 }

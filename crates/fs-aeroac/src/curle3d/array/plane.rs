@@ -45,7 +45,7 @@ pub enum IdealPlaneBoundary {
 }
 
 impl IdealPlaneBoundary {
-    const fn sign(self) -> f64 {
+    pub(super) const fn sign(self) -> f64 {
         match self {
             Self::Rigid => 1.0,
             Self::PressureRelease => -1.0,
@@ -97,7 +97,7 @@ impl IdealAcousticPlane {
         self.boundary
     }
 
-    fn distance(&self, position: [f64; 3]) -> Result<Dd, AeroacError> {
+    pub(super) fn distance(&self, position: [f64; 3]) -> Result<Dd, AeroacError> {
         let mut distance = Dd::ZERO;
         for axis in 0..3 {
             distance = distance
@@ -110,22 +110,41 @@ impl IdealAcousticPlane {
         Ok(distance)
     }
 
-    fn image(&self, source: [f64; 3]) -> Result<[f64; 3], AeroacError> {
+    pub(super) fn image(&self, source: [f64; 3]) -> Result<[f64; 3], AeroacError> {
         let distance = self.distance(source)?;
         if distance.to_f64() <= 0.0 {
             return Err(invalid(
                 "compact sources must lie strictly inside the fluid half-space",
             ));
         }
-        let image = core::array::from_fn(|axis| {
-            (Dd::from_f64(source[axis]) - distance * Dd::from_f64(2.0 * self.normal[axis])).to_f64()
-        });
+        let image = self.reflect_at_distance(source, distance)?;
         if image.iter().any(|v| !v.is_finite()) || self.distance(image)?.to_f64() >= 0.0 {
             return Err(invalid(
                 "reflected compact source position is not representable",
             ));
         }
         Ok(image)
+    }
+
+    // A later image in a dihedral group may be on either side of this plane.
+    // Only ORIGINAL source admission selects the physical fluid half-spaces.
+    pub(super) fn reflected_position(&self, position: [f64; 3]) -> Result<[f64; 3], AeroacError> {
+        self.reflect_at_distance(position, self.distance(position)?)
+    }
+
+    fn reflect_at_distance(
+        &self,
+        position: [f64; 3],
+        distance: Dd,
+    ) -> Result<[f64; 3], AeroacError> {
+        let reflected = core::array::from_fn(|axis| {
+            (Dd::from_f64(position[axis]) - distance * Dd::from_f64(2.0 * self.normal[axis]))
+                .to_f64()
+        });
+        if reflected.iter().any(|v| !v.is_finite()) {
+            return Err(nonfinite("reflected compact source position"));
+        }
+        Ok(reflected)
     }
 }
 
@@ -359,15 +378,29 @@ fn reflect_source_components(
     transfer: &mut Transfer,
     plane: IdealAcousticPlane,
 ) -> Result<(), AeroacError> {
+    let reflection = core::array::from_fn(|axis| {
+        core::array::from_fn(|col| {
+            let identity = if axis == col { 1.0 } else { 0.0 };
+            identity - 2.0 * plane.normal[axis] * plane.normal[col]
+        })
+    });
+    transform_source_components(transfer, reflection, plane.boundary.sign())
+}
+
+// A complete image acts by Q -> sign Q and F -> sign M F in the SAME
+// Cartesian frame. Matrix order matters for nonperpendicular reflections.
+pub(super) fn transform_source_components(
+    transfer: &mut Transfer,
+    transform: [[f64; 3]; 3],
+    sign: f64,
+) -> Result<(), AeroacError> {
     for row in &mut transfer.field {
         let original = *row;
-        row[0] = original[0].scale(plane.boundary.sign());
+        row[0] = original[0].scale(sign);
         for col in 0..3 {
             let mut sum = ComplexSum::default();
             for axis in 0..3 {
-                let identity = if axis == col { 1.0 } else { 0.0 };
-                let coefficient = plane.boundary.sign()
-                    * (identity - 2.0 * plane.normal[axis] * plane.normal[col]);
+                let coefficient = sign * transform[axis][col];
                 sum.add(original[axis + 1].scale(coefficient))?;
             }
             row[col + 1] = sum.value();
