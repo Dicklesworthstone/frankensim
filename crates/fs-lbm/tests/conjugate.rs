@@ -2534,6 +2534,8 @@ fn g3_radiation_cooled_natural_convection_needs_no_conductive_anchor() {
         radiation.surface_exchange = surface_exchange;
         radiation.patch_size = 1;
         radiation.tolerance = config.temperature_tolerance;
+        // Radiation now shares the declared complete buoyancy pass budget.
+        radiation.max_iterations = config.max_couplings;
         let (reference, _) = solve_energy_radiating(
             &domain,
             &fluid,
@@ -2588,6 +2590,145 @@ fn g3_radiation_cooled_natural_convection_needs_no_conductive_anchor() {
         "{balance:?}"
     );
     assert!(balance.relative_residual < 1e-9, "{balance:?}");
+}
+
+#[test]
+fn g0_natural_convection_reports_the_accepted_projected_thermal_epoch() {
+    // Deliberately leave a loose pressure correction after one SIMPLEC sweep.
+    // The reported temperature change must describe the subsequently projected
+    // field that the caller receives, not the discarded pre-projection solve.
+    let gate = CancelGate::new();
+    let n = 8;
+    let domain = VoxelDomain::new(n, n, 1, 1.0 / n as f64).unwrap();
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1e-2,
+        kinematic_viscosity_m2_s: 0.71e-2,
+    };
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(301.0);
+    faces[1] = ThermalFace::Temperature(300.0);
+    let setup = ThermalSetup::new(faces);
+    let mut flow = SimpleConfig::new([
+        FvBoundary::wall(), FvBoundary::wall(),
+        FvBoundary::wall(), FvBoundary::wall(),
+        FvBoundary::Symmetry, FvBoundary::Symmetry,
+    ]);
+    flow.tolerance = 10.0;
+    flow.pressure_tolerance = 0.5;
+    let beta = 1e3 * fluid.kinematic_viscosity_m2_s * fluid.conductivity_w_m_k / 9.81;
+    let mut config = FvBuoyancyConfig::new([0.0, -9.81, 0.0], beta, 300.5, flow);
+    config.sweeps_per_coupling = 1;
+    config.max_couplings = 1;
+    config.temperature_tolerance = 10.0;
+    let seed = solve_energy(
+        &domain, &fluid, &[], &FlowField::quiescent(&domain),
+        &setup, &config.energy, &gate,
+    ).unwrap();
+    let run = fv_natural_convection(
+        &domain, &fluid, &[], &setup, &config, &gate,
+    ).unwrap();
+    assert_eq!(run.report.couplings, 1);
+    let (lo, hi) = run.energy.temperature.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo, hi), &t| (lo.min(t), hi.max(t)),
+    );
+    let actual_change = run.energy.temperature.iter().zip(&seed.temperature)
+        .map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max)
+        / (hi - lo);
+    assert!(actual_change > 1e-6, "the convection perturbation must be resolved");
+    assert!(
+        (run.report.temperature_change - actual_change).abs() < 1e-12,
+        "reported {} but returned projected pair changed by {actual_change}",
+        run.report.temperature_change,
+    );
+    let replay = solve_energy(
+        &domain, &fluid, &[], &run.flow.field, &setup, &config.energy, &gate,
+    ).unwrap();
+    assert_eq!(run.energy.temperature, replay.temperature);
+    assert_eq!(
+        run.report.physical_energy_residual_w,
+        run.energy.report.balance.residual_w,
+    );
+    assert!(run.report.radiation_relative_power_defect.is_none());
+}
+
+#[test]
+fn g1_natural_convection_requires_radiation_closure_with_loose_temperature_tolerance() {
+    // The left plate generates heat and both plates radiate to 300 K.
+    // No prescribed-temperature bath can conceal an unclosed radiation law.
+    let gate = CancelGate::new();
+    let (n, dx) = (4, 0.125);
+    let domain = VoxelDomain::from_fn(n, n, 1, dx, |p| {
+        if p[0] < dx || p[0] > (n - 1) as f64 * dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    }).unwrap();
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1e-2,
+        kinematic_viscosity_m2_s: 0.71e-2,
+    };
+    let solids = [SolidMaterial::new("plate", 10.0)];
+    let power = 500.0;
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.add_uniform_power(&domain, power, |p| p[0] < dx);
+    let flow = SimpleConfig::new([
+        FvBoundary::wall(), FvBoundary::wall(),
+        FvBoundary::wall(), FvBoundary::wall(),
+        FvBoundary::Symmetry, FvBoundary::Symmetry,
+    ]);
+    let mut config = FvBuoyancyConfig::new([0.0, -9.81, 0.0], 0.0, 300.0, flow);
+    config.temperature_tolerance = 1e6;
+    let mut radiation = RadiationConfig::new(vec![0.9], [Some(300.0); 6]);
+    radiation.surface_exchange = false;
+    radiation.rays_per_face = 64;
+    radiation.tolerance = 1e-9;
+    radiation.max_iterations = 50;
+    config.radiation = Some(radiation.clone());
+    config.max_couplings = 1;
+    assert!(matches!(
+        fv_natural_convection(&domain, &fluid, &solids, &setup, &config, &gate),
+        Err(ChtError::SolverNotConverged {
+            system: "natural convection radiation", iterations: 1, ..
+        }),
+    ));
+
+    config.max_couplings = 50;
+    let run = fv_natural_convection(
+        &domain, &fluid, &solids, &setup, &config, &gate,
+    ).unwrap();
+    assert!(run.report.couplings > 1);
+    assert!(run.report.temperature_change <= radiation.tolerance);
+    assert!(run.report.radiation_relative_power_defect.unwrap() <= radiation.tolerance);
+    // Re-evaluate the original nonlinear face law independently of the
+    // converged tangent system and its stored energy-balance report.
+    let faces = escape_factors(&domain, &solids, &radiation, &gate).unwrap();
+    let emitted: f64 = faces.iter().map(|face| {
+        face.emissivity * STEFAN_BOLTZMANN * face.escape * dx * dx
+            * (run.energy.temperature[face.cell].powi(4) - face.surroundings_k.powi(4))
+    }).sum();
+    assert!((emitted - power).abs() < 1e-8 * power, "{emitted} vs {power}");
+    assert!((run.report.radiated_w.unwrap() - emitted).abs() < 1e-10 * power);
+    assert!(run.report.physical_energy_residual_w.abs() < 1e-8 * power);
+    assert_eq!(
+        run.report.physical_energy_residual_w,
+        run.energy.report.balance.residual_w
+            - run.report.radiation_net_outflow_correction_w.unwrap(),
+    );
+
+    // A larger flow budget cannot waive a caller's smaller radiation budget.
+    config.radiation.as_mut().unwrap().max_iterations = 1;
+    assert!(matches!(
+        fv_natural_convection(&domain, &fluid, &solids, &setup, &config, &gate),
+        Err(ChtError::SolverNotConverged {
+            system: "natural convection radiation", iterations: 1, ..
+        }),
+    ));
 }
 
 /// Open vertical channel (chimney) between isothermal plates `n` cells

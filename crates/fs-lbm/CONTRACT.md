@@ -5244,12 +5244,25 @@ The coupling starts from conduction
 through still fluid with the openings held at ambient (a uniform reference
 field carries no buoyancy, and openings without flow anchor no temperature).
 Each coupling runs `sweeps_per_coupling`
-SIMPLEC iterations under the current force, then re-solves energy on the
-current fluxes; convergence needs the SIMPLEC residuals below
-`flow.tolerance` AND the energy re-solve's largest temperature change below
-`temperature_tolerance` times the span, at the same coupling. The returned
-energy solution is computed on exactly the returned (tightly projected)
-fluxes. This closes the LBM path's "closed enclosures only" boundary.
+SIMPLEC iterations under the current force. A batch that meets
+`flow.tolerance` is projected before the energy re-solve, so
+`temperature_tolerance` times the span bounds the change of the actual
+returned projected pair. Acceptance returns that pair without another
+pressure correction or thermal solve. This closes the LBM path's
+"closed enclosures only" boundary.
+
+When radiation is declared, its positive finite `tolerance` also bounds
+temperature change over the span and each cell's physical radiation power
+minus the solved tangent, normalized by the original radiation owner's heat
+scale and floating-point allowance. A loose buoyancy temperature criterion
+cannot waive this physical heat gate. The shared iteration limit is the
+smaller of `max_couplings` and `radiation.max_iterations`; an unresolved
+radiative endpoint refuses instead of returning a fresh radiation total
+beside an unclosed tangent balance. The report retains the relative power
+defect, net physical heat correction excluding fixed-temperature
+thermostats, and corrected physical energy residual in watts. Focused
+regressions exercise a single projected coupling epoch and a heated
+radiative enclosure under deliberately loose thermal convergence controls.
 
 | Fixture | Reference | Measured |
 |---|---|---|

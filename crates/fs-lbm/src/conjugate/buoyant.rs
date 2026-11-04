@@ -16,8 +16,11 @@
 //! current fluxes. Convergence requires, at the same coupling, the SIMPLEC
 //! mass and momentum residuals below `flow.tolerance` and the largest
 //! temperature change of the energy re-solve below `temperature_tolerance`
-//! times the temperature span. The returned flow is projected tightly and the
-//! returned energy solution is computed on exactly those fluxes.
+//! times the temperature span. A candidate flow is projected BEFORE its
+//! thermal acceptance test; the accepted pair is returned without another
+//! projection or energy solve. Radiation additionally closes its physical
+//! endpoint powers against the solved tangent, using its own relative
+//! tolerance and nonlinear iteration budget.
 //!
 //! # No-claim boundaries
 //!
@@ -54,14 +57,15 @@ pub struct FvBuoyancyConfig {
     pub energy: EnergyConfig,
     /// SIMPLEC iterations between energy re-solves.
     pub sweeps_per_coupling: usize,
-    /// Coupling budget.
+    /// Coupling budget; radiation, when declared, also bounds these passes
+    /// through its own `max_iterations`.
     pub max_couplings: usize,
     /// Largest temperature change of one energy re-solve over the
     /// temperature span, at convergence.
     pub temperature_tolerance: f64,
-    /// Optional surface radiation to the surroundings (each coupling's
-    /// energy solve carries the sinks linearized about the current
-    /// temperature, so the coupling criterion also converges radiation).
+    /// Optional surface radiation. The same coupled endpoint must satisfy
+    /// its relative temperature and physical-power tolerances. The smaller
+    /// of `max_couplings` and its `max_iterations` bounds the shared loop.
     pub radiation: Option<RadiationConfig>,
 }
 
@@ -92,7 +96,7 @@ impl FvBuoyancyConfig {
 /// Run evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FvNaturalConvectionReport {
-    /// Energy re-solves.
+    /// Coupled energy re-solves, excluding the initial conduction seed.
     pub couplings: usize,
     /// SIMPLEC iterations in total.
     pub sweeps: usize,
@@ -106,6 +110,17 @@ pub struct FvNaturalConvectionReport {
     /// Net heat radiated to the surroundings at the returned temperatures,
     /// W, when radiation is declared.
     pub radiated_w: Option<f64>,
+    /// Maximum cellwise physical-minus-tangent radiation defect, normalized
+    /// by the original radiation owner's heat scale and roundoff allowance.
+    /// Bounded by `radiation.tolerance` when radiation is declared.
+    pub radiation_relative_power_defect: Option<f64>,
+    /// Add to the solved balance's net outward heat to obtain physical
+    /// radiation heat [W]. Fixed-temperature cells' corrections belong to
+    /// their thermostats and cancel from this net value.
+    pub radiation_net_outflow_correction_w: Option<f64>,
+    /// Solved energy residual minus the radiation correction [W]. Without
+    /// radiation this is exactly `energy.report.balance.residual_w`.
+    pub physical_energy_residual_w: f64,
 }
 
 /// Steady natural convection: flow, temperature and evidence.
@@ -143,8 +158,9 @@ fn body_force(
 ///
 /// # Errors
 /// Input refusals, [`ChtError::FlowNotSteady`] when the coupling budget ends
-/// first, [`ChtError::FlowDiverged`], energy-solver refusals (for example
-/// flow through a closed thermal face), or [`ChtError::Cancelled`].
+/// first, [`ChtError::FlowDiverged`], [`ChtError::SolverNotConverged`] when
+/// radiation misses its endpoint tolerance, energy-solver refusals (for
+/// example flow through a closed thermal face), or [`ChtError::Cancelled`].
 pub fn fv_natural_convection(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -172,6 +188,18 @@ pub fn fv_natural_convection(
             reason: "must be at least one".into(),
         });
     }
+    let maximum_couplings = if let Some(radiation) = &config.radiation {
+        finite_positive("radiation.tolerance", radiation.tolerance)?;
+        if radiation.max_iterations == 0 {
+            return Err(ChtError::InvalidInput {
+                field: "radiation.max_iterations",
+                reason: "must be at least one".into(),
+            });
+        }
+        config.max_couplings.min(radiation.max_iterations)
+    } else {
+        config.max_couplings
+    };
     let exposed = match &config.radiation {
         Some(radiation) => Some(Radiators::build(domain, solids, radiation, gate)?),
         None => None,
@@ -230,11 +258,27 @@ pub fn fv_natural_convection(
     )?
     .temperature;
     let mut radiation_endpoint = evaluate_radiation(&temperature)?;
+    // Reuse one pair of radiation work arrays. The seed solve has already
+    // admitted the fixed-temperature indices; those thermostats own their
+    // own heat corrections rather than the body's net energy residual.
+    let radiation_cells = if exposed.is_some() { domain.cell_count() } else { 0 };
+    let mut tangent_power = vec![0.0; radiation_cells];
+    let mut tangent_scale = vec![0.0; radiation_cells];
+    let mut fixed = vec![false; radiation_cells];
+    if exposed.is_some() {
+        for (index, &(cell, _)) in setup.fixed_temperature.iter().enumerate() {
+            if index.is_multiple_of(1024) {
+                poll(gate)?;
+            }
+            fixed[cell] = true;
+        }
+    }
     let mut residuals = (f64::INFINITY, f64::INFINITY);
     let mut temperature_change = f64::INFINITY;
+    let mut radiation_relative_power_defect = 0.0_f64;
     let (mut couplings, mut sweeps) = (0usize, 0usize);
     let tolerance = config.flow.tolerance;
-    while couplings < config.max_couplings {
+    while couplings < maximum_couplings {
         poll(gate)?;
         couplings += 1;
         solver.set_force(body_force(domain, fluid, config, &temperature));
@@ -244,6 +288,13 @@ pub fn fv_natural_convection(
             if !(residuals.0.is_finite() && residuals.1.is_finite()) {
                 return Err(ChtError::FlowDiverged { step: sweeps });
             }
+        }
+        let flow_converged = residuals.0 <= tolerance && residuals.1 <= tolerance;
+        if flow_converged {
+            // This is the flux field a successful call will actually return.
+            // Its thermal response must pass the coupling gate; polishing
+            // pressure after that gate could otherwise invalidate the pair.
+            solver.project(gate)?;
         }
         let energy = solve_energy(
             domain,
@@ -267,46 +318,84 @@ pub fn fv_natural_convection(
             .zip(&temperature)
             .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
         temperature_change = change / (hi - lo).max(f64::MIN_POSITIVE);
+        radiation_relative_power_defect = 0.0;
+        let mut radiation_correction_w = 0.0;
+        if let (Some(applied), Some(endpoint)) = (&radiation_endpoint, &next_radiation) {
+            applied.write_tangent_power(
+                &energy.temperature, &mut tangent_power, &mut tangent_scale, gate,
+            )?;
+            for cell in 0..radiation_cells {
+                if cell.is_multiple_of(1024) {
+                    poll(gate)?;
+                }
+                let defect = endpoint.power_defect(
+                    cell,
+                    tangent_power[cell],
+                    tangent_scale[cell],
+                    setup.power_w.get(cell).copied().unwrap_or(0.0).abs(),
+                )?;
+                radiation_relative_power_defect =
+                    radiation_relative_power_defect.max(defect.relative);
+                if !fixed[cell] {
+                    radiation_correction_w += defect.difference_w;
+                }
+            }
+        }
+        let physical_energy_residual_w =
+            energy.report.balance.residual_w - radiation_correction_w;
+        finite("radiation.net_outflow_correction_w", radiation_correction_w)?;
+        finite("radiation.physical_energy_residual_w", physical_energy_residual_w)?;
+        let radiation_converged = config.radiation.as_ref().is_none_or(|radiation| {
+            temperature_change <= radiation.tolerance
+                && radiation_relative_power_defect <= radiation.tolerance
+        });
+        if flow_converged
+            && temperature_change <= config.temperature_tolerance
+            && radiation_converged
+        {
+            poll(gate)?;
+            let radiated_w = next_radiation.as_ref().map(|endpoint| endpoint.radiated_w);
+            // The accepted flow and heat already share one projected epoch.
+            // Reporting it must not launch another pressure or energy solve.
+            let flow = solver.finish_projected(fluid, sweeps, residuals);
+            return Ok(FvNaturalConvection {
+                flow,
+                energy,
+                report: FvNaturalConvectionReport {
+                    couplings,
+                    sweeps,
+                    mass_residual: residuals.0,
+                    momentum_residual: residuals.1,
+                    temperature_change,
+                    radiated_w,
+                    radiation_relative_power_defect:
+                        radiated_w.map(|_| radiation_relative_power_defect),
+                    radiation_net_outflow_correction_w:
+                        radiated_w.map(|_| radiation_correction_w),
+                    physical_energy_residual_w,
+                },
+            });
+        }
         temperature = energy.temperature;
         radiation_endpoint = next_radiation;
-        if residuals.0 <= tolerance
-            && residuals.1 <= tolerance
-            && temperature_change <= config.temperature_tolerance
-        {
-            break;
-        }
     }
-    if residuals.0 > tolerance
-        || residuals.1 > tolerance
-        || temperature_change > config.temperature_tolerance
+    if residuals.0 <= tolerance
+        && residuals.1 <= tolerance
+        && temperature_change <= config.temperature_tolerance
+        && let Some(radiation) = &config.radiation
+        && (temperature_change > radiation.tolerance
+            || radiation_relative_power_defect > radiation.tolerance)
     {
-        return Err(ChtError::FlowNotSteady {
-            steps: sweeps,
-            last_change: residuals.0.max(residuals.1).max(temperature_change),
-            tolerance,
+        return Err(ChtError::SolverNotConverged {
+            system: "natural convection radiation",
+            iterations: couplings,
+            relative_residual: temperature_change.max(radiation_relative_power_defect),
+            tolerance: radiation.tolerance,
         });
     }
-    let flow = solver.finish(fluid, sweeps, residuals, gate)?;
-    let energy = solve_energy(
-        domain,
-        fluid,
-        solids,
-        &flow.field,
-        &energy_setup(radiation_endpoint.as_ref(), &flow.heat_eddy_viscosity_m2_s),
-        &config.energy,
-        gate,
-    )?;
-    let radiated_w = evaluate_radiation(&energy.temperature)?.map(|endpoint| endpoint.radiated_w);
-    Ok(FvNaturalConvection {
-        flow,
-        energy,
-        report: FvNaturalConvectionReport {
-            couplings,
-            sweeps,
-            mass_residual: residuals.0,
-            momentum_residual: residuals.1,
-            temperature_change,
-            radiated_w,
-        },
+    Err(ChtError::FlowNotSteady {
+        steps: sweeps,
+        last_change: residuals.0.max(residuals.1).max(temperature_change),
+        tolerance,
     })
 }
