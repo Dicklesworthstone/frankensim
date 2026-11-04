@@ -165,8 +165,10 @@ fn data_only_two_medium_tone_holes_reach_cli_pcm_at_both_block_sizes() {
             success(wind(&input, &output, block, false));
             assert_eq!(std::fs::read(&output).unwrap(), expected);
             let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
-            assert!(metadata.contains("\"pressure_point\":\"baffled-outlet\""));
-            assert!(metadata.contains("bound exterior gas"));
+            assert!(metadata.contains("\"pressure_point\":\"baffled-openings\""));
+            assert!(metadata.contains("terminal and open-hole Rayleigh pressure"));
+            assert!(metadata.contains("all open or vented hole pressures in the bound exterior gas"));
+            assert!(!metadata.contains("terminal-only"));
         }
     }
 }

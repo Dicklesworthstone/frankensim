@@ -151,5 +151,48 @@ class IndependentExteriorGas(unittest.TestCase):
             lower.performance(desc, SEGMENTS, 1800)
 
 
+class SpecimenInputsWithoutClarinetNames(unittest.TestCase):
+    """Manufactured rows: diameters printed at holes, other hole quantities, no mouthpiece."""
+
+    DIMS = {
+        ("bore", "station-000"): {"axial-position": 0.0, "diameter": 0.002},
+        ("bore", "station-500"): {"axial-position": 0.5, "diameter": 0.016},
+        ("bore", "at-hole-01"): {"diameter": 0.006},
+        ("bore", "at-hole-02"): {"diameter": 0.006},
+        ("tone-holes", "hole-01"): {"axial-position": 0.2, "height": 0.003, "diameter": 0.004},
+        ("tone-holes", "hole-02"): {"axial-position": 0.2, "height": 0.003, "diameter": 0.005},
+        ("tone-holes", "hole-03"): {"axial-position": 0.3, "height": 0.004, "diameter": 0.006},
+    }
+
+    def test_diameter_printed_at_a_hole_takes_that_holes_position_once(self):
+        self.assertEqual(lower.bore_knots(self.DIMS), [(0.0, 0.001), (0.2, 0.003), (0.5, 0.008)])
+
+    def test_hole_quantities_are_named_and_holes_are_omitted_by_key(self):
+        desc = {"tonehole.height_quantity": "height", "tonehole.diameter_quantity": "diameter", "tonehole.omit": "1,2"}
+        self.assertEqual(lower.holes_of(desc, self.DIMS), {3: (0.3, 0.004, 0.003)})
+
+    def test_an_omitted_hole_stays_in_when_the_fingering_opens_it(self):
+        desc = {"tonehole.height_quantity": "height", "tonehole.diameter_quantity": "diameter", "tonehole.omit": "1,2"}
+        self.assertEqual(sorted(lower.holes_of(desc, self.DIMS, {2})), [2, 3])
+
+    def test_an_opened_hole_with_no_printed_height_takes_the_declared_one_or_refuses(self):
+        dims = {("tone-holes", "hole-01"): {"axial-position": 0.1, "diameter": 0.0003}}
+        desc = {"tonehole.height_quantity": "height", "tonehole.diameter_quantity": "diameter", "tonehole.omit": "1"}
+        self.assertEqual(lower.holes_of(desc, dims), {})
+        with self.assertRaisesRegex(SystemExit, "hole-01 is missing height"):
+            lower.holes_of(desc, dims, {1})
+        desc["tonehole.height_unprinted_m"] = "0.006"
+        self.assertEqual(lower.holes_of(desc, dims, {1}), {1: (0.1, 0.006, 0.00015)})
+
+    def test_without_the_keys_the_clarinet_quantities_are_required(self):
+        with self.assertRaisesRegex(SystemExit, "hole-0[123] is missing chimney-height"):
+            lower.holes_of({}, self.DIMS)
+        dims = {("tone-holes", "hole-01"): {"axial-position": 0.2, "chimney-height": 0.003, "min-diameter": 0.004}}
+        self.assertEqual(lower.holes_of({}, dims), {1: (0.2, 0.003, 0.002)})
+
+    def test_declared_absent_mouthpiece_adds_no_segments(self):
+        self.assertEqual(lower.mouthpiece_segments({"mouthpiece.part": "-"}, self.DIMS), [])
+
+
 if __name__ == "__main__":
     unittest.main()

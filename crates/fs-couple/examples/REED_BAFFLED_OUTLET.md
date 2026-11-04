@@ -1,7 +1,8 @@
 # Physical terminal sound from regional gas reed performances
 
-The `frankensim-reed-performance-v1` source can select terminal-only Rayleigh
-pressure rather than the historical bore-pressure/compact-jet proxy. Replace
+The `frankensim-reed-performance-v1` source can select Rayleigh pressure from the
+terminal and every open or vented tone hole, rather than the historical
+bore-pressure/compact-jet proxy. Replace
 `listener_m` with the explicit physical observer record:
 
 ```text
@@ -99,8 +100,9 @@ and are not removed by ensemble alignment. Source PCM scales are not mixing gain
 ## Scope and focused checks
 
 These are stationary, prescribed gases, with no composition transport, live
-medium replacement, thermal equilibration or mean flow. The observation is
-terminal-only: side-hole, jet, structural and room radiation are absent.
+medium replacement, thermal equilibration or mean flow. The observation sums the
+terminal and every open or vented hole, each its own baffled disk with no scattering
+between mouths: jet, structural and room radiation are absent.
 Finite-history Fourier sampling, fractional-delay and backward-difference
 approximations remain those of the existing owners. No certified broadband
 radiation match, measured timbre or instrument calibration is implied.

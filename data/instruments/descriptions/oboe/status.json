@@ -3,19 +3,19 @@
   "family": "oboe",
   "title": "Oboe",
   "reference_instrument": "Oboe",
-  "summary": "No render yet. One complete oboe tone-hole table exists (Nederveen and de Bruijn 1967, a Munnich oboe), but its bore is published only as graphs with diameters at the hole stations, and it carries no pad heights or fingering chart; the double reed also needs the paired-reed valve driver wired to a bore.",
+  "summary": "First renders are posted on Bb4 and Db4 (graded) and on G5 and Ab5 (no grade, an octave down); Eb6 has none because the printed ladder ends at D5. One complete oboe tone-hole table exists (Nederveen and de Bruijn 1967, a Munnich oboe). Its bore is published only as graphs, now read at stations with stated reading errors, and it carries no pad heights or fingering chart. Nothing open prints an oboe reed's blade mass, stiffness or damping.",
   "physics_present": [
-    "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; none has been given this instrument's geometry",
+    "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; a description gives them this bore and a reed with values partly borrowed from the clarinet, and the posted first renders come from it",
     "Fuks and Sundberg 1996 blowing pressures for two professional oboe players are retained as player data"
   ],
   "physics_missing": [
-    "continuous bore profile and bell flare as numbers",
+    "a measured bore profile and bell flare: only reads from the paper's graphs exist",
     "pad and key heights, undercut geometry and a full fingering chart",
     "a double-reed valve driving this bore (paired reed or the material-modal valve)",
     "staple and reed channel geometry",
     "a modern specimen: the only complete table is from 1967"
   ],
-  "blocked": "Bore profile is published only as figures; the 1967 transcription is also still unverified against the page images. Needs a digitised and checked bore, or a newer measured oboe from its authors.",
+  "blocked": "The paper's bore graphs are read and its tables were transcribed from the page images, but no open source prints an oboe reed's blade mass, stiffness or damping. Needs those from the authors or a measured reed, and a newer measured oboe.",
   "beads": [
     "pexfp.246"
   ]

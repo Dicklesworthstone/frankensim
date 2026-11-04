@@ -20,6 +20,13 @@ The native gas owner resolves both declarations and checks their compatibility.
 Omitting exterior.* retains the native same-medium behavior; it never invents
 room conditions. A supplied exterior reaches both opening loads and the physical
 microphone, including descriptions with open tone holes.
+
+A specimen may print other hole quantities: optional tonehole.height_quantity and
+tonehole.diameter_quantity name them (chimney-height and min-diameter when absent)
+and tonehole.omit lists holes left out unless a fingering opens them, when a hole
+that prints no height takes tonehole.height_unprinted_m. A bore row at-hole-NN is a diameter at that
+hole's position. mouthpiece.part - declares a reed with no mouthpiece, whose bore
+stations start at the reed tip.
 """
 import csv
 import math
@@ -105,24 +112,37 @@ def dimensions(specimen_dir):
 
 
 def bore_knots(dims):
-    stations = sorted(
+    stations = {
         (q["axial-position"], q["diameter"] / 2.0)
         for (part, feature), q in dims.items()
         if part == "bore" and feature.startswith("station-")
-    )
+    }
+    # A diameter printed at a hole ("at-hole-NN") takes its position from that hole; two holes may share a station.
+    stations |= {
+        (dims[("tone-holes", feature[3:])]["axial-position"], q["diameter"] / 2.0)
+        for (part, feature), q in dims.items()
+        if part == "bore" and feature.startswith("at-hole-")
+    }
+    stations = sorted(stations)
     if len(stations) < 2:
         refuse("specimen has fewer than two bore stations")
     return stations
 
 
-def holes_of(dims):
+def holes_of(desc, dims, open_holes=()):
+    """Each hole's position, height and radius; a specimen may name other quantities and omit unusable holes by key."""
+    height = desc.get("tonehole.height_quantity", "chimney-height")
+    diameter = desc.get("tonehole.diameter_quantity", "min-diameter")
+    omitted = {int(h) for h in desc.get("tonehole.omit", "").split(",") if h}
     holes = {}
     for (part, feature), q in dims.items():
-        if part == "tone-holes" and feature.startswith("hole-"):
-            for quantity in ("axial-position", "chimney-height", "min-diameter"):
+        if part == "tone-holes" and feature.startswith("hole-") and (int(feature[5:]) not in omitted or int(feature[5:]) in open_holes):
+            if int(feature[5:]) in omitted and height not in q and "tonehole.height_unprinted_m" in desc:
+                q = {**q, height: float(desc["tonehole.height_unprinted_m"])}
+            for quantity in ("axial-position", height, diameter):
                 if quantity not in q:
                     refuse(f"{feature} is missing {quantity}")
-            holes[int(feature[5:])] = (q["axial-position"], q["chimney-height"], q["min-diameter"] / 2.0)
+            holes[int(feature[5:])] = (q["axial-position"], q[height], q[diameter] / 2.0)
     return holes
 
 
@@ -135,6 +155,8 @@ def radius_at(knots, x):
 
 def mouthpiece_segments(desc, dims):
     part = need(desc, "mouthpiece.part")
+    if part == "-":  # a double reed has no mouthpiece: the bore stations start at the reed tip
+        return []
     near_name, exit_name = need(desc, "mouthpiece.exit_cone_features").split(",")
     volume_feature = need(desc, "mouthpiece.volume_feature")
     near, exit_ = dims[(part, near_name)], dims[(part, exit_name)]
@@ -164,7 +186,7 @@ def axial_record(xa, ra, xb, rb):
 
 def duct_records(desc, dims, open_holes):
     knots = bore_knots(dims)
-    holes = holes_of(dims)
+    holes = holes_of(desc, dims, open_holes)
     points = {x: (r, []) for x, r in knots}
     for number, (x, height, radius) in sorted(holes.items()):
         near = [k for k in points if abs(k - x) < 1e-9]

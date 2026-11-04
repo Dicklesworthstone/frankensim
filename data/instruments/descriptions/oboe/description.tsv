@@ -1,0 +1,41 @@
+frankensim.wind-description.v1
+key	value	unit	status	source
+description_id	oboe-moennich-almeida-reed-inferred-fingerings-v1	-	authored	-
+family	oboe, double reed, conical bore with 20 modelled tone holes and hole 2 where a fingering opens it; inferred fingerings only	-	authored	-
+specimen_dir	data/instruments/geometry/oboe-moennich-1962-nederveen1967	path	published-measured	nederveen-de-bruijn-1967-oboe-holes
+fingering_chart	data/instruments/geometry/oboe-moennich-1962-nederveen1967/fingerings.tsv	path	inferred	nederveen-de-bruijn-1967-oboe-holes: inferred rows, see each note
+bore.interpolation	linear radius between consecutive stations (cone), cylinder when equal	-	authored	Table III d_1 at hole stations, Table II top, Fig. 1 and Fig. 2 reads; the channel of the reed and staple is oval, modelled round
+tonehole.diameter_quantity	hole-diameter	-	published-measured	nederveen-de-bruijn-1967-oboe-holes Table III d_H; undercut NOT modelled (u-undercut)
+tonehole.height_quantity	hole-length-shortest	-	derived	nederveen-de-bruijn-1967-oboe-holes Table III l_H, the shortest hole length, stands in for a chimney height (u-hole-length-definition)
+tonehole.omit	1,2	-	authored	nederveen-de-bruijn-1967-oboe-holes: holes 1 and 2 print d_H 0.3 mm with no l_H or d_1 and are closed in the first register, so they stay out unless a fingering opens them (u-holes-1-2-diameter)
+tonehole.height_unprinted_m	0.006	m	authored	ASSUMED for a hole opened with no printed l_H: holes 1 and 2 print none, and hole 3's 6 mm is the nearest printed (u-hole-length-definition)
+tonehole.opening	1 for holes in the fingering open set, 0 otherwise; pads and key rise UNKNOWN (u-pad-lift)	-	inferred	nederveen-de-bruijn-1967-oboe-holes
+mouthpiece.part	-	-	authored	a double reed has no mouthpiece: the bore stations start at the reed tip
+reed.rest_opening_m	0.000357	m	derived	almeida-vergez-causse-2007-oboe-reed: rest area 2 mm^2 ('around 2 mm2 for the oboe', p. 7, lips not stated) / width 5.6 mm. The same paper's fit gives 3.0-3.4 mm^2 on a dry reed with no lips
+reed.width_m	0.0056	m	published-measured	almeida-vergez-causse-rodet-2002-double-reed: area/width coefficient 5.3-5.9 mm, mid value
+reed.closing_pressure_pa	17720	Pa	derived	almeida-vergez-causse-2007-oboe-reed: ks 8.86e9 kg m-3 s-2 (decreasing-pressure fit, one dry cane reed, no lips, masses added) x rest area 2 mm^2; the reed's own fit closes at 27 kPa
+reed.stiffness_n_m	3464	N/m	derived	ASSUMED pressure face 0.7 cm^2: blade 28 x 6.4 mm from almeida-vergez-causse-2007-oboe-reed Fig. 14, uniform-cantilever first-mode weight 0.39; k = P_M A / h0. It sets the reed's compliance, hence the pitch, and is not moved to fix pitch
+reed.mass_kg	2.2e-5	kg	BORROWED from the clarinet	k / (2 pi 1996 Hz)^2 with the measured clarinet cane F1 of taillard-2014-v12-reed-resonances. No oboe blade resonance is printed; a single-reed number, labelled as such
+reed.damping_ratio	0.114	-	BORROWED from the clarinet	chatziioannou-van-walstijn-2009-clarinet-reed: g = 3000 1/s on the clarinet reed (zeta 0.114). No oboe value is printed
+reed.operating_blowing_pa	7400	Pa	published-measured	fuks-sundberg-1996-blowing-pressures Table A6, Ob2, ff, rising arpeggio: F4 70 and Bb4 77 cm H2O, A4 interpolated 75.6 cm H2O; not raised past print. A rough quasi-static model put the speaking threshold near 6.6 kPa and the pitch at +30 to +125 c, a barely speaking reed; the first render at this pressure spoke within about 20 ms of the ramp, rich to about 10 kHz, at -88 c. That model was wrong about how hard this reed plays, so don't use its pitch range. The one pressure is held for every chart row. Db4's own ff print, 5908 Pa, is silent on this card, so Db4 is played about 1.5 kPa above it. G5 and Ab5's own ff print, 10689 and 10983 Pa, leaves them in the first register, as 7400 Pa does
+ambient.gas_pack	breath-woodwind-exhaled-coltman1966-nederveen1969	-	published-model	the clarinet's bore gas, unchanged
+exterior.temperature_k	293.15	K	authored	20 C dry room air, as on the posted cards; an assumption
+exterior.pressure_pa	101325	Pa	authored	standard atmosphere
+exterior.relative_humidity	0	-	authored	20 C dry room air, as on the posted cards; an assumption
+observer.record	baffled_outlet 0 0 0.5 32 128 4800	-	authored	the clarinet's receiver
+observer.law	iso9613	-	published-model	as on the clarinet ALL-IN cards
+observer.termination	flanged	-	authored	required by the baffled_outlet receiver; an oboe bell is not a flanged pipe
+audio.rate_hz	96000	Hz	authored	mechanics clock, rendered with --decimate to 48 kHz. On A4, 48 kHz puts a non-harmonic comb at n + 0.75 f0 at -37 dB; 96 kHz puts it at n + 0.5 f0 at -53 dB, with pitch and harmonics the same
+audio.full_scale_pa	20	Pa	authored	PCM scale at the microphone, never a gain; clipped_samples must be 0
+audio.duration_s	2.65	s	authored	as on the clarinet
+compile_limits	600000 8192	-	authored	as on the clarinet
+gesture.control_rate_hz	48000	Hz	authored	as on the clarinet
+gesture.attack_start_s	0.15	s	authored	as on the clarinet
+gesture.attack_s	0.02	s	authored	as on the clarinet, UNKNOWN real attack; no tongue row
+gesture.release_start_s	2.45	s	authored	as on the clarinet
+gesture.release_s	0.06	s	authored	as on the clarinet
+player.level	ff	-	published-measured	fuks-sundberg-1996-blowing-pressures: the pressure is the second player's ff, the highest printed near this note
+player.pressure_table	-	-	authored	fixed operating point, reed.operating_blowing_pa
+player.extrapolation_semitones_max	1	semitone	authored	unused under a fixed operating point
+player.pressure_round_pa	1	Pa	authored	rounding step
+output.prefix	Oboe	-	authored	UIowa MIS name prefix
