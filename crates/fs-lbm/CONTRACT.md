@@ -11554,3 +11554,43 @@ The full native fs-lbm library and unit tests with `turbulent-inflow` and the
 boundary-SGS integration targets typecheck; these new CFD tests were not executed
 in the resource-limited session. The underlying atmosphere's 33 Mann-field tests
 were executed successfully.
+
+## Finite-inertia planar drag on shared D3Q19/D3Q27 transport
+
+`lattice3::finite_wall::{FinitePlanarWall3,PlanarWallState3}` binds a fixed
+planar coupling window to two tangential material velocities and spin about
+its positive Cartesian normal axis. Positive mass and axial inertia are
+physical inputs. Complete face-cell stencils, a center on the wall plane,
+nonperiodic normal and unchanged voxel topology are required. Corners crossing
+another physical surface refuse. The window and inertia are frozen: a moving
+finite footprint, changing geometry, pose integration and conservative
+moving-volume remap remain separate work.
+
+`Grid3::{step_serial_with_finite_wall,step_pooled_with_finite_wall}` accepts
+external tangential impulses and an axial couple, permitting driven motion
+and coasting under actual fluid traction. One original collision pass supplies
+`b` and the positive-semidefinite resistance `K` in `J(v)=b-Kv`. The existing
+prepared LU workspace solves `(M+K/2) delta_v=b-Kv_before+J_external`, after
+normalizing by the square root of the physical inertia. Streaming uses the
+solved midpoint field through the original moving-wall owner. Complete planar
+stencils make its moving-mass terms cancel from generalized translation and
+axial spin; actual Wen-relative impulse, torque and wall work are nevertheless
+measured and checked before acceptance. No drag coefficient, force
+extrapolation, repeated collision or additional population buffer is used.
+
+The receipt separates finite-wall traction, other stationary-wall loads,
+zero-work normal/transverse support reactions, external drive and held Guo
+fluid forcing. It reports the polarized wall kinetic-energy increment and
+external work. Declared relative impulse/work budgets gate the actual measured
+exchange. Cancellation or any admission failure publishes neither fluid nor
+mechanical state; accepted updates publish together. Sparse selections,
+velocity storage and the three-by-three factor workspace are prepared once.
+Optional per-cell collision fields retain their original material/SGS meaning.
+Isothermal fluid kinetic-energy loss is not wall heat, and this local receipt
+does not supply missing periodic global angular transport.
+
+`tests/lattice3_finite_wall.rs` covers independent half-space resistance and
+midpoint inertia on all six faces for both lattices, BGK/TRT variants,
+off-center translation-spin response, driven/coasting evolution with varying
+viscosity and prescribed-motion population parity, linear momentum and work,
+worker parity, and post-stream cancellation/refusal with exact retry.

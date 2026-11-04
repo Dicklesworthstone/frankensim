@@ -105,7 +105,7 @@ impl<L: Lattice3<Q>, const Q: usize> WallMomentumProbe3<L, Q> {
         checkpoint()
     }
 
-    fn measure(
+    pub(super) fn measure(
         &self,
         grid: &Grid3<L, Q>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,

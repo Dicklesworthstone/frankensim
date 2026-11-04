@@ -32,8 +32,8 @@ use fs_exec::{CancelGate, Cx, KernelRunner};
 pub type MovingWallMomentum3 = crate::d3q19::WallMomentumExchange3;
 
 pub(super) struct WallMotion3<'a, L: Lattice3<Q>, const Q: usize> {
-    probe: &'a WallMomentumProbe3<L, Q>,
-    velocities: &'a [[f64; 3]],
+    pub(super) probe: &'a WallMomentumProbe3<L, Q>,
+    pub(super) velocities: &'a [[f64; 3]],
 }
 
 fn dot_direction(e: [i32; 3], u: [f64; 3]) -> f64 {
@@ -49,7 +49,7 @@ fn cross(r: [f64; 3], p: [f64; 3]) -> [f64; 3] {
 }
 
 impl<L: Lattice3<Q>, const Q: usize> WallMotion3<'_, L, Q> {
-    fn admit(
+    pub(super) fn admit(
         &self,
         grid: &Grid3<L, Q>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
@@ -113,7 +113,7 @@ impl<L: Lattice3<Q>, const Q: usize> WallMotion3<'_, L, Q> {
         Ok(moving)
     }
 
-    fn measure(
+    pub(super) fn measure(
         &self,
         grid: &Grid3<L, Q>,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,

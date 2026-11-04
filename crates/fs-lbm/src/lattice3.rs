@@ -8,6 +8,8 @@ use core::{fmt, marker::PhantomData, ops::ControlFlow};
 use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
 use std::sync::Mutex;
 
+/// Finite-inertia tangential wall motion coupled to actual streamed drag.
+pub mod finite_wall;
 /// Prescribed tangential surface motion on the same fixed halfway walls.
 pub mod moving_walls;
 /// Source-preserving generalized-Newtonian viscosity on the existing 3-D step.
