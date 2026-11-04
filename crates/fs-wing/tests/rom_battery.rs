@@ -23,19 +23,20 @@ fn ground() -> CertifiedGround {
 }
 
 const V: f64 = 13.0;
+const RHO: f64 = 1.294;
 const ROWS: usize = 120;
 
 #[test]
 fn dimensions_and_determinism_golden() {
     let layout = wright_a1_layout_v1();
     let grid = frozen_grid_v1();
-    let lti = assemble_a1_lti(&layout, &grid.points[0], &ground(), V, ROWS).unwrap();
+    let lti = assemble_a1_lti(&layout, &grid.points[0], &ground(), V, RHO, ROWS).unwrap();
     assert_eq!(lti.n_stations, 12);
     assert_eq!(lti.order, 24);
     assert_eq!(lti.a.len(), 24 * 24);
     assert_eq!(lti.b.len(), 24 * 2);
     assert_eq!(lti.c.len(), 3 * 24);
-    let again = assemble_a1_lti(&layout, &grid.points[0], &ground(), V, ROWS).unwrap();
+    let again = assemble_a1_lti(&layout, &grid.points[0], &ground(), V, RHO, ROWS).unwrap();
     assert_eq!(lti.digest, again.digest, "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{}\"", lti.digest));
     assert_eq!(
@@ -53,7 +54,7 @@ fn stability_simulated_at_every_frozen_grid_point() {
     let grid = frozen_grid_v1();
     let mut checked = 0usize;
     for point in &grid.points {
-        let lti = assemble_a1_lti(&layout, point, &ground(), V, ROWS).unwrap();
+        let lti = assemble_a1_lti(&layout, point, &ground(), V, RHO, ROWS).unwrap();
         let y = lti.simulate(&|_| [0.1, 0.02], 1.0 / 240.0, 4_000).unwrap();
         let last = y[y.len() - 1];
         for (o, v) in last.iter().enumerate() {
@@ -87,10 +88,10 @@ fn dc_gain_matches_the_independent_steady_recompute() {
     let u = [0.1, 0.02];
     for idx in [0usize, 17, 55, 100, 143] {
         let point = &grid.points[idx];
-        let lti = assemble_a1_lti(&layout, point, &ground(), V, ROWS).unwrap();
+        let lti = assemble_a1_lti(&layout, point, &ground(), V, RHO, ROWS).unwrap();
         let y = lti.simulate(&|_| u, 1.0 / 240.0, 6_000).unwrap();
         let settled = y[y.len() - 1];
-        let direct = A1Lti::dc_direct(&layout, point, &ground(), V, ROWS, u).unwrap();
+        let direct = A1Lti::dc_direct(&layout, point, &ground(), V, RHO, ROWS, u).unwrap();
         for o in 0..3 {
             let scale = direct[o].abs().max(1.0);
             assert!(
@@ -130,8 +131,8 @@ fn ground_point_dc_differs_from_free_air() {
         })
         .unwrap();
     let u = [0.0, 0.05];
-    let dl = A1Lti::dc_direct(&wright_a1_layout_v1(), low, &ground(), V, ROWS, u).unwrap();
-    let dh = A1Lti::dc_direct(&layout, high, &ground(), V, ROWS, u).unwrap();
+    let dl = A1Lti::dc_direct(&wright_a1_layout_v1(), low, &ground(), V, RHO, ROWS, u).unwrap();
+    let dh = A1Lti::dc_direct(&layout, high, &ground(), V, RHO, ROWS, u).unwrap();
     let rel = (dl[0] - dh[0]).abs() / dh[0].abs().max(1.0);
     assert!(
         rel > 0.01,
@@ -148,21 +149,21 @@ fn caps_at_cap_and_cap_plus_one() {
     let layout = wright_a1_layout_v1();
     let grid = frozen_grid_v1();
     let p = &grid.points[0];
-    assert!(assemble_a1_lti(&layout, p, &ground(), 40.0, ROWS).is_ok());
+    assert!(assemble_a1_lti(&layout, p, &ground(), 40.0, RHO, ROWS).is_ok());
     for v in [40.0_f64.next_up(), 5.0_f64.next_down(), f64::NAN] {
         assert!(matches!(
-            assemble_a1_lti(&layout, p, &ground(), v, ROWS),
+            assemble_a1_lti(&layout, p, &ground(), v, RHO, ROWS),
             Err(e) if e.code == "a1-speed-invalid"
         ));
     }
     // Wake-row caps pass through from the operator (cap AND cap+1).
-    assert!(assemble_a1_lti(&layout, p, &ground(), V, 512).is_ok());
+    assert!(assemble_a1_lti(&layout, p, &ground(), V, RHO, 512).is_ok());
     assert!(matches!(
-        assemble_a1_lti(&layout, p, &ground(), V, 513),
+        assemble_a1_lti(&layout, p, &ground(), V, RHO, 513),
         Err(e) if e.code == "wake-rows-invalid"
     ));
     // Simulation domain caps.
-    let lti = assemble_a1_lti(&layout, p, &ground(), V, ROWS).unwrap();
+    let lti = assemble_a1_lti(&layout, p, &ground(), V, RHO, ROWS).unwrap();
     assert!(lti.simulate(&|_| [0.0, 0.0], 0.01, 1).is_ok());
     assert!(matches!(
         lti.simulate(&|_| [0.0, 0.0], 0.01_f64.next_up(), 1),
@@ -173,4 +174,67 @@ fn caps_at_cap_and_cap_plus_one() {
         Err(e) if e.code == "a1-sim-invalid"
     ));
     jlog("caps", "\"cap_and_cap_plus_one\":true");
+}
+
+#[test]
+fn density_scales_physical_loads_without_changing_circulation_memory() {
+    // G3: Kutta–Joukowsky force is linear in rho at fixed incompressible
+    // flow/geometry. Reduced-time lag poles and input circulation do not change.
+    // Test both free air and the image-aware ground operator, including the
+    // full transient and the independent steady circulation solve.
+    let layout = wright_a1_layout_v1();
+    let grid = frozen_grid_v1();
+    for idx in [0usize, 143] {
+        let point = &grid.points[idx];
+        let base = assemble_a1_lti(&layout, point, &ground(), V, RHO, ROWS).unwrap();
+        let u = |k| if k < 30 { [0.04, -0.01] } else { [-0.02, 0.03] };
+        let history = base.simulate(&u, 1.0 / 240.0, 120).unwrap();
+        let steady = A1Lti::dc_direct(&layout, point, &ground(), V, RHO, ROWS, u(0)).unwrap();
+        for factor in [0.25, 2.0] {
+            let rho = factor * RHO;
+            let scaled = assemble_a1_lti(&layout, point, &ground(), V, rho, ROWS).unwrap();
+            assert_eq!(scaled.density_kg_m3, rho);
+            assert_eq!(scaled.a, base.a, "density must not change lag poles");
+            assert_eq!(
+                scaled.b, base.b,
+                "density must not change circulation input"
+            );
+            assert_ne!(
+                scaled.digest, base.digest,
+                "physical output identity includes density"
+            );
+            for (actual, original) in scaled
+                .c
+                .iter()
+                .chain(&scaled.d)
+                .zip(base.c.iter().chain(&base.d))
+            {
+                assert_eq!(*actual, factor * original);
+            }
+            let changed = scaled.simulate(&u, 1.0 / 240.0, 120).unwrap();
+            for (actual, original) in changed.iter().flatten().zip(history.iter().flatten()) {
+                assert_eq!(*actual, factor * original);
+            }
+            let dc = A1Lti::dc_direct(&layout, point, &ground(), V, rho, ROWS, u(0)).unwrap();
+            for out in 0..3 {
+                assert_eq!(dc[out], factor * steady[out]);
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_density_never_publishes_physical_operators_or_steady_loads() {
+    let layout = wright_a1_layout_v1();
+    let point = frozen_grid_v1().points[0];
+    for rho in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(matches!(
+            assemble_a1_lti(&layout, &point, &ground(), V, rho, ROWS),
+            Err(e) if e.code == "a1-density-invalid"
+        ));
+        assert!(matches!(
+            A1Lti::dc_direct(&layout, &point, &ground(), V, rho, ROWS, [0.1, 0.02]),
+            Err(e) if e.code == "a1-density-invalid"
+        ));
+    }
 }

@@ -45,10 +45,10 @@ fn systems() -> (A1Lti, A1Lti, A1Lti, A1Lti) {
     let mut hmid = grid.points[0];
     hmid.h_over_b = 0.3;
     (
-        assemble_a1_lti(&layout, &c085, &ground(), V, ROWS).unwrap(),
-        assemble_a1_lti(&layout, &c100, &ground(), V, ROWS).unwrap(),
-        assemble_a1_lti(&layout, &hlow, &ground(), V, ROWS).unwrap(),
-        assemble_a1_lti(&layout, &hmid, &ground(), V, ROWS).unwrap(),
+        assemble_a1_lti(&layout, &c085, &ground(), V, 1.294, ROWS).unwrap(),
+        assemble_a1_lti(&layout, &c100, &ground(), V, 1.294, ROWS).unwrap(),
+        assemble_a1_lti(&layout, &hlow, &ground(), V, 1.294, ROWS).unwrap(),
+        assemble_a1_lti(&layout, &hmid, &ground(), V, 1.294, ROWS).unwrap(),
     )
 }
 
@@ -63,6 +63,43 @@ fn transfer_err(truth: &A1Lti, red: &fs_wing::romreduce::ReducedLti, w: f64) -> 
         }
     }
     worst
+}
+
+#[test]
+fn density_schedule_preserves_shared_circulation_and_scales_dimensional_transfer() {
+    let layout = wright_a1_layout_v1();
+    let point = frozen_grid_v1().points[0];
+    let low = assemble_a1_lti(&layout, &point, &ground(), V, 0.5, ROWS).unwrap();
+    let high = assemble_a1_lti(&layout, &point, &ground(), V, 2.0, ROWS).unwrap();
+    // One basis: density does not introduce new circulation states or lag poles.
+    let reduction = reduce_shared(&[&low, &high]).unwrap();
+    let rom = ScheduledRom::new(vec![
+        SchedulePoint {
+            param: 0.5,
+            sys: project(&low, &reduction.basis, reduction.order),
+        },
+        SchedulePoint {
+            param: 2.0,
+            sys: project(&high, &reduction.basis, reduction.order),
+        },
+    ])
+    .unwrap();
+    for rho in [0.8, 1.225, 1.7] {
+        let truth = assemble_a1_lti(&layout, &point, &ground(), V, rho, ROWS).unwrap();
+        let interpolated = rom.at(rho).unwrap();
+        let projected = project(&truth, &reduction.basis, reduction.order);
+        for (a, b) in interpolated
+            .c
+            .iter()
+            .chain(&interpolated.d)
+            .zip(projected.c.iter().chain(&projected.d))
+        {
+            assert!((a - b).abs() <= 2e-12 * b.abs().max(1.0));
+        }
+        for &w in &HELD_OUT_W {
+            assert!(transfer_err(&truth, &interpolated, w) < 0.01);
+        }
+    }
 }
 
 #[test]
@@ -88,7 +125,7 @@ fn scheduling_matches_heldout_path_samples_on_both_axes() {
     for &p in &[0.8875_f64, 0.925, 0.9625] {
         let mut point = grid.points[0];
         point.convection = p;
-        let truth = assemble_a1_lti(&layout, &point, &ground(), V, ROWS).unwrap();
+        let truth = assemble_a1_lti(&layout, &point, &ground(), V, 1.294, ROWS).unwrap();
         let sched = rom.at(p).unwrap();
         for &w in &HELD_OUT_W[..4] {
             worst_conv = worst_conv.max(transfer_err(&truth, &sched, w));
@@ -114,7 +151,7 @@ fn scheduling_matches_heldout_path_samples_on_both_axes() {
     for &hb in &[0.15_f64, 0.2, 0.25] {
         let mut point = grid.points[0];
         point.h_over_b = hb;
-        let truth = assemble_a1_lti(&layout, &point, &ground(), V, ROWS).unwrap();
+        let truth = assemble_a1_lti(&layout, &point, &ground(), V, 1.294, ROWS).unwrap();
         let sched = rom_g.at(hb).unwrap();
         for &w in &HELD_OUT_W[..4] {
             worst_gnd = worst_gnd.max(transfer_err(&truth, &sched, w));

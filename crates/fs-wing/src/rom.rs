@@ -20,6 +20,9 @@
 //! The LTI is CIRCULATORY-ONLY (declared): the apparent-mass share is
 //! a static feed-through handled outside the reduction, so the ROM
 //! never has to approximate a derivative feed-through.
+//! Uniform fluid density is an explicit operating input in kg/m³. It scales
+//! the physical lift/hinge outputs through Kutta–Joukowsky, while the inviscid
+//! circulation and reduced-time lag dynamics are independent of density.
 
 use crate::images::CertifiedGround;
 use crate::prescribedwake::{WakeOperatingPoint, assemble_operator};
@@ -95,6 +98,8 @@ pub struct A1Lti {
     pub d: [f64; 6],
     /// The operating point.
     pub point: WakeOperatingPoint,
+    /// Uniform fluid density [kg/m³] used by the physical output operators.
+    pub density_kg_m3: f64,
     /// Content digest over (A, B, C, D) bits.
     pub digest: String,
 }
@@ -155,23 +160,23 @@ pub(crate) fn solve_multi(
 
 /// Assemble the A1 FOM at one frozen operating point.
 ///
+/// `density_kg_m3` belongs to the caller's physical environment. This model
+/// freezes it over the body and does not infer viscosity, compressibility,
+/// buoyancy or a gas equation of state from density alone.
+///
 /// # Errors
 /// `a1-speed-invalid` (v outside [5, 40] — cap AND cap+1);
+/// `a1-density-invalid` (nonpositive/nonfinite or unrepresentable loads);
 /// `a1-loop-singular`; prescribed-wake refusals pass through.
 pub fn assemble_a1_lti(
     layout: &A1Layout,
     point: &WakeOperatingPoint,
     ground: &CertifiedGround,
     v_mps: f64,
+    density_kg_m3: f64,
     wake_rows: usize,
 ) -> Result<A1Lti, Refusal> {
-    if !(v_mps.is_finite() && (5.0..=40.0).contains(&v_mps)) {
-        return Err(refuse(
-            "a1-speed-invalid",
-            format!("v {v_mps} outside [5, 40]"),
-            "the A1 grid is registered for the flight-speed class",
-        ));
-    }
+    admit_flow(v_mps, density_kg_m3)?;
     let n = layout.shed_points.len();
     let row_dx = v_mps * (1.0 / 120.0);
     let op = assemble_operator(
@@ -259,13 +264,17 @@ pub fn assemble_a1_lti(
         }
     }
     // Outputs: y = T·α_eff with T rows = [wing lift, canard lift, hinge].
-    // L_i = ρV·Γ_i·width = ρ V² π c_i width_i α_eff,i (ρ = 1.294 reference,
-    // declared — the reduction is scale-invariant, ρ only scales C/D).
-    let rho = 1.294;
+    // L_i = ρV·Γ_i·width = ρ V² π c_i width_i α_eff,i. Density only
+    // scales C/D; neither the circulation solve nor lag rates need rebuilding
+    // as a new fluid-dynamics model when the environmental density changes.
     let mut t = vec![0.0f64; 3 * n];
     for i in 0..n {
-        let li =
-            rho * v_mps * v_mps * core::f64::consts::PI * layout.chords_m[i] * layout.widths_m[i];
+        let li = density_kg_m3
+            * v_mps
+            * v_mps
+            * core::f64::consts::PI
+            * layout.chords_m[i]
+            * layout.widths_m[i];
         if layout.is_canard[i] {
             t[n + i] = li;
             t[2 * n + i] = -li * 0.15 * layout.chords_m[i]; // 40 %-chord hinge arm
@@ -298,6 +307,7 @@ pub fn assemble_a1_lti(
             d_mat[out * 2 + input] = s;
         }
     }
+    admit_loads(c_mat.iter().chain(&d_mat).copied())?;
     let mut bytes = Vec::new();
     for v in a_mat.iter().chain(b_mat.iter()).chain(c_mat.iter()) {
         bytes.extend_from_slice(&v.to_bits().to_le_bytes());
@@ -314,8 +324,38 @@ pub fn assemble_a1_lti(
         c: c_mat,
         d: d_mat,
         point: *point,
+        density_kg_m3,
         digest,
     })
+}
+
+fn admit_flow(v_mps: f64, density_kg_m3: f64) -> Result<(), Refusal> {
+    if !(v_mps.is_finite() && (5.0..=40.0).contains(&v_mps)) {
+        return Err(refuse(
+            "a1-speed-invalid",
+            format!("v {v_mps} outside [5, 40]"),
+            "the A1 grid is registered for the flight-speed class",
+        ));
+    }
+    if !density_kg_m3.is_finite() || density_kg_m3 <= 0.0 {
+        return Err(refuse(
+            "a1-density-invalid",
+            format!("density {density_kg_m3} must be finite and positive"),
+            "supply the operating environment's density in kg/m^3",
+        ));
+    }
+    Ok(())
+}
+
+fn admit_loads(mut values: impl Iterator<Item = f64>) -> Result<(), Refusal> {
+    if values.any(|value| !value.is_finite()) {
+        return Err(refuse(
+            "a1-density-invalid",
+            "physical lift or hinge output is not representable at this density".into(),
+            "supply a finite density and geometry with representable SI loads",
+        ));
+    }
+    Ok(())
 }
 
 impl A1Lti {
@@ -370,15 +410,17 @@ impl A1Lti {
     /// recompute: α_eff = (I − M)⁻¹ α_geo directly — no A/B/C/D).
     ///
     /// # Errors
-    /// `a1-loop-singular`.
+    /// `a1-speed-invalid`, `a1-density-invalid`, `a1-loop-singular`.
     pub fn dc_direct(
         layout: &A1Layout,
         point: &WakeOperatingPoint,
         ground: &CertifiedGround,
         v_mps: f64,
+        density_kg_m3: f64,
         wake_rows: usize,
         u: [f64; 2],
     ) -> Result<[f64; 3], Refusal> {
+        admit_flow(v_mps, density_kg_m3)?;
         let n = layout.shed_points.len();
         let row_dx = v_mps * (1.0 / 120.0);
         let op = assemble_operator(
@@ -402,10 +444,9 @@ impl A1Lti {
             *a = f64::from(u8::from(layout.is_canard[i])) * u[0] + u[1];
         }
         solve_multi(&mut im, &mut alpha, n, 1)?;
-        let rho = 1.294;
         let mut y = [0.0f64; 3];
         for i in 0..n {
-            let li = rho
+            let li = density_kg_m3
                 * v_mps
                 * v_mps
                 * core::f64::consts::PI
@@ -419,6 +460,7 @@ impl A1Lti {
                 y[0] += li;
             }
         }
+        admit_loads(y.into_iter())?;
         Ok(y)
     }
 }

@@ -163,9 +163,10 @@ pub fn run_selection_campaign() -> Result<SelectionReceipt, Refusal> {
         })
         .expect("registered ground point");
     let v = 13.0;
+    let rho = fs_atmo::DEC17_AIR.rho_kg_m3;
     let rows = 120;
-    let fom_free = assemble_a1_lti(&layout, &free_pt, &ground, v, rows).map_err(map_w)?;
-    let fom_gnd = assemble_a1_lti(&layout, &gnd_pt, &ground, v, rows).map_err(map_w)?;
+    let fom_free = assemble_a1_lti(&layout, &free_pt, &ground, v, rho, rows).map_err(map_w)?;
+    let fom_gnd = assemble_a1_lti(&layout, &gnd_pt, &ground, v, rho, rows).map_err(map_w)?;
     let refs = [&fom_free, &fom_gnd];
     let red = reduce_shared(&refs).map_err(map_w)?;
     let dt = 1.0 / 120.0;
@@ -183,7 +184,7 @@ pub fn run_selection_campaign() -> Result<SelectionReceipt, Refusal> {
             ground_z_m: if ground_case { Some(-2.4) } else { None },
             v_mps: v,
             alpha0_rad: 0.05,
-            rho_kg_m3: 1.294,
+            rho_kg_m3: rho,
             convection: 1.0,
             dt_s: dt,
             n_steps,
@@ -228,8 +229,8 @@ pub fn run_selection_campaign() -> Result<SelectionReceipt, Refusal> {
             }
         }
         // A0: the instantaneous DC map (zero lag — today's spine tier).
-        let dc =
-            A1Lti::dc_direct(&layout, &fom.point, &ground, v, rows, [0.1, 0.0]).map_err(map_w)?;
+        let dc = A1Lti::dc_direct(&layout, &fom.point, &ground, v, rho, rows, [0.1, 0.0])
+            .map_err(map_w)?;
         let a0_series: Vec<f64> = (0..n_steps).map(|k| dc[1] * delta(k) / 0.1).collect();
         let early = |series: &[f64]| -> f64 {
             let shape = normalized_shape(series);

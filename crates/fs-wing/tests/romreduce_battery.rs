@@ -45,7 +45,7 @@ fn anchors() -> Vec<A1Lti> {
     let layout = wright_a1_layout_v1();
     anchor_points()
         .iter()
-        .map(|p| assemble_a1_lti(&layout, p, &ground(), V, ROWS).unwrap())
+        .map(|p| assemble_a1_lti(&layout, p, &ground(), V, 1.294, ROWS).unwrap())
         .collect()
 }
 
@@ -92,7 +92,7 @@ fn heldout_transfer_matches_on_every_channel_incl_hinge() {
     let red = reduce_shared(&refs).unwrap();
     let layout = wright_a1_layout_v1();
     let grid = frozen_grid_v1();
-    let holdout = assemble_a1_lti(&layout, &grid.points[60], &ground(), V, ROWS).unwrap();
+    let holdout = assemble_a1_lti(&layout, &grid.points[60], &ground(), V, 1.294, ROWS).unwrap();
     let r = project(&holdout, &red.basis, red.order);
     let mut worst = (0usize, 0.0f64);
     for &w in &HELD_OUT_W {
@@ -168,9 +168,9 @@ fn per_point_basis_interpolation_is_the_executed_falsifier() {
     p100.convection = 1.0;
     let mut pmid = base;
     pmid.convection = 0.925;
-    let s085 = assemble_a1_lti(&layout, &p085, &ground(), V, ROWS).unwrap();
-    let s100 = assemble_a1_lti(&layout, &p100, &ground(), V, ROWS).unwrap();
-    let truth = assemble_a1_lti(&layout, &pmid, &ground(), V, ROWS).unwrap();
+    let s085 = assemble_a1_lti(&layout, &p085, &ground(), V, 1.294, ROWS).unwrap();
+    let s100 = assemble_a1_lti(&layout, &p100, &ground(), V, 1.294, ROWS).unwrap();
+    let truth = assemble_a1_lti(&layout, &pmid, &ground(), V, 1.294, ROWS).unwrap();
     let w = 3.7;
     let gt = transfer_of(&truth.a, &truth.b, &truth.c, &truth.d, truth.order, w).unwrap();
     let err_of = |ga: &[(f64, f64); 6]| -> f64 {

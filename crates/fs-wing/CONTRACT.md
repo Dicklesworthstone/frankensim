@@ -32,6 +32,25 @@ safeguarded iteration, branch identity).
   section closure vs TRAILING-SHEET induced alpha, warm-started
   safeguarded relaxation, branch identity, enforced operator-reuse rule.
 
+### Density in unsteady aerodynamic reduction
+
+`rom::assemble_a1_lti` and `A1Lti::dc_direct` require the operating fluid's
+uniform density in kg/m³. The full-order model retains that density beside
+its output operators. Kutta–Joukowsky lift and hinge moment scale with density;
+the inviscid circulation operators and reduced-time lag rates do not. The
+shared-basis reduction and existing scheduler carry these dimensional outputs
+through unchanged, so a density schedule needs no extra lag state. The Wright
+reference campaign passes the same `DEC17_AIR` density to the model and referee.
+
+Nonpositive/nonfinite density and unrepresentable physical outputs refuse as
+`a1-density-invalid`. This remains a frozen, uniform-density, circulatory model:
+varying viscosity, compressibility, spatial stratification and apparent mass
+are not inferred from this input. G3 tests in `rom_battery` establish density
+scaling of every physical output, transient history and independent steady
+solve in free air and with ground images; `romsched_battery` checks held-out
+density interpolation and frequency response in the shared reduction basis.
+The reference-density operator digest remains unchanged.
+
 ### Complete circulatory force vectors
 
 `SolveReport::total_force_n` and `NonlinearReport::total_force_n` expose all
