@@ -420,6 +420,22 @@ pub fn upper_block_exponential_with_budget(
     Ok(result)
 }
 
+// Complete V^T A V in two cubic products, retaining every original entry.
+// Fixed row/inner/column loops are deterministic; neither triangle is repaired.
+fn basis_congruence(matrix: &[f64], basis: &[f64], n: usize) -> Vec<f64> {
+    let right = product(matrix, basis, n);
+    let mut result = vec![0.0; n * n];
+    for i in 0..n {
+        for k in 0..n {
+            let left = basis[k * n + i];
+            for j in 0..n {
+                result[i * n + j] += left * right[k * n + j];
+            }
+        }
+    }
+    result
+}
+
 /// Prepare without probing H or dropping any state, damping, or port terms.
 ///
 /// # Errors
@@ -477,15 +493,12 @@ pub fn split_quadratic(
     for value in &mut values {
         *value = value.max(0.0);
     }
+    let basis_j = basis_congruence(&sys.j, &basis, n);
+    let basis_r = basis_congruence(&sys.r, &basis, n);
     let mut skew = vec![0.0; extent];
     for i in 0..n {
         for j in 0..n {
-            for a in 0..n {
-                for b in 0..n {
-                    skew[i * n + j] += basis[a * n + i] * sys.j[a * n + b] * basis[b * n + j];
-                }
-            }
-            skew[i * n + j] *= det::sqrt(values[i]) * det::sqrt(values[j]);
+            skew[i * n + j] = basis_j[i * n + j] * (det::sqrt(values[i]) * det::sqrt(values[j]));
         }
     }
     // K^T K = -K^2; forming the Gram matrix preserves exact symmetry.
@@ -536,13 +549,7 @@ pub fn split_quadratic(
             } else {
                 1.0
             };
-            let mut jr = 0.0;
-            for a in 0..n {
-                for b in 0..n {
-                    jr +=
-                        basis[a * n + i] * (sys.j[a * n + b] - sys.r[a * n + b]) * basis[b * n + j];
-                }
-            }
+            let jr = basis_j[i * n + j] - basis_r[i * n + j];
             let entry = (wi * jr * values[j] / wj).abs();
             row += entry;
             columns[j] += entry;
@@ -1254,6 +1261,138 @@ mod tests {
         LinearSplitBudget {
             max_modes: n,
             max_omega_dt: core::f64::consts::PI,
+        }
+    }
+
+    // Independent original four-index formula, including both raw triangles.
+    fn basis_reference(matrix: &[f64], basis: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+        let mut value = vec![0.0; n * n];
+        let mut absolute = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                for a in 0..n {
+                    for b in 0..n {
+                        let term = basis[a * n + i] * matrix[a * n + b] * basis[b * n + j];
+                        value[i * n + j] += term;
+                        absolute[i * n + j] += term.abs();
+                    }
+                }
+            }
+        }
+        (value, absolute)
+    }
+
+    #[test]
+    fn cubic_basis_congruence_matches_complete_four_index_reference() {
+        for n in [1, 2, 5] {
+            let basis: Vec<_> = (0..n * n)
+                .map(|i| ((11 * (i / n) + 7 * (i % n) + 3) % 19) as f64 / 13.0 - 0.7)
+                .collect();
+            for scale in [1e-120, 1.0, 1e120] {
+                // Deliberately nonsymmetric: repairing or ignoring a triangle
+                // would change the result, even for tolerated raw asymmetry.
+                let matrix: Vec<_> = (0..n * n)
+                    .map(|i| {
+                        scale * (((5 * (i / n) + 3 * (i % n) + 1) % 13) as f64 - 6.0) / 7.0
+                    })
+                    .collect();
+                let actual = basis_congruence(&matrix, &basis, n);
+                let (expected, absolute) = basis_reference(&matrix, &basis, n);
+                for ((&a, &b), bound) in actual.iter().zip(&expected).zip(absolute) {
+                    assert!(
+                        (a - b).abs() <= 128.0 * n as f64 * f64::EPSILON * bound,
+                        "n={n}, scale={scale:e}, actual={a:e}, reference={b:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cubic_split_retains_scaled_passive_spectrum_damping_and_zero_coordinate() {
+        let n = 5;
+        let mut rotation = vec![0.0; n * n];
+        let signs = [
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0, 1.0],
+        ];
+        for i in 0..4 {
+            for j in 0..4 {
+                rotation[i * n + j] = 0.5 * signs[i][j];
+            }
+        }
+        rotation[4 * n + 4] = 1.0;
+        let mut q = vec![0.0; n * n];
+        let mut j = vec![0.0; n * n];
+        let mut r = vec![0.0; n * n];
+        for (i, diagonal) in [4.0, 1.0, 49.0, 1.0, 0.0].into_iter().enumerate() {
+            q[i * n + i] = diagonal;
+        }
+        for i in [0, 2] {
+            j[i * n + i + 1] = 1.0;
+            j[(i + 1) * n + i] = -1.0;
+        }
+        r[n + 1] = 0.6;
+        r[3 * n + 3] = 20.0;
+        let (rotated_q, _) = basis_reference(&q, &rotation, n);
+        let (rotated_j, _) = basis_reference(&j, &rotation, n);
+        let (rotated_r, _) = basis_reference(&r, &rotation, n);
+        for scales in [[1.0; 5], [0.125, 0.5, 2.0, 8.0, 4.0]] {
+            // y=D H x, with H symmetric and orthogonal: physical oscillators
+            // remain at 2 and 7 rad/s despite dense storage and changed units.
+            for i in 0..n {
+                for k in 0..n {
+                    let scale = scales[i] * scales[k];
+                    q[i * n + k] = rotated_q[i * n + k] / scale;
+                    j[i * n + k] = rotated_j[i * n + k] * scale;
+                    r[i * n + k] = rotated_r[i * n + k] * scale;
+                }
+            }
+            let sys = PortHamiltonian::new(
+                n, 0, j.clone(), r.clone(), vec![],
+                Box::new(QuadraticStorage::new(q.clone(), n).unwrap()),
+            ).unwrap();
+            let split = split_quadratic(&sys, budget(n)).unwrap();
+            assert_eq!(split.angular_frequencies_rad_s().len(), n);
+            for (&actual, expected) in split.angular_frequencies_rad_s().iter()
+                .zip([0.0, 2.0, 2.0, 7.0, 7.0])
+            {
+                assert!(
+                    (actual - expected).abs() < 2e-8,
+                    "scales={scales:?}, actual={actual}, expected={expected}"
+                );
+            }
+            // The heavily damped second oscillator has poles -10 +/- sqrt(51).
+            // A bound based only on its lossless 7 rad/s frequency is invalid.
+            assert!(split.pole_rate_bound_rad_s() >= 10.0 + det::sqrt(51.0) - 1e-10);
+            let jr: Vec<_> = j.iter().zip(&r).map(|(a, b)| a - b).collect();
+            let (reference, _) = basis_reference(&jr, &split.basis, n);
+            let mut columns = vec![0.0; n];
+            let mut infinity = 0.0_f64;
+            for i in 0..n {
+                let wi = if split.values[i] > 0.0 {
+                    det::sqrt(split.values[i])
+                } else {
+                    1.0
+                };
+                let mut row = 0.0;
+                for k in 0..n {
+                    let wk = if split.values[k] > 0.0 {
+                        det::sqrt(split.values[k])
+                    } else {
+                        1.0
+                    };
+                    let entry = (wi * reference[i * n + k] * split.values[k] / wk).abs();
+                    row += entry;
+                    columns[k] += entry;
+                }
+                infinity = infinity.max(row);
+            }
+            let expected = det::sqrt(infinity)
+                * det::sqrt(columns.into_iter().fold(0.0_f64, f64::max));
+            assert!((split.pole_rate_bound_rad_s() - expected).abs() < 1e-11 * expected);
         }
     }
 

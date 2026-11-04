@@ -548,6 +548,20 @@ second-order oscillator), and the augmented exponential is capped at dimension
 256. No modal truncation is performed. Nonfinite operators, stale splits,
 unsupported storage, capacity exhaustion and unrepresentable work refuse.
 
+The complete energy-basis transforms of `J` and `R` use two matrix products
+per congruence, `V^T (A V)`. Their combined contraction work is `4 n^3`
+accumulated two-factor terms, replacing `2 n^4` three-factor terms; this is
+an operation count, not an end-to-end timing claim. Both raw triangles and
+all damping entries remain present. The transformed `J` is reused for the
+frequency operator and, with the transformed `R`, the complete pole-rate
+bound. Original physical storage, generator, states, ports and numerical
+admission tolerances are unchanged. Fixed reduction orders remain deterministic;
+the reassociation does not promise historical bitwise equality. Focused tests
+compare every entry with the original four-index expression over extreme
+matrix scales, and verify analytic oscillator frequencies, a zero-storage
+coordinate and an overdamped pole bound after dense coordinate mixing and
+changes of units.
+
 `linear_exact::exponential_with_budget` exposes the same dense Taylor/scaling
 algorithm to explicit cold preparation callers. `DenseExponentialBudget`
 declares matrix-dimension, simultaneous dense-byte and multiply-term ceilings;
