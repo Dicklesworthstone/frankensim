@@ -2,8 +2,8 @@
 use fs_math::c64::C64;
 use fs_phs::acoustic_outlet::{
     AcousticCellWall, AcousticSectionMedium, AcousticWallRelaxation, acoustic_cell_geometry,
-    acoustic_chain_with_outlet_flow, acoustic_chain_with_outlet_flow_in_exterior,
-    acoustic_chain_with_regional_outlet_flow,
+    acoustic_chain_with_opening_flows, acoustic_chain_with_outlet_flow,
+    acoustic_chain_with_outlet_flow_in_exterior, acoustic_chain_with_regional_outlet_flow,
     acoustic_chain_with_regional_outlet_flow_and_cell_walls,
 };
 use fs_phs::harmonic::{HarmonicBudget, HarmonicModel};
@@ -18,6 +18,163 @@ fn section(cells: usize, cone: bool) -> AcousticSection {
         radius: 0.01,
         outlet_radius: if cone { 0.02 } else { 0.01 },
         cells,
+    }
+}
+
+#[test]
+fn side_opening_rows_use_native_terminal_flow_and_effective_area_without_changing_the_source() {
+    let taps = [
+        AcousticTap {
+            station: 0.2,
+            neck_length: 0.002,
+            neck_radius: 0.003,
+            open_fraction: 0.25,
+        },
+        AcousticTap {
+            station: 0.65,
+            neck_length: 0.06,
+            neck_radius: 0.004,
+            open_fraction: 1.0,
+        },
+        AcousticTap {
+            station: 0.45,
+            neck_length: 0.01,
+            neck_radius: 0.002,
+            open_fraction: 0.0,
+        },
+        AcousticTap {
+            station: 0.8,
+            neck_length: 0.05,
+            neck_radius: 0.003,
+            open_fraction: 0.5,
+        },
+    ];
+    let pin = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 3,
+    };
+    let wall = WallPin {
+        surface_density: 0.1,
+        stiffness_per_area: 1e7,
+        resistance: 10.0,
+    };
+    for cells in [3, 4] {
+        for loss in [None, Some(pin)] {
+            let sections = [section(cells, false)];
+            let outlet = ChainOutlet::Radiating(MouthFlange::Flanged);
+            let (system, bell, holes) = acoustic_chain_with_opening_flows(
+                &sections,
+                1.2,
+                343.0,
+                outlet,
+                1,
+                &taps,
+                loss.as_ref(),
+                Some(&wall),
+            )
+            .unwrap();
+            let (original, original_bell) = acoustic_chain_with_outlet_flow(
+                &sections,
+                1.2,
+                343.0,
+                outlet,
+                1,
+                &taps,
+                loss.as_ref(),
+                Some(&wall),
+            )
+            .unwrap();
+            assert_eq!(bell, original_bell);
+            assert_eq!(system.state_dim(), original.state_dim());
+            let state: Vec<_> = (0..system.state_dim())
+                .map(|i| (i + 1) as f64 * 1e-8)
+                .collect();
+            assert_eq!(system.effort(&state), original.effort(&state));
+            assert_eq!(
+                system.hamiltonian(&state).to_bits(),
+                original.hamiltonian(&state).to_bits()
+            );
+            assert_eq!(
+                holes.iter().map(|hole| hole.tap_index).collect::<Vec<_>>(),
+                vec![0, 1, 3]
+            );
+            let effort = original.effort(&state);
+            // Compact, long, closed, long: the original owner retains the
+            // actual terminal after each long branch's compression cells.
+            for (hole, terminal) in holes.iter().zip([2 * cells, 2 * cells + 5, 2 * cells + 10]) {
+                let tap = taps[hole.tap_index];
+                assert_eq!(hole.station, tap.station);
+                assert_eq!(
+                    hole.effective_radius_m,
+                    tap.neck_radius * tap.open_fraction.sqrt()
+                );
+                assert_eq!(hole.flow.coefficients().len(), system.state_dim());
+                let cell = (tap.station * cells as f64).floor() as usize;
+                let orientation = if cell % 2 == 0 { 1.0 } else { -1.0 };
+                let expected = orientation * effort[terminal];
+                assert!(
+                    (hole.flow.volume_flow_m3_s(&state).unwrap() - expected).abs()
+                        < 1e-14 * expected.abs()
+                );
+                let mut inlet_only = vec![0.0; system.state_dim()];
+                if hole.tap_index != 0 {
+                    inlet_only[terminal - 3] = 1.0;
+                    assert_eq!(
+                        hole.flow.volume_flow_m3_s(&inlet_only).unwrap(),
+                        0.0,
+                        "long-chimney inlet flow is not its radiating mouth flow"
+                    );
+                }
+            }
+            let before = fs_phs::step(&original, &state, &[1e-4], 1e-6).unwrap();
+            let observed = fs_phs::step(&system, &state, &[1e-4], 1e-6).unwrap();
+            assert_eq!(before.x, observed.x);
+            assert_eq!(before.dissipated.to_bits(), observed.dissipated.to_bits());
+            assert_eq!(before.supplied.to_bits(), observed.supplied.to_bits());
+        }
+    }
+}
+
+#[test]
+fn closed_pads_retain_their_native_load_without_a_radiating_flow_row() {
+    let sections = [section(4, false)];
+    let closed = [AcousticTap {
+        station: 0.5,
+        neck_length: 0.05,
+        neck_radius: 0.004,
+        open_fraction: 0.0,
+    }];
+    for taps in [&[][..], &closed[..]] {
+        let (system, bell, holes) = acoustic_chain_with_opening_flows(
+            &sections,
+            1.2,
+            343.0,
+            ChainOutlet::PressureRelease,
+            1,
+            taps,
+            None,
+            None,
+        )
+        .unwrap();
+        let (original, original_bell) = acoustic_chain_with_outlet_flow(
+            &sections,
+            1.2,
+            343.0,
+            ChainOutlet::PressureRelease,
+            1,
+            taps,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(holes.is_empty());
+        assert_eq!(bell, original_bell);
+        assert_eq!(
+            system.effort(&vec![1.0; system.state_dim()]),
+            original.effort(&vec![1.0; original.state_dim()])
+        );
     }
 }
 

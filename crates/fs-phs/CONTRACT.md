@@ -22,6 +22,24 @@ retained flux. Evaluation is read-only and allocation-free; invalid state
 extent, nonfinite coordinates or arithmetic refuse. Observation adds no power
 port, radiation solver or side-opening receiver.
 
+`acoustic_outlet::acoustic_chain_with_opening_flows` returns that same uniform
+frustum system, its bell-flow row and one `AcousticTapFlow` for each active
+side opening. The original assembler records the actual terminal coordinate
+when it builds each branch: a compact neck uses its single flux; a long
+chimney uses its outlet flux after both compression cells. Consumers do not
+reconstruct offsets or substitute neck inflow for mouth outflow.
+
+Each descriptor retains the original tap index, normalized authored station
+and effective aperture radius. The native effective area already includes
+open fraction; the exported outward flow removes only coordinate orientation,
+with no second area or square-root multiplier. Closed pads emit no row.
+Rows are derived once from complete declared quadratic storage, including
+the original loss/radiation/wall memories. Evaluation adds no state, load or
+power debit. This entry retains one common interior/exterior gas; regional
+tap materials and independent exterior loading require their own complete
+ownership. Focused per-mouth flow and partial-opening regressions are authored,
+with no native-execution claim.
+
 `acoustic_outlet::acoustic_chain_with_outlet_flow_in_exterior` supplies
 independent exterior density and sound speed to the same original terminal
 radiation owner. Cell compression/inertia, viscothermal and wall response,

@@ -181,6 +181,95 @@ impl AcousticOutletFlow {
     }
 }
 
+/// Outward flow from an active original side opening, in native tap order.
+///
+/// A compact opening uses its single neck flow; a distributed chimney uses
+/// the terminal flux after its final compression cell. Closed pads have no
+/// emitting row. The effective area already includes the authored open fraction:
+/// no additional square-root or area multiplier belongs on `flow`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AcousticTapFlow {
+    /// Index in the original `AcousticTap` slice, including closed entries.
+    pub tap_index: usize,
+    /// Authored fraction of the chain's total axial length.
+    pub station: f64,
+    /// Radius of the original emitting aperture: neck radius * sqrt(open fraction).
+    pub effective_radius_m: f64,
+    /// Complete-state outward volume flow [m3/s], with native orientation removed.
+    pub flow: AcousticOutletFlow,
+}
+
+// Filled only where the original assembler selects a compact or long branch.
+// Coupling code never reconstructs state offsets or estimates terminal inertia.
+pub(crate) struct AcousticTapTerminal {
+    pub tap_index: usize,
+    pub station: f64,
+    pub effective_radius_m: f64,
+    pub coordinate: usize,
+    pub orientation: f64,
+}
+
+/// Assemble one original uniform frustum chain and every radiating mouth's flow.
+///
+/// The returned terminal row and active side rows belong to the same complete
+/// system, including original viscothermal, pad, wall and radiation memories.
+/// Source geometry, aperture corrections and radiation loading are unchanged;
+/// these immutable observations add no resistance or power port. Each side
+/// opening emits into the same gas used by its native neck/chimney owner.
+/// Separate exterior media and regional gas/wall partitions need their own
+/// complete tap ownership and are not introduced by this entry point.
+///
+/// # Errors
+/// Original chain admission or an unrepresentable complete-state flow row.
+#[allow(clippy::too_many_arguments)]
+pub fn acoustic_chain_with_opening_flows(
+    sections: &[AcousticSection],
+    density: f64,
+    sound_speed: f64,
+    outlet: ChainOutlet,
+    inlets: usize,
+    taps: &[AcousticTap],
+    viscothermal: Option<&ViscothermalPin>,
+    wall: Option<&WallPin>,
+) -> Result<(PortHamiltonian, AcousticOutletFlow, Vec<AcousticTapFlow>), PhsError> {
+    let mut terminals = Vec::new();
+    let system = acoustic_frustum_chain_outlet_wall_in_exterior(
+        sections,
+        density,
+        sound_speed,
+        density,
+        sound_speed,
+        outlet,
+        inlets,
+        taps,
+        viscothermal,
+        wall,
+        None,
+        None,
+        Some(&mut terminals),
+    )?;
+    let (system, bell) = with_outlet_flow(system, sections, outlet)?;
+    let q = declared_quadratic(&system)?;
+    let openings = terminals
+        .into_iter()
+        .map(|terminal| {
+            Ok(AcousticTapFlow {
+                tap_index: terminal.tap_index,
+                station: terminal.station,
+                effective_radius_m: terminal.effective_radius_m,
+                flow: effort_flow_row(
+                    &q,
+                    system.state_dim(),
+                    terminal.coordinate,
+                    terminal.orientation,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, PhsError>>()?;
+    drop(q);
+    Ok((system, bell, openings))
+}
+
 /// Assemble the original frustum chain and its physical terminal-flow row.
 ///
 /// All geometry, material, boundary, loss and wall admission remains with
@@ -256,6 +345,7 @@ pub fn acoustic_chain_with_outlet_flow_in_exterior(
         taps,
         viscothermal,
         wall,
+        None,
         None,
         None,
     )?;
@@ -371,8 +461,57 @@ fn regional_outlet(
         wall,
         regional,
         cell_walls,
+        None,
     )?;
     with_outlet_flow(system, sections, outlet)
+}
+
+fn declared_quadratic(system: &PortHamiltonian) -> Result<std::borrow::Cow<'_, [f64]>, PhsError> {
+    let q = match system.storage.exact_quadratic_matrix() {
+        Some(q) => std::borrow::Cow::Borrowed(q),
+        None => {
+            // Original Maxwell storage supplies an owned exact quadratic
+            // image. Derive immutable rows without gradient probes or a second
+            // state model; retain the borrowed path for native quadratic storage.
+            let part = system
+                .storage
+                .quadratic_part()
+                .filter(|part| part.exact)
+                .ok_or(PhsError::Unadmitted {
+                    what: "native acoustic outlet requires its declared quadratic storage",
+                })?;
+            std::borrow::Cow::Owned(part.matrix)
+        }
+    };
+    if Some(q.len()) != system.state_dim().checked_mul(system.state_dim()) {
+        return Err(PhsError::Dimension {
+            what: "native acoustic outlet quadratic storage",
+        });
+    }
+    Ok(q)
+}
+
+fn effort_flow_row(
+    q: &[f64],
+    n: usize,
+    terminal: usize,
+    orientation: f64,
+) -> Result<AcousticOutletFlow, PhsError> {
+    if terminal >= n {
+        return Err(PhsError::Dimension {
+            what: "native acoustic outlet coordinate",
+        });
+    }
+    let coefficients: Vec<_> = q[terminal * n..(terminal + 1) * n]
+        .iter()
+        .map(|value| orientation * value)
+        .collect();
+    if coefficients.iter().any(|value| !value.is_finite()) || coefficients[terminal] == 0.0 {
+        return Err(PhsError::Unadmitted {
+            what: "native acoustic outlet flow map is unrepresentable",
+        });
+    }
+    Ok(AcousticOutletFlow { coefficients })
 }
 
 fn with_outlet_flow(
@@ -380,44 +519,19 @@ fn with_outlet_flow(
     sections: &[AcousticSection],
     outlet: ChainOutlet,
 ) -> Result<(PortHamiltonian, AcousticOutletFlow), PhsError> {
-    let n = system.state_dim();
-    let mut coefficients = vec![0.0; n];
-    if outlet != ChainOutlet::Rigid {
+    let flow = if outlet == ChainOutlet::Rigid {
+        AcousticOutletFlow {
+            coefficients: vec![0.0; system.state_dim()],
+        }
+    } else {
         let cells: usize = sections.iter().map(|section| section.cells).sum();
         let orientation = if cells % 2 == 0 { 1.0 } else { -1.0 };
-        let q: std::borrow::Cow<'_, [f64]> = match system.storage.exact_quadratic_matrix() {
-            Some(q) => std::borrow::Cow::Borrowed(q),
-            None => {
-                // Original Maxwell storage supplies an owned exact quadratic
-                // image. Derive this immutable row once, without gradient probes
-                // or a second state model; keep the existing borrowed fast path.
-                let part = system
-                    .storage
-                    .quadratic_part()
-                    .filter(|part| part.exact)
-                    .ok_or(PhsError::Unadmitted {
-                        what: "native acoustic outlet requires its declared quadratic storage",
-                    })?;
-                std::borrow::Cow::Owned(part.matrix)
-            }
-        };
-        if Some(q.len()) != n.checked_mul(n) {
-            return Err(PhsError::Dimension {
-                what: "native acoustic outlet quadratic storage",
-            });
-        }
-        let terminal = 2 * cells - 1;
-        for (coefficient, value) in coefficients
-            .iter_mut()
-            .zip(&q[terminal * n..(terminal + 1) * n])
-        {
-            *coefficient = orientation * value;
-        }
-        if coefficients.iter().any(|value| !value.is_finite()) || coefficients[terminal] == 0.0 {
-            return Err(PhsError::Unadmitted {
-                what: "native acoustic outlet flow map is unrepresentable",
-            });
-        }
-    }
-    Ok((system, AcousticOutletFlow { coefficients }))
+        effort_flow_row(
+            &declared_quadratic(&system)?,
+            system.state_dim(),
+            2 * cells - 1,
+            orientation,
+        )?
+    };
+    Ok((system, flow))
 }

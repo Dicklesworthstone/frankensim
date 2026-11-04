@@ -4501,6 +4501,7 @@ pub fn acoustic_frustum_chain_outlet_wall(
         wall,
         None,
         None,
+        None,
     )
 }
 
@@ -4522,6 +4523,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     wall: Option<&WallPin>,
     section_media: Option<&[acoustic_outlet::AcousticSectionMedium]>,
     cell_walls: Option<&[acoustic_outlet::AcousticCellWall]>,
+    mut tap_terminals: Option<&mut Vec<acoustic_outlet::AcousticTapTerminal>>,
 ) -> Result<PortHamiltonian, PhsError> {
     if !(exterior_density.is_finite()
         && exterior_density > 0.0
@@ -4740,7 +4742,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     let mut open_state = 0usize;
     let mut open_foster = 0usize;
     let mut pad_i = 0usize;
-    for tap in taps {
+    for (tap_index, tap) in taps.iter().enumerate() {
         if !tap_valid(tap) {
             return Err(PhsError::Unadmitted {
                 what: "acoustic tap station and neck",
@@ -4773,6 +4775,17 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
             }
         }
         let b_eff = tap.neck_radius * sigma.sqrt();
+        // Capture the coordinate selected by this owner, before any observer
+        // sees the complete system. Open area is already in the native L/C;
+        // physical volume flow needs only the bore's orientation transform.
+        let mut record_terminal = |coordinate| {
+            if let Some(terminals) = tap_terminals.as_mut() {
+                terminals.push(acoustic_outlet::AcousticTapTerminal {
+                    tap_index, station: tap.station, effective_radius_m: b_eff,
+                    coordinate, orientation: if cell % 2 == 0 { 1.0 } else { -1.0 },
+                });
+            }
+        };
         let ts = tap_open_series_length(tap, radii[cell], taps, total_length);
         let a_bore = core::f64::consts::PI * radii[cell] * radii[cell];
         apply_t_junction_series(&mut q, n, tap_q + 1, density * ts / a_bore);
@@ -4800,6 +4813,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
                 viscothermal,
                 tap_off,
             )?;
+            record_terminal(base + 2 * TAP_LINE_CELLS);
             continue;
         }
         let phi = n_line + open_state;
@@ -4834,6 +4848,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
             viscothermal,
             tap_off,
         )?;
+        record_terminal(phi);
     }
     let wall_base = n_line + n_tap_states + n_tap_foster + n_pad_foster + n_rad_foster + n_foster;
     if wall.is_some() || cell_walls.is_some() {
