@@ -846,7 +846,12 @@ impl SpatialConductionThermalNetwork<'_> {
                     )
                     .map_err(map_conduction_error)
             },
-            |candidate| &candidate.step.spatial,
+            |candidate| {
+                (
+                    &candidate.step.spatial.field.cell_power_w,
+                    &candidate.step.spatial.contacts,
+                )
+            },
             cancel,
         )?;
         Ok(SpatialConductionCircuitEnthalpyCandidate {

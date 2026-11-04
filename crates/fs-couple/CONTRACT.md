@@ -2385,6 +2385,44 @@ current/heat balances, pressure/material substitutions, latent-fraction feedback
 continuation and transactional refusal. Native field tests independently
 integrate nonuniform triangle voltage jumps and their work.
 
+### Moving-conductor heat on the same material endpoint
+
+`SpatialConductionThermalNetwork::step_moving_candidate` uses the original
+native motional-current solve inside that SAME finite-enthalpy residual. Every
+trial refreshes the retained scalar or fixed-orientation conductivity sources
+at the original receiving cells' actual temperature/phase before resolving
+`J = Sigma(T,f) (E + u cross B)`. Only the original tetrahedron integrals of
+`(E + u cross B).J` enter those cells. The existing full-volume/mass/source
+admission, local heat routing, thermal links, event rules and shared solve
+budget remain authoritative. The accepted field arrays move into an owned
+snapshot without cloning and publish with their exact refreshed operator and
+thermal history.
+
+Signed boundary electrical work and Lorentz mechanical work are retained
+separately. The shared driver receives electrical input minus mechanical
+output, and independently closes that against Joule heat and finite thermal
+storage. Short-circuit magnetic braking therefore heats from mechanical input
+with zero electrical supply; generation can export electrical work while still
+heating. Mechanical work is neither a thermal source nor numerical dissipation.
+Voltage and distributed-current traces retain their native boundary semantics;
+open components screen conservative motional fields through their actual
+voltage solution.
+
+This bounded path holds geometry, velocity and magnetic flux density over the
+interval. The caller must preserve represented material/source occupancy and
+finite thermal inventory; it does not add material advection, induction,
+momentum evolution or magnet energy storage. Finite-resistance moving contacts
+refuse without a surface-work owner. Every discarded, out-of-domain, over-budget
+or cancelled trial leaves both accepted owners unchanged. First-order temporal
+and spatial accuracy still require refinement independently of energy closure.
+
+`tests/spatial_conduction_enthalpy/motion.rs` checks independent two-cell
+backward-Euler temperatures, original-cell heat, changing resistivity and
+continued current/material state in motoring and generating regimes. It also
+checks short-circuit braking, open-circuit screening, zero-motion parity,
+subdivision, source identity and transactional refusals. These remain synthetic
+numerical checks, not measured moving-device validation.
+
 This fixed-geometry, memoryless DC closure adds no thermal spatial-resolution
 claim beyond its authored finite cells, phase-density motion, contact-layer
 storage, opening/arcing, induction, dielectric storage,

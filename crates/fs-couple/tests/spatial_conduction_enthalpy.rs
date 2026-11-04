@@ -9,6 +9,8 @@ mod contacts;
 mod current;
 #[path = "spatial_conduction_enthalpy/heat.rs"]
 mod heat;
+#[path = "spatial_conduction_enthalpy/motion.rs"]
+mod motion;
 use common::{config, initial, near};
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,

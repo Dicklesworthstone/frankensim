@@ -11,6 +11,8 @@
 
 /// Native multi-electrode current coupled to finite circuit storage.
 pub mod circuit;
+/// Conductor-frame Joule heating under prescribed motion and magnetic field.
+pub mod motion;
 
 use super::contacts::{self, ConductionContactThermal, SolvedContactPressure};
 use super::{
@@ -576,7 +578,7 @@ impl SpatialConductionThermalNetwork<'_> {
                     field_solves,
                 ))
             },
-            |candidate| &candidate.step,
+            |candidate| (&candidate.step.field.cell_power_w, &candidate.step.contacts),
             cancel,
         )?;
         Ok(SpatialConductionEnthalpyCandidate {
@@ -620,7 +622,7 @@ impl SpatialConductionThermalNetwork<'_> {
             &contacts::PreparedContacts<'_, '_>,
             usize,
         ) -> Result<(D, usize), CircuitEnthalpyError<E>>,
-        spatial_step: impl Fn(&D) -> &SpatialConductionThermalStep,
+        spatial_heat: impl Fn(&D) -> (&[f64], &[SpatialConductionContactHeat]),
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<
         (
@@ -846,11 +848,11 @@ impl SpatialConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                let step = spatial_step(candidate);
+                let (bulk_power_w, contacts) = spatial_heat(candidate);
                 let mut powers = route_owner
-                    .deposit_power(&step.field.cell_power_w, &routes, checkpoint)
+                    .deposit_power(bulk_power_w, &routes, checkpoint)
                     .map_err(map_conduction_error)?;
-                for contact in &step.contacts {
+                for contact in contacts {
                     checkpoint()?;
                     contacts::deposit_partition(
                         contact.cells,
