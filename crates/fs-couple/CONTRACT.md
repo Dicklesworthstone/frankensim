@@ -291,6 +291,44 @@ complete rollback after energy, source, cancellation or work-budget refusal.
 Test presence does not claim native execution.
 
 
+### Heat input during continuing membrane motion
+
+`GasMembraneMotion::into_thermal` moves the complete accepted native mechanical
+state, clock, telemetry history, reference masses and current parcels into
+`GasMembraneThermalMotion`. It does not restart motion or recompute algorithmic
+acceleration. Each thermal interval supplies signed heat to the first parcel
+and, for a sealed opposing chamber, separately to that parcel with independent
+`GasEnergySolve` controls. Fixed exterior pressure retains the existing
+reservoir-work account.
+
+The original ideal/PR `midpoint_heat_volume` owners solve heat and volume work
+together. Their midpoint pressures drive the original nonlinear membrane at
+the native generalized-alpha midpoint, and their complete endpoints become the
+next accepted gas states. The tangent differentiates this discrete law at fixed
+interval heat: endpoint coordinates are `q1=2*q_stage-q_old`, so the native
+`dp_mid/dV1` contributes a factor-two cross-gradient action using endpoint and
+stage volume gradients. Opposing-gas stiffness and follower geometry occur
+once. This action is generally nonsymmetric; no isentropic tangent is used
+for heated trials.
+
+For curved membrane geometry, midpoint traction work need not equal pressure
+times the exact swept volume. The runtime reports and separately gates this
+pressure-work mismatch and the enclosing
+`Delta K + Delta E_membrane + Delta U1 + Delta U2 + W_reservoir - W_dead - Q1 - Q2`
+defect. Both allowances must be finite and nonnegative. Original gas receipts
+retain actual heat, work, internal-energy change, entropy change and discrete
+pressure derivatives. Neither numerical defect is a heat source or damping
+model, and finite midpoint steps do not certify isentropy or nonnegative
+entropy production.
+
+Geometry and source admission, bounded native Newton/Krylov work, both energy
+gates and final cancellation precede atomic publication of all participants.
+Repeated stage/tangent calls reuse their native gas proposal. Heat is
+prescribed interval energy; this API does not infer heat-transfer coefficients,
+finite heat-source dynamics, gas waves, composition change or phase equilibrium.
+Time refinement remains necessary. Focused heated-motion regressions are
+authored; this checkpoint does not claim native execution.
+
 ### Two finite gas chambers sharing a membrane
 
 `GasMembrane::with_sealed_exterior` replaces the held exterior-pressure reservoir

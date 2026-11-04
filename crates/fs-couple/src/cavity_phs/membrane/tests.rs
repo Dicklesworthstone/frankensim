@@ -1,6 +1,6 @@
 //! Focused synthetic-source coupling regressions, not empirical membrane/gas qualification.
 mod vibration;
-mod motion;
+pub(super) mod motion;
 mod sealed_exterior;
 
 use super::*;
@@ -122,7 +122,7 @@ fn transport(name: &str) -> SpeciesTransportMaterial {
         selection: MaterialPropertySelection::SingleClaimOnly,
     }
 }
-fn source_gas(x: f64, slope: f64) -> ClosedGasParcel {
+pub(super) fn source_gas(x: f64, slope: f64) -> ClosedGasParcel {
     let model = ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
             vec![
@@ -167,7 +167,7 @@ const STRETCH: f64 = 1.02;
 const SIDE: f64 = 0.1;
 const STIFFNESS: f64 = 8000.0;
 
-fn near(actual: f64, expected: f64, atol: f64, rtol: f64) {
+pub(super) fn near(actual: f64, expected: f64, atol: f64, rtol: f64) {
     assert!((actual - expected).abs() <= atol + rtol * actual.abs().max(expected.abs()),
         "{actual:e} != {expected:e}");
 }
@@ -182,7 +182,7 @@ fn controls() -> GasMembraneSolve {
         max_iterations: 40, max_evaluations: 1000, max_krylov_restart: 8,
     } }
 }
-fn chart(mesh: Mesh2, free: &[usize]) -> (MembranePatch, Vec<[f64; 3]>, Vec<Option<f64>>) {
+pub(super) fn chart(mesh: Mesh2, free: &[usize]) -> (MembranePatch, Vec<[f64; 3]>, Vec<Option<f64>>) {
     let mut claims = ClaimSet::new();
     for (key, value, dims) in [
         ("areal_density", 0.2, Dims([-2, 1, 0, 0, 0, 0])),
@@ -216,7 +216,7 @@ fn chart(mesh: Mesh2, free: &[usize]) -> (MembranePatch, Vec<[f64; 3]>, Vec<Opti
         MembraneBudget { max_nodes: 32, max_triangles: 32 }, || false).unwrap();
     (patch, reference, fixed)
 }
-fn pyramid() -> (MembranePatch, Vec<[f64; 3]>, Vec<Option<f64>>) {
+pub(super) fn pyramid() -> (MembranePatch, Vec<[f64; 3]>, Vec<Option<f64>>) {
     chart(Mesh2 {
         nodes: vec![[0.0, 0.0], [SIDE, 0.0], [0.0, SIDE], [-SIDE, 0.0], [0.0, -SIDE]],
         elems: vec![vec![0, 1, 2], vec![0, 2, 3], vec![0, 3, 4], vec![0, 4, 1]],

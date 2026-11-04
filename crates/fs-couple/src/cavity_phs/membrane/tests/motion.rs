@@ -3,7 +3,7 @@ use super::*;
 use fs_solid::membrane::vibration::VibrationSettings;
 use fs_time::galpha::{ImplicitSolveConfig, SecondOrderState};
 
-fn motion_controls() -> GasMembraneMotionControls {
+pub(in crate::cavity_phs::membrane) fn motion_controls() -> GasMembraneMotionControls {
     GasMembraneMotionControls {
         gas: gas_controls(),
         time: ImplicitSolveConfig {
@@ -263,7 +263,7 @@ fn curved_full_coordinate_motion_balances_native_pressure_at_the_midpoint() {
     assert!(geometric.iter().flatten().any(|value| value.abs() > 0.01));
 }
 
-fn real_gas() -> ClosedRealGasParcel {
+pub(in crate::cavity_phs::membrane) fn real_gas() -> ClosedRealGasParcel {
     let ideal = source_gas(0.75, 0.001);
     let source = ThermochemicalPengRobinsonModel::new(
         ideal.model().clone(),

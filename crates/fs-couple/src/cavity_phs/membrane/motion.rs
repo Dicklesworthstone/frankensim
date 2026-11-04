@@ -6,9 +6,13 @@
 //! discrete energy defect is measured and gated, never reported as heat.
 
 mod operator;
+mod thermal;
+pub use thermal::{GasMembraneThermalControls, GasMembraneThermalEvaluation,
+    GasMembraneThermalMotion, GasMembraneThermalStep};
 
 use super::*;
 use fs_math::dd::Dd;
+use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_time::galpha::{
     ImplicitSolveConfig, ImplicitStepTelemetry, OperatorGeneralizedAlpha, SecondOrderState,
     TimeSolveError,
@@ -66,6 +70,8 @@ pub enum GasMembraneMotionError {
     Physical(GasMembraneError),
     /// Original structural integrator/nonlinear solve refusal.
     Time(TimeSolveError),
+    /// Original simultaneous gas heat/volume closure refused a proposal.
+    Heat(GasEnergyError),
     EvaluationBudget,
     StepBudget,
     /// Actual signed storage-minus-work defect exceeded the caller allowance.
@@ -73,6 +79,8 @@ pub enum GasMembraneMotionError {
         defect_j: f64,
         allowance_j: f64,
     },
+    /// Midpoint traction and native swept-volume work differ beyond allowance.
+    PressureWork { defect_j: f64, allowance_j: f64 },
     Cancelled,
 }
 impl core::fmt::Display for GasMembraneMotionError {
@@ -99,6 +107,14 @@ impl From<TimeSolveError> for GasMembraneMotionError {
         match error {
             TimeSolveError::Cancelled => Self::Cancelled,
             other => Self::Time(other),
+        }
+    }
+}
+impl From<GasEnergyError> for GasMembraneMotionError {
+    fn from(error: GasEnergyError) -> Self {
+        match error {
+            GasEnergyError::Cancelled => Self::Cancelled,
+            other => Self::Heat(other),
         }
     }
 }
@@ -155,6 +171,13 @@ pub struct GasMembraneMotion<'m, 'p> {
 }
 
 impl<'m, 'p> GasMembraneMotion<'m, 'p> {
+    /// Continue with prescribed heat and native simultaneous heat/volume work.
+    /// Moves the accepted mechanics, gases, clock and complete history without
+    /// recalculating acceleration or restarting the structural integrator.
+    pub fn into_thermal(self) -> GasMembraneThermalMotion<'m, 'p> {
+        GasMembraneThermalMotion::from_motion(self)
+    }
+
     /// Start at time zero from an admitted full shape and velocity. Prescribed
     /// coordinates retain their bound values and have exactly zero velocity.
     /// Initial acceleration is the original force balance divided by the
