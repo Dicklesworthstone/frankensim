@@ -3,9 +3,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
-use fs_solid::hyper3::{
-    HyperTetProblem, HyperTetSettings, HyperTetSolution, HyperelasticLawField,
-};
+use fs_solid::hyper3::{HyperTetProblem, HyperTetSettings, HyperTetSolution, HyperelasticLawField};
 use fs_solid::linear3::TetAssemblyBudget;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -132,7 +130,13 @@ fn assert_equilibrium(solution: &HyperTetSolution, force: f64) -> f64 {
         "reported equilibrium has relative physical force error {relative_force_error:e}; extension {extension:e}"
     );
     assert!((extension - independent_extension(force)).abs() < 2e-10);
-    let relative = *solution.steps.last().unwrap().residual_history.last().unwrap();
+    let relative = *solution
+        .steps
+        .last()
+        .unwrap()
+        .residual_history
+        .last()
+        .unwrap();
     assert!(relative.is_finite() && relative <= HyperTetSettings::default().relative_tolerance);
     extension
 }
@@ -159,7 +163,12 @@ fn load_applied_only_to_a_prescribed_dof_changes_only_its_reaction() {
     let actual = assert_equilibrium(&support_loaded, force);
     assert!((actual - expected).abs() < 2e-10);
     let reaction = |solution: &HyperTetSolution| {
-        solution.reactions_n.iter().find(|&&(dof, _)| dof == 0).unwrap().1
+        solution
+            .reactions_n
+            .iter()
+            .find(|&&(dof, _)| dof == 0)
+            .unwrap()
+            .1
     };
     assert!((reaction(&support_loaded) - reaction(&isolated) + 1e12).abs() < 1e-3);
 }
@@ -179,7 +188,13 @@ fn connected_force_scale_preserves_translation_and_rigid_rotation() {
 #[test]
 fn zero_force_reference_converges_without_an_artificial_force_floor() {
     let solution = solve(false, 0.0, [0.0; 3], false, 0.0);
-    assert!(solution.displacement_m.iter().flatten().all(|&value| value == 0.0));
+    assert!(
+        solution
+            .displacement_m
+            .iter()
+            .flatten()
+            .all(|&value| value == 0.0)
+    );
     assert_eq!(solution.steps[0].residual_history, vec![0.0]);
     assert_eq!(solution.steps[0].linear_iterations, 0);
 }
