@@ -521,3 +521,6 @@ pub mod adhesive_elastic_events;
 
 /// Sourced adhesive events retaining every original elastic mode and connection.
 pub mod adhesive_network_events;
+
+/// Signed source-bound normal adhesion on the complete native modal network.
+pub mod source_normal;

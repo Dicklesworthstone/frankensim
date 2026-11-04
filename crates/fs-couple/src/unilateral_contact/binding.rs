@@ -80,6 +80,14 @@ impl BoundNormalContact {
     pub const fn source(&self) -> &NormalLawSource {
         &self.source
     }
+    /// Original complete displacement row; its transpose applies normal force.
+    pub fn work_column(&self) -> &[f64] {
+        &self.collocation
+    }
+    /// Original affine gap in `work_column dot q - gap_m` [m].
+    pub const fn gap_m(&self) -> f64 {
+        self.gap_m
+    }
 
     // Mean forces need the original signed affine interval, including the
     // fraction before a unilateral contact closes. Point observations still

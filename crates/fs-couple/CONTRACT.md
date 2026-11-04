@@ -18707,6 +18707,54 @@ The `adhesive_mixed_jacobian` regressions independently check the complete
 mixed-source Newton action and advance native/prepared three-body motion just
 inside the JKR fold with the original energy and momentum accounts.
 
+### Shared source normal work on the complete continuing modal network
+
+`contact::source_normal::SourceNormalModalSystem` binds one original
+`BoundNormalContact` to the complete `CoupledModalSystem`. Its unchanged
+physical work column spans all participating bodies and modes. Original modal
+stiffness and damping, multiple bilateral springs and dashpots, rest loads,
+material-memory states and their separate stores/losses remain with the native
+owner. The same native prediction and held-force response supply a cached scalar
+compliance; the original network stages and publishes the resulting body,
+material and admitted radiation states.
+
+The scalar solve consumes `NormalLawSource::mean_force_between` and its original
+analytic endpoint derivative, also used by `BoundNormalStorage`. Conservative
+Hertz, explicit attached JKR, finite-range DMT and retained finite-gap tables
+share this path without a fitted common law. Signed attraction and negative
+adhesive potential remain physical. Unilateral laws retain the inactive
+negative-approach fraction through contact onset and release. Positive
+Hunt--Crossley dissipation and Maugis without an admitted analytic path
+derivative refuse; native network damping does not replace their contact loss.
+
+Safeguarded analytic Newton refinement retains the positive-slope mechanical
+root connected to the accepted JKR state and respects explicit source-domain,
+iteration, force and coordinate bounds. A coarse ambiguous DMT step, source
+fold/domain escape or unresolved root refuses. Contact uses the straight
+approach path between accepted native endpoints, with a held work-conjugate
+reaction; continuous within-sample turning points, attachment and snap release
+are not resolved by this lane.
+
+The adapter reevaluates the original source on restored native geometry and
+checks the force correction actually represented in every mode. Contact
+potential change, source path work and native contact work close independently
+at the contact energy scale; unrelated network storage cannot inflate that
+tolerance. Authored external work, every original native loss and total storage
+then pass the original network and combined energy checks. The network's own
+frame retains its complete applied-force port; the outer frame splits authored
+and contact work once. `step_with_admission` stages receiving state before final
+native publication and cancellation. Refusals preserve accepted coordinates,
+material memory, clocks, ports and previous observations.
+
+Focused evidence uses the original ordinary complete-pencil propagator: four
+stiff modes and two Kelvin--Voigt links under tensile JKR; twenty steps of native
+Maxwell memory, storage and independently integrated loss; source-domain,
+receiving-state and cancellation rollback; and Hertz/table onset and release,
+DMT gap attraction and explicit lossy-contact refusal. The retained-table test
+does not rerun its BEM producer. Prepared radiation/material-ingress paths and
+full typed-port/workspace audits are not newly claimed by the bounded
+verification projection.
+
 ## Adhesive junctions on the native modal network
 
 `friction::adhesive::AdhesiveModalBinding` attaches an explicit real area,
