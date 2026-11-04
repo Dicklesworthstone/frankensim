@@ -3,7 +3,10 @@
 //! One fixed normal coordinate has caller-supplied relative mass and held
 //! external force. Each attached substep is the scalar condensation of the
 //! complete kinetic/contact discrete gradient: its original path mean supplies
-//! both impulse and work. Detached motion is exact constant-force flight.
+//! both impulse and work. Optional undamped linear support participates in
+//! the same equation with separate work and impulse accounts. Detached motion
+//! is conservative midpoint motion, or exact constant-force flight at zero
+//! support stiffness.
 //! Touch and the displacement fold split the trajectory at their original
 //! thresholds. A snap changes only contact phase/storage, never momentum.
 //!
@@ -19,6 +22,7 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
 
 mod advance;
+mod elastic;
 mod solve;
 
 /// Fixed event storage; the caller may impose a smaller limit.
@@ -38,7 +42,7 @@ pub struct JkrNormalMotionBudget {
     /// Actual travel, including a within-branch reversal, over one call.
     pub maximum_accumulated_travel_m: f64,
     pub maximum_normal_speed_m_s: f64,
-    /// Bounds held load and original contact force over every accepted path.
+    /// Independently bounds held load, contact and support force on every path.
     pub maximum_force_n: f64,
     pub coordinate_absolute_tolerance_m: f64,
     pub coordinate_relative_tolerance: f64,
@@ -103,11 +107,18 @@ pub struct JkrNormalMotionStep {
     pub normal_time_moment_n_s2: f64,
     /// Original smooth contact work, integral F d(delta), excluding snaps.
     pub normal_work_j: f64,
+    /// Linear-support reaction; the original contact observations stay separate.
+    pub support_impulse_n_s: f64,
+    pub support_time_moment_n_s2: f64,
+    pub support_work_j: f64,
+    pub support_energy_j: f64,
+    /// Maximum absolute support force over all accepted interpolation extrema.
+    pub support_force_bound_n: f64,
     pub applied_work_j: f64,
     /// Energy leaving quasistatic storage at source-owned branch changes.
     pub released_energy_j: f64,
     pub kinetic_energy_j: f64,
-    /// Endpoint kinetic plus contact storage; released energy is separate.
+    /// Endpoint kinetic, contact and support storage; released energy is separate.
     pub total_energy_j: f64,
     pub energy_residual_j: f64,
     pub impulse_residual_n_s: f64,
@@ -118,6 +129,12 @@ pub struct JkrNormalMotionStep {
     pub trials: usize,
 }
 impl JkrNormalMotionStep {
+    pub fn reaction_impulse_n_s(&self) -> f64 {
+        self.normal_impulse_n_s + self.support_impulse_n_s
+    }
+    pub fn reaction_time_moment_n_s2(&self) -> f64 {
+        self.normal_time_moment_n_s2 + self.support_time_moment_n_s2
+    }
     pub const fn initial_state(&self) -> JkrNormalMotionState {
         self.initial
     }
@@ -176,12 +193,26 @@ pub struct JkrNormalMotion<'a> {
     mass_kg: f64,
     budget: JkrNormalMotionBudget,
     identity: ContentHash,
+    support: elastic::Support,
 }
 impl<'a> JkrNormalMotion<'a> {
     pub fn new(
         normal: &'a SourceJkrSphereContact,
         mass_kg: f64,
         budget: JkrNormalMotionBudget,
+    ) -> Result<Self, JkrNormalMotionError> {
+        Self::new_with_support(normal, mass_kg, budget, 0.0, 0.0)
+    }
+
+    /// Add one undamped spring with reaction `k * (indentation - anchor)`.
+    /// This is source-independent mechanical support, not contact stiffness or
+    /// modified adhesion. The anchor is frozen with the support identity.
+    pub fn new_with_support(
+        normal: &'a SourceJkrSphereContact,
+        mass_kg: f64,
+        budget: JkrNormalMotionBudget,
+        stiffness_n_per_m: f64,
+        zero_force_indentation_m: f64,
     ) -> Result<Self, JkrNormalMotionError> {
         let positive = [
             mass_kg,
@@ -212,13 +243,19 @@ impl<'a> JkrNormalMotion<'a> {
                 "finite mass and bounded explicit motion controls",
             ));
         }
-        let mut hash = DomainHasher::new("fs-contact/jkr-normal-motion/v1");
+        let support = elastic::Support::new(
+            normal,
+            stiffness_n_per_m,
+            zero_force_indentation_m,
+            budget.maximum_root_iterations,
+        )?;
+        let mut hash = DomainHasher::new("fs-contact/jkr-normal-motion/v2");
         hash.update(normal.identity().as_bytes());
-        for value in positive
-            .into_iter()
-            .chain(relative)
-            .chain([budget.minimum_indentation_m])
-        {
+        for value in positive.into_iter().chain(relative).chain([
+            budget.minimum_indentation_m,
+            stiffness_n_per_m,
+            zero_force_indentation_m,
+        ]) {
             hash.update(&value.to_bits().to_le_bytes());
         }
         for count in [
@@ -233,6 +270,7 @@ impl<'a> JkrNormalMotion<'a> {
             mass_kg,
             budget,
             identity: hash.finalize(),
+            support,
         })
     }
 
@@ -244,6 +282,19 @@ impl<'a> JkrNormalMotion<'a> {
     }
     pub const fn budget(&self) -> JkrNormalMotionBudget {
         self.budget
+    }
+    pub const fn support_stiffness_n_per_m(&self) -> f64 {
+        self.support.stiffness
+    }
+    pub const fn support_zero_force_indentation_m(&self) -> f64 {
+        self.support.anchor
+    }
+    pub fn support_energy_j(
+        &self,
+        state: JkrNormalMotionState,
+    ) -> Result<f64, JkrNormalMotionError> {
+        self.response(state)?;
+        self.support.energy(state.contact.indentation_m())
     }
 
     /// The caller explicitly supplies a detached or stable attached source
@@ -276,7 +327,9 @@ impl<'a> JkrNormalMotion<'a> {
             "initial normal kinetic energy",
         )?;
         finite(
-            kinetic + response.reversible_energy_j,
+            kinetic
+                + response.reversible_energy_j
+                + self.support.energy(contact.indentation_m())?,
             "initial normal total energy",
         )?;
         Ok(state)
@@ -312,6 +365,9 @@ impl<'a> JkrNormalMotion<'a> {
         };
         if response.normal_force_n.abs() > self.budget.maximum_force_n {
             return Err(JkrNormalMotionError::Range("normal force"));
+        }
+        if self.support.force(state.contact.indentation_m())?.abs() > self.budget.maximum_force_n {
+            return Err(JkrNormalMotionError::Range("support force"));
         }
         Ok(response)
     }

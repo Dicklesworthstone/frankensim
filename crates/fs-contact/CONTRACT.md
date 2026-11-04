@@ -697,6 +697,31 @@ This is one fixed normal with quasistatic contact radius; general elastic
 networks, contact waves, finite-range attraction and automatic heat deposition
 are outside this owner's scope.
 
+The normal motion owner also accepts one frozen, undamped linear support with
+explicit nonnegative stiffness and zero-force indentation. Its midpoint spring
+reaction participates in the same kinetic/contact discrete gradient; detached
+motion uses conservative midpoint integration and retains exact free flight
+at zero stiffness. Original JKR force, source history, fold, and snap releases
+remain unchanged. Contact and support work, impulses and first time moments
+stay separate; endpoint energy includes both storages. Native consumers can
+restore the sum of reaction moments while retaining the original spring port.
+The existing force budget independently bounds contact, support and held load,
+including spring-force extrema during reversals. Source, mass, numerical policy
+and support parameters bind the immutable motion history.
+
+The original monotone contact tangent locates the combined force minimum once
+at construction. Each held-load call resolves at most one intervening maximum
+of the contact-plus-spring effective potential, reused by all its substeps;
+an energy-preserving endpoint solve cannot silently cross an inaccessible
+barrier. Independent contact, support, kinetic-work and complete-energy gates
+prevent a large preload energy datum from masking a local accounting error.
+Six additional physical regression groups cover the exact detached oscillator
+and second-order convergence, equilibrium reaction channels, stiffness/preload
+changes to pull-off, inaccessible supported barriers, interior force limits,
+and support-bound history. The nine original free-motion groups still pass.
+Support adds no damping, moving anchor, changing material, or general elastic
+network capability.
+
 `interface_binding::adhesive_shear::SourceAdhesiveShear` selects constant
 junction shear from explicit `adhesive_static_shear_strength` and
 `adhesive_kinetic_shear_strength` claims in Pa at the SAME ordered interface and

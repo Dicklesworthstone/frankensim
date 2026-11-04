@@ -24,6 +24,9 @@ pub(super) fn run(
             "finite step and held normal force inside budget",
         ));
     }
+    let barrier =
+        law.support
+            .barrier(law.normal, load, law.budget.maximum_root_iterations, gate)?;
     let target = finite(previous.time_s + dt, "normal target time")?;
     if target <= previous.time_s {
         return Err(JkrNormalMotionError::Unresolved("normal clock precision"));
@@ -37,6 +40,11 @@ pub(super) fn run(
     let mut impulse = Sum::default();
     let mut moment = Sum::default();
     let mut work = Sum::default();
+    let mut support_impulse = Sum::default();
+    let mut support_moment = Sum::default();
+    let mut support_work = Sum::default();
+    let mut support_work_magnitude = Sum::default();
+    let mut support_peak = 0.0_f64;
     let mut released = Sum::default();
     let mut travel = Sum::default();
     let mut events = [None; MAX_JKR_NORMAL_EVENTS];
@@ -65,13 +73,14 @@ pub(super) fn run(
                 ));
             }
             trials += 1;
-            match solve::next(law, state, load, h, gate) {
+            match solve::next(law, state, load, h, barrier, gate) {
                 Ok(segment) => break segment,
                 Err(JkrNormalMotionError::Cancelled) => {
                     return Err(JkrNormalMotionError::Cancelled);
                 }
                 Err(error @ JkrNormalMotionError::Range(_))
-                    if state.contact.branch() == JkrBranch::Detached =>
+                    if state.contact.branch() == JkrBranch::Detached
+                        && law.support.stiffness == 0.0 =>
                 {
                     return Err(error);
                 }
@@ -96,6 +105,16 @@ pub(super) fn run(
             "normal impulse time moment",
         )?)?;
         work.add(finite(segment.force * increment, "normal smooth work")?)?;
+        let elastic_impulse = finite(h * segment.support_force, "support impulse")?;
+        support_impulse.add(elastic_impulse)?;
+        support_moment.add(finite(
+            elastic_impulse * (elapsed + 0.5 * h),
+            "support impulse time moment",
+        )?)?;
+        let elastic_work = finite(segment.support_force * increment, "support work")?;
+        support_work.add(elastic_work)?;
+        support_work_magnitude.add(elastic_work.abs())?;
+        support_peak = support_peak.max(segment.support_peak);
         travel.add(segment.travel)?;
         if travel.value > law.budget.maximum_accumulated_travel_m {
             return Err(JkrNormalMotionError::Range("accumulated normal travel"));
@@ -144,16 +163,28 @@ pub(super) fn run(
         contact.reversible_energy_j - before.reversible_energy_j,
         "normal storage change",
     )?;
+    let support_before = law.support.energy(previous.contact.indentation_m())?;
+    let support_energy = law.support.energy(state.contact.indentation_m())?;
+    // The endpoint spring energy difference is evaluated in factored form,
+    // independently of all substep work, so large preload does not erase it.
+    let support_change = law.support.work(
+        previous.contact.indentation_m(),
+        state.contact.indentation_m(),
+    )?;
     let kinetic_residual = finite(
-        kinetic_change + work.value - applied,
+        kinetic_change + work.value + support_work.value - applied,
         "normal kinetic work residual",
     )?;
     let storage_residual = finite(
         storage_change + released.value - work.value,
         "normal storage work residual",
     )?;
+    let support_residual = finite(
+        support_change - support_work.value,
+        "support storage work residual",
+    )?;
     let energy_residual = finite(
-        kinetic_residual + storage_residual,
+        kinetic_residual + storage_residual + support_residual,
         "normal energy residual",
     )?;
     let energy_scale = finite(
@@ -161,17 +192,35 @@ pub(super) fn run(
             + kinetic
             + before.reversible_energy_j.abs()
             + contact.reversible_energy_j.abs()
+            + support_before
+            + support_energy
+            + support_work.value.abs()
             + work.value.abs()
             + applied.abs()
             + released.value,
         "normal energy scale",
     )?;
-    let energy_tolerance = finite(
-        law.budget.energy_absolute_tolerance_j
-            + law.budget.energy_relative_tolerance * energy_scale,
-        "normal energy tolerance",
-    )?;
-    for residual in [kinetic_residual, storage_residual, energy_residual] {
+    // Channel-sized gates prevent a large, arbitrary spring preload datum from
+    // masking lost contact work or kinetic work. Support uses factored endpoint
+    // work and absolute path work, including cycles with zero net change.
+    let contact_scale = before.reversible_energy_j.abs()
+        + contact.reversible_energy_j.abs()
+        + work.value.abs()
+        + released.value;
+    let support_scale = support_change.abs() + support_work_magnitude.value;
+    let kinetic_scale =
+        kinetic_before + kinetic + work.value.abs() + support_work_magnitude.value + applied.abs();
+    for (residual, scale) in [
+        (kinetic_residual, kinetic_scale),
+        (storage_residual, contact_scale),
+        (support_residual, support_scale),
+        (energy_residual, energy_scale),
+    ] {
+        let energy_tolerance = finite(
+            law.budget.energy_absolute_tolerance_j
+                + law.budget.energy_relative_tolerance * finite(scale, "channel energy scale")?,
+            "normal energy tolerance",
+        )?;
         if residual.abs() > energy_tolerance {
             return Err(JkrNormalMotionError::EnergyBalance {
                 residual_j: residual,
@@ -184,14 +233,23 @@ pub(super) fn run(
         law.mass_kg * (state.velocity_m_s - previous.velocity_m_s),
         "normal momentum change",
     )?;
+    let reaction_impulse = finite(
+        impulse.value + support_impulse.value,
+        "total reaction impulse",
+    )?;
+    let reaction_moment = finite(
+        moment.value + support_moment.value,
+        "total reaction time moment",
+    )?;
     let impulse_residual = finite(
-        momentum_change - supplied_impulse + impulse.value,
+        momentum_change - supplied_impulse + reaction_impulse,
         "normal impulse residual",
     )?;
     let impulse_scale = finite(
         law.mass_kg * (state.velocity_m_s.abs() + previous.velocity_m_s.abs())
             + supplied_impulse.abs()
-            + impulse.value.abs(),
+            + impulse.value.abs()
+            + support_impulse.value.abs(),
         "normal impulse scale",
     )?;
     let impulse_tolerance = finite(
@@ -210,7 +268,8 @@ pub(super) fn run(
     // the scalar contact coordinate drift away from their native trajectory.
     let restored_increment = finite(
         dt * previous.velocity_m_s
-            + (0.5 * dt * supplied_impulse - (dt * impulse.value - moment.value)) / law.mass_kg,
+            + (0.5 * dt * supplied_impulse - (dt * reaction_impulse - reaction_moment))
+                / law.mass_kg,
         "normal restored increment",
     )?;
     let coordinate_residual = finite(increment - restored_increment, "normal coordinate residual")?;
@@ -229,7 +288,10 @@ pub(super) fn run(
             tolerance_m: coordinate_tolerance,
         });
     }
-    let total_energy = finite(kinetic + contact.reversible_energy_j, "normal total energy")?;
+    let total_energy = finite(
+        kinetic + contact.reversible_energy_j + support_energy,
+        "normal total energy",
+    )?;
     poll(gate)?;
     Ok(JkrNormalMotionStep {
         initial: previous,
@@ -240,6 +302,11 @@ pub(super) fn run(
         normal_impulse_n_s: impulse.value,
         normal_time_moment_n_s2: moment.value,
         normal_work_j: work.value,
+        support_impulse_n_s: support_impulse.value,
+        support_time_moment_n_s2: support_moment.value,
+        support_work_j: support_work.value,
+        support_energy_j: support_energy,
+        support_force_bound_n: support_peak,
         applied_work_j: applied,
         released_energy_j: released.value,
         kinetic_energy_j: kinetic,

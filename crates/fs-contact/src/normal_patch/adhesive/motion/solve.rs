@@ -1,7 +1,7 @@
 //! Scalar condensation and bounded source-domain trajectory checks.
 use super::{
-    CancelGate, JkrBranch, JkrNormalMotion, JkrNormalMotionError, JkrNormalMotionState, finite,
-    poll,
+    CancelGate, JkrBranch, JkrNormalMotion, JkrNormalMotionError, JkrNormalMotionState, elastic,
+    finite, poll,
 };
 
 pub(super) struct Segment {
@@ -9,6 +9,8 @@ pub(super) struct Segment {
     pub indentation: f64,
     pub velocity: f64,
     pub force: f64,
+    pub support_force: f64,
+    pub support_peak: f64,
     pub travel: f64,
     pub event: bool,
 }
@@ -18,54 +20,82 @@ pub(super) fn next(
     state: JkrNormalMotionState,
     load: f64,
     h: f64,
+    barrier: Option<f64>,
     gate: &CancelGate,
 ) -> Result<Segment, JkrNormalMotionError> {
     poll(gate)?;
     let from = state.contact.indentation_m();
     let velocity = state.velocity_m_s;
     if state.contact.branch() == JkrBranch::Detached {
-        let acceleration = finite(load / law.mass_kg, "free acceleration")?;
-        if let Some(duration) = arrival(-from, velocity, acceleration, h, 1.0)? {
-            return segment(law, state, load, duration, 0.0, 0.0, true);
-        }
-        let to = finite(
-            from + h * velocity + 0.5 * h * (h * acceleration),
-            "free approach",
+        let touch_acceleration = finite(
+            (load - law.support.mean(from, 0.0)?) / law.mass_kg,
+            "touch acceleration",
         )?;
-        return segment(law, state, load, h, to, 0.0, false);
+        if let Some(duration) = arrival(-from, velocity, touch_acceleration, h, 1.0)? {
+            return segment(law, state, load, duration, 0.0, 0.0, true, barrier);
+        }
+        let to = if law.support.stiffness == 0.0 {
+            finite(
+                from + h * velocity + 0.5 * h * (h * (load / law.mass_kg)),
+                "free approach",
+            )?
+        } else {
+            let acceleration = finite(
+                (load - law.support.force(from)?) / law.mass_kg,
+                "supported flight acceleration",
+            )?;
+            let denominator = finite(
+                1.0 + 0.25 * h * (h * (law.support.stiffness / law.mass_kg)),
+                "supported flight denominator",
+            )?;
+            finite(
+                from + (h * velocity + 0.5 * h * (h * acceleration)) / denominator,
+                "supported flight approach",
+            )?
+        };
+        return segment(law, state, load, h, to, 0.0, false, barrier);
     }
     let fold = law.normal.minimum_attached_indentation_m();
     // Only a monotone outward segment may jump directly to this boundary.
     // A segment that first reverses is resolved before testing the fold again.
     if velocity <= 0.0 {
         let force = law.normal.attached_path_average(from, fold)?;
-        let acceleration = finite((load - force) / law.mass_kg, "fold acceleration")?;
+        let total_force = finite(force + law.support.mean(from, fold)?, "fold total reaction")?;
+        let acceleration = finite((load - total_force) / law.mass_kg, "fold acceleration")?;
         if let Some(duration) = arrival(fold - from, velocity, acceleration, h, -1.0)? {
-            let derivative = law.normal.attached_path_end_derivative(from, fold)?;
-            if 1.0 + 0.5 * duration * (duration * (derivative / law.mass_kg)) <= 0.0 {
+            let derivative =
+                law.normal.attached_path_end_derivative(from, fold)? + 0.5 * law.support.stiffness;
+            let slope = finite(
+                1.0 + 0.5 * duration * (duration * (derivative / law.mass_kg)),
+                "fold root slope",
+            )?;
+            if slope <= 0.0 {
                 return Err(JkrNormalMotionError::Unresolved(
                     "fold step needs refinement",
                 ));
             }
-            return segment(law, state, load, duration, fold, force, true);
+            return segment(law, state, load, duration, fold, force, true, barrier);
         }
     }
     let force0 = law.normal.evaluate_attached(from)?.normal_force_n;
+    let total_force0 = finite(force0 + law.support.force(from)?, "initial normal reaction")?;
     let residual = |to: f64| -> Result<(f64, f64), JkrNormalMotionError> {
         let force = law.normal.attached_path_average(from, to)?;
+        let total_force = finite(force + law.support.mean(from, to)?, "mean normal reaction")?;
         Ok((
             finite(
-                (to - from) - h * velocity + 0.5 * h * (h * ((force - load) / law.mass_kg)),
+                (to - from) - h * velocity + 0.5 * h * (h * ((total_force - load) / law.mass_kg)),
                 "normal root residual",
             )?,
             force,
         ))
     };
     let initial = finite(
-        -h * velocity + 0.5 * h * (h * ((force0 - load) / law.mass_kg)),
+        -h * velocity + 0.5 * h * (h * ((total_force0 - load) / law.mass_kg)),
         "initial normal residual",
     )?;
-    let initial_derivative = law.normal.attached_path_end_derivative(from, from)?;
+    let initial_derivative =
+        law.normal.attached_path_end_derivative(from, from)? + 0.5 * law.support.stiffness;
     let initial_slope = finite(
         1.0 + 0.5 * h * (h * (initial_derivative / law.mass_kg)),
         "initial normal root slope",
@@ -76,7 +106,7 @@ pub(super) fn next(
         ));
     }
     if initial.abs() <= root_tolerance(law, from.abs()) {
-        return segment(law, state, load, h, from, force0, false);
+        return segment(law, state, load, h, from, force0, false, barrier);
     }
     // F'(delta) increases along the original JKR branch. The residual is
     // convex; these opposite-sign brackets select its upper, positive-slope
@@ -103,13 +133,14 @@ pub(super) fn next(
         poll(gate)?;
         let (value, force) = residual(to)?;
         let tolerance = root_tolerance(law, from.abs().max(to.abs()).max((h * velocity).abs()));
-        let derivative = law.normal.attached_path_end_derivative(from, to)?;
+        let derivative =
+            law.normal.attached_path_end_derivative(from, to)? + 0.5 * law.support.stiffness;
         let slope = finite(
             1.0 + 0.5 * h * (h * (derivative / law.mass_kg)),
             "normal root slope",
         )?;
         if value.abs() <= tolerance && slope > 0.0 {
-            return segment(law, state, load, h, to, force, to == fold);
+            return segment(law, state, load, h, to, force, to == fold, barrier);
         }
         if value < 0.0 {
             lo = to;
@@ -196,9 +227,12 @@ fn segment(
     to: f64,
     force: f64,
     event: bool,
+    barrier: Option<f64>,
 ) -> Result<Segment, JkrNormalMotionError> {
     let from = state.contact.indentation_m();
-    let acceleration = finite((load - force) / law.mass_kg, "normal acceleration")?;
+    let support_force = law.support.mean(from, to)?;
+    let reaction = finite(force + support_force, "total normal reaction")?;
+    let acceleration = finite((load - reaction) / law.mass_kg, "normal acceleration")?;
     let velocity = finite(state.velocity_m_s + h * acceleration, "normal velocity")?;
     if velocity.abs() > law.budget.maximum_normal_speed_m_s {
         return Err(JkrNormalMotionError::Range("normal speed"));
@@ -232,6 +266,14 @@ fn segment(
     if low < law.budget.minimum_indentation_m {
         return Err(JkrNormalMotionError::Range("minimum normal approach"));
     }
+    let support_peak = law
+        .support
+        .force(low)?
+        .abs()
+        .max(law.support.force(high)?.abs());
+    if support_peak > law.budget.maximum_force_n {
+        return Err(JkrNormalMotionError::Range("support force along path"));
+    }
     if state.contact.branch() == JkrBranch::Detached {
         if high > 0.0 || (!event && high == 0.0) {
             return Err(JkrNormalMotionError::Unresolved("unresolved contact entry"));
@@ -255,51 +297,16 @@ fn segment(
         if peak > law.budget.maximum_force_n {
             return Err(JkrNormalMotionError::Range("normal force along path"));
         }
-        barrier(law, state, load, low, high)?;
+        elastic::check_barrier(law, state, load, low, high, barrier)?;
     }
     Ok(Segment {
         duration: h,
         indentation: to,
         velocity,
         force,
+        support_force,
+        support_peak,
         travel,
         event,
     })
-}
-
-// A coarse energy-preserving endpoint solve must not tunnel through the
-// intervening unstable equilibrium of U(delta)-P*delta. JKR has at most one
-// such maximum; the smaller root of u(u-6)=P/Fs locates it, u=(a/as)^(3/2).
-fn barrier(
-    law: &JkrNormalMotion<'_>,
-    state: JkrNormalMotionState,
-    load: f64,
-    low: f64,
-    high: f64,
-) -> Result<(), JkrNormalMotionError> {
-    let scaled = load / law.normal.force_scale_n;
-    if !(-9.0..=-5.0).contains(&scaled) {
-        return Ok(());
-    }
-    let x = (3.0 - (9.0 + scaled).sqrt()).cbrt();
-    let critical = law.normal.displacement_scale_m * (x * x * x * x - 4.0 * x);
-    if critical > low && critical < high {
-        let from = state.contact.indentation_m();
-        let needed = finite(
-            law.normal.reversible_work_between(from, critical)? - load * (critical - from),
-            "normal barrier work",
-        )?;
-        let kinetic = finite(
-            0.5 * law.mass_kg * state.velocity_m_s * state.velocity_m_s,
-            "normal barrier kinetic energy",
-        )?;
-        let tolerance = law.budget.energy_absolute_tolerance_j
-            + law.budget.energy_relative_tolerance * needed.abs().max(kinetic);
-        if needed > kinetic + tolerance {
-            return Err(JkrNormalMotionError::Unresolved(
-                "unresolved adhesive turning barrier",
-            ));
-        }
-    }
-    Ok(())
 }
