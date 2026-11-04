@@ -29,6 +29,9 @@ mod angular_spectrum;
 #[path = "plane_wave/layer_fields.rs"]
 mod layer_fields;
 
+#[path = "plane_wave/half_space_absorption.rs"]
+mod half_space_absorption;
+
 #[path = "plane_wave/coherence.rs"]
 mod coherence;
 #[path = "plane_wave/exposure.rs"]

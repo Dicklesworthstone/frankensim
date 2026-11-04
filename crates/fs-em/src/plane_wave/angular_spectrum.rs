@@ -14,6 +14,12 @@
 //! spatial bandwidth and periodic-image convergence are caller-owned physical
 //! resolution choices, not a certificate for an isolated hard-edged aperture.
 //!
+//! Transmitted absorption queries apply the original exit material's complex
+//! permittivity to the propagated electric field. Local volumetric heat keeps
+//! coherent spatial interference; depth-integrated watts use exact modal
+//! attenuation over the whole cell. Substrate absorption is accounted for
+//! separately from absorption in the stack's finite films.
+//!
 //! Reference: ETH Photonics, Angular Spectrum Representation, equations 7.5–7.9:
 //! <https://ethz.ch/content/dam/ethz/special-interest/itet/photonics-dam/documents/lectures/EandM/AngularSpectrumRepresentation.pdf>.
 //! The phasor sign here is the conjugate of that reference, matching `layers`.
@@ -26,6 +32,8 @@ use modes::{
     basis, cartesian, fields, fields_from_tangential, finite, normal_flux, polarized, propagation,
 };
 
+mod absorption;
+pub use absorption::AngularSpectrumAbsorptionField;
 mod modes;
 
 mod aperture;

@@ -3910,3 +3910,36 @@ sibling repositories.
 The existing constitutive/interface/film/angular-spectrum owners consume epsilon = n_phase²/(mu*c0²), with the same retained permeability. The original group index and analytic material partials remain separately available. Evaluation allocates nothing, and existing prepared film/beam values retain their normal caching. Multifrequency identity checks retain the original source; the finite-window heat owner explicitly refuses this finite-band real-index law because it supplies no original causal material reservoir.
 
 Six focused actual-source controls pass through the complete native plane-wave subtree: published index and group/phase/mu distinctions; source/state/band refusals; oblique TE/TM, Snell, reciprocity, Brewster and TIR; independent Fabry–Perot and interior Maxwell fields across two water states; coherent three-mode/two-polarization beam fields and Poynting flux; and source-continuity/causal-reservoir behavior. This is homogeneous isotropic finite-band optical dispersion under an explicitly lossless approximation, not measured transparent-water absorption, scattering, phase-mixture optics, or a causal time-domain energy law.
+
+
+### Absorbing exit media: coherent local heat and analytic substrate watts
+
+`PlanarAngularSpectrum::transmitted_absorption_field` reconstructs the original
+transmitted E/H plane and reports local dielectric/Joule heat
+`q = -omega Im(epsilon) |E|²/2` for peak exp(+i omega t) phasors. The complete
+vector E includes longitudinal TM fields and coherent spatial interference.
+The original exit permittivity already owns its Ohmic, dielectric or optical
+loss; no separate conductivity or fitted attenuation is added. A lossless
+evanescent field has exactly zero heat despite its spatial decay.
+
+`transmitted_absorbed_power_w(z0, z1)` integrates that loss over the entire
+periodic cell and a finite depth interval or infinite substrate tail. Modal
+orthogonality applies only to the whole-cell integral. Each positive mode
+contributes its entering watts times exact exponential transmission and
+`-expm1(-2 alpha dz)`. A logarithmic fallback preserves representable watts
+when intermediate transmission or opacity underflows. The O(modes) query
+allocates no workspace and needs neither a depth mesh nor additional FFTs.
+
+Local heat adds one explicitly admitted scalar plane and O(grid points) work
+to the existing six-FFT field reconstruction. Scaling E by the square root of
+the loss coefficient before squaring preserves weak-loss heat at large finite
+amplitudes. Finite films reuse this same owner through the existing
+`AngularSpectrumLayerField` alias. Depth, work, storage and cancellation
+refusals publish no partial observation. Finite-film absorption remains
+separate; these queries do not evolve temperature or alter constitutive state.
+
+Five integrated regressions cover volume/Poynting/film closure, oblique Ohmic
+skin heating, weak absorption, lossless TIR and admission/cancellation.
+Four native arithmetic tests passed with actual fs-math before the final
+deep-tail/opacity fallback; its additional decimal-reference regression and
+the full integration tests remain unrun after execution-host failure.

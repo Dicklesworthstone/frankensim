@@ -22,23 +22,7 @@ pub struct AngularSpectrumLayerLimits {
 
 /// A plane inside the selected physical film. Heat is cycle-mean W/m³; its
 /// transverse integral is W/m of depth, not the film's total absorbed watts.
-#[derive(Debug)]
-pub struct AngularSpectrumLayerField {
-    field: AngularSpectrumField,
-    absorbed_power_density_w_m3: Vec<f64>,
-    absorbed_power_per_depth_w_m: f64,
-}
-impl AngularSpectrumLayerField {
-    pub fn field(&self) -> &AngularSpectrumField {
-        &self.field
-    }
-    pub fn absorbed_power_density_w_m3(&self) -> &[f64] {
-        &self.absorbed_power_density_w_m3
-    }
-    pub fn absorbed_power_per_depth_w_m(&self) -> f64 {
-        self.absorbed_power_per_depth_w_m
-    }
-}
+pub type AngularSpectrumLayerField = AngularSpectrumAbsorptionField;
 
 /// Retains only one selected layer, O(grid points) storage rather than the
 /// product of all layers and grid points. Each additional depth uses six
@@ -274,47 +258,7 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
     ) -> Result<AngularSpectrumLayerField, AngularSpectrumError> {
         let (electric, magnetic) =
             self.modal_field_for_beam(beam, depth_m, &mut cancelled)?;
-        let n = self.modes.len();
         let field = beam.synthesize(electric, magnetic, &mut cancelled)?;
         AngularSpectrumLayerField::from_field(field, self.heat_coefficient, &mut cancelled)
-    }
-}
-
-impl AngularSpectrumLayerField {
-    // Both one- and two-sided illumination form the complete coherent field
-    // before the same positive constitutive loss is applied in physical space.
-    pub(super) fn from_field(
-        field: AngularSpectrumField,
-        heat_coefficient: f64,
-        mut cancelled: impl FnMut() -> bool,
-    ) -> Result<Self, AngularSpectrumError> {
-        let n = field.electric_v_per_m().len();
-        let mut absorbed_power_density_w_m3 = Vec::with_capacity(n);
-        let mut sum = 0.0;
-        for (index, e) in field.electric_v_per_m().iter().enumerate() {
-            if index % 256 == 0 {
-                poll(&mut cancelled)?;
-            }
-            let heat = if heat_coefficient == 0.0 {
-                0.0
-            } else {
-                heat_coefficient * e.iter().map(|v| v.norm_sq()).sum::<f64>()
-            };
-            if !heat.is_finite() || heat < 0.0 {
-                return Err(bad("local dielectric heat is unrepresentable"));
-            }
-            absorbed_power_density_w_m3.push(heat);
-            sum += heat;
-        }
-        let absorbed_power_per_depth_w_m = sum * field.grid.spacing_m[0] * field.grid.spacing_m[1];
-        if !absorbed_power_per_depth_w_m.is_finite() {
-            return Err(bad("integrated dielectric heat is unrepresentable"));
-        }
-        poll(&mut cancelled)?;
-        Ok(AngularSpectrumLayerField {
-            field,
-            absorbed_power_density_w_m3,
-            absorbed_power_per_depth_w_m,
-        })
     }
 }

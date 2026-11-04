@@ -206,7 +206,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn g1_full_dispersion_retains_original_state_and_classical_limit() {
         for cv in [4.0, 8.0] {
