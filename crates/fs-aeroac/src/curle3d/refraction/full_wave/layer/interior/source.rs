@@ -24,6 +24,9 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::TAU;
 use fs_math::{c64::C64, det};
 
+mod force;
+pub use force::{FULL_WAVE_INTERIOR_SOURCE_FORCE_SCOPE, PreparedInteriorSourceFullWaveForce};
+
 /// Applicability of the original interior source and exterior observation.
 pub const FULL_WAVE_INTERIOR_SOURCE_SCOPE: &str = "Prescribed stationary compact 3D \
 volume source strictly inside one infinite planar homogeneous lossless fluid layer; \

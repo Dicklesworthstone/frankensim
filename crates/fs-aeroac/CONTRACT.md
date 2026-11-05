@@ -2268,6 +2268,45 @@ are also covered. A private phase regression retains a second-face distance
 smaller than one ulp of its leading component. Numerical diagnostics remain
 estimates plus analytic spectral-tail bounds, not interval certificates.
 
+### Physical forces originating inside the layer
+
+`interior::source::PreparedInteriorSourceFullWaveForce` radiates a prescribed
+original force ON the layer fluid into the incident exterior. The source lies
+strictly between the original faces and the observer strictly before the first
+face. Explicitly reversing the same original layer observes the other exterior;
+the force remains a Cartesian vector in its actual source fluid. The reciprocal
+interior Green kernel supplies every coherent return, critical branch, scaled
+numerator and resonance check without another boundary solve.
+
+For source depth s, the original pressure numerator satisfies
+`dA/ds = i rho_layer B`. Thus the normal source-force pressure uses `-WB`,
+while tangential source-force pressure uses `i q WA/rho_layer`, both divided
+by `2 pi`. Receiving derivatives use the actual exterior density and outward
+propagation sign. The physical receiver radial basis is opposite the swapped
+interior kernel's tangent. Both mixed velocity coefficients keep their distinct
+standing-wave factors. The Cartesian force/velocity transfer is the transpose
+of the swapped exterior-force/interior-receiver transfer; the pressure-force
+vector is the negative swapped monopole velocity. Pressure reciprocity alone
+does not justify copying either velocity vector or a force's source density.
+
+Seven channels share adaptive samples and derivative-aware all-evanescent tails
+at the actual exterior clearance plus source depth. The pressure bound retains
+`max(rho_exterior/rho_layer,1)` and the velocity bound retains both fluid
+densities. Numerical limits and cancellation remain explicit. Preparation
+caches a 4-by-3 Cartesian response; force evaluation and native harmonic output
+use fixed DD accumulation without allocation, quadrature or an extra delay.
+An invisible second face delegates the original reversed single-interface
+force owner, including its exact equal-speed and homogeneous limits.
+
+`tests/full_wave_layer_interior_source_force.rs` uses the independently refined
+35/50-digit reciprocal spectra for all seven channels, a rotated two-family
+force-image series into both original exteriors, Cartesian reciprocity,
+original source derivatives and exterior-fluid momentum. Exact reductions,
+axial pressure-null motion, native clocks, strict domains, finite forces, work
+exhaustion and cancellation are covered. Interior receivers, source loading,
+guided poles, absorption, flow and finite lateral edges remain outside this
+owner; quadrature estimates and tail bounds are not interval certificates.
+
 ### Coherent exterior source arrays observed inside the layer
 
 `interior::array::PreparedInteriorFullWaveCompactSourceObserver` composes the
