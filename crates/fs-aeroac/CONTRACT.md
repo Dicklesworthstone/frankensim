@@ -1567,3 +1567,38 @@ G1/G3 tests in `tests/refraction.rs` check Snell fields, normal energy partition
 equal-speed spherical pressure, reciprocal source/receiver exchange, independent
 stationary-phase Hessians, rotation/scaling, physical clock integration and
 explicit admission/work refusals.
+
+## Full-wave transmission of a physical spherical source
+
+`curle3d::refraction::full_wave::PreparedFullWaveMonopole` prepares the transmitted
+pressure and all three particle-velocity components of one prescribed volume
+source across the original stationary fluid plane. The outgoing Sommerfeld
+spectrum retains propagating, critical and evanescent components. Pressure and
+velocity derive from the same Green function and original densities/speeds;
+near-field velocity and reactive intensity are retained. Equal original sound
+speeds use the exact scaled spherical field, including receiving-density
+velocity scaling. Different but nearby speeds still use distinct spectra.
+The scalar identity and outgoing exp(-i omega t) branch follow Chew, Purdue
+ECE 604 lecture 35, equations (35.1.11)--(35.1.14):
+<https://engineering.purdue.edu/wcchew/ece604s20/Lecture%20Notes/Lect35.pdf>.
+
+Branch-regularizing substitutions split the spectrum at both original fluid
+wavenumbers. A bounded adaptive Gauss--Kronrod rule integrates pressure/radial/
+normal velocity together, with DD coherent reductions. Explicit evaluation and
+depth limits bound temporary storage and work; cancellation or exhaustion
+publishes no owner. Monotone phase and attenuation variation must be resolved
+before embedded error estimates can pass. An analytic omitted-tail bound is
+reported separately from estimated finite quadrature error. Neither includes
+geometry, Bessel or floating-point error; this is not an interval certificate.
+Diagnostics report maximum q*R against the existing Bessel owner's documented
+accuracy range. There is no implicit high-frequency fallback or spectral loss.
+
+The cached four-coefficient transfer applies original source-clock amplitudes
+without allocation or transcendental work and feeds existing coherent-field and
+harmonic-window observers. The model covers strictly positive source/receiver
+clearances on opposite sides of one infinite lossless plane. It does not model
+flow, absorption, finite surfaces, layers, force dipoles or source feedback.
+`tests/full_wave_refraction.rs` covers independent high-precision direct-spectrum
+references, important evanescent contributions, exact reactive equal-speed
+fields, reciprocity, pressure-gradient velocity, ray-tube asymptotics, geometry,
+refinement, original observation clocks and explicit work/cancellation refusals.

@@ -23,6 +23,9 @@
 //! not certified wave-error bounds. Full-wave material/FE owners remain
 //! necessary outside that envelope. No material or source is inferred.
 
+/// Spherical-wave transmission retaining near fields and evanescent components.
+pub mod full_wave;
+
 use super::CoherentCompactField;
 use super::statistics::{finite, invalid, nonfinite};
 use crate::AeroacError;
