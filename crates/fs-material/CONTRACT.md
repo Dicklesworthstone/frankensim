@@ -346,6 +346,9 @@ frozen-state updates, opposite impulses and one nonnegative dissipated-energy
 density. That heat is returned for a thermal owner to accept once; this update
 does not evolve temperature or silently discard/re-add kinetic energy.
 Deterministic `fs_math::det::expm1` resolves weak linear drag without cancellation.
+Strong linear and Gorter-Mellink updates retain their independently evaluated
+exponential or algebraic counterflow tail, reconstructing component velocities
+from conserved barycentric motion instead of subtracting nearly equal values.
 
 The full state implements neither ordinary Newtonian transport nor scalar
 acoustics. `first_sound_projection` explicitly retains the original state and
@@ -389,6 +392,33 @@ tortuosity, moving walls, or second viscosity. A spatial composition must
 separately control its time error. `tests/superfluid_viscosity.rs` checks
 Poiseuille resistance, component and wall impulses, heat balance, coflow versus
 superflow, semigroup/rotation, weak/stiff limits and finite-domain refusal.
+
+## Authored Kapitza solid/helium thermal interfaces
+
+`superfluid::kapitza::KapitzaInterface` evaluates the explicit surface law
+`Q = area * sigma * (T_from^n - T_to^n)`, with positive heat leaving the first
+side. Its immutable `KapitzaParameters` retain actual area, the source's
+power-law coefficient in W/(m² K^n), exponent `n >= 1`, and inclusive positive
+temperature bounds. A coefficient is never inferred from a material name.
+The common quartic relation and its temperature-dependent secant conductance
+are described in Bottura, *Cable Stability*, CERN-2014-005, equations (28)-(29),
+<https://cds.cern.ch/record/1974064/files/CERN-2014-005-p401.pdf>.
+
+Both sides must remain inside the declared source range. Tangents are positive,
+and the lower-endpoint tangent bounds them throughout that interval. Integer
+power differences are factored; general exponents use the original deterministic
+math owner with a corrected logarithm and `expm1`. Nearly equal temperatures
+therefore retain their small heat transfer without subtracting absolute powers.
+The evaluation allocates no memory and exposes source parameters, tangents and
+the validity range to implicit thermal consumers.
+
+`entropy_production_w_k` reports `Q*(1/T_to - 1/T_from) >= 0`. This entropy
+account is not a second heat source: a finite thermal composition must debit
+and credit the original heat once. The law has no interface storage and does
+not supply bulk helium conductivity, material calibration, boiling or lambda
+transition physics. `tests/superfluid_kapitza.rs` checks independent integer
+and fractional-power solutions, one-ULP temperature differences, sign and area
+covariance, monotonicity, entropy production and domain refusals (G0/G1/G3).
 
 ## Continuous gold leaching with oxygen uptake and stripping
 

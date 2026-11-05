@@ -25,6 +25,9 @@ use fs_math::det;
 /// Source-backed helium-II reference points with their original domain limits.
 pub mod helium;
 
+/// Nonlinear solid/helium heat transfer with authored area and source validity.
+pub mod kapitza;
+
 /// Normal-component drag against stationary walls at authored permeability.
 pub mod normal_wall;
 pub use normal_wall::{NormalViscousWall, NormalWallRelaxation, NormalWallStep};
@@ -528,9 +531,17 @@ impl TwoFluidState {
                 "linear-friction rate times duration is unrepresentable",
             ));
         }
-        let velocity_loss = -det::expm1(-rate_time);
+        // Resolve whichever side of the relaxation is small: a weak impulse
+        // needs expm1, while a strong decay needs its independent exp tail.
+        let (velocity_loss, attenuation) = if rate_time < 1.0 {
+            let loss = -det::expm1(-rate_time);
+            (loss, 1.0 - loss)
+        } else {
+            let tail = det::exp(-rate_time);
+            (1.0 - tail, tail)
+        };
         let energy_loss = -det::expm1(-2.0 * rate_time);
-        self.friction_step(velocity, velocity_loss, energy_loss)
+        self.friction_step(velocity, velocity_loss, attenuation, energy_loss)
     }
 
     /// Exact isotropic Gorter-Mellink `F_n = -A rho_n rho_s |w|² w`,
@@ -559,13 +570,14 @@ impl TwoFluidState {
             ));
         }
         let root = (1.0 + x).sqrt();
+        let attenuation = 1.0 / root;
         let velocity_loss = if x < 1.0 {
             x / (root * (root + 1.0))
         } else {
-            1.0 - 1.0 / root
+            1.0 - attenuation
         };
         let energy_loss = x / (1.0 + x);
-        self.friction_step(velocity, velocity_loss, energy_loss)
+        self.friction_step(velocity, velocity_loss, attenuation, energy_loss)
     }
 
     /// Exact homogeneous Hall–Vinen source for frozen, straight, aligned vortex
@@ -675,18 +687,32 @@ impl TwoFluidState {
         &self,
         velocity: TwoFluidVelocity,
         velocity_loss: f64,
+        attenuation: f64,
         energy_loss: f64,
     ) -> Result<MutualFrictionStep, MaterialError> {
         let relative = self.counterflow_velocity_m_s(velocity)?;
         let kinetic = self.kinetic_energy_density(velocity)?;
+        if relative == [0.0; 3] {
+            return Ok(unchanged(velocity));
+        }
         let impulse = finite_vector(relative.map(|w| -self.reduced_density * velocity_loss * w))?;
-        let next = TwoFluidVelocity {
-            normal_m_s: std::array::from_fn(|i| {
-                velocity.normal_m_s[i] - self.superfluid_fraction() * velocity_loss * relative[i]
-            }),
-            superfluid_m_s: std::array::from_fn(|i| {
-                velocity.superfluid_m_s[i] + self.normal_fraction * velocity_loss * relative[i]
-            }),
+        let next = if velocity_loss <= 0.5 {
+            TwoFluidVelocity {
+                normal_m_s: std::array::from_fn(|i| {
+                    velocity.normal_m_s[i]
+                        - self.superfluid_fraction() * velocity_loss * relative[i]
+                }),
+                superfluid_m_s: std::array::from_fn(|i| {
+                    velocity.superfluid_m_s[i] + self.normal_fraction * velocity_loss * relative[i]
+                }),
+            }
+        } else {
+            // Reconstruct from the surviving counterflow. Subtracting a nearly
+            // complete impulse from the initial velocity can erase this tail.
+            self.velocities_from_barycentric(
+                self.barycentric_velocity_m_s(velocity)?,
+                relative.map(|w| attenuation * w),
+            )?
         };
         validate_velocity(next)?;
         let dissipated_energy_j_m3 = kinetic.counterflow_j_m3 * energy_loss;

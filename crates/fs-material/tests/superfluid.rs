@@ -283,6 +283,135 @@ fn gorter_mellink_has_cubic_drag_and_exact_bounded_heat() {
 }
 
 #[test]
+fn strong_linear_friction_retains_the_exponential_tail_and_semigroup() {
+    let material = state();
+    // Exactly zero barycentric momentum: rho_n=1, rho_s=3. A subtraction
+    // from the initial velocities loses these representable decay tails.
+    let initial = TwoFluidVelocity {
+        normal_m_s: [3.0, 0.0, 0.0],
+        superfluid_m_s: [-1.0, 0.0, 0.0],
+    };
+    for exposure in [40.0_f64, 100.0, 300.0] {
+        let gamma = material.reduced_density_kg_m3() * exposure;
+        let whole = material.relax_linear_friction(initial, gamma, 1.0).unwrap();
+        let attenuation = (-exposure).exp();
+        assert!(whole.velocity.normal_m_s[0] > 0.0);
+        close(whole.velocity.normal_m_s[0], 3.0 * attenuation, attenuation);
+        close(whole.velocity.superfluid_m_s[0], -attenuation, attenuation);
+        close(
+            material.currents(whole.velocity).unwrap().mass_kg_m2_s[0],
+            0.0,
+            attenuation,
+        );
+        let first = material.relax_linear_friction(initial, gamma, 0.4).unwrap();
+        let split = material
+            .relax_linear_friction(first.velocity, gamma, 0.6)
+            .unwrap();
+        close_vector(
+            split.velocity.normal_m_s,
+            whole.velocity.normal_m_s,
+            attenuation,
+        );
+        close_vector(
+            split.velocity.superfluid_m_s,
+            whole.velocity.superfluid_m_s,
+            attenuation,
+        );
+        close(
+            first.dissipated_energy_j_m3 + split.dissipated_energy_j_m3,
+            whole.dissipated_energy_j_m3,
+            6.0,
+        );
+        close(
+            material
+                .kinetic_energy_density(whole.velocity)
+                .unwrap()
+                .total_j_m3
+                + whole.dissipated_energy_j_m3,
+            6.0,
+            6.0,
+        );
+        assert_eq!(
+            whole.superfluid_impulse_kg_m2_s,
+            whole.normal_impulse_kg_m2_s.map(|v| -v)
+        );
+    }
+    // With no relative motion, even a nonbinary mass split cannot change
+    // either component or produce heat merely through a reconstruction.
+    let mut p = properties();
+    p.superfluid_fraction = 0.37;
+    let coflow = TwoFluidVelocity {
+        normal_m_s: [0.1, -0.7, 1.3],
+        superfluid_m_s: [0.1, -0.7, 1.3],
+    };
+    let unchanged = TwoFluidState::try_new(p)
+        .unwrap()
+        .relax_linear_friction(coflow, 100.0, 1.0)
+        .unwrap();
+    assert_eq!(unchanged.velocity, coflow);
+    assert_eq!(unchanged.dissipated_energy_j_m3, 0.0);
+}
+
+#[test]
+fn strong_gorter_mellink_retains_the_algebraic_tail_and_semigroup() {
+    let material = state();
+    let initial = TwoFluidVelocity {
+        normal_m_s: [3.0, 0.0, 0.0],
+        superfluid_m_s: [-1.0, 0.0, 0.0],
+    };
+    for exposure in [1e8_f64, 1e40, 1e160] {
+        // x = 2*A*rho*|w0|^2*dt = 128*A for this independently fixed state.
+        let coefficient = exposure / 128.0;
+        let whole = material
+            .relax_gorter_mellink(initial, coefficient, 1.0)
+            .unwrap();
+        let attenuation = 1.0 / (1.0 + exposure).sqrt();
+        assert!(whole.velocity.normal_m_s[0] > 0.0);
+        close(whole.velocity.normal_m_s[0], 3.0 * attenuation, attenuation);
+        close(whole.velocity.superfluid_m_s[0], -attenuation, attenuation);
+        close(
+            material.currents(whole.velocity).unwrap().mass_kg_m2_s[0],
+            0.0,
+            attenuation,
+        );
+        let first = material
+            .relax_gorter_mellink(initial, coefficient, 0.4)
+            .unwrap();
+        let split = material
+            .relax_gorter_mellink(first.velocity, coefficient, 0.6)
+            .unwrap();
+        close_vector(
+            split.velocity.normal_m_s,
+            whole.velocity.normal_m_s,
+            attenuation,
+        );
+        close_vector(
+            split.velocity.superfluid_m_s,
+            whole.velocity.superfluid_m_s,
+            attenuation,
+        );
+        close(
+            first.dissipated_energy_j_m3 + split.dissipated_energy_j_m3,
+            whole.dissipated_energy_j_m3,
+            6.0,
+        );
+        close(
+            material
+                .kinetic_energy_density(whole.velocity)
+                .unwrap()
+                .total_j_m3
+                + whole.dissipated_energy_j_m3,
+            6.0,
+            6.0,
+        );
+        assert_eq!(
+            whole.superfluid_impulse_kg_m2_s,
+            whole.normal_impulse_kg_m2_s.map(|v| -v)
+        );
+    }
+}
+
+#[test]
 fn scalar_acoustics_requires_an_explicit_uncoupled_projection() {
     let material = state();
     let first = material.first_sound_projection().unwrap();
