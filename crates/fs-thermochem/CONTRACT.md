@@ -241,6 +241,26 @@ The immutable accessors let coupled process owners verify specific transfer
 models, including the neutral monovalent-counterion/gold-cyanide pair, while
 retaining the original reaction conservation certificate.
 
+## Sulfite reagents and the free-cyanide SO2/air endpoint
+
+Seven `MineralReaction` equations retain crystalline sodium sulfite/metabisulfite
+preparation, HSO3-/SO3(2-) dissociation, productive free-CN oxidation and separate
+bisulfite/sulfite side oxidation. Four matched NBS packs supply 15 literal claims
+at 298.15 K and 1 bar. Negative conventional ionic entropy stays conventional;
+missing metabisulfite Gibbs energy/entropy cannot be replaced by its enthalpy.
+The existing acid/base owner admits the explicitly limited HSO3-/SO3(2-) family.
+
+`cyanide_treatment sulfite` resolves actual source packs and completes finite
+preparation and oxidation stages before printing accepted output. Productive
+and side reactions consume the same original dissolved oxygen and reagent
+stocks. Sodium, sulfate, water and proton equivalents stay in the inventory;
+nitrogen stays in cyanide/cyanate. Source mass, enthalpy and source identities
+are reported. Exact conservation, source facts/refusals, independently summed
+heats, staged demand and shared-pH checks are G0/G1/G3 evidence in
+`xtask/tests/mining_sulfite_sources.rs`. No gas-transfer, copper-catalyst kinetics,
+WAD-CN conversion, automatic pH, commercial dose or treatment-completion claim
+is made. See `data/matdb/seed-v1/MINING_SULFITE_TREATMENT.md`.
+
 ## Finite peroxide treatment and the ammonia acid/base family
 
 `MineralReaction` adds free-CN oxidation by aqueous peroxide, cyanate hydrolysis

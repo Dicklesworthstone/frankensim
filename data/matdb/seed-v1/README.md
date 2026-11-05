@@ -6,6 +6,11 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [sulfite-treatment guide](MINING_SULFITE_TREATMENT.md) adds four matched
+NBS source profiles and seven conserved endpoints for reagent preparation,
+free-cyanide SO2/air treatment, competing oxygen demand and sulfite protonation.
+The source-pack example retains finite inventories and standard reaction heat.
+
 The [scorodite reference guide](MINING_SCORODITE_REFERENCE.md) supplies a
 separate, consistent NMK2014/CODATA Gibbs dataset. The finite salt-partition
 owner couples both Fe and As inventories to all four arsenate states and

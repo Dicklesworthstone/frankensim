@@ -94,6 +94,20 @@
 //! Gas and dissolved oxygen are distinct declared endpoints. These equations
 //! supply no catalyst kinetics, metal-complex destruction, total/WAD cyanide
 //! conversion, nitrogen removal, oxygen-transfer rate or plant treatment claim.
+//! Sulfite/bisulfite cyanide oxidation retains the SO2/air endpoint of SGS
+//! Minerals Services T3 SGS 018 (May 2005), equations 13-14:
+//! <https://www.sgs.com/pt/-/media/sgscorp/documents/corporate/brochures/sgs-min-wa017-cyanide-destruction-en-11.cdn.pt.pdf>.
+//! The equations here select free CN-, free sulfate and finite dissolved O2,
+//! rather than treating an analytical WAD-cyanide measurement as one species.
+//! Metabisulfite preparation retains water and both sodium counterions;
+//! bisulfite dissociation explicitly separates the protonated reagent from
+//! sulfite. Competing sulfite oxidation consumes the same oxygen stock without
+//! destroying cyanide. These net balances supply no catalyst kinetics, air
+//! transfer, metal-complex conversion, pH control or treatment completion.
+//! Source references are NBS Table 14:S and Table 99:Na, with 1989 errata:
+//! <https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv>.
+//! Crystalline Na2S2O5 has no tabulated formation Gibbs energy or entropy;
+//! its known formation enthalpy must not be promoted into equilibrium data.
 //! Magnesite calcination and magnetite oxidation retain the crystalline/gas
 //! endpoints of JANAF C-079, Mg-008, C-095, Fe-032, Fe-030 and O-029:
 //! <https://janaf.nist.gov/>. Their standard reaction heats do not determine
@@ -238,6 +252,27 @@ pub enum MineralReaction {
     /// CN-(aq) + H2O2(aq) -> OCN-(aq, cyanate) + H2O(l).
     /// Free cyanide only; bound metal-cyanide ligands are different inventories.
     CyanidePeroxideOxidation,
+    /// Na2S2O5(s) + H2O(l) -> 2 Na+(aq) + 2 HSO3-(aq).
+    /// Explicit hydrated dissolution extent, not a solubility or completion claim.
+    SodiumMetabisulfiteDissolution,
+    /// Na2SO3(s) -> 2 Na+(aq) + SO3(2-)(aq).
+    /// The crystalline anhydrous reagent is distinct from its dissolved ions.
+    SodiumSulfiteDissolution,
+    /// HSO3-(aq) -> H+(aq) + SO3(2-)(aq).
+    /// Sulfite protonation remains separate from sulfur oxidation.
+    HydrogenSulfiteDissociation,
+    /// CN-(aq) + HSO3-(aq) + O2(aq) -> OCN-(aq) + SO4(2-)(aq) + H+(aq).
+    /// Free-cyanide SO2/air endpoint; finite dissolved oxygen is an explicit input.
+    CyanideBisulfiteOxidation,
+    /// CN-(aq) + SO3(2-)(aq) + O2(aq) -> OCN-(aq) + SO4(2-)(aq).
+    /// Unprotonated sulfite endpoint, with no implied acid-generation equivalent.
+    CyanideSulfiteOxidation,
+    /// 2 SO3(2-)(aq) + O2(aq) -> 2 SO4(2-)(aq).
+    /// Competing reagent/oxygen demand with no cyanide destruction.
+    SulfiteOxygenOxidation,
+    /// 2 HSO3-(aq) + O2(aq) -> 2 SO4(2-)(aq) + 2 H+(aq).
+    /// Protonated side-oxidation endpoint, consuming the original finite oxygen.
+    BisulfiteOxygenOxidation,
     /// OCN-(aq) + 2 H2O(l) -> NH4+(aq) + CO3(2-)(aq).
     /// Declared hydrolysis endpoint; acid/base speciation remains separate.
     CyanateHydrolysisAmmoniumCarbonate,
@@ -625,6 +660,76 @@ impl MineralReaction {
                     ("H2O2(aq)", &[0, 0, 2, 2], 0, -1),
                     ("OCN[-](aq)", &[1, 1, 0, 1], -1, 1),
                     ("H2O(l)", &[0, 0, 2, 1], 0, 1),
+                ],
+            ),
+            Self::SodiumMetabisulfiteDissolution => (
+                "sodium-metabisulfite-dissolution",
+                &["Na", "S", "O", "H"],
+                &[
+                    ("Na2S2O5(s)", &[2, 2, 5, 0], 0, -1),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, -1),
+                    ("Na[+](aq)", &[1, 0, 0, 0], 1, 2),
+                    ("HSO3[-](aq)", &[0, 1, 3, 1], -1, 2),
+                ],
+            ),
+            Self::SodiumSulfiteDissolution => (
+                "sodium-sulfite-dissolution",
+                &["Na", "S", "O"],
+                &[
+                    ("Na2SO3(s)", &[2, 1, 3], 0, -1),
+                    ("Na[+](aq)", &[1, 0, 0], 1, 2),
+                    ("SO3[2-](aq)", &[0, 1, 3], -2, 1),
+                ],
+            ),
+            Self::HydrogenSulfiteDissociation => (
+                "hydrogen-sulfite-dissociation",
+                &["H", "S", "O"],
+                &[
+                    ("HSO3[-](aq)", &[1, 1, 3], -1, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("SO3[2-](aq)", &[0, 1, 3], -2, 1),
+                ],
+            ),
+            Self::CyanideBisulfiteOxidation => (
+                "cyanide-bisulfite-oxidation",
+                &["C", "N", "H", "S", "O"],
+                &[
+                    ("CN[-](aq)", &[1, 1, 0, 0, 0], -1, -1),
+                    ("HSO3[-](aq)", &[0, 0, 1, 1, 3], -1, -1),
+                    ("O2(aq)", &[0, 0, 0, 0, 2], 0, -1),
+                    ("OCN[-](aq)", &[1, 1, 0, 0, 1], -1, 1),
+                    ("SO4[2-](aq)", &[0, 0, 0, 1, 4], -2, 1),
+                    ("H+(aq)", &[0, 0, 1, 0, 0], 1, 1),
+                ],
+            ),
+            Self::CyanideSulfiteOxidation => (
+                "cyanide-sulfite-oxidation",
+                &["C", "N", "S", "O"],
+                &[
+                    ("CN[-](aq)", &[1, 1, 0, 0], -1, -1),
+                    ("SO3[2-](aq)", &[0, 0, 1, 3], -2, -1),
+                    ("O2(aq)", &[0, 0, 0, 2], 0, -1),
+                    ("OCN[-](aq)", &[1, 1, 0, 1], -1, 1),
+                    ("SO4[2-](aq)", &[0, 0, 1, 4], -2, 1),
+                ],
+            ),
+            Self::SulfiteOxygenOxidation => (
+                "sulfite-oxygen-oxidation",
+                &["S", "O"],
+                &[
+                    ("SO3[2-](aq)", &[1, 3], -2, -2),
+                    ("O2(aq)", &[0, 2], 0, -1),
+                    ("SO4[2-](aq)", &[1, 4], -2, 2),
+                ],
+            ),
+            Self::BisulfiteOxygenOxidation => (
+                "bisulfite-oxygen-oxidation",
+                &["H", "S", "O"],
+                &[
+                    ("HSO3[-](aq)", &[1, 1, 3], -1, -2),
+                    ("O2(aq)", &[0, 0, 2], 0, -1),
+                    ("SO4[2-](aq)", &[0, 1, 4], -2, 2),
+                    ("H+(aq)", &[1, 0, 0], 1, 2),
                 ],
             ),
             Self::CyanateHydrolysisAmmoniumCarbonate => (

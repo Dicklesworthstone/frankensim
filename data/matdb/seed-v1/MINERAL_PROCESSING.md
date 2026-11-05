@@ -22,6 +22,11 @@ Peroxide oxidation, cyanate hydrolysis and ammonia speciation now have matched
 material references and finite-inventory and coupled-pH examples; see
 [cyanide treatment](MINING_CYANIDE_TREATMENT.md).
 
+The [sulfite-treatment guide](MINING_SULFITE_TREATMENT.md) adds matched NBS
+bisulfite/sulfite and crystalline sodium-reagent sources. Its runnable SO2/air
+endpoint keeps reagent preparation, finite dissolved oxygen, productive and
+side oxidation, sulfate, sodium and proton equivalents in separate accounts.
+
 Native-silver cyanidation and shared-zinc gold/silver cementation now have
 matched material references, finite-inventory reactions and a runnable
 source-pack consumer; see [precious-metal recovery](MINING_PRECIOUS_METALS.md).
