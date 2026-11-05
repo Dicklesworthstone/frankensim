@@ -353,6 +353,13 @@ bindings; it runs no solves and admits no scenarios itself.
   with the admitted range, requiring one selected claim throughout. Exact-only
   curve samples cannot cover a nondegenerate range, even with a pin. A conflict
   confined to interior temperatures still refuses and names the candidates.
+  A triangulated interface source with exactly one varying query coordinate
+  reuses matdb's continuous `query_line_typed` proof across its declared cells;
+  fixed-pressure temperature ranges and fixed-temperature pressure bands are
+  admitted without filling holes or changing claim selection. The complete
+  manufacturing band is checked before nominal endpoint values are returned.
+  Genuine multi-coordinate surface boxes still require an unavailable full-box
+  support proof and refuse; a diagonal or nominal line cannot cover them.
   Every value arrives as matdb
   `Evidence` + `PropertyUsageReceipt`; receipts are retained
   (`RetainedReceipt`: receipt, canonical bytes, content hash, context) for

@@ -7,7 +7,7 @@
 //! Categorical finish, fluid and pattern declarations remain card/state
 //! provenance, not numeric surrogates for an unprovided constitutive law.
 
-use fs_matdb::{ClaimSelection, ClaimSet, EnvelopeAnswer, PropertySupportError, QueryPoint};
+use fs_matdb::{ClaimSelection, ClaimSet, EnvelopeAnswer, PropertySupportError, PropertyValue, QueryPoint};
 use fs_qty::{Dims, QtyAny};
 use crate::{InterfaceState, ProjectError};
 
@@ -68,18 +68,49 @@ pub fn query_point(state: &InterfaceState, temperature_axis: &str, temperature: 
     Ok(point)
 }
 
+// A one-coordinate interface range has the existing source-line continuity
+// proof. Count every query coordinate: a manufacturing band must never become
+// a nominal line merely because the source values happen to be constant there.
+fn supported_envelope(
+    claims: &ClaimSet, property: &str, lower: &QueryPoint, upper: &QueryPoint,
+    selection: ClaimSelection,
+) -> Result<EnvelopeAnswer, PropertySupportError> {
+    let mut varying = lower.axes().iter().filter_map(|(axis, value)| {
+        upper.axes().get(axis)
+            .filter(|upper| value.to_bits() != upper.to_bits()).map(|_| axis)
+    });
+    let (Some(axis), None) = (varying.next(), varying.next()) else {
+        return claims.query_envelope(property, lower, upper, selection);
+    };
+    // Resolve through the original dimension-only owner first. Taking a key
+    // directly from the card would bypass its quantity and context refusals.
+    let point = claims.query_envelope(property, lower, lower, selection)?;
+    let claim = claims.claim(point.lower.receipt.selected).ok_or_else(||
+        PropertySupportError::InvalidEnvelope { reason: "selected interface claim is absent".into() })?;
+    if !matches!(claim.value, PropertyValue::Surface2D { .. }) {
+        return claims.query_envelope(property, lower, upper, selection);
+    }
+    let line = claims.query_line_typed(&claim.key, axis, lower, upper, selection)?;
+    let mut knots = line.knots.into_iter();
+    let lower = knots.next().expect("an admitted source line includes its lower endpoint").1;
+    let upper = knots.next_back().map_or_else(|| lower.clone(), |(_, answer)| answer);
+    Ok(EnvelopeAnswer { lower, upper })
+}
+
 /// Admit the WHOLE temperature x manufacturing-band box through matdb's
 /// continuous-support owner, then return the NOMINAL-state temperature ends.
 /// Checking only two diagonal samples would miss an interior source conflict.
 /// Returning the manufacturing corners as nominal values would incorrectly
 /// turn pressure/thickness dependence into temperature dependence.
+/// A single varying coordinate uses the source-line support proof; genuine
+/// multi-coordinate surface boxes retain matdb's existing refusal.
 pub fn query_envelope(
     claims: &ClaimSet, property: &str, state: &InterfaceState,
     temperature_axis: &str, low_k: f64, high_k: f64, selection: ClaimSelection,
 ) -> Result<EnvelopeAnswer, PropertySupportError> {
     let point = |t, at| query_point(state, temperature_axis, t, at)
         .map_err(|e| PropertySupportError::InvalidEnvelope { reason: e.detail });
-    let support = claims.query_envelope(property,
+    let support = supported_envelope(claims, property,
         &point(low_k, StatePoint::Lower)?, &point(high_k, StatePoint::Upper)?, selection)?;
     // Legacy axis names carry no QueryPoint descriptor. Check the selected
     // source coordinate dimensions explicitly before interpreting them as
@@ -103,7 +134,7 @@ pub fn query_envelope(
             });
         }
     }
-    let nominal = claims.query_envelope(property,
+    let nominal = supported_envelope(claims, property,
         &point(low_k, StatePoint::Nominal)?, &point(high_k, StatePoint::Nominal)?, selection)?;
     if support.lower.receipt.selected != nominal.lower.receipt.selected {
         return Err(PropertySupportError::InvalidEnvelope {
