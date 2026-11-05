@@ -40,7 +40,7 @@
 //! remain responsible for cancellation and accepted-state publication.
 
 use crate::cohesive::mixed_mode::MixedModeParameters;
-use crate::cohesive::{BilinearCohesive, CohesiveError, CohesivePoint};
+use crate::cohesive::{BilinearCohesive, CohesiveError, CohesivePoint, CohesiveStep};
 use crate::elastic::IsotropicElastic;
 use crate::tensor::contract;
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
@@ -55,6 +55,9 @@ pub mod temperature;
 
 /// Bounded tensile onset discovery and elastic-to-crack-band handoff.
 pub mod initiation;
+
+/// Exact path-mean stress and its native derivative for work-conjugate dynamics.
+pub mod path;
 
 /// Explicit pure-mode strengths and fracture work. No values are inferred from
 /// a material name, hardness, flexural modulus of rupture or yield stress.
@@ -286,14 +289,35 @@ impl BrittleCrackBand {
         strain: &Voigt,
         state: &BrittleState<'a>,
     ) -> Result<BrittleStep<'a>, BrittleError> {
+        let jump = self.jump_for_trial(strain, state)?;
+        let step = state.point.trial(jump, self.area_energy_tolerance)?;
+        self.finish_trial(strain, state, step)
+    }
+
+    // Shared admission keeps endpoint and path-mean operations on exactly the
+    // same original owner, geometry and Frobenius strain domain.
+    fn jump_for_trial(
+        &self,
+        strain: &Voigt,
+        state: &BrittleState<'_>,
+    ) -> Result<[f64; 3], BrittleError> {
         if !core::ptr::eq(state.owner, self) || !core::ptr::eq(state.point.law(), &self.cohesive) {
             return Err(BrittleError::StateMismatch);
         }
         self.check_strain(&state.strain)?;
         self.check_strain(strain)?;
+        Ok(self.modes.map(|mode| self.settings.band_width_m*contract(&mode, strain)))
+    }
+
+    // Project one already accepted native trial. Path operations reuse this
+    // endpoint assembly instead of repeating constitutive evolution.
+    fn finish_trial<'a>(
+        &'a self,
+        strain: &Voigt,
+        state: &BrittleState<'a>,
+        step: CohesiveStep<'a>,
+    ) -> Result<BrittleStep<'a>, BrittleError> {
         let width = self.settings.band_width_m;
-        let jump = self.modes.map(|mode| width*contract(&mode, strain));
-        let step = state.point.trial(jump, self.area_energy_tolerance)?;
         let mut stress = self.parallel_stress(strain);
         for (mode, traction) in self.modes.iter().zip(step.traction_pa) {
             for i in 0..6 { stress[i] += mode[i]*traction; }

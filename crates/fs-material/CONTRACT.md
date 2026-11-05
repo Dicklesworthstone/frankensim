@@ -1,5 +1,29 @@
 # fs-material — CONTRACT
 
+## Exact brittle path-mean stress and derivative
+
+`brittle::path` projects the existing analytic cohesive path mean into the
+original tensor-strain crack band, including its positive in-plane remainder.
+`trial_with_mean_stress` performs one native cohesive evolution and returns
+the unchanged endpoint plus the exact affine-path stress average.
+The average's double-contracted work must match original material work within
+the declared volumetric tolerance. Rupture overshoot, unloading, normal
+reclosure and nonproportional first initiation retain their original histories.
+
+`trial_with_mean_stress_tangent` additionally projects the native derivative
+with respect to endpoint strain: half the parallel elastic stiffness plus the
+cohesive mean derivative and original tensor-shear column weights. It retains
+first-onset BK sensitivities and returns None at the native unresolved kinks;
+the endpoint tangent is not substituted. Force-only calls avoid derivative work.
+Both operations remain fixed-size and allocation-free and share original
+owner, Frobenius-strain and energy admission with the ordinary endpoint trial.
+
+Eight G0/G1/G3 tests in `tests/brittle_path.rs` cover exact elasticity,
+fracture work through overshoot, unload/reclosure, mixed-mode derivative finite
+differences, rotation, native endpoint equality and transactional refusals.
+This provides work-conjugate forces for time-integration consumers; it does not
+supply mass, advance time, add damping or claim an FE time-stepping method.
+
 ## Gent finite-chain elasticity through native material consumers
 
 `hyper::HyperelasticModel::Gent` retains the explicitly supplied shear
