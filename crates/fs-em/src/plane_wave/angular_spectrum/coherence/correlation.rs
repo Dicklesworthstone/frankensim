@@ -26,14 +26,16 @@ pub struct AngularSpectrumObservation {
     pub position_m: [f64; 2],
 }
 
-/// Query limits, checked before any modal reconstruction. Exactly 2*M*N modes
-/// are reconstructed for M source factors and N original Fourier modes. No FFT,
-/// material solve, heap allocation or dense spatial covariance is needed.
+/// Query limits, checked before any modal reconstruction. Two-point queries
+/// reconstruct exactly 2*M*N modes for M source factors and N original Fourier
+/// modes. Prepared multi-arm queries reconstruct A*M*N modes for A arms and
+/// retain their factor/arm amplitudes. Neither path runs FFTs or material solves.
 ///
 /// Numerical workspace counts the returned tensors, two synthesized vector
 /// fields and one mode's E/H buffers. Scalar compiler temporaries, borrowed
 /// beam/factor storage and previously retained results are excluded. Both
-/// queries use the same conservative bound, including the smaller direct sum.
+/// two-point queries use the same conservative bound, including the smaller
+/// direct sum. Interferometer preparation adds its retained amplitude storage.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumCorrelationLimits {
     pub maximum_mode_evaluations: usize,
@@ -134,7 +136,147 @@ pub struct AngularSpectrumInterferenceStatistics {
     pub visibility: Option<f64>,
 }
 
+/// One explicitly analyzed arm of a monochromatic field combiner.
+///
+/// The dimensionless analyzer acts as `w† E`, including conjugation. It may
+/// include an authored transmission gain, but no splitter, propagation path
+/// or power normalization is inferred from the observation coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AngularSpectrumInterferenceArm {
+    pub observation: AngularSpectrumObservation,
+    pub analyzer: [C64; 3],
+}
+
+/// Prepared multi-arm interference of the original independent source factors.
+///
+/// Fields are reconstructed once at preparation. Each subsequent reading takes
+/// O(factors * arms) complex operations and no FFT, material solve, or allocation.
+/// Original DD amplitudes are retained so dark ports do not subtract rounded
+/// arm intensities. Reprepare after changing a source, observation or analyzer.
+pub struct PreparedAngularSpectrumInterferometer {
+    arm_count: usize,
+    amplitudes: Vec<ComplexDd>,
+}
+
+impl PreparedAngularSpectrumInterferometer {
+    pub fn arm_count(&self) -> usize {
+        self.arm_count
+    }
+
+    pub fn factor_count(&self) -> usize {
+        self.amplitudes.len() / self.arm_count
+    }
+
+    /// Evaluate `sum_m |sum_a gain_a * w_a† E_am|² / 2` in V²/m².
+    ///
+    /// Gains are explicit finite complex amplitude multipliers, applied without
+    /// conjugation. For a phase scan supply `exp(+i phi_a)`; physical splitters
+    /// must supply their own gains. Independent factors add only AFTER each
+    /// nonnegative square. This is electric mean square, not received watts or
+    /// detector back-action. All arms are checked even for a dark source bank.
+    pub fn electric_mean_square_v2_m2(
+        &self,
+        gains: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        if gains.len() != self.arm_count || gains.iter().any(|&gain| !finite(gain)) {
+            return Err(bad(
+                "interferometer requires one finite complex gain per arm",
+            ));
+        }
+        let mut power = Dd::ZERO;
+        for factor in self.amplitudes.chunks_exact(self.arm_count) {
+            poll(&mut cancelled)?;
+            let mut field = ZERO_COMPLEX;
+            for (index, (&amplitude, &gain)) in factor.iter().zip(gains).enumerate() {
+                if index % 32 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                field = plus(field, multiply(lift(gain), amplitude));
+            }
+            power = power + multiply(half(field), conjugate(field))[0];
+        }
+        let value = nonnegative(power)?;
+        poll(&mut cancelled)?;
+        Ok(value)
+    }
+}
+
 impl AngularSpectrumCoherence<'_, '_, '_> {
+    /// Exact mode reconstructions for a prepared combiner with 1..=4096 arms.
+    pub fn interferometer_mode_evaluations(
+        &self,
+        arm_count: usize,
+    ) -> Result<usize, AngularSpectrumError> {
+        admit_arm_count(arm_count)?;
+        self.factors
+            .len()
+            .checked_mul(self.anchor.modes.len())
+            .and_then(|work| work.checked_mul(arm_count))
+            .ok_or_else(|| bad("multi-arm interference work overflow"))
+    }
+
+    /// Retained factor/arm amplitudes plus the original conservative direct
+    /// reconstruction workspace. Borrowed arms, gains and sources are excluded.
+    pub fn interferometer_workspace_bytes(
+        &self,
+        arm_count: usize,
+    ) -> Result<usize, AngularSpectrumError> {
+        admit_arm_count(arm_count)?;
+        self.factors
+            .len()
+            .checked_mul(arm_count)
+            .and_then(|count| count.checked_mul(core::mem::size_of::<ComplexDd>()))
+            .and_then(|bytes| bytes.checked_add(self.correlation_workspace_bytes()))
+            .ok_or_else(|| bad("multi-arm interference workspace overflow"))
+    }
+
+    /// Prepare original Maxwell fields for an explicitly authored field combiner.
+    ///
+    /// The supplied limits bound all mode reconstructions and retained storage
+    /// before allocation. A single arm is a point analyzer; multiple arms keep
+    /// every coherent cross term within each original source factor. There is
+    /// no dense arm covariance, source-rank reduction or intensity-only sum.
+    pub fn prepare_interferometer(
+        &self,
+        arms: &[AngularSpectrumInterferenceArm],
+        limits: AngularSpectrumCorrelationLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedAngularSpectrumInterferometer, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        let work = self.interferometer_mode_evaluations(arms.len())?;
+        let workspace = self.interferometer_workspace_bytes(arms.len())?;
+        if work > limits.maximum_mode_evaluations || workspace > limits.maximum_workspace_bytes {
+            return Err(bad(
+                "multi-arm interference exceeds its work or workspace budget",
+            ));
+        }
+        for arm in arms {
+            poll(&mut cancelled)?;
+            admit_observation(arm.observation)?;
+            admit_analyzers([arm.analyzer; 2])?;
+        }
+        let count = self.factors.len() * arms.len();
+        let mut amplitudes = Vec::new();
+        amplitudes
+            .try_reserve_exact(count)
+            .map_err(|_| bad("interferometer amplitude allocation failed"))?;
+        for factor in self.factors {
+            for arm in arms {
+                let [field] = synthesize(factor, [arm.observation], &mut cancelled)?;
+                let amplitude = analyze(field, arm.analyzer);
+                rounded(amplitude)?;
+                amplitudes.push(amplitude);
+            }
+        }
+        poll(&mut cancelled)?;
+        Ok(PreparedAngularSpectrumInterferometer {
+            arm_count: arms.len(),
+            amplitudes,
+        })
+    }
+
     /// Exact number of mode reconstructions admitted by either two-point query.
     pub fn correlation_mode_evaluations(&self) -> Result<usize, AngularSpectrumError> {
         self.factors
@@ -169,7 +311,7 @@ impl AngularSpectrumCoherence<'_, '_, '_> {
             cross: ZERO_TENSOR,
         };
         for factor in self.factors {
-            let [ea, eb] = synthesize_pair(factor, [a, b], &mut cancelled)?;
+            let [ea, eb] = synthesize(factor, [a, b], &mut cancelled)?;
             accumulate_tensor(&mut result.at_a, ea, ea);
             accumulate_tensor(&mut result.at_b, eb, eb);
             accumulate_tensor(&mut result.cross, ea, eb);
@@ -212,7 +354,7 @@ impl AngularSpectrumCoherence<'_, '_, '_> {
         let phase = [cosine, sine];
         let mut sum = Dd::ZERO;
         for factor in self.factors {
-            let [ea, eb] = synthesize_pair(factor, [a, b], &mut cancelled)?;
+            let [ea, eb] = synthesize(factor, [a, b], &mut cancelled)?;
             let combined = plus(
                 analyze(ea, analyzers[0]),
                 multiply(phase, analyze(eb, analyzers[1])),
@@ -233,14 +375,7 @@ impl AngularSpectrumCoherence<'_, '_, '_> {
         poll(cancelled)?;
         // Darkness does not make invalid geometry or work limits admissible.
         for observation in observations {
-            if !observation.distance_from_face_m.is_finite()
-                || observation.distance_from_face_m < 0.0
-                || observation.position_m.iter().any(|v| !v.is_finite())
-            {
-                return Err(bad(
-                    "coherence observations need finite coordinates and nonnegative depth",
-                ));
-            }
+            admit_observation(observation)?;
         }
         if self.correlation_mode_evaluations()? > limits.maximum_mode_evaluations
             || self.correlation_workspace_bytes() > limits.maximum_workspace_bytes
@@ -253,13 +388,32 @@ impl AngularSpectrumCoherence<'_, '_, '_> {
     }
 }
 
-fn synthesize_pair(
+fn admit_arm_count(count: usize) -> Result<(), AngularSpectrumError> {
+    if count == 0 || count > 4096 {
+        return Err(bad("interferometer requires one to 4096 observation arms"));
+    }
+    Ok(())
+}
+
+fn admit_observation(observation: AngularSpectrumObservation) -> Result<(), AngularSpectrumError> {
+    if !observation.distance_from_face_m.is_finite()
+        || observation.distance_from_face_m < 0.0
+        || observation.position_m.iter().any(|v| !v.is_finite())
+    {
+        return Err(bad(
+            "coherence observations need finite coordinates and nonnegative depth",
+        ));
+    }
+    Ok(())
+}
+
+fn synthesize<const N: usize>(
     factor: &PlanarAngularSpectrum<'_, '_>,
-    observations: [AngularSpectrumObservation; 2],
+    observations: [AngularSpectrumObservation; N],
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<[Electric; 2], AngularSpectrumError> {
+) -> Result<[Electric; N], AngularSpectrumError> {
     poll(cancelled)?;
-    let mut sums = [[ZERO_COMPLEX; 3]; 2];
+    let mut sums = [[ZERO_COMPLEX; 3]; N];
     for (index, mode) in factor.modes.iter().enumerate() {
         if index % 32 == 0 {
             poll(cancelled)?;

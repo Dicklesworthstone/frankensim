@@ -4217,6 +4217,29 @@ qualify a measured substrate or infer thermal evolution.
 
 ### Two-point electric coherence and explicitly analyzed interference
 
+`AngularSpectrumCoherence::prepare_interferometer` extends those same Maxwell
+observations to 1–4096 explicitly analyzed arms. Preparation retains the DD
+complex analyzer amplitude for every original factor/arm pair. Readings apply
+the supplied complex amplitude gains and sum each factor's arm fields before
+its positive cycle-averaged square. All coherent arm cross terms survive;
+independent source factors still add only as second moments. No splitter gain,
+free-space path, energy normalization or source statistics are inferred.
+
+For F factors, A arms and N Fourier modes, preparation admits F*A*N mode
+reconstructions and retained O(F*A) storage before allocation. Repeated gain or
+phase scans cost O(F*A), without allocation, FFT, material solves or new field
+reconstruction. Limits include the retained amplitudes and the existing
+conservative reconstruction workspace. Every arm is validated for dark banks,
+and cancellation checks bound arm/mode work and precede publication. This is
+monochromatic electric mean square, not detector watts or back-action; changed
+sources, observation geometry or analyzers require preparation again.
+
+Focused G1/G3 tests compare three-arm fringe scans with the analytic geometric
+sum for independent uniform and oblique waves, verify one-/two-arm parity,
+retain a 2^-59 dark-port residual and a common gain-phase invariance. G0/G4
+checks exercise exact work/storage boundaries, invalid dark-source arms and
+gains, cancellation and source reuse.
+
 The original monochromatic source-factor owner now exposes
 `AngularSpectrumCoherence::mutual_coherence` between two exterior observations.
 Each observation supplies a side, a finite nonnegative distance from that side's

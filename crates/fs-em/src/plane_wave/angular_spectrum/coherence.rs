@@ -13,8 +13,9 @@ use fs_math::dd::Dd;
 
 mod correlation;
 pub use correlation::{
-    AngularSpectrumCorrelationLimits, AngularSpectrumInterferenceStatistics,
-    AngularSpectrumMutualCoherence, AngularSpectrumObservation,
+    AngularSpectrumCorrelationLimits, AngularSpectrumInterferenceArm,
+    AngularSpectrumInterferenceStatistics, AngularSpectrumMutualCoherence,
+    AngularSpectrumObservation, PreparedAngularSpectrumInterferometer,
 };
 
 /// Whole-factor-bank limits for one query. The conservative workspace includes

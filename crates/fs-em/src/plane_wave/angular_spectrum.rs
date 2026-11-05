@@ -54,9 +54,9 @@ mod coherence;
 pub use coherence::{
     AngularSpectrumCoherence, AngularSpectrumCoherenceField, AngularSpectrumCoherenceLayerField,
     AngularSpectrumCoherenceLimits, AngularSpectrumCorrelationLimits,
-    AngularSpectrumInterferenceStatistics, AngularSpectrumMutualCoherence,
-    AngularSpectrumObservation, AngularSpectrumPointStatistics,
-    PreparedAngularSpectrumCoherenceLayer,
+    AngularSpectrumInterferenceArm, AngularSpectrumInterferenceStatistics,
+    AngularSpectrumMutualCoherence, AngularSpectrumObservation, AngularSpectrumPointStatistics,
+    PreparedAngularSpectrumCoherenceLayer, PreparedAngularSpectrumInterferometer,
 };
 
 mod force;
