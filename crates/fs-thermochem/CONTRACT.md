@@ -2704,6 +2704,32 @@ form retains the Gibbs identity with the existing residual enthalpy. These
 primitives support source-bound entropy inversion in `fs-material` without
 coupling this mechanical owner to transport cards or mutable parcel state.
 
+### Stable finite homogeneous calorics
+
+`prepare_density_caloric_change` borrows the original mixture, admits its initial
+T/rho state and fixes the final density. Its `caloric::PengRobinsonCaloricReferenceV1`
+prepares density differences once and retains at most 64 component records.
+Each `evaluate` returns the original scalar endpoint and finite residual U/H
+and density-reference entropy changes in one original mixing traversal, with
+no allocation, second quadratic pair pass or independently fitted EOS. Pair
+differences factor Delta sqrt(T) on their actual absolute-alpha branch; a
+changed alpha-product sign retains the original endpoint pair values and
+derivative jump. Density integrals, excluded-volume work and attraction-volume
+work use factored differences and symmetric product identities. The absolute
+state API and its fixed operation-tree version 4 are unchanged.
+
+Ideal-reference source increments remain separate. For entropy, an ideal
+source evaluated at unchanged pressure receives the explicit correction
+`-R [ln(T1/T0)+ln(rho1/rho0)]` and the PR density departure. This avoids
+cancellation between separately rounded real pressure and `R ln Z` terms.
+Preparation/trials retain original density, covolume, pressure and local
+mechanical-stability refusals; complete Cv and material/transport domains
+remain consumer obligations. These are fixed-composition homogeneous endpoint
+differences, not a heat/work path, mixing law or phase-equilibrium latent heat.
+Focused references use independent 85-digit dimensional PR calculations for
+thermal/density changes thousands of coordinate ULPs above resolution, together
+with exact endpoint reversal, alpha-sign, full-component-bound and refusal cases.
+
 ## Pure-fluid coexistence and conserved phase amount
 
 `eos::peng_robinson::saturation` closes pure-fluid liquid/vapor coexistence by

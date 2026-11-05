@@ -22,6 +22,8 @@ pub mod phase_screen;
 pub mod stability;
 /// Pure-fluid coexistence and conservative phase amounts on this same EOS.
 pub mod saturation;
+/// Stable finite caloric changes on the same homogeneous density branch.
+pub mod caloric;
 
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;
@@ -225,18 +227,18 @@ impl PengRobinsonMixtureV1 {
         let n = self.components.len();
         let mut bi = vec![0.0; n];
         let mut aij = vec![0.0; n * n];
-        let caloric = self.mixing_caloric(t, |i, value| bi[i] = value,
-            |ij, value| aij[ij] = value)?;
+        let caloric = self.mixing_caloric(t, |record| match record {
+            MixingRecord::Component { index, covolume, .. } => bi[index] = covolume,
+            MixingRecord::Pair { row, column, attraction, .. } => aij[row * n + column] = attraction,
+        })?;
         Ok(MixedParameters { caloric, aij, bi })
     }
 
     // Both evaluations retain the original component and pair operation tree.
-    // Only the full fugacity owner records component covolumes and pair values;
+    // Full fugacity and finite-caloric owners record only the data they need;
     // the scalar monomorphization has no recorder work or heap allocation.
     fn mixing_caloric(
-        &self, t: f64,
-        mut record_covolume: impl FnMut(usize, f64),
-        mut record_attraction: impl FnMut(usize, f64),
+        &self, t: f64, mut record: impl FnMut(MixingRecord),
     ) -> Result<MixedCaloricParameters, PengRobinsonErrorV1> {
         if !t.is_finite() || t <= 0.0 {
             return Err(PengRobinsonErrorV1::InvalidTemperature { bits: t.to_bits() });
@@ -272,7 +274,8 @@ impl PengRobinsonMixtureV1 {
                     what: "pure-component attraction/covolume",
                 });
             }
-            record_covolume(i, bi[i]);
+            record(MixingRecord::Component { index: i, attraction: ai[i],
+                derivative: dai_dt[i], covolume: bi[i], alpha_base, a0, kappa });
         }
 
         let mut a_mix = 0.0;
@@ -302,8 +305,9 @@ impl PengRobinsonMixtureV1 {
                         what: "binary attraction temperature derivatives",
                     });
                 }
-                record_attraction(i * n + j, value);
                 let weight = self.mole_fractions[i] * self.mole_fractions[j];
+                record(MixingRecord::Pair { row: i, column: j, attraction: value,
+                    derivative: dvalue, weight });
                 a_mix += weight * value;
                 da_mix_dt += weight * dvalue;
                 d2a_mix_dt2 += weight * d2value;
@@ -419,17 +423,8 @@ impl PengRobinsonMixtureV1 {
         if !rho.is_finite() || rho <= 0.0 {
             return Err(PengRobinsonErrorV1::InvalidDensity { bits: rho.to_bits() });
         }
-        let mixed = self.mixing_caloric(t, |_, _| {}, |_, _| {})?;
-        let point = mixed.density_coordinates(t, rho, self.molar_mass.value())?;
-        let residual_geometry = ResidualGeometry::new(point.z, point.dimensionless_a,
-            point.dimensionless_b, point.volume, mixed.b_mix)?;
-        let caloric = CaloricState { parameters: mixed, temperature_k: t,
-            molar_volume_m3_per_mol: point.volume, residual_geometry };
-        caloric.require_mechanical_stability()?;
-        Ok(PengRobinsonDensityCaloricEvaluationV1 {
-            temperature, pressure: Pressure::new(point.pressure),
-            molar_mass: self.molar_mass, density, compressibility_factor: point.z, caloric,
-        })
+        let mixed = self.mixing_caloric(t, |_| {})?;
+        mixed.density_caloric_evaluation(temperature, density, self.molar_mass)
     }
 }
 
@@ -438,6 +433,14 @@ struct MixedParameters {
     caloric: MixedCaloricParameters,
     aij: Vec<f64>,
     bi: Vec<f64>,
+}
+
+// One fused traversal: finite differences need the same original pair values
+// when an alpha-product sign changes, not a separately reconstructed EOS.
+enum MixingRecord {
+    Component { index: usize, attraction: f64, derivative: f64, covolume: f64,
+        alpha_base: f64, a0: f64, kappa: f64 },
+    Pair { row: usize, column: usize, attraction: f64, derivative: f64, weight: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -457,6 +460,21 @@ struct DensityCoordinates {
 }
 
 impl MixedCaloricParameters {
+    fn density_caloric_evaluation(self, temperature: Temperature, density: Density,
+        molar_mass: MolarMass) -> Result<PengRobinsonDensityCaloricEvaluationV1, PengRobinsonErrorV1> {
+        let t = temperature.value();
+        let point = self.density_coordinates(t, density.value(), molar_mass.value())?;
+        let residual_geometry = ResidualGeometry::new(point.z, point.dimensionless_a,
+            point.dimensionless_b, point.volume, self.b_mix)?;
+        let caloric = CaloricState { parameters: self, temperature_k: t,
+            molar_volume_m3_per_mol: point.volume, residual_geometry };
+        caloric.require_mechanical_stability()?;
+        Ok(PengRobinsonDensityCaloricEvaluationV1 {
+            temperature, pressure: Pressure::new(point.pressure), molar_mass,
+            density, compressibility_factor: point.z, caloric,
+        })
+    }
+
     fn dimensionless(&self, t: f64, p: f64) -> Result<(f64, f64), PengRobinsonErrorV1> {
         let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
         let a = self.a_mix * p / (rt * rt);
