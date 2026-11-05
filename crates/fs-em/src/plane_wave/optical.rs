@@ -27,8 +27,10 @@ use fs_material::{
 use fs_math::{c64::C64, det};
 
 mod dispersion;
+mod gas;
 mod spectral;
 mod water;
+pub use gas::{MolecularGasOpticalResponse, MolecularGasOpticalSource};
 pub use spectral::{
     RefreshedSpectralOpticalSource, SpectralOpticalResponse, SpectralOpticalSource,
 };

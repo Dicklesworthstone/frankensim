@@ -42,8 +42,9 @@ pub mod angular_spectrum;
 /// Original spectral metal/dielectric optics with explicit same-state permeability.
 pub mod optical;
 pub use optical::{
-    OpticalConductorResponse, OpticalMaterialResponse, RefreshedSpectralOpticalSource,
-    SpectralOpticalResponse, SpectralOpticalSource, WaterOpticalResponse,
+    MolecularGasOpticalResponse, MolecularGasOpticalSource, OpticalConductorResponse,
+    OpticalMaterialResponse, RefreshedSpectralOpticalSource, SpectralOpticalResponse,
+    SpectralOpticalSource, WaterOpticalResponse,
 };
 
 /// Original collisional carrier transport in an admitted outgoing half-space wave.
@@ -99,6 +100,10 @@ pub enum DielectricResponse<'a> {
     /// with an explicitly selected lossless approximation. Real water absorption
     /// and causal transient reservoirs are not supplied by this index release.
     WaterOptical(WaterOpticalResponse<'a>),
+    /// Original molecular phase/group law and an explicitly selected magnetic
+    /// source, prepared at one frequency. Lossless coherent approximation;
+    /// molecular scattering is not misrepresented as absorbed heat.
+    MolecularGasOptical(MolecularGasOpticalResponse<'a>),
     /// Original collisional free-carrier response plus an explicitly sourced
     /// lossless bound-charge background, prepared at one angular frequency.
     /// Normalized half-space scattering does not admit a physical amplitude;
@@ -107,8 +112,9 @@ pub enum DielectricResponse<'a> {
     IonizedGas(IonizedGasWaveResponse<'a>),
 }
 impl<'a> DielectricResponse<'a> {
-    /// Original scalar-property bundle. For ionized gas this is the explicitly
-    /// sourced bound-charge background; the enum also retains its carrier owner.
+    /// Original scalar-property bundle. Ionized gas retains its bound-charge
+    /// background; molecular optics retains its separately selected magnetic
+    /// source. The enum also retains the actual carrier or molecular owner.
     pub fn material(self) -> &'a ResolvedMaterialStatePoint {
         match self {
             Self::Lossless(material) => material,
@@ -119,6 +125,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(response) => response.material(),
             Self::SpectralOptical(response) => response.material(),
             Self::WaterOptical(response) => response.material(),
+            Self::MolecularGasOptical(response) => response.material(),
             Self::IonizedGas(response) => response.material(),
         }
     }
@@ -156,6 +163,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(response) => response.permittivity_f_m(omega)?,
             Self::SpectralOptical(response) => response.permittivity_f_m(omega)?,
             Self::WaterOptical(response) => response.permittivity_f_m(omega)?,
+            Self::MolecularGasOptical(response) => response.permittivity_f_m(omega)?,
             Self::IonizedGas(response) => response.permittivity(omega)?,
         };
         if !finite(epsilon) || epsilon == C64::ZERO || epsilon.im > 0.0 {
@@ -383,6 +391,7 @@ impl<'a> PlanarDielectricInterface<'a> {
                 | DielectricResponse::OpticalMaterial(_)
                 | DielectricResponse::SpectralOptical(_)
                 | DielectricResponse::WaterOptical(_)
+                | DielectricResponse::MolecularGasOptical(_)
                 | DielectricResponse::IonizedGas(_) => {}
             }
         }

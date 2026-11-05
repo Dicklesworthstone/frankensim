@@ -126,7 +126,9 @@ impl<'a> PlanarDielectricLayers<'a> {
         // admission; an unrestricted film power API must not bypass it.
         if matches!(incident, DielectricResponse::IonizedGas(_))
             || matches!(exit, DielectricResponse::IonizedGas(_))
-            || layers.iter().any(|l| matches!(l.response, DielectricResponse::IonizedGas(_)))
+            || layers
+                .iter()
+                .any(|l| matches!(l.response, DielectricResponse::IonizedGas(_)))
         {
             return Err(bad(
                 "ionized-gas films require whole-field drift admission; use the half-space wave owner",
@@ -327,6 +329,10 @@ impl<'a> PlanarDielectricLayers<'a> {
             (DielectricResponse::WaterOptical(a), DielectricResponse::WaterOptical(b)) => {
                 a.same_source(b)
             }
+            (
+                DielectricResponse::MolecularGasOptical(a),
+                DielectricResponse::MolecularGasOptical(b),
+            ) => a.same_source(b),
             _ => false,
         };
         same_response(self.incident_response, other.incident_response)

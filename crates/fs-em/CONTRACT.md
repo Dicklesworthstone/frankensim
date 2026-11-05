@@ -4405,6 +4405,45 @@ The existing constitutive/interface/film/angular-spectrum owners consume epsilon
 Six focused actual-source controls pass through the complete native plane-wave subtree: published index and group/phase/mu distinctions; source/state/band refusals; oblique TE/TM, Snell, reciprocity, Brewster and TIR; independent Fabry–Perot and interior Maxwell fields across two water states; coherent three-mode/two-polarization beam fields and Poynting flux; and source-continuity/causal-reservoir behavior. This is homogeneous isotropic finite-band optical dispersion under an explicitly lossless approximation, not measured transparent-water absorption, scattering, phase-mixture optics, or a causal time-domain energy law.
 
 
+## Original molecular-gas dispersion in native Maxwell waves
+
+`MolecularGasOpticalResponse` and `DielectricResponse::MolecularGasOptical`
+connect the original `RayleighGasState` or `MolecularRefractionModel` plus
+ordered partial densities to existing interfaces, finite films and coherent
+angular spectra. The caller explicitly selects a lossless coherent-medium
+approximation and supplies a separate original scalar magnetic source. No
+vacuum permeability, material-name mapping, replacement EOS or optical fit is
+inserted. `material()` denotes that magnetic source only; `source()` retains
+the molecular owner and actual immutable state/densities.
+
+For a fixed gas state, every magnetic condition must match the original
+absolute temperature, pressure or mass density, with its static quantity
+meaning. The partial-density model owns no temperature/pressure snapshot and
+therefore admits only an unconditioned magnetic source. Missing, unsupported
+or mismatched conditions refuse instead of being inferred. Ordered density
+basis, component cap, dilute limits and the original wavelength band remain
+those of the molecular owner; declared composition dispersion reaches infrared
+frequencies without extending a constant visible polarizability model.
+
+Preparation evaluates the molecular law once, allocating nothing. The cached
+phase permittivity is `epsilon = n_phase²/(mu*c0²)`; group index remains a
+separate derivative. All subsequent queries enforce the exact prepared angular
+frequency. Separately prepared frequencies share an exposure only when the
+original model/state, ordered partial densities and basis, magnetic owner and
+stack geometry agree; wavelength-dependent caches do not change source identity.
+
+Rayleigh scattering is not deposited heat or an imaginary permittivity in this
+explicit approximation. Native monochromatic heat is exactly zero, while the
+finite-window reservoir owner refuses to promote finite-band phase dispersion
+to an unsourced causal storage law. Molecular attenuation, changing gas state,
+spatial GRIN Maxwell propagation and measured-gas qualification are not supplied.
+
+Focused G1/G3 regressions use independent Lorentz--Lorenz/Cauchy phase/group
+equations, oblique TE/TM refraction and TIR, Fabry--Perot transmission and
+interior fields, coherent multimode beam phase/power, zero true heat despite
+nonzero Rayleigh cross section, and source/domain/frequency admission. These
+regressions are authored; native execution is not claimed by this extension.
+
 ### Absorbing exit media: coherent local heat and analytic substrate watts
 
 `PlanarAngularSpectrum::transmitted_absorption_field` reconstructs the original
