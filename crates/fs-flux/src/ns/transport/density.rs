@@ -126,9 +126,11 @@ type Result<T> = core::result::Result<T, DensityTransportError>;
 /// Original fixed geometry with a frozen, admitted BDM volume velocity.
 /// Reprepare when that velocity changes. No material source is queried here.
 pub struct PreparedDensityTransport<'m> {
-    mesh: &'m TriMesh,
+    pub(super) mesh: &'m TriMesh,
     volumes: Vec<f64>,
     volume_rates: Vec<EdgeVolumeTransport>,
+    // Retain the original affine normal traces for compatible momentum flux.
+    pub(super) velocity_moments: Vec<[f64; 2]>,
     // Per-direction rate divided by its donor area; a boundary inlet uses
     // the receiver area to avoid constructing a fictitious exterior cell.
     donor_rates: Vec<[f64; 2]>,
@@ -197,7 +199,7 @@ impl<'m> FluxSystem<'m> {
         admit_storage(
             &[
                 (nc, size_of::<f64>() + 2 * size_of::<Sum>()),
-                (ne, size_of::<EdgeVolumeTransport>() + size_of::<[f64; 2]>()),
+                (ne, size_of::<EdgeVolumeTransport>() + 2 * size_of::<[f64; 2]>()),
             ],
             max_storage_bytes,
         )?;
@@ -205,6 +207,7 @@ impl<'m> FluxSystem<'m> {
         let mut incoming = allocate(nc, Sum::default())?;
         let mut outgoing = allocate(nc, Sum::default())?;
         let mut volume_rates = allocate(ne, EdgeVolumeTransport::default())?;
+        let mut velocity_moments = allocate(ne, [0.0; 2])?;
         let mut donor_rates = allocate(ne, [0.0; 2])?;
         for (cell, &area) in mesh.areas.iter().enumerate() {
             poll(&mut cancelled)?;
@@ -272,6 +275,7 @@ impl<'m> FluxSystem<'m> {
                 quotient(reverse, mesh.areas[reverse_cell])?,
             ];
             volume_rates[index] = rate;
+            velocity_moments[index] = [velocity[2 * index], velocity[2 * index + 1]];
         }
         let mut maximum_outgoing_rate_s: f64 = 0.0;
         let mut maximum_relative_volume_divergence: f64 = 0.0;
@@ -300,6 +304,7 @@ impl<'m> FluxSystem<'m> {
             mesh,
             volumes,
             volume_rates,
+            velocity_moments,
             donor_rates,
             maximum_outgoing_rate_s,
             maximum_relative_volume_divergence,

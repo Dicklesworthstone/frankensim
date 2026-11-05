@@ -8,6 +8,9 @@ use fs_flux::ns::transport::density::{
 use fs_flux::{FluxSystem, TriMesh};
 use fs_solid::Mesh2;
 
+#[path = "density_transport/mass_flux.rs"]
+mod mass_flux;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

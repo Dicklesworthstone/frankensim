@@ -4,6 +4,8 @@ use super::{FluxSystem, convection_edge_quadrature};
 
 /// Positive conservative density and carried-inventory transport on these faces.
 pub mod density;
+/// Locally conservative H(div) mass flux for native momentum convection.
+pub mod mass_flux;
 
 /// Integrated volume rates per unit depth on one original mesh edge.
 ///

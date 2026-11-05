@@ -290,6 +290,40 @@ contains G1/G3 analytical exchange/refinement, unequal-density counterflow,
 open-boundary inventory closure, high-contrast retained-inventory, throughflow
 constant-specific, depth/density/datum scaling and atomic-refusal regressions.
 
+### Compatible mass flux for native BDM momentum
+
+`PreparedDensityTransport::prepare_mass_flux` retains the same original
+sign-split volume faces and positive donor densities as `advance_into`.
+Its per-depth quadrature carries volume [m²/s] separately from donor-weighted
+mass [kg/(m s)]; opposing streams are never collapsed into net volume flow.
+The plan retains its original normal moments, so a second velocity or mesh
+cannot silently supply a different reconstruction.
+
+Each cell reconstructs a vector P2 H(div) mass flux with the original face
+moments through degree two and constant divergence equal to net outward mass
+rate divided by original area. The remaining zero-normal, divergence-free
+bubble minimizes physical L2 distance to the cell's rho times original BDM1
+velocity. The explicit reference-triangle construction uses the contravariant
+Piola map and fixed positive degree-four quadrature, with no local matrix
+factorization or global solve. Geometry, orientation and finite arithmetic
+are admitted before publication. Uniform density reproduces the original
+affine velocity flux up to floating-point roundoff.
+
+These quadratic moments are necessary for integration by parts against every
+BDM1 kinetic-energy trace, including reversing faces. The reconstructed normal
+polynomial is a moment projection; original sign-split face samples still own
+upwind transport. This does not promote the P0 donor-cell density update to
+second-order spatial accuracy. Its constant divergence and the represented
+Euler density increment agree up to the original transport roundoff.
+
+Preparation and storage are O(cells+edges), with fallible bounded vector
+reservations and per-cell/per-edge cancellation. Warm cell and face sampling
+allocates nothing. `tests/density_transport/mass_flux.rs` covers all quadratic
+integration-by-parts identities, single-valued normal traces, original BDM1
+reproduction, accepted inventory continuity, large density contrast, reference
+depth, local corner permutations, rigid frames and refusal boundaries. Native
+momentum, pressure and thermodynamic closure remain consuming-owner work.
+
 Pressure/divergence coupling uses the exact integrated BDM face moments:
 signed edge length for mean moments and zero for linear moments. The momentum
 transpose and retained pressure reactions use the same coefficients, preserving
