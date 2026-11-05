@@ -776,9 +776,35 @@ Normal uniform or per-cell squeeze/expansion is supported. An ideal `Vented`
 cell represents pressure pinning and total exchange over that retained
 positive-area annular cell (the central cell is a disk), not a point port at
 the symmetry axis. Per-width `CapillaryVented`/`CapillaryReservoir` connections
-are refused in this radial API; no tube count or reservoir volume is silently
-converted into a circular total. Nonzero in-plane wall speed is also refused:
+are refused in this radial API. Instead, `AxisymmetricCapillaryVented` and
+`AxisymmetricCapillaryReservoir` take an explicit nonzero integer **total tube
+count** and, for a finite reservoir, a **total volume [m³]**. The Cartesian entry
+point refuses these total-unit variants. No arbitrary width or circumference
+converts one input basis into the other. Nonzero in-plane wall speed is also refused:
 radial wall motion, swirl and centrifugal pressure require additional physics.
+
+The total capillary flow is `M = N*pi*r_tube^4*(p_cell²-p_reservoir²)/(16*mu*L*R*T)`.
+The existing no-slip capillary owner, positive-root reservoir elimination and
+Newton derivative are shared without an extra coupling iteration. Total `M`
+enters the selected cell's residual as `M/A_cell`; it is never multiplied by
+that cell's circumference. The reservoir uses `B=V_total/(R*T*dt)`, and its
+storage defect is also divided by that cell's annular area for the existing
+local mass-residual gate. Tube Reynolds/Mach numbers use the **single-tube**
+flow `M/N`. Both film ends remain sealed, so a finite reservoir's exchange is
+internal to the combined mass account.
+
+The radial capillary/reservoir receipts expose total work/enthalpy/required
+isothermal heat [W], mass [kg] and mass rate [kg/s]. The shared checkpoint stores
+`capillary_reservoir_mass_kg` only; its Cartesian per-width field stays absent.
+The inverse holds for Cartesian checkpoints. Tube count, reservoir volume and
+initialization, attachment cell, and radial geometry bind restart compatibility;
+missing or wrongly based retained mass refuses. Bath pressure can change per
+step. As for an ideal radial vent, finite-tube exchange is **homogenized around
+the selected positive-area annular cell**, including a central disk cell.
+Individual holes, azimuthal pressure variations and entrance/junction regions
+are unresolved; the total tube count does not claim to resolve discrete ports.
+All existing capillary creeping-flow/Kn/Mach and quasi-steady/isothermal limits
+continue to apply, independently of the film's Maxwell wall policy.
 
 `AxisymmetricGasFilmReceipt` has distinct total units: mass [kg], mass rate
 [kg/s], load [N], and power/enthalpy transport [W]. Its local radial traction
@@ -798,6 +824,12 @@ reference comes from differentiating the continuum radial Reynolds equation,
 not from the discrete flux. Mixed Cartesian ends additionally retain sealed
 wall backpressure and mechanical-work closure. Existing strip, capillary and
 reservoir regressions remain applicable to the shared engine.
+Additional radial connection tests check total tube-count/radius-fourth-power
+flow, each annulus's mass balance, independent closed-volume equilibrium,
+three-volume ODE time refinement, small-capacity stiffness and the large-bath
+limit, squeeze/expansion transfer reversal, and unit/restart refusals. Tiny
+reservoir fixtures test numerical conditioning, not continuum validity at those
+physical volumes.
 
 These are axisymmetric lubrication results, with the existing isothermal,
 thin-film, small-slope and viscous-dominance assumptions. They do not add

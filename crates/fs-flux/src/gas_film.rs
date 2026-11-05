@@ -15,7 +15,9 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 mod axisymmetric;
 mod capillary;
 pub use axisymmetric::{
-    AxisymmetricGasFilmReceipt, AxisymmetricGasFilmStep, solve_isothermal_axisymmetric_gas_film_1d,
+    AxisymmetricCapillaryVent, AxisymmetricCapillaryVentReport, AxisymmetricGasFilmReceipt,
+    AxisymmetricGasFilmReservoir, AxisymmetricGasFilmReservoirReport, AxisymmetricGasFilmStep,
+    solve_isothermal_axisymmetric_gas_film_1d,
 };
 use capillary::{CapillaryConnection, CapillaryExchange};
 pub use capillary::{CapillaryVent, CapillaryVentReport, GasFilmReservoir, GasFilmReservoirReport};
@@ -191,9 +193,38 @@ pub enum GasFilmBoundaryTopology {
         /// Finite gas inventory initialized from volume and absolute pressure.
         reservoir: GasFilmReservoir,
     },
+    /// Sealed radial ends with a total-count capillary bundle to a pressure bath.
+    /// Admitted only by the axisymmetric entry point; exchange is homogenized
+    /// over the selected annular cell rather than pinned at the symmetry axis.
+    AxisymmetricCapillaryVented {
+        /// Active radial-cell index of the connection.
+        cell_index: usize,
+        /// Isothermal bath pressure [Pa absolute], allowed to vary by step.
+        absolute_pressure_pa: f64,
+        /// Explicit total-count geometry of the stationary no-slip tubes.
+        capillary: AxisymmetricCapillaryVent,
+    },
+    /// Sealed radial ends with a finite total-volume isothermal reservoir.
+    /// Admitted only by the axisymmetric entry point. Film and reservoir
+    /// exchange the same total mass through the implicit capillary connection.
+    AxisymmetricCapillaryReservoir {
+        /// Active radial-cell index of the connection.
+        cell_index: usize,
+        /// Explicit total-count geometry of the stationary no-slip tubes.
+        capillary: AxisymmetricCapillaryVent,
+        /// Finite total gas volume and initial absolute pressure.
+        reservoir: AxisymmetricGasFilmReservoir,
+    },
 }
 
 impl GasFilmBoundaryTopology {
+    fn is_axisymmetric_capillary(self) -> bool {
+        matches!(
+            self,
+            Self::AxisymmetricCapillaryVented { .. } | Self::AxisymmetricCapillaryReservoir { .. }
+        )
+    }
+
     fn end_pressures(self) -> [Option<f64>; 2] {
         match self {
             Self::Open {
@@ -399,8 +430,13 @@ pub struct GasFilmCheckpoint {
     /// Number of active prefix cells bound into this checkpoint.
     pub active_cells: usize,
     /// Accepted finite reservoir mass [kg m^-1], present only for
-    /// `CapillaryReservoir`. Volume and gas identity are fixed by the fingerprint.
+    /// Cartesian `CapillaryReservoir`. Absent for every radial checkpoint.
+    /// Volume and gas identity are fixed by the fingerprint.
     pub capillary_reservoir_mass_kg_per_m: Option<f64>,
+    /// Accepted total reservoir mass [kg], present only for
+    /// `AxisymmetricCapillaryReservoir`. Absent for every Cartesian checkpoint;
+    /// the total volume, tube count and radial geometry bind its identity.
+    pub capillary_reservoir_mass_kg: Option<f64>,
 }
 
 /// Pressure/shear/load/work and conservative accounting receipt.
@@ -988,6 +1024,11 @@ impl GasFilmInput {
                 cell_index,
                 absolute_pressure_pa,
                 ..
+            }
+            | GasFilmBoundaryTopology::AxisymmetricCapillaryVented {
+                cell_index,
+                absolute_pressure_pa,
+                ..
             } => {
                 if cell_index >= active {
                     return Err(GasFilmError::InvalidInput {
@@ -1015,9 +1056,31 @@ impl GasFilmInput {
                     "reservoir.initial_absolute_pressure_pa",
                 )?;
             }
+            GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir {
+                cell_index,
+                reservoir,
+                ..
+            } => {
+                if cell_index >= active {
+                    return Err(GasFilmError::InvalidInput {
+                        field: "boundary.vent_cell_index",
+                    });
+                }
+                positive(reservoir.volume_m3, "reservoir.volume_m3")?;
+                positive(
+                    reservoir.initial_absolute_pressure_pa,
+                    "reservoir.initial_absolute_pressure_pa",
+                )?;
+            }
         }
         if let GasFilmBoundaryTopology::CapillaryVented { capillary, .. }
         | GasFilmBoundaryTopology::CapillaryReservoir { capillary, .. } = self.boundary
+        {
+            capillary.validate()?;
+        }
+        if let GasFilmBoundaryTopology::AxisymmetricCapillaryVented { capillary, .. }
+        | GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir { capillary, .. } =
+            self.boundary
         {
             capillary.validate()?;
         }
@@ -1054,6 +1117,15 @@ fn initial_state(
             {
                 return Err(GasFilmError::CheckpointMismatch {
                     field: "capillary_reservoir_mass_kg_per_m",
+                });
+            }
+            if matches!(
+                input.boundary,
+                GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir { .. }
+            ) != state.capillary_reservoir_mass_kg.is_some()
+            {
+                return Err(GasFilmError::CheckpointMismatch {
+                    field: "capillary_reservoir_mass_kg",
                 });
             }
             if state.model_id != input.identity.model_id {
@@ -1215,6 +1287,38 @@ fn invariant_configuration_fingerprint(input: &GasFilmInput) -> String {
                 "capillaries_per_m",
                 capillary.capillaries_per_m,
             );
+        }
+        GasFilmBoundaryTopology::AxisymmetricCapillaryVented {
+            cell_index,
+            capillary,
+            ..
+        }
+        | GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir {
+            cell_index,
+            capillary,
+            ..
+        } => {
+            if let GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir { reservoir, .. } =
+                input.boundary
+            {
+                text(
+                    &mut output,
+                    "boundary_kind",
+                    "radial-capillary-reservoir-v1",
+                );
+                number(&mut output, "reservoir_volume_m3", reservoir.volume_m3);
+                number(
+                    &mut output,
+                    "reservoir_initial_pressure",
+                    reservoir.initial_absolute_pressure_pa,
+                );
+            } else {
+                text(&mut output, "boundary_kind", "radial-capillary-vent-v1");
+            }
+            let _ = write!(output, "vent_cell={cell_index};");
+            number(&mut output, "capillary_radius", capillary.radius_m);
+            number(&mut output, "capillary_length", capillary.length_m);
+            let _ = write!(output, "capillary_count={};", capillary.capillary_count);
         }
     }
     match &input.slip_policy {
@@ -1450,6 +1554,31 @@ fn accepted_request_fingerprint(input: &GasFilmInput) -> String {
                 capillary.capillaries_per_m,
             );
         }
+        GasFilmBoundaryTopology::AxisymmetricCapillaryVented {
+            cell_index,
+            absolute_pressure_pa,
+            ..
+        }
+        | GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir {
+            cell_index,
+            reservoir:
+                AxisymmetricGasFilmReservoir {
+                    initial_absolute_pressure_pa: absolute_pressure_pa,
+                    ..
+                },
+            ..
+        } => {
+            // Includes total tube count/volume as well as all other invariants.
+            // The bath pressure is dynamic; finite-reservoir initial pressure
+            // is already invariant, but is also retained here unambiguously.
+            text(
+                &mut output,
+                "configuration",
+                &invariant_configuration_fingerprint(input),
+            );
+            count(&mut output, "vent_cell", cell_index);
+            number(&mut output, "connection_pressure", absolute_pressure_pa);
+        }
     }
     match &input.slip_policy {
         SlipPolicy::NoSlipContinuum { source_id } => text(&mut output, "slip", source_id),
@@ -1673,7 +1802,7 @@ impl PressureSystem<'_> {
             )?;
             if self.capillary.is_some_and(|vent| cell == vent.cell) {
                 value = derived(
-                    value + exchange.expect("capillary was compiled").flow_kg_per_m_s / measure,
+                    value + exchange.expect("capillary was compiled").mass_flow / measure,
                     "vent_cell_mass_residual",
                 )?;
             }
@@ -1961,7 +2090,14 @@ fn solve_film(
     let (active, spacing, rt, max_slope) = input.validate()?;
     let metrics = match radial_inner_radius_m {
         Some(radius) => axisymmetric::compile_metrics(input, active, spacing, radius)?,
-        None => FilmMetrics::Cartesian { spacing_m: spacing },
+        None => {
+            if input.boundary.is_axisymmetric_capillary() {
+                return Err(GasFilmError::Unavailable {
+                    reason: "cartesian-total-unit-capillary-connection",
+                });
+            }
+            FilmMetrics::Cartesian { spacing_m: spacing }
+        }
     };
     let configuration_fingerprint =
         metrics.bind_fingerprint(invariant_configuration_fingerprint(input));
@@ -2132,10 +2268,12 @@ fn solve_film(
             "vent_outward_mass_flux",
         )?,
         GasFilmBoundaryTopology::CapillaryVented { .. }
-        | GasFilmBoundaryTopology::CapillaryReservoir { .. } => {
+        | GasFilmBoundaryTopology::CapillaryReservoir { .. }
+        | GasFilmBoundaryTopology::AxisymmetricCapillaryVented { .. }
+        | GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir { .. } => {
             capillary_exchange
                 .expect("capillary was compiled")
-                .flow_kg_per_m_s
+                .mass_flow
         }
         _ => 0.0,
     };
@@ -2306,7 +2444,11 @@ fn solve_film(
             active_gap_m: gap.to_vec(),
             active_cells: active,
             capillary_reservoir_mass_kg_per_m: capillary_exchange
-                .and_then(|exchange| exchange.reservoir_mass_kg_per_m),
+                .filter(|_| radial_inner_radius_m.is_none())
+                .and_then(|exchange| exchange.reservoir_mass),
+            capillary_reservoir_mass_kg: capillary_exchange
+                .filter(|_| radial_inner_radius_m.is_some())
+                .and_then(|exchange| exchange.reservoir_mass),
         },
     })
 }

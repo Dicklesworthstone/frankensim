@@ -5,7 +5,8 @@
 //! used here, not the paper's entrance, slip, thermal or inertial corrections.
 
 use super::{
-    GasFilmBoundaryTopology, GasFilmCheckpoint, GasFilmError, GasFilmInput, derived, positive,
+    AxisymmetricCapillaryVent, GasFilmBoundaryTopology, GasFilmCheckpoint, GasFilmError,
+    GasFilmInput, derived, positive,
 };
 
 /// Parallel straight circular capillaries connecting one film cell to a bath.
@@ -77,33 +78,108 @@ pub struct GasFilmReservoirReport {
 
 impl CapillaryVent {
     pub(super) fn validate(self) -> Result<(), GasFilmError> {
-        positive(self.radius_m, "capillary.radius_m")?;
-        positive(self.length_m, "capillary.length_m")?;
         positive(self.capillaries_per_m, "capillary.capillaries_per_m")?;
-        if self.radius_m / self.length_m > 0.01 {
-            return Err(GasFilmError::Unavailable {
-                reason: "capillary-outside-long-tube-envelope",
+        validate_tube(self.radius_m, self.length_m)
+    }
+}
+
+impl AxisymmetricCapillaryVent {
+    pub(super) fn validate(self) -> Result<(), GasFilmError> {
+        if self.capillary_count == 0 {
+            return Err(GasFilmError::InvalidInput {
+                field: "capillary.capillary_count",
             });
         }
-        Ok(())
+        validate_tube(self.radius_m, self.length_m)
+    }
+}
+
+fn validate_tube(radius: f64, length: f64) -> Result<(), GasFilmError> {
+    positive(radius, "capillary.radius_m")?;
+    positive(length, "capillary.length_m")?;
+    if radius / length > 0.01 {
+        return Err(GasFilmError::Unavailable {
+            reason: "capillary-outside-long-tube-envelope",
+        });
+    }
+    Ok(())
+}
+
+// Private integrated quantities follow the film measure: per-width for a strip,
+// totals for an axisymmetric film. Public input/checkpoint/report types retain
+// those distinct units; no physical circumference or arbitrary width rescales
+// the authored tube count or reservoir volume.
+#[derive(Clone, Copy)]
+struct ConnectionGeometry {
+    radius_m: f64,
+    length_m: f64,
+    parallel_count: f64,
+}
+
+impl From<CapillaryVent> for ConnectionGeometry {
+    fn from(value: CapillaryVent) -> Self {
+        Self {
+            radius_m: value.radius_m,
+            length_m: value.length_m,
+            parallel_count: value.capillaries_per_m,
+        }
+    }
+}
+
+impl From<AxisymmetricCapillaryVent> for ConnectionGeometry {
+    fn from(value: AxisymmetricCapillaryVent) -> Self {
+        Self {
+            radius_m: value.radius_m,
+            length_m: value.length_m,
+            parallel_count: f64::from(value.capillary_count),
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 struct ReservoirStorage {
-    old_mass_kg_per_m: f64,
-    capacity_kg_per_m_pa: f64,
+    old_mass: f64,
+    mass_pressure_capacity: f64,
     storage_coefficient: f64,
     duration_s: f64,
 }
 
+impl ReservoirStorage {
+    fn new(
+        volume: f64,
+        initial_pressure: f64,
+        // None means fresh initialization; Some(None) is a malformed checkpoint.
+        retained_mass: Option<Option<f64>>,
+        rt: f64,
+        duration_s: f64,
+    ) -> Result<Self, GasFilmError> {
+        let capacity = derived(volume / rt, "reservoir.mass_pressure_capacity")?;
+        positive(capacity, "reservoir.mass_pressure_capacity")?;
+        let mass = match retained_mass {
+            Some(value) => value.ok_or(GasFilmError::CheckpointMismatch {
+                field: "capillary_reservoir_mass",
+            })?,
+            None => derived(capacity * initial_pressure, "reservoir.initial_mass")?,
+        };
+        positive(mass, "reservoir.gas_mass")?;
+        let storage_coefficient = derived(capacity / duration_s, "reservoir.storage_coefficient")?;
+        positive(storage_coefficient, "reservoir.storage_coefficient")?;
+        Ok(Self {
+            old_mass: mass,
+            mass_pressure_capacity: capacity,
+            storage_coefficient,
+            duration_s,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct CapillaryExchange {
-    pub flow_kg_per_m_s: f64,
+    pub mass_flow: f64,
     pub derivative: f64,
     exterior_pressure_pa: f64,
     pressure_drop_pa: f64,
-    pub reservoir_mass_kg_per_m: Option<f64>,
+    pub reservoir_mass: Option<f64>,
 }
 
 // Compiled once per step. The exact positive pressure derivative keeps the vent
@@ -111,7 +187,7 @@ pub(super) struct CapillaryExchange {
 pub(super) struct CapillaryConnection {
     pub cell: usize,
     pressure_pa: f64,
-    geometry: CapillaryVent,
+    geometry: ConnectionGeometry,
     mass_coefficient: f64,
     area_m2: f64,
     rt: f64,
@@ -124,71 +200,84 @@ impl CapillaryConnection {
         rt: f64,
         checkpoint: Option<&GasFilmCheckpoint>,
     ) -> Result<Option<Self>, GasFilmError> {
-        let (cell_index, absolute_pressure_pa, capillary, reservoir) = match input.boundary {
+        let (cell_index, absolute_pressure_pa, geometry, reservoir) = match input.boundary {
             GasFilmBoundaryTopology::CapillaryVented {
                 cell_index,
                 absolute_pressure_pa,
                 capillary,
-            } => (cell_index, absolute_pressure_pa, capillary, None),
+            } => (
+                cell_index,
+                absolute_pressure_pa,
+                ConnectionGeometry::from(capillary),
+                None,
+            ),
             GasFilmBoundaryTopology::CapillaryReservoir {
                 cell_index,
                 capillary,
                 reservoir,
-            } => {
-                let capacity = derived(
-                    reservoir.volume_per_width_m2 / rt,
-                    "reservoir.mass_pressure_capacity",
-                )?;
-                positive(capacity, "reservoir.mass_pressure_capacity")?;
-                let mass = match checkpoint {
-                    Some(state) => state.capillary_reservoir_mass_kg_per_m.ok_or(
-                        GasFilmError::CheckpointMismatch {
-                            field: "capillary_reservoir_mass_kg_per_m",
-                        },
-                    )?,
-                    None => derived(
-                        capacity * reservoir.initial_absolute_pressure_pa,
-                        "reservoir.initial_mass_kg_per_m",
-                    )?,
-                };
-                positive(mass, "reservoir.gas_mass_kg_per_m")?;
-                let pressure = derived(mass / capacity, "reservoir.absolute_pressure_pa")?;
-                positive(pressure, "reservoir.absolute_pressure_pa")?;
-                let storage_coefficient =
-                    derived(capacity / input.timestep_s, "reservoir.storage_coefficient")?;
-                positive(storage_coefficient, "reservoir.storage_coefficient")?;
-                (
-                    cell_index,
-                    pressure,
-                    capillary,
-                    Some(ReservoirStorage {
-                        old_mass_kg_per_m: mass,
-                        capacity_kg_per_m_pa: capacity,
-                        storage_coefficient,
-                        duration_s: input.timestep_s,
-                    }),
-                )
-            }
+            } => (
+                cell_index,
+                reservoir.initial_absolute_pressure_pa,
+                ConnectionGeometry::from(capillary),
+                Some(ReservoirStorage::new(
+                    reservoir.volume_per_width_m2,
+                    reservoir.initial_absolute_pressure_pa,
+                    checkpoint.map(|state| state.capillary_reservoir_mass_kg_per_m),
+                    rt,
+                    input.timestep_s,
+                )?),
+            ),
+            GasFilmBoundaryTopology::AxisymmetricCapillaryVented {
+                cell_index,
+                absolute_pressure_pa,
+                capillary,
+            } => (
+                cell_index,
+                absolute_pressure_pa,
+                ConnectionGeometry::from(capillary),
+                None,
+            ),
+            GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir {
+                cell_index,
+                capillary,
+                reservoir,
+            } => (
+                cell_index,
+                reservoir.initial_absolute_pressure_pa,
+                ConnectionGeometry::from(capillary),
+                Some(ReservoirStorage::new(
+                    reservoir.volume_m3,
+                    reservoir.initial_absolute_pressure_pa,
+                    checkpoint.map(|state| state.capillary_reservoir_mass_kg),
+                    rt,
+                    input.timestep_s,
+                )?),
+            ),
             _ => return Ok(None),
         };
+        let pressure_pa = match reservoir {
+            Some(storage) => derived(
+                storage.old_mass / storage.mass_pressure_capacity,
+                "reservoir.absolute_pressure_pa",
+            )?,
+            None => absolute_pressure_pa,
+        };
+        positive(pressure_pa, "capillary.exterior_pressure_pa")?;
         let area_m2 = derived(
-            core::f64::consts::PI * capillary.radius_m * capillary.radius_m,
+            core::f64::consts::PI * geometry.radius_m * geometry.radius_m,
             "capillary.area_m2",
         )?;
         positive(area_m2, "capillary.area_m2")?;
         let mass_coefficient = derived(
-            capillary.capillaries_per_m * area_m2 * capillary.radius_m.powi(2)
-                / (16.0 * input.gas.dynamic_viscosity_pa_s * capillary.length_m * rt),
-            "capillary.mass_conductance_kg_per_m_s_pa2",
+            geometry.parallel_count * area_m2 * geometry.radius_m.powi(2)
+                / (16.0 * input.gas.dynamic_viscosity_pa_s * geometry.length_m * rt),
+            "capillary.mass_conductance",
         )?;
-        positive(
-            mass_coefficient,
-            "capillary.mass_conductance_kg_per_m_s_pa2",
-        )?;
+        positive(mass_coefficient, "capillary.mass_conductance")?;
         Ok(Some(Self {
             cell: cell_index,
-            pressure_pa: absolute_pressure_pa,
-            geometry: capillary,
+            pressure_pa,
+            geometry,
             mass_coefficient,
             area_m2,
             rt,
@@ -196,13 +285,13 @@ impl CapillaryConnection {
         }))
     }
 
-    /// Signed outward mass flow [kg m^-1 s^-1] and its pressure derivative.
+    /// Signed outward mass flow in the compiled geometry measure and derivative.
     fn prescribed_exchange(&self, film_pressure_pa: f64) -> Result<(f64, f64), GasFilmError> {
         let flow = derived(
             self.mass_coefficient
                 * (film_pressure_pa - self.pressure_pa)
                 * (film_pressure_pa + self.pressure_pa),
-            "capillary.outward_mass_flux_kg_per_m_s",
+            "capillary.outward_mass_flow",
         )?;
         let derivative = derived(
             2.0 * self.mass_coefficient * film_pressure_pa,
@@ -215,11 +304,11 @@ impl CapillaryConnection {
         let Some(reservoir) = self.reservoir else {
             let (flow, derivative) = self.prescribed_exchange(film_pressure_pa)?;
             return Ok(CapillaryExchange {
-                flow_kg_per_m_s: flow,
+                mass_flow: flow,
                 derivative,
                 exterior_pressure_pa: self.pressure_pa,
                 pressure_drop_pa: film_pressure_pa - self.pressure_pa,
-                reservoir_mass_kg_per_m: None,
+                reservoir_mass: None,
             });
         };
         // Eliminate the reservoir's backward-Euler storage equation exactly:
@@ -253,15 +342,15 @@ impl CapillaryConnection {
         let flow = derived(
             series_conductance(tube, reservoir.storage_coefficient)
                 * (film_pressure_pa - self.pressure_pa),
-            "capillary.outward_mass_flux_kg_per_m_s",
+            "capillary.outward_mass_flow",
         )?;
         let mass = derived(
-            reservoir.old_mass_kg_per_m + reservoir.duration_s * flow,
-            "reservoir.accepted_mass_kg_per_m",
+            reservoir.old_mass + reservoir.duration_s * flow,
+            "reservoir.accepted_mass",
         )?;
-        positive(mass, "reservoir.accepted_mass_kg_per_m")?;
+        positive(mass, "reservoir.accepted_mass")?;
         let pressure = derived(
-            mass / reservoir.capacity_kg_per_m_pa,
+            mass / reservoir.mass_pressure_capacity,
             "reservoir.accepted_pressure_pa",
         )?;
         positive(pressure, "reservoir.accepted_pressure_pa")?;
@@ -275,11 +364,11 @@ impl CapillaryConnection {
             "capillary.mass_flux_pressure_derivative",
         )?;
         Ok(CapillaryExchange {
-            flow_kg_per_m_s: flow,
+            mass_flow: flow,
             derivative,
             exterior_pressure_pa: pressure,
             pressure_drop_pa: derived(flow / tube, "reservoir.capillary_pressure_drop_pa")?,
-            reservoir_mass_kg_per_m: Some(mass),
+            reservoir_mass: Some(mass),
         })
     }
 
@@ -309,7 +398,7 @@ impl CapillaryConnection {
             film_pressure_pa,
             exchange.exterior_pressure_pa,
             exchange.pressure_drop_pa,
-            exchange.flow_kg_per_m_s,
+            exchange.mass_flow,
             input,
         )
     }
@@ -333,7 +422,7 @@ impl CapillaryConnection {
                 reason: "capillary-knudsen-outside-no-slip-envelope",
             });
         }
-        let tube_flow = flow.abs() / self.geometry.capillaries_per_m;
+        let tube_flow = flow.abs() / self.geometry.parallel_count;
         let reynolds = derived(
             2.0 * tube_flow
                 / (core::f64::consts::PI
@@ -363,7 +452,7 @@ impl CapillaryConnection {
         // without subtracting nearly equal logarithms.
         let dissipation = derived(
             flow * self.rt * (pressure_drop_pa / exterior_pressure_pa).ln_1p(),
-            "capillary.viscous_dissipation_w_per_m",
+            "capillary.viscous_dissipation",
         )?;
         Ok(CapillaryVentReport {
             viscous_dissipation_w_per_m: dissipation,
@@ -374,10 +463,10 @@ impl CapillaryConnection {
     }
 
     pub fn reservoir_residual(&self, exchange: CapillaryExchange) -> Result<f64, GasFilmError> {
-        match (self.reservoir, exchange.reservoir_mass_kg_per_m) {
+        match (self.reservoir, exchange.reservoir_mass) {
             (Some(storage), Some(mass)) => derived(
-                (mass - storage.old_mass_kg_per_m) / storage.duration_s - exchange.flow_kg_per_m_s,
-                "reservoir.mass_closure_residual_kg_per_m_s",
+                (mass - storage.old_mass) / storage.duration_s - exchange.mass_flow,
+                "reservoir.mass_closure_residual",
             ),
             _ => Ok(0.0),
         }
@@ -389,28 +478,28 @@ impl CapillaryConnection {
         input: &GasFilmInput,
         film_storage_rate: f64,
     ) -> Result<Option<GasFilmReservoirReport>, GasFilmError> {
-        let (Some(storage), Some(mass)) = (self.reservoir, exchange.reservoir_mass_kg_per_m) else {
+        let (Some(storage), Some(mass)) = (self.reservoir, exchange.reservoir_mass) else {
             return Ok(None);
         };
         let rate = derived(
-            (mass - storage.old_mass_kg_per_m) / storage.duration_s,
-            "reservoir.storage_rate_kg_per_m_s",
+            (mass - storage.old_mass) / storage.duration_s,
+            "reservoir.storage_rate",
         )?;
         Ok(Some(GasFilmReservoirReport {
             absolute_pressure_pa: exchange.exterior_pressure_pa,
             gas_mass_kg_per_m: mass,
             storage_rate_kg_per_m_s: rate,
             inward_enthalpy_flux_w_per_m: derived(
-                exchange.flow_kg_per_m_s * input.gas.declared_specific_enthalpy_j_kg,
-                "reservoir.inward_enthalpy_flux_w_per_m",
+                exchange.mass_flow * input.gas.declared_specific_enthalpy_j_kg,
+                "reservoir.inward_enthalpy_power",
             )?,
             required_isothermal_heat_to_gas_w_per_m: derived(
-                -exchange.flow_kg_per_m_s * self.rt,
-                "reservoir.required_isothermal_heat_to_gas_w_per_m",
+                -exchange.mass_flow * self.rt,
+                "reservoir.required_isothermal_heat_to_gas",
             )?,
             combined_mass_closure_residual_kg_per_m_s: derived(
                 film_storage_rate + rate,
-                "reservoir.combined_mass_closure_residual_kg_per_m_s",
+                "reservoir.combined_mass_closure_residual",
             )?,
         }))
     }

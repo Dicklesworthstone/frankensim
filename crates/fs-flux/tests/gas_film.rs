@@ -1,12 +1,430 @@
 //! G0/G1/G3 checks for the bounded isothermal gas-film foundation.
 
 use fs_flux::{
-    CapillaryVent, ContactExclusionMask, GasFilmApplicability, GasFilmBoundaryTopology,
-    GasFilmBudget, GasFilmError, GasFilmGrid1d, GasFilmIdentity, GasFilmInput,
-    GasFilmInputAuthority, GasFilmReservoir, GasFilmUncertainty, IsothermalIdealGas,
-    MovingWallInput, RoughnessPolicy, SlipPolicy, isothermal_compressible_reynolds_model_id,
-    solve_isothermal_axisymmetric_gas_film_1d, solve_isothermal_gas_film_1d,
+    AxisymmetricCapillaryVent, AxisymmetricGasFilmReservoir, CapillaryVent, ContactExclusionMask,
+    GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget, GasFilmError, GasFilmGrid1d,
+    GasFilmIdentity, GasFilmInput, GasFilmInputAuthority, GasFilmReservoir, GasFilmUncertainty,
+    IsothermalIdealGas, MovingWallInput, RoughnessPolicy, SlipPolicy,
+    isothermal_compressible_reynolds_model_id, solve_isothermal_axisymmetric_gas_film_1d,
+    solve_isothermal_gas_film_1d,
 };
+
+fn radial_connection_fixture(
+    cells: usize,
+    pressure: f64,
+    count: u32,
+    volume: Option<f64>,
+) -> GasFilmInput {
+    let mut input = fixture(cells);
+    let capillary = AxisymmetricCapillaryVent {
+        radius_m: 1.0e-5,
+        length_m: 1.0e-2,
+        capillary_count: count,
+    };
+    input.boundary = match volume {
+        None => GasFilmBoundaryTopology::AxisymmetricCapillaryVented {
+            cell_index: cells - 1,
+            absolute_pressure_pa: pressure,
+            capillary,
+        },
+        Some(volume_m3) => GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir {
+            cell_index: cells - 1,
+            capillary,
+            reservoir: AxisymmetricGasFilmReservoir {
+                volume_m3,
+                initial_absolute_pressure_pa: pressure,
+            },
+        },
+    };
+    input.budget.maximum_iterations = 12;
+    input.budget.relaxation = 1.0;
+    input.budget.mass_residual_tolerance_kg_m2_s = 1.0e-12;
+    input
+}
+
+#[test]
+fn g1_radial_capillary_counts_total_tubes_and_conserves_each_annulus() {
+    let pi = std::f64::consts::PI;
+    for inner in [0.0, 0.02] {
+        for bath in [100_325.0, 102_325.0] {
+            for count in [1, 4] {
+                for radius in [1.0e-5, 2.0e-5] {
+                    let mut input = radial_connection_fixture(2, bath, count, None);
+                    input.timestep_s = 1.0e-4;
+                    if let GasFilmBoundaryTopology::AxisymmetricCapillaryVented {
+                        capillary, ..
+                    } = &mut input.boundary
+                    {
+                        capillary.radius_m = radius;
+                    }
+                    let step =
+                        solve_isothermal_axisymmetric_gas_film_1d(&input, inner, None).unwrap();
+                    let p = &step.checkpoint.active_absolute_pressure_pa;
+                    let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+                    let mu = input.gas.dynamic_viscosity_pa_s;
+                    let h = input.grid.gap_m[0];
+                    let dr = input.grid.length_m / 2.0;
+                    let expected_flow =
+                        f64::from(count) * pi * radius.powi(4) * (p[1] * p[1] - bath * bath)
+                            / (16.0 * mu * 0.01 * rt);
+                    let flow = step.receipt.vent_outward_mass_flow_kg_per_s;
+                    assert!((flow / expected_flow - 1.0).abs() < 1.0e-12);
+                    assert!(flow * (input.initial_absolute_pressure_pa - bath) > 0.0);
+                    // Integrate the radial continuum resistance between sample
+                    // radii, independently of the implementation's face metric.
+                    let internal = pi * h.powi(3) * (p[0] * p[0] - p[1] * p[1])
+                        / (12.0 * mu * rt * ((inner + 1.5 * dr) / (inner + 0.5 * dr)).ln());
+                    for cell in 0..2 {
+                        let r0 = inner + cell as f64 * dr;
+                        let area = pi * ((r0 + dr).powi(2) - r0.powi(2));
+                        let storage = (p[cell] - input.initial_absolute_pressure_pa) * h * area
+                            / (rt * input.timestep_s);
+                        let outward = if cell == 0 { internal } else { flow - internal };
+                        assert!((storage + outward).abs() < 3.0e-16);
+                    }
+                    let vent = step.receipt.capillary_vent.unwrap();
+                    let expected_work = expected_flow * rt * (p[1] / bath).ln();
+                    assert!((vent.viscous_dissipation_w / expected_work - 1.0).abs() < 1.0e-12);
+                    assert!(vent.viscous_dissipation_w >= 0.0);
+                    let expected_re = 2.0 * flow.abs() / (f64::from(count) * pi * radius * mu);
+                    assert!((vent.reynolds_number / expected_re - 1.0).abs() < 1.0e-14);
+                    assert_eq!(
+                        step.receipt.vent_outward_enthalpy_power_w,
+                        flow * input.gas.declared_specific_enthalpy_j_kg
+                    );
+                    assert_eq!(step.receipt.inner_boundary_outward_mass_flow_kg_per_s, 0.0);
+                    assert_eq!(step.receipt.outer_boundary_outward_mass_flow_kg_per_s, 0.0);
+                    assert_eq!(step.checkpoint.capillary_reservoir_mass_kg, None);
+                    assert_eq!(step.checkpoint.capillary_reservoir_mass_kg_per_m, None);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_radial_finite_reservoir_equilibrates_actual_total_volume_and_mass() {
+    for inner in [0.0, 0.007] {
+        for volume in [5.0e-9, 2.0e-8] {
+            for initial_reservoir_pressure in [100_325.0, 102_325.0] {
+                let mut input =
+                    radial_connection_fixture(4, initial_reservoir_pressure, 128, Some(volume));
+                // The physical outer boundary is at the final active circular
+                // face. Excluded material contributes neither film volume nor load.
+                input.grid.contact_exclusion.excluded[3] = true;
+                if let GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir {
+                    cell_index, ..
+                } = &mut input.boundary
+                {
+                    *cell_index = 2;
+                }
+                input.timestep_s = 0.01;
+                input.budget.mass_residual_tolerance_kg_m2_s = 1.0e-13;
+                let outer = inner + 0.75 * input.grid.length_m;
+                let area = std::f64::consts::PI * (outer * outer - inner * inner);
+                let film_volume = area * input.grid.gap_m[0];
+                let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+                let initial_mass = (input.initial_absolute_pressure_pa * film_volume
+                    + initial_reservoir_pressure * volume)
+                    / rt;
+                let equilibrium = initial_mass * rt / (film_volume + volume);
+                let mut checkpoint = None;
+                for index in 0..100 {
+                    let step = solve_isothermal_axisymmetric_gas_film_1d(
+                        &input,
+                        inner,
+                        checkpoint.as_ref(),
+                    )
+                    .unwrap();
+                    let reservoir = step.receipt.finite_reservoir.unwrap();
+                    assert!(
+                        (reservoir.absolute_pressure_pa - reservoir.gas_mass_kg * rt / volume)
+                            .abs()
+                            < 1.0e-9
+                    );
+                    assert!(
+                        (step.receipt.gas_mass_kg + reservoir.gas_mass_kg - initial_mass).abs()
+                            < 2.0e-16
+                    );
+                    assert!(
+                        reservoir.combined_mass_closure_residual_kg_per_s.abs() < 2.0e-16,
+                        "inner={inner}, volume={volume}, step={index}, closure={:e}",
+                        reservoir.combined_mass_closure_residual_kg_per_s
+                    );
+                    let flow = step.receipt.vent_outward_mass_flow_kg_per_s;
+                    assert_eq!(
+                        reservoir.inward_enthalpy_power_w,
+                        step.receipt.vent_outward_enthalpy_power_w
+                    );
+                    assert_eq!(reservoir.required_isothermal_heat_to_gas_w, -rt * flow);
+                    let stored_energy_rate = reservoir.storage_rate_kg_per_s
+                        * (input.gas.declared_specific_enthalpy_j_kg - rt);
+                    assert!(
+                        (stored_energy_rate
+                            - reservoir.inward_enthalpy_power_w
+                            - reservoir.required_isothermal_heat_to_gas_w)
+                            .abs()
+                            < 1.0e-13
+                    );
+                    assert_eq!(
+                        step.checkpoint.capillary_reservoir_mass_kg,
+                        Some(reservoir.gas_mass_kg)
+                    );
+                    assert_eq!(step.checkpoint.capillary_reservoir_mass_kg_per_m, None);
+                    assert_eq!(step.absolute_pressure_pa[3], None);
+                    if index == 99 {
+                        for pressure in &step.checkpoint.active_absolute_pressure_pa {
+                            assert!((pressure - equilibrium).abs() < 0.01);
+                        }
+                        assert!((reservoir.absolute_pressure_pa - equilibrium).abs() < 0.01);
+                    }
+                    checkpoint = Some(step.checkpoint);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_radial_reservoir_time_refinement_matches_independent_three_volume_ode() {
+    for inner in [0.0, 0.01] {
+        let mut input = radial_connection_fixture(2, 100_325.0, 128, Some(2.0e-9));
+        let pi = std::f64::consts::PI;
+        let h = input.grid.gap_m[0];
+        let dr = input.grid.length_m / 2.0;
+        let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+        let mu = input.gas.dynamic_viscosity_pa_s;
+        let capacity: [f64; 3] = [
+            pi * ((inner + dr).powi(2) - inner.powi(2)) * h / rt,
+            pi * ((inner + 2.0 * dr).powi(2) - (inner + dr).powi(2)) * h / rt,
+            2.0e-9 / rt,
+        ];
+        let radial =
+            pi * h.powi(3) / (12.0 * mu * rt * ((inner + 1.5 * dr) / (inner + 0.5 * dr)).ln());
+        let tube = 128.0 * pi * 1.0e-5_f64.powi(4) / (16.0 * mu * 0.01 * rt);
+        let rate = |p: [f64; 3]| {
+            let internal = radial * (p[0] * p[0] - p[1] * p[1]);
+            let exchange = tube * (p[1] * p[1] - p[2] * p[2]);
+            [
+                -internal / capacity[0],
+                (internal - exchange) / capacity[1],
+                exchange / capacity[2],
+            ]
+        };
+        let duration = 0.01;
+        let dt = duration / 16_384.0;
+        let mut reference = [
+            input.initial_absolute_pressure_pa,
+            input.initial_absolute_pressure_pa,
+            100_325.0,
+        ];
+        for _ in 0..16_384 {
+            let a = rate(reference);
+            let b = rate(core::array::from_fn(|i| reference[i] + 0.5 * dt * a[i]));
+            let c = rate(core::array::from_fn(|i| reference[i] + 0.5 * dt * b[i]));
+            let d = rate(core::array::from_fn(|i| reference[i] + dt * c[i]));
+            reference = core::array::from_fn(|i| {
+                reference[i] + dt * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0
+            });
+        }
+        let mut errors = Vec::new();
+        for count in [16, 32, 64] {
+            input.timestep_s = duration / f64::from(count);
+            let mut checkpoint = None;
+            let mut actual = [0.0; 3];
+            for _ in 0..count {
+                let step =
+                    solve_isothermal_axisymmetric_gas_film_1d(&input, inner, checkpoint.as_ref())
+                        .unwrap();
+                actual = [
+                    step.checkpoint.active_absolute_pressure_pa[0],
+                    step.checkpoint.active_absolute_pressure_pa[1],
+                    step.receipt.finite_reservoir.unwrap().absolute_pressure_pa,
+                ];
+                checkpoint = Some(step.checkpoint);
+            }
+            errors.push(
+                actual
+                    .into_iter()
+                    .zip(reference)
+                    .map(|(p, q)| (p - q).abs())
+                    .fold(0.0_f64, f64::max),
+            );
+        }
+        for pair in errors.windows(2) {
+            assert!(
+                pair[0] / pair[1] > 1.8 && pair[0] / pair[1] < 2.1,
+                "radial reservoir time convergence: inner={inner}, errors={errors:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_radial_reservoir_handles_stiff_capacity_and_fixed_bath_limit() {
+    for inner in [0.0, 0.01] {
+        for volume in [1.0e-18, 1.0e-24] {
+            let mut input = radial_connection_fixture(2, 100_325.0, 64, Some(volume));
+            input.timestep_s = 1.0e-3;
+            let step = solve_isothermal_axisymmetric_gas_film_1d(&input, inner, None).unwrap();
+            let reservoir = step.receipt.finite_reservoir.unwrap();
+            assert!(
+                (reservoir.absolute_pressure_pa - step.checkpoint.active_absolute_pressure_pa[1])
+                    .abs()
+                    < 1.0e-3
+            );
+            assert!(reservoir.gas_mass_kg > 0.0);
+            assert!(step.receipt.vent_outward_mass_flow_kg_per_s > 0.0);
+            assert!(step.receipt.capillary_vent.unwrap().viscous_dissipation_w >= 0.0);
+            if volume < 1.0e-20 {
+                assert!(reservoir.gas_mass_kg < 1.0e-20);
+            }
+        }
+        let mut bath = radial_connection_fixture(2, 100_325.0, 64, None);
+        bath.timestep_s = 1.0e-3;
+        let reference = solve_isothermal_axisymmetric_gas_film_1d(&bath, inner, None).unwrap();
+        let mut errors = Vec::new();
+        for volume in [1.0e-7, 1.0e-6, 1.0e-5] {
+            let mut input = radial_connection_fixture(2, 100_325.0, 64, Some(volume));
+            input.timestep_s = bath.timestep_s;
+            let step = solve_isothermal_axisymmetric_gas_film_1d(&input, inner, None).unwrap();
+            let error = step.checkpoint.active_absolute_pressure_pa[1]
+                - reference.checkpoint.active_absolute_pressure_pa[1];
+            assert!(error > 0.0);
+            errors.push(error);
+        }
+        for pair in errors.windows(2) {
+            assert!(
+                pair[0] / pair[1] > 9.0 && pair[0] / pair[1] < 11.0,
+                "radial bath limit: {errors:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn g3_radial_reservoir_replays_squeeze_and_expansion_with_total_inventory() {
+    let mut input = radial_connection_fixture(4, 101_325.0, 128, Some(3.0e-9));
+    let inner = 0.002;
+    input.timestep_s = 1.0e-3;
+    input.wall_motion.gap_rate_m_per_s = -1.0e-5;
+    let outer = inner + input.grid.length_m;
+    let area = std::f64::consts::PI * (outer * outer - inner * inner);
+    let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+    let old_gap = input.grid.gap_m[0] - input.timestep_s * input.wall_motion.gap_rate_m_per_s;
+    let mass = input.initial_absolute_pressure_pa * (area * old_gap + 3.0e-9) / rt;
+    let mut checkpoint = None;
+    let mut filling = false;
+    let mut draining = false;
+    for index in 0..30 {
+        let step =
+            solve_isothermal_axisymmetric_gas_film_1d(&input, inner, checkpoint.as_ref()).unwrap();
+        if index == 15 {
+            assert_eq!(
+                step,
+                solve_isothermal_axisymmetric_gas_film_1d(&input, inner, checkpoint.as_ref())
+                    .unwrap()
+            );
+        }
+        let reservoir = step.receipt.finite_reservoir.unwrap();
+        assert!((step.receipt.gas_mass_kg + reservoir.gas_mass_kg - mass).abs() < 1.0e-17);
+        filling |= step.receipt.vent_outward_mass_flow_kg_per_s > 0.0;
+        draining |= step.receipt.vent_outward_mass_flow_kg_per_s < 0.0;
+        checkpoint = Some(step.checkpoint);
+        if index == 9 {
+            input.wall_motion.gap_rate_m_per_s = 2.0e-5;
+        }
+        for gap in &mut input.grid.gap_m {
+            *gap += input.timestep_s * input.wall_motion.gap_rate_m_per_s;
+        }
+    }
+    assert!(filling && draining);
+}
+
+#[test]
+fn g4_radial_connections_reject_wrong_units_geometry_and_restart_inventory() {
+    let input = radial_connection_fixture(2, 100_325.0, 32, Some(3.0e-9));
+    let step = solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, None).unwrap();
+    for total_mass in [None, Some(0.0), Some(-1.0), Some(f64::NAN)] {
+        let mut invalid = step.checkpoint.clone();
+        invalid.capillary_reservoir_mass_kg = total_mass;
+        assert!(solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, Some(&invalid)).is_err());
+    }
+    let mut wrong_basis = step.checkpoint.clone();
+    wrong_basis.capillary_reservoir_mass_kg_per_m = wrong_basis.capillary_reservoir_mass_kg;
+    assert!(matches!(
+        solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, Some(&wrong_basis)),
+        Err(GasFilmError::CheckpointMismatch {
+            field: "capillary_reservoir_mass_kg_per_m"
+        })
+    ));
+    for change in 0..4 {
+        let mut changed = input.clone();
+        if let GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir {
+            cell_index,
+            capillary,
+            reservoir,
+        } = &mut changed.boundary
+        {
+            match change {
+                0 => capillary.capillary_count *= 2,
+                1 => reservoir.volume_m3 *= 2.0,
+                2 => reservoir.initial_absolute_pressure_pa += 1.0,
+                _ => *cell_index = 0,
+            }
+        }
+        assert!(matches!(
+            solve_isothermal_axisymmetric_gas_film_1d(&changed, 0.0, Some(&step.checkpoint)),
+            Err(GasFilmError::CheckpointMismatch {
+                field: "configuration_fingerprint"
+            })
+        ));
+    }
+    for boundary in [
+        input.boundary,
+        radial_connection_fixture(2, 100_325.0, 32, None).boundary,
+    ] {
+        let mut changed = input.clone();
+        changed.boundary = boundary;
+        assert_eq!(
+            solve_isothermal_gas_film_1d(&changed, None),
+            Err(GasFilmError::Unavailable {
+                reason: "cartesian-total-unit-capillary-connection"
+            })
+        );
+    }
+    let mut changed = input.clone();
+    if let GasFilmBoundaryTopology::AxisymmetricCapillaryReservoir { capillary, .. } =
+        &mut changed.boundary
+    {
+        capillary.capillary_count = 0;
+    }
+    assert!(matches!(
+        solve_isothermal_axisymmetric_gas_film_1d(&changed, 0.0, None),
+        Err(GasFilmError::InvalidInput {
+            field: "capillary.capillary_count"
+        })
+    ));
+    let mut equilibrium = radial_connection_fixture(2, 101_325.0, 32, Some(3.0e-9));
+    equilibrium.budget.maximum_iterations = 1;
+    let parked = solve_isothermal_axisymmetric_gas_film_1d(&equilibrium, 0.0, None).unwrap();
+    let mut squeezed = equilibrium.clone();
+    squeezed.wall_motion.gap_rate_m_per_s = -1.0e-4;
+    for gap in &mut squeezed.grid.gap_m {
+        *gap += squeezed.timestep_s * squeezed.wall_motion.gap_rate_m_per_s;
+    }
+    assert!(matches!(
+        solve_isothermal_axisymmetric_gas_film_1d(&squeezed, 0.0, Some(&parked.checkpoint)),
+        Err(GasFilmError::IterationBudgetExceeded { .. })
+    ));
+    let resumed =
+        solve_isothermal_axisymmetric_gas_film_1d(&equilibrium, 0.0, Some(&parked.checkpoint))
+            .unwrap();
+    assert_eq!(
+        resumed.checkpoint.capillary_reservoir_mass_kg,
+        parked.checkpoint.capillary_reservoir_mass_kg
+    );
+}
 
 #[test]
 fn g1_stiff_radial_drainage_reaches_exact_endpoint_in_bounded_newton_updates() {

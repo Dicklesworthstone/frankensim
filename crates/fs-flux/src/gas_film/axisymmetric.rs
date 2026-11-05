@@ -12,6 +12,63 @@ use super::{
     solve_film,
 };
 
+/// Parallel no-slip capillaries distributed over one complete annular cell.
+///
+/// The connection is azimuthally homogenized: it resolves the annular pressure,
+/// not individual holes or junction flow. Tube storage, inertia and end effects
+/// are excluded under the same envelope as [`super::CapillaryVent`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisymmetricCapillaryVent {
+    /// Internal radius of each identical capillary [m].
+    pub radius_m: f64,
+    /// Fully developed flow length of each capillary [m].
+    pub length_m: f64,
+    /// Total number of identical tubes connected to the annular cell; nonzero.
+    /// This is neither a count per circumference nor a count per radial width.
+    pub capillary_count: u32,
+}
+
+/// Finite rigid volume containing the same isothermal ideal gas as the film.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisymmetricGasFilmReservoir {
+    /// Total reservoir volume [m^3], independent of the film's radius or mesh.
+    pub volume_m3: f64,
+    /// Initial absolute pressure [Pa], used only without a checkpoint.
+    pub initial_absolute_pressure_pa: f64,
+}
+
+/// Total capillary work and single-tube applicability at the accepted endpoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisymmetricCapillaryVentReport {
+    /// Total pressure-gradient work/viscous dissipation [W], `M*R*T*ln(p_f/p_r)`.
+    /// Separate from film heat and from transported enthalpy.
+    pub viscous_dissipation_w: f64,
+    /// Diameter-based Reynolds number in one tube, not the complete bundle.
+    pub reynolds_number: f64,
+    /// Maximum radius-based Knudsen number at either tube endpoint.
+    pub maximum_knudsen_number: f64,
+    /// Maximum centreline Mach number in one tube.
+    pub maximum_gas_mach_number: f64,
+}
+
+/// Actual finite gas inventory and its exchange with the complete radial film.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisymmetricGasFilmReservoirReport {
+    /// Absolute pressure from the accepted mass, fixed temperature and volume [Pa].
+    pub absolute_pressure_pa: f64,
+    /// Total reservoir gas mass [kg].
+    pub gas_mass_kg: f64,
+    /// Represented total mass-storage rate [kg s^-1].
+    pub storage_rate_kg_per_s: f64,
+    /// Signed enthalpy entering the reservoir from the film [W].
+    pub inward_enthalpy_power_w: f64,
+    /// Heat required to maintain fixed temperature [W], `-R*T*M`.
+    /// Filling rejects heat; this is not a solved heat-transfer law.
+    pub required_isothermal_heat_to_gas_w: f64,
+    /// Film plus reservoir storage [kg s^-1]; their exchange is internal.
+    pub combined_mass_closure_residual_kg_per_s: f64,
+}
+
 /// Conservative totals for a complete axisymmetric film, not a strip per width.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxisymmetricGasFilmReceipt {
@@ -34,14 +91,18 @@ pub struct AxisymmetricGasFilmReceipt {
     pub inner_boundary_outward_mass_flow_kg_per_s: f64,
     /// Outward mass rate across the outer circular boundary [kg s^-1].
     pub outer_boundary_outward_mass_flow_kg_per_s: f64,
-    /// Total outward exchange at an ideal pressure-pinned annular cell [kg s^-1].
+    /// Total outward exchange through the annular vent/capillary connection [kg s^-1].
     pub vent_outward_mass_flow_kg_per_s: f64,
     /// Signed inner-boundary enthalpy transport using caller-declared enthalpy [W].
     pub inner_boundary_outward_enthalpy_power_w: f64,
     /// Signed outer-boundary enthalpy transport using caller-declared enthalpy [W].
     pub outer_boundary_outward_enthalpy_power_w: f64,
-    /// Signed ideal ring-vent enthalpy transport [W].
+    /// Signed annular vent/capillary enthalpy transport [W].
     pub vent_outward_enthalpy_power_w: f64,
+    /// Finite capillary mechanics, when present, outside the film's dissipation.
+    pub capillary_vent: Option<AxisymmetricCapillaryVentReport>,
+    /// Total finite reservoir inventory, when present. Both film ends are sealed.
+    pub finite_reservoir: Option<AxisymmetricGasFilmReservoirReport>,
     /// Total storage plus outward boundary/vent mass rate [kg s^-1].
     pub mass_closure_residual_kg_per_s: f64,
     /// Integral of absolute pressure over annular cell areas [N].
@@ -78,8 +139,8 @@ pub struct AxisymmetricGasFilmStep {
     pub absolute_pressure_pa: Vec<Option<f64>>,
     /// Annular storage, circular mass rates, total load/work, and local radial shear.
     pub receipt: AxisymmetricGasFilmReceipt,
-    /// Shared pressure/gap checkpoint bound to the radial geometry. The capillary
-    /// reservoir field is always absent for this entry point.
+    /// Shared pressure/gap checkpoint bound to the radial geometry. A finite
+    /// reservoir uses `capillary_reservoir_mass_kg`; the per-width field is absent.
     pub checkpoint: GasFilmCheckpoint,
 }
 
@@ -91,8 +152,12 @@ pub struct AxisymmetricGasFilmStep {
 /// A disk requires a sealed inner face. Use `MixedEnds { left: None, right:
 /// Some(p) }` (with the full field names) for an ambient-open rim. Normal gap
 /// motion/profiles, both film wall policies and ideal annular pressure vents are
-/// supported. Radial/azimuthal wall motion and per-width capillary/reservoir
-/// connections are refused; they require additional physical geometry/semantics.
+/// supported. `AxisymmetricCapillaryVented`/`AxisymmetricCapillaryReservoir`
+/// supply total tube counts and total finite volumes, with both radial ends
+/// sealed. The selected positive-area cell homogenizes the exchange around its
+/// circumference, including a central disk cell; it is not a point source at r=0.
+/// Radial/azimuthal wall motion and per-width capillary/reservoir connections
+/// are refused; they require different physical geometry/semantics.
 ///
 /// Cell areas are exact annuli. Face resistance integrates 1/r between pressure
 /// samples, preserving the constant-gap steady logarithmic pressure potential.
@@ -126,6 +191,26 @@ pub fn solve_isothermal_axisymmetric_gas_film_1d(
             outer_boundary_outward_enthalpy_power_w: receipt
                 .right_boundary_outward_enthalpy_flux_w_per_m,
             vent_outward_enthalpy_power_w: receipt.vent_outward_enthalpy_flux_w_per_m,
+            capillary_vent: receipt
+                .capillary_vent
+                .map(|vent| AxisymmetricCapillaryVentReport {
+                    viscous_dissipation_w: vent.viscous_dissipation_w_per_m,
+                    reynolds_number: vent.reynolds_number,
+                    maximum_knudsen_number: vent.maximum_knudsen_number,
+                    maximum_gas_mach_number: vent.maximum_gas_mach_number,
+                }),
+            finite_reservoir: receipt.finite_reservoir.map(|reservoir| {
+                AxisymmetricGasFilmReservoirReport {
+                    absolute_pressure_pa: reservoir.absolute_pressure_pa,
+                    gas_mass_kg: reservoir.gas_mass_kg_per_m,
+                    storage_rate_kg_per_s: reservoir.storage_rate_kg_per_m_s,
+                    inward_enthalpy_power_w: reservoir.inward_enthalpy_flux_w_per_m,
+                    required_isothermal_heat_to_gas_w: reservoir
+                        .required_isothermal_heat_to_gas_w_per_m,
+                    combined_mass_closure_residual_kg_per_s: reservoir
+                        .combined_mass_closure_residual_kg_per_m_s,
+                }
+            }),
             mass_closure_residual_kg_per_s: receipt.mass_closure_residual_kg_per_m_s,
             absolute_pressure_load_n: receipt.absolute_pressure_load_n_per_m,
             gauge_pressure_load_n: receipt.gauge_pressure_load_n_per_m,
