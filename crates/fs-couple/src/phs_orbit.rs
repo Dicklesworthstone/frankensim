@@ -30,6 +30,9 @@ pub use tangent::{
 /// Physical port harmonics evaluated through the original nonlinear storage.
 pub mod spectrum;
 
+/// Physical probe response and frequency conversion about driven or self-excited periodic orbits.
+pub mod sideband;
+
 mod continuation;
 pub use continuation::{
     PhsFrequencyResponsePoint, PhsScaledFrequencyResponsePoint,

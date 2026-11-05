@@ -1,0 +1,336 @@
+use super::{controls, near, orbit, scales};
+use fs_couple::phs_orbit::{
+    AutonomousPortFeedback,
+    sideband::{
+        PhsPortSidebandError, solve_autonomous_feedback_port_sideband_response,
+        solve_autonomous_feedback_port_sideband_response_analytic,
+    },
+};
+use fs_math::{c64::C64, det};
+use fs_nlmodal::{SosModalStorage, StressChannel};
+use fs_orbit::{
+    HbOrbit,
+    sideband::{SidebandError, SidebandScales},
+};
+use fs_phs::{PortHamiltonian, RelaxationBranch, Storage};
+
+// An authored active source maintains the exact mechanical limit cycle
+// r'=gain*(1-r^2)*r, theta'=-omega while preserving the original H/R/G and
+// Maxwell state. Radial decay is -2*gain, phase is neutral, memory decays -1/tau.
+struct CycleDrive {
+    omega: f64,
+    gain: f64,
+    resistance: f64,
+    cubic: f64,
+    memory: f64,
+}
+impl AutonomousPortFeedback for CycleDrive {
+    fn port_count(&self) -> usize {
+        2
+    }
+    fn input(&self, x: &[f64], flows: &[f64], out: &mut [f64]) -> bool {
+        let radial = self.gain * (1.0 - x[0] * x[0] - x[1] * x[1]);
+        out[0] = self.resistance * flows[0] + radial * x[0];
+        out[1] = self.omega * (flows[0] - x[0]) + self.resistance * flows[1] + radial * x[1];
+        true
+    }
+}
+impl CycleDrive {
+    fn total_derivative(&self, x: &[f64], _: &[f64], out: &mut [f64]) -> bool {
+        let n = x.len();
+        let radial = self.gain * (1.0 - x[0] * x[0] - x[1] * x[1]);
+        let (rq, rp) = (-2.0 * self.gain * x[0], -2.0 * self.gain * x[1]);
+        let hqq = 1.0 + 3.0 * self.cubic * x[0] * x[0] + self.memory;
+        out.fill(0.0);
+        out[0] = self.resistance * hqq + radial + x[0] * rq;
+        out[1] = x[0] * rp;
+        out[n] = self.omega * (hqq - 1.0) + x[1] * rq;
+        out[n + 1] = self.resistance + radial + x[1] * rp;
+        if n == 3 {
+            // These are the original effort/memory cross derivatives, not a
+            // feedback derivative at fixed physical flow.
+            out[2] = -self.resistance * det::sqrt(self.memory);
+            out[n + 2] = -self.omega * det::sqrt(self.memory);
+        }
+        true
+    }
+}
+
+fn system(source: &CycleDrive, tau: f64, storage: Option<Box<dyn Storage>>) -> PortHamiltonian {
+    let storage = storage.unwrap_or_else(|| {
+        Box::new(SosModalStorage {
+            omegas: vec![1.0],
+            channels: vec![StressChannel {
+                coefficient: source.cubic,
+                coupling: vec![1.0],
+            }],
+        })
+    });
+    let system = PortHamiltonian::new(
+        2,
+        2,
+        vec![0.0, source.omega, -source.omega, 0.0],
+        vec![source.resistance, 0.0, 0.0, source.resistance],
+        vec![1.0, 0.0, 0.0, 1.0],
+        storage,
+    )
+    .unwrap();
+    if source.memory == 0.0 {
+        system
+    } else {
+        system
+            .with_relaxation_branches(vec![RelaxationBranch {
+                projection: vec![1.0, 0.0],
+                stiffness: source.memory,
+                relaxation_time_s: tau,
+            }])
+            .unwrap()
+    }
+}
+fn candidate(source: &CycleDrive, tau: f64, phase: f64) -> HbOrbit {
+    let q = C64::new(det::cos(phase), det::sin(phase)).scale(0.5);
+    let mut coefficients = vec![vec![C64::ZERO, q], vec![C64::ZERO, C64::new(0.0, 1.0) * q]];
+    if source.memory != 0.0 {
+        coefficients.push(vec![
+            C64::ZERO,
+            q.scale(det::sqrt(source.memory)) / C64::new(1.0, tau * source.omega),
+        ]);
+    }
+    orbit(source.omega, coefficients)
+}
+
+// Independent rotating-coordinate solution. Q(theta)^T turns the original
+// perturbation into a scalar radial filter (s+2*gain)^-1 and a neutral phase
+// integrator s^-1. Rotate back to the SAME Cartesian state and phase clock.
+fn exact_mechanical(
+    source: &CycleDrive,
+    phase: f64,
+    carrier: f64,
+    force: [C64; 2],
+) -> Vec<[C64; 2]> {
+    let mut answer = vec![[C64::ZERO; 2]; 5];
+    for sigma in [-1, 1] {
+        let angle = sigma as f64 * phase;
+        let clock = C64::new(det::cos(angle), det::sin(angle));
+        let i = C64::new(0.0, 0.5 * sigma as f64);
+        let rate = C64::new(0.0, carrier + sigma as f64 * source.omega);
+        let radial =
+            (force[0].scale(0.5) + i * force[1]) * clock / (rate + C64::from_re(2.0 * source.gain));
+        let tangent = (-i * force[0] + force[1].scale(0.5)) * clock / rate;
+        for tau in [-1, 1] {
+            let angle = tau as f64 * phase;
+            let clock = C64::new(det::cos(angle), det::sin(angle));
+            let i = C64::new(0.0, 0.5 * tau as f64);
+            let band = (sigma + tau + 2) as usize;
+            answer[band][0] = answer[band][0] + clock * (radial.scale(0.5) - i * tangent);
+            answer[band][1] = answer[band][1] + clock * (i * radial + tangent.scale(0.5));
+        }
+    }
+    answer
+}
+
+#[test]
+fn autonomous_probe_matches_radial_phase_solution_with_nonlinear_output_and_maxwell_memory() {
+    let source = CycleDrive {
+        omega: 1.2,
+        gain: 0.45,
+        resistance: 0.2,
+        cubic: 0.6,
+        memory: 0.3,
+    };
+    let (tau, phase, carrier) = (0.7, 0.31, 0.47);
+    let system = system(&source, tau, None);
+    let base = candidate(&source, tau, phase);
+    let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| source.total_derivative(x, y, out);
+    let force = [C64::new(0.12, -0.04), C64::new(-0.03, 0.05)];
+    let mut forcing = vec![C64::ZERO; 10];
+    forcing[4..6].copy_from_slice(&force);
+    let result = solve_autonomous_feedback_port_sideband_response(
+        &system,
+        &source,
+        &derivative,
+        &base,
+        carrier,
+        &forcing,
+        &controls(3, 2, 2, 4),
+        &scales(3),
+        || false,
+    )
+    .unwrap();
+    let mechanics = exact_mechanical(&source, phase, carrier, force);
+    let mut expected = vec![[C64::ZERO; 3]; 5];
+    for band in 0..5 {
+        let w = carrier + (band as f64 - 2.0) * source.omega;
+        expected[band] = [
+            mechanics[band][0],
+            mechanics[band][1],
+            mechanics[band][0].scale(det::sqrt(source.memory)) / C64::new(1.0, tau * w),
+        ];
+        for j in 0..3 {
+            near(
+                result.state_response.coefficients[band * 3 + j],
+                expected[band][j],
+                4e-11,
+            );
+        }
+    }
+    let state = |k: isize, j: usize| {
+        if k.unsigned_abs() > 2 {
+            C64::ZERO
+        } else {
+            expected[(k + 2) as usize][j]
+        }
+    };
+    let modulation = (base.coeffs[0][1] * base.coeffs[0][1]).scale(3.0 * source.cubic);
+    for k in -4..=4 {
+        let effort = state(k, 0).scale(1.0 + source.memory + 1.5 * source.cubic)
+            + modulation * state(k - 2, 0)
+            + modulation.conj() * state(k + 2, 0)
+            - state(k, 2).scale(det::sqrt(source.memory));
+        near(
+            result.port_coefficients[(k + 4) as usize * 2],
+            effort,
+            4e-11,
+        );
+        near(
+            result.port_coefficients[(k + 4) as usize * 2 + 1],
+            state(k, 1),
+            4e-11,
+        );
+    }
+    assert_eq!(result.state_dimension, 3);
+    assert!(result.state_response.coefficients[0].abs() > 1e-3);
+    assert!(result.state_response.coefficients[12].abs() > 1e-3);
+    assert!(result.base_residual < 1e-11);
+    assert!(result.state_response.omitted_residual < 1e-11);
+}
+
+struct UndeclaredQuadratic;
+impl Storage for UndeclaredQuadratic {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        0.5 * (x[0] * x[0] + x[1] * x[1])
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        out.copy_from_slice(x);
+    }
+}
+
+#[test]
+fn autonomous_probe_requires_complete_storage_and_total_feedback_derivatives() {
+    let source = CycleDrive {
+        omega: 1.0,
+        gain: 0.4,
+        resistance: 0.2,
+        cubic: 0.0,
+        memory: 0.0,
+    };
+    let base = candidate(&source, 1.0, 0.0);
+    let system = system(&source, 1.0, Some(Box::new(UndeclaredQuadratic)));
+    let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| source.total_derivative(x, y, out);
+    let mut forcing = vec![C64::ZERO; 10];
+    forcing[4] = C64::from_re(0.2);
+    let c = controls(2, 2, 2, 2);
+    assert!(matches!(
+        solve_autonomous_feedback_port_sideband_response(
+            &system,
+            &source,
+            &derivative,
+            &base,
+            0.3,
+            &forcing,
+            &c,
+            &scales(2),
+            || false,
+        ),
+        Err(PhsPortSidebandError::Sideband(
+            SidebandError::TangentUnavailable
+        ))
+    ));
+    let hessian = |_: &[f64], v: &[f64], out: &mut [f64]| {
+        out.copy_from_slice(v);
+        true
+    };
+    let result = solve_autonomous_feedback_port_sideband_response_analytic(
+        &system,
+        &source,
+        &derivative,
+        &base,
+        0.3,
+        &forcing,
+        &c,
+        &scales(2),
+        &hessian,
+        || false,
+    )
+    .unwrap();
+    let expected = exact_mechanical(&source, 0.0, 0.3, [C64::from_re(0.2), C64::ZERO]);
+    for (actual, expected) in result
+        .state_response
+        .coefficients
+        .iter()
+        .zip(expected.iter().flatten())
+    {
+        near(*actual, *expected, 3e-11);
+    }
+    for incomplete in [false, true] {
+        let refused = |_: &[f64], _: &[f64], out: &mut [f64]| {
+            if incomplete {
+                out[0] = 0.0;
+            }
+            incomplete
+        };
+        assert!(matches!(
+            solve_autonomous_feedback_port_sideband_response_analytic(
+                &system,
+                &source,
+                &refused,
+                &base,
+                0.3,
+                &forcing,
+                &c,
+                &scales(2),
+                &hessian,
+                || false,
+            ),
+            Err(PhsPortSidebandError::Sideband(
+                SidebandError::TangentRefused { .. }
+            ))
+        ));
+    }
+}
+
+#[test]
+fn autonomous_neutral_carrier_is_not_phase_pinned_or_given_artificial_damping() {
+    let source = CycleDrive {
+        omega: 1.0,
+        gain: 0.0,
+        resistance: 0.2,
+        cubic: 0.0,
+        memory: 0.0,
+    };
+    let base = candidate(&source, 1.0, 0.0);
+    let system = system(&source, 1.0, None);
+    let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| source.total_derivative(x, y, out);
+    let mut forcing = vec![C64::ZERO; 6];
+    forcing[2] = C64::ONE;
+    let scales = SidebandScales {
+        states: vec![1.0; 2],
+        equations: vec![1.0; 2],
+    };
+    assert!(matches!(
+        solve_autonomous_feedback_port_sideband_response(
+            &system,
+            &source,
+            &derivative,
+            &base,
+            0.0,
+            &forcing,
+            &controls(2, 2, 1, 1),
+            &scales,
+            || false,
+        ),
+        Err(PhsPortSidebandError::Sideband(
+            SidebandError::Singular { .. }
+        ))
+    ));
+}

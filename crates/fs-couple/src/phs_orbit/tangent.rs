@@ -83,6 +83,42 @@ impl<'a> StorageTangent<'a> {
     pub(super) fn available(&self) -> bool {
         !matches!(self, Self::Unavailable)
     }
+
+    /// Apply the same complete effort tangent used by the vector-field
+    /// Jacobian, before multiplication by J-R. Physical port observation needs
+    /// G^T Hxx dx, including effort directions in the nullspace of J-R.
+    pub(super) fn apply_hessian(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        let n = state.len();
+        if direction.len() != n
+            || out.len() != n
+            || state.iter().chain(direction).any(|v| !v.is_finite())
+        {
+            return false;
+        }
+        out.fill(f64::NAN);
+        let applied = match self {
+            Self::Unavailable => false,
+            Self::Quadratic { matrix, .. } => {
+                if n.checked_mul(n) != Some(matrix.len()) || matrix.iter().any(|v| !v.is_finite()) {
+                    return false;
+                }
+                for (row, value) in out.iter_mut().enumerate() {
+                    let mut sum = fs_math::dd::Dd::ZERO;
+                    for (column, &v) in direction.iter().enumerate() {
+                        let entry = matrix[row * n + column];
+                        if entry != 0.0 && v != 0.0 {
+                            sum = sum + fs_math::dd::Dd::from_f64(entry)
+                                * fs_math::dd::Dd::from_f64(v);
+                        }
+                    }
+                    *value = sum.to_f64();
+                }
+                true
+            }
+            Self::Hessian { action, .. } => action.apply(state, direction, out),
+        };
+        applied && out.iter().all(|v| v.is_finite())
+    }
 }
 
 impl PhsOrbitProblem<'_> {

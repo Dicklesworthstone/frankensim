@@ -7,8 +7,9 @@
 
 use super::{AutonomousPortFeedback, feedback_problem};
 use crate::phs_orbit::{PhsOrbitAudit, PhsOrbitError, PhsOrbitProblem, audit_orbit_with_input};
+use crate::phs_orbit::variational_feedback::{FeedbackVariationalProblem, feedback_tangent_problem};
 use core::cell::Cell;
-use fs_orbit::{ContinuableProblem, HbOrbit, OrbitProblem};
+use fs_orbit::{ContinuableProblem, HbOrbit, IslandStateJacobian, OrbitProblem};
 use fs_orbit::autonomous::{
     AutonomousBranch, AutonomousContinuationBudget, AutonomousContinuationError,
     continue_autonomous_branch,
@@ -25,6 +26,18 @@ pub trait AutonomousFeedbackFamily {
     fn port_count(&self) -> usize;
     fn input(&self, parameter: f64, state: &[f64], flows: &[f64], out: &mut [f64]) -> bool;
 }
+
+/// Complete TOTAL state derivative of one physical feedback-family member.
+///
+/// At the supplied parameter and original state x, with original conjugate
+/// flows y=G^T*grad H(x), fill the row-major m-by-n array
+/// d[u(parameter,x,G^T*grad H(x))]/dx. Include explicit state dependence AND
+/// the flow/Hessian chain exactly once. This is not a parameter derivative;
+/// the continuation owner probes that complete original column separately.
+/// Return false outside the source domain. False, unwritten or nonfinite
+/// entries refuse; the solve never substitutes finite differences.
+pub type PhsFeedbackFamilyStateJacobian<'a> =
+    dyn Fn(f64, &[f64], &[f64], &mut [f64]) -> bool + 'a;
 
 /// An immutable view at one physical parameter, also usable by the existing
 /// autonomous HB, independent shooting/Floquet and physical-work APIs.
@@ -105,20 +118,45 @@ impl AutonomousPortFeedback for VariableFeedback<'_> {
         self.family.input(self.parameter.get(), state, flows, out)
     }
 }
-struct FamilyProblem<'a> {
-    original: PhsOrbitProblem<'a>,
+struct FamilyProblem<'a, P> {
+    original: P,
     parameter: &'a Cell<f64>,
 }
-impl OrbitProblem for FamilyProblem<'_> {
+impl<P: OrbitProblem> OrbitProblem for FamilyProblem<'_, P> {
     fn dim(&self) -> usize { self.original.dim() }
     fn autonomous(&self) -> bool { true }
     fn island(&self, time: f64, state: &[f64], out: &mut [f64]) {
         self.original.island(time, state, out);
     }
+    fn island_state_jacobian(&self) -> Option<IslandStateJacobian<Self>> {
+        self.original.island_state_jacobian().map(|_| Self::state_jacobian as IslandStateJacobian<Self>)
+    }
     fn time_domain_rhs(&self) -> Option<fs_orbit::TimeDomainRhs<Self>> { Some(Self::island) }
 }
-impl ContinuableProblem for FamilyProblem<'_> {
+impl<P: OrbitProblem> FamilyProblem<'_, P> {
+    fn state_jacobian(&self, time: f64, state: &[f64], out: &mut [f64]) -> bool {
+        self.original.island_state_jacobian()
+            .is_some_and(|callback| callback(&self.original, time, state, out))
+    }
+}
+impl<P: OrbitProblem> ContinuableProblem for FamilyProblem<'_, P> {
     fn set_parameter(&mut self, value: f64) { self.parameter.set(value); }
+}
+
+fn continue_original<P: OrbitProblem>(
+    original: P, parameter: &Cell<f64>, seeds: [(f64, &HbOrbit); 2],
+    controls: &AutonomousContinuationBudget, cancelled: &mut impl FnMut() -> bool,
+    source_refused: fn(&P) -> bool,
+) -> Result<AutonomousBranch> {
+    let mut problem = FamilyProblem { original, parameter };
+    let result = continue_autonomous_branch(&mut problem, seeds, controls, cancelled);
+    if source_refused(&problem.original) {
+        return Err(PhsAutonomousBranchError::Source(PhsOrbitError::SourceRefused));
+    }
+    result.map_err(|e| match e {
+        AutonomousContinuationError::Cancelled => PhsAutonomousBranchError::Cancelled,
+        other => PhsAutonomousBranchError::Continuation(other),
+    })
 }
 
 fn relative_change(a: f64, b: f64) -> f64 {
@@ -168,6 +206,45 @@ pub fn continue_autonomous_feedback_branch(
     family: &dyn AutonomousFeedbackFamily,
     seeds: [(f64, &HbOrbit); 2],
     controls: &PhsAutonomousBranchControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PhsAutonomousBranch> {
+    continue_feedback_branch(system, family, None, seeds, controls, cancelled)
+}
+
+/// Continue the same complete physical feedback family with exact state
+/// tangents, reusing the shared feedback/storage Jacobian and orbit owners.
+///
+/// The native storage must expose its complete exact quadratic form or
+/// continuous Hessian action, including every nonlinear and material-memory
+/// coordinate. The authored derivative obeys [`PhsFeedbackFamilyStateJacobian`].
+/// The shared owner adds G*du_total/dx to (J-R)*H'', exactly once; this adapter
+/// neither reconstructs that tangent nor removes a physical state. All original
+/// sources, phase/arclength conditions, independent physical audits and
+/// cancellation/refusal semantics remain those of the ordinary branch entry.
+/// Frequency and family-parameter columns still probe original residuals.
+///
+/// Unavailable native storage tangents refuse before source evaluation;
+/// declared storage/feedback tangent failures refuse without a probe fallback.
+/// Extra storage/feedback derivative buffers count against the same payload
+/// allowance. The source and derivative must be deterministic and read-only;
+/// the derivative must correspond to the exact family and storage supplied.
+pub fn continue_autonomous_feedback_branch_with_tangent(
+    system: &PortHamiltonian,
+    family: &dyn AutonomousFeedbackFamily,
+    derivative: &PhsFeedbackFamilyStateJacobian<'_>,
+    seeds: [(f64, &HbOrbit); 2],
+    controls: &PhsAutonomousBranchControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PhsAutonomousBranch> {
+    continue_feedback_branch(system, family, Some(derivative), seeds, controls, cancelled)
+}
+
+fn continue_feedback_branch(
+    system: &PortHamiltonian,
+    family: &dyn AutonomousFeedbackFamily,
+    derivative: Option<&PhsFeedbackFamilyStateJacobian<'_>>,
+    seeds: [(f64, &HbOrbit); 2],
+    controls: &PhsAutonomousBranchControls,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PhsAutonomousBranch> {
     poll(&mut cancelled)?;
@@ -186,8 +263,25 @@ pub fn continue_autonomous_feedback_branch(
         || !tolerance(controls.maximum_relative_power_residual)
         || !tolerance(controls.maximum_relative_audit_change)
     { return Err(invalid("complete physical ports and resolved bounded work quadrature required")); }
-    let extra = points as u128 * core::mem::size_of::<[PhsOrbitAudit; 2]>() as u128
+    let mut extra = points as u128 * core::mem::size_of::<[PhsOrbitAudit; 2]>() as u128
         + 128 * (system.state_dim() as u128 + system.port_dim() as u128);
+    if derivative.is_some() {
+        // Bound the native chart before requesting potentially owned storage
+        // metadata or rectangular feedback derivative buffers. The orbit owner
+        // retains all its finer admission checks and its own tangent payload.
+        let n = system.state_dim();
+        let unknowns = controls.continuation.harmonics.checked_mul(2)
+            .and_then(|v| v.checked_add(1)).and_then(|v| v.checked_mul(n))
+            .and_then(|v| v.checked_add(2));
+        if unknowns.is_none_or(|v| v > controls.continuation.maximum_unknowns.min(2048)) {
+            return Err(invalid("complete analytic branch state exceeds its allowance"));
+        }
+        let n = n as u128;
+        let m = system.port_dim() as u128;
+        // Owned exact storage metadata plus its cached vector-field tangent,
+        // or the smaller native Hessian-action scratch, and complete m-by-n du.
+        extra += 16 * n * n + 8 * m * n;
+    }
     if extra > controls.continuation.maximum_payload_bytes as u128 {
         return Err(invalid("physical branch accounts exceed the payload allowance"));
     }
@@ -195,16 +289,22 @@ pub fn continue_autonomous_feedback_branch(
     numerical.maximum_payload_bytes -= extra as usize;
     let parameter = Cell::new(seeds[0].0);
     let law = VariableFeedback { family, parameter: &parameter };
-    let original = feedback_problem(system, &law).map_err(PhsAutonomousBranchError::Source)?;
-    let mut problem = FamilyProblem { original, parameter: &parameter };
-    let result = continue_autonomous_branch(&mut problem, seeds, &numerical, &mut cancelled);
-    if problem.original.source_refused() {
-        return Err(PhsAutonomousBranchError::Source(PhsOrbitError::SourceRefused));
-    }
-    let continuation = result.map_err(|e| match e {
-        AutonomousContinuationError::Cancelled => PhsAutonomousBranchError::Cancelled,
-        other => PhsAutonomousBranchError::Continuation(other),
-    })?;
+    let continuation = if let Some(derivative) = derivative {
+        let at_parameter = |state: &[f64], flows: &[f64], out: &mut [f64]| {
+            derivative(parameter.get(), state, flows, out)
+        };
+        let original = feedback_tangent_problem(system, &law, &at_parameter, None)
+            .map_err(PhsAutonomousBranchError::Source)?;
+        if original.island_state_jacobian().is_none() {
+            return Err(invalid("complete native storage tangent required for analytic continuation"));
+        }
+        continue_original(original, &parameter, seeds, &numerical, &mut cancelled,
+            FeedbackVariationalProblem::source_refused)?
+    } else {
+        let original = feedback_problem(system, &law).map_err(PhsAutonomousBranchError::Source)?;
+        continue_original(original, &parameter, seeds, &numerical, &mut cancelled,
+            PhsOrbitProblem::source_refused)?
+    };
     let mut audits = Vec::with_capacity(continuation.points.len());
     for (index, point) in continuation.points.iter().enumerate() {
         let pair = [

@@ -64,6 +64,15 @@ impl OrbitProblem for FeedbackVariationalProblem<'_> {
 }
 
 impl FeedbackVariationalProblem<'_> {
+    pub(super) fn source_refused(&self) -> bool {
+        self.original.source_refused()
+    }
+
+    /// The same original source for work-conjugate physical port observation.
+    pub(super) fn original_problem(&self) -> &PhsOrbitProblem<'_> {
+        &self.original
+    }
+
     fn state_jacobian(&self, time: f64, state: &[f64], out: &mut [f64]) -> bool {
         let n = self.original.system.state_dim();
         let m = self.original.system.port_dim();
