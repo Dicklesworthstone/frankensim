@@ -4537,3 +4537,16 @@ and actual-source tests pass. See [sources, model limits and runnable recovery
 sequence](MINING_CYANIDE_RECOVERY.md). The selected ideal H2S/HS- assemblage
 admits final pH 2 through 10; it supplies no competing-phase, redox, gas-loss,
 kinetic, filtration, process-heat or calibrated recovery prediction.
+
+## Grinding sump inventory and dilution
+
+The continuous grinding/classifier owner now supports a finite classifier-feed
+sump through `advance_with_sump`. Separate mill/sump dry, elemental and water
+stocks retain assay lag and independently declared dilution water. A positive
+Schur complement reuses the original implicit mill step and source admission;
+mill, sump and whole-circuit accounts independently conserve material.
+See [finite classifier-feed sump and dilution](MINING_CONTINUOUS_GRINDING_CIRCUIT.md#finite-classifier-feed-sump-and-dilution)
+and run `grinding_sump`. All 47 population-balance tests pass, including seven
+new independent sump regressions. The common drain law is explicitly
+source-bound or authored; no settling, pump/level model or plant calibration
+is inferred.

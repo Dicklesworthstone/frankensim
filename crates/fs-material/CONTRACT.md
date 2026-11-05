@@ -14953,3 +14953,36 @@ actual-gas inlet/outlet against the internal PR transfer owner and independent
 stored energy, combine phase uptake with both heat channels, shift independent
 species references, introduce source-bound new species, combine gross depletion,
 and exercise canonical order, work bounds and transactional refusals.
+
+## Finite classifier-feed sump and dilution water
+
+DESIGN: `population_balance::circuit::transient::sump` adds
+`ContinuousGrindingCircuit::advance_with_sump`. A `ClassifierFeedSump`
+retains an explicitly sourced or authored positive common drain time. Mill
+and sump carry separate size-class dry, elemental and water inventories;
+independently declared makeup water enters the sump. The original
+instantaneous-return API remains a separate zero-hold-up model.
+
+Each backward-Euler step uses a positive per-class Schur complement to reuse
+the existing coarse-to-fine mill step. The sump stock is reconstructed
+independently. Actual sump discharge feeds the original classifier; actual
+fresh-plus-return feed enters the original mill's source query. Eight
+integrated stream accounts and independent mill, sump and whole-circuit
+conservation audits retain both stocks, makeup water and internal return.
+No dense circuit solver or balancing stream is introduced. Inputs remain
+immutable on source/domain, arithmetic, budget or cancellation refusal.
+
+FACT (constructed G0/G1/G3/G4 checks): seven dedicated regressions and all 47
+population-balance tests pass in the original production-module closure.
+The checks include an independently solved rational six-by-six system,
+exact open-mill final-stock agreement at zero return, the original steady
+fixed point, refinement against a continuous two-eigenvalue solution,
+actual source/circulation restrictions and atomic work/cancellation refusal.
+The `grinding_sump` example demonstrates simultaneous grade and dilution
+changes; unsupported dilution refuses before successful stdout.
+
+The declared drain law applies the same residence to solids, elements and
+water, with fixed controls during each interval. It supplies no settling/slip,
+pump or level model, tank-volume inference, empty-sump operating policy,
+plant calibration or continuous-time error enclosure. Numerical conservation
+does not certify the first-order trajectory's discretization error.

@@ -22,6 +22,10 @@
 //! bound, dynamic sump/pipe delay, shutdown model, power/rate calibration,
 //! liberation or transfer of laboratory batch parameters to a plant.
 
+/// Finite classifier-feed sump and independently declared dilution water.
+#[path = "transient/sump.rs"]
+pub mod sump;
+
 use super::{ContinuousCircuitError, ContinuousGrindingCircuit, escape};
 use crate::comminution::circuit::CircuitError;
 use crate::comminution::population_balance::{
@@ -95,6 +99,8 @@ pub struct TransientCircuitPoint {
     pub mill_feed: ParticleStream,
     /// Gross size-resolved discharge from retained inventory divided by residence.
     pub mill_discharge: ParticleStream,
+    /// Actual classifier feed. Equal to mill discharge only without a finite sump.
+    pub classifier_feed: ParticleStream,
     /// Original classifier underflow before return/purge splitting.
     pub classifier_underflow: ParticleStream,
     /// Returned underflow, internal to the circuit boundary.
@@ -396,9 +402,37 @@ impl ContinuousGrindingCircuit {
         settings: TransientCircuitSettings,
     ) -> Result<TransientCircuitPoint> {
         let mill_discharge = inventory.discharge_at(residence)?;
+        self.transient_point_from_streams(
+            mill_discharge.clone(),
+            mill_discharge,
+            fresh,
+            residence,
+            mill_conditions,
+            classifier_conditions,
+            recycle_splits,
+            underflow_recycle,
+            settings,
+        )
+    }
+
+    // One source-admission and split owner for both zero-hold-up and finite-sump
+    // circuits. The physical caller supplies each independently retained flow.
+    #[allow(clippy::too_many_arguments)]
+    fn transient_point_from_streams(
+        &self,
+        mill_discharge: ParticleStream,
+        classifier_feed: ParticleStream,
+        fresh: &ParticleStream,
+        residence: Time,
+        mill_conditions: &QueryPoint,
+        classifier_conditions: &QueryPoint,
+        recycle_splits: &[(String, Partition)],
+        underflow_recycle: Partition,
+        settings: TransientCircuitSettings,
+    ) -> Result<TransientCircuitPoint> {
         let classified = self
             .classifier
-            .classify(&mill_discharge, classifier_conditions)?;
+            .classify(&classifier_feed, classifier_conditions)?;
         let split = classified
             .product
             .split(recycle_splits, underflow_recycle)?;
@@ -420,6 +454,7 @@ impl ContinuousGrindingCircuit {
         Ok(TransientCircuitPoint {
             mill_feed,
             mill_discharge,
+            classifier_feed,
             classifier_underflow: classified.product,
             recycle: split.product,
             purge: split.reject,

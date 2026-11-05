@@ -1,5 +1,8 @@
 //! Independent analytical fixtures, not fitted ore or plant performance.
 
+#[path = "sump/tests.rs"]
+mod sump;
+
 use super::*;
 use crate::comminution::{
     breakage::{BreakageTestContext, BreakageTransfer, SizeClass},

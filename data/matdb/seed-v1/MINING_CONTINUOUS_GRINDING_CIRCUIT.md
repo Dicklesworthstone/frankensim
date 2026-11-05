@@ -234,9 +234,74 @@ source/circulation admission, trapped accumulation and atomic work/cancellation
 refusals; all 40 population-balance tests pass in the production-module closure.
 
 This API requires positive fresh dry flow and an initial wet inventory admitted
-by the classifier. Empty startup, shutdown, dynamic sump/pipe delays, changing
-selection coefficients, liberation and equipment power draw need additional
-physical models. Time integration is first order; a conservation residual is
+by the classifier. The finite-sump extension below adds a separately retained
+classifier-feed stock. Empty startup, shutdown, pipe delays, changing selection
+coefficients, liberation and equipment power draw need additional physical models. Time integration is first order; a conservation residual is
 not a bound on trajectory error. Source admission is checked at the initial
 point and numerical endpoints, not as a continuous-time enclosure. Authored
 kinetic fixtures and Bond work-index rows do not establish plant calibration.
+
+## Finite classifier-feed sump and dilution
+
+`ContinuousGrindingCircuit::advance_with_sump` carries both a mill inventory
+and a classifier-feed sump inventory. `ClassifierFeedSump` requires a positive
+common drain residence and its explicit source or authored assumption.
+`SumpCircuitInventory` retains both size-class dry/elemental stocks and both
+water stocks. Carry both into the next call when feed grade or dilution changes.
+
+For a dry or elemental size class, the declared local model is:
+
+```text
+dM_i/dt = fresh_i + return_i*Z_i/tau_s
+          - (selection_i + 1/tau_m)*M_i + daughter_inflow_i
+dZ_i/dt = M_i/tau_m - Z_i/tau_s
+classifier_feed_i = Z_i/tau_s
+```
+
+Water has no breakage; separately declared makeup water enters the sump
+equation. Its returned share reaches the mill through the same physical
+return stream. Mill discharge and classifier feed can therefore differ in
+both amount and assay during a transition.
+
+A positive two-volume Schur complement delegates breakage to the original
+implicit mill step. It introduces no new dense linear solver. Actual sump
+discharge passes the original classifier's source restrictions, and actual
+fresh-plus-return feed passes the mill's restrictions, at the initial point
+and every accepted numerical endpoint.
+
+The response retains eight integrated streams plus fresh and makeup input.
+Independent balances around the mill, sump and entire circuit must close
+for dry matter, water and each element. The external account includes both
+initial/final stocks and excludes internal recycle. Failed admission,
+cancellation or exhausted work returns no partial successful state.
+
+```bash
+cargo run -p fs-material --example grinding_sump
+```
+
+This authored example doubles fresh copper grade and adds sump dilution,
+then restores the original grade and stops dilution:
+
+| Interval | Fresh Cu, kg | External Cu, kg | Change in combined stock, kg |
+| --- | ---: | ---: | ---: |
+| First second | 2 | 1.002742913 | +0.997257087 |
+| Next 29 seconds | 58 | 38.939647474 | +19.060352526 |
+| Next 15 seconds after restoring feed | 15 | 23.757911713 | -8.757911713 |
+
+Final classifier solids fractions are 0.755090, 0.683881 and 0.763510.
+The executable prints separate mill-discharge and classifier-feed assays and
+all three conservation residuals. `--unsupported-dilution` demonstrates
+source-domain refusal with empty successful stdout.
+
+Seven new independent rational, analytical-refinement, conservation,
+source-admission and cancellation/work tests pass, together with all 40
+existing population-balance tests. Zero return gives the original open
+mill's final inventory exactly, even with downstream sump dilution.
+
+The model uses a common ideal drain time for every size class and water.
+It does not infer sump volume, level, density, pump behavior, preferential
+settling or particle/fluid slip. Zero residence refuses; use the existing
+instantaneous API for that distinct model. An initially empty sump whose
+classifier solids fraction is undefined also refuses. Fixed interval controls,
+first-order time stepping and endpoint source checks supply no plant
+calibration or continuous-time trajectory-error enclosure.
