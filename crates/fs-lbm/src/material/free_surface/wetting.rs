@@ -624,7 +624,19 @@ impl WettingPhysics<'_> {
                     "Cox wetting needs finite positive source viscosity",
                 ));
             }
-            let capillary = (viscosity * speed) / binding.surface_tension_n_m;
+            // The thermal capillarity owner admits this SAME source tension
+            // for native Laplace pressure. Using the initial sigma here would
+            // give the contact line a different capillary number after heating.
+            // Genuinely dry stencil ghosts retain the reference coefficients.
+            let surface_tension_n_m = temperature
+                .map_or(Some(binding.surface_tension_n_m), |(_, state)| {
+                    state.surface_tension_n_m
+                })
+                .filter(|sigma| sigma.is_finite() && *sigma > 0.0)
+                .ok_or(Error::Invalid(
+                    "Cox wetting needs finite positive source surface tension",
+                ))?;
+            let capillary = (viscosity * speed) / surface_tension_n_m;
             let ratio = binding.outer_gas.as_ref().map_or(
                 binding.law.outer_to_liquid_viscosity_ratio(),
                 |gas| gas.state().dynamic_viscosity / viscosity,
@@ -641,7 +653,7 @@ impl WettingPhysics<'_> {
             Some(CoxVoinovSample {
                 signed_capillary_number: capillary,
                 dynamic_viscosity_pa_s: viscosity,
-                surface_tension_n_m: binding.surface_tension_n_m,
+                surface_tension_n_m,
                 outer_to_liquid_viscosity_ratio: ratio,
             })
         } else {

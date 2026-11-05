@@ -7,7 +7,8 @@
 //! traction share that surface sigma; neither supplies inferred capillary heat.
 //! The uniform mode admits time-varying sigma only while every wet-cell source
 //! gives exactly the same value. Its zero tangential stress needs no separate
-//! surface reconstruction and composes with native equilibrium wall wetting.
+//! surface reconstruction and composes with native equilibrium or dynamic
+//! planar wall wetting.
 
 use super::*;
 use crate::d3q19::freesurface3::thermocapillary::{
@@ -163,8 +164,8 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// a spatial difference refuses the whole candidate. Time-varying uniform
     /// tension updates the existing Laplace pressure; its surface gradient is
     /// identically zero. This supports the existing arbitrary free surface and
-    /// an explicitly attached equilibrium planar wall, without borrowing the
-    /// incompatible planar/height-graph/local thermocapillary geometry owners.
+    /// an explicitly attached equilibrium or dynamic planar wall, without
+    /// borrowing the incompatible planar/height-graph/local geometry owners.
     ///
     /// Bulk caloric temperature supplies sigma and wall adhesion together.
     /// Separately solved surface temperatures require a surface-geometry owner.

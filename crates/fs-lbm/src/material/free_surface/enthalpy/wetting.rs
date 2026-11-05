@@ -8,9 +8,10 @@
 //! The thermal stage holds the last accepted contact speed while re-evaluating
 //! both pinned angle claims. Its angles drive the same interval's native flow.
 //! The accepted advected temperature and original backward geometric speed then
-//! admit the endpoint history. Equilibrium adhesion also composes with uniform
-//! sigma(T) or the finite-slope height graph's existing Marangoni owner. The
-//! graph boundary angle is installed before its normal, area and stress are
+//! admit the endpoint history. Equilibrium and dynamic adhesion compose with
+//! uniform sigma(T); equilibrium also admits the finite-slope height graph's
+//! existing Marangoni owner. The graph boundary angle is installed before its
+//! normal, area and stress are
 //! reconstructed. This local-cell closure does not resolve interface
 //! temperature, calibrated pinning or a surface-energy balance.
 
@@ -117,7 +118,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// evolving parcel at each thermal endpoint and native flow preparation.
     /// Original gas transport claims stay pinned while admitted composition,
     /// temperature and pressure follow that owner. No second gas momentum or
-    /// heat model is created. Microscopic interface-angle claims, constant sigma,
+    /// heat model is created. Microscopic interface-angle claims, native sigma,
     /// Newtonian creeping-wedge assumptions and matching scales remain explicit.
     pub fn with_cox_voinov_gas_wetting(
         mut self,
@@ -152,6 +153,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// shared with isothermal flow. Source selection occurs once at the original
     /// complete liquid query; subsequent T/speed evaluations pin both claims.
     /// Other substrate/environment conditions remain explicitly fixed context.
+    /// The uniform thermal-capillarity owner may evolve sigma(T); all actual
+    /// wet-cell tensions must still agree exactly at every admitted stage.
+    /// Other thermocapillary geometry owners cannot share this moving boundary.
     ///
     /// All ordinary heat, molecular heat, conduction, finite-wall and finite-gas
     /// entry points retain this binding. Thermal substeps and the final native
@@ -166,8 +170,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         poll(gate)?;
-        if self.thermocapillary.is_some() {
-            return Err(Error::Invalid("flat-interface thermocapillarity cannot impose a separate contact-angle geometry"));
+        if self.thermocapillary.is_some() && !self.uniform_thermal_capillarity() {
+            return Err(Error::Invalid(
+                "dynamic planar wetting needs constant or spatially uniform surface tension",
+            ));
         }
         if self.wetting.is_some() {
             return Err(Error::Invalid("thermal liquid already owns a planar wetting history"));
@@ -186,9 +192,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
 
 impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// Add a hydrodynamic Cox law to an existing STATIC hysteresis binding.
-    /// The actual local source viscosity follows the enthalpy trajectory; sigma
-    /// remains the native constant. Shear-dependent liquids and already dynamic
-    /// angle curves refuse because the Cox wedges require Newtonian fluids.
+    /// The actual local source viscosity and native surface tension follow the
+    /// enthalpy trajectory. Surface tension is constant unless the uniform
+    /// thermal-capillarity owner is active. Shear-dependent liquids and already
+    /// dynamic angle curves refuse because the Cox wedges require Newtonian fluids.
     /// A caller-declared finite outer/liquid viscosity ratio remains fixed as
     /// the liquid heats: that explicitly models proportional outer viscosity,
     /// not a resolved or independently sourced gas-temperature trajectory.

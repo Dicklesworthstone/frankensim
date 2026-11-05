@@ -8216,7 +8216,12 @@ signed capillary number are explicit model outputs, separate from the claims.
 Both native flow paths consume the angle in their original curvature and
 pressure reconstruction. The thermal path uses each liquid cell's actual
 source viscosity, including conduction substeps and advected endpoint states;
-dry numerical ghosts retain the reference coefficients. Source tension remains
+dry numerical ghosts retain the reference coefficients. Dynamic planar wetting
+also composes with the existing uniform thermal-capillarity owner: source
+`sigma(T)` then drives BOTH native Laplace pressure and the Cox capillary
+number at each admitted thermal and advected endpoint. Every actual wet-cell
+tension must still agree exactly; unresolved spatial gradients refuse rather
+than silently discarding Marangoni stress. Without that owner, tension remains
 the native constant. Non-Newtonian rheology, missing tension, high capillary
 number and absent solutions within the declared angular domain refuse before
 publishing candidate flow or heat. No angle is clipped to conceal a film
@@ -8265,9 +8270,17 @@ the same immutable gas receipt through an `Arc`, alongside its distinct local
 liquid viscosity, applied ratio and interface claim bundle. The declared static
 microscopic-angle claims and their fixed context remain authoritative; this
 hydrodynamic connection does not invent a new equilibrium contact angle for a
-different chemical environment. Surface tension remains the native constant.
+different chemical environment. Surface tension follows the same native
+constant or explicitly uniform thermal-capillarity owner.
 Both phase capillary bounds, source support, native transport and cancellation
 must pass before any liquid, finite gas or wall candidate publishes.
+
+The native thermal-wetting regressions verify fixed-sigma trajectory equivalence,
+heated source tension shared by pressure and moving Cox response, and complete
+rollback of flow, enthalpy, tension, source history and time on a spatial-gradient
+or source-domain refusal. This composition does not admit the incompatible
+planar/local/height-graph thermocapillary geometry owners for dynamic wetting,
+or add contact-line heat, a surface-energy balance or new calibration data.
 
 The original reference-ratio table is reused exactly when ratio bits match.
 Changed moving ratios first invert the SAME angular relation over only the

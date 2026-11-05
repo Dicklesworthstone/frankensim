@@ -717,3 +717,268 @@ fn g3_g4_uniform_adhesion_rejects_spatial_gradients_source_exit_and_partial_wett
         );
     }
 }
+
+// The same native uniform-tension owner must also compose with a MOVING
+// contact line. Keep the original source, caloric and geometry fixtures.
+fn with_dynamic_capillarity<R>(
+    card: &MaterialCard,
+    interface: &InterfaceSystemCard,
+    uniform: bool,
+    initial: &[MaterialFreeSurfaceInitialCell3],
+    run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    use fs_lbm::material::free_surface::wetting::{CoxVoinovControls, CoxVoinovLaw};
+
+    let source = liquid_source(card, false);
+    let law = LiquidTemperatureLaw::try_from_material(
+        card,
+        source.material().clone(),
+        "T",
+        LiquidViscosityBasis::Dynamic,
+    )
+    .unwrap();
+    let chart = caloric(card);
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let scaling = plan_free_surface_from_material(&source, 0.001, 0.00002, 0.1).unwrap();
+        let thermal = if uniform {
+            scaling.free_surface3_from_cells_with_uniform_thermal_capillarity(
+                domain(),
+                initial,
+                &law,
+                &chart,
+                FreeSurfaceEnthalpyControls::default(),
+                None,
+                None,
+                |_| 200000.0,
+                cx,
+                &gate,
+            )
+        } else {
+            scaling
+                .free_surface3_from_cells(domain(), initial, cx)
+                .unwrap()
+                .with_enthalpy(
+                    &law,
+                    &chart,
+                    FreeSurfaceEnthalpyControls::default(),
+                    |_| 200000.0,
+                    &gate,
+                )
+        }
+        .unwrap();
+        let mut thermal = thermal
+            .with_dynamic_planar_wetting(
+                PlanarWall3::XMin,
+                interface,
+                MaterialPropertySelection::SingleClaimOnly,
+                wetting_controls(),
+                &gate,
+            )
+            .unwrap()
+            .with_cox_voinov_wetting(
+                CoxVoinovLaw::try_new_with_viscosity_ratio(
+                    CoxVoinovControls {
+                        microscopic_cutoff_m: 1e-9,
+                        observation_length_m: 0.001,
+                        maximum_capillary_number: 0.01,
+                        minimum_angle_radians: 0.01,
+                        maximum_angle_radians: 3.0,
+                    },
+                    1.0,
+                    &gate,
+                )
+                .unwrap(),
+                &gate,
+            )
+            .unwrap();
+        assert_eq!(thermal.uniform_thermal_capillarity(), uniform);
+        run(&mut thermal, &gate)
+    })
+}
+
+#[test]
+fn g3_uniform_capillarity_preserves_constant_sigma_dynamic_wetting() {
+    let liquid = source_card(0.004, false, 500.0);
+    let solid = body::wall_card(0.5, 500.0);
+    let interface = interface(&liquid, &solid, 0.0, 0.0, 500.0, 100.0);
+    let initial = cells()
+        .into_iter()
+        .map(|mut cell| {
+            cell.velocity_m_s = [0.0; 3];
+            cell
+        })
+        .collect::<Vec<_>>();
+    let run = |uniform| {
+        with_dynamic_capillarity(&liquid, &interface, uniform, &initial, |thermal, gate| {
+            let mut history = Vec::new();
+            for _ in 0..3 {
+                thermal.step(gate).unwrap();
+                history.push((
+                    thermal.flow().lattice().grid().state_bits(),
+                    thermal
+                        .wetting_samples()
+                        .unwrap()
+                        .values()
+                        .map(|sample| {
+                            (
+                                sample.signed_speed_m_s,
+                                sample.applied_angle_radians,
+                                sample.hydrodynamic,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            history
+        })
+    };
+    assert_eq!(run(false), run(true));
+}
+
+#[test]
+fn g1_uniform_heating_refreshes_native_pressure_and_cox_capillary_number_together() {
+    let slope = -0.00002;
+    let liquid = varying_tension(slope, 500.0);
+    let solid = body::wall_card(0.5, 500.0);
+    let interface = interface(&liquid, &solid, 0.0, 0.0, 500.0, 100.0);
+    with_dynamic_capillarity(
+        &liquid,
+        &interface,
+        true,
+        &uniform_cells(),
+        |thermal, gate| {
+            let selected = thermal
+                .material_at([0, 2, 3])
+                .unwrap()
+                .material()
+                .property(SURFACE_TENSION_PROPERTY)
+                .unwrap()
+                .answer()
+                .receipt
+                .selected;
+            let before = thermal.total_enthalpy_j().unwrap();
+            let heat = homogeneous_heat(thermal);
+            let supplied = heat.iter().map(|q| q.energy_j).sum::<f64>();
+            let report = thermal.step_with_heat(&heat, gate).unwrap();
+            near(report.external_heat_j, supplied, 2e-12);
+            near(thermal.total_enthalpy_j().unwrap() - before, supplied, 2e-9);
+            near(report.mass_before_kg, report.mass_after_kg, 2e-12);
+            assert_eq!(report.viscous_heat_j, 0.0);
+            let mut heated_moving = 0;
+            for (&position, sample) in thermal.wetting_samples().unwrap() {
+                let prediction = sample.hydrodynamic.unwrap();
+                assert_eq!(
+                    sample.material.state_coordinate(DYNAMIC_WETTING_SPEED_AXIS),
+                    Some(0.0)
+                );
+                if let Some(state) = thermal.material_at(position) {
+                    let sigma = state.material().property(SURFACE_TENSION_PROPERTY).unwrap();
+                    assert_eq!(sigma.answer().receipt.selected, selected);
+                    near(
+                        sigma.value_si(),
+                        0.004 + slope * (temperature(state) - 400.0),
+                        2e-14,
+                    );
+                    near(prediction.surface_tension_n_m, sigma.value_si(), 2e-14);
+                    near(
+                        prediction.dynamic_viscosity_pa_s,
+                        state.dynamic_viscosity_pa_s(),
+                        2e-14,
+                    );
+                    near(
+                        prediction.signed_capillary_number,
+                        state.dynamic_viscosity_pa_s() * sample.signed_speed_m_s / sigma.value_si(),
+                        2e-14,
+                    );
+                    let [x, y, z] = position;
+                    near(
+                        thermal
+                            .flow()
+                            .lattice()
+                            .surface_tension_at(x, y, z)
+                            .unwrap(),
+                        sigma.value_si() * 0.00002_f64.powi(2) / (1000.0 * 0.001_f64.powi(3)),
+                        2e-14,
+                    );
+                    if sample.signed_speed_m_s != 0.0 && sigma.value_si() < 0.0039 {
+                        heated_moving += 1;
+                    }
+                }
+                if sample.regime != ContactLineRegime2::Pinned {
+                    let expected = thermal
+                        .cox_voinov_wetting_law()
+                        .unwrap()
+                        .apparent_angle_radians(1.2, prediction.signed_capillary_number)
+                        .unwrap();
+                    near(sample.applied_angle_radians, expected, 2e-13);
+                }
+            }
+            assert!(
+                heated_moving > 0,
+                "heated source tension must reach a moving contact line"
+            );
+        },
+    );
+}
+
+#[test]
+fn g3_g4_uniform_dynamic_wetting_refuses_sigma_gradients_and_source_exits_atomically() {
+    let solid = body::wall_card(0.5, 500.0);
+    for (sigma_upper, angle_upper) in [(500.0, 500.0), (410.0, 500.0), (500.0, 410.0)] {
+        let liquid = varying_tension(-0.00002, sigma_upper);
+        let interface = interface(&liquid, &solid, 0.0, 0.0, angle_upper, 100.0);
+        with_dynamic_capillarity(
+            &liquid,
+            &interface,
+            true,
+            &uniform_cells(),
+            |thermal, gate| {
+                let snapshot = |thermal: &MaterialFreeSurfaceEnthalpy3<'_, '_>| {
+                    (
+                        thermal.flow().lattice().grid().state_bits(),
+                        thermal.wetting_samples().unwrap().clone(),
+                        thermal.total_enthalpy_j().unwrap(),
+                        thermal.physical_time_s(),
+                        uniform_cells()
+                            .iter()
+                            .map(|cell| {
+                                (
+                                    thermal.specific_enthalpy_at(cell.coordinates),
+                                    thermal.flow().lattice().surface_tension_at(
+                                        cell.coordinates[0],
+                                        cell.coordinates[1],
+                                        cell.coordinates[2],
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                let before = snapshot(thermal);
+                let local = [FreeSurfaceCellHeat {
+                    coordinates: [0, 2, 3],
+                    energy_j: 0.02,
+                }];
+                assert!(thermal.step_with_heat(&local, gate).is_err());
+                assert_eq!(snapshot(thermal), before);
+                assert!(
+                    thermal
+                        .step_with_conduction(&[], &local, controls(), gate)
+                        .is_err()
+                );
+                assert_eq!(snapshot(thermal), before);
+                if sigma_upper < 500.0 || angle_upper < 500.0 {
+                    let heat = homogeneous_heat(thermal);
+                    assert!(thermal.step_with_heat(&heat, gate).is_err());
+                    assert_eq!(snapshot(thermal), before);
+                }
+                let cancelled = CancelGate::new_clock_free();
+                cancelled.request();
+                assert!(thermal.step(&cancelled).is_err());
+                assert_eq!(snapshot(thermal), before);
+                thermal.step(gate).unwrap();
+            },
+        );
+    }
+}
