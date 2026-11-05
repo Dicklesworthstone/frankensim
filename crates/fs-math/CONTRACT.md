@@ -6,6 +6,15 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
 (patch Rev O; plan §5.4/§6.4). Layer: L0.
 
 ## Public types and semantics
+- `decay::{remaining_fraction, decayed_fraction, attenuate, relax_toward}` —
+  allocation-free scalar exponential kernels for nonnegative integrated hazard,
+  including its infinite limit. Separate survival/loss evaluation retains tiny
+  losses; split-exponent scaling retains representable late tails; affine
+  relaxation preserves zero-time identity and resolved short-time increments.
+  Invalid exposure or nonfinite physical values return canonical NaN. Physical
+  owners retain units, rate admission and model validity. G0/G3 regressions
+  compare half-life landmarks, a separate libm/log-domain tail oracle, and
+  interval composition. No correctly-rounded or interval claim is added.
 - `STRICT_CORE_SEMANTICS_VERSION = 1` and
   `STRICT_CORE_GOLDEN_HASH = 0xeb79cab7a01643e5` — package-version-independent
   certificate identity for the strict core. Downstream interval, neural, and

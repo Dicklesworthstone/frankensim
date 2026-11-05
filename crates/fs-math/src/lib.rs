@@ -26,6 +26,7 @@
 
 pub mod c64;
 pub mod dd;
+pub mod decay;
 pub mod det;
 pub mod eft;
 pub mod payne;

@@ -2844,6 +2844,11 @@ authority.
   full transient rather than at loosening the gate. A caller may loosen the
   ceiling, and the verdict then reports the ceiling actually applied so a
   loosened run is never mistaken for a corpus-gated one.
+  `LumpedNode::temperature_deviation_half_life_s` is `ln(2) C/(hA)` for
+  deviation from the constant-power equilibrium, not for absolute temperature.
+  The analytic response uses shared `fs-math::decay` arithmetic to retain
+  small heating increments and scaled late tails. Focused G0/G1/G3 cases in
+  `tests/lumped.rs` cover these limits, half-life ratios and interval composition.
 - `LUMPED_BIOT_CEILING` DUPLICATES THE CORPUS ROW, ON PURPOSE. This crate must
   not depend on `fs-vvreg`, so the `thermal-a-lumped-transient` Biot ceiling is
   restated as a constant. `tests/lumped.rs` asserts the two agree, so the

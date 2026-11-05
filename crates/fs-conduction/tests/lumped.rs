@@ -741,6 +741,72 @@ fn the_response_honours_its_endpoints_and_time_constant() {
 }
 
 #[test]
+fn g1_lumped_temperature_deviation_has_its_declared_half_life() {
+    let network = network_at(0.05);
+    let half_life = network.nodes()[0].temperature_deviation_half_life_s();
+    let power = [500.0];
+    let equilibrium = network.steady(&power).unwrap()[0];
+    let initial = [equilibrium + 128.0];
+    for (halves, remaining) in [(1.0, 64.0), (2.0, 32.0), (3.0, 16.0)] {
+        let actual = network
+            .response_at(&power, &initial, halves * half_life)
+            .unwrap()[0];
+        assert!((actual - equilibrium - remaining).abs() < 2e-10);
+    }
+    let whole = network.response_at(&power, &initial, 3.0 * half_life).unwrap();
+    let mut split = initial.to_vec();
+    for _ in 0..3 {
+        split = network.response_at(&power, &split, half_life).unwrap();
+    }
+    assert!((whole[0] - split[0]).abs() < 2e-10);
+}
+
+#[test]
+fn g1_lumped_half_life_survives_time_constant_overflow() {
+    let node = LumpedNode::new("range", f64::MAX, 0.8, 0.01, 1.0, 1.0).unwrap();
+    assert!(node.time_constant_s().is_infinite());
+    let half_life = node.temperature_deviation_half_life_s();
+    assert!(half_life.is_finite());
+    let network = LumpedNetwork::new(vec![node], 300.0).unwrap();
+    let after = network.response_at(&[0.0], &[400.0], half_life).unwrap()[0];
+    assert!((after - 350.0).abs() < 1e-12, "half-life response: {after}");
+}
+
+#[test]
+fn g0_lumped_response_retains_initial_state_and_resolved_small_heating() {
+    // Numerical range fixture, not a temperature/material calibration claim.
+    let node = LumpedNode::new("range", 1.0, 1.0, 0.01, 1.0, 1.0).unwrap();
+    let network = LumpedNetwork::new(vec![node], 300.0).unwrap();
+    let power = [1e100];
+    let at_zero = network.response_at(&power, &[300.0], 0.0).unwrap()[0];
+    assert_eq!(at_zero.to_bits(), 300.0_f64.to_bits());
+    // C*dT/dt = P - G*(T-300): one joule reaches a 1 J/K body in
+    // this tiny interval, and the loss correction is below binary64 resolution.
+    let tiny = network.response_at(&power, &[300.0], 1e-100).unwrap()[0];
+    assert!((tiny - 301.0).abs() < 1e-12, "tiny response: {tiny}");
+
+    // Positive finite C and G can have an unrepresentable ratio C/G.
+    // The zero-time identity and the dimensionless exposure still exist.
+    let minimum = f64::from_bits(1);
+    let node = LumpedNode::new("range", minimum, 2.0, 0.01, 1.0, 1.0).unwrap();
+    let network = LumpedNetwork::new(vec![node], 0.0).unwrap();
+    let unchanged = network.response_at(&[0.0], &[1.0], 0.0).unwrap()[0];
+    assert_eq!(unchanged.to_bits(), 1.0_f64.to_bits());
+    let after = network.response_at(&[0.0], &[1.0], minimum).unwrap()[0];
+    assert!((after - (-2.0_f64).exp()).abs() < 1e-15);
+}
+
+#[test]
+fn g1_lumped_response_retains_a_resolvable_long_decay_tail() {
+    // Independent 80-digit Decimal oracle for 1e300 * exp(-800).
+    let node = LumpedNode::new("range", 1.0, 1.0, 0.01, 1.0, 1.0).unwrap();
+    let network = LumpedNetwork::new(vec![node], 0.0).unwrap();
+    let late = network.response_at(&[0.0], &[1e300], 800.0).unwrap()[0];
+    let expected = 3.667_874_584_177_687e-48;
+    assert!((late / expected - 1.0).abs() < 2e-14, "scaled tail: {late}");
+}
+
+#[test]
 fn steady_temperature_is_ambient_plus_power_over_conductance() {
     let network = network_at(0.05);
     let node = &network.nodes()[0];

@@ -1591,6 +1591,19 @@ impl LumpedNode {
     pub fn time_constant_s(&self) -> f64 {
         self.capacitance_j_per_k / self.conductance_w_per_k
     }
+
+    /// Half-life of temperature deviation from the constant-power equilibrium,
+    /// `ln(2) C / (hA)`, in seconds. This is not a half-life of absolute kelvin.
+    /// A value outside the binary64 range rounds to zero or positive infinity.
+    #[must_use]
+    pub fn temperature_deviation_half_life_s(&self) -> f64 {
+        let tau = self.time_constant_s();
+        if tau.is_finite() {
+            core::f64::consts::LN_2 * tau
+        } else {
+            (core::f64::consts::LN_2 * self.capacitance_j_per_k) / self.conductance_w_per_k
+        }
+    }
 }
 
 /// The verdict of the lumped validity gate.
@@ -1792,8 +1805,25 @@ impl LumpedNetwork {
         let steady = self.steady(power_w)?;
         let mut out = Vec::with_capacity(self.nodes.len());
         for ((node, start), settle) in self.nodes.iter().zip(initial_k.iter()).zip(steady.iter()) {
-            let decay = fs_math::det::exp(-time_s / node.time_constant_s());
-            let value = settle + (start - settle) * decay;
+            let value = if time_s == 0.0 {
+                *start
+            } else {
+                let tau = node.time_constant_s();
+                let exposure = if tau.is_normal() {
+                    time_s / tau
+                } else {
+                    // C/G may overflow or underflow although t*G/C is
+                    // representable. Prefer a normal intermediate product;
+                    // the other order retains tiny times with tiny C.
+                    let product = time_s * node.conductance_w_per_k;
+                    if product.is_normal() {
+                        product / node.capacitance_j_per_k
+                    } else {
+                        (time_s / node.capacitance_j_per_k) * node.conductance_w_per_k
+                    }
+                };
+                fs_math::decay::relax_toward(*start, *settle, exposure)
+            };
             if !value.is_finite() {
                 return Err(lumped_error(
                     &node.name,
