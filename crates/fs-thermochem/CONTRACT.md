@@ -1,5 +1,29 @@
 # CONTRACT: fs-thermochem
 
+## Quantum-diffraction Coulomb exchange and changing populations
+
+`CoulombModelV1::new_with_cutoff` retains an explicit classical closest-approach
+or quantum-diffraction prescription. The original constructor retains its
+classical-scattering refusal. Quantum diffraction uses
+`ln(lambda_D/max(b90,hbar/(2*mu*sqrt(S))))` in the same reciprocal Maxwellian
+pair moments. The selected fixed thermal convention and static Debye screening
+remain explicit; this is a nondegenerate, nonrelativistic leading-log
+approximation with the original screening, coupling, occupation, source and
+drift gates. It is not a velocity-resolved quantum collision integral.
+The cutoff follows the conventional prescription after Eq.3.119 in
+[Fitzpatrick's Coulomb Logarithm](https://farside.ph.utexas.edu/teaching/plasma/lectures/node39.html).
+
+`evaluate_point` refreshes canonical trial amounts, volume and separate
+temperatures without allocating a frozen thermodynamic state. The retained
+original bank supplies every populated row, including newly formed ash.
+The caller owns charge balance, caloric state admission and final publication;
+existing population/material receipts retain their original binding.
+
+Twelve focused native Coulomb tests pass, including independently reconstructed
+hot-plasma SI coefficients, retained classical behavior and physical gates,
+fresh ash/density/volume evaluation, and cancellation. These are model and
+implementation checks, not a physical-uncertainty certificate.
+
 ## Maxwellian nuclear fusion and original plasma thermodynamics
 
 `fusion` evaluates the separate D-T, D-D neutron, D-D proton and D-He3

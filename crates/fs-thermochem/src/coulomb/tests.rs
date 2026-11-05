@@ -610,3 +610,313 @@ fn coulomb_classical_weak_coupling_and_quantum_bounds_are_refusals_not_clamps() 
         Err(CoulombErrorV1::Invalid(_))
     ));
 }
+
+fn quantum_limits() -> CoulombLimitsV1 {
+    // 10^8 K electrons have kT/(m_e c²)=0.01686. This explicit bound admits
+    // that nonrelativistic leading-order example, not arbitrary hot plasma.
+    CoulombLimitsV1 {
+        maximum_thermal_energy_rest_energy_ratio: 0.03,
+        ..limits()
+    }
+}
+
+#[test]
+fn quantum_cutoff_admits_hot_electrons_and_matches_independent_si_moments() {
+    let cold = state(1e20, 10_000.0, 20_000.0);
+    let classical = bind(&cold);
+    assert_eq!(
+        classical.cutoff(),
+        CoulombShortRangeCutoffV1::ClassicalClosestApproach
+    );
+    let explicit_classical = CoulombModelV1::new_with_cutoff(
+        &cold,
+        classical.screening(),
+        CoulombShortRangeCutoffV1::ClassicalClosestApproach,
+        limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(classical, explicit_classical);
+    let cold_quantum = CoulombModelV1::new_with_cutoff(
+        &cold,
+        classical.screening(),
+        CoulombShortRangeCutoffV1::QuantumDiffraction,
+        limits(),
+        || false,
+    )
+    .unwrap();
+    // Below the diffraction crossover, the exact retained pair math agrees.
+    assert_eq!(pair(&classical), pair(&cold_quantum));
+
+    let hot = state(1e20, 8e7, 1e8);
+    for (screening, debye, logarithm, friction, thermal) in [
+        (
+            CoulombScreeningV1::StaticAllChargedDebye,
+            4.600_598_713_389_44e-5,
+            17.247_312_063_759_096,
+            5.707_510_844_511_341e-7,
+            0.014_125_929_597_132_359,
+        ),
+        (
+            CoulombScreeningV1::ElectronDebye,
+            6.900_898_070_084_16e-5,
+            17.652_777_171_867_26,
+            5.841_688_071_260_836e-7,
+            0.014_458_014_477_956_465,
+        ),
+    ] {
+        assert!(matches!(
+            CoulombModelV1::new(&hot, screening, quantum_limits(), || false),
+            Err(CoulombErrorV1::Domain(
+                "quantum diffraction exceeds classical pair-scattering limit"
+            ))
+        ));
+        let model = CoulombModelV1::new_with_cutoff(
+            &hot,
+            screening,
+            CoulombShortRangeCutoffV1::QuantumDiffraction,
+            quantum_limits(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            model.cutoff(),
+            CoulombShortRangeCutoffV1::QuantumDiffraction
+        );
+        let (summary, actual_pair) = pair(&model);
+        // 70-digit Decimal reconstruction: b90=1.671191400623426862e-13 m,
+        // bq=1.487311365533546238e-12 m. Use bq, not the classical b90.
+        close(summary.debye_length_m().unwrap(), debye, 5e-14);
+        close(actual_pair.coulomb_logarithm(), logarithm, 5e-14);
+        close(actual_pair.friction_coefficient_kg_m3_s(), friction, 9e-14);
+        close(actual_pair.thermal_conductance_w_m3_k(), thermal, 9e-14);
+        close(
+            summary.maximum_quantum_to_classical_ratio(),
+            8.899_706_909_565_922,
+            5e-14,
+        );
+        assert_eq!(
+            summary,
+            model
+                .evaluate_point(
+                    hot.amounts(),
+                    hot.volume(),
+                    hot.heavy_temperature(),
+                    hot.electron_temperature(),
+                    || false,
+                )
+                .unwrap()
+        );
+        let w2 = 0.25 * actual_pair.maximum_relative_speed_squared_m2_s2();
+        let heat = actual_pair.drift_heating(w2).unwrap();
+        close(
+            heat.first_power_density_w_m3() + heat.second_power_density_w_m3(),
+            friction * w2,
+            9e-14,
+        );
+    }
+}
+
+#[test]
+fn quantum_cutoff_preserves_all_other_physical_and_original_source_gates() {
+    let hot = state(1e20, 8e7, 1e8);
+    let construct = |bounds| {
+        CoulombModelV1::new_with_cutoff(
+            &hot,
+            CoulombScreeningV1::StaticAllChargedDebye,
+            CoulombShortRangeCutoffV1::QuantumDiffraction,
+            bounds,
+            || false,
+        )
+    };
+    let model = construct(quantum_limits()).unwrap();
+    let summary = pair(&model).0;
+    let mut bounds = [quantum_limits(); 5];
+    bounds[0].minimum_coulomb_logarithm = summary.minimum_coulomb_logarithm().unwrap() + 1.0;
+    bounds[1].minimum_particles_per_debye_sphere =
+        2.0 * summary.particles_per_debye_sphere().unwrap();
+    bounds[2].maximum_coulomb_coupling = 0.5 * summary.maximum_coulomb_coupling();
+    bounds[3].maximum_thermal_phase_space_density =
+        0.5 * summary.maximum_thermal_phase_space_density();
+    bounds[4].maximum_thermal_energy_rest_energy_ratio =
+        0.5 * summary.maximum_thermal_energy_rest_energy_ratio();
+    for restrictive in bounds {
+        assert!(matches!(
+            construct(restrictive),
+            Err(CoulombErrorV1::Domain(_))
+        ));
+    }
+    assert!(matches!(
+        model.evaluate(Temperature::new(99.0), hot.electron_temperature(), || false),
+        Err(CoulombErrorV1::Species { .. })
+    ));
+    assert!(matches!(
+        model.evaluate(hot.heavy_temperature(), Temperature::new(1e9), || false),
+        Err(CoulombErrorV1::Domain(_))
+    ));
+    let mut invalid = quantum_limits();
+    invalid.maximum_quantum_to_classical_ratio = f64::NAN;
+    assert!(matches!(
+        construct(invalid),
+        Err(CoulombErrorV1::Invalid(_))
+    ));
+    assert_eq!(
+        model.evaluate(hot.heavy_temperature(), hot.electron_temperature(), || true),
+        Err(CoulombErrorV1::Cancelled)
+    );
+}
+
+#[test]
+fn coulomb_trial_refreshes_fusion_ash_with_exact_original_masses_and_charges() {
+    let ids = vec![id("D+"), id("He++"), id("T+"), id("e")];
+    let bank = IdealGasEquilibriumV1::new(
+        ElementalMatrix::new(
+            vec![ElementId::new("H").unwrap(), ElementId::new("He").unwrap()],
+            ids.clone(),
+            vec![vec![1, 0, 1, 0], vec![0, 1, 0, 0]],
+        )
+        .unwrap(),
+        ChargeVector::new(ids, vec![1, 2, 1, -1]).unwrap(),
+        vec![
+            source("D+", 2.0 * MP),
+            source("He++", 4.0 * MP),
+            source("T+", 3.0 * MP),
+            source("e", ELECTRON_MASS_KG),
+        ],
+    )
+    .unwrap();
+    let initial_amounts = [1e20, 0.0, 1e20, 2e20].map(|n| Amount::new(n / AVOGADRO_PER_MOL));
+    let final_amounts = [8e19, 2e19, 8e19, 2e20].map(|n| Amount::new(n / AVOGADRO_PER_MOL));
+    let initial = FrozenIonizedGasStateV1::new(
+        &bank,
+        &initial_amounts,
+        Volume::new(1.0),
+        Temperature::new(8e7),
+        Temperature::new(1e8),
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    let actual = FrozenIonizedGasStateV1::new(
+        &bank,
+        &final_amounts,
+        Volume::new(2.5),
+        Temperature::new(9e7),
+        Temperature::new(8e7),
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    for screening in [
+        CoulombScreeningV1::StaticAllChargedDebye,
+        CoulombScreeningV1::ElectronDebye,
+    ] {
+        let model = CoulombModelV1::new_with_cutoff(
+            &initial,
+            screening,
+            CoulombShortRangeCutoffV1::QuantumDiffraction,
+            quantum_limits(),
+            || false,
+        )
+        .unwrap();
+        let original = model.clone();
+        let trial = model
+            .evaluate_point(
+                actual.amounts(),
+                actual.volume(),
+                actual.heavy_temperature(),
+                actual.electron_temperature(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(trial.pair_count(), 6);
+        assert_eq!(trial, model.evaluate_at_state(&actual, || false).unwrap());
+        let rebound = CoulombModelV1::new_with_cutoff(
+            &actual,
+            screening,
+            CoulombShortRangeCutoffV1::QuantumDiffraction,
+            quantum_limits(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            trial,
+            rebound
+                .evaluate(
+                    actual.heavy_temperature(),
+                    actual.electron_temperature(),
+                    || false
+                )
+                .unwrap()
+        );
+        assert_eq!(model, original);
+        assert!(model.is_bound_to_populations(&initial));
+        assert!(!model.is_bound_to_populations(&actual));
+        assert_eq!(
+            model
+                .evaluate_point(
+                    initial.amounts(),
+                    initial.volume(),
+                    initial.heavy_temperature(),
+                    initial.electron_temperature(),
+                    || false,
+                )
+                .unwrap()
+                .pair_count(),
+            3
+        );
+    }
+}
+
+#[test]
+fn coulomb_trial_rejects_invalid_axes_populations_volume_temperatures_and_cancellation() {
+    let initial = state(1e20, 10_000.0, 20_000.0);
+    let model = bind(&initial);
+    let eval = |amounts: &[Amount], volume, th, te| {
+        model.evaluate_point(amounts, volume, th, te, || false)
+    };
+    let (v, th, te) = (
+        initial.volume(),
+        initial.heavy_temperature(),
+        initial.electron_temperature(),
+    );
+    assert!(matches!(
+        eval(&initial.amounts()[1..], v, th, te),
+        Err(CoulombErrorV1::Invalid(_))
+    ));
+    for bad in [-1.0, f64::NAN, f64::INFINITY] {
+        let mut amounts = initial.amounts().to_vec();
+        amounts[0] = Amount::new(bad); // Neutral rows are validated as well.
+        assert!(matches!(
+            eval(&amounts, v, th, te),
+            Err(CoulombErrorV1::Invalid(_))
+        ));
+    }
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            eval(initial.amounts(), Volume::new(bad), th, te),
+            Err(CoulombErrorV1::Invalid(_))
+        ));
+        assert!(matches!(
+            eval(initial.amounts(), v, Temperature::new(bad), te),
+            Err(CoulombErrorV1::Invalid(_))
+        ));
+        assert!(matches!(
+            eval(initial.amounts(), v, th, Temperature::new(bad)),
+            Err(CoulombErrorV1::Invalid(_))
+        ));
+    }
+    assert!(matches!(
+        eval(initial.amounts(), v, Temperature::new(99.0), te),
+        Err(CoulombErrorV1::Species { .. })
+    ));
+    let mut calls = 0;
+    assert_eq!(
+        model.evaluate_point(initial.amounts(), v, th, te, || {
+            calls += 1;
+            calls == 7
+        }),
+        Err(CoulombErrorV1::Cancelled)
+    );
+    assert_eq!(calls, 7);
+}

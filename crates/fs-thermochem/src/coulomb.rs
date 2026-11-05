@@ -1,6 +1,6 @@
 //! Reciprocal Coulomb momentum and heat transfer between Maxwellian species.
 //!
-//! This is a classical, unmagnetized, weak-coupling, weak-drift Landau moment
+//! This is an unmagnetized, weak-coupling, weak-drift Maxwellian Landau moment
 //! closure for the actual frozen populations. It is not independent drag
 //! against stationary ions, Spitzer-Harm electrical conductivity, or a kinetic
 //! solution for a distorted electron distribution. All unordered charged pairs
@@ -20,9 +20,18 @@
 //! Coulomb logarithms are approximate leading-logarithmic prescriptions, not
 //! exact screening calculations. The caller selects all-carrier STATIC Debye
 //! screening or electron-only Debye screening. Both use the explicitly fixed
-//! thermal convention `b90=C/(mu*S)` and `lnLambda=ln(lambda_D/b90)`; no fitted
-//! constant, logarithm floor or quantum interpolation is inserted. The quantum
-//! length `hbar/(2*mu*sqrt(S))` must be smaller than a declared fraction of b90.
+//! thermal convention `b90=C/(mu*S)` and quantum length
+//! `bq=hbar/(2*mu*sqrt(S))`. The original classical constructor uses
+//! `lnLambda=ln(lambda_D/b90)` and refuses bq above a declared fraction of b90.
+//! The explicit quantum-diffraction selection instead uses
+//! `lnLambda=ln(lambda_D/max(b90,bq))`. This is the conventional short-distance
+//! cutoff prescription in Fitzpatrick, *Coulomb Logarithm*, paragraph following
+//! Eq.3.119, <https://farside.ph.utexas.edu/teaching/plasma/lectures/node39.html>.
+//! We evaluate both lengths at `sqrt(S)`, not a velocity-resolved quantum
+//! collision integral. No fitted constant, logarithm floor, Fermi statistics,
+//! exchange correction, dynamic screening or higher-order quantum moment is
+//! inserted. Large admitted logarithms control the leading-log approximation;
+//! dilute nondegenerate and nonrelativistic populations remain mandatory.
 //! This thermal convention and the static screening choices must not be
 //! confused with NRL's velocity-dependent screening or its fitted logarithms.
 //!
@@ -41,7 +50,7 @@ use crate::electron_collision::{AVOGADRO_PER_MOL, BOLTZMANN_J_PER_K, ELECTRON_MA
 use crate::equilibrium::composition::{FrozenIonizedGasStateV1, MAX_EQUILIBRIUM_SPECIES_V1};
 use crate::{SpeciesId, ThermochemErrorV1};
 use fs_math::det::{exp, ln, sqrt};
-use fs_qty::Temperature;
+use fs_qty::{Amount, Temperature, Volume};
 use std::sync::Arc;
 
 mod evaluate;
@@ -63,10 +72,22 @@ pub enum CoulombScreeningV1 {
     ElectronDebye,
 }
 
+/// Explicit short-distance prescription for the retained leading-log closure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoulombShortRangeCutoffV1 {
+    /// Use b90 and require bq/b90 below the caller's classical-scattering bound.
+    /// This is the unchanged behavior of [`CoulombModelV1::new`].
+    ClassicalClosestApproach,
+    /// Use max(b90, bq), with bq=hbar/(2*mu*sqrt(S)). Only the Coulomb logarithm
+    /// changes; reciprocal Maxwellian pair moments and every other physical
+    /// gate remain unchanged. This is not a quantum kinetic or degenerate EOS.
+    QuantumDiffraction,
+}
+
 /// Caller-selected validity limits, not experimental or numerical error bars.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoulombLimitsV1 {
-    /// Smallest admitted ln(lambda_D/b90), strictly greater than one.
+    /// Smallest admitted ln(lambda_D/b_min), strictly greater than one.
     pub minimum_coulomb_logarithm: f64,
     /// Smallest admitted (4*pi/3)*n_charged*lambda_D³, greater than one.
     pub minimum_particles_per_debye_sphere: f64,
@@ -76,7 +97,10 @@ pub struct CoulombLimitsV1 {
     pub maximum_thermal_phase_space_density: f64,
     /// Largest kB*T_s/(m_s*c²), screening nonrelativistic thermal motion.
     pub maximum_thermal_energy_rest_energy_ratio: f64,
-    /// Largest [hbar/(2*mu*sqrt(S))]/b90, screening classical scattering.
+    /// Largest [hbar/(2*mu*sqrt(S))]/b90 in ClassicalClosestApproach mode.
+    /// Still required finite in (0,1) in QuantumDiffraction mode but not used
+    /// as a rejection there: that explicit selection includes the larger bq
+    /// in b_min instead. The actual ratio remains reported in the summary.
     pub maximum_quantum_to_classical_ratio: f64,
     /// Largest |ua-ub|/min(sqrt(kB*Ta/ma),sqrt(kB*Tb/mb)). Actual drift is
     /// checked by the pair's heating evaluator and by its momentum consumer.
@@ -99,7 +123,7 @@ impl CoulombLimitsV1 {
             .any(|x| !x.is_finite() || *x <= 0.0 || *x >= 1.0)
         {
             return Err(CoulombErrorV1::Invalid(
-                "finite classical Coulomb limits: minima>1, maxima in (0,1)",
+                "finite Coulomb limits: minima>1, maxima in (0,1)",
             ));
         }
         Ok(())
@@ -150,12 +174,21 @@ impl Carrier {
         state: &FrozenIonizedGasStateV1,
         index: usize,
     ) -> Result<Option<Self>, CoulombErrorV1> {
+        Self::from_point(state, index, state.amounts()[index], state.volume())
+    }
+
+    fn from_point(
+        state: &FrozenIonizedGasStateV1,
+        index: usize,
+        amount: Amount,
+        volume: Volume,
+    ) -> Result<Option<Self>, CoulombErrorV1> {
         let z = state
             .thermodynamics()
             .charge_vector()
             .get(index)
             .expect("retained source charge axis");
-        if z == 0 || state.amounts()[index].value() == 0.0 {
+        if z == 0 || amount.value() == 0.0 {
             return Ok(None);
         }
         if z.unsigned_abs() > (1u128 << 53) {
@@ -164,9 +197,7 @@ impl Carrier {
             ));
         }
         let mass = state.thermodynamics().models()[index].molar_mass().value() / AVOGADRO_PER_MOL;
-        let density = state
-            .number_density_per_m3(index)
-            .expect("retained source amount axis");
+        let density = (amount.value() / volume.value()) * AVOGADRO_PER_MOL;
         let electron = state.electron_index() == Some(index);
         if !positive(mass)
             || !positive(density)
@@ -196,6 +227,7 @@ pub struct CoulombModelV1 {
     initial_state: FrozenIonizedGasStateV1,
     carriers: Arc<[Carrier]>,
     screening: CoulombScreeningV1,
+    cutoff: CoulombShortRangeCutoffV1,
     limits: CoulombLimitsV1,
 }
 impl CoulombModelV1 {
@@ -205,6 +237,24 @@ impl CoulombModelV1 {
     pub fn new(
         state: &FrozenIonizedGasStateV1,
         screening: CoulombScreeningV1,
+        limits: CoulombLimitsV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CoulombErrorV1> {
+        Self::new_with_cutoff(
+            state,
+            screening,
+            CoulombShortRangeCutoffV1::ClassicalClosestApproach,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Bind an explicitly selected classical or quantum-diffraction cutoff.
+    /// Neither option changes the original source bank or Maxwellian moments.
+    pub fn new_with_cutoff(
+        state: &FrozenIonizedGasStateV1,
+        screening: CoulombScreeningV1,
+        cutoff: CoulombShortRangeCutoffV1,
         limits: CoulombLimitsV1,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CoulombErrorV1> {
@@ -224,6 +274,7 @@ impl CoulombModelV1 {
             initial_state: state.clone(),
             carriers: carriers.into(),
             screening,
+            cutoff,
             limits,
         };
         model.evaluate(
@@ -249,6 +300,9 @@ impl CoulombModelV1 {
     pub const fn screening(&self) -> CoulombScreeningV1 {
         self.screening
     }
+    pub const fn cutoff(&self) -> CoulombShortRangeCutoffV1 {
+        self.cutoff
+    }
     /// Evaluate the complete state at actual Th and Te, without allocating.
     pub fn evaluate(
         &self,
@@ -269,7 +323,7 @@ impl CoulombModelV1 {
         cancelled: impl FnMut() -> bool,
     ) -> Result<CoulombSummaryV1, CoulombErrorV1> {
         self.evaluate_inner(
-            &self.initial_state,
+            self.initial_state.amounts(),
             &self.carriers,
             heavy_temperature,
             electron_temperature,
@@ -298,20 +352,59 @@ impl CoulombModelV1 {
                 "fresh Coulomb state must retain the exact original thermodynamic bank",
             ));
         }
+        self.evaluate_point(
+            state.amounts(),
+            state.volume(),
+            state.heavy_temperature(),
+            state.electron_temperature(),
+            cancelled,
+        )
+    }
+
+    /// Evaluate local moments for canonical trial populations without allocating
+    /// or constructing a thermodynamic state. The original bank and structural
+    /// electron identity are taken only from this model; newly populated rows
+    /// use their original masses, charges and temperature support.
+    ///
+    /// This checks finite nonnegative amounts, positive volume, source support
+    /// and all Coulomb physical gates. It does not publish a gas state or admit
+    /// its extensive energy and charge balance; the caller owns those checks
+    /// (for example, `DtFusionPlasmaV1::admit_point` during a burn trial).
+    /// Existing population/material receipts are not refreshed by this call.
+    pub fn evaluate_point(
+        &self,
+        amounts: &[Amount],
+        volume: Volume,
+        heavy_temperature: Temperature,
+        electron_temperature: Temperature,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CoulombSummaryV1, CoulombErrorV1> {
+        poll(&mut cancelled)?;
+        if amounts.len() != self.initial_state.amounts().len() || !positive(volume.value()) {
+            return Err(CoulombErrorV1::Invalid(
+                "canonical trial amounts and positive finite volume",
+            ));
+        }
         let mut carriers = [Carrier::EMPTY; MAX_EQUILIBRIUM_SPECIES_V1];
         let mut count = 0;
-        for index in 0..state.amounts().len() {
+        for (index, &amount) in amounts.iter().enumerate() {
             poll(&mut cancelled)?;
-            if let Some(carrier) = Carrier::from_state(state, index)? {
+            if !amount.value().is_finite() || amount.value() < 0.0 {
+                return Err(CoulombErrorV1::Invalid(
+                    "trial amounts must be finite and nonnegative",
+                ));
+            }
+            if let Some(carrier) = Carrier::from_point(&self.initial_state, index, amount, volume)?
+            {
                 carriers[count] = carrier;
                 count += 1;
             }
         }
         self.evaluate_inner(
-            state,
+            amounts,
             &carriers[..count],
-            state.heavy_temperature(),
-            state.electron_temperature(),
+            heavy_temperature,
+            electron_temperature,
             |_| {},
             cancelled,
         )

@@ -3,7 +3,7 @@ use super::*;
 impl CoulombModelV1 {
     pub(super) fn evaluate_inner(
         &self,
-        state: &FrozenIonizedGasStateV1,
+        amounts: &[Amount],
         carriers: &[Carrier],
         heavy_temperature: Temperature,
         electron_temperature: Temperature,
@@ -11,6 +11,7 @@ impl CoulombModelV1 {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoulombSummaryV1, CoulombErrorV1> {
         poll(&mut cancelled)?;
+        let state = &self.initial_state;
         let (th, te) = (heavy_temperature.value(), electron_temperature.value());
         if !positive(th) || !positive(te) {
             return Err(CoulombErrorV1::Invalid(
@@ -31,7 +32,7 @@ impl CoulombModelV1 {
             .thermodynamics()
             .models()
             .iter()
-            .zip(state.amounts())
+            .zip(amounts)
             .enumerate()
         {
             poll(&mut cancelled)?;
@@ -154,15 +155,21 @@ impl CoulombModelV1 {
                 };
                 let log_c = first.log_charge + second.log_charge - log_4pi - log_eps;
                 let log_b90 = log_c - log_reduced_mass - log_variance;
-                let logarithm = log_debye - log_b90;
+                // bq/b90 = h*sqrt(S)/(4*pi*C); reduced mass cancels.
+                let log_quantum = log_h - log_4pi + 0.5 * log_variance - log_c;
+                let log_minimum = match self.cutoff {
+                    CoulombShortRangeCutoffV1::ClassicalClosestApproach => log_b90,
+                    CoulombShortRangeCutoffV1::QuantumDiffraction => log_b90 + log_quantum.max(0.0),
+                };
+                let logarithm = log_debye - log_minimum;
                 if !logarithm.is_finite() || logarithm < self.limits.minimum_coulomb_logarithm {
                     return Err(CoulombErrorV1::Domain(
                         "pair Coulomb logarithm below declared leading-log limit",
                     ));
                 }
-                // bq/b90 = h*sqrt(S)/(4*pi*C); reduced mass cancels.
-                let log_quantum = log_h - log_4pi + 0.5 * log_variance - log_c;
-                if log_quantum > ln(self.limits.maximum_quantum_to_classical_ratio) {
+                if self.cutoff == CoulombShortRangeCutoffV1::ClassicalClosestApproach
+                    && log_quantum > ln(self.limits.maximum_quantum_to_classical_ratio)
+                {
                     return Err(CoulombErrorV1::Domain(
                         "quantum diffraction exceeds classical pair-scattering limit",
                     ));
