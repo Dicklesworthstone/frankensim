@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use super::super::accommodation::ThermalAccommodation;
 use super::super::chamber::coating::{
     GasSupportedChamberSolve, GasSupportedSurface, GasSupportedSurfaceStep,
-    advance_supported_chamber,
+    advance_supported_chamber, advance_supported_chamber_with_films,
 };
 use super::super::{GasSurfaceBinding, GasSurfaceError, compatibility, phase_at, species_snapshot};
 use super::{GasCellAudit, GasTimelineAudit, HeatTotals, Sum, add, finite};
@@ -188,9 +188,10 @@ fn accept_endpoints(
 /// Advance supported deposition without replacing either physical owner.
 ///
 /// The selected binding coefficient must equal the registered coating's
-/// molecular coefficient. A prescribed film-transfer resistance cannot be
-/// silently dropped; the present evolving-gas lane requires it to be absent.
-/// Optional reflected-carrier heat uses the same gas and supported endpoint.
+/// molecular coefficient. Its optional prescribed film-transfer resistance is
+/// retained in the same gross molecular streams, so finite films limit both
+/// mass and crossing-molecule energy consistently. Optional reflected-carrier
+/// heat uses the same gas and supported endpoint.
 /// One original thermal substep allowance covers the complete requested window.
 /// Refusal/cancellation discards all candidate heat, births, phase and gas work.
 #[allow(clippy::too_many_arguments)]
@@ -234,7 +235,6 @@ pub fn advance_coatings_with_gas<'thermal, 'catalog>(
         if bindings.insert(surface.cell_id, surface.binding).is_some()
             || !surface.binding.solid_enthalpy_offset_j_kg.is_finite()
             || model.kinetics.accommodation_coefficient != surface.binding.accommodation_coefficient
-            || model.kinetics.mass_transfer_coefficient_m_s.is_some()
         {
             return Err(DepositionError::InvalidInput(
                 "duplicate coating, invalid datum or incompatible molecular kinetics",
@@ -415,10 +415,20 @@ pub fn advance_coatings_with_gas<'thermal, 'catalog>(
                 }
             })
             .collect();
+        let film_coefficients: BTreeMap<_, _> = active
+            .iter()
+            .filter_map(|id| {
+                next.coating_surfaces()[id]
+                    .kinetics
+                    .mass_transfer_coefficient_m_s
+                    .map(|coefficient| (id.0, coefficient))
+            })
+            .collect();
         let mut refusal = None;
-        let exchange = advance_supported_chamber(
+        let exchange = advance_supported_chamber_with_films(
             &inputs,
             accommodation.map(|_| &active_accommodation),
+            &film_coefficients,
             &next_gas,
             catalog,
             stop - start,
