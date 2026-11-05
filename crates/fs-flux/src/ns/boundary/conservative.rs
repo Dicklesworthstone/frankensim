@@ -28,8 +28,12 @@ use crate::material::{
 use crate::ns::transport::density::{
     DensityTransportCell, DensityTransportError, DensityTransportReport,
 };
+use crate::ns::transport::mass_flux::PreparedDensityMassFlux;
 use crate::ns::{FluxParams, FluxSystem, convection_boundary_trace, momentum_entry};
 use fs_sparse::Coo;
+
+/// Bounded density subcycling with one original native macro momentum solve.
+pub mod subcycle;
 
 /// Physical normalization and explicit density-transport allowances.
 #[derive(Clone, Copy, Debug)]
@@ -290,24 +294,7 @@ impl<'m> FluxSystem<'m> {
         };
         let nc = self.mesh.tris.len();
         let ne = self.mesh.edges.len();
-        let bytes = nc
-            .checked_mul(
-                size_of::<DensityTransportCell<N>>()
-                    + size_of::<[[f64; 2]; 6]>()
-                    + 2 * size_of::<[f64; 6]>(),
-            )
-            .and_then(|value| {
-                ne.checked_mul(size_of::<RelativeMassFluxFace>())
-                    .and_then(|n| value.checked_add(n))
-            })
-            .ok_or_else(|| invalid("transport buffer size overflow"))?;
-        if bytes > controls.maximum_transport_storage_bytes {
-            return Err(DensityTransportError::Storage {
-                required: bytes,
-                maximum: controls.maximum_transport_storage_bytes,
-            }
-            .into());
-        }
+        admit_transport_buffers::<N>(nc, ne, controls.maximum_transport_storage_bytes)?;
         let plan = self.prepare_density_transport(
             advector,
             controls.depth_m,
@@ -334,6 +321,42 @@ impl<'m> FluxSystem<'m> {
             &mut cancelled,
         )?;
         drop(plan);
+        self.assemble_transported_density_momentum_bdf1(
+            params,
+            dynamic_viscosity,
+            force_density,
+            boundaries,
+            previous_velocity,
+            cells,
+            next,
+            transport,
+            mass_flux,
+            inv_dt,
+            controls,
+            &mut cancelled,
+        )
+    }
+
+    // The single-step and density-subcycled paths share this exact original
+    // momentum owner. No density stage may rebuild or solve it independently.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn assemble_transported_density_momentum_bdf1<'a, const N: usize>(
+        &'a self,
+        params: FluxParams,
+        dynamic_viscosity: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> f64,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &'a [f64],
+        cells: &'a [DensityTransportCell<N>],
+        next: Vec<DensityTransportCell<N>>,
+        transport: DensityTransportReport<N>,
+        mass_flux: PreparedDensityMassFlux<'m>,
+        inv_dt: f64,
+        controls: DensityMomentumControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DensityMomentumAssembly<'a, 'm, N>> {
+        let nc = self.mesh.tris.len();
+        let ne = self.mesh.edges.len();
         let admitted =
             with_kinematic_boundaries(controls.reference_density_kg_m3, boundaries, |native| {
                 self.admit_navier_stokes_boundaries(params, native)
@@ -463,6 +486,29 @@ impl<'m> FluxSystem<'m> {
             &mut cancelled,
         )?
         .solve(&mut cancelled)
+    }
+}
+
+fn admit_transport_buffers<const N: usize>(nc: usize, ne: usize, maximum: usize) -> Result<()> {
+    let bytes = nc
+        .checked_mul(
+            size_of::<DensityTransportCell<N>>()
+                + size_of::<[[f64; 2]; 6]>()
+                + 2 * size_of::<[f64; 6]>(),
+        )
+        .and_then(|value| {
+            ne.checked_mul(size_of::<RelativeMassFluxFace>())
+                .and_then(|n| value.checked_add(n))
+        })
+        .ok_or_else(|| invalid("transport buffer size overflow"))?;
+    if bytes > maximum {
+        Err(DensityTransportError::Storage {
+            required: bytes,
+            maximum,
+        }
+        .into())
+    } else {
+        Ok(())
     }
 }
 

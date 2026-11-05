@@ -1219,6 +1219,61 @@ physical density-weighted acceleration and traction pressure, recovery of the
 original uniform-density Oseen matrix/load, and cancellation, CFL, invalid-source
 and unrepresentable-history refusals.
 
+### Density subcycles with one native macro momentum solve
+
+`ns::boundary::conservative::subcycle` adds
+`assemble_density_momentum_subcycled_bdf1` and
+`density_momentum_subcycled_bdf1_step`. The explicit
+`DensityMomentumSubcycleControls` retains the original physical momentum
+controls and adds a maximum density-substep count. Its outgoing-volume Courant
+cap applies to each density substep; the accepted report retains the separate
+macro Courant, substep Courant, dyadic count and interval.
+
+The bounded density owner advances all actual mass/specific inventories under
+one frozen original BDM volume advector, fixed geometry and fixed exterior
+donors. Its compensated PRE-step density mean reconstructs ONE compatible
+mass flux. The resulting final density, original initial density and complete
+macro timestep enter the original consistent native inertia and conservative
+momentum assembly. Both public time-integration paths call the same extracted
+native assembly tail with unchanged matrix/RHS arithmetic. There is one native
+momentum/pressure assembly and one original global solve per convenience-step
+call, independent of the admitted density substep count. Force and viscosity
+callbacks see the final transported endpoint cells; they are not sampled or
+solved at density stages. No averaged specific or thermodynamic state is
+invented.
+
+The original pressure normalization, velocity/slip/traction/reservoir/backflow
+boundaries, complete affine BDM velocity modes, reaction rows and transpose
+surface remain in use. The one time-averaged mass flux has the macro density
+increment as its divergence and retains original quadratic face moments up
+to represented-state/reconstruction roundoff. Thus free-stream compatibility
+and the native conservative kinetic identity use old-density temporal loss,
+macro integrated upwind loss and the original viscous/SIP/external work terms.
+Physical boundary inventory totals come from actual density substeps;
+momentum/kinetic boundary observations use the same averaged native flux.
+Numerical kinetic losses remain separate from transported thermal inventories.
+
+Each original owner retains its explicit storage allowance; the density
+subcycle workspace admits all stages and compensation buffers together and
+reuses them without warm allocations. Cancellation/refusal returns no coupled
+candidate and leaves immutable caller state unchanged. The original
+synchronous linear solve is checked before/after, not advertised as
+interruptible. Native matrix/factor storage remains separately owned. A larger
+density-CFL-admitted interval does not improve the first-order frozen-advector
+temporal approximation or introduce nonlinear density/velocity iteration,
+compressibility, diffusion, phase sources or moving geometry.
+
+G1/G3 regression sources in `tests/density_momentum/subcycle.rs` check exact
+one-substep equality of the original native matrix, RHS, solution and physical
+observations; high-contrast macro free streams with physical pressure and
+boundary momentum/energy balance; and the closed macro kinetic/wall-momentum
+identity against an independent one-mode native solution. Endpoint force-call
+counts stay one original six-point cell quadrature regardless of substeps.
+Bounded work and late cancellation return no partial candidate. Native Rust
+execution remains a validation gate; no runtime, convergence-order improvement
+or performance certification is inferred from source inspection.
+
+
 ### Fixed stratified density in native Stokes inertia
 
 `assemble_stokes_mixed_bdf1_variable_density` adds the spatially weighted
