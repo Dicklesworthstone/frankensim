@@ -381,7 +381,7 @@ fn solve_face(
 /// Add a trial debit/credit to the same original two-word amount every time.
 /// These low words belong to the immutable state and survive accepted sweeps;
 /// they never change capacity, renormalize inventories, or relax admission.
-fn add_amount(amount: f64, remainder: f64, delta: f64) -> Result<(f64, f64)> {
+pub(super) fn add_amount(amount: f64, remainder: f64, delta: f64) -> Result<(f64, f64)> {
     let (sum, first_error) = two_sum(amount, delta)?;
     let (sum, second_error) = two_sum(sum, remainder)?;
     two_sum(

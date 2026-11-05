@@ -4388,8 +4388,8 @@ Each face moves A and B in equal opposite molar amounts. This is a
 molar/volume reference frame with equal fixed partial molar volumes; unequal
 molar masses do not imply zero barycentric mass flux. Local density can change
 with composition. Temperature, pressure and geometry are externally fixed.
-The lane does not advance heat, advection, momentum, gravity, wetting or
-nucleation rates.
+The molecular lane does not advance heat, momentum, gravity, wetting or
+nucleation rates. Prescribed volume-flow advection is a separate operator below.
 
 One canonical face sweep solves an implicit convex-split scalar exchange on
 each face. Logarithmic entropy, convex interactions and the entire graph's
@@ -4435,6 +4435,47 @@ long evolution, adaptive error reduction against an independent RK4 scalar
 oracle, integrated flux/species/energy closure and atomic budget/cancellation
 refusals. These feature-level tests do not replace the full default-feature
 workspace gate.
+
+### Prescribed flow and finite-rate mixing
+
+`miscibility::advection` transports the original paired species inventories
+with a closed incompressible volume flow. Each canonical face retains two
+nonnegative directional rates: opposing streams mix species even when their
+net volume flux is zero. Preparation checks both rates, face areas and every
+cell's volume balance, with an explicit relative roundoff allowance no larger
+than `1e-12`. It does not project the flow or normalize away capacity drift.
+
+Synchronous donor-cell updates use the same preceding state on all faces.
+Outgoing-volume CFL substeps preserve positivity without clipping or seeded
+traces; a caller-supplied substep cap bounds work. Both components retain their
+compensated inventory remainders. The final independent audit applies the
+original species/capacity allowance once over the entire interval. Reports
+retain signed integrated component transfers and the actual bulk plus gradient
+free-energy change. That change may have either sign under prescribed stirring;
+it is neither dissipated heat nor a closed mechanical-work account.
+
+`miscibility::transport` composes advection and the original implicit molecular
+exchange over ONE physical interval. Complete stage reports survive; the
+combined species/capacity audit uses the smaller original allowance once,
+and independent total-energy increments expose the stage-accounting residual.
+The physical clock advances once. Failure or cancellation in either stage
+publishes no candidate. This Lie split and the donor transport are first order:
+CFL subcycling alone does not control splitting error or numerical interfacial
+mixing. The caller must refine the macro interval and spatial discretization.
+
+Prepared flow data and reused O(cells+faces) transaction scratch fit the original
+graph payload budget. Work is linear per advection substep. These are fixed
+geometry, isothermal, equal-partial-molar-volume fields. A prescribed volume
+velocity is not automatically a barycentric velocity for unequal molar masses;
+momentum, capillary feedback, thermal evolution and open boundaries remain
+outside this operator.
+
+Focused G0/G1/G3/G4 regressions cover exact donor exchanges, zero-net
+counterflow, periodic translation refinement, unequal-volume inventories,
+integrated face balances, homogeneous/pure/trace compositions, positive energy
+change under forced nonconvex mixing, combined diffusion/advection limits and
+time refinement, the single physical clock, and atomic source/work/cancellation
+refusals. The numerical fixtures are not measured liquid-pair validation.
 
 ## Same-energy binary interface tension in capillary flow
 

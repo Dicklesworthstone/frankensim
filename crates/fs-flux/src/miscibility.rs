@@ -8,7 +8,8 @@
 //! mass flux in this frame and changing local density; the barycentric mass
 //! frame therefore differs from the fixed molar/volume frame used here.
 //! Temperature and pressure are held externally; this is not caloric evolution,
-//! advection, momentum, wetting/contact-line motion or a nucleation-rate model.
+//! momentum, wetting/contact-line motion or a nucleation-rate model. Prescribed
+//! incompressible volume-flow transport is available through [`advection`].
 //!
 //! Each physical face advances through one implicit convex-split exchange.
 //! Logarithmic ideal terms, convex interactions and the FULL graph's gradient
@@ -33,6 +34,9 @@ use std::sync::Arc;
 mod solve;
 
 pub mod adaptive;
+
+pub mod advection;
+pub mod transport;
 
 /// Hard admission bounds keep every allocation and face sweep finite.
 pub const MAX_MISCIBILITY_CELLS: usize = 65_536;
@@ -105,6 +109,18 @@ pub enum BinaryMiscibilityError {
         change_j: f64,
         dissipation_j: f64,
         tolerance_j: f64,
+    },
+    /// Fixed-volume transport requires a closed, divergence-free volume flow.
+    VolumeDivergence {
+        cell: usize,
+        inflow_m3_s: f64,
+        outflow_m3_s: f64,
+        relative_residual: f64,
+    },
+    /// The explicit donor transport cannot satisfy its CFL limit in this work budget.
+    AdvectionWorkLimit {
+        required_substeps: usize,
+        maximum_substeps: usize,
     },
     Cancelled,
 }
