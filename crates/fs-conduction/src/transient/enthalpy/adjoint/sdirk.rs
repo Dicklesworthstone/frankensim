@@ -1,10 +1,11 @@
 //! Discrete adjoints of the authentic two-stage primary-enthalpy SDIRK2 step.
 //!
 //! Write a=gamma*dt and r=(1-gamma)*dt/a. The accepted first-stage
-//! all-node rate, including prescribed-node reaction, is M(h1-h0)/a.
+//! all-node rate, including prescribed-node reaction, is (E(h1)-E(h0))/a.
 //! Eliminating that rate gives the second free-row residual
-//! M*h2-(1-r)*M*h0-r*M*h1-a*Q2(h2). Its block transpose therefore needs
-//! two original physical stage solves and a diagonal mass carry. Neither a
+//! E(h2)-(1-r)*E(h0)-r*E(h1)-a*Q2(h2), with E=m*h+Cfilm*T(h).
+//! Its block transpose needs the actual storage slopes at h0, h1 and h2;
+//! the interstage carry uses E'(h1), while history uses E'(h0). Neither a
 //! fictitious old enthalpy nor a backward-Euler endpoint receipt is needed.
 //!
 //! Geometry, reference masses, original constitutive data and the time grid
@@ -36,6 +37,7 @@ pub struct EnthalpySdirk2Gradient {
 struct StageTangent {
     tangent: Csr,
     slopes: Vec<f64>,
+    storage_diagonal: Vec<f64>,
     prescribed: Vec<bool>,
     inverse_diagonal: Vec<f64>,
     radiation: Option<PointwiseBoundaryAssembly>,
@@ -49,6 +51,7 @@ pub struct EnthalpySdirk2Linearization<'m> {
     primal: EnthalpySdirk2Step,
     mesh: &'m ConductionMesh,
     masses: Vec<f64>,
+    previous_storage_diagonal: Vec<f64>,
     diagonal_dt: f64,
     carry_ratio: f64,
     stages: [StageTangent; 2],
@@ -96,6 +99,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             .ok_or(EnthalpyAdjointError::InvalidInput(
                 "SDIRK2 radiation address space overflow",
             ))?;
+        let previous_storage_diagonal = storage_history_derivatives(cx, self, old_h)?;
         let primal = self.advance_sdirk2(cx, inputs, old_h, dt_s, config)?;
         let diagonal_dt = finite(SDIRK2_GAMMA * dt_s)?;
         let carry_ratio = finite(((1.0 - SDIRK2_GAMMA) * dt_s) / diagonal_dt)?;
@@ -120,6 +124,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             primal,
             mesh: self.mesh,
             masses: self.masses.clone(),
+            previous_storage_diagonal,
             diagonal_dt,
             carry_ratio,
             stages: [first, second],
@@ -258,7 +263,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
                     .as_ref()
                     .map_or(0.0, |radiation| radiation.preconditioner_diagonal(row));
                 finite(
-                    self.masses[row]
+                    stage.storage_diagonal[row]
                         + dt * finite(
                             stage.tangent.get(row, row) + radiation_diagonal * stage.slope[row],
                         )?,
@@ -275,6 +280,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         Ok(StageTangent {
             tangent: stage.tangent,
             slopes: stage.slope,
+            storage_diagonal: stage.storage_diagonal,
             prescribed,
             inverse_diagonal,
             radiation: stage.radiation,
@@ -296,6 +302,8 @@ impl EnthalpySdirk2Linearization<'_> {
             tangent: &stage.tangent,
             slopes: &stage.slopes,
             masses: &self.masses,
+            storage_diagonal: &stage.storage_diagonal,
+            previous_storage_diagonal: &self.previous_storage_diagonal,
             prescribed: &stage.prescribed,
             inverse_diagonal: &stage.inverse_diagonal,
             dt: self.diagonal_dt,
@@ -359,7 +367,7 @@ impl EnthalpySdirk2Linearization<'_> {
             self.operator(0).action(cx, directions[0], transpose)?,
             self.operator(1).action(cx, directions[1], transpose)?,
         ];
-        for (vertex, &mass) in self.masses.iter().enumerate() {
+        for (vertex, &capacity) in self.stages[0].storage_diagonal.iter().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(cx, vertex)?;
             }
@@ -367,7 +375,7 @@ impl EnthalpySdirk2Linearization<'_> {
                 let (target, source) = if transpose { (0, 1) } else { (1, 0) };
                 output[target][vertex] = finite(
                     output[target][vertex]
-                        - finite(self.carry_ratio * finite(mass * directions[source][vertex])?)?,
+                        - finite(self.carry_ratio * finite(capacity * directions[source][vertex])?)?,
                 )?;
             }
         }
@@ -406,14 +414,19 @@ impl EnthalpySdirk2Linearization<'_> {
             ))?;
         let second = self.operator(1).pullback(cx, seeds[1], config)?;
         let mut first_seed = Vec::with_capacity(self.masses.len());
-        for (vertex, (&seed, &carry)) in seeds[0]
+        for (vertex, (&seed, &lambda)) in seeds[0]
             .iter()
-            .zip(&second.previous_specific_enthalpy)
+            .zip(&second.adjoint)
             .enumerate()
         {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(cx, vertex)?;
             }
+            let carry = if self.stages[1].prescribed[vertex] {
+                0.0
+            } else {
+                finite(self.stages[0].storage_diagonal[vertex] * lambda)?
+            };
             first_seed.push(finite(self.carry_ratio.mul_add(carry, seed))?);
         }
         let first = self.operator(0).pullback(cx, &first_seed, config)?;
@@ -467,3 +480,4 @@ fn radiation_entries(
         Some(PointwiseBoundary::MaterialEnclosure(owner)) => Ok(owner.adjoint_workspace_entries()?),
     }
 }
+

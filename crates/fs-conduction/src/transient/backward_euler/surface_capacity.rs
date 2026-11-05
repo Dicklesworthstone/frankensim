@@ -143,6 +143,36 @@ impl<'s> SurfaceHeatCapacity<'s> {
     pub const fn material(self) -> Option<&'s MaterialHeatCapacity> {
         self.material
     }
+
+    // One exact row-moment owner for temperature and primary-enthalpy storage.
+    // Keep the original P1 thickness/capacity correlation and arithmetic order.
+    pub(crate) fn nodal_moments(
+        self,
+        mesh: &crate::ConductionMesh,
+    ) -> Result<([usize; 3], [f64; 3]), ConductionError> {
+        let face = mesh.boundary().get(self.boundary_face).ok_or_else(|| {
+            invalid("surface capacity face is outside the original boundary table")
+        })?;
+        let vertices = face.vertices.map(|vertex| vertex as usize);
+        let values = self.nodal.map(ArealHeatCapacity::value_j_per_m2_k);
+        if values.iter().all(|&value| value == 0.0) {
+            return Ok((vertices, [0.0; 3]));
+        }
+        let mut moments = [0.0; 3];
+        for (local, entry) in moments.iter_mut().enumerate() {
+            *entry = face.area
+                * (values[local] / 6.0
+                    + values[(local + 1) % 3] / 12.0
+                    + values[(local + 2) % 3] / 12.0);
+            crate::require_finite("surface heat-capacity moment", *entry)?;
+            if *entry <= 0.0 {
+                return Err(invalid(
+                    "positive surface storage has an unrepresentable face moment",
+                ));
+            }
+        }
+        Ok((vertices, moments))
+    }
 }
 
 impl<'m> BackwardEuler<'m> {
@@ -181,35 +211,15 @@ impl<'m> BackwardEuler<'m> {
             if slot % 512 == 0 {
                 poll(cx, slot)?;
             }
-            let face = self
-                .mesh
-                .boundary()
-                .get(surface.boundary_face)
-                .ok_or_else(|| {
-                    invalid("surface capacity face is outside the original boundary table")
-                })?;
+            let (vertices, moments) = surface.nodal_moments(self.mesh)?;
             if !seen.insert(surface.boundary_face) {
                 return Err(invalid("surface capacity face is declared more than once"));
             }
-            let values = surface.nodal.map(ArealHeatCapacity::value_j_per_m2_k);
-            if values.iter().all(|&value| value == 0.0) {
+            if moments.iter().all(|&value| value == 0.0) {
                 continue;
             }
             active = true;
-            for local in 0..3 {
-                // Divide before adding to avoid overflowing otherwise
-                // representable weighted moments at large input capacities.
-                let entry = face.area
-                    * (values[local] / 6.0
-                        + values[(local + 1) % 3] / 12.0
-                        + values[(local + 2) % 3] / 12.0);
-                crate::require_finite("surface heat-capacity moment", entry)?;
-                if entry <= 0.0 {
-                    return Err(invalid(
-                        "positive surface storage has an unrepresentable face moment",
-                    ));
-                }
-                let vertex = face.vertices[local] as usize;
+            for (&vertex, entry) in vertices.iter().zip(moments) {
                 added[vertex] += entry;
                 crate::require_finite("assembled surface heat capacity", added[vertex])?;
             }
@@ -219,14 +229,14 @@ impl<'m> BackwardEuler<'m> {
                     .get_or_insert_with(|| vec![TemperatureSpan::Unbounded; n]);
                 // A zero coefficient at one corner does not remove its
                 // positive basis moment when the rest of the face is active.
-                for &vertex in &face.vertices {
-                    let span = spans[vertex as usize].intersect(material.temperature_span());
+                for vertex in vertices {
+                    let span = spans[vertex].intersect(material.temperature_span());
                     if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
                         return Err(invalid(
                             "volume and surface capacity sources have disjoint temperature support",
                         ));
                     }
-                    spans[vertex as usize] = span;
+                    spans[vertex] = span;
                 }
                 if !self.material_capacities.contains(material) {
                     self.material_capacities.push(material.clone());
@@ -268,3 +278,4 @@ fn invalid(what: &str) -> ConductionError {
         what: what.to_string(),
     }
 }
+

@@ -1,5 +1,15 @@
 # CONTRACT: fs-conduction
 
+## Sensible bonded-film storage in primary enthalpy
+
+`EnthalpyBackwardEuler::with_surface_heat_capacity` and its heterogeneous counterpart bind the existing `SurfaceHeatCapacity` laws to the original host enthalpy. The shared P1 rule gives `C_i = integral(C_s N_i dA)` in J/K, including nonuniform thickness/capacity and its original material source. The native row storage is `E_i(h_i) = m_i h_i + C_i T_i(h_i)` up to a fixed datum, with increment `m_i Delta_h_i + C_i Delta_T_i`. Reference mass, host caloric charts and phase fractions keep their original owners. A sharp host latent plateau has zero sensible film increment at fixed temperature; no latent energy or apparent heat-capacity regularization is added.
+
+Backward Euler, both SDIRK2 stages, adaptive whole-window audits, retained endpoint evaluations, spectral heating, and native contact/radiation paths use this same storage. Prescribed-temperature reactions include the film's actual heat once, while prescribed constraint rows retain their original reference-mass scaling. Native endpoint/history adjoints use the independent storage slopes `m_i + C_i T_i'(h_i)` at the new and old states; the eliminated SDIRK2 carry uses the first-stage slope. Active-film history temperature kinks and host-chart endpoints refuse classical derivatives. Film parameter, geometry and source-selection derivatives are not inferred.
+
+Material-bound films retain their original constant density/Cp bundles and check both history and candidate temperatures against source support. Empty and zero additions retain no film storage or inactive sources. A face may occur once per addition; further additions explicitly represent further layers. A separately meshed coating must not be counted again. The film is thermally thin, perfectly bonded, and purely sensible with frozen capacity; film phase change and temperature-dependent film calorics need another model. Tangential film conductivity remains a separate boundary law.
+
+G1 regressions in `tests/surface_heat_capacity/enthalpy.rs` cover uniform heating through sensible/latent/sensible host branches, independently derived BE/SDIRK2 history sensitivities across different storage slopes, and actual prescribed-bath reactions. These are numerical implementation references, not material-validation or continuum-error certificates.
+
 ## Tangential heat conduction in bonded thin coatings
 
 `SurfaceHeatConduction` declares finite, nonnegative isotropic sheet conductance

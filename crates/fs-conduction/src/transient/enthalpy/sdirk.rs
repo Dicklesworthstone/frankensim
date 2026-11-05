@@ -1,7 +1,8 @@
 //! Alexander's two-stage, stiffly accurate SDIRK2 on the original h residual.
 //!
-//! With gamma=1-1/sqrt(2), M(h1-h0)=gamma*dt*Q(h1) and
-//! M(h2-h0)=dt*((1-gamma)*Q(h1)+gamma*Q(h2)). Both stages retain the
+//! With E_i(h)=m_i*h+Cfilm_i*T_i(h) and gamma=1-1/sqrt(2),
+//! E(h1)-E(h0)=gamma*dt*Q(h1), while
+//! E(h2)-E(h0)=dt*((1-gamma)*Q(h1)+gamma*Q(h2)). Both stages retain the
 //! ORIGINAL h0. A dual-joule carry enters the existing residual without ever
 //! evaluating an extrapolated fictitious enthalpy as a material state.
 //! Stage heat quadrature is distinct from endpoint power and from internal
@@ -75,7 +76,7 @@ pub struct EnthalpySdirk2Step {
     pub robin_out_j: f64,
     pub radiation_out_j: f64,
     pub dirichlet_in_j: f64,
-    /// Independently reconstructed original-to-final reference-mass inventory.
+    /// Original-to-final host enthalpy plus sensible film storage.
     pub stored_energy_change_j: f64,
     pub energy_residual_j: f64,
     /// Original-to-final balance with both physical stage rates. Constrained
@@ -146,7 +147,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         let mut nodal_residual_j = Vec::with_capacity(old_h.len());
         for (i, (&old, &new)) in old_h.iter().zip(&second_stage.specific_enthalpy_j_kg).enumerate() {
             if i % ASSEMBLY_TILE == 0 { poll(cx, i)?; }
-            let delta = Dd::from_f64(self.masses[i]) * (Dd::from_f64(new) - Dd::from_f64(old));
+            let delta = self.storage_change_dd(i, new, old, second_stage.temperature[i])?;
             stored = stored + delta;
             nodal_residual_j.push(checked(delta - carry[i]
                 - Dd::from_f64(diagonal_dt) * Dd::from_f64(second_stage.net_nodal_input_w[i]))?);
@@ -254,8 +255,9 @@ fn finish_stage(
     let mut reaction = Dd::ZERO;
     for (i, &value) in h.iter().enumerate() {
         if i % ASSEMBLY_TILE == 0 { poll(context.cx, i)?; }
-        let delta = Dd::from_f64(context.storage.masses[i])
-            * (Dd::from_f64(value) - Dd::from_f64(context.old[i]));
+        let delta = context.storage.storage_change_dd(
+            i, value, context.old[i], temperature[i],
+        )?;
         let prior = carry.map_or(Dd::ZERO, |carry| carry[i]);
         storage = storage + delta; carried = carried + prior;
         liquid_mass_fraction.push(context.storage.curve_for_vertex(i).values_at_specific_enthalpy(value)
@@ -296,3 +298,4 @@ fn finish_stage(
         pointwise_enclosure_radiation, physical_contacts: None, newton, stage_residual_norm_j,
         stage_energy_residual_j, net_nodal_input_w })
 }
+

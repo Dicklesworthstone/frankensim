@@ -163,7 +163,11 @@ impl<'m, 'c, 'cx> CoupledProblem<'_, 'm, 'c, 'cx> {
             if row % ASSEMBLY_TILE == 0 {
                 poll(self.base.cx, row)?;
             }
-            full.push(row, row, self.base.storage.masses[row]);
+            full.push(row, row, if context.is_prescribed(row) {
+                self.base.storage.masses[row]
+            } else {
+                stage.storage_diagonal[row]
+            });
             if context.is_prescribed(row) {
                 continue;
             }
@@ -443,3 +447,4 @@ impl EnthalpyBackwardEuler<'_, '_> {
         Ok((newton.x, run.report, physical.contacts))
     }
 }
+

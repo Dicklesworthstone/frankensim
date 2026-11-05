@@ -172,6 +172,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 .curve_for_vertex(vertex)
                 .values_at_specific_enthalpy(h)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
+            self.check_film_temperature(vertex, state.temperature_k)?;
             temperature.push(state.temperature_k);
             liquid.push(state.liquid_mass_fraction.clamp(0.0, 1.0));
         }
@@ -517,11 +518,10 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             let (sum, correction) = compensated_add(sum, correction, input_second)?;
             let mut stored = 0.0;
             let mut stored_correction = 0.0;
-            for (vertex, ((&h, &initial), &mass)) in fine
+            for (vertex, (&h, &initial)) in fine
                 .specific_enthalpy_j_kg
                 .iter()
                 .zip(&self.initial_h)
-                .zip(&self.storage.masses)
                 .enumerate()
             {
                 if vertex % ASSEMBLY_TILE == 0 {
@@ -530,7 +530,7 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                 (stored, stored_correction) = compensated_add(
                     stored,
                     stored_correction,
-                    finite(mass * finite(h - initial)?)?,
+                    self.storage.storage_change_j(vertex, h, initial, fine.temperature[vertex])?,
                 )?;
             }
             finite(stored - sum)?;
@@ -676,3 +676,4 @@ fn compensated_add(sum: f64, correction: f64, value: f64) -> Result<(f64, f64), 
     let next = finite(sum + increment)?;
     Ok((next, finite((next - sum) - increment)?))
 }
+

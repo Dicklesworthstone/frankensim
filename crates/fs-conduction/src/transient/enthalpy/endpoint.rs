@@ -329,7 +329,9 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 poll(cx, vertex)?;
             }
             stored_energy_change_j =
-                finite(stored_energy_change_j + self.masses[vertex] * (new - old))?;
+                finite(stored_energy_change_j + self.storage_change_j(
+                    vertex, new, old, temperature[vertex],
+                )?)?;
         }
         let net_input_w =
             finite(source_w + dirichlet_in_w - neumann_out_w - convective_out_w - radiation_out_w)?;
@@ -351,3 +353,4 @@ impl EnthalpyBackwardEuler<'_, '_> {
         })
     }
 }
+

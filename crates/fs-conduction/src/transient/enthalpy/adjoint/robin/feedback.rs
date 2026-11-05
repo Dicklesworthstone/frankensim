@@ -145,7 +145,7 @@ impl EnthalpyStepLinearization<'_> {
             } else {
                 let radiation_diagonal = self.pointwise_radiation.as_ref()
                     .map_or(0.0, |radiation| radiation.preconditioner_diagonal(vertex));
-                finite(self.masses[vertex] + self.dt * finite(
+                finite(self.storage_diagonal[vertex] + self.dt * finite(
                     self.tangent.get(vertex, vertex) + radiation_diagonal * self.slopes[vertex],
                 )?)?
             };

@@ -153,6 +153,29 @@ pub struct HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
 }
 
 impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
+    /// Add sensible, perfectly bonded film storage while retaining every
+    /// original host material chart and reference mass.
+    pub fn with_surface_heat_capacity(
+        mut self,
+        cx: &Cx<'_>,
+        surfaces: &[crate::transient::backward_euler::SurfaceHeatCapacity<'_>],
+    ) -> Result<Self, EnthalpyError> {
+        self.inner = self.inner.with_surface_heat_capacity(cx, surfaces)?;
+        Ok(self)
+    }
+
+    /// Added film row capacities in original mesh vertex order, J/K.
+    #[must_use]
+    pub fn surface_nodal_heat_capacity_j_per_k(&self) -> Option<&[f64]> {
+        self.inner.surface_nodal_heat_capacity_j_per_k()
+    }
+
+    /// Original constant density/Cp film sources.
+    #[must_use]
+    pub fn surface_material_capacities(&self) -> &[crate::transient::MaterialHeatCapacity] {
+        self.inner.surface_material_capacities()
+    }
+
     /// Second-order SDIRK2 with the same original heterogeneous caloric charts,
     /// frozen reference masses and optional complete source conductivity.
     pub fn advance_sdirk2(&self, cx: &Cx<'_>, inputs: [super::sdirk::EnthalpySdirk2Input<'_>; 2],
@@ -323,6 +346,7 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                 curve: materials[0].curve,
                 nodal_curves: Some(nodal_curves),
                 masses,
+                surface_capacity: None,
                 phase_conductivity: None,
                 sourced_melting: None,
                 sourced_phase: None,
@@ -1801,3 +1825,4 @@ impl ReferenceDensityLinearization<'_> {
         })
     }
 }
+

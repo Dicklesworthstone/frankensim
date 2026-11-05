@@ -20,6 +20,9 @@
 //! mass still supplies storage there. No apparent heat capacity or extra
 //! latent account is introduced. The shared conduction assembly retains the
 //! exact base `k'(T)` contribution, natural boundaries and contacts.
+//! An optional sensible thin film adds C_i*(T_new-T_old) to the same row
+//! storage, with tangent C_i*dT/dh. Its original P1 areal moments do not
+//! alter host reference mass or add latent heat while temperature is fixed.
 //!
 //! The source-bound melting adapter instead supplies phase-specific nodal
 //! conductivity and its enthalpy derivative. P1 interpolation gives the exact
@@ -60,6 +63,7 @@ mod endpoint;
 pub use endpoint::EnthalpyEndpointEvaluation;
 mod contact;
 mod pointwise;
+mod surface_capacity;
 pub(super) mod reference_mass;
 use pointwise::{PointwiseBoundary, PointwiseBoundaryAssembly};
 
@@ -289,7 +293,8 @@ pub struct EnthalpyStepSolution {
     /// Prescribed-temperature reservoir heat, W inward, including fixed-node
     /// storage changes. A first-step boundary jump is charged exactly once.
     pub dirichlet_in_w: f64,
-    /// `sum_i m_i*(h_new_i-h_old_i)` of the actual returned state, J.
+    /// Host reference-mass enthalpy plus any sensible film temperature
+    /// increment of the actual returned state, J.
     pub stored_energy_change_j: f64,
     /// Storage minus dt times net external input, J.
     pub energy_residual_j: f64,
@@ -310,6 +315,7 @@ pub struct EnthalpyBackwardEuler<'m, 'c> {
     // public uniform API, including phase_curve(), keeps its original meaning.
     nodal_curves: Option<Vec<&'c EquilibriumEnthalpyPhaseCurve>>,
     masses: Vec<f64>,
+    surface_capacity: Option<surface_capacity::SurfaceStorage>,
     phase_conductivity: Option<PhaseConductivity>,
     // A source-bound melting adapter supplies nodal k(h), using the existing
     // element-scale assembly with its retained unit tensor as numerical basis.
@@ -512,6 +518,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             curve,
             nodal_curves: None,
             masses,
+            surface_capacity: None,
             phase_conductivity: None,
             sourced_melting: None,
             sourced_phase: None,
@@ -779,6 +786,18 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             source.admit_enthalpies(cx, old_specific_h)?;
         }
         validate_work(self.masses.len(), dt_s, config)?;
+        if self.surface_capacity.is_some() {
+            for (vertex, &h) in old_specific_h.iter().enumerate() {
+                if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+                if self.film_capacity(vertex) > 0.0 {
+                    let temperature = self.curve_for_vertex(vertex)
+                        .values_at_specific_enthalpy(h)
+                        .map_err(|source| EnthalpyError::Phase { vertex, source })?
+                        .temperature_k;
+                    self.check_film_temperature(vertex, temperature)?;
+                }
+            }
+        }
         for condition in problem.boundary.conditions() {
             condition.validate(self.masses.len())?;
         }
@@ -989,7 +1008,9 @@ impl StepContext<'_, '_, '_, '_> {
             };
             heat = finite(
                 heat + finite(
-                    self.storage.masses[vertex] * (h[vertex] - self.old[vertex]) / self.dt
+                    self.storage.storage_change_j(
+                        vertex, h[vertex], self.old[vertex], temperature[vertex],
+                    )? / self.dt
                         + transport
                         - system.load[vertex],
                 )?,
@@ -1021,6 +1042,7 @@ impl StepContext<'_, '_, '_, '_> {
                 .curve_for_vertex(vertex)
                 .values_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
+            self.storage.check_film_temperature(vertex, state.temperature_k)?;
             temperature.push(state.temperature_k);
         }
         Ok(temperature)
@@ -1207,6 +1229,7 @@ impl StepContext<'_, '_, '_, '_> {
         };
         let picard = self.assemble(&temperature, phase_scales.as_ref())?;
         let mut slope = Vec::with_capacity(h.len());
+        let mut storage_diagonal = Vec::with_capacity(h.len());
         let mut inverse = Vec::with_capacity(h.len());
         for (vertex, &value) in h.iter().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
@@ -1217,6 +1240,7 @@ impl StepContext<'_, '_, '_, '_> {
                 .curve_for_vertex(vertex)
                 .temperature_derivative_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
+            let capacity = self.storage.storage_derivative(vertex, derivative)?;
             let diagonal = if self.is_prescribed(vertex) {
                 self.storage.masses[vertex]
             } else {
@@ -1225,7 +1249,7 @@ impl StepContext<'_, '_, '_, '_> {
                         + radiation.preconditioner_diagonal(vertex))?,
                     None => picard.operator.get(vertex, vertex),
                 };
-                finite(self.storage.masses[vertex] + self.dt * transport_diagonal * derivative)?
+                finite(capacity + self.dt * transport_diagonal * derivative)?
             };
             if diagonal <= 0.0 {
                 return Err(EnthalpyError::InvalidInput(
@@ -1233,6 +1257,7 @@ impl StepContext<'_, '_, '_, '_> {
                 ));
             }
             slope.push(derivative);
+            storage_diagonal.push(capacity);
             inverse.push(finite(1.0 / diagonal)?);
         }
         let tangent = assemble_enthalpy_jacobian_with_optional_interfaces(
@@ -1254,6 +1279,7 @@ impl StepContext<'_, '_, '_, '_> {
             source_j: None,
             tangent,
             slope,
+            storage_diagonal,
             inverse,
             fatal: RefCell::new(None),
             trial_refusal: RefCell::new(None),
@@ -1313,16 +1339,18 @@ impl StepContext<'_, '_, '_, '_> {
             };
             *value = match source_j {
                 Some(source) => interference::physical_residual_j(
-                    self.storage.masses[vertex],
-                    h[vertex],
-                    self.old[vertex],
+                    self.storage.storage_change_dd(
+                        vertex, h[vertex], self.old[vertex], temperature[vertex],
+                    )?,
                     self.dt,
                     transport,
                     system.load[vertex],
                     source[vertex],
                 )?,
                 None => finite(
-                    self.storage.masses[vertex] * (h[vertex] - self.old[vertex])
+                    self.storage.storage_change_j(
+                        vertex, h[vertex], self.old[vertex], temperature[vertex],
+                    )?
                         + self.dt * (transport - system.load[vertex]),
                 )?,
             };
@@ -1354,7 +1382,9 @@ impl StepContext<'_, '_, '_, '_> {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(self.cx, vertex)?;
             }
-            storage = finite(storage + self.storage.masses[vertex] * (value - self.old[vertex]))?;
+            storage = finite(storage + self.storage.storage_change_j(
+                vertex, value, self.old[vertex], temperature[vertex],
+            )?)?;
             liquid_mass_fraction.push(
                 self.storage
                     .curve_for_vertex(vertex)
@@ -1426,6 +1456,7 @@ struct NewtonStage<'s, 'a, 'm, 'c, 'cx> {
     source_j: Option<&'s [fs_math::dd::Dd]>,
     tangent: Csr,
     slope: Vec<f64>,
+    storage_diagonal: Vec<f64>,
     inverse: Vec<f64>,
     fatal: RefCell<Option<EnthalpyError>>,
     trial_refusal: RefCell<Option<EnthalpyError>>,
@@ -1505,7 +1536,7 @@ impl NonlinearProblem for NewtonStage<'_, '_, '_, '_, '_> {
                 .zip(entries)
                 .map(|(&column, &entry)| entry * direction[column])
                 .sum();
-            *value = self.context.storage.masses[row] * direction[row] + self.context.dt * applied;
+            *value = self.storage_diagonal[row] * direction[row] + self.context.dt * applied;
         }
         if let Some(radiation) = &self.radiation
             && let Err(error) = radiation.add_scaled_tangent(
@@ -1587,3 +1618,4 @@ fn poll(cx: &Cx<'_>, at: usize) -> Result<(), EnthalpyError> {
         })
     })
 }
+

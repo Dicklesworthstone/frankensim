@@ -1,7 +1,8 @@
 //! Discrete adjoints of the accepted reference-mass enthalpy balance.
 //!
-//! For `R=M(h-h_old)+dt*(A(T(h),f(h))*T(h)-b(q))`, solve
-//! `J_h^T lambda=h_bar`, then return `M*lambda` for history and
+//! For E_i(h)=m_i*h+Cfilm_i*T_i(h) and
+//! `R=E(h)-E(h_old)+dt*(A(T(h),f(h))*T(h)-b(q))`, solve
+//! `J_h^T lambda=h_bar`, then return `E'(h_old)*lambda` for history and
 //! `dt*M_source^T*lambda` for nodal volumetric source density. Here
 //! the spatial `J_h` already includes temperature-column scaling and any
 //! declared phase-conductivity chain rule. The shared bounded FGMRES solver
@@ -20,6 +21,8 @@
 //! tensor entries or table knots, moving geometry or chart selection is inferred.
 //! Chart corners and validity endpoints refuse classical two-sided derivatives; a latent
 //! plateau interior has exactly zero temperature sensitivity.
+//! Active film history likewise needs a classical temperature derivative;
+//! endpoint and old-state storage slopes are evaluated independently.
 //! Prescribed rows instead impose `m_i*(h_i-h_i(T_bath))=0`. Their transport,
 //! source and history derivatives vanish, while the bath-temperature pullback
 //! is `m_i*lambda_i/(dT/dh)_i`. Free rows retain the full coupling to fixed
@@ -190,6 +193,11 @@ pub struct EnthalpyStepLinearization<'m> {
     tangent: Csr,
     slopes: Vec<f64>,
     masses: Vec<f64>,
+    // Physical E'(h) differs between endpoint and history when a sensible
+    // film crosses a host caloric branch. Prescribed constraint rows still
+    // use the original reference mass as their purely algebraic scale.
+    storage_diagonal: Vec<f64>,
+    previous_storage_diagonal: Vec<f64>,
     prescribed: Vec<bool>,
     inverse_diagonal: Vec<f64>,
     dt: f64,
@@ -223,6 +231,8 @@ struct EnthalpyTangent<'a, 'm> {
     tangent: &'a Csr,
     slopes: &'a [f64],
     masses: &'a [f64],
+    storage_diagonal: &'a [f64],
+    previous_storage_diagonal: &'a [f64],
     prescribed: &'a [bool],
     inverse_diagonal: &'a [f64],
     dt: f64,
@@ -391,6 +401,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             config.energy_tolerance_j,
         )?;
         check_chart(cx, self, &primal.specific_enthalpy_j_kg)?;
+        let previous_storage_diagonal = storage_history_derivatives(cx, self, old_h)?;
         if !crate::adjoint::robin::nonlinear::material_is_smooth(cx, problem, &primal.temperature)?
         {
             return Err(EnthalpyAdjointError::MaterialKink);
@@ -413,7 +424,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             } else {
                 let radiation_diagonal = stage.radiation.as_ref()
                     .map_or(0.0, |radiation| radiation.preconditioner_diagonal(row));
-                finite(self.masses[row] + dt_s * finite(
+                finite(stage.storage_diagonal[row] + dt_s * finite(
                     stage.tangent.get(row, row) + radiation_diagonal * stage.slope[row],
                 )?)?
             };
@@ -431,6 +442,8 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             tangent: stage.tangent,
             slopes: stage.slope,
             masses: self.masses.clone(),
+            storage_diagonal: stage.storage_diagonal,
+            previous_storage_diagonal,
             prescribed,
             inverse_diagonal,
             dt: dt_s,
@@ -543,7 +556,7 @@ impl EnthalpyStepLinearization<'_> {
             } else {
                 let radiation_diagonal = self.pointwise_radiation.as_ref()
                     .map_or(0.0, |radiation| radiation.preconditioner_diagonal(row));
-                finite(self.masses[row] + self.dt * finite(
+                finite(self.storage_diagonal[row] + self.dt * finite(
                     self.tangent.get(row, row) + radiation_diagonal * self.slopes[row],
                 )?)?
             };
@@ -654,6 +667,8 @@ impl EnthalpyStepLinearization<'_> {
         EnthalpyTangent {
             mesh: self.mesh, tangent: &self.tangent, slopes: &self.slopes,
             masses: &self.masses, prescribed: &self.prescribed,
+            storage_diagonal: &self.storage_diagonal,
+            previous_storage_diagonal: &self.previous_storage_diagonal,
             inverse_diagonal: &self.inverse_diagonal, dt: self.dt,
             feedback: &self.feedback, pointwise_radiation: self.pointwise_radiation.as_ref(),
         }
@@ -719,7 +734,12 @@ impl EnthalpyTangent<'_, '_> {
             if row % ASSEMBLY_TILE == 0 {
                 poll(cx, row)?;
             }
-            *value = finite(self.masses[row].mul_add(x[row], *value))?;
+            let storage = if self.prescribed[row] {
+                self.masses[row]
+            } else {
+                self.storage_diagonal[row]
+            };
+            *value = finite(storage.mul_add(x[row], *value))?;
         }
         for update in self.feedback {
             let (left, right) = if transpose {
@@ -834,12 +854,14 @@ impl EnthalpyTangent<'_, '_> {
                 poll(cx, row)?;
             }
             *value = finite(*value * scale)?;
-            let storage_dual = finite(self.masses[row] * *value)?;
             if self.prescribed[row] {
-                prescribed_temperature[row] = finite(storage_dual / self.slopes[row])?;
+                prescribed_temperature[row] =
+                    finite(finite(self.masses[row] * *value)? / self.slopes[row])?;
                 previous_specific_enthalpy.push(0.0);
             } else {
-                previous_specific_enthalpy.push(storage_dual);
+                previous_specific_enthalpy.push(
+                    finite(self.previous_storage_diagonal[row] * *value)?,
+                );
             }
         }
         let mut source_density = vec![0.0; n];
@@ -915,6 +937,49 @@ impl FlexiblePreconditioner for Transpose<'_, '_, '_> {
         })();
         self.retain(result, output);
     }
+}
+
+// Only active films make the old-state storage derivative depend on T(h).
+// Its temperature kink/domain tests are independent of old conductivity or
+// phase-fraction kinks, which do not enter the history storage term.
+#[allow(clippy::float_cmp)]
+fn storage_history_derivatives(
+    cx: &Cx<'_>,
+    storage: &EnthalpyBackwardEuler<'_, '_>,
+    h: &[f64],
+) -> Result<Vec<f64>, EnthalpyAdjointError> {
+    if h.len() != storage.masses.len() {
+        return Err(EnthalpyAdjointError::InvalidInput(
+            "history storage derivatives require the original nodal shape",
+        ));
+    }
+    let mut derivatives = storage.masses.clone();
+    for (vertex, &value) in h.iter().enumerate() {
+        if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+        if storage.film_capacity(vertex) == 0.0 { continue; }
+        let curve = storage.curve_for_vertex(vertex);
+        let slope = |h| curve.temperature_derivative_at_specific_enthalpy(h)
+            .map_err(|source| EnthalpyError::Phase { vertex, source });
+        let derivative = slope(value)?;
+        let knots = curve.knots();
+        if let Ok(index) = knots.binary_search_by(|knot|
+            knot.specific_enthalpy_j_kg.partial_cmp(&value).expect("finite admitted chart state"))
+        {
+            if index == 0 || index + 1 == knots.len() {
+                return Err(EnthalpyAdjointError::ChartEndpoint {
+                    vertex, specific_enthalpy_j_kg: value,
+                });
+            }
+            if slope(knots[index - 1].specific_enthalpy_j_kg)? != derivative {
+                return Err(EnthalpyAdjointError::ChartKink {
+                    vertex, specific_enthalpy_j_kg: value,
+                });
+            }
+        }
+        derivatives[vertex] = storage.storage_derivative(vertex, derivative)?;
+    }
+    poll(cx, h.len())?;
+    Ok(derivatives)
 }
 
 // Exact segment equality is intentional: a tolerance would silently admit a
@@ -1032,3 +1097,4 @@ fn finite(value: f64) -> Result<f64, EnthalpyAdjointError> {
         Err(EnthalpyAdjointError::NonFiniteArithmetic)
     }
 }
+

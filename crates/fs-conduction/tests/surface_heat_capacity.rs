@@ -1,6 +1,9 @@
 //! Thin bonded films preserve storage, tangential transport and source domains.
 mod support;
 
+#[path = "surface_heat_capacity/enthalpy.rs"]
+mod enthalpy;
+
 use fs_conduction::assemble::{assemble_jacobian, assemble_operator, full_residual};
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{

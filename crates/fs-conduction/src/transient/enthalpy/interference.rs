@@ -441,7 +441,7 @@ fn admit_budget(
     }
 }
 
-fn checked_dd(value: Dd) -> Result<Dd, EnthalpyError> {
+pub(super) fn checked_dd(value: Dd) -> Result<Dd, EnthalpyError> {
     if value.hi.is_finite() && value.lo.is_finite() && value.to_f64().is_finite() {
         Ok(value)
     } else {
@@ -459,7 +459,7 @@ fn absolute(value: Dd) -> Dd {
     if positive(-value) { -value } else { value }
 }
 
-fn product(left: Dd, right: Dd) -> Result<Dd, EnthalpyError> {
+pub(super) fn product(left: Dd, right: Dd) -> Result<Dd, EnthalpyError> {
     let value = checked_dd(left * right)?;
     if !is_zero(left) && !is_zero(right) && is_zero(value) {
         Err(EnthalpyError::NonFiniteArithmetic)
@@ -478,18 +478,12 @@ fn divided(value: Dd, divisor: f64) -> Result<Dd, EnthalpyError> {
 }
 
 fn residual_dd(
-    mass: f64,
-    new_h: f64,
-    old_h: f64,
+    storage: Dd,
     dt: f64,
     transport_w: f64,
     boundary_load_w: f64,
     source_j: Dd,
 ) -> Result<Dd, EnthalpyError> {
-    let storage = product(
-        Dd::from_f64(mass),
-        checked_dd(Dd::from_f64(new_h) - Dd::from_f64(old_h))?,
-    )?;
     let transport = product(
         Dd::from_f64(dt),
         checked_dd(Dd::from_f64(transport_w) - Dd::from_f64(boundary_load_w))?,
@@ -500,18 +494,14 @@ fn residual_dd(
 // Original Newton receives the physical source subtraction in joules, before
 // its final f64 residual interface. Signed cancellation is legitimate.
 pub(super) fn physical_residual_j(
-    mass: f64,
-    new_h: f64,
-    old_h: f64,
+    storage: Dd,
     dt: f64,
     transport_w: f64,
     boundary_load_w: f64,
     source_j: Dd,
 ) -> Result<f64, EnthalpyError> {
     let value = residual_dd(
-        mass,
-        new_h,
-        old_h,
+        storage,
         dt,
         transport_w,
         boundary_load_w,
@@ -622,13 +612,10 @@ fn finish_interval(
         if vertex % ASSEMBLY_TILE == 0 {
             poll(context.cx, vertex)?;
         }
-        storage = checked_dd(
-            storage
-                + product(
-                    Dd::from_f64(context.storage.masses[vertex]),
-                    checked_dd(Dd::from_f64(value) - Dd::from_f64(context.old[vertex]))?,
-                )?,
+        let delta = context.storage.storage_change_dd(
+            vertex, value, context.old[vertex], temperature[vertex],
         )?;
+        storage = checked_dd(storage + delta)?;
         liquid_mass_fraction.push(
             context
                 .storage
@@ -648,9 +635,7 @@ fn finish_interval(
             None => transport,
         };
         let residual = residual_dd(
-            context.storage.masses[vertex],
-            value,
-            context.old[vertex],
+            delta,
             context.dt,
             transport,
             system.load[vertex],
@@ -726,3 +711,4 @@ fn finish_interval(
         newton,
     })
 }
+
