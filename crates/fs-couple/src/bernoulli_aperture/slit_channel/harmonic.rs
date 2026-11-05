@@ -10,7 +10,7 @@ use super::{AcousticRealizeError, invalid};
 use fs_math::c64::C64;
 
 /// Borrowed continuous physical coefficients of the unchanged channel owner.
-/// Valid for fixed geometry, the retained coherent Newtonian gas, and the
+/// Valid for fixed geometry, the retained coherent Newtonian fluid, and the
 /// original incompressible, fully developed, laminar reduction about rest.
 /// The nonlinear uniform-exit-head option cannot produce this view.
 #[derive(Clone, Copy, Debug)]

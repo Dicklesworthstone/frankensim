@@ -33,6 +33,8 @@ pub mod annular;
 pub mod circular;
 /// Original continuous cell equations and physical harmonic observations.
 pub mod harmonic;
+/// Original liquid/gas material sources in the same resolved momentum owners.
+pub mod material;
 use profile::MomentumProfile;
 
 /// Maximum transverse cells. All hot-step storage is allocated at construction.
@@ -268,6 +270,14 @@ impl SlitChannel {
     /// Invalid material state, geometry, resolution, or unrepresentable matrices.
     pub fn from_gas(gas: &GasState, spec: SlitChannelSpec) -> Result<Self, AcousticRealizeError> {
         gas.validate_coherence().map_err(|_| invalid("unsteady slit requires one coherent material gas"))?;
+        let profile = Self::profile_from_transport(gas.density, gas.dynamic_viscosity, spec)?;
+        Ok(Self { gas: *gas, spec, profile })
+    }
+
+    // Gas and material-liquid owners assemble the same original cells and faces.
+    fn profile_from_transport(density: f64, viscosity: f64, spec: SlitChannelSpec)
+        -> Result<MomentumProfile, AcousticRealizeError>
+    {
         if ![spec.length_m, spec.width_m, spec.height_m, spec.sample_period_s]
             .iter().all(|x| x.is_finite() && *x > 0.0)
             || !(2..=MAX_TRANSVERSE_CELLS).contains(&spec.transverse_cells)
@@ -277,19 +287,18 @@ impl SlitChannel {
         let n = spec.transverse_cells;
         let dy = spec.height_m / n as f64;
         let area = spec.width_m * dy;
-        let conductance = gas.dynamic_viscosity * spec.length_m * spec.width_m / dy;
+        let conductance = viscosity * spec.length_m * spec.width_m / dy;
         if ![dy, area, conductance]
             .iter().all(|x| x.is_finite() && *x > 0.0)
         {
             return Err(invalid("unsteady slit coefficients cannot be represented"));
         }
         let mut faces = vec![conductance; n + 1];
-        // Both stationary walls lie half a cell from the adjacent centre.
+        // Both walls lie half a cell from the adjacent centre.
         faces[0] *= 2.0;
         faces[n] *= 2.0;
-        let profile = MomentumProfile::new(gas.density, spec.length_m,
-            spec.sample_period_s, spec.exit, vec![area; n], faces)?;
-        Ok(Self { gas: *gas, spec, profile })
+        MomentumProfile::new(density, spec.length_m,
+            spec.sample_period_s, spec.exit, vec![area; n], faces)
     }
 
     /// Unchanged source material driving storage and wall friction.

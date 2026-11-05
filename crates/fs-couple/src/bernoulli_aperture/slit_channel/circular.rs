@@ -56,6 +56,13 @@ impl CircularChannel {
         -> Result<Self, AcousticRealizeError>
     {
         gas.validate_coherence().map_err(|_| invalid("circular channel needs one coherent material gas"))?;
+        let profile = Self::profile_from_transport(gas.density, gas.dynamic_viscosity, spec)?;
+        Ok(Self { gas: *gas, spec, profile })
+    }
+    // Gas and material-liquid owners share the original radial finite volumes.
+    pub(super) fn profile_from_transport(density: f64, viscosity: f64, spec: CircularChannelSpec)
+        -> Result<MomentumProfile, AcousticRealizeError>
+    {
         if ![spec.length_m, spec.radius_m, spec.sample_period_s].iter()
             .all(|x| x.is_finite() && *x > 0.0)
             || !(2..=MAX_TRANSVERSE_CELLS).contains(&spec.radial_cells) {
@@ -64,13 +71,12 @@ impl CircularChannel {
         let n = spec.radial_cells;
         let dr = spec.radius_m / n as f64;
         let ring = core::f64::consts::PI * dr * dr;
-        let shear = 2.0 * core::f64::consts::PI * gas.dynamic_viscosity * spec.length_m;
+        let shear = 2.0 * core::f64::consts::PI * viscosity * spec.length_m;
         let areas = (0..n).map(|i| ring * (2 * i + 1) as f64).collect();
         let mut conductances: Vec<_> = (0..=n).map(|i| shear * i as f64).collect();
         conductances[n] *= 2.0;
-        let profile = MomentumProfile::new(gas.density, spec.length_m,
-            spec.sample_period_s, spec.exit, areas, conductances)?;
-        Ok(Self { gas: *gas, spec, profile })
+        MomentumProfile::new(density, spec.length_m,
+            spec.sample_period_s, spec.exit, areas, conductances)
     }
     /// Complete source gas driving inertia, shear and coupled admissibility.
     #[must_use] pub const fn gas(&self) -> &GasState { &self.gas }

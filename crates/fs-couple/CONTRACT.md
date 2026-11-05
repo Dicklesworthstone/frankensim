@@ -1,5 +1,33 @@
 # CONTRACT: fs-couple
 
+## Material-source resolved laminar channels
+
+`slit_channel::material::MaterialChannel<M: FluidTransport>` admits original
+liquid, gas or explicitly raw transport owners into the shared planar,
+circular and annular no-slip momentum solver. The source is evaluated once
+at construction and retained with its receipts and conditions. Geometry,
+cell inertia and face shear come from the same constructors as the gas
+owners; no synthetic gas or independently fitted resistance is introduced.
+Ordinary stepping does not resample the source or require it to be cloneable.
+
+The original transverse field supplies pressure condensation, harmonic
+response, wall reactions, signed mechanical work and physical/numerical
+energy accounts. `with_source_controlled` is an immutable, cancellable
+proposal at fixed geometry and exactly unchanged density. It preserves
+every velocity, kinetic inventory and historical exchange, while the new
+viscosity changes future diffusion. Material errors remain typed; unequal
+density refuses because this owner cannot supply a changing-mass balance
+or density parameter work. Flow previews clone only when the source is
+cloneable; a borrowed source can preserve the original source identity.
+
+G1/G3 `channel_material` covers original-gas parity, liquid Poiseuille
+behavior, retained source identity and sampling count, non-cloneable
+sources, viscosity continuation and source/density/cancellation refusals.
+The input describes a spatially uniform Newtonian transport snapshot.
+Temperature, species, phase and thermal evolution, non-Newtonian shear
+dependence, compressibility and transition prediction remain with their
+respective physical owners.
+
 ## Resolved axial laminar flow in concentric annuli
 
 `slit_channel::annular::AnnularChannel` retains a coherent source gas and
