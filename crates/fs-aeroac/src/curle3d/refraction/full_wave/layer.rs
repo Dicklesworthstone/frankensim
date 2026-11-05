@@ -539,11 +539,15 @@ impl LayerKernel {
     fn layer_functions_at(vertical: C64, h: f64) -> (f64, f64) {
         if vertical.im > 0.0 {
             let eta = vertical.im * h;
+            // The physical scaled sinh(alpha*h)/alpha remains finite even
+            // when alpha*h overflows. Avoid h*(0.5/eta), which would turn
+            // that nonzero half-space limit into zero for an interior field.
+            if eta > 350.0 {
+                return (0.5, 0.5 / vertical.im);
+            }
             let decay = det::exp(-2.0 * eta);
             let ratio = if eta == 0.0 {
                 1.0
-            } else if eta > 350.0 {
-                0.5 / eta
             } else {
                 -det::expm1(-2.0 * eta) / (2.0 * eta)
             };
@@ -889,6 +893,14 @@ mod tests {
         let (scaled_cos, scaled_sine_over_zeta) = kernel.layer_functions(C64::new(0.0, alpha));
         assert_eq!(scaled_cos, 0.5);
         assert!((scaled_sine_over_zeta * alpha - 0.5).abs() < 1e-15);
+        for (alpha, thickness) in [(2.0, f64::MAX), (1e100, 1e250)] {
+            assert!((alpha * thickness).is_infinite());
+            let (cosine, sine) =
+                LayerKernel::layer_functions_at(C64::new(0.0, alpha), thickness);
+            assert_eq!(cosine, 0.5);
+            assert_eq!(sine, 0.5 / alpha);
+            assert!(sine > 0.0);
+        }
         kernel.tail_extent = alpha;
         let point = kernel.point(kernel.critical_count, 1.0);
         let denominator = kernel.denominator(point, point.q);
