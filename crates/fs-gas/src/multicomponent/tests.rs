@@ -1,6 +1,7 @@
 use super::*;
 
 mod compatible_reconstruction;
+mod contact_equilibrium;
 mod pressure_boundary;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};

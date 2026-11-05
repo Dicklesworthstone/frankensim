@@ -100,6 +100,7 @@ impl MixtureEuler1d {
             controls,
             [None; 2],
             Some((force, force_controls)),
+            None,
             cancelled,
         )
     }

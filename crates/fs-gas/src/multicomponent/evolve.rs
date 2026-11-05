@@ -1,4 +1,7 @@
 use super::flux::Face;
+use super::pressure_equilibrium::{
+    ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
+};
 use super::{
     Boundaries, Boundary, Cell, Conserved, Error, MAX_COMPONENTS, MAX_SPECIES, Mesh1d, MixtureGas,
     Primitive, Reconstruction, StepControl, allocated, cell, poll, positive, sum,
@@ -354,7 +357,45 @@ impl MixtureEuler1d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
-        self.advance(maximum_duration, controls, [None; 2], None, cancelled)
+        self.advance(maximum_duration, controls, [None; 2], None, None, cancelled)
+    }
+
+    /// Transport verified equilibrium contacts through fixed, constant-area cells.
+    ///
+    /// Species and momentum use the original conservative fluxes. Only cells
+    /// whose actual incident traces share their pressure and velocity receive
+    /// a source-owned energy reconstruction. Both forward-Euler stages and the
+    /// final SSP average are corrected; the returned RK-weighted numerical
+    /// energy defect is separate from physical heat or mechanical work.
+    ///
+    /// The caller prepares reusable scratch and explicitly bounds the absolute
+    /// energy defect. Physical boundary cells and HLL fallback stencils retain
+    /// the conservative update. This opt-in method does not enable correction
+    /// in moving-mesh, reacting, molecular or forced compositions. Any refusal
+    /// or cancellation leaves the accepted state and time unchanged.
+    pub fn step_with_contact_equilibrium(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        equilibrium: ContactEquilibriumControl,
+        workspace: &mut ContactWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactEquilibriumStepReport<StepReport>, Error> {
+        let transport = self.advance(
+            maximum_duration,
+            controls,
+            [None; 2],
+            None,
+            Some((equilibrium, &mut *workspace)),
+            cancelled,
+        )?;
+        let correction = workspace.receipt();
+        Ok(ContactEquilibriumStepReport {
+            corrected_energy_residual_j: transport.conservation_residual.energy
+                - correction.signed_energy_j,
+            transport,
+            correction,
+        })
     }
 
     /// Advance against prescribed stationary reservoirs at the left/right ends.
@@ -408,7 +449,7 @@ impl MixtureEuler1d {
                 *target = Some((state, self.gas.primitive(state, &mut cancelled)?));
             }
         }
-        self.advance(maximum_duration, controls, admitted, None, cancelled)
+        self.advance(maximum_duration, controls, admitted, None, None, cancelled)
     }
 
     fn advance(
@@ -417,6 +458,7 @@ impl MixtureEuler1d {
         controls: StepControl,
         reservoirs: ReservoirEnds<'_>,
         forcing: Option<(BodyForce<'_>, ForceControl)>,
+        mut equilibrium: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -429,6 +471,14 @@ impl MixtureEuler1d {
         }
         let n = self.gas.species_count();
         let m = n + 2;
+        if let Some((control, workspace)) = equilibrium.as_ref() {
+            workspace.admit(self.cell_count(), *control)?;
+            if forcing.is_some() || self.mesh.uniform_cross_section().is_none() {
+                return Err(Error::Invalid(
+                    "contact equilibrium requires unforced constant-area transport",
+                ));
+            }
+        }
         let mut signal_rate = 0.0_f64;
         for (i, q) in self.states.chunks_exact(m).enumerate() {
             let p = self
@@ -458,6 +508,9 @@ impl MixtureEuler1d {
             } else {
                 controls.reconstruction
             };
+            if let Some((control, workspace)) = equilibrium.as_mut() {
+                workspace.begin_attempt(*control)?;
+            }
             let result = if let Some((force, force_controls)) = forcing {
                 forcing::attempt(
                     &self.gas,
@@ -477,7 +530,7 @@ impl MixtureEuler1d {
                     &mut cancelled,
                 )
             } else {
-                attempt(
+                attempt_with_contact(
                     &self.gas,
                     &self.states,
                     &self.mesh,
@@ -487,6 +540,7 @@ impl MixtureEuler1d {
                     order,
                     reservoirs,
                     &mut self.work,
+                    equilibrium.as_mut().map(|(_, workspace)| &mut **workspace),
                     &mut cancelled,
                 )
                 .map(|(a, b)| (a, b, ForceChange::default(), 0.0))
@@ -532,6 +586,11 @@ impl MixtureEuler1d {
                     {
                         return Err(Error::Invalid("non-finite mixture extensive balance"));
                     }
+                    if let Some((_, workspace)) = equilibrium.as_ref()
+                        && !(residual[n + 1] - workspace.receipt().signed_energy_j).is_finite()
+                    {
+                        return Err(Error::Invalid("non-finite contact energy balance"));
+                    }
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     self.time += dt;
@@ -555,7 +614,10 @@ impl MixtureEuler1d {
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(e) => {
-                    if !matches!(e, Error::CflExceeded { .. }) {
+                    if !matches!(
+                        e,
+                        Error::CflExceeded { .. } | Error::ContactEnergyBudget { .. }
+                    ) {
                         first_order_retry = true;
                     }
                     last = e;
@@ -666,6 +728,35 @@ fn attempt(
     work: &mut Workspace,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Stage, Stage), Error> {
+    attempt_with_contact(
+        gas,
+        states,
+        mesh,
+        boundaries,
+        dt,
+        cfl,
+        reconstruction,
+        reservoirs,
+        work,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_contact(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    reservoirs: ReservoirEnds<'_>,
+    work: &mut Workspace,
+    mut contact: Option<&mut ContactWorkspace>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Stage, Stage), Error> {
     let n = gas.species_count();
     let m = n + 2;
     let mut endpoint_storage = [[0.0; MAX_COMPONENTS]; 2];
@@ -677,7 +768,7 @@ fn attempt(
         &mut endpoint_storage,
         cancelled,
     )?;
-    let a = operator(
+    let a = operator_core(
         gas,
         states,
         mesh,
@@ -688,6 +779,8 @@ fn attempt(
         &mut work.faces,
         &mut work.face_data,
         ends,
+        None,
+        contact.as_deref_mut().map(|workspace| (workspace, true)),
         cancelled,
     )?;
     check_cfl(a.signal_rate * dt, cfl)?;
@@ -703,7 +796,20 @@ fn attempt(
             &mut work.stage[i * m..(i + 1) * m],
             n,
         );
-        if !gas.admissible(&work.stage[i * m..(i + 1) * m]) {
+        let stage = &mut work.stage[i * m..(i + 1) * m];
+        if let Some(workspace) = contact.as_deref_mut() {
+            stage[n + 1] = workspace.project_energy(
+                gas,
+                i,
+                &stage[..n],
+                &stage[n..n + 1],
+                stage[n + 1],
+                mesh.volumes()[i],
+                0.5,
+                &mut *cancelled,
+            )?;
+        }
+        if !gas.admissible(stage) {
             return Err(Error::Invalid(
                 "first mixture RK stage outside source domain",
             ));
@@ -717,7 +823,7 @@ fn attempt(
         &mut endpoint_storage,
         cancelled,
     )?;
-    let b = operator(
+    let b = operator_core(
         gas,
         &work.stage,
         mesh,
@@ -728,6 +834,8 @@ fn attempt(
         &mut work.faces,
         &mut work.face_data,
         ends,
+        None,
+        contact.as_deref_mut().map(|workspace| (workspace, false)),
         cancelled,
     )?;
     check_cfl(b.signal_rate * dt, cfl)?;
@@ -744,6 +852,18 @@ fn attempt(
             &mut second[..m],
             n,
         );
+        if let Some(workspace) = contact.as_deref_mut() {
+            second[n + 1] = workspace.project_energy(
+                gas,
+                i,
+                &second[..n],
+                &second[n..n + 1],
+                second[n + 1],
+                mesh.volumes()[i],
+                0.5,
+                &mut *cancelled,
+            )?;
+        }
         if !gas.admissible(&second[..m]) {
             return Err(Error::Invalid(
                 "second mixture RK stage outside source domain",
@@ -752,6 +872,18 @@ fn attempt(
         let candidate = &mut work.candidate[i * m..(i + 1) * m];
         for k in 0..m {
             candidate[k] = 0.5 * states[i * m + k] + 0.5 * second[k];
+        }
+        if let Some(workspace) = contact.as_deref_mut() {
+            candidate[n + 1] = workspace.project_energy(
+                gas,
+                i,
+                &candidate[..n],
+                &candidate[n..n + 1],
+                candidate[n + 1],
+                mesh.volumes()[i],
+                1.0,
+                &mut *cancelled,
+            )?;
         }
         gas.decode(candidate, Some(work.primitive[i].temperature), cancelled)?;
     }
@@ -814,12 +946,61 @@ pub(super) fn operator_with_face_motion(
     face_velocity: Option<&[f64]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, Error> {
+    operator_core(
+        gas,
+        states,
+        mesh,
+        boundaries,
+        reconstruction,
+        primitive,
+        slopes,
+        faces,
+        face_data,
+        endpoint_fluxes,
+        face_velocity,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operator_core(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    reconstruction: Reconstruction,
+    primitive: &mut [Primitive],
+    slopes: &mut [f64],
+    faces: &mut [f64],
+    face_data: &mut [Face],
+    endpoint_fluxes: [Option<EndpointFlux<'_>>; 2],
+    face_velocity: Option<&[f64]>,
+    mut contact: Option<(&mut ContactWorkspace, bool)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, Error> {
     let n = gas.species_count();
     let m = n + 2;
     let primitive_width = n + 3;
     let count = mesh.cell_count();
     for (i, q) in states.chunks_exact(m).enumerate() {
         primitive[i] = gas.decode(q, Some(primitive[i].temperature), cancelled)?;
+    }
+    if let Some((workspace, first_stage)) = contact.as_mut() {
+        for (i, p) in primitive.iter().enumerate() {
+            poll(cancelled)?;
+            workspace.set_reference(
+                i,
+                p.pressure,
+                [p.velocity, 0.0, 0.0],
+                p.sound_speed,
+                *first_stage,
+            )?;
+        }
+        if boundaries != Boundaries::Periodic {
+            workspace.exclude(0)?;
+            workspace.exclude(count - 1)?;
+        }
     }
     slopes.fill(0.0);
     let value = |i: usize, k: usize| {
@@ -1031,6 +1212,23 @@ pub(super) fn operator_with_face_motion(
         };
         fallbacks += usize::from(data.used_hll_fallback);
         face_data[face] = data;
+        if let Some((workspace, _)) = contact.as_mut() {
+            let recipients = if face == 0 && boundaries == Boundaries::Periodic {
+                [Some(count - 1), Some(0)]
+            } else {
+                [face.checked_sub(1), (face < count).then_some(face)]
+            };
+            for i in recipients.into_iter().flatten() {
+                workspace.observe_pair(
+                    i,
+                    pl.pressure,
+                    [pl.velocity, 0.0, 0.0],
+                    pr.pressure,
+                    [pr.velocity, 0.0, 0.0],
+                    data.used_hll_fallback,
+                )?;
+            }
+        }
     }
     let mut signal_rate = 0.0_f64;
     let mut force = 0.0;

@@ -4626,3 +4626,42 @@ and latent walls, mechanical evolution at zero thermal exposure, independent
 species-datum invariance, whole-call budgets, source refusal and final
 cancellation with deterministic retry. They use the existing synthetic binary
 constitutive fixture and do not claim experimental-mixture validation.
+
+
+## Opt-in pressure equilibrium at transported mixture contacts
+
+`MixtureEuler1d::step_with_contact_equilibrium` adds a bounded alternative for
+stationary, constant-area inviscid transport. The default `step` remains fully
+conservative and retains its unequal-caloric contact-pressure limitation.
+The option uses the same species and momentum fluxes, HLLC/HLL wave closure,
+canonical species order and original NASA-9 calorics.
+
+A recipient is eligible only when both actual traces on every incident face
+match its original pressure and full velocity within the caller's tolerance.
+Velocity differences are scaled by sound speed, never by the bulk speed.
+HLL fallback, physical boundary cells and later-stage mismatches disable the
+correction. Pressure or velocity variations exceeding that tolerance retain the
+conservative update.
+It reconstructs energy from the transported species and represented momenta
+at the original pressure after each forward-Euler stage and the final SSP
+average. All source-temperature and kinetic-energy precision gates still apply.
+
+`ContactWorkspace` is prepared once under an explicit byte budget; subsequent
+attempts allocate no numerical storage. `ContactEquilibriumControl` requires
+a finite positive relative tolerance at most 1e-6 and a finite nonnegative
+absolute energy-defect budget per accepted step. The `ContactCorrection`
+receipt reports the signed energy defect, sum of absolute corrections and
+number of distinct corrected cells. Stage corrections receive weights
+1/2, 1/2 and 1, respectively, and each uses the physical cell volume.
+Opposing corrections cannot conceal work from the absolute budget.
+
+The native energy residual continues to include this numerical defect.
+`corrected_energy_residual_j` subtracts the separately reported signed defect;
+the correction is not physical heat or mechanical work. Budget failures halve
+the step without forcing MUSCL to first order. Refusal or cancellation leaves
+accepted cells and time untouched. Source-inversion hints are private scratch.
+
+This Estimated option does not establish fully discrete entropy stability,
+general multicomponent shock accuracy, or equilibrium preservation outside
+admitted contacts. Variable-area, moving-mesh, body-force, reacting, molecular,
+piston and network compositions retain their original transport methods.
