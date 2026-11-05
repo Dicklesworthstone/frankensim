@@ -22,7 +22,8 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_thermal::crystallization::{
-    CrystallizationError, CrystallizationLaw, CrystallizationSolve, CrystallizationState,
+    CrystallizationError, CrystallizationLaw, CrystallizationPopulation, CrystallizationSolve,
+    CrystallizationState,
 };
 
 /// Explicit coordinates of one original material's kinetic property data.
@@ -91,6 +92,31 @@ impl CrystallizationPropertyState {
     }
 }
 
+/// A source answer for a thermally equilibrated population of distinct ages.
+/// The aggregate mass fraction is physical; it is not represented by a made-up
+/// single-history phase state. Individual cohorts remain owned by the population.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CrystallizationPopulationPropertyState {
+    temperature_k: f64,
+    crystalline_mass_fraction: f64,
+    volume: CrystallizationVolumeState,
+    material: ResolvedMaterialStatePoint,
+}
+impl CrystallizationPopulationPropertyState {
+    pub const fn temperature_k(&self) -> f64 {
+        self.temperature_k
+    }
+    pub const fn crystalline_mass_fraction(&self) -> f64 {
+        self.crystalline_mass_fraction
+    }
+    pub const fn volume(&self) -> CrystallizationVolumeState {
+        self.volume
+    }
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        &self.material
+    }
+}
+
 /// Immutable preparation shared by every consumer of these material properties.
 ///
 /// Preparation selects the original claims once. Evaluation refreshes that
@@ -126,6 +152,60 @@ impl<'a> CrystallizationPropertySource<'a> {
         selection: MaterialPropertySelection,
         solve: CrystallizationSolve,
     ) -> Result<Self, CrystallizationPropertyError> {
+        law.validate_state(initial, solve)?;
+        Self::new_at(
+            pair,
+            law,
+            initial.temperature_k(),
+            initial.crystalline_mass_fraction(),
+            point,
+            requirements,
+            selection,
+            solve,
+        )
+    }
+
+    /// Select original property claims at the actual aggregate coordinates of
+    /// an admitted parallel-cohort population. The source must explicitly apply
+    /// to that population closure; this does not average individual conductivity
+    /// or stiffness values, or infer a microstructure-dependent mixing rule.
+    pub fn for_population(
+        pair: CrystallizationCaloricPair<'a>,
+        initial: &CrystallizationPopulation<'a>,
+        point: CrystallizationMaterialPoint<'a>,
+        requirements: &[ScalarPropertyRequirement],
+        selection: MaterialPropertySelection,
+        solve: CrystallizationSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CrystallizationPropertyError> {
+        initial.validate(solve, &mut cancelled)?;
+        let source = Self::new_at(
+            pair,
+            *initial.law(),
+            initial.temperature_k(),
+            initial.crystalline_mass_fraction(),
+            point,
+            requirements,
+            selection,
+            solve,
+        )?;
+        if cancelled() {
+            return Err(CrystallizationError::Cancelled.into());
+        }
+        Ok(source)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_at(
+        pair: CrystallizationCaloricPair<'a>,
+        law: CrystallizationLaw<'a>,
+        temperature_k: f64,
+        crystalline_mass_fraction: f64,
+        point: CrystallizationMaterialPoint<'a>,
+        requirements: &[ScalarPropertyRequirement],
+        selection: MaterialPropertySelection,
+        solve: CrystallizationSolve,
+    ) -> Result<Self, CrystallizationPropertyError> {
         if point.material.content_hash() != pair.parent().curve().material_card_identity()
             || law.parent_caloric_identity() != Some(*pair.parent().identity().as_bytes())
             || law.crystalline_caloric_identity() != Some(*pair.crystal().identity().as_bytes())
@@ -136,10 +216,8 @@ impl<'a> CrystallizationPropertySource<'a> {
             ));
         }
         admit_axes(point)?;
-        law.validate_state(initial, solve)?;
-        let volume =
-            pair.volume_state(initial.temperature_k(), initial.crystalline_mass_fraction())?;
-        let query = query_at(point, initial, volume)?;
+        let volume = pair.volume_state(temperature_k, crystalline_mass_fraction)?;
+        let query = query_at(point, temperature_k, crystalline_mass_fraction, volume)?;
         let original =
             resolve_material_state_point(point.material, &query, requirements, selection)?;
         let thermal = ThermalMaterialPoint {
@@ -217,12 +295,58 @@ impl<'a> CrystallizationPropertySource<'a> {
                 crystalline_mass_fraction_axis: self.mass_fraction_axis.as_deref(),
                 crystalline_volume_fraction_axis: self.volume_fraction_axis.as_deref(),
             },
-            state,
+            state.temperature_k(),
+            state.crystalline_mass_fraction(),
             volume,
         )?;
         let material = self.original.at_query_point(self.material, &query)?;
         Ok(CrystallizationPropertyState {
             phase: state,
+            volume,
+            material,
+        })
+    }
+
+    /// Refresh the same claims for a population, retaining the actual mass and
+    /// density-derived volume fractions without collapsing its kinetic history.
+    pub fn evaluate_population(
+        &self,
+        population: &CrystallizationPopulation<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CrystallizationPopulationPropertyState, CrystallizationPropertyError> {
+        let law = population.law();
+        if law.config() != self.law.config()
+            || law.parent_caloric_identity() != self.law.parent_caloric_identity()
+            || law.crystalline_caloric_identity() != self.law.crystalline_caloric_identity()
+        {
+            return Err(CrystallizationError::StateMismatch.into());
+        }
+        population.validate(self.solve, &mut cancelled)?;
+        let temperature_k = population.temperature_k();
+        let crystalline_mass_fraction = population.crystalline_mass_fraction();
+        let volume = self
+            .pair
+            .volume_state(temperature_k, crystalline_mass_fraction)?;
+        let context = self.original.query();
+        let query = query_at(
+            CrystallizationMaterialPoint {
+                material: self.material,
+                context: &context,
+                temperature_axis: &self.temperature_axis,
+                crystalline_mass_fraction_axis: self.mass_fraction_axis.as_deref(),
+                crystalline_volume_fraction_axis: self.volume_fraction_axis.as_deref(),
+            },
+            temperature_k,
+            crystalline_mass_fraction,
+            volume,
+        )?;
+        let material = self.original.at_query_point(self.material, &query)?;
+        if cancelled() {
+            return Err(CrystallizationError::Cancelled.into());
+        }
+        Ok(CrystallizationPopulationPropertyState {
+            temperature_k,
+            crystalline_mass_fraction,
             volume,
             material,
         })
@@ -268,7 +392,8 @@ fn admit_axes(point: CrystallizationMaterialPoint<'_>) -> Result<(), Crystalliza
 
 fn query_at(
     point: CrystallizationMaterialPoint<'_>,
-    state: CrystallizationState,
+    temperature_k: f64,
+    crystalline_mass_fraction: f64,
     volume: CrystallizationVolumeState,
 ) -> Result<QueryPoint, CrystallizationPropertyError> {
     let coordinate = |e: fs_matdb::MatDbError| {
@@ -277,12 +402,12 @@ fn query_at(
     let mut query = point
         .context
         .clone()
-        .with(point.temperature_axis, state.temperature_k())
+        .with(point.temperature_axis, temperature_k)
         .map_err(coordinate)?;
     for (axis, value) in [
         (
             point.crystalline_mass_fraction_axis,
-            state.crystalline_mass_fraction(),
+            crystalline_mass_fraction,
         ),
         (
             point.crystalline_volume_fraction_axis,

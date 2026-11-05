@@ -42,6 +42,10 @@ use core::fmt;
 mod rate;
 pub use rate::{HoffmanLauritzenConfig, HoffmanLauritzenRate};
 
+#[path = "crystallization/population.rs"]
+mod population;
+pub use population::{CrystallizationPopulation, CrystallizationPopulationStep};
+
 #[path = "crystallization/adaptive.rs"]
 mod adaptive;
 pub use adaptive::{AdaptiveCrystallizationStep, CrystallizationAdaptivity};
@@ -416,6 +420,30 @@ impl<'a> CrystallizationLaw<'a> {
         check_cancelled(&mut cancelled)?;
         let h = finite(specific_enthalpy_j_kg)?;
         let fraction = self.crystalline_mass_fraction(exposure)?;
+        let temperature =
+            self.temperature_at_enthalpy_fraction(h, fraction, solve, &mut cancelled)?;
+        Ok(self.state(h, temperature, exposure, fraction))
+    }
+
+    // Original inversion shared by single histories and parallel kinetic
+    // cohorts. A population supplies its actual mass-weighted fraction without
+    // inventing one equivalent Avrami age. All source bounds and tolerances
+    // remain owned by this same caloric solve.
+    fn temperature_at_enthalpy_fraction(
+        &self,
+        specific_enthalpy_j_kg: f64,
+        fraction: f64,
+        solve: CrystallizationSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, CrystallizationError> {
+        check_solve(solve)?;
+        check_cancelled(&mut cancelled)?;
+        let h = finite(specific_enthalpy_j_kg)?;
+        if !nonnegative(fraction) || fraction > self.config.maximum_crystalline_mass_fraction {
+            return Err(CrystallizationError::Invalid(
+                "crystalline mass fraction outside model",
+            ));
+        }
         let minimum_cp = self
             .minimum_heat_capacities_j_kg_k
             .map(|[a, c]| (1.0 - fraction) * a + fraction * c);
@@ -441,12 +469,7 @@ impl<'a> CrystallizationLaw<'a> {
         }
         if h == h_lower || h == h_upper {
             check_cancelled(&mut cancelled)?;
-            return Ok(self.state(
-                h,
-                if h == h_lower { lower } else { upper },
-                exposure,
-                fraction,
-            ));
+            return Ok(if h == h_lower { lower } else { upper });
         }
         for iteration in 0..solve.maximum_iterations {
             check_cancelled(&mut cancelled)?;
@@ -488,7 +511,7 @@ impl<'a> CrystallizationLaw<'a> {
                         .is_some_and(|error| error <= solve.temperature_tolerance_k))
             {
                 check_cancelled(&mut cancelled)?;
-                return Ok(self.state(h, temperature, exposure, fraction));
+                return Ok(temperature);
             }
             if temperature == lower || temperature == upper {
                 break;

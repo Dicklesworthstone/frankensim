@@ -425,3 +425,162 @@ fn finite_contact_uses_actual_candidate_crystallinity_and_conserves_heat() {
         1e-12,
     );
 }
+
+#[test]
+fn population_properties_follow_aggregate_fractions_without_collapsing_histories() {
+    use fs_thermal::crystallization::CrystallizationPopulation;
+
+    let card = material();
+    let [parent, crystal] = branches(&card);
+    let pair = CrystallizationCaloricPair::new(&parent, &crystal, RANGE).unwrap();
+    let rate = |t: f64| Ok(if t < 420.0 { 0.1 } else { 0.0 });
+    let law = pair
+        .law(&rate, ContentHash([5; 32]), 2.0, 0.8, 420.0)
+        .unwrap();
+    let solve = CrystallizationSolve::default();
+    let population = CrystallizationPopulation::new(
+        law,
+        &[
+            (1.0, law.state_at_temperature(320.0, 0.0).unwrap()),
+            (3.0, law.state_at_temperature(360.0, 1.0).unwrap()),
+        ],
+        2,
+        solve,
+        || false,
+    )
+    .unwrap();
+    let context = context();
+    let source = CrystallizationPropertySource::for_population(
+        pair,
+        &population,
+        point(&card, &context),
+        &requirements(),
+        MaterialPropertySelection::SingleClaimOnly,
+        solve,
+        || false,
+    )
+    .unwrap();
+    let initial = source.evaluate_population(&population, || false).unwrap();
+    let expected_initial_x = 0.75 * 0.8 * (1.0 - (-1.0_f64).exp());
+    // Original densities are 1000 and 2000 kg/m3. Volume fraction is X/(2-X),
+    // not X, and the manufactured source declares k=0.2+X on this population.
+    let expected_initial_v = expected_initial_x / (2.0 - expected_initial_x);
+    close(initial.temperature_k(), 350.0, 1e-9);
+    close(
+        initial.crystalline_mass_fraction(),
+        expected_initial_x,
+        1e-14,
+    );
+    close(
+        initial.volume().crystalline_volume_fraction,
+        expected_initial_v,
+        1e-14,
+    );
+    close(
+        initial.volume().bulk_density_kg_m3,
+        1000.0 / (1.0 - 0.5 * expected_initial_x),
+        1e-10,
+    );
+    close(
+        initial
+            .material()
+            .property(THERMAL_CONDUCTIVITY_PROPERTY)
+            .unwrap()
+            .value_si(),
+        0.2 + expected_initial_x,
+        1e-14,
+    );
+    close(
+        initial
+            .material()
+            .property("volume_observation")
+            .unwrap()
+            .value_si(),
+        expected_initial_v,
+        1e-14,
+    );
+    assert_eq!(
+        initial.material().state_coordinate("pressure"),
+        Some(100_000.0)
+    );
+
+    let (grown, _) = population.advance_isothermal(2.0, || false).unwrap();
+    let later = source.evaluate_population(&grown, || false).unwrap();
+    let expected_x =
+        0.8 * (0.25 * (1.0 - (-0.2_f64.powi(2)).exp()) + 0.75 * (1.0 - (-1.2_f64.powi(2)).exp()));
+    let expected_v = expected_x / (2.0 - expected_x);
+    close(later.temperature_k(), 350.0, 1e-9);
+    close(later.crystalline_mass_fraction(), expected_x, 1e-14);
+    close(
+        later.volume().crystalline_volume_fraction,
+        expected_v,
+        1e-14,
+    );
+    close(
+        later.material().state_coordinate("X").unwrap(),
+        expected_x,
+        1e-14,
+    );
+    close(
+        later.material().state_coordinate("V").unwrap(),
+        expected_v,
+        1e-14,
+    );
+    close(
+        later
+            .material()
+            .property(THERMAL_CONDUCTIVITY_PROPERTY)
+            .unwrap()
+            .value_si(),
+        0.2 + expected_x,
+        1e-14,
+    );
+    for property in later.material().properties() {
+        let original = source
+            .original_source()
+            .property(property.requirement().name())
+            .unwrap();
+        assert_eq!(
+            property.answer().receipt.selected,
+            original.answer().receipt.selected
+        );
+    }
+    assert_eq!(
+        later.material().state_coordinate("pressure"),
+        Some(100_000.0)
+    );
+    assert_eq!(population.cohort_state(0).unwrap().unwrap().exposure(), 0.0);
+    assert_eq!(population.cohort_state(1).unwrap().unwrap().exposure(), 1.0);
+    close(
+        grown.cohort_state(0).unwrap().unwrap().exposure(),
+        0.2,
+        1e-15,
+    );
+    close(
+        grown.cohort_state(1).unwrap().unwrap().exposure(),
+        1.2,
+        1e-15,
+    );
+
+    let foreign_law = pair
+        .law(&rate, ContentHash([6; 32]), 2.0, 0.8, 420.0)
+        .unwrap();
+    let foreign = CrystallizationPopulation::new(
+        foreign_law,
+        &[(4.0, foreign_law.state_at_temperature(350.0, 0.0).unwrap())],
+        1,
+        solve,
+        || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        source.evaluate_population(&foreign, || false),
+        Err(CrystallizationPropertyError::Kinetic(
+            CrystallizationError::StateMismatch
+        ))
+    ));
+    assert_eq!(
+        source.evaluate_population(&population, || false).unwrap(),
+        initial
+    );
+}
