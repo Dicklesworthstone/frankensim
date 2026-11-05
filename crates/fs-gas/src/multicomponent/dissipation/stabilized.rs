@@ -52,6 +52,29 @@ impl Rkl2Scheme {
         b(1) * (1.0 / self.stability_extent())
     }
 
+    /// Physical time fraction of state `Y_stage` in the native recurrence.
+    ///
+    /// The operator forming `Y_j` observes `Y_(j-1)` at `abscissa(j-1)`;
+    /// its reused anchor observes `Y_0` at zero. These fractions solve
+    /// `c_j = mu*c_(j-1) + nu*c_(j-2) + mu_tilde + gamma_tilde`.
+    /// In particular `c_1` is the first forward weight, not `1 / stages`.
+    /// The final admitted state is exactly at the macrostep endpoint.
+    pub fn abscissa(self, stage: usize) -> Result<f64, DissipationError> {
+        if stage > self.stages {
+            return Err(DissipationError::Invalid(
+                "RKL2 time stage outside prepared scheme",
+            ));
+        }
+        Ok(match stage {
+            0 => 0.0,
+            1 => self.first_weight(),
+            _ => {
+                let j = stage as f64;
+                (j * j + j - 2.0) / (4.0 * self.stability_extent())
+            }
+        })
+    }
+
     /// `[mu, nu, mu_tilde, gamma_tilde]` for each stage `j` in `2..=s`:
     /// `Yj = Y0 + mu*(Yj-1-Y0) + nu*(Yj-2-Y0)`
     /// `     + dt*(mu_tilde*L(Yj-1) + gamma_tilde*L(Y0))`.

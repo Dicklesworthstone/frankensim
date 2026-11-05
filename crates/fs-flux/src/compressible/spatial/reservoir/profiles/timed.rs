@@ -13,7 +13,18 @@ pub(in crate::compressible::spatial) struct TimedSource<'a> {
     terminal_failure: bool,
 }
 
-impl TimedSource<'_> {
+impl<'a> TimedSource<'a> {
+    pub(in crate::compressible::spatial) fn new(
+        sample: &'a mut Sample<'a>,
+        maximum_face_evaluations: usize,
+    ) -> Self {
+        Self {
+            sample,
+            remaining: maximum_face_evaluations,
+            terminal_failure: false,
+        }
+    }
+
     pub(in crate::compressible::spatial) fn failed(&self) -> bool {
         self.terminal_failure
     }
@@ -100,11 +111,7 @@ impl Euler3d {
         mut sample: impl FnMut(f64, BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
-        let mut source = TimedSource {
-            sample: &mut sample,
-            remaining: maximum_face_evaluations,
-            terminal_failure: false,
-        };
+        let mut source = TimedSource::new(&mut sample, maximum_face_evaluations);
         self.step_impl(
             maximum_duration,
             controls,

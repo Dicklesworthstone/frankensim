@@ -1,6 +1,6 @@
 use super::*;
-use crate::compressible::molecular::stabilized::StepWork;
 use crate::compressible::mixture::molecular::stabilized::IntervalFailure;
+use crate::compressible::molecular::stabilized::StepWork;
 
 /// One completely accepted three-dimensional molecular/Euler/molecular step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -371,7 +371,42 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         controls: MolecularStepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, MolecularError> {
-        self.step_impl(maximum_duration, controls, None, None, cancelled)
+        self.step_impl(maximum_duration, controls, None, None, None, cancelled)
+    }
+
+    /// Compose molecular SSP and Euler with a replayable prescribed exterior.
+    ///
+    /// The first molecular half observes `[t, t + dt/2]`, native Euler observes
+    /// `[t, t + dt]`, and the second half observes `[t + dt/2, t + dt]`.
+    /// Each operator samples its own stage times; a shortened Euler step
+    /// restarts the complete split from the accepted state. The provider must
+    /// therefore permit repeated and nonmonotone time observations, following
+    /// [`Euler3d::step_with_reservoir_profiles`].
+    ///
+    /// One cumulative face-evaluation budget includes the initial exterior CFL
+    /// admission, both molecular halves, central Euler and every discarded
+    /// trial. The original bath, wall, SGS and caloric operators remain active;
+    /// molecular bath exchange requires [`Self::with_reservoir_exchange`].
+    /// A successful split publishes the endpoint profile with all accepted
+    /// cells, time, loads and reports. Any refusal leaves those data unchanged.
+    /// This method does not advance an evolving random-source owner for you.
+    pub fn step_with_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(f64, BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, MolecularError> {
+        let mut source = timed::TimedSource::new(&mut sample, maximum_face_evaluations);
+        self.step_impl(
+            maximum_duration,
+            controls,
+            None,
+            None,
+            Some(&mut source),
+            cancelled,
+        )
     }
 
     /// Sustain a driven viscous/channel flow with conservative body work.
@@ -400,6 +435,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             controls,
             Some((force, force_controls, workspace)),
             None,
+            None,
             cancelled,
         )
     }
@@ -418,7 +454,47 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     ) -> Result<StabilizedMolecularStepReport3d, MolecularError> {
         let mut work = StepWork::new(stabilization);
         let transport = self.step_impl(
-            maximum_duration, controls, None, Some(&mut work), cancelled,
+            maximum_duration,
+            controls,
+            None,
+            Some(&mut work),
+            None,
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    /// Use native RKL2 molecular stage times inside the complete prescribed split.
+    ///
+    /// Physical intervals and atomic publication follow
+    /// [`Self::step_with_reservoir_profiles`]. The operator-evaluation budget
+    /// and the provider-face budget each span both halves and every rejected
+    /// whole split; neither is reset by a smaller trial. Original Legendre
+    /// field and boundary weights are retained without per-stage allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_stabilized_with_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        stabilization: MolecularStabilization,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(f64, BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, MolecularError> {
+        let mut source = timed::TimedSource::new(&mut sample, maximum_face_evaluations);
+        let mut work = StepWork::new(stabilization);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls,
+            None,
+            Some(&mut work),
+            Some(&mut source),
+            cancelled,
         )?;
         Ok(StabilizedMolecularStepReport3d {
             transport,
@@ -449,8 +525,12 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         }
         let mut work = StepWork::new(stabilization);
         let transport = self.step_impl(
-            maximum_duration, controls, Some((force, force_controls, workspace)),
-            Some(&mut work), cancelled,
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            None,
+            cancelled,
         )?;
         Ok(StabilizedMolecularStepReport3d {
             transport,
@@ -465,16 +545,34 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         duration: Time,
         controls: MolecularControl,
         stabilization: Option<&mut StepWork>,
+        clock: timed::Clock,
+        profiles: Option<&mut timed::TimedSource<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularReport3d, MolecularError> {
         match stabilization {
-            None => self.molecular.advance(&mut self.trial, duration, controls, cancelled),
+            None => self.molecular.advance_impl(
+                &mut self.trial,
+                duration,
+                controls,
+                clock,
+                profiles,
+                cancelled,
+            ),
             Some(work) => {
                 let report = self.molecular.advance_stabilized_with_budget(
-                    &mut self.trial, duration, controls, work.controls,
-                    &mut work.evaluations, cancelled,
+                    &mut self.trial,
+                    duration,
+                    controls,
+                    work.controls,
+                    &mut work.evaluations,
+                    clock,
+                    profiles,
+                    cancelled,
                 )?;
-                work.record(report.maximum_stages_used, report.maximum_scaled_parabolic_number);
+                work.record(
+                    report.maximum_stages_used,
+                    report.maximum_scaled_parabolic_number,
+                );
                 Ok(report.transport)
             }
         }
@@ -486,6 +584,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         controls: MolecularStepControl,
         mut forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
         mut stabilization: Option<&mut StepWork>,
+        mut profiles: Option<&mut timed::TimedSource<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, MolecularError> {
         poll(&mut cancelled)?;
@@ -502,14 +601,33 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         }
         if let Some(work) = stabilization.as_deref() {
             work.controls.controller(controls.molecular)?;
-            self.molecular.prepare_stabilized(work.controls.maximum_extra_workspace_bytes)?;
+            self.molecular
+                .prepare_stabilized(work.controls.maximum_extra_workspace_bytes)?;
         }
         let before = checked_totals(
             &self.accepted.states,
             self.accepted.grid.cell_volume(),
             &mut cancelled,
         )?;
-        let mut rate = self.accepted.reservoirs.maximum_rate(
+        // A failed timed split may leave endpoint data in the private owner.
+        // Restore the accepted bath before every call, including a later held
+        // call. Only reusable private scratch is touched until this copy passes.
+        self.trial
+            .reservoirs
+            .profiles
+            .copy_accepted_from(&self.accepted.reservoirs.profiles, &mut cancelled)?;
+        self.trial.reservoirs.profiles.publish();
+        let reservoirs = timed::stage(
+            &mut self.trial.reservoirs,
+            profiles.as_deref_mut(),
+            &self.accepted.gas,
+            &self.accepted.grid,
+            self.accepted.time,
+            true,
+            &mut cancelled,
+        )?
+        .ok_or(MolecularError::Invalid("missing coupled reservoir view"))?;
+        let mut rate = reservoirs.maximum_rate(
             &self.accepted.gas,
             &self.accepted.grid,
             &self.accepted.states,
@@ -534,6 +652,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             if !positive(dt * 0.5) {
                 return Err(MolecularError::Invalid("unrepresentable coupled duration"));
             }
+            if profiles.is_some() {
+                timed::admit_interval(self.accepted.time, dt)?;
+            }
             self.trial.states.copy_from_slice(&self.accepted.states);
             self.trial.time = self.accepted.time;
             self.trial.last_step = self.accepted.last_step;
@@ -546,6 +667,8 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     Time::new(0.5 * dt),
                     controls.molecular,
                     stabilization.as_deref_mut(),
+                    timed::Clock::split(self.accepted.time, dt, false),
+                    profiles.as_deref_mut(),
                     &mut cancelled,
                 )?;
                 self.boundary_trial
@@ -558,9 +681,13 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                         None,
                         &mut cancelled,
                     )?,
-                    None => self
-                        .trial
-                        .step(Time::new(dt), controls.advection, &mut cancelled)?,
+                    None => self.trial.step_impl(
+                        Time::new(dt),
+                        controls.advection,
+                        None,
+                        profiles.as_deref_mut(),
+                        &mut cancelled,
+                    )?,
                 };
                 if advection.elapsed.value() != dt {
                     shortened = Some(advection.elapsed.value());
@@ -583,6 +710,8 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     Time::new(0.5 * dt),
                     controls.molecular,
                     stabilization.as_deref_mut(),
+                    timed::Clock::split(self.accepted.time, dt, true),
+                    profiles.as_deref_mut(),
                     &mut cancelled,
                 )?;
                 for (i, (total, impulse)) in self
@@ -651,7 +780,12 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     self.last_step = Some(report);
                     return Ok(report);
                 }
-                Err(error) if error.is_terminal() => return Err(error),
+                Err(error)
+                    if error.is_terminal()
+                        || profiles.as_deref().is_some_and(timed::TimedSource::failed) =>
+                {
+                    return Err(error);
+                }
                 Err(error) => {
                     if retry == controls.maximum_coupling_retries {
                         return Err(MolecularError::CouplingRetries {

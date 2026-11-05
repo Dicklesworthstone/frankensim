@@ -252,6 +252,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             &mut self.work.stabilized_y_flux,
             cancelled,
         )
+        .map_err(Into::into)
     }
 
     #[allow(clippy::too_many_arguments)]

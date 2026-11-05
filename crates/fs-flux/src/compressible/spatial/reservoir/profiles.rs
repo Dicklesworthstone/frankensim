@@ -193,6 +193,23 @@ impl Profiles {
         poll(cancelled)
     }
 
+    /// Restore a composing owner's private bath after an earlier timed trial.
+    /// Only scratch changes until the caller publishes this complete copy.
+    pub(in crate::compressible::spatial) fn copy_accepted_from(
+        &mut self,
+        source: &Self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        if self.ranges != source.ranges || self.trial.len() != source.values.len() {
+            return Err(Error::Invalid("coupled reservoir profile layouts differ"));
+        }
+        for (target, values) in self.trial.chunks_mut(64).zip(source.values.chunks(64)) {
+            poll(cancelled)?;
+            target.copy_from_slice(values);
+        }
+        poll(cancelled)
+    }
+
     pub(in crate::compressible::spatial) fn publish(&mut self) {
         std::mem::swap(&mut self.values, &mut self.trial);
     }

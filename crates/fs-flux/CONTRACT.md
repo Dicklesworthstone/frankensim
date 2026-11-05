@@ -5891,3 +5891,70 @@ composition after the internal stage-time argument was introduced. The fresh
 exterior CFL fixture uses a tangential speed jump to isolate its unsplit bound;
 it does not suppress stronger normal-shock wave speeds or require those shocks
 to bypass the existing retry policy.
+
+## Prescribed physical-time baths in frozen volumetric molecular transport
+
+`spatial::molecular::MolecularTransport3d::advance_with_reservoir_profiles`
+and `advance_stabilized_with_reservoir_profiles` observe prepared exterior
+profiles at the original SSP or RKL2 physical stage times. The explicit
+`physical_start: Time` supplies the origin because a standalone molecular
+operator does not advance the Euler clock. Existing held entry points retain
+their original arithmetic. Molecular bath exchange still requires the
+existing `with_reservoir_exchange` selection.
+
+Each SSP substep samples its start and endpoint; a rejected trial rebuilds
+its start trace and samples the shortened endpoint. Native RKL2 reuses its
+original coefficients, anchor flux and signed boundary recurrence. Its state
+abscissae are `c_0=0`, `c_1=4/(3D)`, and `c_j=(j*j+j-2)/D` for `j>=2`, with
+`D=s*s+s-2`; the residual forming stage `j` observes state `j-1`, and final
+admission observes the exact endpoint. The dimension-independent original
+`Rkl2Scheme::abscissa` is shared by both frozen and mixture owners. No
+replacement temporal or spatial transport kernel is introduced.
+
+`MolecularEuler3d::step_with_reservoir_profiles` and its stabilized counterpart
+compose the first molecular half on `[t,t+dt/2]`, Euler on `[t,t+dt]`, and the
+second molecular half on `[t+dt/2,t+dt]`. A shortened central Euler step retries
+the complete split from accepted cells. Split clocks retain the original
+origin and phase offsets: the final source observation is the canonical
+`t+dt` used by the native flow clock, including nonzero origins where adding
+two separately rounded half-step clocks would leave the admitted interval.
+
+The original gas, original transport law and its actual midpoint source
+admission own every heat/stress/work evaluation. All six bath normals,
+half-cell conductances, tangential profile derivatives, cell-gradient ghosts,
+wall conditions and selected interior SGS follow the same immutable active or
+staged reservoir view. Bath faces retain molecular-only exchange under the
+existing SGS contract. Density/composition/caloric ownership does not change.
+
+The provider must be a replayable read-only observation: identical arguments
+return identical physical data, including repeated or nonmonotone time
+visits. One cumulative face-evaluation budget covers initial exterior CFL
+admission, both molecular halves, central Euler, accepted substeps and all
+discarded retries. Each full scan must fit before it starts. A provider,
+exterior-source or face-budget error terminates immediately with its original
+error; native numerical cell/CFL failures retain bounded retries. RKL's
+operator-evaluation budget remains independent and cumulative across the
+complete coupled call.
+
+The existing active/trial profile arrays remain the only profile storage;
+time-aware sampling adds no numerical buffers or per-stage allocation. Source admission writes private
+staged data. A complete standalone molecular interval publishes cells, its
+endpoint profile and molecular loads together, leaving the Euler clock and
+advection metadata unchanged. A complete coupled interval publishes the full
+accepted owner, time, profile, combined loads and report. Failure, exhausted
+work or final-poll cancellation preserves all accepted data. Before a later
+coupled call, the private owner restores accepted profiles, so held stepping
+after a failed or successful timed call uses the accepted endpoint.
+
+Focused regressions cover held-bit compatibility, analytic oscillating
+six-face Fourier response, manufactured nonautonomous isothermal shear with
+bath work, actual accelerated RKL abscissae, native temperature-dependent-law
+retry sampling, complete split replay after central CFL shortening, shared
+provider budgets, exact nonzero-epoch endpoints, late source refusal and
+cancellation, and subsequent held owner swaps. Their time-refinement targets
+concern the original discrete transport operators with smooth prescribed
+boundary data. They do not qualify a measured turbulence spectrum, a DNS,
+nonreflecting boundaries, wall laws or experimental material data. These APIs
+do not implicitly retime reacting chemistry, body-force compositions or an
+evolving stochastic-source owner; a separately admitted replayable source
+adapter must supply those observations.

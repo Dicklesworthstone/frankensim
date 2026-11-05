@@ -39,13 +39,21 @@ impl Workspace {
 impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Required EXTRA anchor-face/boundary bytes, excluding existing storage.
     pub fn required_stabilized_workspace_bytes(&self) -> Result<usize, MolecularError> {
-        self.work.flux[0].len().checked_add(self.work.flux[1].len())
+        self.work.flux[0]
+            .len()
+            .checked_add(self.work.flux[1].len())
             .and_then(|n| n.checked_add(self.work.flux[2].len()))
             .and_then(|n| n.checked_mul(size_of::<SpatialFaceFlux>()))
-            .and_then(|n| self.work.boundary_step.len()
-                .checked_mul(size_of::<BoundaryImpulse>())
-                .and_then(|b| n.checked_add(b)))
-            .ok_or(MolecularError::Invalid("volumetric stabilized workspace size overflow"))
+            .and_then(|n| {
+                self.work
+                    .boundary_step
+                    .len()
+                    .checked_mul(size_of::<BoundaryImpulse>())
+                    .and_then(|b| n.checked_add(b))
+            })
+            .ok_or(MolecularError::Invalid(
+                "volumetric stabilized workspace size overflow",
+            ))
     }
 
     /// Actual retained capacity of the additional RKL2 buffers.
@@ -74,7 +82,14 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedMolecularReport3d, MolecularError> {
         self.advance_stabilized_with_budget(
-            flow, duration, controls, stabilization, &mut 0, &mut cancelled,
+            flow,
+            duration,
+            controls,
+            stabilization,
+            &mut 0,
+            timed::Clock::interval(0.0, duration.value()),
+            None,
+            &mut cancelled,
         )
     }
 
@@ -106,15 +121,22 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         controls: MolecularControl,
         stabilization: MolecularStabilization,
         evaluations: &mut usize,
+        clock: timed::Clock,
+        mut profiles: Option<&mut timed::TimedSource<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<StabilizedMolecularReport3d, MolecularError> {
         poll(cancelled)?;
         let selected = stabilization.controller(controls)?;
         if self.gas != flow.gas || self.grid != flow.grid || self.boundaries != flow.boundaries {
-            return Err(MolecularError::Invalid("molecular operator and flow differ"));
+            return Err(MolecularError::Invalid(
+                "molecular operator and flow differ",
+            ));
         }
         if !positive(duration.value()) {
             return Err(MolecularError::Invalid("molecular duration"));
+        }
+        if profiles.is_some() {
+            clock.admit(duration.value())?;
         }
         self.prepare_stabilized(stabilization.maximum_extra_workspace_bytes)?;
         let before = checked_totals(&flow.states, self.grid.cell_volume(), cancelled)?;
@@ -123,51 +145,114 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             poll(cancelled)?;
             tile.fill(Totals::default());
         }
-        let reservoirs = self.reservoir_exchange.then_some(&flow.reservoirs);
         let accepted = controller::advance(
-            duration.value(), selected, evaluations, cancelled,
+            duration.value(),
+            selected,
+            evaluations,
+            cancelled,
             |action, elapsed, evaluations, cancelled| {
-                let rate = match action {
-                    Action::First => {
-                        return spatial(
-                            &self.gas, &self.grid, self.boundaries, &self.walls,
-                            reservoirs,
-                            &self.work.current, &mut self.law, &mut self.work.primitive,
-                            &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
-                            #[cfg(feature = "experimental-sgs")]
-                            self.sgs.as_mut(),
+                let result = (|| {
+                    let rate = match action {
+                        Action::First => {
+                            let reservoirs = timed::stage(
+                                &mut flow.reservoirs,
+                                profiles.as_deref_mut(),
+                                &self.gas,
+                                &self.grid,
+                                clock.at(elapsed, duration.value()),
+                                self.reservoir_exchange,
+                                cancelled,
+                            )?;
+                            return spatial(
+                                &self.gas,
+                                &self.grid,
+                                self.boundaries,
+                                &self.walls,
+                                reservoirs,
+                                &self.work.current,
+                                &mut self.law,
+                                &mut self.work.primitive,
+                                &mut self.work.gradient,
+                                &mut self.work.flux,
+                                &mut self.work.binary,
+                                #[cfg(feature = "experimental-sgs")]
+                                self.sgs.as_mut(),
+                                cancelled,
+                            )
+                            .map(|rate| Stage {
+                                rate,
+                                ..Stage::default()
+                            });
+                        }
+                        Action::Trial {
+                            dt,
+                            scheme,
+                            first,
+                            cached,
+                        } => self.rkl_trial(
+                            flow,
+                            profiles.as_deref_mut(),
+                            clock,
+                            duration.value(),
+                            dt,
+                            scheme,
+                            first.rate,
+                            cached,
+                            selected,
+                            elapsed,
+                            evaluations,
                             cancelled,
-                        ).map(|rate| Stage { rate, ..Stage::default() });
+                        )?,
+                    };
+                    for (index, (total, change)) in self
+                        .work
+                        .boundary_trial
+                        .iter_mut()
+                        .zip(&self.work.boundary_step)
+                        .enumerate()
+                    {
+                        if index % 256 == 0 {
+                            poll(cancelled)?;
+                        }
+                        *total = add_totals(*total, *change);
                     }
-                    Action::Trial { dt, scheme, first, cached } => self.rkl_trial(
-                        reservoirs, dt, scheme, first.rate, cached, selected, elapsed,
-                        evaluations, cancelled,
-                    )?,
-                };
-                for (index, (total, change)) in self.work.boundary_trial.iter_mut()
-                    .zip(&self.work.boundary_step).enumerate()
-                {
-                    if index % 256 == 0 { poll(cancelled)?; }
-                    *total = add_totals(*total, *change);
-                }
-                std::mem::swap(&mut self.work.current, &mut self.work.stage);
-                Ok(Stage { rate, ..Stage::default() })
+                    std::mem::swap(&mut self.work.current, &mut self.work.stage);
+                    Ok(Stage {
+                        rate,
+                        ..Stage::default()
+                    })
+                })();
+                result.map_err(|error| timed::AttemptFailure {
+                    error,
+                    source_failed: profiles.as_deref().is_some_and(timed::TimedSource::failed),
+                })
             },
-        )?;
+        )
+        .map_err(|failure| failure.error)?;
         let after = checked_totals(&self.work.current, self.grid.cell_volume(), cancelled)?;
-        let outward = sum_arrays(self.work.boundary_trial.iter().map(|q| q.array()), cancelled)?;
+        let outward = sum_arrays(
+            self.work.boundary_trial.iter().map(|q| q.array()),
+            cancelled,
+        )?;
         let boundary_change = Totals::from_array(outward.map(|v| -v));
         let conservation_residual = balance(before, after, boundary_change)?;
         poll(cancelled)?;
         flow.states.copy_from_slice(&self.work.current);
-        self.boundary_impulses.copy_from_slice(&self.work.boundary_trial);
+        self.boundary_impulses
+            .copy_from_slice(&self.work.boundary_trial);
+        if profiles.is_some() {
+            flow.reservoirs.profiles.publish();
+        }
         Ok(StabilizedMolecularReport3d {
             transport: MolecularReport3d {
                 elapsed: duration,
                 accepted_steps: accepted.interval.accepted_steps,
                 rejected_steps: accepted.interval.rejected_steps,
                 maximum_parabolic_number: accepted.interval.maximum_parabolic_number,
-                before, after, boundary_change, conservation_residual,
+                before,
+                after,
+                boundary_change,
+                conservation_residual,
             },
             operator_evaluations: accepted.operator_evaluations,
             maximum_stages_used: accepted.maximum_stages_used,
@@ -178,7 +263,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     #[allow(clippy::too_many_arguments)]
     fn rkl_trial(
         &mut self,
-        reservoirs: Option<&super::super::reservoir::Reservoirs>,
+        flow: &mut Euler3d,
+        mut profiles: Option<&mut timed::TimedSource<'_>>,
+        clock: timed::Clock,
+        duration: f64,
         dt: f64,
         scheme: Rkl2Scheme,
         first: f64,
@@ -192,11 +280,27 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             first
         } else {
             reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
+            let reservoirs = timed::stage(
+                &mut flow.reservoirs,
+                profiles.as_deref_mut(),
+                &self.gas,
+                &self.grid,
+                clock.at(elapsed, duration),
+                self.reservoir_exchange,
+                cancelled,
+            )?;
             spatial(
-                &self.gas, &self.grid, self.boundaries, &self.walls,
+                &self.gas,
+                &self.grid,
+                self.boundaries,
+                &self.walls,
                 reservoirs,
-                &self.work.current, &mut self.law, &mut self.work.primitive,
-                &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
+                &self.work.current,
+                &mut self.law,
+                &mut self.work.primitive,
+                &mut self.work.gradient,
+                &mut self.work.flux,
+                &mut self.work.binary,
                 #[cfg(feature = "experimental-sgs")]
                 self.sgs.as_mut(),
                 cancelled,
@@ -211,13 +315,24 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             copy_values(source, target, cancelled)?;
         }
         evolve::update(
-            &self.gas, &self.grid, &self.work.current, &self.work.current,
-            &self.work.flux, &mut self.work.stage,
-            dt * scheme.first_weight(), false, None, cancelled,
+            &self.gas,
+            &self.grid,
+            &self.work.current,
+            &self.work.current,
+            &self.work.flux,
+            &mut self.work.stage,
+            dt * scheme.first_weight(),
+            false,
+            None,
+            cancelled,
         )?;
         evolve::capture_boundaries(
-            &self.grid, &self.work.flux, dt * scheme.first_weight(),
-            &mut self.work.boundary_step, false, cancelled,
+            &self.grid,
+            &self.work.flux,
+            dt * scheme.first_weight(),
+            &mut self.work.boundary_step,
+            false,
+            cancelled,
         )?;
         for tile in stable.boundary_stage.chunks_mut(256) {
             poll(cancelled)?;
@@ -226,11 +341,27 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         let mut rate = first;
         for j in 2..=scheme.stage_count() {
             reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
+            let reservoirs = timed::stage(
+                &mut flow.reservoirs,
+                profiles.as_deref_mut(),
+                &self.gas,
+                &self.grid,
+                clock.at(elapsed + dt * scheme.abscissa(j - 1)?, duration),
+                self.reservoir_exchange,
+                cancelled,
+            )?;
             let stage_rate = spatial(
-                &self.gas, &self.grid, self.boundaries, &self.walls,
+                &self.gas,
+                &self.grid,
+                self.boundaries,
+                &self.walls,
                 reservoirs,
-                &self.work.stage, &mut self.law, &mut self.work.primitive,
-                &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
+                &self.work.stage,
+                &mut self.law,
+                &mut self.work.primitive,
+                &mut self.work.gradient,
+                &mut self.work.flux,
+                &mut self.work.binary,
                 #[cfg(feature = "experimental-sgs")]
                 self.sgs.as_mut(),
                 cancelled,
@@ -240,11 +371,18 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             let [mu, nu, mu_tilde, gamma_tilde] = scheme.coefficients(j)?;
             let older = Cell::from_mut(self.work.candidate.as_mut_slice()).as_slice_of_cells();
             cartesian::update::<5, Error, _>(
-                &self.grid, 5, dt, false,
+                &self.grid,
+                5,
+                dt,
+                false,
                 |_, _| 0.0,
                 |k, d| {
                     let anchor = self.work.current[k].array()[d];
-                    let old = if j == 2 { anchor } else { older[k].get().array()[d] };
+                    let old = if j == 2 {
+                        anchor
+                    } else {
+                        older[k].get().array()[d]
+                    };
                     anchor + mu * (self.work.stage[k].array()[d] - anchor) + nu * (old - anchor)
                 },
                 |axis, face, d| {
@@ -260,7 +398,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 },
             )?;
             cartesian::capture::<Error>(
-                &self.grid, 5, dt, false,
+                &self.grid,
+                5,
+                dt,
+                false,
                 |axis, face, d| {
                     mu_tilde * evolve::flux_array(self.work.flux[axis][face], axis)[d]
                         + gamma_tilde * evolve::flux_array(stable.anchor_flux[axis][face], axis)[d]
@@ -277,11 +418,32 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             std::mem::swap(&mut self.work.boundary_step, &mut stable.boundary_stage);
         }
         reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
+        let endpoint = if dt == duration - elapsed {
+            duration
+        } else {
+            elapsed + dt
+        };
+        let reservoirs = timed::stage(
+            &mut flow.reservoirs,
+            profiles.as_deref_mut(),
+            &self.gas,
+            &self.grid,
+            clock.at(endpoint, duration),
+            self.reservoir_exchange,
+            cancelled,
+        )?;
         let endpoint_rate = spatial(
-            &self.gas, &self.grid, self.boundaries, &self.walls,
+            &self.gas,
+            &self.grid,
+            self.boundaries,
+            &self.walls,
             reservoirs,
-            &self.work.stage, &mut self.law, &mut self.work.primitive,
-            &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
+            &self.work.stage,
+            &mut self.law,
+            &mut self.work.primitive,
+            &mut self.work.gradient,
+            &mut self.work.flux,
+            &mut self.work.binary,
             #[cfg(feature = "experimental-sgs")]
             self.sgs.as_mut(),
             cancelled,

@@ -21,6 +21,7 @@ pub use coupled::{MolecularEuler3d, MolecularStepReport3d, StabilizedMolecularSt
 mod stabilized;
 pub use stabilized::StabilizedMolecularReport3d;
 mod reservoir;
+mod timed;
 
 /// Explicit local or periodic dynamic subgrid transport for low-Mach studies.
 #[cfg(feature = "experimental-sgs")]
@@ -219,6 +220,26 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         flow: &mut Euler3d,
         duration: Time,
         controls: MolecularControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularReport3d, MolecularError> {
+        self.advance_impl(
+            flow,
+            duration,
+            controls,
+            timed::Clock::interval(0.0, duration.value()),
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_impl(
+        &mut self,
+        flow: &mut Euler3d,
+        duration: Time,
+        controls: MolecularControl,
+        clock: timed::Clock,
+        mut profiles: Option<&mut timed::TimedSource<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularReport3d, MolecularError> {
         poll(&mut cancelled)?;
@@ -231,10 +252,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         if !positive(duration.value()) {
             return Err(MolecularError::Invalid("molecular duration"));
         }
+        if profiles.is_some() {
+            clock.admit(duration.value())?;
+        }
         let before = checked_totals(&flow.states, self.grid.cell_volume(), &mut cancelled)?;
         self.work.current.copy_from_slice(&flow.states);
         self.work.boundary_trial.fill(Totals::default());
-        let reservoirs = self.reservoir_exchange.then_some(&flow.reservoirs);
         let mut elapsed = 0.0;
         let mut accepted = 0;
         let mut rejected = 0;
@@ -248,6 +271,15 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     rejected,
                 });
             }
+            let reservoirs = timed::stage(
+                &mut flow.reservoirs,
+                profiles.as_deref_mut(),
+                &self.gas,
+                &self.grid,
+                clock.at(elapsed, duration.value()),
+                self.reservoir_exchange,
+                &mut cancelled,
+            )?;
             let first_rate = spatial(
                 &self.gas,
                 &self.grid,
@@ -291,6 +323,15 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     let r1 = if halving == 0 {
                         first_rate
                     } else {
+                        let reservoirs = timed::stage(
+                            &mut flow.reservoirs,
+                            profiles.as_deref_mut(),
+                            &self.gas,
+                            &self.grid,
+                            clock.at(elapsed, duration.value()),
+                            self.reservoir_exchange,
+                            &mut cancelled,
+                        )?;
                         spatial(
                             &self.gas,
                             &self.grid,
@@ -327,6 +368,20 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         0.5 * dt,
                         &mut self.work.boundary_step,
                         false,
+                        &mut cancelled,
+                    )?;
+                    let endpoint = if dt == remaining {
+                        duration.value()
+                    } else {
+                        elapsed + dt
+                    };
+                    let reservoirs = timed::stage(
+                        &mut flow.reservoirs,
+                        profiles.as_deref_mut(),
+                        &self.gas,
+                        &self.grid,
+                        clock.at(endpoint, duration.value()),
+                        self.reservoir_exchange,
                         &mut cancelled,
                     )?;
                     let r2 = spatial(
@@ -393,6 +448,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         break;
                     }
                     Err(MolecularError::Cancelled) => return Err(MolecularError::Cancelled),
+                    Err(error) if profiles.as_deref().is_some_and(timed::TimedSource::failed) => {
+                        return Err(error);
+                    }
                     Err(error) => {
                         rejected += 1;
                         if halving == controls.maximum_halvings
@@ -420,6 +478,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         flow.states.copy_from_slice(&self.work.current);
         self.boundary_impulses
             .copy_from_slice(&self.work.boundary_trial);
+        if profiles.is_some() {
+            flow.reservoirs.profiles.publish();
+        }
         Ok(MolecularReport3d {
             elapsed: duration,
             accepted_steps: accepted,
@@ -464,7 +525,7 @@ fn spatial<L: TransportLaw>(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
     walls: &[MolecularWall3d; 6],
-    reservoirs: Option<&super::reservoir::Reservoirs>,
+    reservoirs: Option<super::reservoir::View<'_>>,
     states: &[State],
     law: &mut L,
     primitive: &mut [Primitive],

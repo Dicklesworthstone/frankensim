@@ -22,7 +22,7 @@ fn prepare<L: TransportLaw>(op: &mut MolecularTransport3d<L>, flow: &Euler3d) ->
         &op.grid,
         op.boundaries,
         &op.walls,
-        op.reservoir_exchange.then_some(&flow.reservoirs),
+        op.reservoir_exchange.then(|| flow.reservoirs.accepted()),
         &flow.states,
         &mut op.law,
         &mut op.work.primitive,

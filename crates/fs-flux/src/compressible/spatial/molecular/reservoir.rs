@@ -1,4 +1,4 @@
-//! Tangential derivatives of the original held, source-admitted bath traces.
+//! Tangential derivatives of the selected source-admitted bath traces.
 
 use super::*;
 
@@ -11,7 +11,7 @@ use super::*;
 pub(super) fn tangential_gradient(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &super::super::reservoir::Reservoirs,
+    reservoirs: super::super::reservoir::View<'_>,
     axis: usize,
     sign: f64,
     cell: usize,
