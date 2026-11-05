@@ -12,8 +12,9 @@ use super::super::{BoundarySide, StepControl};
 use super::forcing::{self, ForcingWorkspace3d};
 use super::molecular::{
     DissipationControl, MolecularReport, MolecularTransport3d, StabilizedDissipationControl,
-    TransportLaw, WallAcceleration3d, WallDrive3d, WallInertiaReport3d, WallWork,
+    TransportLaw, WallAcceleration3d, WallDrive3d, WallInertiaReport3d, WallWork, timed::Clock,
 };
+use super::reservoir_stages::Context;
 use super::{BodyForce3d, ForceChange3d, ForceControl3d};
 use super::{
     BoundaryImpulse, MixtureEuler3d, StepReport, Totals, allocated, boundary_view, cell,
@@ -27,6 +28,8 @@ pub use fs_gas::multicomponent::reactive::{
     CellChemistry, ChemistryReport, IdealGasKineticsV1, ReactiveError,
 };
 use fs_qty::{Time, Volume};
+
+mod timed;
 
 /// Bounded whole-interval restarts and original wave controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -354,6 +357,7 @@ impl ReactingEuler3d {
             None,
             None,
             &[],
+            None,
             cancelled,
         )
     }
@@ -385,6 +389,7 @@ impl ReactingEuler3d {
             None,
             None,
             &[],
+            None,
             cancelled,
         )
     }
@@ -410,6 +415,7 @@ impl ReactingEuler3d {
             Some((force, force_controls, workspace)),
             None,
             &[],
+            None,
             cancelled,
         )
     }
@@ -439,6 +445,7 @@ impl ReactingEuler3d {
             Some((force, force_controls, workspace)),
             None,
             &[],
+            None,
             cancelled,
         )
     }
@@ -470,6 +477,7 @@ impl ReactingEuler3d {
             None,
             None,
             accelerations,
+            None,
             cancelled,
         )
     }
@@ -500,6 +508,7 @@ impl ReactingEuler3d {
             Some((force, force_controls, workspace)),
             None,
             accelerations,
+            None,
             cancelled,
         )
     }
@@ -534,6 +543,7 @@ impl ReactingEuler3d {
             None,
             Some(&mut work),
             &[],
+            None,
             cancelled,
         )?;
         Ok(StabilizedReactiveStepReport3d {
@@ -571,6 +581,7 @@ impl ReactingEuler3d {
             Some((force, force_controls, workspace)),
             Some(&mut work),
             &[],
+            None,
             cancelled,
         )?;
         Ok(StabilizedReactiveStepReport3d {
@@ -592,9 +603,24 @@ impl ReactingEuler3d {
         mut forcing: Option<forcing::Context<'_, '_>>,
         mut stabilization: Option<&mut StepWork>,
         accelerations: &[WallAcceleration3d],
+        mut profiles: Option<&mut Context<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport3d, ReactiveError> {
         poll(&mut cancelled)?;
+        if profiles.is_some() {
+            if !accelerations.is_empty() {
+                return Err(ReactiveError::Invalid(
+                    "time-resolved reacting reservoirs require constant prescribed wall velocities",
+                ));
+            }
+            if let Some(operator) = operator.as_deref() {
+                operator.admit_time_resolved_profiles(
+                    &self.accepted,
+                    Clock::direct(self.accepted.time, maximum_duration.value()),
+                    maximum_duration.value(),
+                )?;
+            }
+        }
         if stabilization.is_some() {
             if !accelerations.is_empty() {
                 return Err(ReactiveError::Invalid(
@@ -673,7 +699,22 @@ impl ReactingEuler3d {
             &mut cancelled,
         )?;
         let spacing = self.accepted.grid.spacing();
-        let mut rate = self.accepted.reservoirs.maximum_rate(&self.accepted.grid);
+        let mut rate = if let Some(context) = profiles.as_deref_mut() {
+            // Admission samples only the private bank. One provider counter
+            // spans this initial CFL bound, every split phase and all retries.
+            context.sample_at(
+                self.accepted.time,
+                &self.accepted.gas,
+                &self.accepted.grid,
+                &mut self.trial.reservoirs,
+                &mut cancelled,
+            )?;
+            self.trial
+                .reservoirs
+                .maximum_rate_at(&self.accepted.grid, true)
+        } else {
+            self.accepted.reservoirs.maximum_rate(&self.accepted.grid)
+        };
         for q in self.accepted.states.chunks_exact(width) {
             let p = cell(q, n).primitive(&self.accepted.gas, &mut cancelled)?;
             if let Some((_, control, _)) = forcing.as_ref() {
@@ -723,6 +764,16 @@ impl ReactingEuler3d {
                             drive.as_ref().map(|d| (d, 0.0)),
                             None,
                             &wall_work,
+                            profiles.as_deref_mut().map(|context| {
+                                (
+                                    context,
+                                    Clock {
+                                        origin_s: self.accepted.time,
+                                        phase_start_s: 0.0,
+                                        phase_end_s: 0.5 * dt,
+                                    },
+                                )
+                            }),
                             &mut cancelled,
                         )?;
                         copy_field(
@@ -741,19 +792,19 @@ impl ReactingEuler3d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
-                let transport = if let Some((force, control, workspace)) = forcing.as_mut() {
-                    // This owner already admitted the immutable source and
-                    // scratch geometry before entering the split retry loop.
-                    self.trial.step_impl(
-                        Time::new(dt),
-                        controls.transport,
-                        Some((*force, *control, &mut **workspace)),
-                        &mut cancelled,
-                    )?
-                } else {
-                    self.trial
-                        .step(Time::new(dt), controls.transport, &mut cancelled)?
-                };
+                // The original wave owner retains its force kicks, source
+                // work and CFL controller. Chemistry does not advance its
+                // physical clock; stage samples are still at t and t + dt.
+                let transport = self.trial.step_impl_with_contact(
+                    Time::new(dt),
+                    controls.transport,
+                    forcing
+                        .as_mut()
+                        .map(|(force, control, workspace)| (*force, *control, &mut **workspace)),
+                    None,
+                    profiles.as_deref_mut(),
+                    &mut cancelled,
+                )?;
                 if transport.elapsed.value() != dt {
                     shortened = Some(transport.elapsed.value());
                     return Err(ReactiveError::Invalid(
@@ -797,6 +848,16 @@ impl ReactingEuler3d {
                                 .as_ref()
                                 .and_then(|report| report.wall_inertia.as_ref()),
                             &wall_work,
+                            profiles.as_deref_mut().map(|context| {
+                                (
+                                    context,
+                                    Clock {
+                                        origin_s: self.accepted.time,
+                                        phase_start_s: 0.5 * dt,
+                                        phase_end_s: dt,
+                                    },
+                                )
+                            }),
                             &mut cancelled,
                         )?;
                         add_impulses(
@@ -910,6 +971,11 @@ impl ReactingEuler3d {
                     return Ok(report);
                 }
                 Err(ReactiveError::Cancelled) => return Err(ReactiveError::Cancelled),
+                Err(error) if profiles.as_ref().is_some_and(|context| context.failed()) => {
+                    // A prescribed source/admission/work refusal cannot be
+                    // repaired by replaying chemistry at a shorter duration.
+                    return Err(error);
+                }
                 Err(ReactiveError::Dissipation(error))
                     if stabilization.is_some() && error.is_terminal() =>
                 {
@@ -941,10 +1007,11 @@ fn molecular_half<L: TransportLaw>(
     drive: Option<(&WallDrive3d, f64)>,
     previous: Option<&WallInertiaReport3d>,
     wall_work: &WallWork,
+    profiles: Option<(&mut Context<'_>, Clock)>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<MolecularReport, ReactiveError> {
     match stabilization {
-        None => Ok(operator.advance_driven_unpublished(
+        None => Ok(operator.advance_driven_with_profiles_unpublished(
             flow,
             duration,
             controls,
@@ -952,15 +1019,17 @@ fn molecular_half<L: TransportLaw>(
             drive,
             previous,
             wall_work,
+            profiles,
             cancelled,
         )?),
         Some(work) => {
-            let report = operator.advance_stabilized_unpublished(
+            let report = operator.advance_stabilized_with_profiles_unpublished(
                 flow,
                 duration,
                 work.controls,
                 maximum_workspace_bytes,
                 &mut work.evaluations,
+                profiles,
                 cancelled,
             )?;
             work.record(
@@ -995,6 +1064,15 @@ fn copy_physical(
         &mut target.boundary_impulses,
         cancelled,
     )?;
+    match (&source.reservoirs.profiles, &mut target.reservoirs.profiles) {
+        (Some(source), Some(target)) => target.copy_active_from(source, cancelled)?,
+        (None, None) => {}
+        _ => {
+            return Err(ReactiveError::Invalid(
+                "reacting reservoir profile layout differs",
+            ));
+        }
+    }
     target.time = source.time;
     target.last_step = source.last_step;
     Ok(())

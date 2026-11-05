@@ -6241,3 +6241,50 @@ rollback with subsequent successful reuse. These manufactured checks do not
 establish turbulent spectra or experimental validation. Finite wall inertia,
 wall acceleration and adaptive molecular compositions retain their existing
 explicit limits; held-profile APIs retain their existing semantics.
+
+### Time-resolved reacting spatial reservoir transport
+
+`ReactingEuler3d` can now consume prepared prescribed reservoir histories through
+its original chemistry/waves/chemistry transaction, with optional source-owned
+molecular outer halves using SSP or RKL2. Each of those three paths also admits
+the original held `BodyForce3d` and forcing workspace. The provider fills every
+canonical species density and supplies velocity and absolute pressure; the
+existing gas, kinetic mechanism, molecular law, energy references and physical
+boundary operators remain authoritative.
+
+One prescribed-face evaluation allowance covers initial exterior CFL admission,
+both molecular halves, the central native Euler stages and every discarded
+whole-chemistry trial. Chemistry-driven acoustic shortening replays the same
+prescribed history at the shortened physical times. Provider errors, exterior
+source admission errors and provider work exhaustion are terminal. Original
+RKL2 work accounting separately spans both halves and all discarded trials.
+
+The physical molecular intervals are `[t,t+dt/2]` and `[t+dt/2,t+dt]`; the wave
+residuals sample `t` and `t+dt`. All split times retain the original outer clock
+and relative offsets, so the accepted endpoint has exactly the original `t+dt`
+bits even where adding two rounded half increments would exceed a bounded
+prescribed source interval. Local chemistry retains its two original
+fixed-volume half intervals and does not independently advance physical time.
+
+Accepted cells, physical time, endpoint profiles, complete boundary loads,
+body impulse/work, chemistry changes, formation/reference-energy balances and
+both owners' reports publish together only after the complete split succeeds.
+The private field restores accepted profile banks before every whole trial and
+later held-profile calls, including recovery after late source failures or final
+cancellation. Provider mutation of an external accepted source is outside this
+transaction: prescribed callbacks must be replayable, and may use mutable access
+only for observation scratch or work counters.
+
+Finite wall inertia is refused before provider or chemistry work on these timed
+entry points; wall acceleration is also unsupported. Existing held wall and
+reactive APIs retain their original behavior. This extension does not synthesize
+species/temperature fluctuations, change the kinetic or molecular model, or
+claim fully coupled stochastic-source evolution, resolved detonation thickness,
+or a nonlinear positivity/entropy guarantee from RKL2 stabilization.
+
+Focused native tests cover zero-rate and nonzero-rate constant-history parity,
+all six public combinations, changing composition/pressure with nonzero chemical
+heat and body work, original RKL2 stages above two, heat-release whole-trial
+replay and cumulative source work, physical split stages and rounded endpoints,
+terminal late provider/admission/budget failures, final cancellation, complete
+accepted-state rollback, later held recovery and early finite-inertia refusal.
