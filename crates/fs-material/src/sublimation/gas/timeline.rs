@@ -28,6 +28,10 @@ pub mod adaptive;
 #[path = "timeline/observed.rs"]
 pub mod observed;
 
+/// Finite coatings on persistent substrates sharing this evolving gas.
+#[path = "timeline/coating.rs"]
+pub mod coating;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
