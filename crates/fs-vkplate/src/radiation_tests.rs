@@ -343,7 +343,7 @@ fn g0_friction_on_a_loaded_head_uses_the_same_nonlocal_force_response() {
         );
         assert_eq!(friction[0].stuck, cap > 1.0);
         if friction[0].stuck {
-            let slip = |j| (body.wn[a] - body.w[a]) - (body.wn[j] - body.w[j]);
+            let slip = |j| (body.wn[a] - body.wp[a]) - (body.wn[j] - body.wp[j]);
             assert!(slip(b).hypot(slip(c)) < 1e-12);
         } else {
             assert!((scale / cap - 1.0).abs() < 1e-10);

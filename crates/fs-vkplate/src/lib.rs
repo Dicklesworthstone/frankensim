@@ -80,6 +80,9 @@ pub use contact_island::{Controls as ContactSolveControls, SolveError as Contact
 #[cfg(test)]
 mod contact_island_tests;
 
+#[cfg(test)]
+mod friction_contact_tests;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
@@ -3268,8 +3271,11 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
 /// s = (t_a / 2) grad w_a + (t_b / 2) grad w_b, the face below a plate moving opposite to the face
 /// above it. `sx` and `sy` hold the two slip components as weighted sums of node displacements. The
 /// friction force acts against the final slip with at most `mu` times the normal force. It is
-/// solved after normal contact using backward slip. This reduces free-mass kinetic energy;
-/// it does not certify passivity of the complete coupled oscillator discretization.
+/// solved after normal contact using centered slip across the same two-step
+/// interval as the body and normal-contact work. Backward slip can oppose the
+/// centered velocity and inject energy into an oscillator. Normal/tangential
+/// cross-coupling still requires a joint solve; this sequential stage alone
+/// does not certify passivity of the complete coupled discretization.
 #[derive(Clone)]
 pub struct Friction {
     pub contact: usize,
@@ -3337,8 +3343,9 @@ fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [F
             fr.stuck = false;
             continue;
         }
-        // slip over this step as predicted (contacts included), and the slip compliance matrix
-        let inc = |t: &[(usize, usize, f64)]| t.iter().map(|&(b, i, w)| w * (bodies[b].wn[i] - bodies[b].w[i])).sum::<f64>();
+        // The body's work is f * (w_next - w_previous) / 2. Solve against
+        // that centered slip, including the normal-contact correction.
+        let inc = |t: &[(usize, usize, f64)]| t.iter().map(|&(b, i, w)| w * (bodies[b].wn[i] - bodies[b].wp[i])).sum::<f64>();
         let (dx, dy) = (inc(&fr.sx), inc(&fr.sy));
         let (mut cxx, mut cyy, mut cxy) = (0.0, 0.0, 0.0);
         for &(b, i, w) in &fr.sx {

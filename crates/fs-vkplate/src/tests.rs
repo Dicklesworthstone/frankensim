@@ -1193,7 +1193,7 @@ fn endpoint_friction_recovers_prescribed_cone_solutions() {
 }
 
 #[test]
-fn rim_friction_sticks_inside_its_cone_and_contracts_backward_slip() {
+fn rim_friction_sticks_inside_its_cone_and_contracts_centered_slip() {
     // the closed hat's rim frictions on a coarse grid, each solved alone on a random step
     let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 };
     let mut ins = kit::hihat_grid_mu(0.0, 80.0, &[], rim, 0.8, 6.0, 0.4).unwrap().instrument;
@@ -1208,7 +1208,7 @@ fn rim_friction_sticks_inside_its_cone_and_contracts_backward_slip() {
         (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
     };
     let slip = |bodies: &[Body], f: &Friction| {
-        let s = |t: &[(usize, usize, f64)]| t.iter().map(|&(b, i, w)| w * (bodies[b].wn[i] - bodies[b].w[i])).sum::<f64>();
+        let s = |t: &[(usize, usize, f64)]| t.iter().map(|&(b, i, w)| w * (bodies[b].wn[i] - bodies[b].wp[i])).sum::<f64>();
         (s(&f.sx), s(&f.sy))
     };
     let (mut stuck, mut slid) = (0, 0);
@@ -1217,6 +1217,7 @@ fn rim_friction_sticks_inside_its_cone_and_contracts_backward_slip() {
             for b in ins.bodies.iter_mut() {
                 for i in 0..b.n {
                     b.w[i] = 0.0;
+                    b.wp[i] = 0.0;
                     b.wn[i] = 1.0e-6 * rnd();
                 }
             }
