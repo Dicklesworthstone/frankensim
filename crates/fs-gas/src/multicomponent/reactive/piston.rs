@@ -11,7 +11,9 @@ use fs_qty::Time;
 pub(super) mod molecular;
 mod thermal;
 mod two_chambers;
-pub use two_chambers::{ReactiveSharedPistonGasReport, ReactiveSharedPistonStep};
+pub use two_chambers::{
+    ReactiveSharedPistonGasReport, ReactiveSharedPistonStep, ReactiveSharedPistonThermalStep,
+};
 pub use thermal::{
     PistonThermalEnds, PistonThermalReport, SplitPistonThermalReport, ThermalReactiveStepReport,
 };

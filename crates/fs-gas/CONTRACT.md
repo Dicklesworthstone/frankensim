@@ -5137,3 +5137,57 @@ two-volume heat/species relaxation and unequal-end-area thermal-resistance
 balances, plus uniform Soret/Dufour parity, late constitutive refusal,
 cancellation and workspace reuse. Source tests and isolated arithmetic are not
 experimental qualification or a claim that the full workspace suite passed.
+
+## Reacting shared pistons retain one finite thermal store
+
+`ReactingEuler1d::step_with_shared_piston_and_heat` composes both original
+chemical mechanisms with the existing `SharedPistonThermal` and two-field
+inertial pressure solve. The stages are `C(dt/2), H(dt/2), A(dt), H(dt/2), C(dt/2)`.
+First source stages use accepted physical volumes; final source stages use
+the actual moved cell volumes. Each chamber retains its own species bank,
+caloric path, formation-energy references and fixed-U,V reactor. Formation
+energy is converted only by that reactor; neither heat nor pressure work is
+inferred from a separate chemistry or constant-gamma law.
+
+Both piston faces share one original finite inventory. The original caloric
+wall solve supplies each side's conductive heat and represented storage change.
+The first C and H stages change the actual pressures driving the midpoint-speed
+root. Final chemistry sees the thermally updated compressed/expanded state.
+A shortened inner thermal/mechanical interval restarts BOTH complete chamber
+compositions from accepted state at the common duration. Native gas, moving
+geometry, source, amount and thermal workspaces are reused.
+
+`step_with_shared_suspended_piston_and_heat` additionally uses the original
+held spring/damper. Its authored fraction `f` of accepted loss `D=c*w_mid^2*dt`
+enters the SAME wall before H2; the remainder leaves the represented system.
+Both final heat contacts and mechanisms therefore see the returned heat.
+The complete physical account is
+`Delta E_chemical,left + Delta E_chemical,right + Delta U_wall + Delta K
+ + Delta U_spring + (D-f*D) - W_drive`.
+There is no duplicated thermal mass, formation heat, pressure work or damper
+deposit. Conductive and returned heat never enter pressure-impulse/work arrays.
+The nested native piston report covers the middle thermal/mechanical stages;
+`ReactiveSharedPistonThermalStep` separately exposes complete before/after
+inventories, both chemical reports, heat-corrected per-chamber residuals,
+physical chemical-energy changes and whole-system energy/momentum residuals.
+
+The thermal owner can retain an unpublished candidate for this composition.
+Its accepted storage and heat report publish only after BOTH final chemistry
+halves, per-chamber chemical-energy balances, whole-system balances and the
+final cancellation checkpoint. Late source refusal, exhausted retries or
+cancellation leave both accepted fields, meshes, clocks, piston and wall
+unchanged. Every subsequent attempt resets the wall candidate from accepted
+storage, so rejected steps cannot retain conductive or returned damper heat.
+
+Focused G1/G4 regressions cover reacting compression with finite-wall energy
+closure, accepted-duration replay through actual moved volumes after acoustic
+shortening, independent formation gauges, an analytic reversible-isomerization
+amount trajectory during heating/motion, independent midpoint spring/damper
+mechanics and heat fractions, final-chemistry refusal after wall heating, and
+cancellation after prior motion followed by reuse.
+
+This retains the Estimated closed constant-area, one-piston, uniform-wall model,
+the original mechanism validity and work budgets, and backward-Euler heat
+stages. It adds no molecular transport, material-contact correction, leakage,
+thermal expansion, wall temperature gradients, temperature-dependent damping,
+general second-order accuracy, entropy inequality or FSI-stability certificate.

@@ -12,7 +12,9 @@ use crate::multicomponent::{Boundaries, Boundary, MixtureEuler1d, SharedPistonGa
 use fs_qty::Time;
 
 mod molecular;
+mod thermal;
 pub use molecular::ReactiveSharedPistonGasReport;
+pub use thermal::ReactiveSharedPistonThermalStep;
 
 /// One accepted pair of reacting chambers and their common mechanical response.
 #[derive(Clone, Copy, Debug, PartialEq)]

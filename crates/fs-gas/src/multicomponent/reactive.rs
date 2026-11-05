@@ -31,7 +31,9 @@ pub use stabilized::{
 mod inertial_walls;
 pub use inertial_walls::ReactiveInertialWallsStep;
 mod piston;
-pub use piston::{ReactiveSharedPistonGasReport, ReactiveSharedPistonStep};
+pub use piston::{
+    ReactiveSharedPistonGasReport, ReactiveSharedPistonStep, ReactiveSharedPistonThermalStep,
+};
 pub use piston::{
     PistonThermalEnds, PistonThermalReport, ReactivePistonStep, SplitPistonThermalReport,
     ThermalReactiveStepReport,

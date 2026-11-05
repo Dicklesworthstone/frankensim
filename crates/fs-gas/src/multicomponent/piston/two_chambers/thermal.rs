@@ -366,8 +366,47 @@ impl<'law> SharedPistonThermal<'law> {
         })
     }
 
+    // Native callers publish the thermal candidate in the same infallible
+    // tail as the two fields and piston. A reacting owner instead retains it
+    // until both final chemistry halves and whole-system balances succeed.
     #[allow(clippy::too_many_arguments)]
     fn advance(
+        &mut self,
+        left: &mut MixtureEuler1d,
+        right: &mut MixtureEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        heat_controls: WallControl,
+        external_force_n: f64,
+        suspension: Option<PistonSuspension>,
+        damping_heat_fraction_to_wall: f64,
+        piston_controls: PistonControl,
+        equilibrium: Option<([ContactEquilibriumControl; 2], [&mut ContactWorkspace; 2])>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<SharedPistonThermalStepReport>, SharedPistonThermalError> {
+        let step = self.advance_trial(
+            left, right, piston, maximum_duration, gas_controls, heat_controls,
+            external_force_n, suspension, damping_heat_fraction_to_wall,
+            piston_controls, equilibrium, cancelled,
+        )?;
+        self.publish_trial_heat(step.piston.gas.heat);
+        Ok(step)
+    }
+
+    pub(in crate::multicomponent) fn publish_trial_heat(
+        &mut self,
+        report: SharedPistonHeatReport,
+    ) {
+        self.group.accepted.storage.thermal = self.group.candidate;
+        self.last_report = Some(report);
+    }
+
+    /// Advance supplied trial fields and piston, retaining unpublished wall heat.
+    /// Every complete attempt starts from this owner's accepted wall inventory.
+    /// The composing owner must publish only after all remaining stages succeed.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent) fn advance_trial(
         &mut self,
         left: &mut MixtureEuler1d,
         right: &mut MixtureEuler1d,
@@ -592,8 +631,6 @@ impl<'law> SharedPistonThermal<'law> {
                     poll(&mut cancelled)?;
                     core::mem::swap(left, &mut self.trial[0]);
                     core::mem::swap(right, &mut self.trial[1]);
-                    self.group.accepted.storage.thermal = self.group.candidate;
-                    self.last_report = Some(step.piston.gas.heat);
                     piston.accept(&step.piston);
                     return Ok(step);
                 }

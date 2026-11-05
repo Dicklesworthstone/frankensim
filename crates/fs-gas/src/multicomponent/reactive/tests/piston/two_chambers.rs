@@ -3,6 +3,7 @@ use crate::multicomponent::Mesh1d;
 
 mod molecular;
 mod suspension;
+mod thermal;
 
 fn chamber(
     mechanism: &IdealGasKineticsV1,
