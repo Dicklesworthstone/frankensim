@@ -121,6 +121,17 @@ impl<'a> PlanarDielectricLayers<'a> {
         omega_rad_s: f64,
         layers: &[DielectricLayer<'a>],
     ) -> Result<Self, ReflectionError> {
+        // The half-space plasma owner checks the actual maximum surface drift.
+        // Standing waves and beams require their own complete-field domain
+        // admission; an unrestricted film power API must not bypass it.
+        if matches!(incident, DielectricResponse::IonizedGas(_))
+            || matches!(exit, DielectricResponse::IonizedGas(_))
+            || layers.iter().any(|l| matches!(l.response, DielectricResponse::IonizedGas(_)))
+        {
+            return Err(bad(
+                "ionized-gas films require whole-field drift admission; use the half-space wave owner",
+            ));
+        }
         if layers.len() > MAX_LAYERS
             || layers
                 .iter()

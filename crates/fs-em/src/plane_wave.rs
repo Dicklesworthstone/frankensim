@@ -3,7 +3,8 @@
 //! This explicit plane-wave rung is separate from the mesh MQS solvers.
 //! Sources declare a nondispersive lossless law, the existing passive Debye
 //! law, an explicitly selected isotropic Ohmic conductor with displacement
-//! current, or an original spectral complex-index metal response. Selecting a
+//! current, an original spectral complex-index metal response, or explicitly
+//! prepared collisional plasma. Selecting a
 //! law is not experimental qualification at a frequency.
 //! Both sides retain their complete source states, including absolute SI mu.
 //!
@@ -44,6 +45,10 @@ pub use optical::{
     OpticalConductorResponse, OpticalMaterialResponse, RefreshedSpectralOpticalSource,
     SpectralOpticalResponse, SpectralOpticalSource, WaterOpticalResponse,
 };
+
+/// Original collisional carrier transport in an admitted outgoing half-space wave.
+pub mod plasma;
+pub use plasma::{IonizedGasWavePoint, IonizedGasWaveResponse, PreparedIonizedGasWave};
 
 // Shared power-to-momentum contractions. Source/geometry admission belongs
 // to the original film and beam owners, not to an arbitrary power input.
@@ -94,8 +99,16 @@ pub enum DielectricResponse<'a> {
     /// with an explicitly selected lossless approximation. Real water absorption
     /// and causal transient reservoirs are not supplied by this index release.
     WaterOptical(WaterOpticalResponse<'a>),
+    /// Original collisional free-carrier response plus an explicitly sourced
+    /// lossless bound-charge background, prepared at one angular frequency.
+    /// Normalized half-space scattering does not admit a physical amplitude;
+    /// prepare_ionized_gas_wave checks the complete actual surface drift.
+    /// Finite films refuse until their whole-field drift admission is supplied.
+    IonizedGas(IonizedGasWaveResponse<'a>),
 }
 impl<'a> DielectricResponse<'a> {
+    /// Original scalar-property bundle. For ionized gas this is the explicitly
+    /// sourced bound-charge background; the enum also retains its carrier owner.
     pub fn material(self) -> &'a ResolvedMaterialStatePoint {
         match self {
             Self::Lossless(material) => material,
@@ -106,6 +119,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(response) => response.material(),
             Self::SpectralOptical(response) => response.material(),
             Self::WaterOptical(response) => response.material(),
+            Self::IonizedGas(response) => response.material(),
         }
     }
 
@@ -142,6 +156,7 @@ impl<'a> DielectricResponse<'a> {
             Self::OpticalMaterial(response) => response.permittivity_f_m(omega)?,
             Self::SpectralOptical(response) => response.permittivity_f_m(omega)?,
             Self::WaterOptical(response) => response.permittivity_f_m(omega)?,
+            Self::IonizedGas(response) => response.permittivity(omega)?,
         };
         if !finite(epsilon) || epsilon == C64::ZERO || epsilon.im > 0.0 {
             return Err(ReflectionError::Invalid(
@@ -194,11 +209,17 @@ fn shared_ohmic_conductivity(
 #[derive(Debug)]
 pub enum ReflectionError {
     Material(FieldStorageError),
+    IonizedGas(fs_material::ionized_gas::IonizedGasError),
     Invalid(&'static str),
 }
 impl From<FieldStorageError> for ReflectionError {
     fn from(value: FieldStorageError) -> Self {
         Self::Material(value)
+    }
+}
+impl From<fs_material::ionized_gas::IonizedGasError> for ReflectionError {
+    fn from(value: fs_material::ionized_gas::IonizedGasError) -> Self {
+        Self::IonizedGas(value)
     }
 }
 impl core::fmt::Display for ReflectionError {
@@ -226,6 +247,10 @@ pub struct PlanarDielectricInterface<'a> {
 pub struct InterfaceReflection {
     pub reflected_tangential_e: C64,
     pub transmitted_tangential_e: C64,
+    /// Transmitted power-conjugate H divided by incident H. Its independent
+    /// Fresnel numerator preserves a small H when reflection rounds to one,
+    /// including critical TM fields; it is not formed by subtracting 1-r.
+    pub transmitted_conjugate_h: C64,
     pub reflected_power_fraction: f64,
     pub transmitted_power_fraction: f64,
     /// Positive real incident normal wavenumber [rad/m].
@@ -357,7 +382,8 @@ impl<'a> PlanarDielectricInterface<'a> {
                 | DielectricResponse::OpticalConductor(_)
                 | DielectricResponse::OpticalMaterial(_)
                 | DielectricResponse::SpectralOptical(_)
-                | DielectricResponse::WaterOptical(_) => {}
+                | DielectricResponse::WaterOptical(_)
+                | DielectricResponse::IonizedGas(_) => {}
             }
         }
         Ok(Self {
@@ -376,6 +402,12 @@ impl<'a> PlanarDielectricInterface<'a> {
     pub const fn incident_response(&self) -> DielectricResponse<'a> {
         self.incident_response
     }
+    /// Full transmitted constitutive owner, including separately sourced
+    /// plasma carriers when present.
+    pub const fn transmitted_response(&self) -> DielectricResponse<'a> {
+        self.transmitted
+    }
+    /// Original scalar-property bundle; plasma returns its explicit background.
     pub fn transmitted_material(&self) -> &'a ResolvedMaterialStatePoint {
         self.transmitted.material()
     }
@@ -438,11 +470,13 @@ fn interface_response(
     let norm = positive(denominator.norm_sq())?;
     let reflected = (a - b) / denominator;
     let transmitted = a.scale(2.0) / denominator;
+    let transmitted_h = b.scale(2.0) / denominator;
     let reflected_power = reflected.norm_sq();
     // Stable Poynting flux, not |t|^2 alone and not a clipped 1-|r|^2.
     let transmitted_power = 4.0 * (a.re * b.re + a.im * b.im) / norm;
     if !finite(reflected)
         || !finite(transmitted)
+        || !finite(transmitted_h)
         || !transmitted_power.is_finite()
         || transmitted_power < 0.0
         || (reflected_power + transmitted_power - 1.0).abs() > 128.0 * f64::EPSILON
@@ -454,6 +488,7 @@ fn interface_response(
     Ok(InterfaceReflection {
         reflected_tangential_e: reflected,
         transmitted_tangential_e: transmitted,
+        transmitted_conjugate_h: transmitted_h,
         reflected_power_fraction: reflected_power,
         transmitted_power_fraction: transmitted_power,
         incident_normal_wavenumber_rad_m: incident_normal,

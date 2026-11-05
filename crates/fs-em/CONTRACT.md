@@ -1,5 +1,49 @@
 # fs-em contract
 
+## Frequency-resolved collisional plasma half-spaces
+
+`plane_wave::IonizedGasWaveResponse` binds the original prepared
+`IonizedGasHarmonic` to explicit lossless background epsilon/mu at one positive
+angular frequency. It reuses the original neutral and mutual Coulomb drag and
+forms `epsilon_eff = epsilon_background - i*sigma(omega)/omega` for
+`exp(+i omega t)`. The background excludes those free carriers; the caller
+declares its applicability to the frozen mixture. Supplied T/T_h, T_e and typed
+pressure coordinates must match the retained gas; unmapped condition axes
+refuse. No vacuum coefficients or composition-to-permittivity fit are inserted.
+
+`DielectricResponse::IonizedGas` uses the existing interface kernel, including
+negative real epsilon and the passive outgoing branch. The frequency-specific
+cache preserves allocation-free normalized scattering. A different frequency
+refuses and requires explicit preparation from the original transport.
+`InterfaceReflection::transmitted_conjugate_h` retains the independent native
+Fresnel numerator, avoiding subtraction from a reflection rounded to one.
+
+`PlanarDielectricInterface::prepare_ionized_gas_wave` applies an actual complex
+peak incident tangential field and recovers complete TE/TM vectors, including
+normal TM E. The original material validates surface carrier and pair-relative
+peak drift and supplies physical current, friction partitions and reversible
+kinetic storage. The outgoing homogeneous wave only decays, so this surface
+admission bounds all deeper points. Normal flux must match the native
+transmission power, and `-2 Im(k_z) S_z` must equal original friction heat.
+There is no conversion of reactive power into heat.
+
+The retained wave evaluates arbitrary finite nonnegative depths with no
+allocation or repeated carrier solve. Currents and carrier velocities acquire
+the same decaying complex phase; heat and stored energies acquire its squared
+amplitude. Depth-integrated heat uses `-expm1(2 Im(k_z) z)` rather than subtracting
+nearly equal fluxes. Background electric/magnetic energy and carrier kinetic
+energy remain separate. Thermal consumers apply area/volume/time and deposit
+each physical heat source once.
+
+Four G1/G3/G0 regressions cover independent Drude dispersion and plasma cutoff,
+native vector Maxwell/Poynting identities through depth, original coupled
+Coulomb thermal partitions, condition/frequency mismatch, excessive drift,
+cancellation and zero/opaque fields. This is the inherited frozen, local,
+unmagnetized weak-drift model, without sheath/ionization evolution or a measured
+broadband qualification. Finite films and their beam/exposure consumers
+explicitly refuse this law until whole-field drift admission covers their
+standing-wave enhancement.
+
 ## Conduction at independent common-voltage references
 
 The planar static, material-response and prescribed-motion current paths retain

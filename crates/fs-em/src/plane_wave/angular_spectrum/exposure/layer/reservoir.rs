@@ -49,7 +49,8 @@ impl<'m> LossLaw<'m> {
             DielectricResponse::OpticalConductor(_)
             | DielectricResponse::OpticalMaterial(_)
             | DielectricResponse::SpectralOptical(_)
-            | DielectricResponse::WaterOptical(_) => {
+            | DielectricResponse::WaterOptical(_)
+            | DielectricResponse::IonizedGas(_) => {
                 return Err(bad(
                     "finite-window film heat needs an original causal material reservoir",
                 ));
