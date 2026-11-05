@@ -12,6 +12,9 @@ use super::convection::conjugate::{
 };
 use super::convection::reservoir::{GraphConvectiveReservoir, GraphReservoirConvectionError, GraphReservoirHeat};
 use super::convection::developing::{GraphDevelopingConvectionError, GraphDevelopingHeat, GraphDevelopingSection};
+use super::convection::developing::conjugate::{
+    PreparedGraphDevelopingConjugateLinks, ResolvedGraphDevelopingConjugateHeat,
+};
 use super::*;
 use fs_material::thermochemical_gas::{
     ResolvedThermochemicalGasState, energy::enthalpy::GasEnthalpyLaw,
@@ -423,6 +426,60 @@ impl<'a> GasGraphSources<'a> {
             |t| resolve_gas(self.source, t),
         )?;
         Ok(GraphReservoirHeat { admission, convection })
+    }
+
+    /// Original gas developing film at the conducting wall's actual surface.
+    /// Native bulk-source, density, Mach and interval-work gates still apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_developing_conjugate_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        report: &InertialGraphReport,
+        prepared: &PreparedGraphDevelopingConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphDevelopingConjugateHeat<ResolvedThermochemicalGasState>, GraphConjugateError> {
+        self.evaluate_developing_conjugate_flow(
+            cx, thermal, sources, GraphFlow::Inertial(report), prepared, config,
+        )
+    }
+
+    /// Original fixed-pressure/composition source at each solved developing
+    /// surface, with the SAME quasi-steady hydraulic and thermal candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_developing_conjugate_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        prepared: &PreparedGraphDevelopingConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphDevelopingConjugateHeat<ResolvedThermochemicalGasState>, GraphConjugateError> {
+        self.evaluate_developing_conjugate_flow(
+            cx, thermal, sources, GraphFlow::QuasiSteady { hydraulics, duration_s },
+            prepared, config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_developing_conjugate_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedThermochemicalGasState>,
+        flow: GraphFlow<'_>,
+        prepared: &PreparedGraphDevelopingConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphDevelopingConjugateHeat<ResolvedThermochemicalGasState>, GraphConjugateError> {
+        let admission = self.admit_flow(cx, thermal, sources, flow)
+            .map_err(|error| GraphConjugateError::Developing(
+                GraphDevelopingConvectionError::Source(error),
+            ))?;
+        prepared.resolve(&self.core, cx, thermal, flow, admission, config,
+            |t| resolve_gas(self.source, t))
     }
 
     /// Section-integrated original duct relation with the original gas source.

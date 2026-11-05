@@ -28,6 +28,8 @@ const AREA: f64 = 0.002;
 const DISTANCE: f64 = 0.05;
 #[path = "conjugate/surface.rs"]
 mod surface;
+#[path = "conjugate/developing.rs"]
+mod developing;
 fn config() -> LayerConductionConfig {
     LayerConductionConfig {
         max_iterations: 96,

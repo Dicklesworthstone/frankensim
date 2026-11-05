@@ -16,6 +16,9 @@ use fs_convection::{CorrelationError, NusseltEvaluation, ThermalConductivity};
 use fs_material::fluid_transport::ThermalFluidTransportState;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Source-integrated solid walls on the original finite developing sections.
+pub mod conjugate;
+
 /// Existing owner of a whole section's wetted-wall patch.
 #[derive(Clone, Copy, Debug)]
 pub enum DevelopingWall {
@@ -177,6 +180,8 @@ pub struct GraphDevelopingHeat<M> {
 pub struct DevelopingConvectionSample<M> {
     pub fluid_cell: CellId,
     pub wall: DevelopingWall,
+    /// Actual fluid-facing temperature; a conjugate wall retains its separate
+    /// stored cell trace in the surrounding surface-balance report.
     pub wall_temperature_k: f64,
     pub fluid_temperature_k: f64,
     pub property_temperature_k: f64,
@@ -256,6 +261,33 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
     maximum_sections: usize,
     mut resolve: impl FnMut(Temperature) -> Result<M, SourceGraphError>,
 ) -> Result<ResolvedDevelopingConvection<M>, GraphDevelopingConvectionError> {
+    let geometry = admit_sections(core, cx, thermal, bindings, maximum_sections)?;
+    let mut links = BTreeMap::new();
+    let mut reservoirs = BTreeMap::new();
+    let mut samples = Vec::with_capacity(geometry.len());
+    for g in geometry {
+        let sample = evaluate_surface(core, cx, flow, &g, g.wall_temperature, &mut resolve)?;
+        match g.binding.wall {
+            DevelopingWall::Link(id) => { links.insert(id, sample.conductance_w_k); }
+            DevelopingWall::Reservoir => {
+                reservoirs.insert(g.binding.fluid_cell, sample.conductance_w_k);
+            }
+        }
+        samples.push(sample);
+    }
+    poll(cx).map_err(GraphDevelopingConvectionError::Source)?;
+    Ok(ResolvedDevelopingConvection { links, reservoirs, samples })
+}
+
+// This admission is shared by ordinary and source-integrated finite walls.
+// It runs once for the whole endpoint before any material query or root trial.
+fn admit_sections<'a>(
+    core: &BoundGraphCore<'_>,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'_>,
+    bindings: &'a [GraphDevelopingSection],
+    maximum_sections: usize,
+) -> Result<Vec<Geometry<'a>>, GraphDevelopingConvectionError> {
     let source = GraphDevelopingConvectionError::Source;
     poll(cx).map_err(source)?;
     if !(1..=1_000_000).contains(&maximum_sections)
@@ -326,83 +358,94 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
         });
     }
     geometry.sort_by_key(|g| g.binding.fluid_cell);
-    let mut links = BTreeMap::new();
-    let mut reservoirs = BTreeMap::new();
-    let mut samples = Vec::with_capacity(geometry.len());
-    for g in geometry {
-        poll(cx).map_err(source)?;
-        let binding = g.binding;
-        let property_temperature_k = match binding.property_temperature {
-            ConvectionPropertyTemperature::Reservoir => g.fluid_temperature,
-            ConvectionPropertyTemperature::FilmMean => {
-                0.5 * g.wall_temperature + 0.5 * g.fluid_temperature
-            }
-        };
-        let material = resolve(Temperature::new(property_temperature_k)).map_err(|error| {
-            GraphDevelopingConvectionError::Convection(SourceCellConvectionError::Source {
-                cell: binding.fluid_cell, property_temperature_k, source: error,
-            })
-        })?;
-        let snapshot = material.thermal_transport_state()
+    poll(cx).map_err(source)?;
+    Ok(geometry)
+}
+
+// Evaluate the SAME section/source and signed native flow envelope at an
+// actual passive surface, returning evidence only, without an applicable map.
+fn evaluate_surface<M: ThermalFluidTransport>(
+    core: &BoundGraphCore<'_>,
+    cx: &Cx<'_>,
+    flow: GraphFlow<'_>,
+    g: &Geometry<'_>,
+    surface_temperature: f64,
+    resolve: &mut impl FnMut(Temperature) -> Result<M, SourceGraphError>,
+) -> Result<DevelopingConvectionSample<M>, GraphDevelopingConvectionError> {
+    let source = GraphDevelopingConvectionError::Source;
+    poll(cx).map_err(source)?;
+    if !positive(surface_temperature)
+        || surface_temperature < g.wall_temperature.min(g.fluid_temperature)
+        || surface_temperature > g.wall_temperature.max(g.fluid_temperature)
+    {
+        return Err(invalid("developing surface must lie between its actual wall and fluid temperatures"));
+    }
+    let binding = g.binding;
+    let property_temperature_k = match binding.property_temperature {
+        ConvectionPropertyTemperature::Reservoir => g.fluid_temperature,
+        ConvectionPropertyTemperature::FilmMean => {
+            0.5 * surface_temperature + 0.5 * g.fluid_temperature
+        }
+    };
+    let material = resolve(Temperature::new(property_temperature_k)).map_err(|error| {
+        GraphDevelopingConvectionError::Convection(SourceCellConvectionError::Source {
+            cell: binding.fluid_cell, property_temperature_k, source: error,
+        })
+    })?;
+    let snapshot = material.thermal_transport_state()
+        .map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
+    let transport = material.transport_state()
+        .map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
+    if snapshot.temperature_k() != property_temperature_k || snapshot.transport() != transport {
+        return Err(invalid("developing source must match requested temperature and transport state"));
+    }
+    core.admit_density(binding.fluid_cell, transport).map_err(source)?;
+    let evaluate_flow = |rate: f64| {
+        let start = if rate < 0.0 { binding.reverse_start.value() }
+            else { binding.forward_start.value() };
+        let reynolds = transport.reynolds(rate.abs() / g.flow_area, g.duct.diameter.value())
             .map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
-        let transport = material.transport_state()
-            .map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
-        if snapshot.temperature_k() != property_temperature_k || snapshot.transport() != transport {
-            return Err(invalid("developing source must match requested temperature and transport state"));
+        let start_ratio = start / g.duct.diameter.value();
+        let end_ratio = (start + g.length) / g.duct.diameter.value();
+        if start > 0.0 && start_ratio == 0.0 {
+            return Err(invalid("positive developing distance cannot underflow to a new entrance"));
         }
-        core.admit_density(binding.fluid_cell, transport).map_err(source)?;
-        let evaluate_flow = |rate: f64| {
-            let start = if rate < 0.0 { binding.reverse_start.value() }
-                else { binding.forward_start.value() };
-            let reynolds = transport.reynolds(rate.abs() / g.flow_area, g.duct.diameter.value())
-                .map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
-            let start_ratio = start / g.duct.diameter.value();
-            let end_ratio = (start + g.length) / g.duct.diameter.value();
-            if start > 0.0 && start_ratio == 0.0 {
-                return Err(invalid("positive developing distance cannot underflow to a new entrance"));
-            }
-            match g.duct.aspect {
-                None => evaluate_circular_duct_section(
-                    reynolds, transport.prandtl(), start_ratio, end_ratio,
-                ).map(DevelopingSectionEvaluation::Circular),
-                Some(aspect) => evaluate_rectangular_duct_section(
-                    reynolds, transport.prandtl(), aspect, start_ratio, end_ratio,
-                ).map(DevelopingSectionEvaluation::Rectangular),
-            }.map_err(|error| native(ConvectionSourceError::Material(error.into())))
-        };
-        let average = flow.average(g.branch);
-        let section = evaluate_flow(average)?;
-        // Every actually traversed endpoint retains its own entrance direction.
-        // A signed reversal crosses Re=0, outside the original forced card.
-        let initial = flow.initial(g.branch);
-        let final_flow = flow.final_flow(g.branch);
-        if initial != average { evaluate_flow(initial)?; }
-        if final_flow != average && final_flow != initial { evaluate_flow(final_flow)?; }
-        if (initial < 0.0 && final_flow > 0.0) || (initial > 0.0 && final_flow < 0.0) {
-            evaluate_flow(0.0)?;
-        }
-        let coefficient = section.coefficient(
-            transport.thermal_conductivity_w_m_k(), g.duct.diameter,
-        ).map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
-        let conductance_w_k = g.wall_area * coefficient;
-        let difference = g.wall_temperature - g.fluid_temperature;
-        let heat_into_fluid_w = conductance_w_k * difference;
-        if !positive(conductance_w_k) || !difference.is_finite() || !heat_into_fluid_w.is_finite()
-            || (difference != 0.0 && heat_into_fluid_w == 0.0)
-        {
-            return Err(invalid("developing wall transfer is unrepresentable"));
-        }
-        match binding.wall {
-            DevelopingWall::Link(id) => { links.insert(id, conductance_w_k); }
-            DevelopingWall::Reservoir => { reservoirs.insert(binding.fluid_cell, conductance_w_k); }
-        }
-        samples.push(DevelopingConvectionSample {
-            fluid_cell: binding.fluid_cell, wall: binding.wall,
-            wall_temperature_k: g.wall_temperature, fluid_temperature_k: g.fluid_temperature,
-            property_temperature_k, length_m: g.length, area_m2: g.wall_area,
-            conductance_w_k, heat_into_fluid_w, material, thermal: snapshot, section,
-        });
+        match g.duct.aspect {
+            None => evaluate_circular_duct_section(
+                reynolds, transport.prandtl(), start_ratio, end_ratio,
+            ).map(DevelopingSectionEvaluation::Circular),
+            Some(aspect) => evaluate_rectangular_duct_section(
+                reynolds, transport.prandtl(), aspect, start_ratio, end_ratio,
+            ).map(DevelopingSectionEvaluation::Rectangular),
+        }.map_err(|error| native(ConvectionSourceError::Material(error.into())))
+    };
+    let average = flow.average(g.branch);
+    let section = evaluate_flow(average)?;
+    // Every actually traversed endpoint retains its own entrance direction.
+    // A signed reversal crosses Re=0, outside the original forced card.
+    let initial = flow.initial(g.branch);
+    let final_flow = flow.final_flow(g.branch);
+    if initial != average { evaluate_flow(initial)?; }
+    if final_flow != average && final_flow != initial { evaluate_flow(final_flow)?; }
+    if (initial < 0.0 && final_flow > 0.0) || (initial > 0.0 && final_flow < 0.0) {
+        evaluate_flow(0.0)?;
+    }
+    let coefficient = section.coefficient(
+        transport.thermal_conductivity_w_m_k(), g.duct.diameter,
+    ).map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
+    let conductance_w_k = g.wall_area * coefficient;
+    let difference = surface_temperature - g.fluid_temperature;
+    let heat_into_fluid_w = conductance_w_k * difference;
+    if !positive(conductance_w_k) || !difference.is_finite() || !heat_into_fluid_w.is_finite()
+        || (difference != 0.0 && heat_into_fluid_w == 0.0)
+    {
+        return Err(invalid("developing wall transfer is unrepresentable"));
     }
     poll(cx).map_err(source)?;
-    Ok(ResolvedDevelopingConvection { links, reservoirs, samples })
+    Ok(DevelopingConvectionSample {
+        fluid_cell: binding.fluid_cell, wall: binding.wall,
+        wall_temperature_k: surface_temperature, fluid_temperature_k: g.fluid_temperature,
+        property_temperature_k, length_m: g.length, area_m2: g.wall_area,
+        conductance_w_k, heat_into_fluid_w, material, thermal: snapshot, section,
+    })
 }

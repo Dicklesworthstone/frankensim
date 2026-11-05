@@ -8,6 +8,9 @@ use super::convection::conjugate::{
 use super::heating::{GraphHeatingError, LiquidGraphHeating};
 use super::convection::reservoir::{GraphConvectiveReservoir, GraphReservoirConvectionError, GraphReservoirHeat};
 use super::convection::developing::{GraphDevelopingConvectionError, GraphDevelopingHeat, GraphDevelopingSection};
+use super::convection::developing::conjugate::{
+    PreparedGraphDevelopingConjugateLinks, ResolvedGraphDevelopingConjugateHeat,
+};
 use super::*;
 use crate::graph::thermal::medium::series::enthalpy::admit_liquid_caloric_source;
 use fs_material::liquid::ResolvedLiquidState;
@@ -351,6 +354,60 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
             |t| self.law.at_temperature(t).map_err(SourceGraphError::Liquid),
         )?;
         Ok(GraphReservoirHeat { admission, convection })
+    }
+
+    /// Original developing-duct film at the conducting wall's solved surface.
+    /// The SAME finite fluid/wall cells own all reciprocal heat and storage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_developing_conjugate_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        report: &InertialGraphReport,
+        prepared: &PreparedGraphDevelopingConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphDevelopingConjugateHeat<ResolvedLiquidState>, GraphConjugateError> {
+        self.evaluate_developing_conjugate_flow(
+            cx, thermal, sources, GraphFlow::Inertial(report), prepared, config,
+        )
+    }
+
+    /// Source-integrated developing walls at the actual quasi-steady endpoint.
+    /// Physical entrance distances follow the original signed native flow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_developing_conjugate_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        prepared: &PreparedGraphDevelopingConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphDevelopingConjugateHeat<ResolvedLiquidState>, GraphConjugateError> {
+        self.evaluate_developing_conjugate_flow(
+            cx, thermal, sources, GraphFlow::QuasiSteady { hydraulics, duration_s },
+            prepared, config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_developing_conjugate_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        flow: GraphFlow<'_>,
+        prepared: &PreparedGraphDevelopingConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphDevelopingConjugateHeat<ResolvedLiquidState>, GraphConjugateError> {
+        let admission = self.core.admit_flow(cx, thermal, sources, flow)
+            .map_err(|error| GraphConjugateError::Developing(
+                GraphDevelopingConvectionError::Source(error),
+            ))?;
+        prepared.resolve(&self.core, cx, thermal, flow, admission, config,
+            |t| self.law.at_temperature(t).map_err(SourceGraphError::Liquid))
     }
 
     /// Section-integrated original duct relation at the actual inertial endpoint.

@@ -126,7 +126,7 @@ impl PreparedGraphConjugateLinks<'_, '_> {
             conductances_w_k.insert(binding.convection.link, conductance);
             samples.push(GraphConjugateSurfaceSample {
                 link: binding.convection.link,
-                wall_cell: prepared.wall,
+                wall_cell: prepared.wall.cell,
                 fluid_cell: binding.convection.fluid_cell,
                 wall_temperature_k: wall,
                 fluid_temperature_k: bulk,

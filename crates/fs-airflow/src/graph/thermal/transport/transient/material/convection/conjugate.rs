@@ -41,6 +41,7 @@ pub struct GraphConjugateLinkBinding<'a, 'm> {
 pub enum GraphConjugateError {
     Invalid(&'static str),
     Convection(GraphConvectionError),
+    Developing(super::developing::GraphDevelopingConvectionError),
     Layer(LayerSourceError),
     Thermal(DepositionError),
     SurfaceBalance {
@@ -68,8 +69,16 @@ impl From<DepositionError> for GraphConjugateError {
 
 struct PreparedLink<'a, 'm> {
     binding: GraphConjugateLinkBinding<'a, 'm>,
+    wall: PreparedConjugateWall,
+}
+
+/// One original contact and caloric trace, shared by all native film owners.
+/// It contains no heat coefficient, source law or additional thermal storage.
+pub(super) struct PreparedConjugateWall {
+    link: u64,
+    fluid: CellId,
     patch: ContactPatch,
-    wall: CellId,
+    pub(super) cell: CellId,
     wall_geometry: CellGeometry,
     wall_material: MaterialId,
 }
@@ -140,7 +149,7 @@ impl<M> ResolvedGraphConjugateHeat<M> {
     }
 }
 
-fn apply_conductances(
+pub(super) fn apply_conductances(
     conductances: &BTreeMap<u64, f64>,
     destination: &mut BTreeMap<u64, f64>,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -214,36 +223,12 @@ impl<'a, 'm> PreparedGraphConjugateLinks<'a, 'm> {
                     "duplicate native conjugate link",
                 ));
             }
-            let patch = thermal.contact_patch(binding.convection.link).ok_or(
-                GraphConjugateError::Invalid("inactive native conjugate link"),
+            let wall = PreparedConjugateWall::new(
+                thermal, binding.convection.link, binding.convection.fluid_cell,
+                binding.geometry, binding.wall_layer,
             )?;
-            if patch.link.conductance_w_k != 0.0
-                || patch.link.area_m2 != binding.geometry.surface_area_m2()
-            {
-                return Err(GraphConjugateError::Invalid(
-                    "conjugate geometry needs the exact original area and zero authored conductance",
-                ));
-            }
-            let wall = if binding.convection.fluid_cell == patch.link.a {
-                patch.link.b
-            } else if binding.convection.fluid_cell == patch.link.b {
-                patch.link.a
-            } else {
-                return Err(GraphConjugateError::Invalid(
-                    "conjugate fluid is not a link endpoint",
-                ));
-            };
-            let cell = &thermal.cells()[&wall];
             convection.push(binding.convection);
-            let prepared = PreparedLink {
-                binding,
-                patch,
-                wall,
-                wall_geometry: cell.geometry,
-                wall_material: cell.material_id,
-            };
-            prepared.temperatures(thermal)?;
-            links.push(prepared);
+            links.push(PreparedLink { binding, wall });
         }
         checkpoint()?;
         Ok(Self { links, convection })
@@ -290,12 +275,12 @@ impl<'a, 'm> PreparedGraphConjugateLinks<'a, 'm> {
             let [wall, bulk] = prepared.temperatures(thermal)?;
             let correlation = admit_law(binding.convection)?;
             if sample.link != binding.convection.link
-                || sample.wall_cell != prepared.wall
+                || sample.wall_cell != prepared.wall.cell
                 || sample.fluid_cell != binding.convection.fluid_cell
                 || sample.wall_temperature_k != wall
                 || sample.fluid_temperature_k != bulk
                 || sample.property_temperature_k != bulk
-                || sample.area_m2 != prepared.patch.link.area_m2
+                || sample.area_m2 != prepared.wall.patch.link.area_m2
                 || sample.surface.is_some()
                 || sample
                     .evaluation
@@ -344,7 +329,7 @@ impl<'a, 'm> PreparedGraphConjugateLinks<'a, 'm> {
             conductances_w_k.insert(sample.link, conductance);
             samples.push(GraphConjugateLinkSample {
                 link: sample.link,
-                wall_cell: prepared.wall,
+                wall_cell: prepared.wall.cell,
                 fluid_cell: sample.fluid_cell,
                 wall_temperature_k: wall,
                 fluid_temperature_k: bulk,
@@ -372,20 +357,62 @@ impl PreparedLink<'_, '_> {
         &self,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<[f64; 2], GraphConjugateError> {
-        if thermal.contact_patch(self.binding.convection.link) != Some(self.patch) {
+        self.wall.temperatures(thermal, self.binding.wall_layer)
+    }
+}
+
+impl PreparedConjugateWall {
+    pub(super) fn new(
+        thermal: &DepositionSimulation<'_>,
+        link: u64,
+        fluid: CellId,
+        geometry: ReservoirLayerGeometry,
+        layer: &ResolvedConductionLayer<'_>,
+    ) -> Result<Self, GraphConjugateError> {
+        let patch = thermal.contact_patch(link).ok_or(
+            GraphConjugateError::Invalid("inactive native conjugate link"),
+        )?;
+        if patch.link.conductance_w_k != 0.0
+            || patch.link.area_m2 != geometry.surface_area_m2()
+        {
+            return Err(GraphConjugateError::Invalid(
+                "conjugate geometry needs the exact original area and zero authored conductance",
+            ));
+        }
+        let cell = if fluid == patch.link.a { patch.link.b }
+            else if fluid == patch.link.b { patch.link.a }
+            else { return Err(GraphConjugateError::Invalid(
+                "conjugate fluid is not a link endpoint",
+            )); };
+        let original = &thermal.cells()[&cell];
+        let prepared = Self {
+            link, fluid, patch, cell,
+            wall_geometry: original.geometry,
+            wall_material: original.material_id,
+        };
+        prepared.temperatures(thermal, layer)?;
+        Ok(prepared)
+    }
+
+    pub(super) fn temperatures(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        layer: &ResolvedConductionLayer<'_>,
+    ) -> Result<[f64; 2], GraphConjugateError> {
+        if thermal.contact_patch(self.link) != Some(self.patch) {
             return Err(GraphConjugateError::Invalid(
                 "conjugate contact changed; reprepare its geometry",
             ));
         }
         let cell = thermal
             .cells()
-            .get(&self.wall)
+            .get(&self.cell)
             .ok_or(GraphConjugateError::Invalid("inactive conjugate wall"))?;
         if cell.geometry != self.wall_geometry
             || cell.material_id != self.wall_material
             || !thermal.uses_material_law(
                 cell.material_id,
-                self.binding.wall_layer.caloric_curve() as &dyn ThermalLaw,
+                layer.caloric_curve() as &dyn ThermalLaw,
             )
         {
             return Err(GraphConjugateError::Invalid(
@@ -393,10 +420,8 @@ impl PreparedLink<'_, '_> {
             ));
         }
         Ok([
-            self.binding
-                .wall_layer
-                .temperature_at_enthalpy(cell.specific_h_j_kg)?,
-            thermal.temperature_k(self.binding.convection.fluid_cell)?,
+            layer.temperature_at_enthalpy(cell.specific_h_j_kg)?,
+            thermal.temperature_k(self.fluid)?,
         ])
     }
 }

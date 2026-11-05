@@ -3489,6 +3489,44 @@ are exercised in those same tests. Source/API review was completed; Rust
 parsing, compilation and native numerical execution were unavailable, so these
 regression sources are not reported as executed.
 
+### Source-integrated walls on developing duct sections
+
+`developing::conjugate::PreparedGraphDevelopingConjugateLinks` binds the original
+finite wall contact, identical wall caloric object and supported pure-phase
+conductivity chart. Liquid and gas owners expose
+`evaluate_developing_conjugate_links` and
+`evaluate_quasi_steady_developing_conjugate_links`. Only existing zero-conductance
+finite links are admitted; a prescribed reservoir has no finite material trace.
+The normal-path area must exactly equal its original contact area, and the
+section owner still requires the whole native wetted perimeter and length.
+
+Ordinary and conjugate paths share geometry admission and the same original
+circular/rectangular source evaluator. Geometry is admitted once per endpoint
+before surface trials. Each actual surface uses the original bulk/mean-film
+convention, signed forward/reverse entrance distances, initial/final/average
+flow support, density and native gas Mach/work checks. The shared material
+power-coordinate root balances supported k(T) integrals against actual section
+film heat, retaining cumulative evaluations and the final source payload. One
+Q/(Twall-Tbulk) coefficient transfers heat reciprocally; bare film hA remains
+diagnostic. Exact contact/caloric identity and atomic conflict/cancellation
+checks are shared with the other conjugate links.
+
+The selected card retains its original inlet, uniform-wall and held-property
+assumptions. Different cell/surface states do not establish exact partition
+additivity or a resolved nonisothermal entrance history. The rectangular owner
+still requires its original aspect ratio 0.5 and source Pr 0.72; no clipping or
+substituted coefficient is introduced. Internal phase fronts, axial wall
+spreading and new section-level model-error bounds are not supplied.
+
+Three focused integration specifications cover independent Hausen/affine-k
+surfaces, both heat directions and equilibrium, reversed entrances, original
+rectangular table values, actual film-source temperature, native reciprocal
+residuals, quasi-steady parity and typed physical/budget refusals. Native graph
+tests were syntax/API reviewed and remain uncompiled/unexecuted with missing
+constellation siblings. A separate bounded build passed 18 actual material and
+rectangular arithmetic tests, including one coupled affine-k/section-heat
+oracle; it does not compile the full source-card or native graph stack.
+
 ## Original gas correlations on planar moving-liquid heat interfaces
 
 `graph::thermal::medium::convection::PlanarFreeSurfaceConvection` implements
@@ -3698,8 +3736,8 @@ remain diagnostic and cannot be applied as another heat owner. Bracket/source
 failure, exhausted power-residual budget, cancellation and competing overrides
 refuse atomically. This is a quasi-steady homogeneous normal path with the
 selected original correlation's uniform-wall and external-flow assumptions;
-it does not resolve wall spreading, boundary-layer history or developing-duct
-section conjugacy.
+it does not resolve wall spreading or boundary-layer history. Developing-duct
+sections use their explicit conjugate owner above.
 
 Focused `source_graph::conjugate::surface` tests compare independent film
 equations for a variable-k wall, duct/sphere/plate source states, natural/mixed
