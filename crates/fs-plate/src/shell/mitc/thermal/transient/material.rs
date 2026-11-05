@@ -36,11 +36,12 @@ impl EnrichedMitcShell {
             ));
         }
         let mut same_stiffness = true;
-        for (reference, next) in self.model.sections.iter().zip(&current.sections) {
+        for (element, (reference, next)) in
+            self.model.sections.iter().zip(&current.sections).enumerate()
+        {
             check(&mut cancelled)?;
-            if reference.areal_mass_kg_m2 != next.areal_mass_kg_m2
-                || reference.mass_first_moment_kg_m != next.mass_first_moment_kg_m
-                || reference.rotary_inertia_kg != next.rotary_inertia_kg
+            if self.model.reference_inertia_moments(element)
+                != current.reference_inertia_moments(element)
             {
                 return Err(invalid(
                     "material refresh cannot change original reference mass or inertia moments",

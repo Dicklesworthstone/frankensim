@@ -1,4 +1,5 @@
-use super::{PlateError, ShearShellSection, ShellMass, ShellMesh, cross, dot};
+use super::{PlateError, ShearShellInertia, ShearShellSection, ShellMass, ShellMesh, cross, dot};
+use super::inertia::FacetInertia;
 use crate::shell::FacetGeometry;
 use fs_math::det;
 
@@ -232,9 +233,13 @@ impl PreparedStrainField {
     pub(super) fn physical_inertia(
         &self,
         section: &ShearShellSection,
+        corners: Option<&[ShearShellInertia; 3]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Matrix, PlateError> {
-        let m = mass_matrix(&self.kin, &self.g, section, ShellMass::Consistent, cancelled)?;
+        let m = mass_matrix(
+            &self.kin, &self.g, FacetInertia::new(section, corners),
+            ShellMass::Consistent, cancelled,
+        )?;
         self.in_complete_basis(&m)
     }
 
@@ -401,8 +406,8 @@ impl ElementStrainField {
 }
 
 fn mass_rule() -> Vec<([f64; 3], f64)> {
-    // Positive collapsed five-by-five Gauss rule, exact beyond the degree-six
-    // enriched rotation products. Reference weights normalized to unit area.
+    // Positive collapsed five-by-five Gauss rule, exact beyond the degree-seven
+    // P1 inertia times enriched rotation products. Weights sum to unit area.
     let nodes = [
         -0.9061798459386640,
         -0.5384693101056831,
@@ -440,9 +445,23 @@ pub(super) fn matrices(
     mass: ShellMass,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Condensed, Condensed), PlateError> {
+    matrices_with_inertia(mesh, tri, g, normals, section, None, mass, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn matrices_with_inertia(
+    mesh: &ShellMesh,
+    tri: &[usize; 3],
+    g: &FacetGeometry,
+    normals: [[f64; 3]; 3],
+    section: &ShearShellSection,
+    corners: Option<&[ShearShellInertia; 3]>,
+    mass: ShellMass,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Condensed, Condensed), PlateError> {
     let kin = Kinematics::new(mesh, tri, g, normals);
     let mut k = strain_matrix(&kin, g, section.coupled_matrices(), cancelled)?;
-    let mut m = mass_matrix(&kin, g, section, mass, cancelled)?;
+    let mut m = mass_matrix(&kin, g, FacetInertia::new(section, corners), mass, cancelled)?;
     for i in 0..N {
         for j in i..N {
             k[j][i] = k[i][j];
@@ -481,7 +500,7 @@ pub(super) fn matrices(
 fn mass_matrix(
     kin: &Kinematics,
     g: &FacetGeometry,
-    section: &ShearShellSection,
+    inertia: FacetInertia<'_>,
     mass: ShellMass,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Matrix, PlateError> {
@@ -493,37 +512,36 @@ fn mass_matrix(
             }
             let basis: [([f64; 3], [f64; 3]); N] =
                 core::array::from_fn(|c| kin.director_inertia_basis(lambda[1], lambda[2], c));
+            let [i0, i1, i2] = inertia.at(lambda);
             for i in 0..N {
                 for j in i..N {
                     // Bare and coated shells use the SAME material velocity
                     // u_dot + z*director_dot. I1 is its work-conjugate cross
                     // inertia, not an angular/translation scalar product.
                     m[i][j] += weight * g.area_m2
-                        * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
-                            + section.mass_first_moment_kg_m
+                        * (i0 * dot(basis[i].0, basis[j].0)
+                            + i1
                                 * (dot(basis[i].0, basis[j].1) + dot(basis[i].1, basis[j].0))
-                            + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
+                            + i2 * dot(basis[i].1, basis[j].1));
                 }
             }
         }
     } else {
-        for i in 0..18 {
-            m[i][i] = g.area_m2 / 3.0
-                * if i % 6 < 3 {
-                    section.areal_mass_kg_m2
-                } else {
-                    section.rotary_inertia_kg
-                };
-        }
-        for node in 0..3 { for component in 0..3 {
-            let mut rotation = [0.0; 3];
-            rotation[component] = 1.0;
-            let motion = cross(rotation, kin.normals[node]);
-            for axis in 0..3 {
-                m[6*node+axis][6*node+3+component] =
-                    g.area_m2/3.0*section.mass_first_moment_kg_m*motion[axis];
+        for node in 0..3 {
+            let [i0, i1, i2] = inertia.at_node(node, g.area_m2);
+            for component in 0..6 {
+                m[6 * node + component][6 * node + component] =
+                    if component < 3 { i0 } else { i2 };
             }
-        } }
+            for component in 0..3 {
+                let mut rotation = [0.0; 3];
+                rotation[component] = 1.0;
+                let motion = cross(rotation, kin.normals[node]);
+                for axis in 0..3 {
+                    m[6 * node + axis][6 * node + 3 + component] = i1 * motion[axis];
+                }
+            }
+        }
     }
     for i in 0..N {
         for j in i..N {
@@ -703,7 +721,7 @@ mod tests {
         fn factorial(n: usize) -> f64 {
             (1..=n).map(|x| x as f64).product()
         }
-        for (rule, degree) in [(stiffness_rule(), 5), (mass_rule(), 6)] {
+        for (rule, degree) in [(stiffness_rule(), 5), (mass_rule(), 7)] {
             for a in 0..=degree {
                 for b in 0..=degree - a {
                     let observed: f64 = rule

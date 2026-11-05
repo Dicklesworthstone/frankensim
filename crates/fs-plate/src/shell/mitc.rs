@@ -19,6 +19,8 @@ use fs_sparse::Coo;
 use std::collections::BTreeMap;
 
 mod element;
+mod inertia;
+pub use inertia::{ShearShellInertia, assemble_mitc3p_with_reference_inertia};
 mod static_solver;
 pub use static_solver::PreparedMitcStatic;
 /// Reusable observation of the original condensed MITC strain field.
@@ -486,6 +488,7 @@ pub struct MitcShellModel {
     mesh: ShellMesh,
     directors: NodalDirectors,
     sections: Vec<ShearShellSection>,
+    reference_inertia: Option<Vec<[ShearShellInertia; 3]>>,
 }
 impl MitcShellModel {
     /// The existing eigenproblem carrier, in the declared support coordinates.
@@ -497,6 +500,17 @@ impl MitcShellModel {
     #[must_use]
     pub const fn mass_model(&self) -> ShellMass {
         self.mass_model
+    }
+    /// Original corner moments about the mesh reference surface. Uniform
+    /// section inertia is returned at all three corners on the scalar path.
+    #[must_use]
+    pub fn reference_inertia_moments(&self, element: usize) -> Option<[ShearShellInertia; 3]> {
+        self.sections.get(element).map(|section| {
+            self.reference_inertia.as_ref().map_or_else(
+                || [ShearShellInertia::from_section(section); 3],
+                |field| field[element],
+            )
+        })
     }
     /// Pull back a physical global force/moment vector by the same frame map
     /// used in assembly, preserving `f_global · u_global = f_free · u_free`.
@@ -1425,6 +1439,23 @@ pub fn assemble_mitc3p(
     mass: ShellMass,
     budget: MitcBudget,
     drilling_alpha: f64,
+    cancelled: impl FnMut() -> bool,
+) -> Result<MitcShellModel, PlateError> {
+    assemble_mitc3p_impl(
+        mesh, directors, sections, None, constraints, mass, budget, drilling_alpha, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_mitc3p_impl(
+    mesh: &ShellMesh,
+    directors: &NodalDirectors,
+    sections: &[ShearShellSection],
+    reference_inertia: Option<&[[ShearShellInertia; 3]]>,
+    constraints: &[ShellConstraint],
+    mass: ShellMass,
+    budget: MitcBudget,
+    drilling_alpha: f64,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<MitcShellModel, PlateError> {
     if cancelled() {
@@ -1456,6 +1487,22 @@ pub fn assemble_mitc3p(
     }
     for section in sections {
         section.validate()?;
+    }
+    if let Some(field) = reference_inertia {
+        if field.len() != mesh.tris.len() {
+            return Err(PlateError::SectionCount {
+                expected: mesh.tris.len(),
+                actual: field.len(),
+            });
+        }
+        for corners in field {
+            if cancelled() {
+                return Err(PlateError::Cancelled);
+            }
+            for moments in corners {
+                moments.validate()?;
+            }
+        }
     }
     let full = mesh
         .nodes
@@ -1519,15 +1566,19 @@ pub fn assemble_mitc3p(
             return Err(PlateError::Cancelled);
         }
         let g = mesh.facet(e)?;
-        let (ke, me) = element::matrices(
-            mesh,
-            tri,
-            &g,
-            tri.map(|i| directors.vectors[i]),
-            &sections[e],
-            mass,
-            &mut cancelled,
-        )?;
+        let corners = reference_inertia.map(|field| &field[e]);
+        let (ke, me) = if let Some(corners) = corners {
+            element::matrices_with_inertia(
+                mesh, tri, &g, tri.map(|i| directors.vectors[i]), &sections[e],
+                Some(corners), mass, &mut cancelled,
+            )?
+        } else {
+            element::matrices(
+                mesh, tri, &g, tri.map(|i| directors.vectors[i]), &sections[e],
+                mass, &mut cancelled,
+            )?
+        };
+        let facet_inertia = inertia::FacetInertia::new(&sections[e], corners);
         for i in 0..18 {
             let ni = tri[i / 6];
             let bi = i % 6;
@@ -1569,12 +1620,12 @@ pub fn assemble_mitc3p(
         // drilling rotation, so this fixes only that gauge; averaging avoids
         // multiple inconsistent drilling penalties on a curved fan.
         let a66 = sections[e].matrices().0[8];
-        for &node in tri {
+        for (corner, &node) in tri.iter().enumerate() {
             let weight = g.area_m2 / 3.0;
             node_area[node] += weight;
             drill_scale[node] += weight * a66;
             if mass == ShellMass::Consistent {
-                drill_inertia[node] += weight * sections[e].rotary_inertia_kg;
+                drill_inertia[node] += facet_inertia.at_node(corner, g.area_m2)[2];
             }
             for c in 0..3 {
                 *drill[node].entry(6 * node + 3 + c).or_default() += weight * g.frame[2][c];
@@ -1653,6 +1704,7 @@ pub fn assemble_mitc3p(
         mesh: mesh.clone(),
         directors: directors.clone(),
         sections: sections.to_vec(),
+        reference_inertia: reference_inertia.map(<[_]>::to_vec),
     })
 }
 

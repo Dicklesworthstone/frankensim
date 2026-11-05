@@ -221,7 +221,11 @@ impl EnrichedMitcShell {
                 &model.sections[e],
                 &mut cancelled,
             )?;
-            let inertia = field.physical_inertia(&model.sections[e], &mut cancelled)?;
+            let inertia = field.physical_inertia(
+                &model.sections[e],
+                model.reference_inertia.as_ref().map(|moments| &moments[e]),
+                &mut cancelled,
+            )?;
             material::scatter(&mut m, &model, e, &inertia, 1.0, &mut cancelled)?;
             let physical = field.condensed_stiffness(&model.sections[e], &mut cancelled)?;
             material::scatter(&mut gauge, &model, e, &physical, -1.0, &mut cancelled)?;

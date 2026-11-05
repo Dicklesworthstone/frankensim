@@ -250,6 +250,31 @@ and unchanged lumped inertia. These checks certify the declared
 reference-area/director model; they do not add a curved three-dimensional
 volume-Jacobian model.
 
+`assemble_mitc3p_with_reference_inertia` retains three physical
+`ShearShellInertia` values per facet in triangle-corner order. Each contains
+original reference-area moments `I0`, signed `I1`, and `I2` about the same mesh
+surface and directors as the elastic section. The positive-definite moment
+matrix is admitted at every corner and interpolated linearly, preserving its
+positive cone. The admission compares finite binary products exactly, avoiding
+singular matrices hidden by rounded square roots and overflow/underflow of
+floating determinant products. This field supplies inertia while the section
+retains its original A/B/D/shear stiffness. The existing positive five-by-five
+quadrature integrates its degree-seven enriched velocity products exactly;
+consistent mass retains full translation/director cross inertia and the original
+bubble congruence. Constant corner values use the uniform arithmetic path.
+
+Explicit lumping and the numerical drilling weight use the exact positive
+partition `integral N_i I_k dA = area*(2*I_k,i + I_k,j + I_k,l)/12`, rather than
+assigning the facet mean to every node. `reference_inertia_moments` exposes the
+retained physical profile. `EnrichedMitcShell` restores its complete physical
+inertia from that same profile, and `with_material_model` refuses any change
+to the original corner inventory, including relocation at unchanged totals.
+Temperature-dependent stiffness never supplies replacement reference density.
+`tests/mitc_reference_inertia.rs` covers independent rigid six-by-six moments
+on flat and varying-director fans, transformed geometry and both signs of
+`I1`, constant-path bits, equal-total-mass frequency changes, exact interior
+bubble inertia, material refresh, positive lumping and typed admission errors.
+
 `MitcBudget` checks node/triangle caps before assembly allocation. Assembly
 polls its caller cancellation callback before work, per element and per
 quadrature point and publishes no partial pencil. Static solves use only
