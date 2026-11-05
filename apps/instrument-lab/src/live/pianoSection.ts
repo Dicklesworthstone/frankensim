@@ -11,6 +11,8 @@ import { resumeContext } from '../audio';
 import { LivePianoClient, midiVelocityToMS, type PianoInfo, type PianoSnapshot, type PianoStats, type PianoStringMaterials } from './pianoClient';
 import { LiveRefusal } from './liveAudio';
 import { PianoStage, noteName, type PianoView, type StageScales } from './pianoStage';
+import { LiveMidiInput, type MidiInputState } from './midiInput';
+import { PianoMidi, combinePianoPedals, type PianoMidiPedals } from './pianoMidi';
 
 const FIRST = 21;
 const LAST = 108;
@@ -163,13 +165,17 @@ export class LivePianoSection {
   private pedalBeforeSpace = 0;
   private sostenuto = false;
   private unaCorda = false;
+  private localPedals: PianoMidiPedals = { sustain: 0, sostenuto: false, unaCorda: false };
+  private midiPedals: PianoMidiPedals = { sustain: 0, sostenuto: false, unaCorda: false };
   private silentKeys = false;
   private demoTimers: number[] = [];
   private demoName: string | null = null;
   private lastStats: PianoStats | null = null;
   private sounding = new Set<number>();
   private lastAnnounce = 0;
-  private midiAccess: MIDIAccess | null = null;
+  private readonly midiInput: LiveMidiInput;
+  private readonly midiPerformance: PianoMidi;
+  private midiStatus: MidiInputState['status'] = 'disconnected';
   private readonly reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
   private readonly cleanups: Array<() => void> = [];
 
@@ -186,6 +192,18 @@ export class LivePianoSection {
     this.buildKeyboard();
     this.buildDemos();
     this.buildHonesty(null);
+    this.midiPerformance = new PianoMidi({
+      noteOn: (key, velocity, acquireHold) => this.pressMidi(key, midiVelocityToMS(velocity), acquireHold),
+      noteOff: (key) => this.release(key, 'midi'),
+      pedals: (pedals) => { this.midiPedals = pedals; this.syncPedals(); },
+    });
+    this.midiInput = new LiveMidiInput({
+      onMessage: (message) => {
+        if (this.client && !this.disposed) this.midiPerformance.receive(message);
+      },
+      onReset: () => this.midiPerformance.reset(),
+      onState: (state) => this.paintMidi(state),
+    });
     this.wire();
     this.layoutKeyboard(true);
     this.stage.draw(0);
@@ -291,8 +309,20 @@ export class LivePianoSection {
         </div>
       </div>
       <div class="field lp-midi" hidden>
-        <span class="label"><span>MIDI</span><output class="lp-midi-out">not connected</output></span>
+        <span class="label"><span>MIDI</span><output class="lp-midi-out" role="status">not connected</output></span>
         <div class="lp-row"><button type="button" class="btn sm lp-midi-btn">Connect MIDI</button></div>
+        <div class="lp-row">
+          <label for="${id}-midi-input">Input</label>
+          <select id="${id}-midi-input" class="lp-midi-input" disabled style="max-width:100%;min-width:0"><option value="">No input connected</option></select>
+        </div>
+        <div class="lp-row">
+          <label for="${id}-midi-channel">Channel</label>
+          <select id="${id}-midi-channel" class="lp-midi-channel">
+            <option value="pitched">All pitched channels (except 10)</option>
+            ${Array.from({ length: 16 }, (_, channel) => `<option value="${channel}">${channel + 1}${channel === 9 ? ' (percussion)' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <p class="small muted">CC64 sustain, CC66 sostenuto and CC67 una corda. MIDI and on-screen pedal holds combine; disconnect releases only MIDI controls.</p>
       </div>
     </div>
     <div class="lp-scrub" aria-hidden="true"><div class="lp-scrub-keys"></div><div class="lp-scrub-window"></div></div>
@@ -552,9 +582,9 @@ export class LivePianoSection {
     // pedal
     const pedalRange = q<HTMLInputElement>(this.root, '.lp-pedal-range');
     pedalRange.addEventListener('input', () => this.setPedal(Number(pedalRange.value), 'ui'));
-    q<HTMLButtonElement>(this.root, '.lp-pedal-btn').addEventListener('click', () => this.setPedal(this.pedal > 0 ? 0 : 1, 'ui'));
-    q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').addEventListener('click', () => this.setSostenuto(!this.sostenuto));
-    q<HTMLButtonElement>(this.root, '.lp-una-btn').addEventListener('click', () => this.setUnaCorda(!this.unaCorda));
+    q<HTMLButtonElement>(this.root, '.lp-pedal-btn').addEventListener('click', () => this.setPedal(this.localPedals.sustain > 0 ? 0 : 1, 'ui'));
+    q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').addEventListener('click', () => this.setSostenuto(!this.localPedals.sostenuto));
+    q<HTMLButtonElement>(this.root, '.lp-una-btn').addEventListener('click', () => this.setUnaCorda(!this.localPedals.unaCorda));
     q<HTMLButtonElement>(this.root, '.lp-silent-btn').addEventListener('click', () => {
       this.silentKeys = !this.silentKeys;
       q<HTMLButtonElement>(this.root, '.lp-silent-btn').setAttribute('aria-pressed', String(this.silentKeys));
@@ -564,7 +594,17 @@ export class LivePianoSection {
     // MIDI
     if (typeof navigator.requestMIDIAccess === 'function') {
       q<HTMLElement>(this.root, '.lp-midi').hidden = false;
-      q<HTMLButtonElement>(this.root, '.lp-midi-btn').addEventListener('click', () => void this.connectMidi());
+      q<HTMLButtonElement>(this.root, '.lp-midi-btn').addEventListener('click', () => {
+        if (this.midiStatus === 'connected' || this.midiStatus === 'connecting' || this.midiStatus === 'waiting') {
+          this.midiInput.disconnect();
+        } else void this.connectMidi();
+      });
+      const input = q<HTMLSelectElement>(this.root, '.lp-midi-input');
+      input.addEventListener('change', () => { if (input.value) this.midiInput.select(input.value); });
+      const channel = q<HTMLSelectElement>(this.root, '.lp-midi-channel');
+      channel.addEventListener('change', () => this.midiPerformance.selectChannel(
+        channel.value === 'pitched' ? 'pitched' : Number(channel.value),
+      ));
     }
 
     // keyboard strip: pointer capture per pointer, glissando by hit-testing
@@ -721,10 +761,9 @@ export class LivePianoSection {
       for (const b of this.root.querySelectorAll<HTMLButtonElement>('.lp-demo')) b.disabled = false;
       this.buildHonesty(client.info);
       this.root.classList.add('lp-running');
-      this.setPedal(this.pedal, 'ui');
-      this.setUnaCorda(this.unaCorda);
       // A fresh engine has no key held: a sostenuto left down could catch nothing.
-      this.setSostenuto(false);
+      this.localPedals.sostenuto = false;
+      this.syncPedals(true);
       this.announce(`Live piano ready in ${Math.round(client.initMs)} milliseconds. Play the keys, or use the computer keyboard.`);
       this.kick();
     } catch (error) {
@@ -751,14 +790,25 @@ export class LivePianoSection {
     this.down.set(midi, count + 1);
     if (source === 'demo') this.demoKeys.add(midi);
     if (count > 0) return;
-    if (this.silentKeys && source !== 'demo') {
-      this.client.silentKeyDown(midi);
+    this.soundKey(midi, speed, this.silentKeys && source !== 'demo');
+  }
+
+  /** MIDI re-strikes are gestures, not additional holds on an already-owned key. */
+  private pressMidi(midi: number, speed: number, acquireHold: boolean): void {
+    if (!this.client) return;
+    if (acquireHold) this.down.set(midi, (this.down.get(midi) ?? 0) + 1);
+    this.soundKey(midi, speed, this.silentKeys);
+  }
+
+  private soundKey(midi: number, speed: number, silent: boolean): void {
+    if (silent) {
+      this.client?.silentKeyDown(midi);
       this.keyEls.get(midi)?.classList.add('on');
       setText(q(this.root, '.lp-speed-out'), `${noteName(midi)} held down silently`);
       return;
     }
     const v = Math.max(0.05, Math.min(8, speed));
-    this.client.noteOn(midi, v);
+    this.client?.noteOn(midi, v);
     this.keyEls.get(midi)?.classList.add('on');
     setText(q(this.root, '.lp-speed-out'), `${noteName(midi)} at ${v.toFixed(2)} m/s`);
   }
@@ -787,10 +837,9 @@ export class LivePianoSection {
     this.keyEls.get(midi)?.classList.remove('on');
   }
 
-  setPedal(value: number, _source: 'ui' | 'space' | 'midi' | 'demo'): void {
-    this.pedal = Math.max(0, Math.min(1, value));
-    this.client?.sustain(this.pedal);
-    this.paintPedal();
+  setPedal(value: number, _source: 'ui' | 'space' | 'demo'): void {
+    this.localPedals.sustain = Math.max(0, Math.min(1, value));
+    this.syncPedals();
   }
 
   private paintPedal(): void {
@@ -803,21 +852,33 @@ export class LivePianoSection {
 
   /** Pressing it latches the dampers of the keys held down at that moment (engine `set_sostenuto`). */
   setSostenuto(on: boolean): void {
-    this.sostenuto = on;
-    this.client?.sostenuto(on);
-    q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').setAttribute('aria-pressed', String(on));
+    this.localPedals.sostenuto = on;
+    this.syncPedals();
   }
 
   /** Strikes that start while it is down miss the last string of each course. */
   setUnaCorda(on: boolean): void {
-    this.unaCorda = on;
-    this.client?.unaCorda(on);
-    q<HTMLButtonElement>(this.root, '.lp-una-btn').setAttribute('aria-pressed', String(on));
+    this.localPedals.unaCorda = on;
+    this.syncPedals();
+  }
+
+  private syncPedals(force = false): void {
+    const pedals = combinePianoPedals(this.localPedals, this.midiPedals);
+    if (force || pedals.sustain !== this.pedal) this.client?.sustain(pedals.sustain);
+    if (force || pedals.sostenuto !== this.sostenuto) this.client?.sostenuto(pedals.sostenuto);
+    if (force || pedals.unaCorda !== this.unaCorda) this.client?.unaCorda(pedals.unaCorda);
+    this.pedal = pedals.sustain;
+    this.sostenuto = pedals.sostenuto;
+    this.unaCorda = pedals.unaCorda;
+    this.paintPedal();
+    q<HTMLButtonElement>(this.root, '.lp-sostenuto-btn').setAttribute('aria-pressed', String(this.sostenuto));
+    q<HTMLButtonElement>(this.root, '.lp-una-btn').setAttribute('aria-pressed', String(this.unaCorda));
   }
 
   /** Every key up, the pedals up, the engine told so (blur, hidden tab). */
   private silence(): void {
     this.cancelDemo(false);
+    this.midiPerformance.reset();
     for (const [pointer] of this.pointerKeys) {
       try { this.kbd.releasePointerCapture(pointer); } catch { /* not captured */ }
     }
@@ -826,6 +887,9 @@ export class LivePianoSection {
     this.down.clear();
     for (const key of this.keyEls.values()) key.classList.remove('on');
     this.pedal = 0;
+    this.pedalBeforeSpace = 0;
+    this.localPedals = { sustain: 0, sostenuto: false, unaCorda: false };
+    this.midiPedals = { sustain: 0, sostenuto: false, unaCorda: false };
     this.paintPedal();
     this.client?.allNotesOff(); // lifts sostenuto and una corda too
     this.sostenuto = false;
@@ -885,7 +949,7 @@ export class LivePianoSection {
     if (e.code === 'Space') {
       e.preventDefault();
       if (!e.repeat) {
-        this.pedalBeforeSpace = this.pedal;
+        this.pedalBeforeSpace = this.localPedals.sustain;
         this.setPedal(1, 'space');
       }
       return;
@@ -924,40 +988,42 @@ export class LivePianoSection {
   }
 
   private async connectMidi(): Promise<void> {
+    if (this.disposed) return;
     const out = q<HTMLElement>(this.root, '.lp-midi-out');
     if (!this.client) {
       out.textContent = 'start the piano first';
       return;
     }
-    try {
-      const access = await navigator.requestMIDIAccess();
-      this.midiAccess = access;
-      const attach = (): void => {
-        const names: string[] = [];
-        access.inputs.forEach((input) => {
-          input.onmidimessage = (event) => this.onMidi(event);
-          names.push(input.name ?? 'input');
-        });
-        out.textContent = names.length ? names.join(', ') : 'no input found';
-      };
-      access.onstatechange = attach;
-      attach();
-    } catch (error) {
-      out.textContent = error instanceof Error ? error.message : 'access refused';
-    }
+    await this.midiInput.connect();
   }
 
-  private onMidi(event: MIDIMessageEvent): void {
-    const data = event.data;
-    if (!data || data.length < 2) return;
-    const kind = (data[0] ?? 0) & 0xf0;
-    const a = data[1] ?? 0;
-    const b = data[2] ?? 0;
-    if (kind === 0x90 && b > 0) this.press(a, midiVelocityToMS(b), 'midi');
-    else if (kind === 0x80 || (kind === 0x90 && b === 0)) this.release(a, 'midi');
-    else if (kind === 0xb0 && a === 64) this.setPedal(b / 127, 'midi');
-    else if (kind === 0xb0 && a === 66 && (b >= 64) !== this.sostenuto) this.setSostenuto(b >= 64);
-    else if (kind === 0xb0 && a === 67 && (b >= 64) !== this.unaCorda) this.setUnaCorda(b >= 64);
+  private paintMidi(state: MidiInputState): void {
+    if (this.disposed) return;
+    this.midiStatus = state.status;
+    const out = q<HTMLElement>(this.root, '.lp-midi-out');
+    out.textContent = state.message;
+    out.title = state.message;
+    const input = q<HTMLSelectElement>(this.root, '.lp-midi-input');
+    const options = state.inputs.map(({ id, name }) => {
+      const option = el('option', undefined, name);
+      option.value = id;
+      return option;
+    });
+    if (state.selectedId && !state.inputs.some(({ id }) => id === state.selectedId)) {
+      const option = el('option', undefined, 'Selected input disconnected');
+      option.value = state.selectedId;
+      options.unshift(option);
+    } else if (!options.length) {
+      const option = el('option', undefined, 'No input connected');
+      option.value = '';
+      options.push(option);
+    }
+    input.replaceChildren(...options);
+    input.value = state.selectedId ?? '';
+    input.disabled = state.inputs.length === 0;
+    q<HTMLButtonElement>(this.root, '.lp-midi-btn').textContent = state.status === 'connecting'
+      ? 'Cancel MIDI connection' : state.status === 'connected' || state.status === 'waiting'
+      ? 'Disconnect MIDI' : 'Connect MIDI';
   }
 
   // ------------------------------------------------------------------ demos
@@ -1132,15 +1198,12 @@ export class LivePianoSection {
   // ------------------------------------------------------------------ teardown
   dispose(): void {
     if (this.disposed) return;
-    this.silence();
     this.disposed = true;
+    this.midiInput.dispose();
+    this.silence();
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
-    if (this.midiAccess) {
-      this.midiAccess.inputs.forEach((input) => { input.onmidimessage = null; });
-      this.midiAccess.onstatechange = null;
-    }
     this.client?.dispose();
     this.client = null;
   }
