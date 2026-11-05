@@ -96,7 +96,7 @@ impl FlowField {
         )
     }
 
-    /// Combine exterior bath conduction and original molecular stress heat
+    /// Combine boundary bath conduction and original molecular stress heat
     /// before the existing thermal-volume and momentum transport, once each.
     /// Baths obey [`Self::advance_isotropic_conductive_thermal_volume_with_baths`].
     /// `reservoir` optionally carries the existing mechanical faces and pressure

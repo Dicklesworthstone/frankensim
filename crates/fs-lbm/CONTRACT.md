@@ -11223,17 +11223,21 @@ must accept before any endpoint is returned.
 `advance_isotropic_conductive_thermal_volume_with_baths` and
 `advance_isotropic_conductive_thermal_volume_momentum_with_baths` attach explicit
 `ThermalVolumeBathFace` laws to the original conductive volume timeline. Each
-unique exterior fluid-cell face supplies its bath temperature and nonnegative
-area-specific resistance. The original graded grid supplies actual face area
-and half-cell distance; the same original k(T,f) sample used by internal
-conduction gives `G=A/(d/k+R)`. No fixed-solid cell, bath mass or second material
-law is introduced. Unlisted faces retain insulation. The same bath input is
+unique fluid boundary face supplies its bath temperature and nonnegative
+area-specific resistance. Faces at the grid exterior and adjoining fixed-solid
+voxels are admitted; fluid/fluid interfaces are not bath boundaries. The
+original graded grid supplies actual face area and the fluid half-cell distance;
+the same original k(T,f) sample used by internal conduction gives `G=A/(d/k+R)`.
+An embedded solid defines the boundary geometry without contributing its width,
+conductivity, heat capacity or material inventory. The caller explicitly owns
+the prescribed ideal wall/bath temperature and additional resistance. Unlisted
+faces retain insulation. The same bath input is
 available alongside the original molecular-viscosity and phase-resistance
 momentum owners, including their existing mechanical pressure profiles. Each
 owner keeps one bath entry point and delegates legacy insulation to empty baths.
 
 Bath heat enters the existing net-enthalpy/phase-density/pressure/momentum
-advance exactly once. Signed six-side heat and gross absolute transfers remain
+advance exactly once. Signed heat by face normal and gross absolute transfers remain
 separate from internal exchange, advective enthalpy and required mechanical
 source work. The original local heat-addition defects and total enthalpy budget
 still gate publication. Sorted physical cell/face order removes input-list
@@ -11248,7 +11252,8 @@ enthalpy-domain admission. Coefficients are held at the original cell state
 for this explicit interval. This is first-order split heat transport, not a
 nonlinear through-wall solve, evolving finite bath, or closed pressure-work
 model. Focused G1/G3/G4 regression definitions cover six graded physical faces,
-source coefficients and caloric datum shifts, opposed bath heat, latent energy,
+source coefficients and caloric datum shifts, embedded-wall calorimetry with
+zero solid inventory, opposed bath heat, latent energy,
 native material momentum, additive molecular heat, work/stability refusal and
 cancellation/replay.
 

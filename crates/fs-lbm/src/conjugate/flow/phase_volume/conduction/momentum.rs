@@ -75,7 +75,7 @@ impl FlowField {
         )
     }
 
-    /// The same heat/volume/momentum endpoint with explicit exterior thermal
+    /// The same heat/volume/momentum endpoint with explicit boundary thermal
     /// baths. Geometry, source conductivity, latent storage and stability use
     /// [`Self::advance_isotropic_conductive_thermal_volume_with_baths`].
     /// Bath heat drives the original density/pressure/momentum trials once;

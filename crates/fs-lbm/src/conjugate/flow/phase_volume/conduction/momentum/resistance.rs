@@ -130,7 +130,7 @@ impl FlowField {
         )
     }
 
-    /// Add prescribed exterior bath heat to original material conduction once,
+    /// Add prescribed boundary bath heat to original material conduction once,
     /// before the existing phase-resistance, physical drag heat and volume trials.
     /// Baths obey [`Self::advance_isotropic_conductive_thermal_volume_with_baths`].
     /// The optional original pressure profile carries only mechanical work;

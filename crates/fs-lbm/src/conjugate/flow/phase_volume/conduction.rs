@@ -37,9 +37,9 @@ pub struct ConductiveThermalVolumeReport {
     /// Identity already retained by the prepared original k(T,f) source.
     pub conductivity_source_identity: ContentHash,
     pub conductive_faces: usize,
-    /// Number of explicitly supplied exterior bath faces, including zero heat.
+    /// Number of explicitly supplied fluid-boundary bath faces, including zero heat.
     pub boundary_faces: usize,
-    /// Signed heat supplied by each bath side, ordered x-, x+, y-, y+, z-, z+ [J].
+    /// Signed bath heat by face orientation, ordered x-, x+, y-, y+, z-, z+ [J].
     /// This is external heat, separate from native advective enthalpy transport.
     pub boundary_heat_j: [f64; 6],
     /// Sum of absolute individual bath-face transfers [J]. Opposed heating and
@@ -139,15 +139,16 @@ impl FlowField {
     }
 
     /// Advance the same source-owned conduction and volume transport with
-    /// explicit thermal baths on selected exterior fluid-cell faces.
+    /// explicit thermal baths on selected fluid-domain boundary faces.
     ///
     /// Each bath adds `dt*A*(T_bath-T_cell)/(d/k_cell+R)`, where the original
     /// graded grid supplies the physical area A and cell-centre-to-face distance
     /// d (half the local width). R is the authored area-specific external
     /// resistance; zero gives a prescribed surface temperature. Conductivity
     /// is frozen at the SAME original cell state as internal conduction.
-    /// Unlisted exterior faces and all fixed-solid interfaces stay insulated.
-    /// A bath supplies no material mass or extra caloric storage.
+    /// Exterior faces and faces adjoining fixed solids admit a bath; all
+    /// unlisted faces stay insulated. A fixed-solid neighbor supplies geometry
+    /// only. A bath supplies no material mass or extra caloric storage.
     ///
     /// Bath conductances share the internal explicit-step bound, using the
     /// maximum dT/dh of the original chart over its admitted conductivity range.

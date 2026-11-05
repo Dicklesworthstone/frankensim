@@ -1,4 +1,4 @@
-//! Exterior Fourier/thermal-resistance baths on the original volume timeline.
+//! Boundary Fourier/thermal-resistance baths on the original volume timeline.
 
 use std::collections::BTreeMap;
 
@@ -7,18 +7,20 @@ use fs_material::thermal::conduction::phase::PhaseConductivitySample;
 use super::*;
 use crate::d3q19::Face3;
 
-/// A prescribed thermal bath covering one complete exterior fluid-cell face.
+/// A prescribed thermal bath covering one complete fluid-domain boundary face.
 ///
 /// The original Cartesian geometry owns the area and centre-to-surface distance
 /// (half the local width). The external resistance is additional to that fluid
 /// half cell. It may represent a declared wall layer, contact or heat-transfer
 /// film, without adding wall storage or substituting its material for the fluid.
+/// The face may adjoin the grid exterior or a fixed-solid voxel. An embedded
+/// solid supplies geometry only; its width and material do not enter this law.
 /// Each `(cell, face)` may occur once; unlisted faces remain insulated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermalVolumeBathFace {
     /// Original fluid-cell index; fixed-solid cells cannot receive this law.
     pub cell: usize,
-    /// Exterior side of that cell, in the original global Cartesian frame.
+    /// Side adjoining the exterior or fixed solid, in the global Cartesian frame.
     pub face: Face3,
     /// Held external absolute temperature [K], finite and strictly positive.
     /// This is not an incoming-fluid enthalpy or a finite bath's state.
@@ -46,9 +48,11 @@ pub(super) fn prepare<'a>(
         let side = bath.face as usize;
         if bath.cell >= domain.cell_count()
             || !domain.is_fluid(bath.cell)
-            || domain.neighbor(bath.cell, side).is_some()
+            || domain
+                .neighbor(bath.cell, side)
+                .is_some_and(|neighbor| domain.is_fluid(neighbor))
         {
-            return Err(refuse("thermal bath requires an exterior fluid-cell face"));
+            return Err(refuse("thermal bath requires a boundary fluid-cell face"));
         }
         finite_positive("flow.conductive_bath_temperature", bath.temperature_k)?;
         if !bath.resistance_m2_k_w.is_finite() || bath.resistance_m2_k_w < 0.0 {
@@ -57,7 +61,7 @@ pub(super) fn prepare<'a>(
             ));
         }
         if ordered.insert((bath.cell, side), bath).is_some() {
-            return Err(refuse("duplicate thermal bath on one exterior cell face"));
+            return Err(refuse("duplicate thermal bath on one fluid boundary face"));
         }
     }
     Ok(ordered)
@@ -134,7 +138,7 @@ pub(super) fn apply(
         let sample = samples[cell].expect("admitted fluid bath and original phase state");
         let k = sample.conductivity_w_m_k();
         let delta_t = bath.temperature_k - sample.temperature_k();
-        if k == 0.0 || delta_t == 0.0 {
+        if k == 0.0 {
             continue;
         }
         let axis = side / 2;
@@ -153,6 +157,11 @@ pub(super) fn apply(
                     "explicit conductive enthalpy mixing weight exceeds one",
                 ));
             }
+        }
+        // An initially equilibrated bath still contributes stiffness to the
+        // explicit interval, including when other authored heat changes h.
+        if delta_t == 0.0 {
+            continue;
         }
         let q = dt * (g * delta_t);
         finite("flow.conductive_bath_heat", q)?;

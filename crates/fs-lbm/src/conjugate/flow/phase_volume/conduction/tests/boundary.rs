@@ -124,6 +124,142 @@ fn six_graded_faces_follow_independent_fourier_resistance_and_calorimetry() {
 }
 
 #[test]
+fn equilibrated_bath_retains_sensible_stiffness_with_authored_heat() {
+    let material = card("T", &[(300.0, 4.0), (500.0, 4.0)]);
+    let caloric = curve(
+        &material,
+        &[(0.0, 300.0, 1.0, 1.0), (400.0, 500.0, 1.0, 1.0)],
+    );
+    let source = source(&material, &caloric, [0.0, 400.0]);
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let states = [Some(caloric.state_at_specific_enthalpy(100.0).unwrap())];
+    let gate = CancelGate::new_clock_free();
+    let run = |dt| {
+        field.advance_isotropic_conductive_thermal_volume_with_baths(
+            &domain,
+            [FlowFace::Wall; 6],
+            &source,
+            &[bath(0, Face3::XMin, 350.0, 0.0)],
+            input(&[1.0], &states, &[2.0]),
+            controls(dt),
+            &gate,
+        )
+    };
+    // The original bath/cell temperature difference is zero, but G=4/.5=8
+    // and dT/dh=1/2 still give weight dt*8/2=4*dt for the sensible law.
+    invalid(run(0.5), "mixing weight exceeds one");
+    let result = run(0.125).unwrap();
+    close(result.report.maximum_enthalpy_mixing_weight, 0.5);
+    assert_eq!(result.report.boundary_faces, 1);
+    assert_eq!(result.report.boundary_heat_j, [0.0; 6]);
+    assert_eq!(result.report.absolute_boundary_heat_j, 0.0);
+    assert_eq!(result.conductive_enthalpy_increment_j, [0.0]);
+    close(
+        result.thermal.volume.report.requested_enthalpy_increment_j,
+        2.0,
+    );
+    close(result.thermal.volume.report.material_enthalpy_change_j, 2.0);
+    close(
+        result.thermal.volume.transport.specific_enthalpy_j_kg[0],
+        102.0,
+    );
+    close(
+        result.thermal.volume.phase_states[0]
+            .unwrap()
+            .temperature_k(),
+        351.0,
+    );
+    assert_eq!(result.thermal.volume.transport.mass_kg, [1.0]);
+    assert_eq!(states[0].unwrap().specific_enthalpy_j_kg(), 100.0);
+    assert_eq!(field, FlowField::quiescent(&domain));
+}
+
+#[test]
+fn embedded_wall_bath_uses_fluid_half_distance_without_solid_inventory() {
+    let material = card("T", &[(300.0, 4.0), (500.0, 4.0)]);
+    let caloric = curve(
+        &material,
+        &[(0.0, 300.0, 1.0, 1.0), (400.0, 500.0, 1.0, 1.0)],
+    );
+    let source = source(&material, &caloric, [0.0, 400.0]);
+    // The fluid is 2 m wide; the adjacent fixed-solid width is 7 m.
+    // The wall temperature belongs to their actual shared surface, so its
+    // conductance must use only d_fluid=1, A=12, k_fluid=4 and R=.5.
+    let fluid_domain = VoxelDomain::graded([vec![2.0, 7.0], vec![3.0], vec![4.0]]).unwrap();
+    let mut domain = fluid_domain.clone();
+    domain.set(1, 0, 0, Voxel::Solid(0));
+    let field = FlowField::quiescent(&domain);
+    let phase = Some(caloric.state_at_specific_enthalpy(100.0).unwrap());
+    let states = [phase, None];
+    let mass = [24.0, 0.0];
+    let gate = CancelGate::new_clock_free();
+    let run = |baths: &[ThermalVolumeBathFace]| {
+        field.advance_isotropic_conductive_thermal_volume_with_baths(
+            &domain,
+            [FlowFace::Wall; 6],
+            &source,
+            baths,
+            input(&mass, &states, &[0.0; 2]),
+            controls(0.125),
+            &gate,
+        )
+    };
+    let insulated = run(&[]).unwrap();
+    assert_eq!(insulated.conductive_enthalpy_increment_j, [0.0; 2]);
+    assert_eq!(insulated.thermal.volume.phase_states, states);
+    for temperature in [340.0, 360.0] {
+        let wall = bath(0, Face3::XMax, temperature, 0.5);
+        let result = run(&[wall]).unwrap();
+        let expected_heat = 0.125 * 12.0 * (temperature - 350.0) / (1.0 / 4.0 + 0.5);
+        close(result.conductive_enthalpy_increment_j[0], expected_heat);
+        assert_eq!(result.conductive_enthalpy_increment_j[1], 0.0);
+        assert_eq!(result.thermal.volume.transport.mass_kg, mass);
+        assert_eq!(result.thermal.volume.phase_states[1], None);
+        close(
+            result.thermal.volume.transport.specific_enthalpy_j_kg[0],
+            100.0 + expected_heat / 24.0,
+        );
+        close(
+            result.thermal.volume.phase_states[0]
+                .unwrap()
+                .temperature_k(),
+            350.0 + expected_heat / 48.0,
+        );
+        close(
+            result.thermal.volume.report.material_enthalpy_change_j,
+            expected_heat,
+        );
+        close(
+            result.report.boundary_heat_j[Face3::XMax as usize],
+            expected_heat,
+        );
+        close(result.report.absolute_boundary_heat_j, expected_heat.abs());
+        close(result.report.conduction_balance_defect_j, 0.0);
+        close(result.report.maximum_enthalpy_mixing_weight, 1.0 / 24.0);
+        assert_eq!(result.report.conductive_faces, 0);
+        assert_eq!(result.report.boundary_faces, 1);
+        invalid(run(&[wall, wall]), "duplicate thermal bath");
+        invalid(
+            FlowField::quiescent(&fluid_domain)
+                .advance_isotropic_conductive_thermal_volume_with_baths(
+                    &fluid_domain,
+                    [FlowFace::Wall; 6],
+                    &source,
+                    &[wall],
+                    input(&[24.0, 84.0], &[phase; 2], &[0.0; 2]),
+                    controls(0.125),
+                    &gate,
+                ),
+            "boundary fluid-cell face",
+        );
+    }
+    assert_eq!(mass, [24.0, 0.0]);
+    assert_eq!(states, [phase, None]);
+    assert_eq!(field.flux_x(1, 0, 0), 0.0);
+}
+
+#[test]
 fn opposed_baths_retain_gross_heat_and_are_independent_of_input_order() {
     let material = card("T", &[(300.0, 4.0), (500.0, 4.0)]);
     let caloric = curve(
@@ -298,7 +434,7 @@ fn invalid_baths_and_combined_heat_limits_leave_original_inventories_unchanged()
             controls(0.125),
             &gate,
         ),
-        "exterior fluid-cell face",
+        "boundary fluid-cell face",
     );
     let accepted = run(&[good], controls(0.125)).unwrap();
     gate.request();
