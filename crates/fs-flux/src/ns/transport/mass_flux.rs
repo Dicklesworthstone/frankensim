@@ -19,6 +19,9 @@ use crate::bdm::tri_quad;
 use crate::ns::convection_edge_quadrature;
 use fs_math::dd::Dd;
 
+/// Native BDM1 momentum transported by this same conservative mass flux.
+pub mod momentum;
+
 type Result<T> = core::result::Result<T, DensityTransportError>;
 
 /// One original sign-split face site. Both rates ALREADY include its line
