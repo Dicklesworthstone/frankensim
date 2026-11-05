@@ -651,10 +651,7 @@ impl StepWorkspace {
             dissipated += self.nonlinear_power.dissipated_power_w;
         }
         dissipated *= dt;
-        self.output.fill(0.0);
-        for port in 0..self.m {
-            for row in 0..n { self.output[port] += sys.g[row * self.m + port] * self.effort[row]; }
-        }
+        sys.output_from_effort_into(&self.effort, &mut self.output)?;
         let mut supplied = dt * u.iter().zip(&self.output).map(|(a, b)| a * b).sum::<f64>();
         if self.nonlinear_power.supplied_power_w != 0.0 {
             supplied += dt * self.nonlinear_power.supplied_power_w;

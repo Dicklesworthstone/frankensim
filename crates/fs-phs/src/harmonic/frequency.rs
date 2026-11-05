@@ -162,10 +162,10 @@ impl HarmonicFactor<'_> {
             }
             loss_derivative += half_pair(effort_derivative[i], resistance)?
                 + half_pair(response.effort[i], resistance_derivative)?;
-            for p in 0..m {
-                output_derivative[p] =
-                    output_derivative[p] + effort_derivative[i].scale(model.g[i * m + p]);
-            }
+        }
+        for (p, value) in output_derivative.iter_mut().enumerate() {
+            poll(&mut cancelled)?;
+            *value = super::port_output(&model.g, m, p, &effort_derivative)?;
         }
         let mut port_power_derivative = Vec::with_capacity(m);
         for p in 0..m {

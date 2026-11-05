@@ -559,12 +559,7 @@ pub fn audit_forced_orbit(
 }
 
 fn port_flows_into(system: &PortHamiltonian, effort: &[f64], out: &mut [f64]) -> bool {
-    let n=system.state_dim(); let m=system.port_dim();
-    let (_,_,g)=system.structure();
-    for (p,value) in out.iter_mut().enumerate() {
-        *value=(0..n).map(|i|g[i*m+p]*effort[i]).sum::<f64>();
-    }
-    out.iter().all(|value|value.is_finite())
+    system.output_from_effort_into(effort, out).is_ok()
 }
 
 fn audit_orbit_with_input(

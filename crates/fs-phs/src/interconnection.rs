@@ -210,7 +210,7 @@ fn contraction(
     })
 }
 
-mod accumulation;
+pub(crate) mod accumulation;
 use accumulation::Sum;
 
 fn checked<T>(value: Option<T>) -> Result<T, PhsError> {

@@ -1072,14 +1072,26 @@ impl PortHamiltonian {
 
     fn output_from_effort(&self, e: &[f64]) -> Vec<f64> {
         let mut y = vec![0.0; self.m];
-        for p in 0..self.m {
-            let mut acc = 0.0;
-            for i in 0..self.n {
-                acc += self.g[i * self.m + p] * e[i];
-            }
-            y[p] = acc;
+        if self.output_from_effort_into(e, &mut y).is_err() {
+            y.fill(f64::NAN);
         }
         y
+    }
+
+    /// Contract an already evaluated original effort into `y = G^T effort`.
+    ///
+    /// This allocation-free owner retains product rounding remainders and
+    /// compensated signed sums, so cancelling strong contributions do not
+    /// erase a weaker physical mode or harmonic. Only exact-zero map entries
+    /// are skipped. The original storage, state and port order are unchanged.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite efforts, wrong output extent, or an
+    /// unrepresentable contraction. On arithmetic refusal `out` is scratch
+    /// with unspecified contents; transactional callers publish it only on
+    /// success. No arbitrary-precision or overflow-cancellation claim is made.
+    pub fn output_from_effort_into(&self, effort: &[f64], out: &mut [f64]) -> Result<(), PhsError> {
+        port_outputs_into(self.n, self.m, &self.g, effort, out)
     }
 
     /// Structure matrices (row-major J, R, G) — read-only views.
@@ -1311,15 +1323,41 @@ impl DescriptorPortHamiltonian {
         self.storage.gradient(x, &mut e);
         e[self.n_diff..].copy_from_slice(&x[self.n_diff..]);
         let mut y = vec![0.0; self.m];
-        for p in 0..self.m {
-            let mut acc = 0.0;
-            for i in 0..self.n {
-                acc += self.g[i * self.m + p] * e[i];
-            }
-            y[p] = acc;
+        if port_outputs_into(self.n, self.m, &self.g, &e, &mut y).is_err() {
+            y.fill(f64::NAN);
         }
         y
     }
+}
+
+// Share the existing two-word physical-map accumulator with real and complex
+// port observation. A complex effort uses this same real map on each component.
+pub(crate) fn port_output_component(
+    g: &[f64], m: usize, port: usize, effort: impl Fn(usize) -> f64,
+) -> Option<f64> {
+    let mut sum = interconnection::accumulation::Sum::default();
+    for (i, row) in g.chunks_exact(m).enumerate() {
+        if row[port] != 0.0 {
+            sum.product(row[port], effort(i))?;
+        }
+    }
+    sum.value()
+}
+
+fn port_outputs_into(
+    n: usize, m: usize, g: &[f64], effort: &[f64], out: &mut [f64],
+) -> Result<(), PhsError> {
+    if effort.len() != n || out.len() != m || n.checked_mul(m) != Some(g.len()) {
+        return Err(PhsError::Dimension { what: "physical port output extents" });
+    }
+    if effort.iter().any(|v| !v.is_finite()) {
+        return Err(PhsError::Unadmitted { what: "nonfinite physical port effort" });
+    }
+    for (port, value) in out.iter_mut().enumerate() {
+        *value = port_output_component(g, m, port, |i| effort[i])
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical port output" })?;
+    }
+    Ok(())
 }
 
 /// Isolated 0-junction of two 1-port systems: `p_a = p_b`, `U_a + U_b = U_ext`.
@@ -2011,13 +2049,7 @@ pub fn step_descriptor(
         what: "accepted storage, effort, or flow is nonfinite",
     })?;
     let mut y = vec![0.0; sys.m];
-    for p in 0..sys.m {
-        let mut acc = 0.0;
-        for i in 0..n {
-            acc += sys.g[i * sys.m + p] * dg[i];
-        }
-        y[p] = acc;
-    }
+    port_outputs_into(n, sys.m, &sys.g, &dg, &mut y)?;
     let h1 = sys.storage.hamiltonian(&x1);
     let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x1,
         &mut vec![0.0; n], &mut vec![0.0; n]);
@@ -2427,7 +2459,7 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
             )
             .with_rounding_allowance(),
     )?;
-    Ok(ledger(
+    ledger(
         sys,
         x0,
         x1,
@@ -2436,7 +2468,7 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         iters,
         solver_residual,
         solver_certificate,
-    ))
+    )
 }
 
 /// Assemble the exact per-step energy ledger at the accepted iterate.
@@ -2450,7 +2482,7 @@ fn ledger(
     newton_iters: usize,
     solver_residual: f64,
     solver_certificate: SolveCertificate,
-) -> StepRecord {
+) -> Result<StepRecord, PhsError> {
     let n = sys.n;
     let mut dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
     let mut dissipated = 0.0;
@@ -2462,11 +2494,12 @@ fn ledger(
         dissipated += dg[i] * row;
     }
     dissipated *= dt;
-    let y = sys.output_from_effort(&dg);
+    let mut y = vec![0.0; sys.m];
+    sys.output_from_effort_into(&dg, &mut y)?;
     let supplied = dt * u.iter().zip(&y).map(|(&a, &b)| a * b).sum::<f64>();
     let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x1,
         &mut vec![0.0; n], &mut dg);
-    StepRecord {
+    Ok(StepRecord {
         x: x1,
         y,
         delta_h,
@@ -2475,7 +2508,7 @@ fn ledger(
         newton_iters,
         solver_residual,
         solver_certificate: Some(solver_certificate),
-    }
+    })
 }
 
 /// The implicit residual closure shared between the Newton loop and

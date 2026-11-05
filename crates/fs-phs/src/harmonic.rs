@@ -498,9 +498,10 @@ impl HarmonicFactor<'_> {
                 resistance = resistance + model.nonlinear_loss_row(i, &state);
             }
             loss += (effort[i].conj() * resistance).re * 0.5;
-            for p in 0..m {
-                output[p] = output[p] + effort[i].scale(model.g[i * m + p]);
-            }
+        }
+        for (p, value) in output.iter_mut().enumerate() {
+            poll(&mut cancelled)?;
+            *value = port_output(&model.g, m, p, &effort)?;
         }
         let mut port_power_components = Vec::with_capacity(m);
         let mut port_power = Vec::with_capacity(m);
@@ -629,4 +630,13 @@ impl HarmonicFactor<'_> {
         }
         Ok((state, relative))
     }
+}
+
+fn port_output(g: &[f64], ports: usize, port: usize, effort: &[C64]) -> Result<C64, HarmonicError> {
+    let re = crate::port_output_component(g, ports, port, |i| effort[i].re);
+    let im = crate::port_output_component(g, ports, port, |i| effort[i].im);
+    Ok(C64::new(
+        re.ok_or_else(|| invalid("physical port output is not representable"))?,
+        im.ok_or_else(|| invalid("physical port output is not representable"))?,
+    ))
 }

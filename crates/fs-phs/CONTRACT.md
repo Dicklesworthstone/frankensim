@@ -1,5 +1,23 @@
 # fs-phs — Contract
 
+## Signed physical port observation
+
+`PortHamiltonian::output_from_effort_into` is the allocation-free owner of
+`G^T effort` for original real port outputs. It reuses the existing physical-map
+two-word accumulator, retaining product/FMA remainders and signed cancellation.
+Direct ODE/descriptor observation, ordinary/prepared discrete-gradient outputs,
+and complex harmonic response use the same contraction arithmetic. Complete
+effort dimensions and finite representable arithmetic are required; no small
+coefficient is discarded. The periodic pHS adapter consumes this owner for
+feedback, work audit and nonlinear output spectra, so a weak overtone survives
+cancellation of stronger modal contributions. This adds no physical mode,
+changes no constitutive law, and is not an arbitrary-precision guarantee.
+
+Focused regressions in `prepared_step` and `harmonic_response` use exact signed
+mode cancellation, a known product remainder, direct/prepared parity, and an
+independent complex relaxation response. Workspace outputs remain unpublished
+on refusal; the low-level effort contraction documents its scratch semantics.
+
 ## Explicit synchronous converter gate cycles
 
 `circuit::converter::switching::PreparedSwitchCycle` advances the original

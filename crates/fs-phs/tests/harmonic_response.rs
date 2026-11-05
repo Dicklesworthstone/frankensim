@@ -52,6 +52,32 @@ fn damped_resonance_has_analytic_amplitude_phase_and_independent_power() {
 }
 
 #[test]
+fn coherent_port_sum_preserves_a_weak_phasor_between_opposite_strong_responses() {
+    // Three independent unit relaxation states have x_i = u_i / (1-i*w).
+    // The fourth port observes their signed sum with no applied input.
+    let identity = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let system = PortHamiltonian::new(
+        3, 4, vec![0.0; 9], identity.clone(),
+        vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+        Box::new(QuadraticStorage::new(identity, 3).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let large = 2.0_f64.powi(54);
+    let factor = model.factor(1.0, || false).unwrap();
+    for small in [C64::ONE, C64::new(-0.7, 0.3)] {
+        let input = [C64::from_re(large), small, C64::from_re(-large), C64::ZERO];
+        let result = factor.response(&input, || false).unwrap();
+        near(result.output[3], small / C64::new(1.0, -1.0), 3e-15);
+        assert!(result.relative_residual < 1e-14);
+        let derivative = factor.response_with_frequency_derivative(&input, None, || false).unwrap();
+        // d/dw [u/(1-i*w)] at w=1 is -u/2, including its complex phase.
+        near(derivative.output_derivative[3], small.scale(-0.5), 3e-15);
+        near(derivative.output_logarithmic_derivative(3).unwrap().unwrap(),
+            C64::new(-0.5, 0.5), 3e-15);
+    }
+}
+
+#[test]
 fn hereditary_internal_states_produce_the_original_frequency_dependent_loss() {
     let (mass, equilibrium, branch, tau) = (0.4_f64, 110.0, 300.0, 0.025);
     let system = fs_phs::mass_spring_damper(mass, equilibrium, 0.0)
