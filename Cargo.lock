@@ -1323,6 +1323,7 @@ dependencies = [
  "fs-conduction",
  "fs-contact",
  "fs-convection",
+ "fs-cutfem",
  "fs-dcontact",
  "fs-duct",
  "fs-em",
