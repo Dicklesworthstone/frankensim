@@ -263,6 +263,39 @@ declared conductivity source within the existing implicit network residual.
 These manufactured cases test numerical integration, not material calibration,
 source support between endpoints, morphology or coupled mechanical work.
 
+### Material properties of retained crystal populations
+
+The original thermal `CrystallizationPopulation` equilibrates incoming masses
+at conserved enthalpy while retaining their individual kinetic exposures. Its
+parallel-cohort closure uses one common temperature and exposure increment;
+averaging ages is unavailable. The original caloric inverse also serves this
+population, and immutable cohort storage is shared across trial steps.
+`CrystallizationPropertySource::for_population` and `evaluate_population`
+resolve the actual aggregate mass and density-derived volume fractions on the
+same pinned claims, without manufacturing a single-history phase state.
+An explicitly admitted aggregate property law remains necessary: this API does
+not infer conductivity/stiffness homogenization, inter-cohort impingement,
+spatial mass flux, remelting or calibrated molecular mixing.
+
+### Bulk conduction on kinetic interface exchange
+
+`thermal::interface::crystallization::CrystallizationBulkConduction` prepares
+both original conductivity claims with actual kinetic coordinates and fixed
+positive layer distances. Supplied pressure coordinates must agree with the
+parcel pressure. `CrystallizationInterfaceContact::new_with_bulk_conduction`
+binds that preparation to the same ordered caloric/kinetic laws and evaluates
+both conductivities and the original interface resistance inside each existing
+implicit heat candidate. The shared series-resistance owner computes total
+conductance. Zero interface resistance is admitted with bulk resistance;
+supported zero conductivity insulates without freezing phase history.
+
+Accepted responses retain both bulk source answers and the interface receipt.
+Unsupported domains cannot select another claim or publish either parcel.
+These stationary isotropic layer laws do not infer moving geometry, spatial
+temperature profiles or material calibration. Focused regressions specify
+analytic heat/latent balances, distinct crystal coordinates, both resistances,
+insulation and transactional source refusal.
+
 ## Original mixed pressure dual without unused remainder tangents
 
 `MixedFiniteStrainPotential::mixed_pressure_potential` exposes the original

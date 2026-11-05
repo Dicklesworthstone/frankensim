@@ -1,10 +1,11 @@
 //! Source-bound contact between two uniform, finite kinetic phase inventories.
 //!
 //! The original ordered interface supplies area-specific resistance at the two
-//! ACTUAL endpoint temperatures. A caller-owned fixed area gives G=A/R; the
-//! shared implicit exchange kernel owns heat, kinetic history and pressure work.
-//! Bulk thermal resistance is absent in this declared contact-only model. Area,
-//! separation and interface pressure are not inferred from the free phase volume.
+//! ACTUAL endpoint temperatures. Contact-only exchange uses G=A/R. Optional
+//! prepared bulk conduction uses each body's original conductivity at its own
+//! kinetic temperature and crystal fractions, with declared fixed distances.
+//! The shared implicit kernel still owns heat, history and pressure work. Area,
+//! distances and interface pressure are not inferred from the free phase volume.
 //!
 //! No equilibrium phase state or liquid fraction is manufactured from kinetic X.
 //! The source must apply over the intended crystallization history without an
@@ -17,6 +18,7 @@ use super::{
     ThermalInterfacePoint,
 };
 use crate::phase::crystallization::CrystallizationCaloricPair;
+use crate::phase::crystallization::properties::CrystallizationPropertyError;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedInterfaceStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_interface_state_point,
@@ -32,13 +34,29 @@ use fs_thermal::crystallization::pressure::exchange::{
 };
 use fs_thermal::crystallization::pressure::parcel::IsobaricCrystallizationParcel;
 use fs_thermal::crystallization::{CrystallizationConfig, CrystallizationError};
+use fs_thermal::enthalpy::{DepositionError, series_contact_conductance_w_k};
+
+mod conduction;
+pub use conduction::{CrystallizationBulkConduction, CrystallizationBulkConductionResponse};
 
 /// Identity/geometry admission, original source refusal, or shared thermal refusal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CrystallizationInterfaceError {
     Invalid(&'static str),
     Material(ThermalMaterialError),
+    Property(CrystallizationPropertyError),
+    Conduction(DepositionError),
     Thermal(CrystallizationError),
+}
+impl From<CrystallizationPropertyError> for CrystallizationInterfaceError {
+    fn from(error: CrystallizationPropertyError) -> Self {
+        Self::Property(error)
+    }
+}
+impl From<DepositionError> for CrystallizationInterfaceError {
+    fn from(error: DepositionError) -> Self {
+        Self::Conduction(error)
+    }
 }
 impl From<ThermalMaterialError> for CrystallizationInterfaceError {
     fn from(error: ThermalMaterialError) -> Self {
@@ -67,6 +85,9 @@ impl std::error::Error for CrystallizationInterfaceError {}
 pub struct CrystallizationInterfaceResponse {
     pub source: ResolvedInterfaceStatePoint,
     pub resistance_m2_k_w: f64,
+    /// Both bulk source answers when finite distances/conductivities are present.
+    pub bulk: Option<CrystallizationBulkConductionResponse>,
+    /// TOTAL conductance: contact-only A/R, or bulk plus contact in series.
     pub conductance_w_k: f64,
 }
 
@@ -86,6 +107,7 @@ pub struct CrystallizationInterfaceContact<'a> {
     mean_temperature_axis: Option<String>,
     bindings: [CaloricBinding; 2],
     area_m2: f64,
+    bulk: Option<CrystallizationBulkConduction<'a>>,
 }
 
 impl<'a> CrystallizationInterfaceContact<'a> {
@@ -103,6 +125,70 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     /// explicitly refuses instead of introducing a numerical regularization.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        point: ThermalInterfacePoint<'a>,
+        pairs: [&CrystallizationCaloricPair<'_>; 2],
+        parcels: [&IsobaricCrystallizationParcel<'_, '_>; 2],
+        area_m2: f64,
+        fixed_pressure_axis: Option<&str>,
+        fixed_separation_axis: Option<&str>,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, CrystallizationInterfaceError> {
+        let contact = Self::prepare(
+            point,
+            pairs,
+            parcels,
+            area_m2,
+            fixed_pressure_axis,
+            fixed_separation_axis,
+            selection,
+        )?;
+        conductance(area_m2, contact.source.properties()[0].value_si())?;
+        Ok(contact)
+    }
+
+    /// Add original crystallinity-dependent bulk conduction to this interface.
+    ///
+    /// The bulk preparation must describe these same ordered caloric/kinetic
+    /// laws and fixed parcel pressures. It supplies positive fixed distances,
+    /// never distances inferred from the free phase volume. Conductivities and
+    /// contact resistance are refreshed together at every implicit candidate;
+    /// an unavailable source aborts the entire two-body exchange.
+    ///
+    /// An explicitly zero-resistance interface is supported here because the
+    /// finite bulk layers close the total resistance. No small contact epsilon
+    /// or arbitrary conductivity mixing rule is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_bulk_conduction(
+        point: ThermalInterfacePoint<'a>,
+        pairs: [&CrystallizationCaloricPair<'_>; 2],
+        parcels: [&IsobaricCrystallizationParcel<'_, '_>; 2],
+        area_m2: f64,
+        fixed_pressure_axis: Option<&str>,
+        fixed_separation_axis: Option<&str>,
+        selection: MaterialPropertySelection,
+        bulk: CrystallizationBulkConduction<'a>,
+    ) -> Result<Self, CrystallizationInterfaceError> {
+        let mut contact = Self::prepare(
+            point,
+            pairs,
+            parcels,
+            area_m2,
+            fixed_pressure_axis,
+            fixed_separation_axis,
+            selection,
+        )?;
+        if contact.bindings != bulk.bindings {
+            return Err(invalid(
+                "bulk conduction and interface require the same ordered original laws and pressures",
+            ));
+        }
+        contact.bulk = Some(bulk);
+        contact.evaluate(parcels[0], parcels[1])?;
+        Ok(contact)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
         point: ThermalInterfacePoint<'a>,
         pairs: [&CrystallizationCaloricPair<'_>; 2],
         parcels: [&IsobaricCrystallizationParcel<'_, '_>; 2],
@@ -172,7 +258,6 @@ impl<'a> CrystallizationInterfaceContact<'a> {
                 "contact source depends on an unowned or nonstatic physical coordinate",
             ));
         }
-        conductance(area_m2, property.value_si())?;
         Ok(Self {
             interface: point.interface,
             source,
@@ -180,6 +265,7 @@ impl<'a> CrystallizationInterfaceContact<'a> {
             mean_temperature_axis: point.mean_temperature_axis.map(str::to_owned),
             bindings,
             area_m2,
+            bulk: None,
         })
     }
 
@@ -188,6 +274,9 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     }
     pub const fn area_m2(&self) -> f64 {
         self.area_m2
+    }
+    pub fn bulk_conduction(&self) -> Option<&CrystallizationBulkConduction<'a>> {
+        self.bulk.as_ref()
     }
     pub fn caloric_pair_identities(&self) -> [ContentHash; 2] {
         self.bindings
@@ -215,10 +304,24 @@ impl<'a> CrystallizationInterfaceContact<'a> {
         )?;
         let source = self.source.at_query_point(self.interface, &query)?;
         let resistance_m2_k_w = source.properties()[0].value_si();
-        let conductance_w_k = conductance(self.area_m2, resistance_m2_k_w)?;
+        let bulk = self
+            .bulk
+            .as_ref()
+            .map(|bulk| bulk.evaluate(parcels))
+            .transpose()?;
+        let conductance_w_k = match (&self.bulk, &bulk) {
+            (Some(prepared), Some(response)) => series_contact_conductance_w_k(
+                self.area_m2,
+                prepared.distances_m(),
+                response.conductivity_w_m_k,
+                resistance_m2_k_w,
+            )?,
+            _ => conductance(self.area_m2, resistance_m2_k_w)?,
+        };
         Ok(CrystallizationInterfaceResponse {
             source,
             resistance_m2_k_w,
+            bulk,
             conductance_w_k,
         })
     }
@@ -299,7 +402,7 @@ impl<'a> CrystallizationInterfaceContact<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct CaloricBinding {
     pair_identity: ContentHash,
     branch_identities: [ContentHash; 2],
