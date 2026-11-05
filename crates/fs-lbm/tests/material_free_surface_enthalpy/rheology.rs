@@ -13,6 +13,10 @@ mod impulse;
 #[path = "rheology/pressure.rs"]
 mod pressure;
 
+#[cfg(feature = "enthalpy-coupling")]
+#[path = "rheology/viscous_feedback.rs"]
+mod viscous_feedback;
+
 const CELL: [usize; 3] = [3; 3];
 
 #[test]

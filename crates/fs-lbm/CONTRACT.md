@@ -13064,3 +13064,48 @@ the exact linearized NSF modes, with relative error below `2e-4` on the finer
 rung and decreasing under refinement. A transverse shear wave checks that
 changing only bulk viscosity does not introduce shear loss. These focused
 checks supplement, rather than replace, the broader NSF qualification matrix.
+
+## Molecular viscous heat with thermal feedback on the original free surface
+
+`MaterialFreeSurfaceEnthalpy3::step_with_conduction_and_viscous_feedback`
+refreshes molecular stress power at every source evaluation on the original
+thermal timeline. It captures the accepted Guo-corrected nonequilibrium stress
+numerator once, alongside the existing source-owned mechanical pressure when
+pressure-dependent rheology is selected. The original `RheologyModel::sample`
+then closes `gamma*tau(T,gamma)=A/dt` at each actual caloric state. Newtonian
+sources use the same numerator with their newly resolved molecular tau. Thus
+`mu(T,gamma)*gamma^2` uses one consistent material/strain response; it never
+combines an old physical strain rate with a new viscosity.
+
+Within one private thermal candidate, an identical enthalpy bit pattern can
+reuse its complete resolved sample for the same original source, held stress,
+pressure and physical scaling. Cancellation still polls before each cache hit.
+Only two bounded enthalpy-key vectors accompany the existing diagnostic
+samples; the cache never survives a different flow interval or source binding.
+
+Every accepted thermal substep integrates its applied power once over the
+located liquid volume and actual duration. Zero-mass interface ghosts and
+unlocated conversion carry receive no inferred strain or heat. The report
+retains the last applied and thermal-endpoint source samples, including the
+physical rate, molecular tau and power. Endpoint samples provide admission and
+diagnostics without a second deposit. Authored heat, internal conduction and
+molecular heat retain distinct accounting, and the original thermal audit must
+close their sum. The original VOF collision, mass routes and conservative
+`mass*h` transport then advance once using the accepted thermal endpoint.
+Source, thermal-work-budget, native-flow or cancellation refusal preserves the
+accepted liquid state, material/rheology observations and physical clock.
+
+This opt-in is explicit thermal subcycling with the original first-order
+thermal/flow split. It holds the kinetic stress numerator, not physical strain
+or physical Cauchy stress, during thermal evolution. Nonlinear thermal time
+refinement is still required; no unconditional stability, simultaneous momentum
+feedback, kinetic-plus-thermal conservation, bulk-viscosity heat, phase heat,
+pressure work or numerical-loss heating is asserted. Existing frozen-source
+viscous-heating APIs retain their original arithmetic and meaning.
+
+Focused regression sources compare thermal/rheological feedback with an
+independent dimensional RK4 heat ODE and closed-form constitutive root, check
+substep refinement and original source identity, exercise Newtonian conduction and
+constant-viscosity native-population parity, and verify complete rollback and
+exact retry after source and late thermal-budget refusals. These are synthetic
+constitutive coupling checks, not experimental validation of a liquid.

@@ -61,6 +61,10 @@ pub use pressure::{FreeSurfaceGasPressure, FreeSurfaceThermalBoundaries};
 pub mod interface;
 pub use interface::FreeSurfaceBodyInterface;
 
+/// Temperature/rheology feedback of molecular stress power on this timeline.
+mod viscous_feedback;
+pub use viscous_feedback::{FreeSurfaceViscousFeedbackReport, FreeSurfaceViscousFeedbackSample};
+
 /// Actual wet geometry of one face at the beginning of this flow step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceConductionFace {
@@ -125,6 +129,9 @@ pub struct FreeSurfaceConductionReport {
     pub body_radiation: Option<FreeSurfaceBodyRadiationExchange>,
     /// Actual native electrode supply and Joule heat, counted once in external heat.
     pub electrical: Option<FreeSurfaceElectricalExchange>,
+    /// Present only for explicitly selected substep-resolved molecular heating.
+    /// Its heat is already included once in `flow.viscous_heat_j`.
+    pub viscous_feedback: Option<FreeSurfaceViscousFeedbackReport>,
 }
 
 fn checkpoint(gate: &CancelGate) -> Result<(), DepositionError> {
@@ -200,6 +207,7 @@ struct Conduction<'a, 'm> {
     body_atmosphere: atmosphere::BodyAtmosphere,
     body_radiation: radiation::BodyRadiation,
     electrical: Option<electrical::ElectricalTimeline>,
+    viscous_feedback: Option<viscous_feedback::ViscousFeedback>,
 }
 
 struct Samples {
@@ -229,6 +237,12 @@ impl<'a, 'm> Conduction<'a, 'm> {
         h: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ResolvedLiquidState, Error> {
+        if let Some(material) = self.viscous_feedback.as_ref()
+            .and_then(|feedback| feedback.cached_material(id, h))
+        {
+            check()?;
+            return Ok(material.clone());
+        }
         if let Some(model) = &self.rheology {
             Ok(model
                 .sample(h, self.rheology_stress[&id], || {
@@ -385,6 +399,7 @@ impl DepositionObserver for Conduction<'_, '_> {
     ) -> Result<BTreeMap<CellId, f64>, Error> {
         check()?;
         let mut powers = self.powers.clone();
+        self.add_viscous_feedback(thermal, &mut powers, check)?;
         if let Some(current) = self.sample_current(thermal, check)? {
             let electrical = self.electrical.as_mut().expect("bound electrical core");
             for (&id, &watts) in electrical.cells.iter().zip(&current.solution.joule_w) {
@@ -511,6 +526,7 @@ impl Conduction<'_, '_> {
         implicit_gas: Option<(&fs_material::thermochemical_gas::energy::IsochoricGasParcel, f64)>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Error> {
+        self.accept_viscous_feedback(duration_s, thermal, check)?;
         let mut gas_heat = 0.0;
         for sample in &self.environment_last {
             check()?;
@@ -787,7 +803,37 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_viscous_feedback(
+            faces, heat, controls, viscous, bodies, contacts, interfaces,
+            environment, radiation, surfaces, surface_solve, surface_convection,
+            finite_atmosphere, gas_pressure, false, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_viscous_feedback(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        environment: &[FreeSurfaceGasContact<'_>],
+        radiation: &[FreeSurfaceRadiationFace],
+        surfaces: &[FreeSurfaceInterfaceContact<'_>],
+        surface_solve: FreeSurfaceInterfaceSolve,
+        surface_convection: Option<&dyn surface::convection::FreeSurfaceGasConvection>,
+        finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
+        gas_pressure: Option<(f64, GasPressureField<'_>)>,
+        refresh_viscous_heat: bool,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
+        if refresh_viscous_heat && !viscous.is_empty() {
+            return Err(Error::Invalid("molecular heat must have one source owner"));
+        }
         if surface_convection.is_some() && surfaces.is_empty() {
             return Err(Error::Invalid(
                 "gas surface convection requires complete exposed surface patches",
@@ -1174,6 +1220,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 rheology_stress.insert(id, self.rheology_stress(&self.flow.lattice, location)?);
             }
         }
+        let viscous_feedback = if refresh_viscous_heat {
+            Some(viscous_feedback::ViscousFeedback::prepare(self, &ids, &thermal, gate)?)
+        } else {
+            None
+        };
         let observer = Conduction {
             gate,
             law: self.law,
@@ -1242,6 +1293,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             body_atmosphere,
             body_radiation,
             electrical,
+            viscous_feedback,
         };
         #[cfg(feature = "implicit-enthalpy-coupling")]
         let implicit_surface = surface_solve.implicit;
@@ -1254,6 +1306,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         #[cfg(not(feature = "implicit-enthalpy-coupling"))]
         let (thermal, mut observer, audit) =
             thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?;
+        if let Some(feedback) = &observer.viscous_feedback {
+            viscous_heat = environment::finite(viscous_heat + feedback.report.heat_j)?;
+            absolute_heat = environment::finite(absolute_heat + feedback.report.heat_j)?;
+        }
         let electrical_report = observer.electrical.as_ref()
             .map(|current| current.report(controls.energy_tolerance_j)).transpose()?;
         let electrical_forces = observer.electrical.as_ref()
@@ -1270,6 +1326,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             heated.insert(location, thermal.cells()[&id].specific_h_j_kg);
         }
         let external = if viscous.is_empty()
+            && observer.viscous_feedback.is_none()
             && environment.is_empty()
             && radiation.is_empty()
             && surfaces.is_empty()
@@ -1428,6 +1485,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 thermal_endpoint: observer.body_radiation.endpoint,
             },
         );
+        let viscous_feedback = observer.viscous_feedback.map(|feedback| feedback.report);
         // Flow has passed every endpoint/advection gate; accepting the already
         // admitted solid candidate is now infallible. No partial thermal commit.
         for ((body, h), material) in bodies.iter_mut().zip(body_enthalpies).zip(body_sources) {
@@ -1461,6 +1519,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             surface: surface_report,
             finite_gas: finite_gas_report,
             electrical: electrical_report,
+            viscous_feedback,
         })
     }
 }

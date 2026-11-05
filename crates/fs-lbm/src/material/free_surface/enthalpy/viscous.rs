@@ -181,6 +181,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// initial molecular stress power. Source k(T), collision mu(T) and optional
     /// buoyancy refresh through their original owners; flow advances once.
     /// The same source-split and physical limits as viscous heating apply.
+    /// Use [`Self::step_with_conduction_and_viscous_feedback`] when molecular
+    /// power must also refresh at each thermal temperature/rheology query.
     #[cfg(feature = "enthalpy-coupling")]
     pub fn step_with_conduction_and_viscous_heating(
         &mut self,
