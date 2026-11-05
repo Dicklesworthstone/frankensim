@@ -5,10 +5,13 @@
 //! linear network. The original scalar or simultaneous bow solve includes that
 //! reaction. The fixed point is accepted only when the reaction law AND the combined energy
 //! balance close. fs-phs owns DG; this adapter changes neither the exponential
-//! linear propagator nor the friction law, its stick/slip branch or work port.
+//! linear propagator nor the friction law, its stick/slip branch rule or work
+//! port. Only a step whose reaction iteration exhausts its budget is solved
+//! again, with each port's branch memory held across trials (`stage_trial`).
 //! This is a bounded iterated discrete-gradient composition, not SAV, a unique
 //! nonlinear-solution claim, a trajectory certificate or a real-time guarantee.
 use super::*;
+use crate::stribeck_friction::ContactBranch;
 use fs_phs::Storage;
 use std::borrow::Cow;
 
@@ -162,6 +165,13 @@ pub(super) trait NonlinearTrial {
     fn core(&self) -> &FrictionModalSystem;
     fn stage(&mut self, forces: &[f64], gate: Option<&CancelGate>)
         -> Result<NonlinearTrialWork, ModalFrictionError>;
+    /// Each dry port's McIntyre-Schumacher-Woodhouse memory, which its root
+    /// rule starts from: the accepted step's, except inside the held-branch
+    /// pass of `stage_trial`, which sets the previous trial's and restores it.
+    fn branch_memory(&self) -> Vec<ContactBranch>;
+    fn set_branch_memory(&mut self, memory: &[ContactBranch]);
+    /// Each port's branch as the last `stage` resolved it, not yet committed.
+    fn staged_branches(&self) -> Vec<ContactBranch>;
 }
 pub(super) struct NonlinearTrialWork {
     pub observer_pressure_pa: f64,
@@ -227,6 +237,14 @@ impl NonlinearTrial for SingleTrial<'_> {
             contacts: None,
         })
     }
+    fn branch_memory(&self) -> Vec<ContactBranch> { vec![self.inner.branch] }
+    fn set_branch_memory(&mut self, memory: &[ContactBranch]) { self.inner.branch = memory[0]; }
+    fn staged_branches(&self) -> Vec<ContactBranch> { vec![self.inner.staged_branch] }
+}
+/// A reaction iteration that used its whole budget without being accepted.
+struct Exhausted {
+    ratio: f64,
+    energy: (f64, f64),
 }
 struct BoundPotential {
     coordinates: Vec<usize>,
@@ -539,12 +557,49 @@ impl NonlinearFrictionState {
             reaction_tolerance: correction.diagnostics.reaction_tolerance,
         })
     }
+    // Every trial first chooses each port's root from the ACCEPTED step's
+    // branch memory, so an accepted fixed point is the branch rule's own
+    // answer at its own forces. A port at the static cone's edge can have no
+    // such point: sticking is inadmissible under the reaction of its own stuck
+    // response and admissible under that of the sliding one, so the trials
+    // alternate until the budget ends. Only then is the step solved again from
+    // the same accepted state with each trial's memory set to the previous
+    // trial's resolved branches: a port that had to leave its branch keeps the
+    // new one while that branch's root exists. A port may change branch once
+    // in this pass; a second change, or any failure, returns the first pass's
+    // refusal. A step the first pass accepts is never solved again.
     pub(super) fn stage_trial<T: NonlinearTrial>(
         &mut self,
         trial: &mut T,
         external: &[f64],
         gate: Option<&CancelGate>,
     ) -> Result<NonlinearCorrection, ModalFrictionError> {
+        let ratio = match self.iterate(trial, external, gate, false)? {
+            Ok(accepted) => return Ok(accepted),
+            Err(Exhausted { ratio, .. }) if ratio > 1.0 => ratio,
+            Err(Exhausted { energy: (residual_j, tolerance_j), .. }) => {
+                return Err(ModalCouplingError::EnergyBalance { residual_j, tolerance_j }.into());
+            }
+        };
+        let accepted_memory = trial.branch_memory();
+        let held = self.iterate(trial, external, gate, true);
+        trial.set_branch_memory(&accepted_memory);
+        if let Ok(Ok(mut accepted)) = held {
+            // Disclosed: every trial staged for this step, both passes.
+            accepted.diagnostics.nonlinear_iterations = self.config.max_iterations
+                .saturating_add(accepted.diagnostics.nonlinear_iterations);
+            return Ok(accepted);
+        }
+        poll(gate)?;
+        Err(ModalCouplingError::SolveResidual { relative: ratio, tolerance: 1.0 }.into())
+    }
+    fn iterate<T: NonlinearTrial>(
+        &mut self,
+        trial: &mut T,
+        external: &[f64],
+        gate: Option<&CancelGate>,
+        hold: bool,
+    ) -> Result<Result<NonlinearCorrection, Exhausted>, ModalFrictionError> {
         self.staged_history_sample = None;
         poll(gate)?;
         let inner = trial.core();
@@ -574,6 +629,8 @@ impl NonlinearFrictionState {
         let mut forces = external.to_vec();
         let mut last_ratio = f64::INFINITY;
         let mut last_energy = (0.0, 0.0);
+        let mut held: Option<Vec<ContactBranch>> = None;
+        let mut changes: Vec<u8> = Vec::new();
         for iteration in 1..=self.config.max_iterations {
             poll(gate)?;
             for i in 0..forces.len() {
@@ -583,7 +640,20 @@ impl NonlinearFrictionState {
                     finite(external[i] + reaction[i])?
                 };
             }
+            if let Some(previous) = &held { trial.set_branch_memory(previous); }
             let frame = trial.stage(&forces, gate)?;
+            if hold {
+                let staged = trial.staged_branches();
+                if let Some(previous) = &held {
+                    for ((count, now), before) in changes.iter_mut().zip(&staged).zip(previous) {
+                        if now != before { *count = count.saturating_add(1); }
+                    }
+                    if changes.iter().any(|&count| count > 1) { break; }
+                } else {
+                    changes = vec![0; staged.len()];
+                }
+                held = Some(staged);
+            }
             let inner = trial.core();
             let after_q = coordinates(&inner.network.candidates);
             let mut after_potential = self.potential_energy(&after_q)?;
@@ -714,22 +784,11 @@ impl NonlinearFrictionState {
                 };
                 poll(gate)?;
                 self.staged_history_sample = Some(inner.samples_rendered());
-                return Ok(accepted);
+                return Ok(Ok(accepted));
             }
             std::mem::swap(&mut reaction, &mut next_reaction);
         }
-        if last_ratio <= 1.0 {
-            return Err(ModalCouplingError::EnergyBalance {
-                residual_j: last_energy.0,
-                tolerance_j: last_energy.1,
-            }
-            .into());
-        }
-        Err(ModalCouplingError::SolveResidual {
-            relative: last_ratio,
-            tolerance: 1.0,
-        }
-        .into())
+        Ok(Err(Exhausted { ratio: last_ratio, energy: last_energy }))
     }
     pub(super) fn publish(&mut self, frame: NonlinearFrictionFrame) {
         self.publish_histories();

@@ -51,6 +51,11 @@ impl NonlinearTrial for MultipleTrial<'_> {
         self.frame = Some(frame);
         Ok(work)
     }
+    fn branch_memory(&self) -> Vec<crate::stribeck_friction::ContactBranch> { self.inner.branches.clone() }
+    fn set_branch_memory(&mut self, memory: &[crate::stribeck_friction::ContactBranch]) {
+        self.inner.branches.copy_from_slice(memory);
+    }
+    fn staged_branches(&self) -> Vec<crate::stribeck_friction::ContactBranch> { self.inner.staged_branches.clone() }
 }
 impl MultiFrictionModalSystem {
     pub(super) fn stage_with_nonlinear(&mut self, external: &[f64],
