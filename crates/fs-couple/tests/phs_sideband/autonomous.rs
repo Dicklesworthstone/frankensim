@@ -11,7 +11,7 @@ use fs_math::{c64::C64, det};
 use fs_nlmodal::{SosModalStorage, StressChannel};
 use fs_orbit::{
     HbOrbit,
-    sideband::{SidebandError, SidebandScales},
+    sideband::{SidebandError, SidebandScales, refinement::SidebandRefinementControls},
 };
 use fs_phs::{PortHamiltonian, RelaxationBranch, Storage};
 
@@ -444,5 +444,97 @@ fn prepared_autonomous_sweep_reuses_one_complete_tangent_and_keeps_physical_memo
         assert!(zero.port_coefficients.iter().all(|z| *z == C64::ZERO));
     }
     assert_eq!(calls.get(), preparations);
+    assert_eq!(base.coeffs, original);
+}
+
+#[test]
+fn adaptive_autonomous_probe_resolves_generated_bands_before_original_memory_and_port_observation()
+{
+    let drive = CycleDrive {
+        omega: 1.2,
+        gain: 0.45,
+        resistance: 0.2,
+        cubic: 0.6,
+        memory: 0.3,
+    };
+    let (tau, phase, carrier) = (0.7, 0.31, 0.47);
+    let system = system(&drive, tau, None);
+    let base = candidate(&drive, tau, phase);
+    let original = base.coeffs.clone();
+    let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| drive.total_derivative(x, y, out);
+    let mut c = controls(3, 2, 1, 4);
+    c.sideband.maximum_unknowns = 3 * 15;
+    let refinement = SidebandRefinementControls {
+        maximum_harmonics: 7,
+        equation_tolerances: vec![2e-10; 3],
+        state_tolerances: vec![2e-10; 3],
+    };
+    let force = [C64::new(0.12, -0.04), C64::new(-0.03, 0.05)];
+    let mut forcing = vec![C64::ZERO; 6];
+    forcing[2..4].copy_from_slice(&force);
+    let mut source =
+        PhsPortSidebandSource::autonomous_feedback(&system, &drive, &derivative, &base, &c)
+            .unwrap();
+    let adaptive = source
+        .solve_adaptive(carrier, &forcing, &scales(3), &refinement, || false)
+        .unwrap();
+    assert_eq!(
+        adaptive
+            .refinement_trace
+            .iter()
+            .map(|check| check.harmonics)
+            .collect::<Vec<_>>(),
+        [1, 3, 7]
+    );
+    assert!(adaptive.refinement_trace[0].equation_residual_ratio > 1.0);
+    assert!(adaptive.refinement_trace[1].state_change_ratio.unwrap() > 1.0);
+    let result = adaptive.response;
+    assert_eq!(result.state_harmonics, 7);
+    assert_eq!(result.output_harmonics, 4);
+    assert_eq!(result.state_dimension, 3);
+    assert_eq!(result.port_count, 2);
+    let mechanics = exact_mechanical(&drive, phase, carrier, force);
+    let state = |k: isize, j: usize| {
+        if k.unsigned_abs() > 2 {
+            return C64::ZERO;
+        }
+        let mechanical = mechanics[(k + 2) as usize];
+        if j < 2 {
+            mechanical[j]
+        } else {
+            mechanical[0].scale(det::sqrt(drive.memory))
+                / C64::new(1.0, tau * (carrier + k as f64 * drive.omega))
+        }
+    };
+    for k in -7..=7 {
+        for j in 0..3 {
+            near(
+                result.state_response.coefficients[(k + 7) as usize * 3 + j],
+                state(k, j),
+                5e-11,
+            );
+        }
+    }
+    let modulation = (base.coeffs[0][1] * base.coeffs[0][1]).scale(3.0 * drive.cubic);
+    for k in -4..=4 {
+        let effort = state(k, 0).scale(1.0 + drive.memory + 1.5 * drive.cubic)
+            + modulation * state(k - 2, 0)
+            + modulation.conj() * state(k + 2, 0)
+            - state(k, 2).scale(det::sqrt(drive.memory));
+        near(
+            result.port_coefficients[(k + 4) as usize * 2],
+            effort,
+            5e-11,
+        );
+        near(
+            result.port_coefficients[(k + 4) as usize * 2 + 1],
+            state(k, 1),
+            5e-11,
+        );
+    }
+    assert!(result.state_response.coefficients[(7 - 2) * 3].abs() > 1e-3);
+    assert!(result.state_response.coefficients[(7 + 2) * 3].abs() > 1e-3);
+    assert!(result.port_coefficients[0].abs() > 1e-4);
+    assert!(result.port_coefficients[16].abs() > 1e-4);
     assert_eq!(base.coeffs, original);
 }

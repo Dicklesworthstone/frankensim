@@ -27,8 +27,8 @@ use fs_phs::PortHamiltonian;
 
 mod prepared;
 pub use prepared::{
-    FactoredPhsPortSidebands, PhsPortSidebandSource, PreparedPhsPortSidebands,
-    solve_forced_feedback_port_sideband_response,
+    AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsPortSidebandSource,
+    PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
     solve_forced_feedback_port_sideband_response_analytic,
 };
 

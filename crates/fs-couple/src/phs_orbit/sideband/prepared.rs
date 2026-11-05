@@ -8,13 +8,29 @@ use super::super::{
 use super::{
     AutonomousPortFeedback, C64, HbOrbit, PeriodicPortInput, PhsFeedbackStateJacobian,
     PhsOrbitProblem, PhsPortSidebandControls, PhsPortSidebandError, PhsPortSidebandResponse,
-    PhsStorageHessianAction, PortHamiltonian, Result, SidebandScales, admit, admit_carrier,
-    admit_forcing, admit_source, admit_storage, input_forcing, observe, poll,
+    PhsStorageHessianAction, PortHamiltonian, Result, SidebandResponse, SidebandScales, admit,
+    admit_carrier, admit_forcing, admit_source, admit_storage, input_forcing, observe, poll,
 };
 use fs_orbit::{
     IslandStateJacobian, OrbitProblem,
-    sideband::{PreparedPeriodicLinearization, PreparedSidebandResponse},
+    sideband::{
+        PreparedPeriodicLinearization, PreparedSidebandResponse,
+        refinement::{
+            SidebandRefinementCheck, SidebandRefinementControls, solve_sideband_adaptive,
+        },
+    },
 };
+
+/// A complete physical response with independently measured sideband convergence.
+/// The state order is `response.state_harmonics`; the output order remains the
+/// separately authored `response.output_harmonics`. Neither finite-grid trace
+/// is an infinite-tail, forward-error or Floquet-stability certificate.
+#[derive(Clone, Debug)]
+pub struct AdaptivePhsPortSidebandResponse {
+    pub response: PhsPortSidebandResponse,
+    /// Every actually solved state order and its original-equation assessment.
+    pub refinement_trace: Vec<SidebandRefinementCheck>,
+}
 
 // This dispatch only selects existing ORIGINAL source owners. In particular,
 // feedback uses its total derivative and never the storage-only Jacobian.
@@ -306,6 +322,141 @@ impl<'model> PhsPortSidebandSource<'model> {
             linearization,
         })
     }
+
+    /// Resolve the complete physical response by growing the retained state order.
+    ///
+    /// `forcing` contains all original-port efforts at the SOURCE'S initial
+    /// sideband order. Map G once, then let the shared generic owner preserve
+    /// that exact support while solving and independently assessing larger full
+    /// state systems. A small change between two truncated solves is insufficient
+    /// without the original-equation and omitted-band checks.
+    ///
+    /// After state acceptance, observe the ENTIRE accepted state response through
+    /// the original `G^T Hxx` action. The output harmonic order stays independently
+    /// authored; it is never silently raised or replaced by the state order.
+    /// Observation grids grow enough to resolve the accepted state, within the
+    /// unchanged maximum grid, Hessian-action, work and payload allowances.
+    ///
+    /// The generic `maximum_work` is cumulative across every attempted order in
+    /// this call. Adapter work covers one physical input map and the final output
+    /// assessment. Cloned tolerances, mapped input and retained refinement trace
+    /// are admitted explicitly; the generic and adapter live payload caps add.
+    /// This method recomputes the adaptive solve; use [`Self::prepare`] to reuse
+    /// one chosen fixed-order tangent/factor across subsequent drives.
+    ///
+    /// # Errors
+    /// Invalid original forcing/scales/refinement, generic resolution or numerical
+    /// refusal, insufficient final observation resources, unresolved physical
+    /// output, source refusal or cancellation. A generic state solution alone
+    /// never escapes as an accepted physical response. Source controls/base are
+    /// unchanged after success or refusal, so the same source can be reused.
+    pub fn solve_adaptive(
+        &mut self,
+        carrier_angular_frequency: f64,
+        forcing: &[C64],
+        scales: &SidebandScales,
+        refinement: &SidebandRefinementControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AdaptivePhsPortSidebandResponse> {
+        poll(&mut cancelled)?;
+        let system = self.problem.original().system;
+        admit_carrier(self.orbit, carrier_angular_frequency, &self.controls)?;
+        admit_forcing(system, forcing, &self.controls)?;
+        // The generic 0..=64 order ladder has at most eight checks, including
+        // both endpoints. Keep that returned history alive during observation,
+        // and charge this second owned tolerance vector before either allocation.
+        let extra = 8 * system.port_dim() as u128
+            + 8 * core::mem::size_of::<SidebandRefinementCheck>() as u128;
+        if extra > self.controls.max_workspace_bytes as u128 {
+            return Err(PhsPortSidebandError::Budget(
+                "adaptive physical controls and trace exceed the adapter payload cap",
+            ));
+        }
+        let mut observer = self.controls.clone();
+        observer.max_workspace_bytes -= extra as usize;
+        // The existing 32*n*(2*N+1) term includes both mapped input and response;
+        // the mapped input is dropped before any output-grid allocation.
+        admit_storage(
+            system.state_dim(),
+            system.port_dim(),
+            &observer,
+            observer.initial_samples,
+        )?;
+        let resolved = {
+            let rhs = input_forcing(system, forcing, observer.sideband.harmonics, &mut cancelled)?;
+            solve_sideband_adaptive(
+                &self.problem,
+                self.orbit,
+                carrier_angular_frequency,
+                &rhs,
+                observer.sideband,
+                scales,
+                refinement,
+                &mut cancelled,
+            )?
+        };
+        observer.sideband.harmonics = resolved.harmonics;
+        let largest = (self.orbit.coeffs[0].len() - 1)
+            .max(resolved.harmonics)
+            .max(observer.output_harmonics);
+        // These extents were bounded by source and generic admission. The FFT
+        // grid must be strictly larger than twice every synthesized order.
+        observer.initial_samples = observer
+            .initial_samples
+            .max((2 * largest + 1).next_power_of_two());
+        if observer.initial_samples > observer.max_samples / 4 {
+            return Err(PhsPortSidebandError::Budget(
+                "refined physical response needs three resolved observation grids within the maximum",
+            ));
+        }
+        admit_source(system, self.orbit, &observer)?;
+        let response = self.observe_response(
+            carrier_angular_frequency,
+            resolved.response,
+            &observer,
+            resolved.base_residual,
+            resolved.tangent_sampling_defect,
+            &mut cancelled,
+        )?;
+        Ok(AdaptivePhsPortSidebandResponse {
+            response,
+            refinement_trace: resolved.refinement_trace,
+        })
+    }
+
+    fn observe_response(
+        &self,
+        carrier: f64,
+        state_response: SidebandResponse,
+        controls: &PhsPortSidebandControls,
+        base_residual: f64,
+        tangent_sampling_defect: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PhsPortSidebandResponse> {
+        let original = self.problem.original();
+        let (port_coefficients, observation_trace, hessian_actions) = observe(
+            original,
+            self.orbit,
+            &state_response.coefficients,
+            controls,
+            cancelled,
+        )?;
+        poll(cancelled)?;
+        Ok(PhsPortSidebandResponse {
+            omega_rad_s: self.orbit.omega,
+            carrier_angular_frequency: carrier,
+            state_harmonics: controls.sideband.harmonics,
+            output_harmonics: controls.output_harmonics,
+            state_dimension: original.system.state_dim(),
+            port_count: original.system.port_dim(),
+            state_response,
+            port_coefficients,
+            base_residual,
+            tangent_sampling_defect,
+            observation_trace,
+            hessian_actions,
+        })
+    }
 }
 
 fn admit_input(
@@ -460,34 +611,19 @@ impl FactoredPhsPortSidebands<'_, '_> {
         let original = self.source.problem.original();
         let system = original.system;
         let controls = &self.source.controls;
-        let orbit = self.source.orbit;
         admit_forcing(system, forcing, controls)?;
         let state_response = {
             let rhs = input_forcing(system, forcing, controls.sideband.harmonics, &mut cancelled)?;
             self.factor.solve(&rhs, &mut cancelled)?
         };
-        let (port_coefficients, observation_trace, hessian_actions) = observe(
-            original,
-            orbit,
-            &state_response.coefficients,
-            controls,
-            &mut cancelled,
-        )?;
-        poll(&mut cancelled)?;
-        Ok(PhsPortSidebandResponse {
-            omega_rad_s: orbit.omega,
-            carrier_angular_frequency: self.carrier_angular_frequency(),
-            state_harmonics: controls.sideband.harmonics,
-            output_harmonics: controls.output_harmonics,
-            state_dimension: system.state_dim(),
-            port_count: system.port_dim(),
+        self.source.observe_response(
+            self.carrier_angular_frequency(),
             state_response,
-            port_coefficients,
-            base_residual: self.base_residual,
-            tangent_sampling_defect: self.tangent_sampling_defect,
-            observation_trace,
-            hessian_actions,
-        })
+            controls,
+            self.base_residual,
+            self.tangent_sampling_defect,
+            &mut cancelled,
+        )
     }
 }
 
