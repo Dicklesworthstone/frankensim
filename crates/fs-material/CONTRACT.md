@@ -15646,3 +15646,29 @@ all six tangent columns after mixed history, weighted tangent symmetry, the
 native J2 limit and reversal, rotations, stress-unit scaling, refusal paths,
 and the physical/numerical work split. These are numerical checks, not
 experimental validation.
+
+## Source-resolved porous compaction
+
+`plastic::porous::source` resolves Young's modulus, Poisson ratio, initial
+uniaxial yield stress, explicit porous energetic hardening and dimensionless
+Deshpande--Fleck pressure sensitivity at one fixed material state.
+`ResolvedPorousPlasticity` preserves the complete source/query/usage bundle
+and delegates `SmallStrainLaw` and checked responses to the native return map.
+The explicit source keys are `porous_hardening_modulus` [Pa] and
+`porous_pressure_sensitivity` [dimensionless]. Hardening is the slope against
+this law's work-conjugate accumulated plastic strain; density, porosity, J2
+coefficients and total-strain tangents provide no fallback. Perfect plasticity
+and the J2 limit each require an explicit zero source.
+
+Fixed external-condition interpolation is admitted by the common material
+resolver, while evolving strain, stress, history, rate and frequency sources
+refuse. Exact SI quantity dimensions and original native parameter limits are
+checked even when adopting a separately resolved shared material bundle.
+The native small-strain and symmetric-yield limits remain binding; source
+re-resolution neither transfers history nor accounts for parameter work.
+Additional physics properties and their original receipts remain available.
+
+Four focused regressions cover source-driven hydrostatic compaction and mixed
+loading, fixed-temperature interpolation with extra physics and receipts,
+missing/wrong/other-law calibration refusal, explicit zero limits, ambiguous
+source pinning, and refusal to freeze evolving mechanical conditions.

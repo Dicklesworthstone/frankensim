@@ -15,6 +15,9 @@
 //! A scalar safeguarded return and its analytic tangent use fixed-size arrays.
 //! No finite-difference tangent or tensor Newton iteration is needed.
 
+/// Fixed-condition material sources for the native porous plasticity law.
+pub mod source;
+
 use super::energy::{EnergyTolerances, IncrementEnergy, StoredEnergy};
 use crate::elastic::{IsotropicElastic, bulk_shear_stiffness};
 use crate::tensor::{contract, deviator, trace};
