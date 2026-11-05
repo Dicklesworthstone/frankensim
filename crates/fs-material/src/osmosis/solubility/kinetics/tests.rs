@@ -1,0 +1,186 @@
+//! G0/G1/G3: actual osmotic particles, finite-rate lag and transactional updates.
+
+use super::*;
+use fs_qty::{Amount, AmountConcentration};
+use fs_thermochem::solution::solubility::IdealSolubilityV1;
+use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
+
+fn law(name: &str, concentration: f64, enthalpy: f64) -> IdealSolubilityV1 {
+    IdealSolubilityV1::new(
+        SpeciesId::new("water").unwrap(),
+        SpeciesId::new(name).unwrap(),
+        Temperature::new(300.0),
+        AmountConcentration::new(concentration),
+        enthalpy,
+        [Temperature::new(280.0), Temperature::new(350.0)],
+    )
+    .unwrap()
+}
+fn component(
+    name: &str,
+    concentration: f64,
+    total: f64,
+    dissolved: f64,
+    conductance: f64,
+) -> (SolubilityKineticsV1, SolubilityKineticStateV1) {
+    (
+        SolubilityKineticsV1::new(
+            law(name, concentration, 0.0),
+            VolumetricFlowRate::new(conductance),
+            PrecipitationPolicyV1::SeededSurface,
+        )
+        .unwrap(),
+        SolubilityKineticStateV1::new(Amount::new(total), Amount::new(dissolved)).unwrap(),
+    )
+}
+fn near(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 5e-13 * expected.abs().max(1e-300),
+        "{actual:e} != {expected:e}"
+    );
+}
+fn reservoir() -> KineticSolubilitySolution {
+    KineticSolubilitySolution::new(
+        Temperature::new(300.0),
+        18e-6,
+        Volume::new(1e-3),
+        vec![
+            component("A", 100.0, 0.2, 0.0, 1e-3),
+            component("B", 50.0, 0.1, 0.1, 5e-4),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn actual_dissolved_amounts_drive_osmotic_pressure_during_opposed_phase_transfers() {
+    let mut owner = reservoir();
+    let phase_buffer = owner.last_steps().as_ptr();
+    let dissolved_buffer = owner.solution().solute_moles().as_ptr();
+    owner.advance(Time::new(1.0), || false).unwrap();
+    let expected = [
+        0.1 * (1.0 - (-1.0_f64).exp()),
+        0.05 + 0.05 * (-0.5_f64).exp(),
+    ];
+    for (index, value) in expected.into_iter().enumerate() {
+        near(owner.solution().solute_moles()[index], value);
+        let state = owner.last_steps()[index].state();
+        near(
+            state.dissolved().value() + state.solid().value(),
+            state.total_solute().value(),
+        );
+    }
+    near(
+        owner.solution().osmotic_pressure_pa().unwrap(),
+        R * 300.0 * expected.iter().sum::<f64>() / 1e-3,
+    );
+    near(
+        owner.solution().water_activity().unwrap(),
+        (-18e-6 * expected.iter().sum::<f64>() / 1e-3).exp(),
+    );
+    assert!(owner.last_steps()[0].transferred_to_solution().value() > 0.0);
+    assert!(owner.last_steps()[1].transferred_to_solution().value() < 0.0);
+    assert_eq!(owner.last_steps().as_ptr(), phase_buffer);
+    assert_eq!(owner.solution().solute_moles().as_ptr(), dissolved_buffer);
+}
+
+#[test]
+fn dilution_and_prescribed_heating_preserve_stocks_then_resolve_the_kinetic_lag() {
+    let equilibrium = FiniteSolubilitySolution::new(
+        Temperature::new(300.0),
+        18e-6,
+        Volume::new(1e-3),
+        vec![(law("A", 100.0, 6000.0), Amount::new(0.2))],
+    )
+    .unwrap();
+    let owner = KineticSolubilitySolution::from_equilibrium(
+        &equilibrium,
+        &[(
+            VolumetricFlowRate::new(1e-3),
+            PrecipitationPolicyV1::ExistingSolidOnly,
+        )],
+    )
+    .unwrap();
+    assert_eq!(owner.solution(), equilibrium.solution());
+    let mut diluted = owner.with_solvent_volume_m3(2e-3).unwrap();
+    assert_eq!(
+        diluted.last_steps()[0].state(),
+        owner.last_steps()[0].state()
+    );
+    assert!(std::ptr::eq(diluted.models(), owner.models()));
+    assert_eq!(diluted.last_steps()[0].equilibrium().dissolved.value(), 0.2);
+    assert_eq!(diluted.solution().solute_moles(), &[0.1]);
+    diluted.advance(Time::new(1.0), || false).unwrap();
+    near(
+        diluted.solution().solute_moles()[0],
+        0.1 + 0.1 * (1.0 - (-0.5_f64).exp()),
+    );
+    let mut heated = owner.with_temperature(Temperature::new(330.0)).unwrap();
+    assert_eq!(
+        heated.last_steps()[0].state(),
+        owner.last_steps()[0].state()
+    );
+    assert!(heated.last_steps()[0].equilibrium().capacity.value() > 0.1);
+    heated.advance(Time::new(0.1), || false).unwrap();
+    assert!(heated.solution().solute_moles()[0] > 0.1);
+    assert!(
+        heated.solution().solute_moles()[0]
+            < heated.last_steps()[0].equilibrium().dissolved.value()
+    );
+    assert!(owner.with_temperature(Temperature::new(400.0)).is_err());
+    assert_eq!(owner.solution(), equilibrium.solution());
+}
+
+#[test]
+fn cancellation_and_late_aqueous_refusal_leave_all_component_stocks_unchanged() {
+    let mut owner = reservoir();
+    let original = owner.clone();
+    let mut calls = 0;
+    assert_eq!(
+        owner.advance(Time::new(1.0), || {
+            calls += 1;
+            calls == 4
+        }),
+        Err(KineticSolubilityError::Cancelled)
+    );
+    assert_eq!(owner, original);
+    assert!(owner.advance(Time::new(-1.0), || false).is_err());
+    assert_eq!(owner, original);
+
+    let mut excessive = KineticSolubilitySolution::new(
+        Temperature::new(300.0),
+        18e-6,
+        Volume::new(1e-3),
+        vec![component("A", 1e9, 1e6, 0.0, 1e-3)],
+    )
+    .unwrap();
+    let original = excessive.clone();
+    assert!(excessive.advance(Time::new(1.0), || false).is_err());
+    assert_eq!(excessive, original);
+}
+
+#[test]
+fn layout_and_source_identity_cannot_change_silently() {
+    assert!(
+        KineticSolubilitySolution::new(Temperature::new(300.0), 18e-6, Volume::new(1e-3), vec![])
+            .is_err()
+    );
+    let duplicate = component("A", 100.0, 0.2, 0.0, 1e-3);
+    assert!(
+        KineticSolubilitySolution::new(
+            Temperature::new(300.0),
+            18e-6,
+            Volume::new(1e-3),
+            vec![duplicate.clone(), duplicate]
+        )
+        .is_err()
+    );
+    let equilibrium = FiniteSolubilitySolution::new(
+        Temperature::new(300.0),
+        18e-6,
+        Volume::new(1e-3),
+        vec![(law("A", 100.0, 0.0), Amount::new(0.2))],
+    )
+    .unwrap();
+    assert!(KineticSolubilitySolution::from_equilibrium(&equilibrium, &[]).is_err());
+}

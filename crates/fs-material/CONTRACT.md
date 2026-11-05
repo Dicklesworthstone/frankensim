@@ -10184,6 +10184,9 @@ Each solvent-volume trial performs direct finite partitions without repeated
 temperature exponentials or chemical root solves. Explicit retemperature
 re-evaluates every original law within its domain. Original laws, identities,
 totals, capacities and floating-point phase balances remain inspectable.
+Optional distinct solid/dissolved heat capacities remain part of that same
+law: their integrated temperature correction reaches membrane and moisture
+consumers through the original cached saturation, without another phase model.
 G0/G3 cases check two-component precipitation/redissolution, original ideal
 unsaturated and zero-stock limits, prescribed heating/cooling, phase balances,
 species-layout/domain refusal and immutable failed trials.
@@ -10229,13 +10232,43 @@ can be moved out of the result for subsequent material evolution without
 copying the accepted phase inventories.
 
 This adapter adds no caloric constitutive law or transport integrator. It uses
-the L1 owner's explicit common solid/dissolved Cp assumption, instantaneous
+either the L1 owner's explicit common phase Cp or the exact distinct phase
+curves already bound to its temperature-dependent solubility law, instantaneous
 independent neutral-solute equilibrium and fixed-pressure, fixed-volume
 incompressible-solvent convention. It does not claim simultaneous thermal
-membrane transport or variable-pressure work. Four focused regressions check
+membrane transport or variable-pressure work. Focused regressions check
 independent sensible-plus-dissolution heat across exhaustion and recrystallization,
+unequal-phase caloric feedback into osmotic pressure and solvent activity,
 updated transported stocks, exact solvent volume, consistency of both accepted
 views, source incompatibility, unsupported heat and transactional cancellation.
+
+### Finite-rate soluble material inventories
+
+`osmosis::solubility::kinetics::KineticSolubilitySolution` retains 1–64 original
+ordered kinetic laws and actual dissolved/solid stocks. Its aqueous view uses
+only the current dissolved amounts for osmotic pressure and water activity;
+the instantaneous-equilibrium target is a separate diagnostic. Construction
+accepts explicitly unequilibrated stocks or the complete original equilibrium
+owner through `from_equilibrium`, with caller-supplied conductances and growth
+policies. Original phase heat-capacity bindings remain attached to each law.
+
+Prescribed solvent-volume and temperature changes retain both phase stocks.
+Only subsequent kinetic steps cause dissolution or precipitation. Repeated
+steps reuse prepared phase/aqueous buffers and bounded stack storage, with no
+heap allocation. Every original component and the resulting solvent activity
+are admitted before any publication; early, intermediate and final cancellation
+leave all accepted inventories unchanged. Clones share immutable laws and own
+independent writable state.
+
+The model is isothermal during each step and does not infer thermostat heat,
+simultaneous membrane/moisture transport, changing crystal area, nonideal
+chemistry or spontaneous nucleation. `cargo run -p fs-material --example
+solubility_dissolution` exercises dissolution, prescribed solvent removal,
+delayed crystal growth, and a separate equilibrium heat calculation using the
+same phase-qualified law. Demonstration coefficients are explicitly authored.
+Focused cases verify opposed phase transfers and actual osmotic response,
+finite-rate dilution/heating lag, original source sharing, buffer reuse,
+layout refusal and transactional cancellation.
 
 ## Shared cavitation coefficients and frozen mixture acoustics
 

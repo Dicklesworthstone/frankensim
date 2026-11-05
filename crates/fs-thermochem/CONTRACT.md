@@ -93,6 +93,35 @@ solubility, variable-pressure work, separate phase temperatures, nucleation or
 finite dissolution kinetics. Numeric caller coefficients do not authenticate
 measured material data.
 
+## Finite-rate neutral dissolution and crystal growth
+
+`solution::solubility::kinetics::SolubilityKineticsV1` uses the original pair law
+and an explicitly declared fixed-area conductance `G=kA [m³/s]`. At fixed
+temperature and solvent volume its active equation is
+`dn_dissolved/dt = G*(c_sat - n_dissolved/V)`. The analytical exponential update
+retains actual dissolved and solid stocks, their conserved component total,
+signed transfer and a separate equilibrium target. A finite solid stock is
+exhausted at its analytical event; the remaining interval has no dissolution.
+It does not clip an Euler step or substitute the equilibrium target for the
+accepted kinetic state.
+
+`ExistingSolidOnly` permits precipitation only while actual solid is present.
+`SeededSurface` explicitly declares a persistent growth substrate with no added
+solute moles; it supplies neither a nucleation barrier nor an induction-time
+law. Dilution or temperature changes can therefore leave a finite lag, and an
+unseeded supersaturated solution may remain supersaturated. The fixed-area
+well-mixed approximation is derived in the module from the Noyes–Whitney law:
+<https://doi.org/10.1021/ja02086a003>.
+
+Scalar updates allocate nothing. Stable exponential increments retain short
+steps; explicit phase storage retains small remaining donors. An unrepresentable
+asymptotic tail may round to zero but is never labeled a finite exhaustion event.
+G0/G1/G3 cases check independent exponential/event solutions, semigroup and
+extensive scaling, zero contact/time, seeded/unseeded growth, trace stocks and
+source/domain refusal. This model has no shrinking-particle geometry, evolving
+interfacial area, crystal population, reaction/speciation, or thermal evolution.
+Its conductance and experimental applicability remain explicit caller inputs.
+
 ## Binary liquid miscibility and source-owned thermodynamic forces
 
 `solution::BinaryRegularSolutionV1` retains two explicit ordered species and a

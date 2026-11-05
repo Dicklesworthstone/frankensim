@@ -167,6 +167,70 @@ fn finite_crystal_reservoir_buffers_diffusion_then_exhausts_at_the_analytic_tran
 }
 
 #[test]
+fn phase_heat_capacity_corrected_saturation_drives_native_membrane_transfer() {
+    use fs_thermochem::{MolarThermalQuantityV1, solution::caloric::MolarHeatCapacityCurveV1};
+    let solute = SpeciesId::new("solute-0").unwrap();
+    let cp = |value| {
+        MolarHeatCapacityCurveV1::new(
+            solute.clone(),
+            Temperature::new(280.0),
+            [280.0, 350.0]
+                .into_iter()
+                .map(|t| (Temperature::new(t), MolarThermalQuantityV1::new(value)))
+                .collect(),
+        )
+        .unwrap()
+    };
+    let law = IdealSolubilityV1::new(
+        SpeciesId::new("water").unwrap(),
+        solute.clone(),
+        Temperature::new(280.0),
+        AmountConcentration::new(1.0),
+        0.0,
+        [Temperature::new(280.0), Temperature::new(350.0)],
+    )
+    .unwrap()
+    .with_phase_heat_capacities(cp(50.0), cp(150.0))
+    .unwrap();
+    // Constant delta-Cp analytical saturation, independent of the material call.
+    let saturation = (100.0 / R * ((TEMPERATURE / 280.0).ln() + 280.0 / TEMPERATURE - 1.0)).exp();
+    let cell = |total| {
+        OsmoticCompartment::with_solubility(
+            FiniteSolubilitySolution::new(
+                Temperature::new(TEMPERATURE),
+                18e-6,
+                Volume::new(1.0),
+                vec![(law.clone(), Amount::new(total))],
+            )
+            .unwrap(),
+            OsmoticPressureVolume::new(1.0, 0.0, 0.0).unwrap(),
+            1e-6,
+        )
+        .unwrap()
+    };
+    let mut system = network(
+        vec![cell(1.5 * saturation), cell(0.0)],
+        vec![membrane(0, 1, 0.0, &[(0.0, 0.2)])],
+    );
+    let report = system.advance(2.0, controls(0.2), || false).unwrap();
+    let received = saturation * (1.0 - (-0.4_f64).exp());
+    near(system.cells[1].total_moles(0), received, 3e-4);
+    near(
+        system.cells[0].solution().solute_moles()[0],
+        saturation,
+        2e-14,
+    );
+    let phases = system.cells[0].solubility_snapshot().unwrap();
+    near(
+        phases.phase_partitions()[0].solid.value(),
+        0.5 * saturation - received,
+        3e-4,
+    );
+    assert_eq!(phases.components()[0].law(), &law);
+    near(report.solute_balance_residual_mol[0], 0.0, 2e-12);
+}
+
+#[test]
 fn water_removal_precipitates_and_reversed_pressure_redissolves_the_same_finite_stock() {
     let mut system = network(
         vec![

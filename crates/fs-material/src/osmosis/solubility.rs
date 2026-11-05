@@ -19,6 +19,9 @@
 /// Energy-balanced heating and cooling of the original finite phase owner.
 pub mod caloric;
 
+/// Actual dissolved/solid inventories evolving under declared transfer kinetics.
+pub mod kinetics;
+
 /// Source-backed ionic solids, pH and actual dissolved osmotic species.
 pub mod electrolyte;
 

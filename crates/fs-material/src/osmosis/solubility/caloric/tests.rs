@@ -31,6 +31,10 @@ fn thermal_model(molar_volume: f64, laws: &[IdealSolubilityV1]) -> SolubilityCal
     let components = laws
         .iter()
         .map(|law| {
+            if law.phase_heat_capacities().is_some() {
+                return SolubilityCaloricComponentV1::from_phase_heat_capacities(law.clone())
+                    .unwrap();
+            }
             SolubilityCaloricComponentV1::new(
                 law.clone(),
                 MolarHeatCapacityCurveV1::new(
@@ -103,6 +107,80 @@ fn consistent(initial: &FiniteSolubilitySolution, step: &FiniteSolubilityHeatSte
         );
     }
     near(step.balance().energy_residual_j(), 0.0, 1e-8);
+}
+
+#[test]
+fn unequal_phase_heat_capacities_follow_live_material_stocks_and_osmotic_activity() {
+    let original_law = law("solvent", "A", 250.0, 1000.0);
+    let phase_cp = |capacity| {
+        MolarHeatCapacityCurveV1::new(
+            original_law.solute().clone(),
+            Temperature::new(300.0),
+            [280.0, 340.0]
+                .into_iter()
+                .map(|t| (Temperature::new(t), MolarThermalQuantityV1::new(capacity)))
+                .collect(),
+        )
+        .unwrap()
+    };
+    let source = original_law
+        .clone()
+        .with_phase_heat_capacities(phase_cp(30.0), phase_cp(90.0))
+        .unwrap();
+    let model = thermal_model(2e-5, std::slice::from_ref(&source));
+    let original = FiniteSolubilitySolution::new(
+        Temperature::new(290.0),
+        2e-5,
+        Volume::new(0.0002),
+        vec![(source.clone(), Amount::new(0.2))],
+    )
+    .unwrap();
+    let mut transported = original.independent_clone();
+    transported.replace_inventories(0.00011, &[0.06]).unwrap();
+    let before = transported.clone();
+    // Independent Kirchhoff/van't Hoff closed form; both endpoints retain solid.
+    let target = 320.0;
+    let saturation = 250.0
+        * ((1000.0 * (1.0 / 290.0 - 1.0 / target)
+            + 60.0 * ((target / 290.0_f64).ln() + 290.0 / target - 1.0))
+            / R)
+            .exp();
+    let final_dissolved = saturation * 0.00011;
+    let initial_dissolved = 250.0 * 0.00011;
+    let heat =
+        (0.00011 / 2e-5 * 50.0 + (0.06 - initial_dissolved) * 30.0 + initial_dissolved * 90.0)
+            * 30.0
+            + (final_dissolved - initial_dissolved) * (1000.0 + 60.0 * 30.0);
+    let step = transported
+        .add_heat(&model, heat, controls(310.0, 330.0), || false)
+        .unwrap();
+    consistent(&transported, &step);
+    near(step.solution().solution().temperature_k(), target, 1e-9);
+    near(
+        step.solution().phase_partitions()[0].dissolved.value(),
+        final_dissolved,
+        2e-12,
+    );
+    near(
+        step.solution().solution().osmotic_pressure_pa().unwrap(),
+        R * target * saturation,
+        1e-7,
+    );
+    near(
+        step.solution().solution().water_activity().unwrap(),
+        (-2e-5 * saturation).exp(),
+        1e-14,
+    );
+    assert_eq!(step.solution().components()[0].law(), &source);
+    assert_eq!(transported, before);
+
+    // A numerically identical reference saturation without the original phase
+    // Cp sources cannot stand in for this material's actual thermal owner.
+    let wrong_model = thermal_model(2e-5, &[original_law]);
+    assert_eq!(
+        transported.add_heat(&wrong_model, heat, controls(310.0, 330.0), || false),
+        Err(FiniteSolubilityHeatError::SourceMismatch)
+    );
 }
 
 #[test]

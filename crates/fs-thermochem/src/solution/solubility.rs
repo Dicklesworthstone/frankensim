@@ -25,6 +25,9 @@
 
 pub mod caloric;
 
+/// Fixed-area, finite-rate dissolution and explicitly seeded precipitation.
+pub mod kinetics;
+
 mod heat_capacity;
 
 use crate::solution::caloric::MolarHeatCapacityCurveV1;
