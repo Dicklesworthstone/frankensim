@@ -256,7 +256,9 @@ impl PreparedReedLoad {
         )
         .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
         let incoming = 0.5 * free_pressure_pa;
-        let next = super::contact::step_with_contact_response(
+        // No closure stop on this path: its work ledger below balances heats and works of the free step and has
+        // no impact term, so a stopped step would refuse there. The reed voice (`render`) takes the stop.
+        let next = super::contact::step_with_contact_response_and_stop(
             self.reed,
             self.rho,
             mean_impedance,
@@ -289,6 +291,7 @@ impl PreparedReedLoad {
                     .response(after, velocity)
                     .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))
             },
+            false,
         )?;
         let pressure_pa = next.outgoing + incoming;
         let drop = mouth_pressure_pa - pressure_pa;

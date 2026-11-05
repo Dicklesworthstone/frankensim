@@ -259,7 +259,10 @@ mod tests {
                 for _ in 0..192 {
                     let (old_y, old_v) = (v.reed_y, v.reed_v);
                     v.step_block(&mut [0.0]).unwrap();
-                    let velocity = f64::midpoint(old_v, v.reed_v);
+                    // A step the closure stop engaged ends shut (opening exactly 0, velocity 0) at the mean velocity that
+                    // brings the reed to zero in the step; every other step is the free midpoint scheme.
+                    let stopped = v.reed_y == 0.0;
+                    let velocity = if stopped { (v.reed_y - old_y) / v.dt } else { f64::midpoint(old_v, v.reed_v) };
                     let gap = f64::midpoint(old_y, v.reed_y).max(0.0);
                     let dp = pressure - (v.p_plus_prev + v.line.incoming());
                     let flow = (v.p_plus_prev - v.line.incoming()) / v.zc;
@@ -278,8 +281,15 @@ mod tests {
                         + contact.dissipated_power + jet.dissipated_power_w());
                     let work = v.dt * dp * flow;
                     let scale = delta.abs() + loss.abs() + work.abs();
-                    assert!((delta + loss - work).abs() <= 2e-9 * scale + 2e-18,
-                        "work residual {:e} at gap {:e}", delta + loss - work, gap);
+                    let residual = delta + loss - work;
+                    if stopped {
+                        // The stop is rigid and inelastic: it removes energy at the impact, never adds any.
+                        assert!(residual <= 2e-9 * scale + 2e-18,
+                            "closure stop created energy {:e} at gap {:e}", residual, gap);
+                    } else {
+                        assert!(residual.abs() <= 2e-9 * scale + 2e-18,
+                            "work residual {:e} at gap {:e}", residual, gap);
+                    }
                     let swept = -face * velocity;
                     assert!((jet.flow_m3_s + swept - flow).abs()
                         < 1e-10 * (jet.flow_m3_s.abs() + swept.abs() + flow.abs()) + 1e-18);

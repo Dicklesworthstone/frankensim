@@ -7919,6 +7919,34 @@ clarinet is one filling of those objects.
   The isolated ODE reed retains its own pHS stepping scheme. This is not a
   nonlinear contact or whole-bore energy certificate: contact work, coupled
   geometry/time refinement and onset validation remain MR68 obligations.
+  Closure stop (MB 3381 and 3605, 2026-11-05). The reed coordinate cannot go below zero opening: the
+  reed cannot pass through its mouthpiece. After the implicit midpoint solve above, which is unchanged,
+  a step that starts at `y >= 0` and whose solution ends at `y < 0` is replaced by the unilateral
+  constraint `0 <= y` with a non-negative multiplier: the reed ends the step at exactly 0 with mean
+  velocity `-y/dt` and end velocity 0 (rigid and inelastic), and the aperture junction and the lay
+  contact are evaluated at that landing velocity by the same code. The multiplier is the stop's push,
+  the momentum residual at the landing velocity; the residual rises with the mean velocity, so it is not
+  negative, and a negative one refuses ("closure stop would pull the reed shut"). Flow through the shut
+  channel is the existing `max(0, midpoint opening)` clamp: zero while the reed rests shut; only the
+  landing step, in which the opening is still closing, passes the flow of its half-open midpoint.
+  A step whose free solution stays at or above zero is the original arithmetic, bit for bit
+  (`step_with_contact_response_and_stop` with `closure_stop = false` is that original step). A reed that
+  enters a step already below zero is left to the free solve. The loaded finite-gas path
+  (`reed_bore::loaded`) takes no stop: its work ledger balances the heats and works of the free step and
+  has no impact term, so a stopped step would refuse there. The plastic stop is a modelling choice: no
+  restitution is printed for a reed on its lay. Measured on the clarinet G4 test card without its slit
+  line (impact about 0.5 m/s, about 5e-7 J per impact, 0.2 to 0.4 mW): at 3.0 kPa the earlier law left
+  the opening below zero on 14.75 % of the steady samples (minimum -0.0226 mm) and at 3.6 kPa on 38.22 %
+  (-0.0450 mm); with the stop the minimum is 0 and the reed is shut for 20 % and 36 % of the samples;
+  H8 to H12 over the recording moved by -0.4 and -2.5 dB. The live clarinet cards at 1.8 kPa never close
+  (minimum opening 0.080 mm at G4) and are byte-identical (G4, D3, Eb5). Other families move, as they should: RubyPrairie's
+  alto-sax cards were below zero on 18.0 % (C4), 17.1 % (E3) and 19.0 % (F3) of the steady samples (minimum -0.96,
+  -1.25 and -1.29 mm), a held C4 card with the clarinet lay on 8.0 % (-0.18 mm), and the oboe Bb4 noise-row card on
+  19.6 % (-0.30 mm); those renders change and are re-rendered on the landed binary. No bassoon card was held.
+  G1 tests: the free reed pressed through a soft lay
+  stops at exactly zero opening and stays shut with zero velocity, and is bitwise the free step until
+  the crossing; a reed that stays open is bitwise unchanged; the flow of the shut channel is zero and
+  the junction wave is the closed one; a stop that would pull the reed shut refuses.
   Isolated
   cylindrical bores use the `acoustic_chain` ODE with a
   `ViscothermalPin` (massive

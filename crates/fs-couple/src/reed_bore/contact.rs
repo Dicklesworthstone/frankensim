@@ -157,6 +157,7 @@ fn step_with_opening_and_junction(
 /// Reuse the same mechanics and scalar root with an already admitted contact
 /// response. The full-body held-flow adapter uses the allocation-free unit-slit
 /// owner; existing characteristic callers retain their original contact path.
+/// The reed cannot pass through its mouthpiece: see [`step_with_contact_response_and_stop`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn step_with_contact_response(
     reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
@@ -166,6 +167,33 @@ pub(super) fn step_with_contact_response(
     propagator: OpeningPropagator<'_>,
     junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
     contact_response: impl Fn(f64, f64) -> Result<fs_dcontact::AffineContactResponse, AcousticRealizeError>,
+) -> Result<OpeningStep, AcousticRealizeError> {
+    step_with_contact_response_and_stop(reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+        flow_opening, material_force, propagator, junction_pressure, contact_response, true)
+}
+
+/// The step of [`step_with_contact_response`] with the rigid closure stop selectable.
+///
+/// The stop is the unilateral constraint `0 <= opening` with a non-negative multiplier. The implicit
+/// midpoint solve below is unchanged and is run first. If the reed starts the step at or above zero
+/// opening and that solve ends it below zero, the step is replaced by the constrained one: the reed
+/// ends at exactly 0 with mean velocity `-y/dt` and end velocity 0 (rigid and inelastic: no printed
+/// restitution exists for a reed on its lay), the junction and the lay contact being evaluated at that
+/// landing velocity by the same code. The momentum residual rises with the mean velocity, so at the
+/// landing velocity, above the penetrating root, it is not negative; that residual is the stop's own
+/// push, and a negative one would mean the stop pulls the reed shut, which refuses. A reed that
+/// enters the step already below zero is left to the free solve. With `closure_stop` false, or when
+/// the free solve ends at or above zero, the result is the original one bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step_with_contact_response_and_stop(
+    reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
+    y: f64, v: f64, dt: f64, u_body: f64,
+    flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
+    material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
+    propagator: OpeningPropagator<'_>,
+    junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
+    contact_response: impl Fn(f64, f64) -> Result<fs_dcontact::AffineContactResponse, AcousticRealizeError>,
+    closure_stop: bool,
 ) -> Result<OpeningStep, AcousticRealizeError> {
     if material_force.is_some() && matches!(propagator, OpeningPropagator::Exact { .. }) {
         // The exact block already carries its Maxwell arms; a midpoint material
@@ -283,6 +311,8 @@ pub(super) fn step_with_contact_response(
                 mean_velocity: velocity },
         })
     };
+    // The original solve, unchanged, as one closure so the closure stop can follow it.
+    let solve = || -> Result<OpeningStep, AcousticRealizeError> {
     let mut velocity = predicted;
     let mut current = evaluate(velocity)?;
     if resolved(current) {
@@ -375,6 +405,24 @@ pub(super) fn step_with_contact_response(
     Err(AcousticRealizeError::Reed {
         what: "implicit reed contact exceeded the binary64 refinement budget",
     })
+    };
+    let free = solve()?;
+    if !closure_stop || y < 0.0 || free.opening >= 0.0 {
+        return Ok(free);
+    }
+    let landing = -y / dt;
+    let trial = evaluate(landing)?;
+    if trial.residual < -trial.floor.max(2e-11 * trial.scale) {
+        return Err(AcousticRealizeError::Reed {
+            what: "closure stop would pull the reed shut (non-monotone momentum balance)",
+        });
+    }
+    Ok(OpeningStep {
+        outgoing: trial.state.outgoing,
+        opening: 0.0,
+        velocity: 0.0,
+        mean_velocity: landing,
+    })
 }
 
 #[cfg(test)]
@@ -421,11 +469,8 @@ mod tests {
                     for v in [-2.0, -0.2, 0.1, 1.0] {
                         for dt in [1e-6, 1e-5, 1e-4, 5e-4] {
                             for mouth in [-500.0, 0.0, 500.0, 10000.0] {
-                                let (pressure, y1, v1) = super::super::step_massive_reed(
-                                    reed, rho, zc, incoming, mouth, y, v, dt, body,
-                                    Some(&lay), ReedSolverMode::Strict,
-                                    &mut FastSolveStats::default(),
-                                ).unwrap();
+                                let (pressure, y1, v1) = step_through_the_lay(
+                                    reed, rho, zc, incoming, mouth, y, v, dt, body, &lay);
                                 let vm = 0.5 * (v + v1);
                                 let dp = mouth - (pressure + incoming);
                                 let opening = (0.5 * (y + y1)).max(0.0);
@@ -606,6 +651,138 @@ mod tests {
         let lay = slit_lay(1e8, 2.0).unwrap();
         for dt in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
             assert!(step(reed(), 1.2, 2.7e7, 0.0, 0.0, -1e-4, -0.2, dt, 0.0, &lay).is_err());
+        }
+    }
+
+    /// The lay step WITHOUT the closure stop: the free implicit midpoint scheme with the lay's own penetration branch, whose
+    /// impact, release and work balance `g1_reed_contact_step_balances_impact_release_and_bore_work` asserts. With the stop
+    /// on, a step that would end below zero opening ends shut with end velocity 0 and no longer satisfies those identities
+    /// by construction; the closure-stop tests below cover it.
+    #[allow(clippy::too_many_arguments)]
+    fn step_through_the_lay(
+        reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64, y: f64, v: f64, dt: f64, u_body: f64,
+        lay: &Obstacle,
+    ) -> (f64, f64, f64) {
+        let contact = ApertureContactStep::new(lay, y).unwrap();
+        let next = step_with_contact_response_and_stop(
+            reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+            |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint,
+            |opening, moving| solve_moving_aperture_wave(
+                reed.width_m, opening, rho, zc, p_minus, p_m, moving),
+            |after, velocity| contact.response(after, velocity)
+                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string())),
+            false,
+        ).unwrap();
+        (next.outgoing, next.opening, next.velocity)
+    }
+
+    // ---- closure stop (MB 3381): a reed cannot pass through its mouthpiece -----------------------
+
+    /// March the reed from rest under a held mouth pressure against a lay, with the closure stop on or off.
+    fn march(closure_stop: bool, mouth: f64, steps: usize, lay: &Obstacle) -> Vec<OpeningStep> {
+        let reed = reed();
+        let (rho, zc, incoming, body, dt) = (1.2, 2.7e7, 0.0, 0.0, 1e-5);
+        let (mut y, mut v) = (reed.rest_opening_m, 0.0);
+        let mut out = Vec::new();
+        for _ in 0..steps {
+            let contact = ApertureContactStep::new(lay, y).unwrap();
+            let next = step_with_contact_response_and_stop(
+                reed, rho, zc, incoming, mouth, y, v, dt, body,
+                |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint,
+                |opening, moving| solve_moving_aperture_wave(
+                    reed.width_m, opening, rho, zc, incoming, mouth, moving),
+                |after, velocity| contact.response(after, velocity)
+                    .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string())),
+                closure_stop,
+            ).unwrap();
+            (y, v) = (next.opening, next.velocity);
+            out.push(next);
+        }
+        out
+    }
+
+    fn same_bits(a: &OpeningStep, b: &OpeningStep) -> bool {
+        [(a.outgoing, b.outgoing), (a.opening, b.opening), (a.velocity, b.velocity),
+            (a.mean_velocity, b.mean_velocity)]
+            .iter().all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    #[test]
+    fn g1_a_reed_pressed_through_a_soft_lay_stops_at_zero_opening_and_stays() {
+        // A lay far too soft to hold the closing pressure: without the stop the reed goes through.
+        let lay = slit_lay(1e3, 2.0).unwrap();
+        let free = march(false, 10000.0, 400, &lay);
+        let stopped = march(true, 10000.0, 400, &lay);
+        let first = free.iter().position(|s| s.opening < 0.0)
+            .expect("this setup must press the free reed through zero opening");
+        // Until the free reed would have crossed zero, the stop changes nothing, bit for bit.
+        for i in 0..first {
+            assert!(same_bits(&free[i], &stopped[i]), "step {i} moved before any crossing");
+        }
+        assert!(stopped.iter().all(|s| s.opening >= 0.0 && s.opening.is_finite()));
+        // It lands at exactly zero in the very step the free reed crossed, with zero velocity,
+        // and stays shut while the closing pressure holds.
+        for s in &stopped[first..] {
+            assert_eq!(s.opening, 0.0);
+            assert_eq!(s.velocity, 0.0);
+        }
+    }
+
+    #[test]
+    fn g1_the_stop_never_acts_on_a_reed_that_stays_open() {
+        let lay = slit_lay(1e8, 2.0).unwrap();
+        let free = march(false, 500.0, 400, &lay);
+        let stopped = march(true, 500.0, 400, &lay);
+        assert!(free.iter().all(|s| s.opening > 0.0), "this setup must keep the reed open");
+        assert!(free.iter().zip(&stopped).all(|(a, b)| same_bits(a, b)));
+    }
+
+    #[test]
+    fn g1_flow_through_a_closed_channel_is_zero() {
+        let reed = reed();
+        let (rho, zc, incoming, mouth, dt) = (1.2, 2.7e7, 0.0, 10000.0, 1e-5);
+        let lay = slit_lay(1e3, 2.0).unwrap();
+        // Shut, at rest, with the mouth pressure holding it closed.
+        let contact = ApertureContactStep::new(&lay, 0.0).unwrap();
+        let step = step_with_contact_response_and_stop(
+            reed, rho, zc, incoming, mouth, 0.0, 0.0, dt, 0.0,
+            |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint,
+            |opening, moving| solve_moving_aperture_wave(
+                reed.width_m, opening, rho, zc, incoming, mouth, moving),
+            |after, velocity| contact.response(after, velocity)
+                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string())),
+            true,
+        ).unwrap();
+        assert_eq!((step.opening, step.velocity, step.mean_velocity), (0.0, 0.0, 0.0));
+        let closed_wave = solve_moving_aperture_wave(reed.width_m, 0.0, rho, zc, incoming, mouth, 0.0)
+            .unwrap();
+        assert_eq!(step.outgoing, closed_wave);
+        let drop = mouth - (step.outgoing + incoming);
+        assert_eq!(crate::bernoulli_aperture::moving::volume_flow(reed.width_m, 0.0, drop, rho), 0.0);
+    }
+
+    #[test]
+    fn g0_a_closure_stop_that_would_pull_the_reed_shut_refuses() {
+        let reed = reed();
+        let (rho, zc, incoming, mouth, dt) = (1.2, 2.7e7, 0.0, 10000.0, 1e-5);
+        // A pathological contact reaction, non-zero only in a thin band around zero opening: the free
+        // solve ends below zero (outside the band) but at the landing the reaction would pull the reed
+        // shut, so the momentum residual there is negative. That must refuse, not publish a state.
+        let spike = |after: f64, _velocity: f64| {
+            let force = if after.abs() < 1e-9 { 1e6 } else { 0.0 };
+            Ok(fs_dcontact::AffineContactResponse { elastic_force: force, force, dissipated_power: 0.0 })
+        };
+        let run = |closure_stop| step_with_contact_response_and_stop(
+            reed, rho, zc, incoming, mouth, 0.0, 0.0, dt, 0.0,
+            |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint,
+            |opening, moving| solve_moving_aperture_wave(
+                reed.width_m, opening, rho, zc, incoming, mouth, moving),
+            spike, closure_stop,
+        );
+        assert!(run(false).unwrap().opening < 0.0, "the free solve must end below zero");
+        match run(true) {
+            Err(AcousticRealizeError::Reed { what }) => assert!(what.contains("pull the reed shut"), "{what}"),
+            other => panic!("expected the closure stop to refuse, got {:?}", other.map(|s| s.opening)),
         }
     }
 }

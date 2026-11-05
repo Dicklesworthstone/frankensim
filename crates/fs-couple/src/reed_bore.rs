@@ -786,6 +786,27 @@ mod fast_mode_tests {
     use fs_material::gas::{GasSpec, GasState};
     use fs_scenario::BeatingReed;
 
+    /// The contact-free massive reed step WITHOUT the closure stop: the free implicit midpoint scheme whose identities the
+    /// tests below assert (junction at the midpoint opening, midpoint swept-face velocity, linear energy balance). With the
+    /// stop on, a step that would end below zero opening ends shut with end velocity 0 and no longer satisfies those
+    /// identities by construction; `contact::tests` covers the stop.
+    #[allow(clippy::too_many_arguments)]
+    fn step_without_stop(
+        reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64, y: f64, v: f64, dt: f64, u_body: f64,
+    ) -> (f64, f64, f64) {
+        let next = contact::step_with_contact_response_and_stop(
+            reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+            |opening| Ok(opening.max(0.0)), None, contact::OpeningPropagator::Midpoint,
+            |opening, moving| solve_moving_aperture_wave(
+                reed.width_m, opening, rho, zc, p_minus, p_m, moving),
+            |_after, _velocity| Ok(fs_dcontact::AffineContactResponse {
+                elastic_force: 0.0, force: 0.0, dissipated_power: 0.0,
+            }),
+            false,
+        ).unwrap();
+        (next.outgoing, next.opening, next.velocity)
+    }
+
     const BORE_RADIUS_M: f64 = 0.0022;
 
     fn air20_at(pressure_pa: f64) -> GasState {
@@ -991,21 +1012,9 @@ mod fast_mode_tests {
                 for mouth in [-3000.0, 0.0, 12000.0] {
                     let incoming = 70.0;
                     let body_flow = 2e-7;
-                    let (outgoing, next_opening, next_velocity) = step_massive_reed(
-                        reed,
-                        gas.density,
-                        zc,
-                        incoming,
-                        mouth,
-                        opening,
-                        velocity,
-                        1e-6,
-                        body_flow,
-                        None,
-                        ReedSolverMode::Strict,
-                        &mut FastSolveStats::default(),
-                    )
-                    .unwrap();
+                    let (outgoing, next_opening, next_velocity) = step_without_stop(
+                        reed, gas.density, zc, incoming, mouth, opening, velocity, 1e-6, body_flow,
+                    );
                     let dp = mouth - (outgoing + incoming);
                     // Independent signed Bernoulli reference, not the solver helper.
                     // The step solves the junction at the clamped MIDPOINT opening of its
@@ -1068,21 +1077,9 @@ mod fast_mode_tests {
                         for mouth in [-500.0, 0.0, 500.0] {
                             let incoming = 75.0;
                             let body = 2e-7;
-                            let (outgoing, y1, v1) = step_massive_reed(
-                                reed,
-                                gas.density,
-                                zc,
-                                incoming,
-                                mouth,
-                                y,
-                                v,
-                                dt,
-                                body,
-                                None,
-                                ReedSolverMode::Strict,
-                                &mut FastSolveStats::default(),
-                            )
-                            .unwrap();
+                            let (outgoing, y1, v1) = step_without_stop(
+                                reed, gas.density, zc, incoming, mouth, y, v, dt, body,
+                            );
                             let vm = 0.5 * (v + v1);
                             let dp = mouth - outgoing - incoming;
                             // Jet loss at the clamped MIDPOINT opening the step solves at
