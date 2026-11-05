@@ -393,7 +393,25 @@ where
     L: SublimationLaw + ?Sized,
     F: Fn(f64) -> Result<f64, SublimationError> + ?Sized,
 {
-    if !positive(solid.mass_kg)
+    if !positive(solid.mass_kg) {
+        return Err(invalid(
+            "finite surface state, datum and admissible sticking probability required",
+        ));
+    }
+    validate_surface(binding, solid)?;
+    let temperature_k = temperature_from_enthalpy(solid.specific_enthalpy_j_kg)?;
+    snapshot_surface_at_temperature(
+        law, binding, solid, gas, catalog, temperature_k, duration_s, controls,
+    )
+}
+
+// A supported interface may have no volatile inventory. Its nonvolatile
+// substrate owns temperature and storage; its deposit still owns species h.
+fn validate_surface(
+    binding: &GasSurfaceBinding,
+    solid: SolidSurfaceState,
+) -> Result<(), GasSurfaceError> {
+    if !nonnegative(solid.mass_kg)
         || !solid.specific_enthalpy_j_kg.is_finite()
         || !nonnegative(solid.area_m2)
         || !binding.solid_enthalpy_offset_j_kg.is_finite()
@@ -404,7 +422,23 @@ where
             "finite surface state, datum and admissible sticking probability required",
         ));
     }
-    let temperature_k = temperature_from_enthalpy(solid.specific_enthalpy_j_kg)?;
+    Ok(())
+}
+
+// Both condensed owners validate their actual inventory before entering this
+// shared molecular snapshot. A bare admitted substrate has an incoming stream
+// but cannot emit a nonexistent coating, even at the species saturation point.
+#[allow(clippy::too_many_arguments)]
+fn snapshot_surface_at_temperature<L: SublimationLaw + ?Sized>(
+    law: &L,
+    binding: &GasSurfaceBinding,
+    solid: SolidSurfaceState,
+    gas: GasSpeciesSnapshot,
+    catalog: &ThermochemicalGasModel,
+    temperature_k: f64,
+    duration_s: f64,
+    controls: GasSurfaceSolve,
+) -> Result<SurfaceSnapshot, GasSurfaceError> {
     let phase = phase_at(law, temperature_k, gas.molar_mass)?;
     let vapor_enthalpy = catalog.species_specific_enthalpy_j_kg(&binding.species, temperature_k)?;
     let source_alignment_residual_j_kg = compatibility(
@@ -425,9 +459,17 @@ where
         },
     )?;
     let exposure = solid.area_m2 * duration_s;
-    let outgoing_mass_kg = flux.outgoing_kg_m2_s * exposure;
+    let outgoing_mass_kg = if solid.mass_kg == 0.0 {
+        0.0
+    } else {
+        flux.outgoing_kg_m2_s * exposure
+    };
     let incoming_mass_kg = flux.incoming_kg_m2_s * exposure;
-    let transferred_mass_kg = flux.net_kg_m2_s * exposure;
+    let transferred_mass_kg = if solid.mass_kg == 0.0 {
+        -incoming_mass_kg
+    } else {
+        flux.net_kg_m2_s * exposure
+    };
     let outgoing_specific_energy_j_kg =
         vapor_enthalpy - 0.5 * gas.specific_gas_constant * temperature_k;
     if !nonnegative(exposure)
@@ -455,7 +497,8 @@ where
     };
     Ok(SurfaceSnapshot {
         solid,
-        stationary_equilibrium: temperature_k == gas.temperature_k
+        stationary_equilibrium: solid.mass_kg > 0.0
+            && temperature_k == gas.temperature_k
             && phase.saturation_pressure_pa == gas.partial_pressure_pa,
         available_solid_mass_kg: solid.mass_kg,
         gas,
@@ -469,6 +512,52 @@ where
         transferred_mass_kg,
         outgoing_specific_energy_j_kg,
         incoming_specific_energy_j_kg,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct MolecularStreamEnergy {
+    difference_j_kg: f64,
+    phase_relative_energy_into_gas_j: f64,
+    relative_energy_into_gas_j: f64,
+    energy_into_gas_j: f64,
+}
+
+// Share the original NASA enthalpy increment and molecular kinetic correction
+// across whole-body and supported storage. Formation references cancel BEFORE
+// the sensible terms are combined; reflection is included exactly once.
+fn molecular_stream_energy(
+    snapshot: SurfaceSnapshot,
+    reflected_heat_into_gas_j: f64,
+) -> Result<MolecularStreamEnergy, GasSurfaceError> {
+    if !reflected_heat_into_gas_j.is_finite() {
+        return Err(invalid("reflected molecular heat is unrepresentable"));
+    }
+    let difference = snapshot.partial_enthalpy_change_j_kg
+        - 0.5 * snapshot.gas.specific_gas_constant
+            * (snapshot.temperature_k - snapshot.gas.temperature_k);
+    let phase_relative_energy_into_gas_j = snapshot.transferred_mass_kg
+        * (snapshot.partial_enthalpy_change_j_kg
+            - 0.5 * snapshot.gas.specific_gas_constant * snapshot.temperature_k)
+        + snapshot.incoming_mass_kg * difference;
+    let relative_energy_into_gas_j =
+        phase_relative_energy_into_gas_j + reflected_heat_into_gas_j;
+    let energy_into_gas_j = snapshot.transferred_mass_kg
+        * snapshot.outgoing_specific_energy_j_kg
+        + snapshot.incoming_mass_kg * difference;
+    let energy_into_gas_j = if reflected_heat_into_gas_j == 0.0 {
+        energy_into_gas_j
+    } else {
+        energy_into_gas_j + reflected_heat_into_gas_j
+    };
+    if !energy_into_gas_j.is_finite() || !relative_energy_into_gas_j.is_finite() {
+        return Err(invalid("molecular stream energy is unrepresentable"));
+    }
+    Ok(MolecularStreamEnergy {
+        difference_j_kg: difference,
+        phase_relative_energy_into_gas_j,
+        relative_energy_into_gas_j,
+        energy_into_gas_j,
     })
 }
 
@@ -547,9 +636,7 @@ fn prepare_surface_with_endpoint(
     reflected_heat_into_gas_j: f64,
     endpoint: impl FnOnce(f64) -> Result<(f64, SublimationProperties), GasSurfaceError>,
 ) -> Result<PreparedSurface, GasSurfaceError> {
-    if !reflected_heat_into_gas_j.is_finite() {
-        return Err(invalid("reflected molecular heat is unrepresentable"));
-    }
+    let energy = molecular_stream_energy(snapshot, reflected_heat_into_gas_j)?;
     let SurfaceSnapshot {
         solid,
         stationary_equilibrium: _,
@@ -559,33 +646,16 @@ fn prepare_surface_with_endpoint(
         latent_heat_j_kg,
         source_alignment_residual_j_kg,
         pure_solid_enthalpy_j_kg,
-        partial_enthalpy_change_j_kg,
+        partial_enthalpy_change_j_kg: _,
         outgoing_mass_kg,
         incoming_mass_kg,
         transferred_mass_kg,
         outgoing_specific_energy_j_kg,
         incoming_specific_energy_j_kg,
     } = snapshot;
-    // Maxwellian stream differences use the original source increment. A large
-    // common formation datum must not erase sensible or effusive kinetic heat.
-    let difference = partial_enthalpy_change_j_kg
-        - 0.5 * gas.specific_gas_constant * (temperature_k - gas.temperature_k);
-    let phase_relative_energy_into_gas_j = transferred_mass_kg
-        * (partial_enthalpy_change_j_kg - 0.5 * gas.specific_gas_constant * temperature_k)
-        + incoming_mass_kg * difference;
-    let relative_energy_into_gas_j = phase_relative_energy_into_gas_j + reflected_heat_into_gas_j;
-    let energy_into_gas_j =
-        transferred_mass_kg * outgoing_specific_energy_j_kg + incoming_mass_kg * difference;
-    let energy_into_gas_j = if reflected_heat_into_gas_j == 0.0 {
-        energy_into_gas_j
-    } else {
-        energy_into_gas_j + reflected_heat_into_gas_j
-    };
     let next_mass = solid.mass_kg - transferred_mass_kg;
     let mass_residual = (next_mass - solid.mass_kg) + transferred_mass_kg;
-    if !energy_into_gas_j.is_finite()
-        || !relative_energy_into_gas_j.is_finite()
-        || !positive(next_mass)
+    if !positive(next_mass)
         || (transferred_mass_kg != 0.0 && next_mass == solid.mass_kg)
         || !mass_residual.is_finite()
         || mass_residual.abs() > controls.gas.mass_tolerance_kg
@@ -601,7 +671,7 @@ fn prepare_surface_with_endpoint(
         * (solid.specific_enthalpy_j_kg - pure_solid_enthalpy_j_kg
             - latent_heat_j_kg - source_alignment_residual_j_kg
             + 0.5 * gas.specific_gas_constant * temperature_k)
-        - incoming_mass_kg * difference;
+        - incoming_mass_kg * energy.difference_j_kg;
     let thermal_target = caloric_change - reflected_heat_into_gas_j;
     let specific_change = thermal_target / next_mass;
     let next_enthalpy = solid.specific_enthalpy_j_kg + specific_change;
@@ -647,9 +717,9 @@ fn prepare_surface_with_endpoint(
         transferred_mass_kg,
         outgoing_specific_energy_j_kg,
         incoming_specific_energy_j_kg,
-        energy_into_gas_j,
-        phase_relative_energy_into_gas_j,
-        relative_energy_into_gas_j,
+        energy_into_gas_j: energy.energy_into_gas_j,
+        phase_relative_energy_into_gas_j: energy.phase_relative_energy_into_gas_j,
+        relative_energy_into_gas_j: energy.relative_energy_into_gas_j,
         solid_energy_change_j,
         energy_residual_j,
         recession_m,

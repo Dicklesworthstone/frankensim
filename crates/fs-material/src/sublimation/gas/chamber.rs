@@ -19,6 +19,8 @@
 
 /// Bounded adaptive histories using the same conservative joint interval.
 pub mod advance;
+/// Separate substrate/deposit storage, including initially bare substrates.
+pub mod coating;
 /// Explicit solid/liquid inventories on original sharp-melting caloric charts.
 pub mod mixed;
 
@@ -27,6 +29,7 @@ use super::{
     GasSurfaceError, GasSurfaceSolve, PreparedSurface, SolidSurfaceState, SpeciesBoundaryRelativeTransfer,
     SpeciesId, SublimationError, SublimationLaw, ThermochemicalGasModel, invalid, inventory_limit,
     poll, prepare_surface_with_heat, snapshot_surface, species_snapshot, validate_controls,
+    SurfaceSnapshot,
 };
 use std::collections::BTreeMap;
 use super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
@@ -42,6 +45,22 @@ pub struct GasChamberSurface<'a> {
     pub binding: &'a GasSurfaceBinding,
     pub solid: SolidSurfaceState,
     pub temperature_from_enthalpy: &'a dyn Fn(f64) -> Result<f64, SublimationError>,
+}
+
+// The common gas owner needs only identity, binding, exposed area and actual
+// participating condensed mass. Each physical storage owner supplies its own
+// snapshot and endpoint without a synthetic whole-body caloric coordinate.
+trait ChamberSurfaceOwner {
+    fn id(&self) -> u64;
+    fn binding(&self) -> &GasSurfaceBinding;
+    fn area_m2(&self) -> f64;
+    fn condensed_mass_kg(&self) -> f64;
+}
+impl ChamberSurfaceOwner for GasChamberSurface<'_> {
+    fn id(&self) -> u64 { self.id }
+    fn binding(&self) -> &GasSurfaceBinding { self.binding }
+    fn area_m2(&self) -> f64 { self.solid.area_m2 }
+    fn condensed_mass_kg(&self) -> f64 { self.solid.mass_kg }
 }
 
 /// The original single-surface controls and a caller-owned work/allocation cap.
@@ -65,7 +84,8 @@ pub struct GasChamberSurfaceStep {
     pub energy_into_gas_j: f64,
     /// Original-datum report: intended transferred-mass reference energy plus
     /// actual represented caloric storage. Inventory rounding is independently
-    /// bounded. On the mixed path this includes the complete condensed body.
+    /// bounded. On the mixed path this includes the complete condensed body;
+    /// the supported path includes both nonvolatile substrate and deposit.
     pub solid_energy_change_j: f64,
     /// Solid storage change plus its allocated stream energy, with conserved
     /// formation references canceled before evaluation. The actual gas storage
@@ -325,11 +345,11 @@ pub(super) fn advance_chamber_observed<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasChamberSolve,
-    mut observe: impl FnMut(
+    observe: impl FnMut(
         &GasChamberSurface<'_>,
         &super::SurfaceSnapshot,
     ) -> Result<(), GasSurfaceError>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<
     (
         GasChamberCandidate<'catalog>,
@@ -337,6 +357,46 @@ pub(super) fn advance_chamber_observed<'catalog>(
     ),
     GasSurfaceError,
 > {
+    advance_chamber_with_owner(
+        surfaces, accommodation, gas, catalog, duration_s, controls,
+        || {
+            if let Some(laws) = calorics { mixed::validate_roster(surfaces, laws)?; }
+            Ok(())
+        },
+        |surface, context| match calorics {
+            Some(laws) => mixed::snapshot(surface, laws[&surface.id], context, catalog,
+                duration_s, controls.surface),
+            None => snapshot_surface(surface.law, surface.binding, surface.solid, context,
+                catalog, surface.temperature_from_enthalpy, duration_s, controls.surface),
+        },
+        |surface, snapshot, reflected_heat, _| match calorics {
+            Some(laws) => mixed::prepare(surface, laws[&surface.id], snapshot, catalog,
+                controls.surface, reflected_heat),
+            None => prepare_surface_with_heat(surface.law, surface.binding, snapshot, catalog,
+                surface.temperature_from_enthalpy, controls.surface, reflected_heat),
+        },
+        observe, cancelled,
+    )
+}
+
+// One canonical species/inventory/relative-energy transaction serves every
+// admitted condensed storage owner. Only the local physical storage changes;
+// this function remains the sole reconstructor of the original gas endpoint.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_chamber_with_owner<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bool>(
+    surfaces: &[S],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberSolve,
+    admit_roster: impl FnOnce() -> Result<(), GasSurfaceError>,
+    mut snapshot_surface: impl FnMut(&S, GasSpeciesSnapshot) -> Result<SurfaceSnapshot, GasSurfaceError>,
+    mut prepare_surface: impl FnMut(&S, SurfaceSnapshot, f64, &mut C)
+        -> Result<PreparedSurface, GasSurfaceError>,
+    mut observe: impl FnMut(&S, &SurfaceSnapshot) -> Result<(), GasSurfaceError>,
+    mut cancelled: C,
+) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
     poll(&mut cancelled)?;
     validate_controls(controls.surface, duration_s)?;
     if controls.maximum_surfaces == 0 || surfaces.len() > controls.maximum_surfaces {
@@ -347,7 +407,7 @@ pub(super) fn advance_chamber_observed<'catalog>(
     let mut ordered = BTreeMap::new();
     for surface in surfaces {
         poll(&mut cancelled)?;
-        if ordered.insert(surface.id, surface).is_some() {
+        if ordered.insert(surface.id(), surface).is_some() {
             return Err(invalid(
                 "joint molecular surfaces require unique stable identities",
             ));
@@ -358,31 +418,19 @@ pub(super) fn advance_chamber_observed<'catalog>(
             return Err(invalid("thermal accommodation must cover exactly the active chamber surfaces"));
         }
     }
-    if let Some(laws) = calorics { mixed::validate_roster(surfaces, laws)?; }
+    admit_roster()?;
     let mut reflections = BTreeMap::new();
     let mut species: BTreeMap<SpeciesId, SpeciesAccount> = BTreeMap::new();
     let mut snapshots = Vec::with_capacity(ordered.len());
     let mut limit = None;
     for surface in ordered.values() {
         poll(&mut cancelled)?;
-        let id = &surface.binding.species;
+        let id = &surface.binding().species;
         let context = match species.get(id) {
             Some(account) => account.gas,
             None => species_snapshot(gas, catalog, id)?,
         };
-        let snapshot = match calorics {
-            Some(laws) => mixed::snapshot(surface, laws[&surface.id], context, catalog, duration_s, controls.surface)?,
-            None => snapshot_surface(
-                surface.law,
-                surface.binding,
-                surface.solid,
-                context,
-                catalog,
-                surface.temperature_from_enthalpy,
-                duration_s,
-                controls.surface,
-            )?,
-        };
+        let snapshot = snapshot_surface(surface, context)?;
         let account = species.entry(id.clone()).or_insert_with(|| {
             SpeciesAccount::new(context, snapshot.outgoing_specific_energy_j_kg)
         });
@@ -395,7 +443,7 @@ pub(super) fn advance_chamber_observed<'catalog>(
                 duration_s,
                 snapshot.outgoing_mass_kg,
                 // In a mixture this is only its OLD solid inventory.
-                snapshot.solid.mass_kg,
+                snapshot.available_solid_mass_kg,
                 controls.surface.maximum_gross_inventory_fraction,
             ),
         );
@@ -432,8 +480,8 @@ pub(super) fn advance_chamber_observed<'catalog>(
         poll(&mut cancelled)?;
         let mut reflected_heat = 0.0;
         if let Some(laws) = accommodation {
-            let reflection = laws[&surface.id].evaluate(
-                surface.binding, gas, snapshot.temperature_k, surface.solid.area_m2,
+            let reflection = laws[&surface.id()].evaluate(
+                surface.binding(), gas, snapshot.temperature_k, surface.area_m2(),
                 duration_s, &mut cancelled,
             )?;
             reflected_heat = reflection.heat_into_gas_j;
@@ -448,24 +496,13 @@ pub(super) fn advance_chamber_observed<'catalog>(
                 species.get_mut(&row.species).expect("original reflected species account")
                     .reflected_heat.add(row.heat_into_gas_j)?;
             }
-            reflections.insert(surface.id, reflection);
+            reflections.insert(surface.id(), reflection);
         }
-        let prepared = match calorics {
-            Some(laws) => mixed::prepare(surface, laws[&surface.id], snapshot, catalog, controls.surface, reflected_heat)?,
-            None => prepare_surface_with_heat(
-                surface.law,
-                surface.binding,
-                snapshot,
-                catalog,
-                surface.temperature_from_enthalpy,
-                controls.surface,
-                reflected_heat,
-            )?,
-        };
+        let prepared = prepare_surface(surface, snapshot, reflected_heat, &mut cancelled)?;
         let account = species
-            .get_mut(&surface.binding.species)
+            .get_mut(&surface.binding().species)
             .expect("snapshot retains its original species account");
-        let dm = prepared.solid.mass_kg - surface.solid.mass_kg;
+        let dm = prepared.solid.mass_kg - surface.condensed_mass_kg();
         account.solid_mass_change.add(dm)?;
         solid_mass_change.add(dm)?;
         solid_energy.add(prepared.solid_energy_change_j)?;
@@ -488,7 +525,7 @@ pub(super) fn advance_chamber_observed<'catalog>(
             account.single_stream_energy_j = phase_energy;
         }
         observe(surface, &snapshot)?;
-        outputs.push(GasChamberSurfaceStep::new(surface.id, prepared));
+        outputs.push(GasChamberSurfaceStep::new(surface.id(), prepared));
     }
     let mut rows = Vec::with_capacity(species.len());
     let mut total_outgoing = Total::default();
