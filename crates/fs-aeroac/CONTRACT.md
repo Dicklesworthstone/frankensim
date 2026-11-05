@@ -1854,6 +1854,40 @@ trains and coherent total intensity, verifies analytic source derivatives of
 the monopole, retains on-axis transverse motion, and covers matched-fluid,
 clock, self-field, invalid-input, work-limit and cancellation behavior.
 
+### Prepared compact-source arrays around the original layer
+
+`curle3d::refraction::full_wave::layer::array::PreparedLayeredFullWaveCompactSourceObserver`
+composes the native layered Q/F owners for multiple original source positions.
+`new`, `new_reflected`, and `new_total` respectively select transmission beyond
+the second face, the returning incident-side field, or coherent incident-side
+direct plus return. The original `PlanarFluidLayer` supplies all three material
+snapshots and both face clearances without reconstructing or renormalizing its
+plane. No observation inside the layer or guided-mode solver is inferred.
+
+Each source retains one cached Cartesian 4-by-4 transfer and separate native
+monopole/force diagnostics. `FullWaveCompactSourceLimits` bounds allocation,
+per-mechanism integration and aggregate Q/F evaluations across the complete
+array. Only an actual native interface reduction with equal exterior speeds
+has zero quadrature work; equal speeds alone do not eliminate a finite density
+layer. Empty arrays are validated silence. Total construction refuses any
+singular direct source/observer coincidence, while reflected construction
+retains finite returning self-fields.
+
+Interface and layer arrays share the same private borrowed `ArrayField` and
+`Transfer` implementation: fixed-order DD accumulation, coherent source phases,
+independent-source statistics, bounded low-rank factors, full velocity covariance,
+and signed active/reactive intensity. Application adds no allocation, quadrature,
+transcendental work or dynamic dispatch. Within each original source, direct
+and returned amplitudes interfere before any independence assumption across
+different sources. Field-kind metadata and result scopes distinguish all three
+observations; reflected numerical diagnostics retain their absolute-only
+meaning near a total-field or array interference null.
+
+`tests/full_wave_layer_array.rs` covers collapsed/homogeneous and invisible-face
+limits, actual finite-layer Q/F composition and all moments, path/source coherence,
+global work exhaustion, equal-speed density-layer work, finite versus singular
+self-fields, original clocks, explicit domains, empty arrays and cancellation.
+
 ## Full spherical-wave transmission through a finite fluid layer
 
 `curle3d::refraction::full_wave::layer::PreparedLayeredFullWaveMonopole`

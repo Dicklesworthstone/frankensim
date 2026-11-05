@@ -91,11 +91,11 @@ pub struct FullWaveCompactSourceDiagnostics {
 }
 
 #[derive(Clone, Debug)]
-struct Transfer {
-    source_m: [f64; 3],
+pub(super) struct Transfer<D> {
+    pub(super) source_m: [f64; 3],
     // Rows p,ux,uy,uz; columns Q,Fx,Fy,Fz in their original physical units.
-    field: [[C64; 4]; 4],
-    diagnostics: FullWaveCompactSourceDiagnostics,
+    pub(super) field: [[C64; 4]; 4],
+    pub(super) diagnostics: D,
 }
 
 /// Full-wave source-array observation with fixed, allocation-free application.
@@ -110,7 +110,7 @@ pub struct PreparedFullWaveCompactSourceObserver {
     field_kind: FullWaveCompactFieldKind,
     frequency_hz: f64,
     observer_m: [f64; 3],
-    transfers: Vec<Transfer>,
+    transfers: Vec<Transfer<FullWaveCompactSourceDiagnostics>>,
     evaluations: usize,
 }
 
@@ -373,19 +373,7 @@ impl PreparedFullWaveCompactSourceObserver {
         &self,
         sources: &[CompactSourcePhasor],
     ) -> Result<CoherentCompactField, AeroacError> {
-        let [pressure, ux, uy, uz] = self.amplitudes(sources)?;
-        let velocity = [ux, uy, uz];
-        let intensity = velocity.map(|v| pressure.scale(0.5) * v.conj());
-        if intensity.iter().any(|v| !finite(*v)) {
-            return Err(nonfinite("full-wave compact array intensity"));
-        }
-        Ok(CoherentCompactField {
-            pressure_pa: pressure,
-            particle_velocity_m_s: velocity,
-            active_intensity_w_m2: intensity.map(|v| v.re),
-            reactive_intensity_w_m2: intensity.map(|v| v.im),
-            scope: self.scope(),
-        })
+        self.view().evaluate(sources)
     }
 
     /// Feed finite-window observation with all source and propagation phases
@@ -394,12 +382,7 @@ impl PreparedFullWaveCompactSourceObserver {
         &self,
         sources: &[CompactSourcePhasor],
     ) -> Result<HarmonicFieldLine<3>, AeroacError> {
-        let [pressure, ux, uy, uz] = self.amplitudes(sources)?;
-        Ok(HarmonicFieldLine {
-            frequency_hz: self.frequency_hz,
-            pressure_pa: pressure,
-            particle_velocity_m_s: [ux, uy, uz],
-        })
+        self.view().evaluate_harmonic_line(sources)
     }
 
     /// Propagate explicit coherence factors S=Bξ, E[ξξ*]=I. Each factor keeps
@@ -412,15 +395,82 @@ impl PreparedFullWaveCompactSourceObserver {
         modes: &[&[CompactSourcePhasor]],
         budget: CoherenceBudget,
     ) -> Result<CompactFieldStatistics, AeroacError> {
+        self.view().evaluate_coherence_modes(modes, budget)
+    }
+
+    /// O(N) observation of explicitly independent physical sources. Q and F
+    /// remain coherent within each source. Unknown phase alone does not imply
+    /// independence; the caller must supply that statistical assumption.
+    pub fn evaluate_independent_sources(
+        &self,
+        sources: &[CompactSourcePhasor],
+    ) -> Result<CompactFieldStatistics, AeroacError> {
+        self.view().evaluate_independent_sources(sources)
+    }
+
+    fn view(&self) -> ArrayField<'_, FullWaveCompactSourceDiagnostics> {
+        ArrayField {
+            transfers: &self.transfers,
+            frequency_hz: self.frequency_hz,
+            scope: self.scope(),
+        }
+    }
+}
+
+/// Borrow the same fixed Cartesian transfers for every propagation owner.
+/// Diagnostics retain their native units/type but do not enter hot evaluation.
+pub(super) struct ArrayField<'a, D> {
+    pub(super) transfers: &'a [Transfer<D>],
+    pub(super) frequency_hz: f64,
+    pub(super) scope: &'static str,
+}
+
+impl<D> ArrayField<'_, D> {
+    pub(super) fn evaluate(
+        &self,
+        sources: &[CompactSourcePhasor],
+    ) -> Result<CoherentCompactField, AeroacError> {
+        let [pressure, ux, uy, uz] = self.amplitudes(sources)?;
+        let velocity = [ux, uy, uz];
+        let intensity = velocity.map(|v| pressure.scale(0.5) * v.conj());
+        if intensity.iter().any(|v| !finite(*v)) {
+            return Err(nonfinite("full-wave compact array intensity"));
+        }
+        Ok(CoherentCompactField {
+            pressure_pa: pressure,
+            particle_velocity_m_s: velocity,
+            active_intensity_w_m2: intensity.map(|v| v.re),
+            reactive_intensity_w_m2: intensity.map(|v| v.im),
+            scope: self.scope,
+        })
+    }
+
+    pub(super) fn evaluate_harmonic_line(
+        &self,
+        sources: &[CompactSourcePhasor],
+    ) -> Result<HarmonicFieldLine<3>, AeroacError> {
+        let [pressure, ux, uy, uz] = self.amplitudes(sources)?;
+        Ok(HarmonicFieldLine {
+            frequency_hz: self.frequency_hz,
+            pressure_pa: pressure,
+            particle_velocity_m_s: [ux, uy, uz],
+        })
+    }
+
+    pub(super) fn evaluate_coherence_modes(
+        &self,
+        modes: &[&[CompactSourcePhasor]],
+        budget: CoherenceBudget,
+    ) -> Result<CompactFieldStatistics, AeroacError> {
         if modes.len() > budget.max_modes
             || modes
                 .len()
-                .checked_mul(self.source_count())
+                .checked_mul(self.transfers.len())
                 .is_none_or(|pairs| pairs > budget.max_source_mode_pairs)
         {
             return Err(invalid("full-wave compact coherence exceeds work budget"));
         }
-        if modes.iter().any(|mode| mode.len() != self.source_count()) {
+        if modes.iter().any(|mode| mode.len() != self.transfers.len()) {
             return Err(invalid(
                 "each full-wave coherence factor requires one vector per source",
             ));
@@ -429,13 +479,10 @@ impl PreparedFullWaveCompactSourceObserver {
         for mode in modes {
             sum.add(self.amplitudes(mode)?)?;
         }
-        sum.finish(self.scope())
+        sum.finish(self.scope)
     }
 
-    /// O(N) observation of explicitly independent physical sources. Q and F
-    /// remain coherent within each source. Unknown phase alone does not imply
-    /// independence; the caller must supply that statistical assumption.
-    pub fn evaluate_independent_sources(
+    pub(super) fn evaluate_independent_sources(
         &self,
         sources: &[CompactSourcePhasor],
     ) -> Result<CompactFieldStatistics, AeroacError> {
@@ -446,11 +493,11 @@ impl PreparedFullWaveCompactSourceObserver {
             transfer.accumulate(*source, &mut field)?;
             sum.add(field.map(ComplexSum::value))?;
         }
-        sum.finish(self.scope())
+        sum.finish(self.scope)
     }
 
     fn check_count(&self, sources: &[CompactSourcePhasor]) -> Result<(), AeroacError> {
-        if sources.len() != self.source_count() {
+        if sources.len() != self.transfers.len() {
             return Err(invalid(
                 "one vector is required per full-wave compact source",
             ));
@@ -472,14 +519,18 @@ impl PreparedFullWaveCompactSourceObserver {
     }
 }
 
-fn set_column(field: &mut [[C64; 4]; 4], column: usize, line: HarmonicFieldLine<3>) {
+pub(super) fn set_column(field: &mut [[C64; 4]; 4], column: usize, line: HarmonicFieldLine<3>) {
     field[0][column] = line.pressure_pa;
     for axis in 0..3 {
         field[axis + 1][column] = line.particle_velocity_m_s[axis];
     }
 }
 
-fn remaining_budget(requested: usize, remaining: usize, exact: bool) -> Result<usize, AeroacError> {
+pub(super) fn remaining_budget(
+    requested: usize,
+    remaining: usize,
+    exact: bool,
+) -> Result<usize, AeroacError> {
     if remaining == 0 && !exact {
         return Err(invalid(
             "full-wave compact array exhausted its shared evaluation budget",
@@ -489,7 +540,7 @@ fn remaining_budget(requested: usize, remaining: usize, exact: bool) -> Result<u
     Ok(requested.min(remaining.max(1)))
 }
 
-impl Transfer {
+impl<D> Transfer<D> {
     fn accumulate(
         &self,
         source: CompactSourcePhasor,

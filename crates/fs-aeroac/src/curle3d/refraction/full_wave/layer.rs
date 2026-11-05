@@ -34,6 +34,8 @@ use core::f64::consts::{FRAC_PI_2, TAU};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det};
 
+/// Coherent and statistically specified original Q/F arrays around the layer.
+pub mod array;
 mod force;
 pub use force::{
     FULL_WAVE_LAYER_FORCE_SCOPE, FullWaveLayerForceDiagnostics, PreparedLayeredFullWaveForce,
