@@ -1,6 +1,8 @@
 //! Original mixed-mode area/work and actual full-inertia paired-body recoil.
 #[path = "../../fs-contact/tests/adhesive_dmt_coupled/common.rs"]
 mod common;
+#[path = "adhesive_jkr_mixed_mode/temperature.rs"]
+mod temperature;
 
 use core::f64::consts::PI;
 use fs_contact::interface_binding::adhesive_shear::SourceAdhesiveShear;

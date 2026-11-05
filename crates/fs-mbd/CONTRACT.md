@@ -5017,6 +5017,21 @@ elastic unloading and area recovery, independent full-tensor three-axis recoil,
 external force/torque work, world/body-index covariance, held mixed preload and
 chronology, and atomic frame/source/mobility/geometry/twist/load/cancel refusals
 with retry.
+
+`PreparedRigidJkrMixedModePair::continue_at_temperature` authenticates the
+original held-indentation thermal receipt and its pinned shear-strength
+successor while preserving the captured body poses, momenta, full mobility,
+reaction arms, tangent frame, normal datum, elastic shifts, actual rates,
+controls, time and step count. Native history and torsion checks precede source
+transfer. The replacement pair and retained token return together with the
+original source's separate normal-elastic, tangential-elastic and surface
+energy changes; their complete signed parameter work must also pass the native
+energy tolerance. This endpoint parameter change applies no impulse, heat or
+elapsed time and claims no intervening thermal path, expansion or reattachment.
+Three native temperature groups cover unequal source temperatures with nonzero
+actual momentum and subsequent whole-body energy closure, exact no-op transfer
+after an accepted step, and stale frame/rates/geometry/mobility/twist plus
+cancellation refusal with retry.
 Source/native execution remains subject to the documented dependency build
 limitation.
 

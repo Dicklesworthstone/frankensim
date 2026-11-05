@@ -6,6 +6,8 @@ mod common;
 mod motion;
 #[path = "adhesive_mixed_mode/path.rs"]
 mod path;
+#[path = "adhesive_mixed_mode/temperature.rs"]
+mod temperature;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{

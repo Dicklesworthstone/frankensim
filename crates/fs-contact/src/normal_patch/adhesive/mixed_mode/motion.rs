@@ -16,6 +16,9 @@
 //! still required. A positive symmetric part of the local inertial tangent is
 //! required throughout Newton continuation; it is not a continuum stability test.
 
+/// Original-source prescribed-temperature continuation at held coordinates.
+pub mod temperature;
+
 use super::{
     JkrMixedModeResponse, SourceJkrMixedMode,
     path::{JkrMixedModePath, JkrMixedModePathError},

@@ -1568,6 +1568,19 @@ static-capacity and source-identity refusals preserve the input source. These
 are conservative floating-point screens, not interval certificates or an
 inferred dynamic post-slip, post-fold, dissipation or healing law.
 
+`mixed_mode::motion::temperature` continues an accepted coupled trajectory
+through the existing sealed held-indentation normal refresh and original pinned
+junction-claim rebind. All three mechanical coordinates, velocities, clock,
+step count, full native mobility and motion budgets remain fixed. The new
+mixed-mode source and shear owner must match those exact authenticated
+successors; refreshed stability, applicability and actual-area static capacity
+are admitted under the shared evaluation budget. Signed parameter work includes
+the separately reported normal-elastic, tangential-elastic and surface-energy
+changes, with an independent total-storage balance. Pure-normal refresh work
+cannot substitute for the energy of a sheared contact. No impulse, mechanical
+step, dissipation, heat, thermal expansion or intervening thermal-path stability
+is inferred, and failed continuation leaves accepted history unchanged.
+
 `mixed_mode::motion::JkrMixedModeMotion` uses that original discrete gradient in
 a joint normal/two-shear midpoint inertial solve with all nine entries of the
 held native mobility. Analytic source tangents and one reusable prepared 3x3 LU

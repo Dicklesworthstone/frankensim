@@ -21,6 +21,9 @@
 //! transfer. Torsion, sliding and radius instability refuse: this owner invents
 //! no spin law, snap continuation, heat, contact migration or finite rotation.
 
+/// Original-source temperature continuation at unchanged native state.
+pub mod temperature;
+
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_contact::interface_binding::adhesive_shear::SourceAdhesiveShear;
 use fs_contact::normal_patch::adhesive::mixed_mode::{
@@ -157,6 +160,7 @@ pub enum RigidJkrMixedModeError {
     StateMismatch,
     GeometryMismatch { residual_m: f64 },
     UnsupportedTorsion { before_rad_s: f64, after_rad_s: f64 },
+    ParameterWorkBalance { residual_j: f64, tolerance_j: f64 },
     Audit(Box<RigidJkrMixedModeAudit>),
 }
 impl From<JkrMixedModeMotionError> for RigidJkrMixedModeError {
@@ -354,31 +358,9 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         dt_s: f64,
         gate: &CancelGate,
     ) -> Result<RigidJkrMixedModeCandidate, RigidJkrMixedModeError> {
-        poll(gate)?;
-        if previous.frame != self.contact.frame
-            || previous.marker_arms != self.marker_arms
-            || previous.reference_approach_m != self.contact.reference_approach_m
-        {
-            return Err(RigidJkrMixedModeError::StateMismatch);
-        }
+        let (rates_before, spin_before) = self.admit_history(previous, gate)?;
         let old = previous.position_m();
-        let geometry_residual = finite(old[0] - self.approach_m)?;
-        if geometry_residual.abs() > self.controls.geometry_tolerance_m {
-            return Err(RigidJkrMixedModeError::GeometryMismatch {
-                residual_m: geometry_residual,
-            });
-        }
         let initial = relative_point(self.reaction_before);
-        let rates_before = self.axes.map(|axis| initial.dot(axis));
-        if (0..3).any(|i| {
-            !rates_before[i].is_finite()
-                || (rates_before[i] - previous.velocity_m_s()[i]).abs()
-                    > self.controls.velocity_tolerance_m_s
-        }) {
-            return Err(RigidJkrMixedModeError::StateMismatch);
-        }
-        let spin_before = finite(relative_spin(self.reaction_before).dot(self.axes[0]))?;
-        self.admit_spin([spin_before; 2])?;
         let mut free = [Vec3::ZERO; 2];
         for i in 0..2 {
             wrenches[i].validate()?;
@@ -589,6 +571,38 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
                 audit,
             },
         })
+    }
+
+    fn admit_history(
+        &self,
+        previous: RigidJkrMixedModeState,
+        gate: &CancelGate,
+    ) -> Result<([f64; 3], f64), RigidJkrMixedModeError> {
+        poll(gate)?;
+        if previous.frame != self.contact.frame
+            || previous.marker_arms != self.marker_arms
+            || previous.reference_approach_m != self.contact.reference_approach_m
+        {
+            return Err(RigidJkrMixedModeError::StateMismatch);
+        }
+        let geometry_residual = finite(previous.position_m()[0] - self.approach_m)?;
+        if geometry_residual.abs() > self.controls.geometry_tolerance_m {
+            return Err(RigidJkrMixedModeError::GeometryMismatch {
+                residual_m: geometry_residual,
+            });
+        }
+        let relative = relative_point(self.reaction_before);
+        let rates = self.axes.map(|axis| relative.dot(axis));
+        if (0..3).any(|i| {
+            !rates[i].is_finite()
+                || (rates[i] - previous.velocity_m_s()[i]).abs()
+                    > self.controls.velocity_tolerance_m_s
+        }) {
+            return Err(RigidJkrMixedModeError::StateMismatch);
+        }
+        let spin = finite(relative_spin(self.reaction_before).dot(self.axes[0]))?;
+        self.admit_spin([spin; 2])?;
+        Ok((rates, spin))
     }
 
     fn admit_spin(&self, spin: [f64; 2]) -> Result<(), RigidJkrMixedModeError> {
