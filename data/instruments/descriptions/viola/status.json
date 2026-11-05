@@ -20,7 +20,8 @@
   "what drives a noisy band of lines around the shell's 400.8 Hz pole (strongest near 395 Hz, noise-driven and not a comb, the same place when the note changes) and a fixed line near 200 Hz on the viola pages: neither is explained",
   "the tone and the start of the note: most notes are too dark (D4 centroid 568 Hz against 1210 Hz in the recording) and start far faster than the recordings (D4 attack 104 to 292 ms against 604 ms; C4 107 ms against 342 ms)",
   "harmonics-to-noise as high as the recordings: ours is lower on the pages that state it (C4 16.0 dB against 30.0 dB, Db4 23.5 dB against 33.0 dB)",
-  "string loss and bending stiffness from a source: no loss is printed for these strings, so the cards carry none, and the stiffness is derived"
+  "string loss and bending stiffness from a source: no loss is printed for these strings, so the cards carry none, and the stiffness is derived",
+  "the viola pages that carry the wood loss raised 3.25 times (G3, C3, D4 and Db4) apply it at every frequency, a factor set on the body's lowest strong pole (Q 75 on the wood alone against 15 to 27 printed); on D4's loaded response it takes the body's pressure per newton down by 4.5, 5.9 and 5.8 dB (medians over 1.0 to 1.6, 1.6 to 2.4 and 2.4 to 3.5 kHz) and sharp peaks by more, one at 2.36 kHz by 14 dB, and the posted page's lines sit within 1.7 dB of that loaded response; that is about half of the 13 dB by which the viola D4 page's lines at the 6th to 11th harmonic sit below the violin D4 page's, which carries wood alone; the rest is 2 to 3 dB of bridge force (the viola string's after-length makes holes at the 6th and 12th harmonics, 12 dB each) and about 4 dB that nothing here accounts for; whether the loss should rise with frequency is not known"
  ],
  "blocked": null,
  "beads": [
