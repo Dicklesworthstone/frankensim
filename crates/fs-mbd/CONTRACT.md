@@ -842,6 +842,14 @@ actual drifted endpoint and returns its original load receipt with its
 wrench. Gravity acts once through the native owner. Each body torque uses
 its own endpoint axes, so its world impulse is rotated at that endpoint.
 
+The staged owner retains the linear half-kick in double-double precision until
+both the position contraction and endpoint kick finish. Representable resultant
+impulses survive half-kicks below the stored momentum's rounding threshold;
+cancelling endpoint forces also retain the original momentum. Position
+is rounded after adding the original position, preserving a small displacement
+when large drift and origin offsets cancel. Callback views and accepted states
+keep their original `f64` representation; no extra substeps or allocation occur.
+
 For smooth configuration-only loads this is a symmetric second-order
 splitting. Spin plus orbital momentum changes only through the
 two physical endpoint impulses, up to floating-point error. The free map

@@ -1,8 +1,9 @@
 //! Native Verlet stages for configuration-coupled endpoint forces.
 use super::{
     DynamicsDiagnostics, DynamicsError, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState,
-    StepReceipt, Vec3, Wrench, free_rotation_step,
+    StepReceipt, Vec3, Wrench, finite_derived, free_rotation_step,
 };
+use fs_math::dd::Dd;
 
 /// An uncommitted native half-kick and full drift, with its original inputs.
 ///
@@ -18,6 +19,10 @@ pub struct VerletStage {
     state_before: RigidBodyState,
     diagnostics_before: DynamicsDiagnostics,
     drifted: RigidBodyState,
+    // The public stage view rounds to the original f64 state. Keep its linear
+    // kick tail until position contraction and the final kick are complete;
+    // two separately rounded half-kicks can otherwise lose a full impulse.
+    linear_momentum_mid: [Dd; 3],
     weight_world: Vec3,
     duration_seconds: f64,
     half: f64,
@@ -44,9 +49,12 @@ impl RigidBodyIntegrator {
         let diagnostics_before = self.diagnostics(state, properties)?;
         let half = 0.5 * duration_seconds;
         let weight_world = self.gravity.acceleration_world().scale(properties.mass);
-        let linear_mid = state
-            .linear_momentum_world
-            .add(wrench_before.force_world.add(weight_world).scale(half));
+        let momentum_before = components(state.linear_momentum_world);
+        let force_before = components(wrench_before.force_world.add(weight_world));
+        let linear_momentum_mid = core::array::from_fn(|d| {
+            Dd::from_f64(momentum_before[d]) + Dd::from_f64(force_before[d]) * Dd::from_f64(half)
+        });
+        let linear_mid = rounded(linear_momentum_mid, "verlet.linear_momentum_mid")?;
         let angular_kicked = state
             .angular_momentum_body
             .add(wrench_before.torque_body.scale(half));
@@ -56,10 +64,20 @@ impl RigidBodyIntegrator {
             properties,
             duration_seconds,
         )?;
-        let position_after = state
-            .pose
-            .position_world
-            .add(linear_mid.scale(duration_seconds / properties.mass));
+        let position_before = components(state.pose.position_world);
+        let quotient = finite_derived(duration_seconds / properties.mass, "verlet.drift_scale")?;
+        // Refine the finite quotient with one fused remainder. Reconstructing
+        // mass*quotient separately can overflow even when dt/mass is finite
+        // (for example f64::MAX / 3). Underflow retains the original scope.
+        let remainder = (-quotient).mul_add(properties.mass, duration_seconds);
+        let correction = finite_derived(remainder / properties.mass, "verlet.drift_scale")?;
+        let drift_scale = Dd::from_pair(quotient, correction);
+        let position_after = rounded(
+            core::array::from_fn(|d| {
+                Dd::from_f64(position_before[d]) + linear_momentum_mid[d] * drift_scale
+            }),
+            "verlet.position_after",
+        )?;
         let drifted = RigidBodyState::new(
             Pose::new(position_after, orientation_after)?,
             linear_mid,
@@ -71,6 +89,7 @@ impl RigidBodyIntegrator {
             state_before: state,
             diagnostics_before,
             drifted,
+            linear_momentum_mid,
             weight_world,
             duration_seconds,
             half,
@@ -79,7 +98,8 @@ impl RigidBodyIntegrator {
 }
 
 impl VerletStage {
-    /// Endpoint pose with half-kicked momenta, for configuration-dependent loads.
+    /// Endpoint pose with rounded half-kicked momenta, for configuration-dependent
+    /// loads. The private stage retains the linear kick tail for [`Self::finish`].
     pub const fn drifted_state(&self) -> RigidBodyState {
         self.drifted
     }
@@ -89,14 +109,16 @@ impl VerletStage {
     /// Invalid arithmetic/state/force returns no completed receipt.
     pub fn finish(self, wrench_after: Wrench) -> Result<StepReceipt, DynamicsError> {
         wrench_after.validate()?;
+        let force_after = components(wrench_after.force_world.add(self.weight_world));
+        let linear_momentum_after = rounded(
+            core::array::from_fn(|d| {
+                self.linear_momentum_mid[d] + Dd::from_f64(force_after[d]) * Dd::from_f64(self.half)
+            }),
+            "verlet.linear_momentum_after",
+        )?;
         let state_after = RigidBodyState::new(
             self.drifted.pose,
-            self.drifted.linear_momentum_world.add(
-                wrench_after
-                    .force_world
-                    .add(self.weight_world)
-                    .scale(self.half),
-            ),
+            linear_momentum_after,
             self.drifted
                 .angular_momentum_body
                 .add(wrench_after.torque_body.scale(self.half)),
@@ -110,4 +132,17 @@ impl VerletStage {
             diagnostics_after,
         })
     }
+}
+
+fn components(value: Vec3) -> [f64; 3] {
+    [value.x, value.y, value.z]
+}
+
+fn rounded(values: [Dd; 3], field: &'static str) -> Result<Vec3, DynamicsError> {
+    for value in values {
+        finite_derived(value.hi, field)?;
+        finite_derived(value.lo, field)?;
+    }
+    let [x, y, z] = values.map(Dd::to_f64);
+    Ok(Vec3::new(x, y, z))
 }

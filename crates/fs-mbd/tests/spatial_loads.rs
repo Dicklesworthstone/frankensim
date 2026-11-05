@@ -176,6 +176,135 @@ fn opposing_large_loads_retain_their_residual_couple_through_verlet() {
 }
 
 #[test]
+fn staged_verlet_accumulates_half_kicks_before_rounding_the_full_impulse() {
+    let large = 9_007_199_254_740_992.0; // 2^53: adding one rounds back to this value.
+    let body = MassProperties::new(large, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    for sign in [-1.0, 1.0] {
+        let momentum = Vec3::new(sign * large, 0.0, 0.0);
+        let impulse = Vec3::new(2.0 * sign, 0.0, 0.0);
+        let initial = RigidBodyState::new(Pose::identity(), momentum, Vec3::ZERO).unwrap();
+        for (gravity, held) in [
+            (
+                Gravity::ZERO,
+                Wrench {
+                    force_world: impulse,
+                    torque_body: Vec3::ZERO,
+                },
+            ),
+            (
+                Gravity::new(impulse.scale(large.recip())).unwrap(),
+                Wrench::ZERO,
+            ),
+        ] {
+            let engine = RigidBodyIntegrator::new(gravity);
+            let stage = engine.begin_verlet(initial, body, held, 1.0).unwrap();
+            // The public callback view still has native f64 momenta.
+            assert_eq!(stage.drifted_state().linear_momentum_world(), momentum);
+            let after = stage.finish(held).unwrap().state_after;
+            assert_eq!(after.linear_momentum_world(), momentum.add(impulse));
+
+            let loads = prepare(held, Vec3::ZERO, &[]);
+            let spatial = engine.step_spatial(initial, body, &loads, 1.0).unwrap();
+            assert_eq!(spatial.step.state_after, after);
+            assert_eq!(spatial.linear_impulse_world, impulse);
+            assert_eq!(spatial.linear_momentum_residual_world, Vec3::ZERO);
+        }
+    }
+}
+
+#[test]
+fn verlet_drift_keeps_the_midpoint_tail_through_position_cancellation() {
+    let large = 9_007_199_254_740_992.0;
+    let body = MassProperties::new(large, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    for sign in [-1.0, 1.0] {
+        let initial = RigidBodyState::new(
+            Pose::new(Vec3::new(-sign, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap(),
+            Vec3::new(sign * large, 0.0, 0.0),
+            Vec3::ZERO,
+        )
+        .unwrap();
+        let held = Wrench {
+            force_world: Vec3::new(2.0 * sign, 0.0, 0.0),
+            torque_body: Vec3::ZERO,
+        };
+        // x1 = -sign + (sign*2^53 + sign)/2^53 = sign*2^-53.
+        // Rounding either midpoint momentum or velocity first would give zero.
+        let position = Vec3::new(sign * large.recip(), 0.0, 0.0);
+        let (native, endpoint) = integrator()
+            .step_verlet_with(initial, body, held, 1.0, |drifted| {
+                assert_eq!(drifted.pose().position_world(), position);
+                assert_eq!(
+                    drifted.linear_momentum_world(),
+                    initial.linear_momentum_world()
+                );
+                Ok::<_, DynamicsError>((held, drifted.pose().position_world()))
+            })
+            .unwrap();
+        assert_eq!(endpoint, position);
+        assert_eq!(native.state_after.pose().position_world(), position);
+
+        let result = integrator()
+            .step_spatial(initial, body, &prepare(held, Vec3::ZERO, &[]), 1.0)
+            .unwrap();
+        assert_eq!(result.step, native);
+        assert_eq!(result.force_work_j, 2.0);
+        assert_eq!(result.work_energy_residual_j, 0.0);
+        assert_eq!(result.linear_momentum_residual_world, Vec3::ZERO);
+    }
+}
+
+#[test]
+fn staged_verlet_combines_different_signed_endpoint_forces() {
+    let large = 9_007_199_254_740_992.0;
+    let body = MassProperties::new(large, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let initial =
+        RigidBodyState::new(Pose::identity(), Vec3::new(large, 0.0, 0.0), Vec3::ZERO).unwrap();
+    let before = Wrench {
+        force_world: Vec3::new(2.0, 0.0, 0.0),
+        torque_body: Vec3::ZERO,
+    };
+    for endpoint_force in [-6.0, -2.0, 6.0] {
+        let after = Wrench {
+            force_world: Vec3::new(endpoint_force, 0.0, 0.0),
+            torque_body: Vec3::ZERO,
+        };
+        let (step, ()) = integrator()
+            .step_verlet_with(initial, body, before, 1.0, |_| {
+                Ok::<_, DynamicsError>((after, ()))
+            })
+            .unwrap();
+        let expected_impulse = Vec3::new(1.0 + 0.5 * endpoint_force, 0.0, 0.0);
+        // Equal and opposite endpoint half-kicks must not create a net kick;
+        // other signed endpoints retain their actual trapezoidal impulse.
+        assert_eq!(
+            step.state_after
+                .linear_momentum_world()
+                .sub(initial.linear_momentum_world()),
+            expected_impulse,
+        );
+    }
+}
+
+#[test]
+fn staged_verlet_preserves_finite_drift_near_the_f64_range_limit() {
+    let body = MassProperties::new(3.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let momentum = Vec3::new(1.0, 0.0, 0.0);
+    let initial = RigidBodyState::new(Pose::identity(), momentum, Vec3::ZERO).unwrap();
+    let expected = Vec3::new(f64::MAX / 3.0, 0.0, 0.0);
+    // The quotient is finite, but separately multiplying it by three rounds
+    // to infinity. Its correction must use a fused division remainder.
+    let (step, ()) = integrator()
+        .step_verlet_with(initial, body, Wrench::ZERO, f64::MAX, |drifted| {
+            assert_eq!(drifted.pose().position_world(), expected);
+            Ok::<_, DynamicsError>((Wrench::ZERO, ()))
+        })
+        .unwrap();
+    assert_eq!(step.state_after.pose().position_world(), expected);
+    assert_eq!(step.state_after.linear_momentum_world(), momentum);
+    assert_eq!(step.state_after.angular_momentum_body(), Vec3::ZERO);
+}
+
+#[test]
 fn constant_axis_torque_has_exact_acceleration_phase_and_work() {
     let body = MassProperties::new(2.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 3.0)).unwrap();
     let z = Vec3::new(0.0, 0.0, 1.0);
@@ -463,7 +592,7 @@ fn held_body_loads_keep_the_existing_symplectic_trajectory_and_gravity_account()
         })
         .unwrap();
     assert_eq!(receipt.step, native);
-    // Two native linear half-kicks and the legacy single full kick can round
+    // The compensated staged impulse and legacy single full kick can round
     // differently; they integrate the same held resultant force.
     vector(
         receipt.step.state_after.linear_momentum_world(),
