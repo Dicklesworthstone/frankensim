@@ -20,6 +20,8 @@ use fs_math::{c64::C64, det};
 
 /// Original volume sources inside the layer radiating into its incident exterior.
 pub mod source;
+/// Original sources and receivers both inside a finite refracting layer.
+pub mod internal;
 
 /// Coherent original exterior volume-flow and force arrays observed in the layer.
 pub mod array;

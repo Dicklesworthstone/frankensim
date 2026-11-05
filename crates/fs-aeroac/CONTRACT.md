@@ -2413,3 +2413,36 @@ differentiated retarded Green potentials, all three momentum equations, causal
 pulse arrivals, transverse velocity at pressure nulls and coherent interference.
 This adds no source-model validation, finite-cell quadrature bound, moving
 quadrupole, absorption, scattering, reciprocal loading or measured-SPL claim.
+
+## Sources and receivers inside the original refracting layer
+
+`curle3d::refraction::full_wave::layer::interior::internal::PreparedLayerInternalFullWaveMonopole`
+prepares complex pressure and all three particle-velocity components with both
+the original volume-flow source and receiver strictly inside a finite fluid
+layer. The direct spherical field uses the original layer-fluid owner; the
+returned field retains all four coherent image families and the original
+physical source clock. Reflected-only evaluation is finite at a coincident
+source and receiver; total-field evaluation explicitly refuses that singularity.
+
+The two returning spectral families reuse the native layer denominator, branch
+maps, bounded quadrature and scaled interior functions. Each uses its actual
+positive source-plus-receiver return clearance for the evanescent cutoff.
+Separate cutoffs avoid forcing long-distance returns onto a near-face spectral
+tail. Double-double depths and rationalized admittance differences preserve
+original geometry and weak material contrast. Absolute error allocations and
+tail bounds add across families even at destructive interference; preparation
+shares one evaluation cap and cancellation contract. Warm evaluation applies
+cached coefficients without allocation or further quadrature.
+
+An absent second face delegates to the original reversed single-interface
+owner, including the exact homogeneous limit. Native harmonic-line output
+retains pressure, vector velocity, and signed active/reactive intensity.
+The scope is stationary, lossless, infinite planar, nontrapping layers and
+prescribed monopoles. Face sources, guided poles, absorption, moving media,
+source loading and a finite total self-field are not supplied.
+
+`tests/full_wave_layer_internal.rs` adds independent spherical-image references,
+deep evanescent and equal-depth cases, reciprocity, all receiving momentum
+components, continuity-equation divergence, both-face pressure/velocity
+continuity, rotated geometry, finite reflected self-fields, symmetry,
+aggregate work exhaustion, cancellation and invalid-input refusals.
