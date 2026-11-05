@@ -65,10 +65,10 @@ impl ImplicitConductionChain<'_> {
     /// Advance native SDIRK2 with the existing h/T/phase local-error controller.
     ///
     /// The entire requested window must satisfy [`Self::advance_sdirk2_to`]'s
-    /// fixed-mass, source-scheduled, constant-bath scope before the generic
+    /// fixed-mass, boundary-scheduled scope before the generic
     /// controller can process any events. Both comparison trajectories end at
-    /// each source event before its new power applies. Prescribed fixed-mass
-    /// implicit advection and its optional graph reconstruction participate in
+    /// each admitted boundary event before its new values apply. Prescribed
+    /// fixed-mass implicit advection and its optional graph reconstruction participate in
     /// every stage of both trajectories. Other pending events through the
     /// target refuse even if the first comparison would end sooner.
     ///

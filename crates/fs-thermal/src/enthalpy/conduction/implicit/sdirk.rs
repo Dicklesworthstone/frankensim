@@ -17,8 +17,8 @@ mod time_control;
 
 impl ImplicitConductionChain<'_> {
     // Check the complete requested window BEFORE an adaptive controller can
-    // process events. Source-only jumps preserve the prepared geometry/material
-    // bindings; a later bath or topology change must not admit a solved prefix.
+    // process events. Source/bath/native-Robin jumps preserve prepared bindings;
+    // a later geometry or law-owned coefficient change must not admit a prefix.
     fn admit_sdirk2_window(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -41,21 +41,33 @@ impl ImplicitConductionChain<'_> {
             }
             let Event::Boundary(id, boundary) = &event.event else {
                 return Err(ImplicitConductionError::Invalid(
-                    "SDIRK2 admits only scheduled source changes on fixed cells",
+                    "SDIRK2 admits only scheduled boundary changes on fixed cells",
                 ));
             };
             let cell = thermal
                 .cells
                 .get(id)
                 .ok_or(ImplicitConductionError::Invalid(
-                    "SDIRK2 source event requires an active cell",
+                    "SDIRK2 boundary event requires an active cell",
                 ))?;
             crate::enthalpy::validate_boundary(*boundary)?;
             let mut expected = cell.boundary;
             expected.source_w = boundary.source_w;
+            expected.ambient_k = boundary.ambient_k;
+            // An unbound ambient channel uses area*htc in both the native rate
+            // and tangent. Bound channels own their complete conductance instead;
+            // admitting an authored htc change there would silently ignore it.
+            if !self.conduction.ambient_faces.contains_key(id) {
+                expected.htc_w_m2_k = boundary.htc_w_m2_k;
+            }
+            if let (Some(expected), Some(reservoir)) =
+                (expected.reservoir.as_mut(), boundary.reservoir)
+            {
+                expected.temperature_k = reservoir.temperature_k;
+            }
             if *boundary != expected {
                 return Err(ImplicitConductionError::Invalid(
-                    "SDIRK2 source events must preserve ambient, film and reservoir boundaries",
+                    "SDIRK2 boundary events must preserve geometry and law-owned coefficients",
                 ));
             }
         }
@@ -128,11 +140,14 @@ impl ImplicitConductionChain<'_> {
     /// Advance fixed-mass convection/conduction with second-order, L-stable SDIRK2.
     ///
     /// All geometric, nonlinear material, contact and integrated boundary laws
-    /// of this prepared solver remain active. Ambient and reservoir temperatures
-    /// must remain constant throughout the call. Authored cell source/sink powers
-    /// may change through source-only boundary events: every interval ends at
-    /// the next event and uses its original left-limit power in both stages.
-    /// Events at the target are applied without aging under their new power.
+    /// of this prepared solver remain active. Authored cell source/sink powers,
+    /// ambient/reservoir temperatures and unbound ambient Robin htc may change
+    /// through boundary events. Every interval ends at the next event and uses
+    /// its original left-limit boundary values in both stages. Events at the
+    /// target update the returned boundary without heat under its new values.
+    /// Bound ambient htc and reservoir conductance declarations must stay fixed:
+    /// their geometric/complete-law owners supply conductance instead. Reservoir
+    /// presence/area and all prepared geometry/material bindings stay fixed.
     /// Both stages integrate powers in the original energy residual;
     /// source entropy retains its original unclassified at-cell convention.
     /// Attached prescribed implicit advection remains active, including limited
@@ -140,7 +155,7 @@ impl ImplicitConductionChain<'_> {
     /// endpoint enthalpy with the original flow, continuity and caloric admission;
     /// mass rates and inlet enthalpies remain fixed throughout the call.
     /// External observers, moving mass and all other scheduled events through
-    /// the target refuse before stage work. Source events retain
+    /// the target refuse before stage work. Boundary events retain
     /// authored order and the same whole-call nonlinear and accepted-step budgets.
     ///
     /// Both stages use the SAME original enthalpy storage. Internal first-stage
@@ -155,7 +170,8 @@ impl ImplicitConductionChain<'_> {
     /// Failed intervals may be halved for nonlinear convergence, without
     /// publishing either stage. This is not adaptive time-error control.
     /// Second-order accuracy requires a smooth admitted solution and independent
-    /// time refinement; phase/source/limiter corners can reduce the observed order.
+    /// time refinement within each event interval; constitutive/phase/limiter
+    /// corners can reduce the observed order.
     /// No explicit flow CFL is imposed; spatial transport error still needs
     /// independent refinement and the supplied flow's history remains unchanged.
     /// L-stability does not guarantee positivity or a maximum principle for
@@ -186,7 +202,7 @@ impl ImplicitConductionChain<'_> {
         loop {
             checkpoint()?;
             // Reuse the native event owner only when events are due. The common
-            // constant-source path does not clone/process a timeline per step.
+            // constant-boundary path does not clone/process a timeline per step.
             if next
                 .schedule
                 .get(next.cursor)

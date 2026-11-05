@@ -1302,22 +1302,31 @@ original initial state and the temporal entropy defect remains explicit.
 
 This entry point admits fixed-mass chains/graphs, including their existing
 nonlinear bulk, contact and integrated interface laws, with piecewise-constant
-authored cell source/sink powers and constant ambient/reservoir temperatures. Sources enter both
-native stages with the same positive weights as conduction; each joule is
-counted once in the external energy account. Their entropy remains explicitly
+authored cell source/sink powers, ambient/reservoir temperatures and native
+Robin htc on unbound ambient channels. Sources enter both native stages with
+the same positive weights as conduction; each joule is counted once in the
+external energy account. Their entropy remains explicitly
 unclassified at-cell heat, not an inferred reservoir entropy or dissipation law.
-Source-only `Event::Boundary` changes split each interval at the exact event
-time. Both stages integrate the left-limit power before processing the event
+Admitted `Event::Boundary` changes split each interval at the exact event
+time. Both stages use the left-limit boundary values before processing the event
 through the original timeline/observer. Simultaneous changes retain authored
-order; target-time events change the returned source without delivering heat
-at the new power. Prepared material, geometry and boundary bindings remain
-unchanged. One whole-window preflight, with bounded cancellation polling,
-rejects changes to ambient, film or reservoir declarations, unknown cells and
-all topology/birth events before stage work. The same whole-call step and
-nonlinear work budgets cover every source interval; events never renew them.
-The nonadaptive constant-source path avoids event processing/cloning at steps
-where no event is due. External source observers and moving mass remain outside
-this entry point. Complete-interval halving in
+order; target-time events change the returned boundary without transferring
+heat under its new values. Each interval's heat and reservoir entropy use its
+actual bath temperatures; a bath jump adds no instantaneous cell heat or
+entropy. No storage or cost of changing an external reservoir is inferred.
+Prepared material, geometry and boundary bindings remain unchanged.
+One whole-window preflight, with bounded cancellation polling, rejects changes
+to reservoir presence/area or authored conductance, bound ambient htc, unknown
+cells and all topology/birth events before stage work. Geometric and complete
+boundary laws own their conductance; accepting changes to overridden authored
+coefficients would silently ignore the requested physics. Native Robin htc
+may change, including to zero for insulation. Complete boundary laws receive
+the current bath temperature, including the gray exterior convection/radiation
+law; their emissivity, film coefficients and surface resistances remain fixed.
+The same whole-call step and nonlinear work budgets cover every event interval;
+events never renew them. The nonadaptive constant-boundary path avoids event
+processing/cloning at steps where no event is due. External source observers
+and moving mass remain outside this entry point. Complete-interval halving in
 `advance_sdirk2_to` handles nonlinear failure; it does not estimate temporal
 accuracy. Second-order time accuracy
 requires a smooth admitted solution and independent timestep refinement;
@@ -1355,6 +1364,13 @@ on all chain/graph and fixed/adaptive entry points. A piecewise exponential
 bath solution retains second-order temporal refinement. Late unsupported
 events, whole-call step budgets and cancellation during a long source-schedule
 preflight refuse without publishing a prefix.
+Boundary-schedule regressions independently compose exponential bath solutions
+on all fixed/adaptive chain/graph entry points, retain second-order refinement,
+and reconstruct stage heat and entropy across bath changes. Native Robin
+switching covers an insulated interval, exact target-time changes and
+continuation. A gray exterior law follows the same event-aligned trajectory
+and accounts as manually changing its bath between separately prepared solves.
+Changes to ignored coefficients refuse before any stage work.
 Convection regressions independently check both-stage paired-transfer entropy,
 directed Fourier convection-diffusion phase/decay with second-order time
 refinement, and open-stream/source/bath joules and entropy under a large enthalpy
@@ -1362,8 +1378,8 @@ datum shift. A limited latent channel has independent scalar stage solutions
 and an exact semi-discrete transient: its enthalpy converges at second order
 while all temperatures remain fixed. Tightening adaptive enthalpy tolerance
 improves that solution. Source-event timing, late cancellation and unsupported
-bath-event preflight are also exercised with attached flow. These numerical
-checks do not assert spatial second order at limiter switches, unconditional
+boundary-geometry event preflight are also exercised with attached flow.
+These numerical checks do not assert spatial second order at limiter switches, unconditional
 TVD/positivity, a stream-entropy closure or experimental validation.
 
 #### Adaptive second-order network convection and diffusion
@@ -1387,9 +1403,9 @@ arithmetic and overflow from multiplying a large normalized error.
 
 The complete requested window is checked before the generic controller can
 process an event or compute a comparison. The generic controller already clips
-both coarse and fine trajectories at source events and processes them only
-after accepting the preceding interval. Attached prescribed implicit advection
-and optional limited reconstruction participate in every stage of both
+both coarse and fine trajectories at admitted boundary events and processes
+them only after accepting the preceding interval. Attached prescribed implicit
+advection and optional limited reconstruction participate in every stage of both
 trajectories. All other events through the target remain outside SDIRK2's
 admitted scope even if an initial comparison would end sooner. The adapter shares
 the original material observables and change-based, caloric-datum-invariant

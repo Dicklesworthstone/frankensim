@@ -6,6 +6,9 @@ use crate::enthalpy::advection::{Advected, MassBoundary, MassFlow};
 #[path = "source_schedule_tests.rs"]
 mod source_schedule;
 
+#[path = "boundary_schedule_tests.rs"]
+mod boundary_schedule;
+
 struct Law {
     cp: f64,
     k: f64,
@@ -799,7 +802,7 @@ fn constant_heating_on_a_latent_plateau_stores_every_joule_once() {
 }
 
 #[test]
-fn scheduled_boundary_changes_refuse_explicitly() {
+fn scheduled_reservoir_removal_refuses_explicitly() {
     let law = Law::constant(1.0, 1.0);
     let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
     let (thermal, observer) = network(
@@ -810,7 +813,7 @@ fn scheduled_boundary_changes_refuse_explicitly() {
         Some(300.0),
         vec![TimedEvent {
             time_s: 0.5,
-            event: Event::Boundary(id(0), boundary(Some(350.0))),
+            event: Event::Boundary(id(0), boundary(None)),
         }],
     );
     let solver = chain(&thermal, &observer, &law);
@@ -1231,7 +1234,7 @@ fn convecting_source_events_keep_stage_timing_and_late_cancellation_atomic() {
     assert_eq!(thermal.time_s(), 0.0);
     assert_eq!(flow.audit().substeps, 0);
 
-    // A later bath change is still a whole-window refusal even with admitted
+    // A later reservoir addition is a whole-window refusal even with admitted
     // flow. It must win over the deliberately insufficient first-stage budget.
     let (thermal, observer) = network(
         &law,
@@ -1241,13 +1244,7 @@ fn convecting_source_events_keep_stage_timing_and_late_cancellation_atomic() {
         None,
         vec![TimedEvent {
             time_s: 0.9,
-            event: Event::Boundary(
-                id(0),
-                Boundary {
-                    ambient_k: 250.0,
-                    ..boundary(None)
-                },
-            ),
+            event: Event::Boundary(id(0), boundary(Some(250.0))),
         }],
     );
     let solver = chain(&thermal, &observer, &law)

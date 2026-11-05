@@ -12,7 +12,7 @@ fn source_event(time_s: f64, power_w: f64, bath: Option<f64>) -> TimedEvent {
     }
 }
 
-fn adaptive_controls(dt: f64) -> AdaptiveImplicitConductionControls {
+pub(super) fn adaptive_controls(dt: f64) -> AdaptiveImplicitConductionControls {
     AdaptiveImplicitConductionControls {
         step: controls(dt),
         initial_dt_s: dt,
@@ -169,12 +169,11 @@ fn driven_bath_solution_refines_across_source_discontinuities() {
 }
 
 #[test]
-fn late_bath_or_topology_changes_refuse_before_any_source_interval() {
+fn late_geometry_or_topology_changes_refuse_before_any_source_interval() {
     let law = Law::constant(1.0, 1.0);
-    for unsupported in [
-        Event::Boundary(id(0), boundary(Some(350.0))),
-        Event::Separation(0),
-    ] {
+    let mut changed_area = boundary(Some(350.0));
+    changed_area.reservoir.as_mut().unwrap().area_m2 = 2.0;
+    for unsupported in [Event::Boundary(id(0), changed_area), Event::Separation(0)] {
         let (thermal, observer) = network(
             &law,
             &[400.0, 300.0],

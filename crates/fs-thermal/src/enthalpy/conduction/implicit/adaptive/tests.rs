@@ -569,7 +569,7 @@ fn sdirk2_adaptive_preflights_entire_window_before_events_or_stage_work() {
             event: Event::Boundary(CellId(0), Boundary {
                 ambient_k: 300.0, htc_w_m2_k: 0.0, source_w: 0.0,
                 reservoir: Some(Reservoir {
-                    area_m2: 1.0, conductance_w_k: 0.0, temperature_k: 500.0,
+                    area_m2: 2.0, conductance_w_k: 0.0, temperature_k: 500.0,
                 }),
             }),
         };
@@ -594,7 +594,16 @@ fn sdirk2_adaptive_preflights_entire_window_before_events_or_stage_work() {
     }
 
     use crate::enthalpy::advection::{Advected, MassFlow};
-    let (thermal, observer) = setup(&law, &[400.0, 300.0], None, vec![]);
+    // Prescribed flow is admitted; adding a reservoir still changes geometry.
+    let (thermal, observer) = setup(&law, &[400.0, 300.0], None, vec![TimedEvent {
+        time_s: 0.5,
+        event: Event::Boundary(CellId(0), Boundary {
+            ambient_k: 300.0, htc_w_m2_k: 0.0, source_w: 0.0,
+            reservoir: Some(Reservoir {
+                area_m2: 1.0, conductance_w_k: 0.0, temperature_k: 350.0,
+            }),
+        }),
+    }]);
     let flow = Advected::new((), vec![
         MassFlow { id: 0, a: CellId(0), b: CellId(1), kg_s: 1.0 },
         MassFlow { id: 1, a: CellId(1), b: CellId(0), kg_s: 1.0 },
@@ -612,7 +621,7 @@ fn sdirk2_adaptive_preflights_entire_window_before_events_or_stage_work() {
         event: Event::Boundary(CellId(0), Boundary {
             ambient_k: 300.0, htc_w_m2_k: 1.0, source_w: 1.0,
             reservoir: Some(Reservoir {
-                area_m2: 1.0, conductance_w_k: 0.0, temperature_k: 300.0,
+                area_m2: 1.0, conductance_w_k: 1.0, temperature_k: 300.0,
             }),
         }),
     }]);

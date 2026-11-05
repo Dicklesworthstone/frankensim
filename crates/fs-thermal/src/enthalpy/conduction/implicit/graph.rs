@@ -192,8 +192,8 @@ impl<'a> ImplicitConductionGraph<'a> {
     }
 
     /// Second-order L-stable convection/conduction on the original graph.
-    /// The chain entry point documents the fixed-cell, source-scheduled,
-    /// constant-bath scope and the original domain/entropy/residual gates.
+    /// The chain entry point documents the fixed-cell boundary schedules and
+    /// original domain/entropy/residual gates.
     /// Attached prescribed advection, including limited reconstruction, uses
     /// each actual stage. Both stages and rejected intervals share this graph's
     /// bounded sparse linear owner.
@@ -252,8 +252,8 @@ impl<'a> ImplicitConductionGraph<'a> {
 
     /// Native SDIRK2 with the shared h/T/phase error controller and sparse
     /// linear work budget, including attached prescribed convection. The entire
-    /// window must satisfy the chain method's source-scheduled, fixed-cell,
-    /// constant-bath scope before any event processing.
+    /// window must satisfy the chain method's boundary-scheduled, fixed-cell
+    /// scope before any event processing.
     pub fn advance_sdirk2_adaptive_to<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
