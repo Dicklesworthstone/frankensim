@@ -17,13 +17,16 @@
 //! Do not count one physical void twice in independently authored geometries.
 //! No scalar averaging or nonlinear layered interface solution is inferred.
 //!
-//! This first-order fixed-volume model supplies no temporal/spatial error
+//! This first-order fixed-volume model has an explicit fixed-step entry point;
+//! [`adaptive`] adds local temporal error control, not a global/spatial error
 //! certificate. Reservoirs are finite and evolve. [`adsorption`] couples the
 //! same time-window driver to the existing finite gas/adsorbent owner. Moving
 //! porosity, capillary work and liquid storage remain separate physical models.
 
 /// Finite competitive adsorption and skeleton heat on the same pore timeline.
 pub mod adsorption;
+/// Accuracy-controlled evolution of the original finite pore inventories.
+pub mod adaptive;
 
 use std::collections::BTreeMap;
 

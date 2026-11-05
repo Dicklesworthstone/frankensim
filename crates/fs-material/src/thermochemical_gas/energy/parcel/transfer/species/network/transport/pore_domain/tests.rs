@@ -1,4 +1,6 @@
 //! Actual ideal-mixture/DGM inventories, with a separate linear-network oracle.
+mod adaptive;
+
 use super::*;
 use crate::porous::permeability::{
     DarcyGasBarrier, IntrinsicPermeability, PorousGasLayer, PorousGasSupport,

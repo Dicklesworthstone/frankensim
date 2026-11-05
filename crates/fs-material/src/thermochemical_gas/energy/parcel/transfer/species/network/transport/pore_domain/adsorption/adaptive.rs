@@ -6,6 +6,7 @@
 //! introduced. This local asymptotic estimate is not a global error certificate.
 
 use super::*;
+use super::super::adaptive::{self as time, PoreAdvanceError};
 
 /// Componentwise absolute scales and a relative allowance on state CHANGES.
 /// Large carrier inventories or absolute temperatures cannot hide small changes.
@@ -70,21 +71,25 @@ impl core::fmt::Display for AdsorbingPoreAdvanceError {
     }
 }
 impl std::error::Error for AdsorbingPoreAdvanceError {}
-use AdsorbingPoreAdvanceError as Error;
+impl From<PoreAdvanceError<4>> for AdsorbingPoreAdvanceError {
+    fn from(error: PoreAdvanceError<4>) -> Self {
+        match error {
+            PoreAdvanceError::Invalid(reason) => Self::Invalid(reason),
+            PoreAdvanceError::Physical { time_s, step_s, error } => Self::Physical { time_s, step_s, error },
+            PoreAdvanceError::Accuracy { time_s, step_s, error_ratios } => Self::Accuracy { time_s, step_s, error_ratios },
+            PoreAdvanceError::TimeResolution { time_s, target_s } => Self::TimeResolution { time_s, target_s },
+            PoreAdvanceError::WorkLimit { time_s, accepted_substeps, evaluations } => Self::WorkLimit { time_s, accepted_substeps, evaluations },
+            PoreAdvanceError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+type Error = PoreAdvanceError<4>;
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
     if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
 }
 fn physical(error: PoreDomainError, time_s: f64, step_s: f64) -> Error {
     if error == PoreDomainError::Cancelled { Error::Cancelled } else { Error::Physical { time_s, step_s, error } }
-}
-fn can_retry(error: &Error) -> bool {
-    match error {
-        Error::Physical { error: PoreDomainError::Adsorption { error, .. }, .. } => super::retryable(error),
-        Error::Physical { error: PoreDomainError::Transport { error, .. }, .. } => super::super::retryable(error),
-        Error::Accuracy { .. } => true,
-        _ => false,
-    }
 }
 fn add(total: &mut Sum, value: f64) -> Result<(), Error> {
     total.add(value).map_err(|_| Error::Invalid("unrepresentable adaptive pore account"))
@@ -277,28 +282,6 @@ impl Accepted {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn probe<C: FnMut() -> bool>(
-    state: &AdsorbingPoreDomain,
-    dt: f64,
-    accepted: usize,
-    evaluations: &mut usize,
-    maximum: usize,
-    advance: &mut impl FnMut(&AdsorbingPoreDomain, f64, &mut C) -> Result<AdsorbingPoreCandidate, PoreDomainError>,
-    cancelled: &mut C,
-) -> Result<AdsorbingPoreCandidate, Error> {
-    poll(cancelled)?;
-    if *evaluations == maximum {
-        return Err(Error::WorkLimit {
-            time_s: state.domain.time_s,
-            accepted_substeps: 2 * accepted,
-            evaluations: *evaluations,
-        });
-    }
-    *evaluations += 1;
-    advance(state, dt, cancelled).map_err(|e| physical(e, state.domain.time_s, dt))
-}
-
 impl AdsorbingPoreDomain {
     /// Propose the complete duration to an absolute target with componentwise
     /// gas species/temperature and bound species/solid-temperature accuracy.
@@ -324,15 +307,10 @@ impl AdsorbingPoreDomain {
         gas_links: &[AdsorbentGasHeatLink<'_>],
         accuracy: AdsorbingPoreTimeControls,
         mut cancelled: C,
-    ) -> Result<AdsorbingPoreAdvanceCandidate, Error> {
+    ) -> Result<AdsorbingPoreAdvanceCandidate, AdsorbingPoreAdvanceError> {
         poll(&mut cancelled)?;
         let start = self.domain.time_s;
-        if !target_s.is_finite()
-            || target_s <= start
-            || !positive(target_s - start)
-            || ![
-                controls.minimum_step_s,
-                controls.maximum_step_s,
+        if ![
                 accuracy.gas_species_tolerance_kg,
                 accuracy.bound_species_tolerance_mol,
                 accuracy.gas_temperature_tolerance_k,
@@ -340,20 +318,17 @@ impl AdsorbingPoreDomain {
             ]
             .iter()
             .all(|x| positive(*x))
-            || controls.minimum_step_s > controls.maximum_step_s
-            || !(2..=MAX_PORE_SUBSTEPS).contains(&controls.maximum_substeps)
-            || !(3..=MAX_PORE_ATTEMPTS).contains(&controls.maximum_attempts)
             || !accuracy.relative_tolerance.is_finite()
             || !(0.0..1.0).contains(&accuracy.relative_tolerance)
         {
-            return Err(Error::Invalid(
-                "forward target, positive temporal scales and bounded comparison/evaluation controls required",
+            return Err(AdsorbingPoreAdvanceError::Invalid(
+                "positive temporal scales and relative tolerance in [0,1) required",
             ));
         }
         // Equal floor/ceiling prevent native retries from hiding a physical
         // refusal behind an inner work limit. Geometry/source admission and all
         // original local/global physical checks still run for this one interval.
-        let mut advance = |state: &Self, dt, cancelled: &mut C| {
+        let advance = |state: &Self, dt, cancelled: &mut C| {
             state.step_candidate_with_heat(
                 dt,
                 faces,
@@ -369,133 +344,39 @@ impl AdsorbingPoreDomain {
                 links,
                 gas_links,
                 cancelled,
-            )
+            ).map(AdsorbingPoreCandidate::into_parts)
         };
-        let mut state = self.clone();
-        let mut ceiling = controls.maximum_step_s;
-        let (mut accepted, mut rejected, mut evaluations) = (0, 0, 0);
-        let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
-        let mut maxima = [0.0_f64; 4];
         let mut ledger = Accepted::default();
-        let mut last = None;
-        while state.domain.time_s < target_s {
-            poll(&mut cancelled)?;
-            let time = state.domain.time_s;
-            if 2 * accepted + 2 > controls.maximum_substeps {
-                return Err(Error::WorkLimit { time_s: time, accepted_substeps: 2 * accepted, evaluations });
-            }
-            let end = if ceiling >= target_s - time { target_s } else { time + ceiling };
-            let span = end - time;
-            let middle = time + 0.5 * span;
-            if !(time < middle && middle < end) {
-                return Err(Error::TimeResolution { time_s: time, target_s: end });
-            }
-            let (h1, h2) = (middle - time, end - middle);
-            let attempted = (|| {
-                let coarse = probe(
-                    &state,
-                    span,
-                    accepted,
-                    &mut evaluations,
-                    controls.maximum_attempts,
-                    &mut advance,
-                    &mut cancelled,
-                )?;
-                let first = probe(
-                    &state,
-                    h1,
-                    accepted,
-                    &mut evaluations,
-                    controls.maximum_attempts,
-                    &mut advance,
-                    &mut cancelled,
-                )?;
-                if first.domain.domain.time_s.to_bits() != middle.to_bits() {
-                    return Err(Error::TimeResolution { time_s: time, target_s: middle });
-                }
-                let second = probe(
-                    first.domain(),
-                    h2,
-                    accepted,
-                    &mut evaluations,
-                    controls.maximum_attempts,
-                    &mut advance,
-                    &mut cancelled,
-                )?;
-                if coarse.domain.domain.time_s.to_bits() != end.to_bits()
-                    || second.domain.domain.time_s.to_bits() != end.to_bits()
-                {
-                    return Err(Error::TimeResolution { time_s: time, target_s: end });
-                }
-                let mut ratios = errors(&state, coarse.domain(), second.domain(), accuracy, &mut cancelled)?;
-                // Fine first-order local-error factor for unequal represented halves.
-                let (u, v) = (h1 / span, h2 / span);
-                let factor = (u * u + v * v) / (2.0 * u * v);
-                for ratio in &mut ratios {
-                    *ratio *= factor;
-                }
-                if ratios.iter().any(|r| *r > 1.0) {
-                    return Err(Error::Accuracy { time_s: time, step_s: span, error_ratios: ratios });
-                }
-                Ok((first, second, ratios))
-            })();
-            match attempted {
-                Ok((first, second, ratios)) => {
-                    ledger.record(first.step(), &mut cancelled)?;
-                    ledger.record(second.step(), &mut cancelled)?;
-                    let (next, step) = second.into_parts();
-                    state = next;
-                    last = Some(step);
-                    accepted += 1;
-                    minimum = minimum.min(h1.min(h2));
-                    maximum = maximum.max(h1.max(h2));
-                    for (max, r) in maxima.iter_mut().zip(ratios) {
-                        *max = max.max(r);
-                    }
-                    ceiling = if ratios.iter().all(|r| *r <= 0.25) {
-                        span + span.min(controls.maximum_step_s - span)
-                    } else {
-                        span
-                    };
-                    ceiling = ceiling.clamp(controls.minimum_step_s, controls.maximum_step_s);
-                }
-                Err(error) => {
-                    let smaller = (0.5 * span).max(controls.minimum_step_s);
-                    if can_retry(&error) && smaller < span {
-                        rejected += 1;
-                        ceiling = smaller;
-                    } else {
-                        return Err(error);
-                    }
-                }
-            }
-        }
+        let run = time::run(self, target_s, controls, |state| state.domain.time_s,
+            advance,
+            |old, coarse, fine, cancelled| errors(old, coarse, fine, accuracy, cancelled),
+            |step, cancelled| ledger.record(step, cancelled), &mut cancelled)?;
         let entropy_limit = adsorption_controls
             .values()
             .fold(controls.transport.entropy_tolerance_j_k, |limit, solve| limit.min(solve.entropy_tolerance_j_k));
         let mut step = ledger.finish(
             self,
-            &state,
-            last.expect("positive duration accepted fine steps"),
+            &run.state,
+            run.last,
             controls,
             entropy_limit,
             &mut cancelled,
         )?;
         step.pore.duration_s = target_s - start;
-        step.pore.accepted_substeps = 2 * accepted;
-        step.pore.attempts = evaluations;
-        step.pore.minimum_accepted_step_s = minimum;
-        step.pore.maximum_accepted_step_s = maximum;
+        step.pore.accepted_substeps = 2 * run.accepted;
+        step.pore.attempts = run.evaluations;
+        step.pore.minimum_accepted_step_s = run.minimum;
+        step.pore.maximum_accepted_step_s = run.maximum;
         poll(&mut cancelled)?;
         Ok(AdsorbingPoreAdvanceCandidate {
-            domain: state,
+            domain: run.state,
             report: AdsorbingPoreAdvanceReport {
                 interval_s: [start, target_s],
-                accepted_intervals: accepted,
-                rejected_intervals: rejected,
-                evaluations,
-                maximum_accepted_error_ratios: maxima,
-                suggested_step_s: ceiling,
+                accepted_intervals: run.accepted,
+                rejected_intervals: run.rejected,
+                evaluations: run.evaluations,
+                maximum_accepted_error_ratios: run.maxima,
+                suggested_step_s: run.suggested,
                 physical: step,
             },
         })
@@ -515,7 +396,7 @@ impl AdsorbingPoreDomain {
         gas_links: &[AdsorbentGasHeatLink<'_>],
         accuracy: AdsorbingPoreTimeControls,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<AdsorbingPoreAdvanceReport, Error> {
+    ) -> Result<AdsorbingPoreAdvanceReport, AdsorbingPoreAdvanceError> {
         let candidate = self.step_candidate_adaptive_to(
             target_s,
             faces,
