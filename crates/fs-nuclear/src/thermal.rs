@@ -29,6 +29,12 @@ pub use irradiation::{
     NeutronFluxChange, NeutronFluxSchedule,
 };
 
+mod kinetics;
+pub use kinetics::{
+    KineticCellSource, KineticCellStep, KineticHeating, KineticHeatingBudget, KineticsControl,
+    KineticsControlChange, KineticsControlSchedule,
+};
+
 /// An absolute-time change to a cell's total prescribed fission rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FissionRateChange {

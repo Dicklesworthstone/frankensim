@@ -9,6 +9,9 @@ use crate::irradiation::{
     IrradiationState, NeutronGroups, NuclideId,
 };
 
+#[path = "kinetics/tests.rs"]
+mod kinetics_tests;
+
 // Manufactured caloric/source data isolate the coupling equations. These
 // coefficients are not nuclear isotope data or an empirical validation deck.
 struct LinearLaw {

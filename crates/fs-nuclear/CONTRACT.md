@@ -488,3 +488,59 @@ that focused dependency build; full workspace and `fs-couple` Cargo gates remain
 separate. The bounded native `cargo check -p fs-thermal --locked --offline --lib`
 attempt timed out after 180 seconds in real dependency compilation, without
 producing thermal metadata or a source diagnostic.
+
+## Material-temperature feedback through neutron kinetics
+
+`thermal::KineticHeating` specializes the same `NuclearHeating` transaction for
+one explicitly normalized fixed-shape neutron region per source cell. Its
+`KineticCellSource` retains the original isotope mixture, point-neutron and
+precursor history, immutable control schedule, and explicit temperature-feedback
+fits. The irradiation schedule is now the reference absolute multigroup flux at
+neutron amplitude one; actual exposure scales with the admitted amplitude.
+Initial admission checks the actual reference-times-population spectrum as well
+as the reference data, so an unrepresentable physical flux cannot enter through
+an otherwise finite initial neutron amplitude.
+
+On each final native thermal interval the source reads the original material
+temperature, adds the admitted feedback shifts to scheduled control reactivity,
+and advances point kinetics. Its independently integrated neutron-population time
+divided by that same duration scales the reference spectrum. Existing irradiation
+owners then advance actual fission/capture counts, finite parents, delayed-energy
+reservoirs and disjoint release channels. The original thermal owner receives
+only their integrated deposited energy. The neutron state and all isotope
+histories are accepted only after the original material step succeeds.
+
+`KineticsControlSchedule` supplies right-continuous reactivity and external-source
+changes; its transitions and reference-flux changes both clip the native timeline.
+Explicit feedback, neutron-group, precursor and isotope work limits remain in
+force. Both endpoints must satisfy feedback-fit and nuclear-data temperature
+domains. Nested checkpoint failures preserve the original caller error. The
+report retains both physical interval reports, applied reactivity, mean neutron
+amplitude and integral-to-mean conversion roundoff. The latter consumes the
+kinetics integral allowance rather than silently becoming extra exposure.
+
+For fixed microscopic data and spectral shape within an interval, total neutron
+fluence determines independent parent removal and the competing reaction counts.
+Using the mean flux approximates the timing of new delayed-energy production;
+material-temperature feedback is also frozen at the beginning of each thermal
+interval. Therefore this is an explicitly partitioned coupled model. Refine
+`StepConfig::max_dt_s`; the source does not claim an exact or unconditionally
+accurate coupled trajectory. Numerical population estimates, nuclear/thermal
+account closure, data uncertainty and this partitioning error remain distinct.
+There is no intercell neutron transport, neutron exchange, burnup-dependent
+reactivity update, automatic criticality calculation or inferred nuclear dataset.
+
+Five new coupled regressions passed: independent exponential population-time
+calorimetry; feedback refinement against an independently derived neutron/fluence
+invariant; control/reference-spectrum transitions with restart and retained
+neutron precursors and decay heat; endpoint and nested-checkpoint rollback; and
+control/work/idle/initial-flux admission. The final focused production-owner run
+passed **76 tests** with `thermal` enabled: 19 prescribed-source, 10 radioactive
+inventory, 12 irradiation, 11 point-kinetics, 11 prescribed/irradiation thermal,
+eight preserved radioactive thermal and five feedback thermal tests. It compiled
+the complete nuclear crate and rebuilt the real math/quantity/hash owners plus
+the complete original decay modules and verified native thermal core/type slice.
+No physical type, heat law, numerical algorithm or integrator was mocked. Full
+workspace Cargo and `fs-couple` build validation remain separate; the existing
+native reproduction gates above still apply when that dependency environment
+is available.
