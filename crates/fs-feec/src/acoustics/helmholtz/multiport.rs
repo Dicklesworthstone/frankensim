@@ -29,6 +29,10 @@ use fs_math::det;
 /// Explicit cap on retained boundary modes. Exceeding it refuses, never truncates.
 pub const MAX_PORT_MODES: usize = 64;
 
+/// Hard ceiling for the complete pressure-coordinate dense factorization.
+/// A smaller caller budget may refuse earlier; no pressure DOFs are discarded.
+pub const MAX_FULL_PRESSURE_DOFS: usize = 1024;
+
 /// One real normal-velocity shape, in caller-specified vertex order on each face.
 /// Faces within a mode must be unique. Different modes may share faces.
 /// Values are dimensionless; the caller owns modal normalization and orientation.
@@ -48,7 +52,9 @@ impl BoundaryMode {
     }
 }
 
-/// Prepared spatial port projection on the existing Helmholtz reduction.
+/// Spatial ports on the existing Helmholtz factorization. [`Self::new_full`]
+/// retains every original pressure coordinate; [`Self::new`] uses the supplied
+/// Galerkin basis. The same loaded solve serves both without changing traces.
 pub struct InteriorMultiport {
     pub(super) reduced: ReducedHelmholtz,
     pub(crate) physical_modes: Vec<Vec<PhysicalTrace>>,
@@ -124,7 +130,9 @@ pub struct InteriorPortResponse {
     pub pressure_pa: Vec<C64>,
     /// Prescribed inward modal flow coordinates [m^3/s].
     pub inward_flow_m3_s: Vec<C64>,
-    /// Original reduced pressure amplitudes `(re, im)`; same basis as the model.
+    /// Pressure amplitudes `(re, im)` in this model's basis. For a model built
+    /// with `new_full`, these are ALL original `HelmholtzFe` DOFs in their
+    /// original order; otherwise they are the supplied reduced coordinates.
     pub amplitudes: Vec<[f64; 2]>,
 }
 
@@ -166,6 +174,118 @@ fn linear_error(error: LuComplexError, frequency_hz: f64) -> AcousticFeError {
 }
 
 impl InteriorMultiport {
+    /// Retain the complete original pressure FE operator and signed port loads.
+    ///
+    /// Original CSR entries are copied directly into the existing dense loaded
+    /// factorization storage, without an eigenmode cutoff, identity-basis
+    /// projection or replacement pressure discretization. `maximum_dofs` must
+    /// be in `1..=MAX_FULL_PRESSURE_DOFS`; larger meshes refuse before any
+    /// dense allocation. Returned amplitudes are original FE coordinates.
+    pub fn new_full(
+        fe: &HelmholtzFe<'_>,
+        ports: &[BoundaryMode],
+        maximum_dofs: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, AcousticFeError> {
+        Self::build_full(fe, ports, maximum_dofs, None, cancelled)
+    }
+
+    /// Complete original pressure field with the existing tangential viscous
+    /// and thermal wall operators, also copied without spatial reduction.
+    /// Wall/port overlap and thin-layer validity retain the native admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_full_with_boundary_layers(
+        fe: &HelmholtzFe<'_>,
+        ports: &[BoundaryMode],
+        maximum_dofs: usize,
+        wall_faces: &[[u32; 3]],
+        transport: BoundaryLayerTransport,
+        geometry: BoundaryLayerGeometry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, AcousticFeError> {
+        Self::build_full(
+            fe,
+            ports,
+            maximum_dofs,
+            Some((wall_faces, transport, geometry)),
+            cancelled,
+        )
+    }
+
+    fn build_full(
+        fe: &HelmholtzFe<'_>,
+        ports: &[BoundaryMode],
+        maximum_dofs: usize,
+        wall: Option<(&[[u32; 3]], BoundaryLayerTransport, BoundaryLayerGeometry)>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, AcousticFeError> {
+        poll(cancelled)?;
+        let n = fe.ndof();
+        if maximum_dofs == 0 || maximum_dofs > MAX_FULL_PRESSURE_DOFS || n > maximum_dofs {
+            return Err(invalid("complete pressure FE exceeds its declared dense DOF cap"));
+        }
+        if ports.is_empty() || ports.len() > MAX_PORT_MODES {
+            return Err(invalid("interior port mode count outside 1..=MAX_PORT_MODES"));
+        }
+        let mut area = Vec::with_capacity(ports.len());
+        let mut b_r = Vec::with_capacity(ports.len());
+        let mut faces = Vec::with_capacity(ports.len());
+        let mut physical_modes = Vec::with_capacity(ports.len());
+        for port in ports {
+            poll(cancelled)?;
+            let mut load = fe.boundary_linear_load(&port.traces)?;
+            let selected: Vec<_> = port.traces.iter().map(|(face, _)| *face).collect();
+            let (_, a) = fe.boundary_load(&selected)?;
+            if !a.is_finite() || a <= 0.0 || load.iter().all(|&v| v == 0.0) {
+                return Err(invalid("interior port has no area or unresolved zero trace"));
+            }
+            for value in &mut load {
+                *value /= a;
+            }
+            if load.iter().any(|v| !v.is_finite()) || load.iter().all(|&v| v == 0.0) {
+                return Err(invalid("complete pressure port normalization is unrepresentable"));
+            }
+            physical_modes.push(physical_trace(fe, port)?);
+            faces.push(selected);
+            b_r.push(load);
+            area.push(a);
+        }
+        // This is storage conversion, not projection: original row/column
+        // numbers, high-order pressure DOFs and CSR values are unchanged.
+        let dense = |matrix: &fs_sparse::Csr| {
+            let mut out = vec![0.0; n * n];
+            for row in 0..n {
+                let (columns, values) = matrix.row(row);
+                for (&column, &value) in columns.iter().zip(values) {
+                    out[row * n + column] = value;
+                }
+            }
+            out
+        };
+        let face_sets: Vec<_> = faces.iter().map(Vec::as_slice).collect();
+        let boundary_layer = wall
+            .map(|(wall_faces, transport, geometry)| {
+                super::boundary_layer::ReducedBoundaryLayer::new(
+                    fe, wall_faces, &face_sets, transport, geometry, &dense,
+                )
+            })
+            .transpose()?;
+        let reduced = ReducedHelmholtz {
+            medium: fe.medium,
+            n,
+            k_r: dense(&fe.stiffness),
+            m_r: dense(&fe.mass),
+            // Multiport loads use b b^T, never the legacy uniform face
+            // impedance matrices. Avoid allocating unused copies per port.
+            c_r: Vec::new(),
+            b_r,
+            area,
+            boundary_layer,
+        };
+        poll(cancelled)?;
+        Ok(Self { reduced, physical_modes })
+    }
+
     /// Project supplied spatial modes onto the original rigid-wall FE problem.
     /// Static enrichment, when requested, uses each ACTUAL mode load.
     pub fn new(
@@ -280,7 +400,8 @@ impl InteriorMultiport {
         self.reduced.b_r.len()
     }
 
-    /// Actual reduced FE dimension, including retained static enrichment.
+    /// Pressure-coordinate count: all original DOFs for `new_full`, or the
+    /// retained Galerkin basis dimension including static enrichment otherwise.
     #[must_use]
     pub const fn dim(&self) -> usize {
         self.reduced.n

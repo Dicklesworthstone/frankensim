@@ -2031,3 +2031,32 @@ Parser/format checks and independent exact-rational moment/work oracles passed.
 Native execution remains pending under the upstream dependency-memory blocker;
 these source checks do not establish numerical test passage or an instrument
 acceptance claim.
+
+### Complete pressure-coordinate multiports and exterior loading
+
+`InteriorMultiport::new_full` and `new_full_with_boundary_layers` retain every
+original `HelmholtzFe` pressure coordinate. Original CSR stiffness/mass entries
+are copied directly into the existing dense loaded-factor storage, and signed
+port columns keep their native geometric-area normalization. No eigenmodes,
+identity-basis projection, static enrichment or discarded pressure DOFs are
+introduced. A caller-specified DOF cap and hard ceiling of 1024 refuse oversized
+fields before dense allocation. Unused legacy per-port dense face matrices are
+not allocated. The existing tangential viscous/thermal wall forms can likewise
+retain their complete original coordinates.
+
+The native loaded scattering and field recovery serve these full fields as
+well as the existing caller-supplied Galerkin path. Responses from `new_full`
+contain all original FE coefficients in original order; positive real power
+references are numerical coordinates. The source-bound orchestrator in
+`fs-couple::cavity_modal::interior::exterior` uses this complete constructor to
+couple finite openings to the original BEM self/mutual impedance, with physical
+pressure/flow work and original port residual checks. Dependency direction is
+unchanged: fs-feec does not depend on fs-couple or fs-bem.
+
+Four focused coupling regressions specify an independently assembled original
+CSR FE/BEM mixed block, complete P2 fields, signed zero-net opening modes,
+reference invariance, finite reactive loading, native wall heat and binding
+refusals. Pinned Rust parsing and independent interface algebra were checked;
+native numerical execution remains pending under the environment's upstream
+dependency-memory blocker. Pressure, trace, geometry and exterior discretization
+still require convergence, and no causal exterior realization is implied.

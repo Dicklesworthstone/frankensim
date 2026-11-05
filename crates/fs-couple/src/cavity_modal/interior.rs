@@ -7,6 +7,9 @@
 /// Source gas and duct composition for original spatial FE boundary modes.
 pub mod multiport;
 
+/// Complete pressure FE fields loaded by geometry-bound finite-opening BEM.
+pub mod exterior;
+
 /// Joint molecular calorics and resolved temperature in the spatial pressure FE.
 pub mod molecular;
 
