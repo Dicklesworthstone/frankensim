@@ -757,6 +757,21 @@ floating electrodes, polarity, gauge invariance, local heat and work bounds.
 This remains a frozen-source stationary Ohmic response, without induction or
 field-dependent constitutive feedback.
 
+`SpatialConductanceMatrix::prepare_current_control` closes mixed terminal
+drives on that same response: an arbitrary proper subset prescribes signed
+total current while the remaining electrodes prescribe voltage. Its bounded,
+diagonally equilibrated current block is factored once and reused. A floating
+electrode is the zero-total-current case, with potentially nonzero currents
+between its faces. No repeated field solve, local insulation approximation or
+independent resistor fit is introduced. The accepted original field retains
+bulk/contact Joule heating and all simultaneous-drive cross terms. Separate
+actual-state checks enforce the authored currents and terminal work, including
+current-source work. Common bias is removed before solving and heat recovery;
+returned nodal voltages use the existing terminal-zero reference convention.
+The heterogeneous/contact series oracle covers voltage-driven floating
+electrodes, nonzero signed injection, several current controls, a controlled
+reference terminal, source-work/local-heat closure and cancellation/retry.
+
 Actual cell E=-grad(V), J=sigma E and volume-integrated E.J remain unsmoothed.
 Acceptance separately checks free-node/current balance, recovered versus Hodge
 power and supplied terminal work. These dimensional residual gates are not

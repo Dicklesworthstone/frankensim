@@ -13,7 +13,10 @@ pub use contact::{SpatialConductionContact, SpatialConductionContactResponse};
 mod terminals;
 pub use terminals::SpatialResistance;
 mod matrix;
-pub use matrix::{SpatialConductanceControls, SpatialConductanceMatrix};
+pub use matrix::{
+    SpatialConductanceControls, SpatialConductanceMatrix, SpatialMixedConductance,
+    SpatialMixedConductanceControls,
+};
 pub mod motion;
 
 use super::{

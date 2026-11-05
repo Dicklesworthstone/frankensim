@@ -39,6 +39,28 @@ pub struct SpatialConductanceMatrix<'a, C = ResolvedConductorState> {
     maximum_coefficient_residual_s: f64,
 }
 
+/// Additional preparation bounds for mixed voltage/total-current control.
+#[derive(Clone, Copy, Debug)]
+pub struct SpatialMixedConductanceControls {
+    pub maximum_current_terminals: usize,
+    /// Peak scalar storage for the current block/factor and working vectors.
+    pub maximum_response_values: usize,
+    /// Conservative dense work for the block factorization: F²(F+N).
+    pub maximum_dense_work: usize,
+}
+
+/// Reusable mixed terminal closure on the original frozen conductor.
+/// The current-controlled block is factored once; subsequent drives only need
+/// a triangular solve and native field recovery. Zero total current makes an
+/// electrode floating, while its local surface currents remain unrestricted.
+pub struct SpatialMixedConductance<'s, 'm, C = ResolvedConductorState> {
+    source: &'s SpatialConductanceMatrix<'m, C>,
+    voltage_terminals: Vec<usize>,
+    current_terminals: Vec<usize>,
+    factor: Cholesky,
+    scales: Vec<f64>,
+}
+
 fn invalid(reason: &'static str) -> SpatialConductionError {
     SpatialConductionError::Invalid(reason)
 }
@@ -217,7 +239,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
     }
 }
 
-impl<C: SpatialConductorMaterial> SpatialConductanceMatrix<'_, C> {
+impl<'m, C: SpatialConductorMaterial> SpatialConductanceMatrix<'m, C> {
     /// Canonical face sets in the original terminal ordering.
     pub fn terminal_faces(&self) -> &[Vec<usize>] {
         &self.faces
@@ -231,6 +253,65 @@ impl<C: SpatialConductorMaterial> SpatialConductanceMatrix<'_, C> {
     }
     pub fn maximum_coefficient_residual_s(&self) -> f64 {
         self.maximum_coefficient_residual_s
+    }
+
+    /// Prepare an arbitrary nonempty proper subset of total-current terminals.
+    /// Remaining terminals are voltage-controlled in original terminal order.
+    /// The supplied current-terminal order fixes the order of future currents.
+    /// All terminals already share a conducting connection, so retaining at
+    /// least one voltage electrode removes the sole terminal voltage gauge.
+    pub fn prepare_current_control(
+        &self,
+        current_terminals: &[usize],
+        controls: SpatialMixedConductanceControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialMixedConductance<'_, 'm, C>> {
+        check(cancelled)?;
+        let n = self.faces.len();
+        let f = current_terminals.len();
+        let square = f.checked_mul(f);
+        let work = square.and_then(|square| square.checked_mul(f.checked_add(n)?));
+        let values =
+            square.and_then(|square| square.checked_mul(2)?.checked_add(n.checked_mul(3)?));
+        if f == 0
+            || f >= n
+            || f > controls.maximum_current_terminals
+            || work.is_none_or(|w| w > controls.maximum_dense_work)
+            || values.is_none_or(|v| v > controls.maximum_response_values)
+            || current_terminals
+                .iter()
+                .enumerate()
+                .any(|(i, &terminal)| terminal >= n || current_terminals[..i].contains(&terminal))
+        {
+            return Err(invalid(
+                "bounded unique current terminals and at least one voltage terminal required",
+            ));
+        }
+        let voltage_terminals = (0..n).filter(|t| !current_terminals.contains(t)).collect();
+        let scales: Vec<_> = current_terminals
+            .iter()
+            .map(|&terminal| self.matrix_s[terminal * n + terminal].sqrt())
+            .collect();
+        let mut block = vec![0.0; f * f];
+        for (row, &a) in current_terminals.iter().enumerate() {
+            check(cancelled)?;
+            for (column, &b) in current_terminals.iter().enumerate() {
+                block[row * f + column] =
+                    finite((self.matrix_s[a * n + b] / scales[row]) / scales[column])?;
+            }
+        }
+        check(cancelled)?;
+        let factor = cholesky(&block, f).map_err(|_| {
+            invalid("current-controlled conductance block is not positive definite")
+        })?;
+        check(cancelled)?;
+        Ok(SpatialMixedConductance {
+            source: self,
+            voltage_terminals,
+            current_terminals: current_terminals.to_vec(),
+            factor,
+            scales,
+        })
     }
 
     /// Recover the original field at arbitrary simultaneous terminal voltages,
@@ -407,5 +488,99 @@ impl<C: SpatialConductorMaterial> SpatialConductanceMatrix<'_, C> {
             });
         }
         check(cancelled)
+    }
+}
+
+impl<C: SpatialConductorMaterial> SpatialMixedConductance<'_, '_, C> {
+    pub fn voltage_terminals(&self) -> &[usize] {
+        &self.voltage_terminals
+    }
+    pub fn current_terminals(&self) -> &[usize] {
+        &self.current_terminals
+    }
+
+    /// Solve G_FF V_F = I_F - G_FD V_D with the retained equilibrated factor.
+    /// Currents are signed INTO the body. Voltage-controlled source reactions
+    /// supply the remaining current and work, including nonzero current-source
+    /// work. As for the original response, returned voltages are relative to
+    /// original terminal zero; common bias is removed before current and heat.
+    /// No FE solve, material refresh or separately added heat occurs here.
+    pub fn field_at_controls(
+        &self,
+        voltages_v: &[f64],
+        currents_a: &[f64],
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialConductionField> {
+        check(cancelled)?;
+        if voltages_v.len() != self.voltage_terminals.len()
+            || currents_a.len() != self.current_terminals.len()
+            || voltages_v.iter().chain(currents_a).any(|v| !v.is_finite())
+            || !positive(current_tolerance_a)
+            || !positive(power_tolerance_w)
+        {
+            return Err(invalid(
+                "complete finite mixed terminal controls and positive field tolerances required",
+            ));
+        }
+        let n = self.source.faces.len();
+        let mut voltages = vec![0.0; n];
+        for (&terminal, &voltage) in self.voltage_terminals.iter().zip(voltages_v) {
+            voltages[terminal] = finite(voltage - voltages_v[0])?;
+        }
+        let mut rhs = Vec::with_capacity(self.current_terminals.len());
+        for ((&terminal, &current), &scale) in self
+            .current_terminals
+            .iter()
+            .zip(currents_a)
+            .zip(&self.scales)
+        {
+            check(cancelled)?;
+            let (mut load, mut correction) = (current, 0.0);
+            for &fixed in &self.voltage_terminals {
+                add(
+                    &mut load,
+                    &mut correction,
+                    finite(-self.source.matrix_s[terminal * n + fixed] * voltages[fixed])?,
+                )?;
+            }
+            rhs.push(finite(load / scale)?);
+        }
+        check(cancelled)?;
+        self.factor.solve(&mut rhs);
+        check(cancelled)?;
+        for ((&terminal, value), &scale) in self.current_terminals.iter().zip(rhs).zip(&self.scales)
+        {
+            voltages[terminal] = finite(value / scale)?;
+        }
+        let field = self.source.field_at_voltages(
+            &voltages,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        let mut expected_currents = self
+            .source
+            .vertices
+            .iter()
+            .map(|vertices| terminal_current(&field, vertices, cancelled))
+            .collect::<Result<Vec<_>>>()?;
+        for (&terminal, &current) in self.current_terminals.iter().zip(currents_a) {
+            expected_currents[terminal] = current;
+        }
+        let gauge = voltages[0];
+        for voltage in &mut voltages {
+            *voltage = finite(*voltage - gauge)?;
+        }
+        self.source.admit_response(
+            &field,
+            &voltages,
+            &expected_currents,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        Ok(field)
     }
 }
