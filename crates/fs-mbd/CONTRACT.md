@@ -3083,6 +3083,39 @@ coefficients and no accuracy guarantee for forcing that changes within a step.
 The separate `rocket::rigid` extension below adds native attitude and staging
 under explicit mass-distribution and exhaust-momentum assumptions.
 
+## Native finite-patch Hertz impulse mechanics
+
+`frictional_impact::hertz_patch::apply_rigid_hertz_impulse` applies the original
+`fs-tribo` Hertz tangent/spin impulse law to one finite rigid body and a second
+finite body or prescribed moving patch. The supplied compressive normal impulse
+sets the constitutive budget and is not applied again. The caller supplies the
+fixed radius, pressure-impulse shape, coefficient and coincident material
+witnesses. Geometry, source motion and every accepted native endpoint retain
+their original dimensional gates.
+
+The complete radius-scaled three-coordinate mobility is assembled from the
+original rigid point-response factors and central spin couple, including full
+inertia tensors and off-centre translation/spin coupling. Each touched body
+receives one native resultant impulse containing both the material-point moment
+and free spin couple. The original full normal cross response and actual
+before/after normal velocities remain visible; this conditional phase does not
+impose a restitution target or solve coupled normal contact.
+
+`PreparedRigidHertzImpulse` caches the fixed native snapshot and mobility for
+repeated normal-budget/coefficient trials. Changing the radius requires new
+preparation. Only the one or two touched bodies are staged, and successful
+preparation/solve/publication uses fixed stack storage. An allocation is used
+only when retaining a failed audit report.
+
+Signed prescribed-support work includes both patch-centre translation and
+normal-axis rotation. Actual native momentum increments determine kinetic change
+without subtracting large endpoint energy totals. Native relative midpoint
+work, constitutive loss, support work, endpoint response and linear/angular
+momentum balances are checked independently. Cancellation or any failed gate
+leaves all caller bodies and reusable preparation unchanged. Mechanical loss
+remains unallocated; contact duration, elastic-memory evolution, heat partition
+and subsequent pose integration belong to their existing owners.
+
 ## Complete finite-mass two-sphere trajectories
 
 `sphere_pair::advance_sphere_pair` advances two original rigid-body states

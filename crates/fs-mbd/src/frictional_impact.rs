@@ -17,6 +17,9 @@ pub mod sphere_scene;
 /// Directional friction ellipses on the same simultaneous native-body owner.
 pub mod elliptic;
 
+/// Conditional finite Hertz patch shear/spin impulses on native body momenta.
+pub mod hertz_patch;
+
 /// Independent dynamic contact islands with atomic whole-scene publication.
 pub mod islands;
 
