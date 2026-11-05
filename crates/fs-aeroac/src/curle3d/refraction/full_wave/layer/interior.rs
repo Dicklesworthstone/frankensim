@@ -302,6 +302,23 @@ impl InteriorKernel {
         })
     }
 
+    fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
+        let alpha = self.common.point(region, lower).zeta[1].im;
+        // Once the remaining-depth numerator has reached its scaled
+        // evanescent limit, so has the full-layer denominator. Their large
+        // exponents already cancel analytically: only the actual interior
+        // depth controls the remaining exponential variation. Keep the full
+        // phase and denominator-variation checks, and retain the original
+        // conservative depth before this common saturation point.
+        let decay_depth = if alpha * self.remaining_m > 350.0 {
+            self.depth_m
+        } else {
+            self.common.layer.thickness_m()
+        };
+        self.common
+            .resolved_at_depth(region, lower, upper, decay_depth)
+    }
+
     fn prepare_tail(
         &mut self,
         limits: FullWaveMonopoleLimits,
@@ -388,7 +405,7 @@ impl Spectrum<3> for InteriorKernel {
         self.common.extent()
     }
     fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
-        self.common.resolved(region, lower, upper)
+        InteriorKernel::resolved(self, region, lower, upper)
     }
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
         let InteriorWeight {

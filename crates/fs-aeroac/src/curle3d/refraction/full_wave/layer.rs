@@ -723,6 +723,10 @@ impl LayerKernel {
     }
 
     fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
+        self.resolved_at_depth(region, lower, upper, self.layer.thickness_m)
+    }
+
+    fn resolved_at_depth(&self, region: usize, lower: f64, upper: f64, decay_depth_m: f64) -> bool {
         let lo = self.point(region, lower);
         let hi = self.point(region, upper);
         let mid = self.point(region, lower + (upper - lower) * 0.5);
@@ -735,7 +739,8 @@ impl LayerKernel {
         let mut decay = 0.0;
         for i in 0..3 {
             phase += lengths[i] * (hi.zeta[i].re - lo.zeta[i].re).abs();
-            decay += lengths[i] * (hi.zeta[i].im - lo.zeta[i].im).abs();
+            let decay_length = if i == 1 { decay_depth_m } else { lengths[i] };
+            decay += decay_length * (hi.zeta[i].im - lo.zeta[i].im).abs();
         }
         if phase > FRAC_PI_2 || decay > 2.0 {
             return false;
@@ -895,8 +900,7 @@ mod tests {
         assert!((scaled_sine_over_zeta * alpha - 0.5).abs() < 1e-15);
         for (alpha, thickness) in [(2.0, f64::MAX), (1e100, 1e250)] {
             assert!((alpha * thickness).is_infinite());
-            let (cosine, sine) =
-                LayerKernel::layer_functions_at(C64::new(0.0, alpha), thickness);
+            let (cosine, sine) = LayerKernel::layer_functions_at(C64::new(0.0, alpha), thickness);
             assert_eq!(cosine, 0.5);
             assert_eq!(sine, 0.5 / alpha);
             assert!(sine > 0.0);

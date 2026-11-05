@@ -178,6 +178,32 @@ fn independent_spherical_images_recover_both_internal_directions_and_near_fields
 }
 
 #[test]
+fn thick_layer_near_field_resolves_without_reintegrating_the_canceled_evanescent_exponent() {
+    let rho = [1.2, 3.4, 1.7];
+    let h = 100_000.0;
+    let hz = 0.00001;
+    let receiver = [0.024, 0.013, 0.01];
+    let mut accuracy = limits();
+    accuracy.absolute_pressure_tolerance_pa_per_m3_s = 1e-14;
+    let prepared = PreparedLayerInteriorFullWaveMonopole::new(
+        slab(rho.map(|v| fluid(v, 300.0)), h),
+        hz,
+        [0.0, 0.0, -0.015],
+        receiver,
+        accuracy,
+        &mut || false,
+    )
+    .unwrap();
+    let actual = prepared.evaluate(C64::ONE).unwrap();
+    let expected = image_series(rho, 300.0, hz, 0.015, h, receiver);
+    close(actual.pressure_pa, expected[0], 5e-8);
+    for axis in 0..3 {
+        close(actual.particle_velocity_m_s[axis], expected[axis + 1], 5e-8);
+    }
+    assert!(prepared.diagnostics().evaluations < accuracy.maximum_evaluations);
+}
+
+#[test]
 fn both_faces_preserve_pressure_normal_velocity_and_tangential_momentum() {
     let media = [fluid(1.2, 300.0), fluid(2.4, 600.0), fluid(1.8, 400.0)];
     let h = 0.018;

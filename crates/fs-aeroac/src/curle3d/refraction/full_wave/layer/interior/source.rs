@@ -176,7 +176,7 @@ impl Spectrum<3> for ExteriorKernel {
         self.interior.common.extent()
     }
     fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
-        self.interior.common.resolved(region, lower, upper)
+        self.interior.resolved(region, lower, upper)
     }
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
         let weight = self.interior.sample_weight(region, x)?;
