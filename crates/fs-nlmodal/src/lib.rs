@@ -845,15 +845,16 @@ fn validate_vk_modes(
             });
         }
     }
-    // Duplicates silently double-count a physical mode (review
-    // finding): refuse in each list.
+    // Duplicates silently double-count a physical mode: refuse in each list.
+    // Sort a cold copy, retaining the authored basis order. A quadratic scan
+    // would dominate analytic assembly for many Airy modes and few motions.
     for list in [disp_modes, stress_modes] {
-        for (i, a) in list.iter().enumerate() {
-            if list[..i].contains(a) {
-                return Err(NlModalError::Parameter {
-                    what: "duplicate mode in list",
-                });
-            }
+        let mut ordered = list.to_vec();
+        ordered.sort_unstable_by_key(|mode| (mode.m, mode.n));
+        if ordered.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(NlModalError::Parameter {
+                what: "duplicate mode in list",
+            });
         }
     }
     Ok(())

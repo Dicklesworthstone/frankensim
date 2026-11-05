@@ -551,7 +551,7 @@ pub use surface::{
 pub use bank::{PlateBank, PlateBankImage, PlateBankObservation, PlateBankStep};
 pub use piston::{BaffledPistonRadiation, PistonRadiationFit};
 pub use cavity::{VkCavityInitial, VkCavityLoad, VkCavityObservation};
-pub use prepared::{PreparedVkBody, PreparedVkStep};
+pub use prepared::{PreparedVkBody, PreparedVkStep, PreparedVkTones, VkToneConfig};
 
 /// A von Karman plate as one pHS.
 ///
@@ -667,17 +667,48 @@ impl VkBody {
     }
 
     /// Build from a thin plate.
-    /// The isotropic simply-supported path retains up to three odd-odd
+    /// The isotropic simply-supported path retains the requested odd-odd
     /// displacement modes and the (1,1) Airy stress mode. This active stress
     /// channel supplies quartic storage and cubic restoring forces; its finite
     /// truncation is not a stress-basis convergence certificate.
     ///
+    /// Keep the complete requested displacement count within the existing pHS
+    /// capacity. The historical simply-supported image uses odd/odd sine modes
+    /// and one Airy stress mode; use [`Self::from_sine_basis`] to refine those
+    /// two independent truncations or retain nonradiating displacement modes.
+    ///
     /// # Errors
-    /// Section, modal-window, or nlmodal admission refusals.
+    /// Section, modal-window, complete-state capacity, or nlmodal admission refusals.
     pub fn from_plate(plate: ThinPlate) -> Result<Self, AcousticRealizeError> {
         Self::from_plate_ports(plate, false)
     }
 
+    /// Assemble an explicit simply-supported isotropic displacement/stress basis.
+    ///
+    /// Both mode lists retain caller order. Even-index displacement modes may
+    /// have zero compact monopole area but still carry physical motion, drive
+    /// work and nonlinear coupling; they are never discarded. The stress list
+    /// controls a separate Airy truncation. The existing analytic fs-nlmodal
+    /// assembler computes every original coupling without spatial sampling.
+    ///
+    /// `plate.n_modes` must equal the complete displacement count. The explicit
+    /// `maximum_coupling_entries` bounds `stress.len() * displacement.len()^2`
+    /// before assembly. The existing complete-state pHS capacity also applies.
+    /// Loss laws, signed force/area projections and material parameters are the
+    /// same as the ordinary plate constructor. Neither basis count alone proves
+    /// convergence; clamped/orthotropic plates require their sampled FE image.
+    ///
+    /// # Errors
+    /// Invalid or duplicate modes, unsupported supports/material symmetry, or
+    /// insufficient coupling-entry/complete-state capacity.
+    pub fn from_sine_basis(
+        plate: ThinPlate,
+        displacement: &[fs_nlmodal::SineMode],
+        stress: &[fs_nlmodal::SineMode],
+        maximum_coupling_entries: usize,
+    ) -> Result<Self, AcousticRealizeError> {
+        Self::from_ss_basis(plate, displacement, stress, maximum_coupling_entries, false)
+    }
 
     /// The same nonlinear plate with explicit anisotropic thermal bending loss.
     /// Uses the original sampled DKT route, including for isotropic elasticity,
@@ -699,6 +730,7 @@ impl VkBody {
     }
 
     fn from_plate_ports(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
+        admit_vk_render_modes(plate.n_modes, with_area)?;
         plane_stress_section(plate)?;
         PlateBendingLaw::new(&plate)?;
         let isotropic = has_isotropic_elasticity(&plate);
@@ -710,13 +742,36 @@ impl VkBody {
     }
 
     fn from_ss_sine(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
-        let n = plate.n_modes.clamp(1, 3);
+        let n = plate.n_modes;
         let disp = odd_odd_modes(n);
         // Odd-odd displacement modes have reflection-even Hessian brackets.
         // Retain the lowest Airy mode with the same symmetry: an even index
         // in either direction would make this entire stress channel zero.
         // One Airy mode is an explicit stress truncation, not a convergence claim.
         let stress = vec![fs_nlmodal::SineMode { m: 1, n: 1 }];
+        Self::from_ss_basis(plate, &disp, &stress, n * n, with_area)
+    }
+
+    fn from_ss_basis(
+        plate: ThinPlate,
+        disp: &[fs_nlmodal::SineMode],
+        stress: &[fs_nlmodal::SineMode],
+        maximum_coupling_entries: usize,
+        with_area: bool,
+    ) -> Result<Self, AcousticRealizeError> {
+        admit_vk_render_modes(disp.len(), with_area)?;
+        let entries = disp.len().checked_mul(disp.len())
+            .and_then(|n| n.checked_mul(stress.len()));
+        if plate.n_modes != disp.len() || stress.is_empty()
+            || entries.is_none_or(|n| n > maximum_coupling_entries)
+            || plate.clamped || !has_isotropic_elasticity(&plate)
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "explicit sine plate needs complete nonempty bases, isotropic simple supports and admitted coupling entries",
+            });
+        }
+        plane_stress_section(plate)?;
+        PlateBendingLaw::new(&plate)?;
         let model = fs_nlmodal::von_karman_ss_plate(
             &fs_nlmodal::VkPlateParams {
                 lx: plate.length_m,
@@ -727,15 +782,15 @@ impl VkBody {
                 rho: plate.density_kg_m3,
                 pretension_n_m: plate.pretension_n_m,
             },
-            &disp,
-            &stress,
+            disp,
+            stress,
         )
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let mut zetas = vec![plate.damping_ratio; disp.len()];
         let loss = PlateBendingLaw::new(&plate)?;
         if loss.is_active() {
             let d = plane_stress_section(plate)?.d[0];
-            for ((z, md), &omega) in zetas.iter_mut().zip(&disp).zip(&model.storage.omegas) {
+            for ((z, md), &omega) in zetas.iter_mut().zip(disp).zip(&model.storage.omegas) {
                 let k2 = (md.m as f64 * core::f64::consts::PI / plate.length_m).powi(2)
                     + (md.n as f64 * core::f64::consts::PI / plate.width_m).powi(2);
                 let fraction = bending_energy_fraction(d * k2, d * k2 + plate.pretension_n_m)?;
@@ -757,8 +812,10 @@ impl VkBody {
             }
         }
         let (drive, areas) = ss_sine_ports(
-            plate.length_m, plate.width_m,
-            plate.density_kg_m3 * plate.thickness_m, &disp,
+            plate.length_m,
+            plate.width_m,
+            plate.density_kg_m3 * plate.thickness_m,
+            disp,
         );
         finish_vk(model.storage, &zetas, &drive, areas, with_area)
     }
@@ -771,11 +828,7 @@ impl VkBody {
     fn from_sampled_fe_with_slab(
         plate: ThinPlate, with_area: bool, slab: Option<SlabThermoelasticBending>,
     ) -> Result<Self, AcousticRealizeError> {
-        if plate.n_modes == 0 {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "thin plate needs at least one mode",
-            });
-        }
+        admit_vk_render_modes(plate.n_modes, with_area)?;
         let section = plane_stress_section(plate)?;
         let (nx_c, ny_c) = (8, 8);
         let mesh = PlateMesh::rectangle(plate.length_m, plate.width_m, nx_c, ny_c);
@@ -805,7 +858,12 @@ impl VkBody {
                 what: "plate modal window returned no certified modes",
             });
         }
-        let n_keep = plate.n_modes.min(report.modes.len()).min(3);
+        if report.modes.len() < plate.n_modes {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "plate eigenvalue window does not contain the complete requested displacement basis",
+            });
+        }
+        let n_keep = plate.n_modes;
         let bending_loss = PlateBendingLoss::new_with_slab(plate, &mesh, &section, &boundary, slab)?;
         let nx = nx_c + 1;
         let ny = ny_c + 1;
@@ -813,8 +871,10 @@ impl VkBody {
         let mut zetas = Vec::with_capacity(n_keep);
         for pair in report.modes.iter().take(n_keep) {
             let omega = pair.lambda.max(0.0).sqrt();
-            if !(omega > 0.0) {
-                continue;
+            if !omega.is_finite() || omega <= 0.0 {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "selected plate modes need positive finite angular frequencies",
+                });
             }
             let mut w = vec![0.0; nx * ny];
             for j in 0..ny {
@@ -934,6 +994,12 @@ fn ss_sine_ports(
     let norm = (4.0 / (surface_density_kg_m2 * length_m * width_m)).sqrt();
     let mut drive = Vec::with_capacity(modes.len());
     let mut areas = Vec::with_capacity(modes.len());
+    // This fixed physical drive has exact integer phase classes. Reducing
+    // before floating-point conversion preserves nodal zeros even for high
+    // half-wave indices; sin(index * pi / divisor) does not.
+    let h = core::f64::consts::FRAC_1_SQRT_2;
+    let quarter = [0.0, h, 1.0, h, 0.0, -h, -1.0, -h];
+    let half = [0.0, 1.0, 0.0, -1.0];
     for mode in modes {
         let mf = mode.m as f64;
         let nf = mode.n as f64;
@@ -943,7 +1009,7 @@ fn ss_sine_ports(
         } else {
             0.0
         });
-        drive.push(norm * det::sin(mf * pi * 0.25) * det::sin(nf * pi * 0.5));
+        drive.push(norm * quarter[mode.m % 8] * half[mode.n % 4]);
     }
     (drive, areas)
 }
@@ -1011,6 +1077,22 @@ fn prepare_render_linear(sys: &fs_phs::PortHamiltonian)
     }).map_err(render_step_error)
 }
 
+// Admit the actual legacy split reservation before constructing a modal tensor.
+// Two physical states per displacement mode; one force port, optionally one
+// face-pressure port. The original owner repeats this admission on the system.
+fn admit_vk_render_modes(modes: usize, with_area: bool) -> Result<(), AcousticRealizeError> {
+    let ports = if with_area { 2 } else { 1 };
+    let block = modes.checked_mul(2)
+        .and_then(|n| n.checked_add(ports + 1))
+        .and_then(|n| n.checked_mul(2));
+    if modes == 0 || block.is_none_or(|n| n > fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "complete plate displacement basis exceeds the existing pHS capacity or is empty",
+        });
+    }
+    Ok(())
+}
+
 fn render_step_error(error: fs_phs::PhsError) -> AcousticRealizeError {
     match error {
         fs_phs::PhsError::TimeResolution(band) => AcousticRealizeError::TimeResolution(band),
@@ -1047,8 +1129,9 @@ fn bilinear_sample(w: &[f64], nx: usize, ny: usize, lx: f64, ly: f64, x: f64, y:
 }
 
 fn odd_odd_modes(n: usize) -> Vec<fs_nlmodal::SineMode> {
-    let mut out = Vec::new();
-    for sum in (2..20).step_by(2) {
+    let mut out = Vec::with_capacity(n);
+    let mut sum = 2;
+    while out.len() < n {
         for m in (1..sum).step_by(2) {
             let nn = sum - m;
             if nn % 2 == 1 {
@@ -1058,8 +1141,53 @@ fn odd_odd_modes(n: usize) -> Vec<fs_nlmodal::SineMode> {
                 }
             }
         }
+        sum += 2;
     }
     out
+}
+
+#[cfg(test)]
+mod vk_sine_basis_tests {
+    use super::*;
+
+    #[test]
+    fn default_sine_branch_keeps_every_requested_displacement() {
+        let plate = ThinPlate {
+            length_m: 0.6, width_m: 0.4, thickness_m: 0.001,
+            density_kg_m3: 7800.0, e1_pa: 2.0e11, e2_pa: 2.0e11,
+            nu12: 0.3, g12_pa: 2.0e11 / 2.6, material_angle_rad: 0.0,
+            damping_ratio: 0.001, thermoelastic: None, kelvin_voigt_bending: None,
+            n_modes: 6, geometric_nonlinearity: true, pretension_n_m: 0.0,
+            clamped: false,
+        };
+        let body = VkBody::from_ss_sine(plate, false).unwrap();
+        assert_eq!(body.state().len(), 12);
+        assert_eq!(body.areas.len(), 6);
+        assert_eq!(odd_odd_modes(63).len(), 63);
+        assert!(admit_vk_render_modes(63, false).is_ok());
+        assert!(admit_vk_render_modes(63, true).is_err());
+        assert!(admit_vk_render_modes(64, false).is_err());
+        assert!(admit_vk_render_modes(usize::MAX, false).is_err());
+        assert!(admit_vk_render_modes(0, false).is_err());
+    }
+
+    #[test]
+    fn fixed_drive_preserves_exact_nodal_phases_at_high_integer_indices() {
+        let high = 1_usize << 30;
+        let modes = [
+            fs_nlmodal::SineMode { m: 1, n: high },
+            fs_nlmodal::SineMode { m: high, n: 1 },
+            fs_nlmodal::SineMode { m: high + 2, n: high + 1 },
+            fs_nlmodal::SineMode { m: high + 6, n: high + 1 },
+            fs_nlmodal::SineMode { m: high + 1, n: high + 3 },
+        ];
+        // Unit normalization, so the entries are the exact fixed-point trace.
+        let (drive, areas) = ss_sine_ports(2.0, 2.0, 1.0, &modes);
+        assert_eq!(&drive[..4], &[0.0, 0.0, 1.0, -1.0]);
+        assert_eq!(drive[4], -core::f64::consts::FRAC_1_SQRT_2);
+        assert_eq!(&areas[..4], &[0.0; 4]);
+        assert!(areas[4] > 0.0);
+    }
 }
 
 /// Certified compact radiators of a thin plate.

@@ -1,9 +1,10 @@
 //! The prepared body preserves physical dynamics while reusing fixed-clock work.
 // The allocator forwards directly to System and is confined to this test binary.
 #![allow(unsafe_code)]
-use fs_couple::thin_plate::VkBody;
+use fs_couple::thin_plate::{PreparedVkTones, VkBody, VkToneConfig};
 use fs_nlmodal::{SosModalStorage, StressChannel};
-use fs_phs::RelaxationBranch;
+use fs_phs::linear_exact::DenseExponentialBudget;
+use fs_phs::{RelaxationBranch, ResistanceWitness};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -167,4 +168,286 @@ fn fixed_clock_and_cancelled_or_invalid_observation_never_reset_or_publish_state
         assert_eq!(prepared.state(), same.state());
         assert_eq!(actual, expected);
     }
+}
+
+fn tone_config(dt: f64) -> VkToneConfig {
+    VkToneConfig {
+        time_step_s: dt,
+        nyquist_guard_fraction: 0.8,
+        dense_budget: DenseExponentialBudget {
+            max_dimension: 64,
+            max_dense_bytes: 8 * 1024 * 1024,
+            max_multiply_terms: 100_000_000,
+        },
+    }
+}
+
+fn loss_channels() -> [ResistanceWitness; 2] {
+    // Original modal viscous and Maxwell resistance, kept separate. The rows
+    // reconstruct the full physical operators, including cross-mode damping.
+    let mut viscous = vec![0.0; 25];
+    viscous[6] = 0.4;
+    viscous[8] = -0.1;
+    viscous[16] = -0.1;
+    viscous[18] = 0.2;
+    let mut rows = vec![0.0; 10];
+    rows[1] = 0.4_f64.sqrt();
+    rows[3] = -0.1 / rows[1];
+    rows[8] = 0.175_f64.sqrt();
+    let mut memory = vec![0.0; 25];
+    memory[24] = 1.0 / 0.15;
+    [
+        ResistanceWitness::try_from_source_rows(5, viscous, rows).unwrap(),
+        ResistanceWitness::try_from_source_rows(
+            5,
+            memory,
+            vec![0.0, 0.0, 0.0, 0.0, (1.0_f64 / 0.15).sqrt()],
+        )
+        .unwrap(),
+    ]
+}
+
+fn tones(dt: f64, affine: bool) -> PreparedVkTones {
+    if affine {
+        body(true).into_prepared_affine_tones(&[1.7, 4.3], tone_config(dt), &loss_channels())
+    } else {
+        body(true).into_prepared_tones(&[1.7, 4.3], tone_config(dt), &loss_channels())
+    }
+    .unwrap()
+}
+
+// Independent continuous equations for the fixture above. These integrate the
+// original quartic/Maxwell law and physical source/loss powers, without calling
+// the prepared owner's discrete gradient or its work/heat integrals.
+fn tone_rhs(t: f64, x: &[f64; 8], affine: bool) -> [f64; 8] {
+    let gain = if affine { 1.0 + 0.8 * t } else { 1.0 };
+    let force = gain
+        * (9.0 * (1.7 * t).cos() + 2.0 * (1.7 * t).sin() - 3.0 * (4.3 * t).cos() + (4.3 * t).sin());
+    let [q0, p0, q1, p1, z, ..] = *x;
+    let form = q0 * q0 + 0.4 * q0 * q1 + 0.6 * q1 * q1;
+    let spring = 3.5_f64.sqrt();
+    let strain = spring * (q0 - 0.5 * q1) - z;
+    [
+        p0,
+        -4.0 * q0 - 30.0 * form * (q0 + 0.2 * q1) - spring * strain - 0.4 * p0 + 0.1 * p1 + force,
+        p1,
+        -9.0 * q1 - 30.0 * form * (0.2 * q0 + 0.6 * q1) + 0.5 * spring * strain + 0.1 * p0
+            - 0.2 * p1
+            + 0.3 * force,
+        strain / 0.15,
+        force * (p0 + 0.3 * p1),
+        0.4 * p0 * p0 - 0.2 * p0 * p1 + 0.2 * p1 * p1,
+        strain * strain / 0.15,
+    ]
+}
+
+fn tone_reference(affine: bool) -> [f64; 8] {
+    let mut x = [0.0; 8];
+    let dt = 0.4 / 8192.0;
+    for k in 0..8192 {
+        let t = k as f64 * dt;
+        let a = tone_rhs(t, &x, affine);
+        let b = tone_rhs(
+            t + dt / 2.0,
+            &core::array::from_fn(|i| x[i] + dt * a[i] / 2.0),
+            affine,
+        );
+        let c = tone_rhs(
+            t + dt / 2.0,
+            &core::array::from_fn(|i| x[i] + dt * b[i] / 2.0),
+            affine,
+        );
+        let d = tone_rhs(t + dt, &core::array::from_fn(|i| x[i] + dt * c[i]), affine);
+        for i in 0..8 {
+            x[i] += dt * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+        }
+    }
+    x
+}
+
+#[test]
+fn continuous_plate_tones_refine_original_motion_work_and_separate_material_heat() {
+    for affine in [false, true] {
+        let reference = tone_reference(affine);
+        let mut errors = [0.0; 2];
+        for (level, dt) in [0.01, 0.005].into_iter().enumerate() {
+            let mut prepared = tones(dt, affine);
+            let (mut c, mut s) = ([9.0, -3.0], [2.0, 1.0]);
+            let mut accounts = [0.0; 3];
+            for k in 0..(0.4 / dt).round() as usize {
+                let (p0, p1) = (prepared.state()[1], prepared.state()[3]);
+                let energy = prepared.stored_energy_j();
+                let g0 = 1.0 + 0.8 * k as f64 * dt;
+                let g1 = g0 + 0.8 * dt;
+                let frame = if affine {
+                    prepared.drive_affine_and_radiate(
+                        &c.map(|v| v * g0),
+                        &s.map(|v| v * g0),
+                        &c.map(|v| v * g1),
+                        &s.map(|v| v * g1),
+                        1.2,
+                        1.5,
+                    )
+                } else {
+                    prepared.drive_and_radiate(&c, &s, 1.2, 1.5)
+                }
+                .unwrap();
+                let pressure = 1.2 / (core::f64::consts::TAU * 1.5 * dt)
+                    * (0.02 * (prepared.state()[1] - p0) - 0.01 * (prepared.state()[3] - p1));
+                assert!((frame.pressure_pa - pressure).abs() < 2e-15);
+                assert_eq!(frame.volume_velocity_m3_s, prepared.volume_velocity());
+                assert!((frame.work.delta_h - (prepared.stored_energy_j() - energy)).abs() < 2e-12);
+                assert!(frame.work.balance_residual().abs() < 2e-12);
+                assert!(
+                    (frame.work.dissipated - prepared.channel_heat_j().iter().sum::<f64>()).abs()
+                        < 2e-12
+                );
+                accounts[0] += frame.work.supplied;
+                for j in 0..2 {
+                    accounts[j + 1] += prepared.channel_heat_j()[j];
+                }
+                for j in 0..2 {
+                    (c[j], s[j]) = prepared.advance_force_phase(j, c[j], s[j]).unwrap();
+                }
+            }
+            assert!(prepared.state()[4].abs() > 0.1);
+            assert!(accounts[1] > 0.01 && accounts[2] > 0.01);
+            errors[level] = prepared
+                .state()
+                .iter()
+                .chain(&accounts)
+                .zip(reference)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f64::max);
+        }
+        assert!(
+            errors[1] < 0.28 * errors[0],
+            "affine={affine}, errors={errors:?}"
+        );
+        assert!(errors[1] < 2e-4, "affine={affine}, errors={errors:?}");
+    }
+}
+
+#[test]
+fn tone_observation_and_cancellation_publish_no_partial_state_or_heat() {
+    let mut prepared = tones(0.005, true);
+    let mut reference = tones(0.005, true);
+    for owner in [&mut prepared, &mut reference] {
+        owner
+            .drive_affine_and_radiate(&[2.0, 1.0], &[0.1, 0.2], &[3.0, 1.2], &[0.2, 0.3], 1.2, 1.0)
+            .unwrap();
+    }
+    let before = prepared.state().to_vec();
+    let heat = prepared.channel_heat_j().to_vec();
+    let mut polls = 0;
+    let expected = reference
+        .drive_affine_and_radiate_controlled(
+            &[3.0, 1.2],
+            &[0.2, 0.3],
+            &[4.0, 1.5],
+            &[0.3, 0.4],
+            1.2,
+            1.0,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    for stop in [1, 2, polls] {
+        let mut calls = 0;
+        assert!(
+            prepared
+                .drive_affine_and_radiate_controlled(
+                    &[3.0, 1.2],
+                    &[0.2, 0.3],
+                    &[4.0, 1.5],
+                    &[0.3, 0.4],
+                    1.2,
+                    1.0,
+                    || {
+                        calls += 1;
+                        calls == stop
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(prepared.state(), before);
+        assert_eq!(prepared.channel_heat_j(), heat);
+    }
+    // A finite but overflowing observer fails after the physical solve.
+    assert!(
+        prepared
+            .drive_affine_and_radiate(
+                &[3.0, 1.2],
+                &[0.2, 0.3],
+                &[4.0, 1.5],
+                &[0.3, 0.4],
+                f64::MAX,
+                1e-100,
+            )
+            .is_err()
+    );
+    assert_eq!(prepared.state(), before);
+    assert_eq!(prepared.channel_heat_j(), heat);
+    let actual = prepared
+        .drive_affine_and_radiate(&[3.0, 1.2], &[0.2, 0.3], &[4.0, 1.5], &[0.3, 0.4], 1.2, 1.0)
+        .unwrap();
+    assert_eq!(prepared.state(), reference.state());
+    assert_eq!(prepared.channel_heat_j(), reference.channel_heat_j());
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn warm_nonlinear_tone_pressure_and_channel_steps_reuse_all_scratch() {
+    for affine in [false, true] {
+        let mut owner = tones(0.001, affine);
+        let mut c = [2.0, -0.5];
+        let mut s = [0.1, 0.2];
+        ALLOCATIONS.with(|n| n.set(0));
+        TRACK.with(|on| on.set(true));
+        for _ in 0..128 {
+            let frame = if affine {
+                owner.drive_affine_and_radiate(
+                    &c,
+                    &s,
+                    &c.map(|v| 1.001 * v),
+                    &s.map(|v| 1.001 * v),
+                    1.2,
+                    1.0,
+                )
+            } else {
+                owner.drive_and_radiate(&c, &s, 1.2, 1.0)
+            }
+            .unwrap();
+            for j in 0..2 {
+                (c[j], s[j]) = owner.advance_force_phase(j, c[j], s[j]).unwrap();
+            }
+            std::hint::black_box(frame);
+        }
+        TRACK.with(|on| on.set(false));
+        assert_eq!(ALLOCATIONS.with(Cell::get), 0, "affine={affine}");
+    }
+}
+
+#[test]
+fn plate_tones_admit_original_modes_carriers_and_complete_cache_budget() {
+    assert!(
+        body(true)
+            .into_prepared_tones(&[4000.0], tone_config(0.001), &[])
+            .is_err()
+    );
+    assert!(
+        body(true)
+            .into_prepared_tones(&[0.0], tone_config(1.0), &[])
+            .is_err()
+    );
+    let mut config = tone_config(0.001);
+    config.dense_budget.max_dense_bytes = 1;
+    assert!(body(true).into_prepared_tones(&[2.0], config, &[]).is_err());
+    assert!(
+        body(true)
+            .into_prepared_tones_controlled(&[2.0], tone_config(0.001), &[], || true)
+            .is_err()
+    );
 }
