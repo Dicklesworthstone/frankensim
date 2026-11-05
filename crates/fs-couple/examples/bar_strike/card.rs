@@ -34,6 +34,28 @@ pub struct Resonator {
     pub measured_hz: Option<f64>,
 }
 
+/// The broadband observer's declared fit: complete poles per mode, and the largest relative error allowed
+/// on the withheld frequencies, over every mode and frequency.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ObserverRow {
+    pub fit_order: usize,
+    pub held_out_budget: f64,
+    /// `observer_rigid_rows on`: the rigid coordinates the strike drives are heard as well. Absent, they are
+    /// silent, as in the narrow-band receiver.
+    pub rigid_rows: bool,
+}
+
+/// A closed-open tube under the bar's middle: air column from the stopper to the open end, inner radius, and the
+/// gap from the plane of the bar's uncut lower face to the mouth. See `tube.rs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tube {
+    pub radius_m: f64,
+    pub air_length_m: f64,
+    pub gap_m: f64,
+    /// How many odd plane-wave modes to carry.
+    pub modes: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Card {
     pub name: String,
@@ -71,9 +93,13 @@ pub struct Card {
     /// `maximum_relative_halfwidth`; absent, 1e-8. It builds the same bar and loosens only what is accepted, so
     /// a card that sets it says so, with the half-width in Hz from the report's `eigen_uncertainty_hz`.
     pub maximum_relative_halfwidth: f64,
+    /// The optional rows `observer broadband`, `observer_fit_order` and `observer_held_out_budget`: the
+    /// receiver is the engine's broadband modal observer. Absent, the narrow-band receiver, as ever.
+    pub observer: Option<ObserverRow>,
     /// Printed modal frequencies of the same bar, for the report only (never used to build the bar).
     pub reference_vertical_hz: Vec<f64>,
     pub resonator: Option<Resonator>,
+    pub tube: Option<Tube>,
 }
 
 impl Profile {
@@ -290,6 +316,21 @@ impl Card {
                 Err(_) => 1e-8,
                 Ok(_) => rows.number("maximum_relative_halfwidth")?,
             },
+            observer: match rows.get("observer") {
+                Err(_) => None,
+                Ok(kind) if kind.first().map(String::as_str) == Some("broadband") => {
+                    Some(ObserverRow {
+                        fit_order: rows.count("observer_fit_order")?,
+                        held_out_budget: rows.number("observer_held_out_budget")?,
+                        rigid_rows: match rows.get("observer_rigid_rows") {
+                            Err(_) => false,
+                            Ok(v) if v.first().map(String::as_str) == Some("on") => true,
+                            Ok(_) => return Err("observer_rigid_rows must be `on`".into()),
+                        },
+                    })
+                }
+                Ok(_) => return Err("observer must be `broadband`".into()),
+            },
             reference_vertical_hz: rows
                 .get("reference_vertical_hz")
                 .map(|v| v.iter().filter_map(|x| x.parse().ok()).collect())
@@ -306,6 +347,16 @@ impl Card {
                     })
                 }
                 Ok(_) => return Err("resonator must be `helmholtz`".into()),
+            },
+            tube: match rows.get("tube") {
+                Err(_) => None,
+                Ok(kind) if kind.first().map(String::as_str) == Some("closed_open") => Some(Tube {
+                    radius_m: rows.number("tube_radius_m")?,
+                    air_length_m: rows.number("tube_air_length_m")?,
+                    gap_m: rows.number("tube_gap_m")?,
+                    modes: rows.count("tube_modes")?,
+                }),
+                Ok(_) => return Err("tube must be `closed_open`".into()),
             },
         };
         card.validate()?;
@@ -330,6 +381,14 @@ impl Card {
         }
         if !(self.maximum_relative_halfwidth > 0.0 && self.maximum_relative_halfwidth <= 1e-6) {
             return Err("maximum_relative_halfwidth must lie in (0, 1e-6]".into());
+        }
+        if let Some(o) = self.observer {
+            if !(o.held_out_budget > 0.0) {
+                return Err("observer_held_out_budget must be positive".into());
+            }
+            if self.resonator.is_some() {
+                return Err("the broadband observer is not wired to a resonator's body".into());
+            }
         }
         let [nx, ny, nz] = self.mesh_counts;
         if nx % 4 != 0 || ny % 2 != 0 || nz == 0 {
@@ -359,6 +418,20 @@ impl Card {
                 && x1 <= self.length_m)
             {
                 return Err("resonator needs positive volume, opening and neck, and a wet interval inside the bar".into());
+            }
+        }
+        if let Some(t) = &self.tube {
+            if self.resonator.is_some() {
+                return Err("a card takes a resonator or a tube, not both".into());
+            }
+            if self.observer.is_some() {
+                return Err("the broadband observer is not wired to a tube's body".into());
+            }
+            if !(t.radius_m > 0.0 && t.air_length_m > 2.0 * t.radius_m && t.gap_m > 0.0) {
+                return Err(
+                    "tube needs a positive radius and gap and a column longer than its diameter"
+                        .into(),
+                );
             }
         }
         if let Profile::Arc {

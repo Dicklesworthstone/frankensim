@@ -1,14 +1,16 @@
 //! Burton-Miller receiver transfer of every band mode, each at its own frequency (the narrow-band
 //! modal observer of the bar_s1 test). The bar's boundary mesh is the structural grid's own boundary
 //! (or a nested coarser one, `bem_stride`); the vertex displacements of each mode give its normal
-//! velocity on the panels. Rigid coordinates get no transfer (direct rigid-body radiation is not modelled).
+//! velocity on the panels. Rigid coordinates get no transfer here: a zero frequency has no narrow-band
+//! hold. The observer's `observer_rigid_rows` row is the only place they are heard.
 use crate::bar::{Mesh, TAU, hz, mesh as build_mesh};
-use crate::card::Card;
+use crate::card::{Card, Tube};
+use crate::tube::{IsolatedMode, MouthField, mouth_centre, mouth_points};
 use fs_bem::helmholtz::{
     Formulation, HelmholtzError, Medium, exterior_pressure_at_points, solve_radiation_batch,
 };
 use fs_bem::panel3d::SpherePanels;
-use fs_math::c64::C64;
+use fs_math::{c64::C64, det};
 use fs_modal::ModePair;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -60,8 +62,28 @@ pub fn surface_and_shapes(
     finest: &Mesh,
     modes: &[ModePair],
 ) -> Result<(SpherePanels, Vec<Vec<f64>>), String> {
-    let stride = card.bem_stride;
-    let counts = finest.counts.map(|c| c / stride);
+    surface_and_shapes_at(card, finest, modes, [card.bem_stride; 3])
+}
+
+/// The same with its own stride along each axis.
+pub fn surface_and_shapes_at(
+    card: &Card,
+    finest: &Mesh,
+    modes: &[ModePair],
+    stride: [usize; 3],
+) -> Result<(SpherePanels, Vec<Vec<f64>>), String> {
+    let fields: Vec<&[f64]> = modes.iter().map(|m| m.phi.as_slice()).collect();
+    surface_and_fields_at(card, finest, &fields, stride)
+}
+
+/// The same for any fields laid out as a mode's `phi`.
+pub fn surface_and_fields_at(
+    card: &Card,
+    finest: &Mesh,
+    fields: &[&[f64]],
+    stride: [usize; 3],
+) -> Result<(SpherePanels, Vec<Vec<f64>>), String> {
+    let counts: [usize; 3] = core::array::from_fn(|a| finest.counts[a] / stride[a]);
     let coarse = build_mesh(card, counts);
     let faces = boundary(&coarse);
     let surface =
@@ -73,22 +95,18 @@ pub fn surface_and_shapes(
             let k = node % (counts[2] + 1);
             let j = node / (counts[2] + 1) % (counts[1] + 1);
             let i = node / ((counts[1] + 1) * (counts[2] + 1));
-            ((i * stride) * (fine[1] + 1) + j * stride) * (fine[2] + 1) + k * stride
+            ((i * stride[0]) * (fine[1] + 1) + j * stride[1]) * (fine[2] + 1) + k * stride[2]
         })
         .collect();
-    let shapes = modes
+    let shapes = fields
         .iter()
-        .map(|mode| {
+        .map(|phi| {
             faces
                 .iter()
                 .zip(surface.normals())
                 .map(|(face, normal)| {
                     face.iter()
-                        .map(|&v| {
-                            (0..3)
-                                .map(|c| mode.phi[3 * map[v] + c] * normal[c])
-                                .sum::<f64>()
-                        })
+                        .map(|&v| (0..3).map(|c| phi[3 * map[v] + c] * normal[c]).sum::<f64>())
                         .sum::<f64>()
                         / 3.0
                 })
@@ -171,4 +189,101 @@ pub fn modal_transfers(
         panels: surface.centroids().len(),
         min_panels_per_wavelength: min_ppw,
     })
+}
+
+/// Normal velocity on each panel that a rigid bar must answer with, per unit outward volume velocity spread over
+/// `sources`: the negative of the free field's velocity from a source p = -i w rho exp(ikr) / (4 pi r), exp(-iwt).
+pub fn reflected_velocity(surface: &SpherePanels, sources: &[[f64; 3]], k: f64) -> Vec<C64> {
+    let share = 1.0 / sources.len() as f64;
+    surface
+        .centroids()
+        .iter()
+        .zip(surface.normals())
+        .map(|(x, n)| {
+            let mut sum = C64::ZERO;
+            for s in sources {
+                let d: [f64; 3] = core::array::from_fn(|c| x[c] - s[c]);
+                let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let cos_n = (d[0] * n[0] + d[1] * n[1] + d[2] * n[2]) / r;
+                let travel = C64::new(det::cos(k * r), det::sin(k * r));
+                let spread = C64::new(-1.0 / r, k);
+                sum = sum + travel * spread * C64::from_re(cos_n * share / (2.0 * TAU * r));
+            }
+            sum
+        })
+        .collect()
+}
+
+/// At each tube mode's frequency: the mouth-mean pressure per unit modal velocity of every bar mode, and the
+/// mouth-mean pressure the rigid bar reflects per unit mouth flow. One factorization per tube mode, in parallel.
+pub fn mouth_fields(
+    card: &Card,
+    tube: &Tube,
+    medium: Medium,
+    surface: &SpherePanels,
+    shapes: &[Vec<f64>],
+    isolated: &[IsolatedMode],
+) -> Result<Vec<MouthField>, String> {
+    let points = mouth_points(mouth_centre(card, tube), tube.radius_m);
+    let share = 1.0 / points.len() as f64;
+    let velocities: Vec<Vec<C64>> = shapes
+        .iter()
+        .map(|shape| shape.iter().map(|&v| C64::from_re(v)).collect())
+        .collect();
+    let next = AtomicUsize::new(0);
+    let results: Vec<Mutex<Option<Result<MouthField, String>>>> =
+        isolated.iter().map(|_| Mutex::new(None)).collect();
+    let threads = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZero::get)
+        .min(16);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let m = next.fetch_add(1, Ordering::Relaxed);
+                    if m >= isolated.len() {
+                        break;
+                    }
+                    let f = isolated[m].omega_rad_s / TAU;
+                    let k = isolated[m].omega_rad_s / medium.sound_speed;
+                    let reflected = reflected_velocity(surface, &points, k);
+                    let mut fields: Vec<&[C64]> = velocities.iter().map(Vec::as_slice).collect();
+                    fields.push(&reflected);
+                    let out = solve_radiation_batch(
+                        surface,
+                        k,
+                        medium,
+                        &fields,
+                        Formulation::BurtonMiller,
+                    )
+                    .map_err(|e| format!("tube mode at {f:.1} Hz: BEM solve: {e:?}"))
+                    .and_then(|solved| {
+                        let mut mean = Vec::with_capacity(solved.len());
+                        for s in &solved {
+                            let p = exterior_pressure_at_points(surface, s, medium, &points)
+                                .map_err(|e| format!("mouth pressure at {f:.1} Hz: {e:?}"))?;
+                            let sum = p.iter().fold(C64::ZERO, |a, b| a + *b);
+                            mean.push(sum * C64::from_re(share));
+                        }
+                        let reflection = mean.pop().ok_or("no reflection field")?;
+                        Ok(MouthField {
+                            per_bar_mode: mean,
+                            reflection,
+                        })
+                    });
+                    if let Ok(mut slot) = results[m].lock() {
+                        *slot = Some(out);
+                    }
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .map_err(|_| "poisoned BEM result".to_string())?
+                .ok_or_else(|| "a tube mode was never solved".to_string())?
+        })
+        .collect()
 }

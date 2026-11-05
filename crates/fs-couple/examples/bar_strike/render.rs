@@ -4,6 +4,7 @@
 //! both run the same mallet loop.
 use crate::bar::{TAU, hz};
 use crate::card::Card;
+use fs_couple::modal_acoustic_time::broadband::BroadbandModalObserver;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel, ModalAcousticWorkspace,
 };
@@ -67,8 +68,8 @@ pub struct Stroke {
 }
 
 /// The audible reference ceilings except the displacement one: the bar has no supports, so after a hard
-/// stroke its six free coordinates drift without bound. The drift does not radiate (rigid transfers are
-/// zero) and the contact has ended.
+/// stroke its six free coordinates drift without bound. A steady drift does not radiate and the contact has
+/// ended.
 pub fn strike_budget() -> ModalAcousticTimeBudget {
     ModalAcousticTimeBudget {
         maximum_abs_displacement_m_sqrt_kg: 100.0,
@@ -109,6 +110,10 @@ pub trait Body {
     fn step(&mut self, forces: &[f64]) -> Result<(), String>;
     /// Receiver pressure after the substeps just taken; called once per output sample.
     fn sample(&mut self) -> f64;
+    /// The narrow-band receiver's samples, when this body also keeps them apart from the ones it returns.
+    fn take_narrow(&mut self) -> Vec<f64> {
+        Vec::new()
+    }
 }
 
 /// The bar alone in free air.
@@ -130,6 +135,56 @@ impl DirectBody {
             workspace,
             pressure: 0.0,
         })
+    }
+
+    pub fn model(&self) -> &ModalAcousticTimeModel {
+        &self.body
+    }
+}
+
+/// The bar alone, heard through the broadband observer. The bar's own model still steps and still carries
+/// the narrow-band receiver, which is kept as a check: the observer only ever sees the forces, so the contact
+/// and the narrow-band samples must replay a render without the observer bit for bit.
+pub struct ObservedBody {
+    direct: DirectBody,
+    observer: BroadbandModalObserver,
+    pressure: f64,
+    narrow: Vec<f64>,
+}
+
+impl ObservedBody {
+    pub fn new(direct: DirectBody, observer: BroadbandModalObserver) -> ObservedBody {
+        ObservedBody {
+            direct,
+            observer,
+            pressure: 0.0,
+            narrow: Vec::new(),
+        }
+    }
+}
+
+impl Body for ObservedBody {
+    fn strike_displacement(&self, projection: &[f64]) -> f64 {
+        self.direct.strike_displacement(projection)
+    }
+
+    fn step(&mut self, forces: &[f64]) -> Result<(), String> {
+        self.direct.step(forces)?;
+        self.pressure = self
+            .observer
+            .step(forces)
+            .map_err(|e| format!("broadband observer step: {e:?}"))?;
+        Ok(())
+    }
+
+    fn sample(&mut self) -> f64 {
+        let narrow = self.direct.sample();
+        self.narrow.push(narrow);
+        self.pressure
+    }
+
+    fn take_narrow(&mut self) -> Vec<f64> {
+        std::mem::take(&mut self.narrow)
     }
 }
 

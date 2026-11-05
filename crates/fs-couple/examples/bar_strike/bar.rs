@@ -297,13 +297,14 @@ pub fn vertical_modes(mesh: &Mesh, modes: &[ModePair]) -> Vec<usize> {
 /// Preserve all six free-body coordinates in contact: dropping them would spuriously anchor a nominally
 /// free-free bar. The analytic affine fields are M-orthonormalized on the assembled body, cut included.
 /// `nodes` are the assembly's nodes (the TET10 mid-edge nodes included). Returns, per rigid coordinate,
-/// its (negated) displacement at the strike node along the thickness axis.
+/// its (negated) displacement at the strike node along the thickness axis, and its field, laid out as a
+/// mode's `phi`.
 pub fn rigid_projectors(
     card: &Card,
     mesh: &Mesh,
     nodes: &[[f64; 3]],
     a: &TetElasticAssembly,
-) -> Result<Vec<f64>, String> {
+) -> Result<(Vec<f64>, Vec<Vec<f64>>), String> {
     let mut basis: Vec<Vec<f64>> = Vec::new();
     let mut mass_basis: Vec<Vec<f64>> = Vec::new();
     let mut scratch = vec![0.0; a.free_dofs.len()];
@@ -353,5 +354,5 @@ pub fn rigid_projectors(
         basis.push(field);
         mass_basis.push(scratch.clone());
     }
-    Ok(projections)
+    Ok((projections, basis))
 }

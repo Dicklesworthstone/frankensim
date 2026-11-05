@@ -8,6 +8,7 @@
 //! the wood's loss is the declared scenario named in the card.
 //! Gauntlet: G2 (benchmarks) for the uniform-prism and density-scaling tests; no G3/G4/G5 claim.
 use fs_bem::helmholtz::Medium;
+use fs_couple::modal_acoustic_time::broadband::BroadbandModalObserver;
 use fs_matdb::ContactLawCard;
 use fs_material::gas_species::input::read_gas_state;
 use fs_modal::ModePair;
@@ -16,11 +17,13 @@ use std::time::Instant;
 
 mod bar;
 mod card;
+mod observer;
 mod radiation;
 mod render;
 mod resonator;
 #[cfg(test)]
 mod tests;
+mod tube;
 
 use card::Card;
 
@@ -38,6 +41,8 @@ pub struct Structure {
     pub modes: Vec<ModePair>,
     /// The six rigid coordinates' (negated) displacement at the strike node along the thickness axis.
     pub rigid: Vec<f64>,
+    /// The same coordinates' mass-normalized fields, laid out as a mode's `phi`.
+    pub rigid_fields: Vec<Vec<f64>>,
     /// Wall time of assembly, slicing and the rigid projections [s].
     pub wall_s: f64,
 }
@@ -51,13 +56,14 @@ pub fn structure(card: &Card, rung: usize, density: f64) -> Result<Structure, St
         let mat = bar::material(card, density)?;
         let (nodes, n_tets, a) = bar::assemble(card, &mesh, &mat, cx)?;
         let modes = bar::band_modes(card, &a, cx)?;
-        let rigid = bar::rigid_projectors(card, &mesh, &nodes, &a)?;
+        let (rigid, rigid_fields) = bar::rigid_projectors(card, &mesh, &nodes, &a)?;
         Ok(Structure {
             n_tets,
             free_dofs: a.free_dofs.len(),
             mesh,
             modes,
             rigid,
+            rigid_fields,
             wall_s: started.elapsed().as_secs_f64(),
         })
     })
@@ -65,8 +71,9 @@ pub fn structure(card: &Card, rung: usize, density: f64) -> Result<Structure, St
 
 fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: bar_strike CARD.bar OUT_DIR | bar_strike CARD.bar --modes-only (run from the repository root)";
-    if args.len() != 2 {
+    let usage = "usage: bar_strike CARD.bar OUT_DIR | bar_strike CARD.bar --modes-only | bar_strike CARD.bar --observer-cost | bar_strike CARD.bar --surface-check X,Y,Z ... (run from the repository root)";
+    let surface_check = args.len() > 2 && args[1] == "--surface-check";
+    if args.len() != 2 && !surface_check {
         return Err(usage.into());
     }
     let root = std::env::current_dir()?;
@@ -78,7 +85,96 @@ fn main() -> Result<(), Error> {
         }
         return Ok(());
     }
+    if args[1] == "--observer-cost" {
+        return observer_cost(&card);
+    }
+    if surface_check {
+        return surface_check_run(&card, &args[2..]);
+    }
     run(&card, Path::new(&args[1]))
+}
+
+/// How the receiver transfers move with the radiating surface: every mode at its own frequency, on the card's
+/// finest rung's modes, for each named stride of that rung's grid along length, width and thickness. Nothing
+/// is struck and nothing is written.
+fn surface_check_run(card: &Card, strides: &[String]) -> Result<(), Error> {
+    let mut finest = None;
+    for &rung in &card.mesh_rungs {
+        let s = structure(card, rung, card.density_kg_m3)?;
+        report_structure(card, rung, &s);
+        finest = Some(s);
+    }
+    let s = finest.ok_or("the card lists no mesh rung")?;
+    let gas_text = std::fs::read_to_string(&card.gas_path)
+        .map_err(|e| format!("{}: {e}", card.gas_path.display()))?;
+    let gas = read_gas_state(&mut gas_text.split_ascii_whitespace(), None)
+        .map_err(|e| format!("gas record: {e:?}"))?;
+    let medium = Medium::from(&gas);
+    for text in strides {
+        let parsed = text
+            .split(',')
+            .map(str::parse::<usize>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("stride `{text}`: {e}"))?;
+        let stride: [usize; 3] = parsed
+            .try_into()
+            .map_err(|_| format!("stride `{text}` needs three counts"))?;
+        if (0..3).any(|a| stride[a] == 0 || s.mesh.counts[a] % stride[a] != 0) {
+            return Err(format!(
+                "stride `{text}` does not divide the grid {:?}",
+                s.mesh.counts
+            )
+            .into());
+        }
+        let started = Instant::now();
+        let (surface, shapes) = radiation::surface_and_shapes_at(card, &s.mesh, &s.modes, stride)?;
+        let t = radiation::modal_transfers(card, medium, &surface, &shapes, &s.modes)?;
+        let row: Vec<[f64; 2]> = t.pressure.iter().map(|p| [p.re, p.im]).collect();
+        println!(
+            "{{\"suite\":\"bar-strike\",\"case\":\"surface-check\",\"bar\":\"{}\",\"grid\":{:?},\"stride\":{stride:?},\"panels\":{},\"min_panels_per_wavelength\":{},\"p_pa_per_unit_modal_velocity_re_im\":{row:?},\"wall_s\":{}}}",
+            card.name,
+            s.mesh.counts,
+            t.panels,
+            t.min_panels_per_wavelength,
+            started.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
+/// What the broadband observer would cost on this card and how its fit behaves on this surface: the band's
+/// BEM, every fit order and the time of a step. Nothing is struck and nothing is written.
+fn observer_cost(card: &Card) -> Result<(), Error> {
+    let mut finest = None;
+    for &rung in &card.mesh_rungs {
+        let s = structure(card, rung, card.density_kg_m3)?;
+        report_structure(card, rung, &s);
+        finest = Some(s);
+    }
+    let s = finest.ok_or("the card lists no mesh rung")?;
+    let gas_text = std::fs::read_to_string(&card.gas_path)
+        .map_err(|e| format!("{}: {e}", card.gas_path.display()))?;
+    let gas = read_gas_state(&mut gas_text.split_ascii_whitespace(), None)
+        .map_err(|e| format!("gas record: {e:?}"))?;
+    let medium = Medium::from(&gas);
+    let (surface, shapes) = radiation::surface_and_shapes(card, &s.mesh, &s.modes)?;
+    let started = Instant::now();
+    let transfers = radiation::modal_transfers(card, medium, &surface, &shapes, &s.modes)?;
+    println!(
+        "{{\"suite\":\"bar-strike\",\"case\":\"observer-narrow-baseline\",\"bar\":\"{}\",\"panels\":{},\"modes\":{},\"min_panels_per_wavelength\":{},\"wall_s\":{}}}",
+        card.name,
+        transfers.panels,
+        s.modes.len(),
+        transfers.min_panels_per_wavelength,
+        started.elapsed().as_secs_f64()
+    );
+    let band = observer::band(card, medium, &surface, &shapes, &s, &transfers)?;
+    observer::report_band(card, &band);
+    let modes = render::bar_modes(&s.modes, None, &transfers.pressure, s.rigid.len());
+    let direct = render::DirectBody::new(card, modes)?;
+    let own_hz: Vec<f64> = s.modes.iter().map(bar::hz).collect();
+    observer::report_fits(card, direct.model(), &band, &transfers.pressure, &own_hz);
+    Ok(())
 }
 
 fn run(card: &Card, out: &Path) -> Result<(), Error> {
@@ -105,7 +201,7 @@ fn run(card: &Card, out: &Path) -> Result<(), Error> {
     let resonator = r
         .resonator_isolated_hz
         .map_or("null".to_string(), |f| f.to_string());
-    let (stroke, mallet, loss, validity) = (r.stroke, r.mallet, r.loss, r.validity);
+    let (stroke, mallet, loss, validity) = (&r.stroke, &r.mallet, &r.loss, &r.validity);
     let rms =
         (stroke.samples.iter().map(|p| p * p).sum::<f64>() / stroke.samples.len() as f64).sqrt();
     let peak = stroke.samples.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
@@ -123,6 +219,34 @@ fn run(card: &Card, out: &Path) -> Result<(), Error> {
     )
     .map_err(|e| format!("float32 wav: {e:?}"))?;
     std::fs::write(out.join(format!("{}-f32.wav", card.name)), f32_wav)?;
+    if let Some(o) = &r.observer {
+        // The same run's narrow-band receiver, kept beside the broadband one: it must replay a render
+        // without the observer bit for bit, which is the check that the bar did not change.
+        let narrow = fs_couple::pcm_wav::high_resolution::encode_pressure_wav(
+            &r.narrow_samples,
+            card.rate_hz,
+            1,
+            card.full_scale_pa,
+            fs_couple::pcm_wav::high_resolution::Encoding::Float32,
+        )
+        .map_err(|e| format!("float32 wav: {e:?}"))?;
+        std::fs::write(out.join(format!("{}-narrow-f32.wav", card.name)), narrow)?;
+        println!(
+            "{{\"suite\":\"bar-strike\",\"case\":\"broadband-observer\",\"bar\":\"{}\",\"order\":{},\"held_out_max\":{},\"held_out_budget\":{},\"producer_estimate\":{},\"delay_samples\":{},\"top_hz\":{},\"training\":{},\"held_out\":{},\"band_wall_s\":{},\"fit_wall_s\":{},\"source\":\"{}\"}}",
+            card.name,
+            o.report.controls.fit_order,
+            o.report.held_out_max_rel_error,
+            o.report.controls.max_held_out_rel_error,
+            o.report.producer_relative_error_estimate,
+            o.report.delay_samples,
+            o.top_hz,
+            o.training,
+            o.held_out,
+            o.band_wall_s,
+            o.fit_wall_s,
+            o.report.source_id
+        );
+    }
     let record = format!(
         "{{\"suite\":\"bar-strike\",\"case\":\"strike-render\",\"bar\":\"{}\",\"mallet_mass_kg\":{},\"mallet_speed_m_s\":{},\"k_n_per_m_alpha\":{},\"alpha\":{},\"contact_time_s\":{},\"peak_force_n\":{},\"contact_card_validity\":\"{validity}\",\"strike_x_m\":{},\"loss\":\"{}\",\"rms_pa\":{rms},\"peak_pa\":{peak},\"clipped_samples\":{clipped},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{},\"full_scale_pa\":{},\"resonator_isolated_hz\":{resonator},\"supports\":false,\"mallet_shaft\":false,\"acceptance\":false,\"elapsed_s\":{}}}",
         card.name,
@@ -162,6 +286,10 @@ pub struct Strike {
     pub validity: String,
     /// Isolated resonance of the card's resonator, when it has one.
     pub resonator_isolated_hz: Option<f64>,
+    /// The broadband observer's fit and cost, when the card names one.
+    pub observer: Option<ObserverOutcome>,
+    /// The narrow-band receiver of the same run when the broadband observer was the one heard.
+    pub narrow_samples: Vec<f64>,
     /// Sound speed of the card's gas record [m/s].
     pub sound_speed_m_s: f64,
     /// Wall time of the surface and the modal transfers [s].
@@ -170,7 +298,26 @@ pub struct Strike {
     pub render_wall_s: f64,
 }
 
+/// What the observer row cost and what its fit reported.
+pub struct ObserverOutcome {
+    /// The broadband fit's own report.
+    pub report: fs_couple::modal_acoustic_time::broadband::BroadbandModalReport,
+    /// Top of the band the observer was fitted on [Hz].
+    pub top_hz: f64,
+    /// Number of frequencies the fit was trained on.
+    pub training: usize,
+    /// Number of frequencies held out to check the fit.
+    pub held_out: usize,
+    /// Wall time of the whole band [s].
+    pub band_wall_s: f64,
+    /// Wall time of the fit [s].
+    pub fit_wall_s: f64,
+    /// The whole bar's translation against a compact dipole, when the rigid rows are on.
+    pub rigid_check: Option<observer::RigidCheck>,
+}
+
 /// Radiate every mode of `s` to the card's receiver and render the cited mallet's stroke.
+#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
     let gas_text = std::fs::read_to_string(&card.gas_path)
         .map_err(|e| format!("{}: {e}", card.gas_path.display()))?;
@@ -206,17 +353,66 @@ pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
     projection.extend_from_slice(&s.rigid);
     let modes = render::bar_modes(&s.modes, loss.as_ref(), &transfers.pressure, s.rigid.len());
 
-    let started = Instant::now();
+    let mut started = Instant::now();
     let mut resonator_isolated_hz = None;
-    let mut body: Box<dyn render::Body> = match &card.resonator {
-        None => Box::new(render::DirectBody::new(card, modes)?),
-        Some(res) => {
+    let mut observer_outcome = None;
+    let mut body: Box<dyn render::Body> = match (&card.resonator, &card.tube) {
+        (None, None) => {
+            let direct = render::DirectBody::new(card, modes)?;
+            match card.observer {
+                None => Box::new(direct),
+                Some(row) => {
+                    let band = observer::band(card, medium, &surface, &shapes, s, &transfers)?;
+                    observer::report_band(card, &band);
+                    let fit_started = Instant::now();
+                    let (heard, report) = BroadbandModalObserver::build(
+                        direct.model(),
+                        &band.samples,
+                        observer::controls(row.fit_order, row.held_out_budget),
+                        card.rate_hz * card.substeps,
+                    )
+                    .map_err(|e| format!("broadband observer: {e:?}"))?;
+                    observer_outcome = Some(ObserverOutcome {
+                        report,
+                        top_hz: band.top_hz,
+                        training: band.samples.omega_rad_s.len(),
+                        held_out: band.samples.held_out.len(),
+                        band_wall_s: band.wall_s,
+                        fit_wall_s: fit_started.elapsed().as_secs_f64(),
+                        rigid_check: band.rigid_check,
+                    });
+                    started = Instant::now();
+                    Box::new(render::ObservedBody::new(direct, heard))
+                }
+            }
+        }
+        (Some(res), _) => {
             resonator_isolated_hz = Some(resonator::isolated_hz(&resonator::cavity(res, &gas)?));
             let shapes = resonator::wet_volume_shapes(&s.mesh, &s.modes, res.wet_x_m);
             Box::new(resonator::CavityBody::new(card, res, &gas, modes, shapes)?)
         }
+        (None, Some(t)) => {
+            let isolated = tube::isolated_modes(t, &gas)?;
+            let fields = radiation::mouth_fields(card, t, medium, &surface, &shapes, &isolated)?;
+            let bar_omega: Vec<f64> = modes[..s.modes.len()]
+                .iter()
+                .map(|m| m.angular_frequency_rad_s)
+                .collect();
+            let network = tube::Network::new(&gas, t, &isolated, &fields, &bar_omega)?;
+            tube::report(card, t, &isolated, &fields, &network);
+            let (monopole, delay) = tube::monopole_to_receiver(card, t, &gas);
+            Box::new(tube::TubeBody::new(
+                card.rate_hz * card.substeps,
+                &modes,
+                s.modes.len(),
+                &network,
+                monopole,
+                delay,
+            )?)
+        }
     };
     let stroke = render::render(card, body.as_mut(), &projection, &mallet)?;
+    let narrow_samples = body.take_narrow();
     let validity = contact
         .lookup(stroke.peak_force_n, mallet.speed_m_s)
         .map(|_| "inside".to_string())
@@ -228,6 +424,8 @@ pub fn strike(card: &Card, s: &Structure) -> Result<Strike, String> {
         loss,
         validity,
         resonator_isolated_hz,
+        observer: observer_outcome,
+        narrow_samples,
         sound_speed_m_s: medium.sound_speed,
         radiation_wall_s,
         render_wall_s: started.elapsed().as_secs_f64(),
