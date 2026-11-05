@@ -245,6 +245,15 @@ fn constant_no_slip_wall_has_zero_transverse_derivative_in_its_normal_traction()
 
 #[test]
 fn planar_wall_evolution_matches_the_same_native_three_dimensional_extrusion() {
+    wall_extrusion(None);
+}
+
+#[test]
+fn navier_slip_and_interface_heat_match_the_native_three_dimensional_extrusion() {
+    wall_extrusion(Some((0.17, 0.35)));
+}
+
+fn wall_extrusion(slip: Option<(f64, f64)>) {
     let grid = CartesianGrid::new(4, 3, 0.25, 0.5, 0.7).unwrap();
     let mut planar = field(gas(0.07), grid, channel_boundaries(1), |x| {
         [1.0, 0.1 + 0.05 * x[1], 0.0, 2.2 + 0.1 * x[0]]
@@ -288,14 +297,33 @@ fn planar_wall_evolution_matches_the_same_native_three_dimensional_extrusion() {
         ),
     ] {
         planar_op = planar_op
-            .with_wall(side2, no_slip(1, speed, thermal))
+            .with_wall(
+                side2,
+                match slip {
+                    Some((slip_length_m, fluid_heat_fraction)) => MolecularWall2d::NavierSlip {
+                        velocity: [speed, 0.0],
+                        thermal,
+                        slip_length_m,
+                        fluid_heat_fraction,
+                    },
+                    None => no_slip(1, speed, thermal),
+                },
+            )
             .unwrap();
         spatial_op = spatial_op
             .with_wall(
                 side3,
-                MolecularWall3d::NoSlip {
-                    velocity: [speed, 0.0, 0.0],
-                    thermal,
+                match slip {
+                    Some((slip_length_m, fluid_heat_fraction)) => MolecularWall3d::NavierSlip {
+                        velocity: [speed, 0.0, 0.0],
+                        thermal,
+                        slip_length_m,
+                        fluid_heat_fraction,
+                    },
+                    None => MolecularWall3d::NoSlip {
+                        velocity: [speed, 0.0, 0.0],
+                        thermal,
+                    },
                 },
             )
             .unwrap();

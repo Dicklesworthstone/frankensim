@@ -246,6 +246,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "molecular wall model requires a reflecting Euler side",
             ));
         }
+        if matches!(wall, MolecularWall3d::NavierSlip { .. }) {
+            return Err(DissipationError::Invalid(
+                "finite Navier slip is not implemented by the evolving-species wall source",
+            ));
+        }
         if let MolecularWall3d::NoSlip { velocity, thermal } = wall {
             if velocity.iter().any(|v| !v.is_finite()) || velocity[side.axis()] != 0.0 {
                 return Err(DissipationError::Invalid(
@@ -989,6 +994,11 @@ fn spatial<'a, L: TransportLaw>(
                             output,
                             &mut *cancelled,
                         )?,
+                    MolecularWall3d::NavierSlip { .. } => {
+                        return Err(DissipationError::Invalid(
+                            "finite Navier slip is not implemented by the evolving-species wall source",
+                        ));
+                    }
                 };
                 #[cfg(feature = "experimental-sgs")]
                 let receipt = if let Some(sgs) = sgs.as_ref() {
@@ -1112,18 +1122,21 @@ fn wall_velocity_sample(
     component: usize,
     reflected: bool,
     walls: &[MolecularWall3d; 6],
-) -> f64 {
+) -> Result<f64, DissipationError> {
     if !reflected {
-        return primitive[neighbour].velocity[component];
+        return Ok(primitive[neighbour].velocity[component]);
     }
     let side = side_for(axis, upper);
     match walls[side_index(side)] {
         MolecularWall3d::SlipAdiabatic => {
-            primitive[cell].velocity[component] * if component == axis { -1.0 } else { 1.0 }
+            Ok(primitive[cell].velocity[component] * if component == axis { -1.0 } else { 1.0 })
         }
         MolecularWall3d::NoSlip { velocity, .. } => {
-            2.0 * velocity[component] - primitive[cell].velocity[component]
+            Ok(2.0 * velocity[component] - primitive[cell].velocity[component])
         }
+        MolecularWall3d::NavierSlip { .. } => Err(DissipationError::Invalid(
+            "finite Navier slip is not implemented by the evolving-species wall source",
+        )),
     }
 }
 

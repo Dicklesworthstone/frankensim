@@ -124,7 +124,10 @@ pub enum MolecularError {
         rejected: usize,
     },
     /// The lazily retained RKL2 buffers exceed the caller's additional byte cap.
-    StabilizedWorkspace { required_bytes: usize, maximum_bytes: usize },
+    StabilizedWorkspace {
+        required_bytes: usize,
+        maximum_bytes: usize,
+    },
     /// No source-admissible internal step remains.
     StepFailure {
         elapsed_s: f64,
@@ -597,7 +600,13 @@ fn spatial<L: TransportLaw>(
                     walls[2 * axis + 1],
                 ),
             ] {
-                if outside && let Some(ghost) = wall.velocity_ghost(primitive[cell].velocity) {
+                if outside
+                    && let Some(ghost) = wall.velocity_ghost(
+                        axis,
+                        0.5 * grid.spacing[axis],
+                        primitive[cell].velocity,
+                    )
+                {
                     sample[1..3].copy_from_slice(&ghost);
                 }
             }
@@ -653,9 +662,7 @@ fn spatial<L: TransportLaw>(
                 let pr = primitive[right];
                 let wall_model = wall.then(|| walls[2 * axis + usize::from(face == count)]);
                 let t = match wall_model {
-                    Some(model @ MolecularWall2d::NoSlip { .. }) => {
-                        model.face_temperature(pl.temperature)
-                    }
+                    Some(model) => model.face_temperature(pl.temperature),
                     _ => 0.5 * pl.temperature + 0.5 * pr.temperature,
                 };
                 let p = 0.5 * pl.pressure + 0.5 * pr.pressure;
@@ -695,13 +702,18 @@ fn spatial<L: TransportLaw>(
                             sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
                             0.0,
                             0.0,
-                            // The authored wall velocity is spatially constant:
-                            // its physical tangential derivative is zero, even
-                            // when the neighboring cell field is nonuniform.
-                            if matches!(wall_model, Some(MolecularWall2d::NoSlip { .. })) {
+                            // Finite slip retains the corresponding fraction
+                            // of the cell's tangential gradient at the wall;
+                            // the authored wall velocity itself is constant.
+                            if wall_model.is_some_and(|model| {
+                                model.tangential_trace_fraction(0.5 * grid.spacing[axis]) == 0.0
+                            }) {
                                 0.0
                             } else {
                                 gradient[cell][tangent][tangent]
+                                    * wall_model.map_or(1.0, |model| {
+                                        model.tangential_trace_fraction(0.5 * grid.spacing[axis])
+                                    })
                             },
                         )
                     } else {

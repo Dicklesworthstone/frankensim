@@ -150,9 +150,11 @@ fn admit_domain(flow: &MixtureEuler3d, normal_axis: usize) -> Result<(), Dissipa
 
 fn admit_wall(wall: MolecularWall3d, normal_cells: usize) -> Result<(), DissipationError> {
     match wall {
-        MolecularWall3d::SlipAdiabatic => Err(DissipationError::Invalid(
-            "dynamic mixture channel requires two explicit no-slip walls",
-        )),
+        MolecularWall3d::SlipAdiabatic | MolecularWall3d::NavierSlip { .. } => {
+            Err(DissipationError::Invalid(
+                "dynamic mixture channel requires two explicit no-slip walls",
+            ))
+        }
         MolecularWall3d::NoSlip {
             thermal: WallThermalCondition::Adiabatic,
             ..

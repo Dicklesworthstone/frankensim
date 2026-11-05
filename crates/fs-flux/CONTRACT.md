@@ -2644,6 +2644,63 @@ prescribed forcing on the stationary Cartesian discretization; no hydrostatic
 well-balanced scheme, implicit velocity-dependent force law or general
 coupled temporal-order theorem is asserted.
 
+### Finite Navier slip in planar and volumetric molecular gas flow
+
+`MolecularWall::NavierSlip` adds finite wall friction to the original frozen-gas
+`MolecularTransport2d` and `MolecularTransport3d` operators and their composing
+time owners. The authored wall velocity is constant on a flat reflecting side
+and has zero normal component. Slip length `b` is finite and nonnegative; the
+friction-heat fraction `chi` is finite and in `[0,1]`. The original gas transport
+source still owns face viscosity, bulk viscosity and conductivity at the actual
+cell/wall temperature and pressure. No accommodation coefficient, mean free
+path or rarefied-gas applicability is inferred from `b`.
+
+For physical cell-to-wall distance `h = dx/2`, the tangential fluid trace and
+traction on the fluid are
+
+```text
+u_f = (h*u_wall + b*u_cell)/(h+b)
+t   = mu*(u_wall-u_cell)/(h+b).
+```
+
+The same trace supplies the reflected velocity ghosts used by adjacent
+interior cross derivatives. Normal velocity remains impermeable. Since the
+wall velocity and `b` are constant on a side, the physical tangential derivative
+of the fluid trace is `b/(h+b)` times the adjacent-cell derivative; the complete
+normal viscous stress retains this contribution. Fourier conduction uses `h`,
+independently of momentum slip. `b = 0` uses the original no-slip arithmetic,
+and increasing `b` tends toward zero tangential traction. These updates add no
+stage allocations or new wall storage; the existing conservative face flux,
+boundary impulse integration, admissibility retries and atomic publication
+remain the owners.
+
+The massless interface dissipates
+`D = -t·(u_f-u_wall) = mu*b*|u_wall-u_cell|²/(h+b)² >= 0` per unit area.
+Actual wall mechanical power is `t·u_wall`, while fluid traction work is
+`t·u_f = t·u_wall-D`. The caller explicitly sends fraction `chi` of this
+friction heat to the fluid and the complement to the prescribed wall. The
+inward fluid energy flux is therefore
+`t·u_f + chi*D + q_heat = t·u_wall - (1-chi)*D + q_heat`.
+The outward boundary-energy receipt includes the complementary wall heat.
+Setting `chi = 1` retains all dissipated kinetic energy in the fluid without
+adding a second volume heat source. Setting `chi = 0` delivers all interface
+friction heat to the wall while resolved fluid viscous heating remains in the
+original conservative energy update. The conductive thermal condition and
+this authored interface heat partition are separate physical inputs; wall
+temperature and conjugate wall heat storage are not solved here.
+
+The evolving-species molecular source explicitly refuses this wall law, as do
+channel filters and equilibrium SGS wall closures that require no slip. The
+law does not add slip to the finite-inertia wall owner or structural wall-load
+couplers. Original no-slip and free-slip configurations retain their behavior.
+
+Focused native wall tests cover all six oriented faces, series-resistance
+traction and analytic interface energy, the finite-slip normal-stress term,
+exact Couette velocity with physical viscous heating, actual conservative
+energy changes under different heat partitions, bit-identical zero-slip
+stepping and receipts, parameter refusals, and agreement between the planar
+owner and its three-dimensional extrusion.
+
 ### Evolving-species molecular transport and reacting diffusion in two dimensions
 
 `compressible::mixture::molecular::MolecularTransport2d` prepares the original

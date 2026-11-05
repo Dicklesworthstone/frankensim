@@ -64,10 +64,12 @@ struct MolecularWorkspace {
 /// Prepared three-dimensional molecular operator bound to the exact gas source.
 ///
 /// Periodic faces share one flux. Reflecting faces are stationary adiabatic
-/// slip walls by default. Explicit no-slip walls prescribe tangential velocity
-/// and adiabatic or fixed-temperature heat transfer. Their stress work uses
-/// the wall velocity and their Fourier flux uses the physical half-cell
-/// distance. SGS wall flux vanishes by default; an explicit smooth equilibrium
+/// slip walls by default. Explicit no-slip or finite Navier-slip walls prescribe
+/// tangential velocity and adiabatic or fixed-temperature conductive transfer.
+/// Navier slip has an explicit interfacial-friction heat partition; its energy
+/// flux includes wall mechanical work and friction heat sent to the wall.
+/// Fourier flux uses the physical half-cell distance. SGS wall flux vanishes
+/// by default; an explicit smooth equilibrium
 /// stress model can supply adiabatic wall traction on a coarse SGS mesh.
 /// Other walls require a resolved molecular wall layer. Transmissive ends
 /// have zero molecular flux by default. [`Self::with_reservoir_exchange`]
@@ -180,7 +182,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             ));
         }
         #[cfg(feature = "experimental-sgs")]
-        if matches!(wall, MolecularWall3d::SlipAdiabatic)
+        if !matches!(wall, MolecularWall3d::NoSlip { .. })
             && self
                 .sgs
                 .as_ref()
@@ -567,9 +569,8 @@ fn spatial<L: TransportLaw>(
         for axis in 0..3 {
             let mut lower = evolve::neighbour(primitive, grid, boundaries, c, axis, false);
             let mut upper = evolve::neighbour(primitive, grid, boundaries, c, axis, true);
-            // An admitted no-slip side is always reflecting. Mirror every
-            // component about its prescribed velocity, not just the normal
-            // component as for the original slip ghost.
+            // Mirror about the actual fluid trace: the prescribed velocity
+            // for no slip, the resolved Navier trace for finite slip.
             for (outside, sample, wall, sign) in [
                 (c[axis] == 0, &mut lower, walls[2 * axis], -1.0),
                 (
@@ -579,7 +580,13 @@ fn spatial<L: TransportLaw>(
                     1.0,
                 ),
             ] {
-                if outside && let Some(ghost) = wall.velocity_ghost(primitive[cell].velocity) {
+                if outside
+                    && let Some(ghost) = wall.velocity_ghost(
+                        axis,
+                        0.5 * grid.spacing[axis],
+                        primitive[cell].velocity,
+                    )
+                {
                     sample[1..4].copy_from_slice(&ghost);
                 } else if outside
                     && let Some(exterior) =
@@ -674,9 +681,7 @@ fn spatial<L: TransportLaw>(
             };
             let wall_model = wall.then(|| walls[2 * axis + usize::from(face == count)]);
             let temperature = match wall_model {
-                Some(model @ MolecularWall3d::NoSlip { .. }) => {
-                    model.face_temperature(pl.temperature)
-                }
+                Some(model) => model.face_temperature(pl.temperature),
                 _ => 0.5 * pl.temperature + 0.5 * pr.temperature,
             };
             let pressure = 0.5 * pl.pressure + 0.5 * pr.pressure;
@@ -771,21 +776,23 @@ fn spatial<L: TransportLaw>(
             } else {
                 None
             };
-            let transverse_divergence: f64 =
-                if matches!(wall_model, Some(MolecularWall3d::NoSlip { .. })) {
-                    // This side prescribes one spatially constant wall velocity.
-                    // Its tangential derivatives at the physical wall are zero;
-                    // substituting adjacent-cell divergence creates false normal
-                    // traction in a nonuniform boundary layer.
-                    0.0
-                } else if let Some(derivatives) = bath_gradient {
-                    derivatives[0][1] + derivatives[1][2]
-                } else {
-                    tangential
-                        .into_iter()
-                        .map(|t| 0.5 * gradient[left][t][t] + 0.5 * gradient[right][t][t])
-                        .sum()
-                };
+            let wall_trace_fraction = wall_model.map_or(1.0, |model| {
+                model.tangential_trace_fraction(0.5 * grid.spacing[axis])
+            });
+            let transverse_divergence: f64 = if wall_trace_fraction == 0.0 {
+                // No-slip wall velocity is spatially constant. Finite-slip
+                // fluid traces retain the fraction b/(h+b) of the adjacent
+                // tangential gradient, including its normal-stress effect.
+                0.0
+            } else if let Some(derivatives) = bath_gradient {
+                derivatives[0][1] + derivatives[1][2]
+            } else {
+                tangential
+                    .into_iter()
+                    .map(|t| 0.5 * gradient[left][t][t] + 0.5 * gradient[right][t][t])
+                    .sum::<f64>()
+                    * wall_trace_fraction
+            };
             let normal_stress = longitudinal * normal_derivative + cross * transverse_divergence;
             let (shear_stress, energy) = if let Some(model) = wall_model {
                 let (shear, energy) = model.shear_and_energy(
