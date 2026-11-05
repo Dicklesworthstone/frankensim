@@ -180,6 +180,35 @@ remains explicitly unresolved. G0/G1/G3/G5 tests cover a standing wave, dense
 covariance and beamformer references, exact cancellation, diagonal factors,
 weak signed residuals, and independently solved finite-source diffraction.
 
+## Prepared two-dimensional panel fields and Kelvin coupling
+
+`panel2d::PreparedPanel2d` retains the original Hess–Smith geometry matrix,
+its LU factorization and tangential influence rows. Arbitrary incident velocity
+at every native midpoint enters both the normal-flow equations and the existing
+Kutta row. `solve_incident` returns the complete source/vortex sheet and its
+surface residuals. `body_velocity` evaluates that same body field at exterior
+points; the caller adds its freestream and wake. It does not replace surface
+principal values or infer unsteady pressure from a steady Bernoulli formula.
+
+`solve_kelvin` solves the body and one newborn vortex simultaneously. Two
+retained-LU responses give bound circulation `G0 + g*G1`, with actual clockwise
+circulation equal to vortex density times section perimeter. Kelvin conservation
+then gives `g = (previous_bound - G0)/(1 + G1)`. The newborn velocity participates
+in every normal row and both trailing-edge tangential terms. A scale-relative
+singular Schur pivot refuses; there is no circulation clamp, empirical relaxation
+or pressure-derived `Cl/2` substitution. Geometry, incident velocities and
+circulation must share explicit frame and units.
+
+Preparation has O(n²) retained storage and the original dense factorization.
+Repeated solves and surface residuals use O(n²) arithmetic without repeated
+panel logarithms. Original panel-count/dense limits and deterministic kernels
+remain. The plain dense API has no asynchronous cancellation receipt. It solves
+the represented inviscid boundary equations without claiming viscous separation,
+measured transient lift, or continuum spatial accuracy. `tests/prepared_panels.rs`
+covers steady-owner compatibility, coupled Kelvin/Kutta/normal-flow constraints,
+independent exterior fields, clockwise contour circulation, frame/unit changes,
+and singular or invalid inputs (G0/G3).
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). Laplace BEM panel methods (plan §8.3 [F], bead

@@ -11,6 +11,9 @@ use crate::BemError;
 use fs_la::factor::lu;
 use fs_math::det;
 
+pub mod wake;
+pub use wake::{PanelState2d, PreparedPanel2d};
+
 /// Largest admitted dense Hess-Smith section.
 pub const MAX_AIRFOIL_PANELS: usize = 2_048;
 /// Largest absolute angle admitted by the NACA 0012 experimental-validation
@@ -325,6 +328,7 @@ fn segments_intersect(
         || (o4.abs() <= area_tol && on_segment(c, d, b, linear_tol))
 }
 
+#[derive(Debug, Clone)]
 struct Geometry {
     mid: Vec<[f64; 2]>,
     tangent: Vec<[f64; 2]>,
