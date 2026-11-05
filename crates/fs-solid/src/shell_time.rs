@@ -137,6 +137,49 @@ pub struct DynamicState {
     pub total_energy_j: f64,
 }
 
+/// Work and mechanical energy change during one accepted Newmark interval.
+///
+/// These are per-step quantities, not accumulated history or checkpoint state.
+/// Work is evaluated independently of energy change. For average acceleration
+/// and initially equilibrated acceleration, symmetric mass/stiffness give
+/// `mechanical_energy_change_j + damping_work_j = applied_work_j` up to roundoff.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NewmarkStepWork {
+    /// Midpoint power quadrature `dt * mean(f)^T * mean(v)` [J]. For average
+    /// acceleration this also equals `mean(f)^T * (u_next - u_current)` in exact
+    /// arithmetic. It is not an exact continuous-time forcing integral.
+    pub applied_work_j: f64,
+    /// Signed work removed by the complete viscous operator,
+    /// `dt * mean(v)^T * C * mean(v)` [J]. For positive-semidefinite symmetric
+    /// `C` this is nonnegative discrete viscous heat. Preparation does not
+    /// certify passivity: an active operator can return negative work, which is
+    /// never clipped or silently interpreted as heat.
+    ///
+    /// This midpoint power quadrature is not the exact continuous-time integral
+    /// of `v^T C v`, for general Newmark parameters or even average acceleration.
+    /// Timestep refinement is needed to resolve the physical heat history.
+    pub damping_work_j: f64,
+    /// Change in the full quadratic kinetic and strain energies [J], evaluated
+    /// from endpoint vector differences instead of subtracting large energies.
+    /// Input state's cached energy fields are not used.
+    pub mechanical_energy_change_j: f64,
+    /// Signed `mechanical_energy_change_j + damping_work_j - applied_work_j` [J].
+    /// Negative values denote energy loss outside the supplied viscous law;
+    /// positive values denote energy gain. This includes algorithmic change,
+    /// solve/roundoff error and any inconsistent initial acceleration. It must
+    /// not be deposited as material heat.
+    pub algorithmic_energy_defect_j: f64,
+}
+
+/// An accepted Newmark endpoint and its independently evaluated interval work.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewmarkStep {
+    /// Accepted displacement, velocity, acceleration and endpoint energies.
+    pub state: DynamicState,
+    /// Work over the interval ending at `state.time_s`.
+    pub work: NewmarkStepWork,
+}
+
 /// Exact serializable checkpoint for pause, resume, and fork.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShellTimeCheckpoint {
@@ -234,6 +277,59 @@ fn mat_vec(n: usize, a: &[f64], x: &[f64]) -> Vec<f64> {
     y
 }
 
+fn quadratic_energy(n: usize, a: &[f64], x: &[f64]) -> f64 {
+    let ax = mat_vec(n, a, x);
+    (0..n).map(|i| 0.5 * x[i] * ax[i]).sum()
+}
+
+fn quadratic_energy_and_change(
+    n: usize,
+    a: &[f64],
+    current: &[f64],
+    next: &[f64],
+    mut inertial_force: Option<(&[f64], &mut [f64])>,
+) -> (f64, f64) {
+    let mut energy = 0.0;
+    let mut change = 0.0;
+    for i in 0..n {
+        let mut ax = 0.0;
+        let mut adx = 0.0;
+        let mut inertia = 0.0;
+        for j in 0..n {
+            let entry = a[i * n + j];
+            ax += entry * next[j];
+            adx += entry * (next[j] - current[j]);
+            if let Some((acceleration, _)) = &inertial_force {
+                inertia += entry * acceleration[j];
+            }
+        }
+        if let Some((_, force)) = &mut inertial_force {
+            force[i] += inertia;
+        }
+        energy += 0.5 * next[i] * ax;
+        // This polarization identity also holds for nonsymmetric input. It
+        // avoids cancellation between two large quadratic energies, while
+        // retaining any loss of a state increment to endpoint rounding.
+        change += 0.5 * ((next[i] - current[i]) * ax + current[i] * adx);
+    }
+    (energy, change)
+}
+
+fn check_values(n: usize, values: &[f64]) -> Result<(), ShellTimeError> {
+    if values.len() != n {
+        return Err(ShellTimeError::DimensionMismatch {
+            expected: n,
+            found: values.len(),
+        });
+    }
+    if values.iter().any(|v| !v.is_finite()) {
+        return Err(ShellTimeError::NonFiniteValue {
+            field: "state_or_force",
+        });
+    }
+    Ok(())
+}
+
 fn next_time(current: &DynamicState, config: &ShellTimeConfig) -> Result<f64, ShellTimeError> {
     let dt = config.dt_s;
     let next_time = current.time_s + dt;
@@ -284,17 +380,7 @@ fn check_state(n: usize, current: &DynamicState, f_next: &[f64]) -> Result<usize
         &current.acceleration,
         f_next,
     ] {
-        if values.len() != n {
-            return Err(ShellTimeError::DimensionMismatch {
-                expected: n,
-                found: values.len(),
-            });
-        }
-        if values.iter().any(|v| !v.is_finite()) {
-            return Err(ShellTimeError::NonFiniteValue {
-                field: "state_or_force",
-            });
-        }
+        check_values(n, values)?;
     }
     current
         .step
@@ -326,6 +412,7 @@ pub struct PreparedNewmark<'a> {
     stiffness: &'a [f64],
     config: ShellTimeConfig,
     solver: LuWorkspace,
+    last_step_work: Option<NewmarkStepWork>,
 }
 
 impl<'a> PreparedNewmark<'a> {
@@ -380,7 +467,84 @@ impl<'a> PreparedNewmark<'a> {
             stiffness,
             config: config.clone(),
             solver,
+            last_step_work: None,
         })
+    }
+
+    /// Initialize a trajectory with `M a = f - C v - K u`, using the complete
+    /// mass and damping matrices. This removes the unphysical first-step
+    /// impulse/energy error caused by guessing zero acceleration.
+    ///
+    /// The original LU owner factors mass for this initialization only; the
+    /// prepared time-step factors remain available for subsequent advancement.
+    /// Successful initialization clears [`Self::last_step_work`].
+    ///
+    /// # Errors
+    /// Returns [`ShellTimeError`] for malformed/non-finite state or forcing,
+    /// non-finite time/energies, or a refused mass solve. A refusal preserves the
+    /// last accepted work result and the prepared time-step factors.
+    pub fn initialize(
+        &mut self,
+        time_s: f64,
+        displacement: &[f64],
+        velocity: &[f64],
+        force: &[f64],
+    ) -> Result<DynamicState, ShellTimeError> {
+        if !time_s.is_finite() {
+            return Err(ShellTimeError::NonFiniteValue { field: "time" });
+        }
+        for values in [displacement, velocity, force] {
+            check_values(self.n, values)?;
+        }
+        let elastic = mat_vec(self.n, self.stiffness, displacement);
+        let mut rhs: Vec<f64> = force.iter().zip(elastic).map(|(f, ku)| f - ku).collect();
+        if let Some(c) = self.damping {
+            for (r, cv) in rhs.iter_mut().zip(mat_vec(self.n, c, velocity)) {
+                *r -= cv;
+            }
+        }
+        let mut mass_solver =
+            LuWorkspace::new(self.n).map_err(|source| ShellTimeError::LinearSolve { source })?;
+        mass_solver
+            .factor(self.mass)
+            .map_err(|source| ShellTimeError::LinearSolve { source })?;
+        let mut acceleration = vec![0.0; self.n];
+        mass_solver
+            .solve_factored_into(&rhs, &mut acceleration)
+            .map_err(|source| ShellTimeError::LinearSolve { source })?;
+        check_values(self.n, &acceleration)?;
+        let kinetic_energy_j = quadratic_energy(self.n, self.mass, velocity);
+        let strain_energy_j = quadratic_energy(self.n, self.stiffness, displacement);
+        let total_energy_j = kinetic_energy_j + strain_energy_j;
+        if ![kinetic_energy_j, strain_energy_j, total_energy_j]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(ShellTimeError::NonFiniteValue { field: "energy" });
+        }
+        self.last_step_work = None;
+        Ok(DynamicState {
+            time_s,
+            step: 0,
+            displacement: displacement.to_vec(),
+            velocity: velocity.to_vec(),
+            acceleration,
+            kinetic_energy_j,
+            strain_energy_j,
+            total_energy_j,
+        })
+    }
+
+    /// Work from the last accepted step, including ordinary [`Self::step`]
+    /// calls. A refused step preserves this value. A newly prepared system or
+    /// successful [`Self::initialize`] has no interval work yet.
+    ///
+    /// This is not accumulated trajectory state. Continuing any checkpoint
+    /// replaces it with the work of that next interval; no work needs to be
+    /// carried through [`ShellTimeCheckpoint`].
+    #[must_use]
+    pub const fn last_step_work(&self) -> Option<&NewmarkStepWork> {
+        self.last_step_work.as_ref()
     }
 
     /// Advance with forcing evaluated at `current.time_s + dt_s`.
@@ -389,6 +553,11 @@ impl<'a> PreparedNewmark<'a> {
     /// workspace. Operators and factors stay fixed, so independent trajectories
     /// and restored checkpoints can reuse the same prepared system. Returned
     /// energies are recomputed; the input state's energy fields are not used.
+    /// [`Self::last_step_work`] receives the interval's work. Because this API
+    /// accepts only the new load, its old load is inferred from
+    /// `M a_current + C v_current + K u_current`. Use [`Self::initialize`] for
+    /// consistent startup or [`Self::step_with_work`] to supply the actual old
+    /// load and expose any initial-equilibrium error in the energy defect.
     ///
     /// # Errors
     /// Returns [`ShellTimeError`] for invalid time/state/force data or non-finite
@@ -400,20 +569,49 @@ impl<'a> PreparedNewmark<'a> {
     ) -> Result<DynamicState, ShellTimeError> {
         let next_time = next_time(current, &self.config)?;
         let next_step = check_state(self.n, current, f_next)?;
-        self.advance(current, f_next, next_time, next_step)
+        self.advance(current, None, f_next, next_time, next_step)
+            .map(|result| result.state)
+    }
+
+    /// Advance with both endpoint forces and return motion plus interval work.
+    ///
+    /// The trajectory is identical to [`Self::step`]. The supplied old force is
+    /// used only for independently evaluating external work, so an inconsistent
+    /// initial acceleration cannot silently masquerade as an applied load.
+    /// Full viscous loss and signed algorithmic energy change remain separate.
+    /// The accepted work is also available through [`Self::last_step_work`].
+    ///
+    /// # Errors
+    /// Returns [`ShellTimeError`] for the same refusals as [`Self::step`], an
+    /// invalid old force, or non-finite work. Refusals preserve the last result.
+    pub fn step_with_work(
+        &mut self,
+        current: &DynamicState,
+        f_current: &[f64],
+        f_next: &[f64],
+    ) -> Result<NewmarkStep, ShellTimeError> {
+        let next_time = next_time(current, &self.config)?;
+        let next_step = check_state(self.n, current, f_next)?;
+        check_values(self.n, f_current)?;
+        self.advance(current, Some(f_current), f_next, next_time, next_step)
     }
 
     fn advance(
         &mut self,
         current: &DynamicState,
+        f_current: Option<&[f64]>,
         f_next: &[f64],
         next_time: f64,
         next_step: usize,
-    ) -> Result<DynamicState, ShellTimeError> {
+    ) -> Result<NewmarkStep, ShellTimeError> {
         let n = self.n;
         let dt = self.config.dt_s;
         let beta = self.config.beta;
         let gamma = self.config.gamma;
+        // Reconstruct a missing old load in the row passes already needed for
+        // predictors, energy and viscous work. This single O(n) workspace avoids
+        // separate old-state products/traversals of all three dense operators.
+        let mut inferred_force = f_current.is_none().then(|| vec![0.0; n]);
 
         // The predictors exclude the unknown acceleration. Off-diagonal inertia,
         // viscous coupling and elastic forces remain in the original operators.
@@ -439,6 +637,9 @@ impl<'a> PreparedNewmark<'a> {
             // Subtract the static preload before adding the small force. The
             // two stiffness actions share a row pass and need no extra vector.
             rhs[i] = (rhs[i] - static_force) - increment_force;
+            if let Some(force) = &mut inferred_force {
+                force[i] = static_force;
+            }
         }
         if let Some(c) = self.damping {
             let viscous = mat_vec(n, c, &v_predict);
@@ -468,19 +669,17 @@ impl<'a> PreparedNewmark<'a> {
             }
         }
 
-        // Energy calculation
-        let m_v = mat_vec(n, self.mass, &v_next);
-        let mut kinetic_energy = 0.0;
-        for i in 0..n {
-            kinetic_energy += 0.5 * v_next[i] * m_v[i];
-        }
-
-        let k_u = mat_vec(n, self.stiffness, &u_next);
-        let mut strain_energy = 0.0;
-        for i in 0..n {
-            strain_energy += 0.5 * u_next[i] * k_u[i];
-        }
-
+        let (kinetic_energy, kinetic_change) = quadratic_energy_and_change(
+            n,
+            self.mass,
+            &current.velocity,
+            &v_next,
+            inferred_force
+                .as_mut()
+                .map(|force| (&current.acceleration[..], &mut force[..])),
+        );
+        let (strain_energy, strain_change) =
+            quadratic_energy_and_change(n, self.stiffness, &current.displacement, &u_next, None);
         let total_energy = kinetic_energy + strain_energy;
         if ![kinetic_energy, strain_energy, total_energy]
             .iter()
@@ -489,7 +688,50 @@ impl<'a> PreparedNewmark<'a> {
             return Err(ShellTimeError::NonFiniteValue { field: "energy" });
         }
 
-        Ok(DynamicState {
+        let mut applied_work_j = 0.0;
+        let mut damping_work_j = 0.0;
+        for i in 0..n {
+            let mut damping_force = 0.0;
+            let mut old_damping = 0.0;
+            if let Some(c) = self.damping {
+                for j in 0..n {
+                    let entry = i * n + j;
+                    damping_force += c[entry] * (0.5 * current.velocity[j] + 0.5 * v_next[j]);
+                    if inferred_force.is_some() {
+                        old_damping += c[entry] * current.velocity[j];
+                    }
+                }
+            }
+            let old_force = match (&inferred_force, f_current) {
+                (Some(force), _) => force[i] + old_damping,
+                (_, Some(force)) => force[i],
+                _ => unreachable!("old load is either supplied or reconstructed"),
+            };
+            let velocity_interval = dt * (0.5 * current.velocity[i] + 0.5 * v_next[i]);
+            applied_work_j += velocity_interval * (0.5 * old_force + 0.5 * f_next[i]);
+            damping_work_j += velocity_interval * damping_force;
+        }
+        let mechanical_energy_change_j = kinetic_change + strain_change;
+        let algorithmic_energy_defect_j =
+            mechanical_energy_change_j + damping_work_j - applied_work_j;
+        if ![
+            applied_work_j,
+            damping_work_j,
+            mechanical_energy_change_j,
+            algorithmic_energy_defect_j,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+        {
+            return Err(ShellTimeError::NonFiniteValue { field: "work" });
+        }
+        let work = NewmarkStepWork {
+            applied_work_j,
+            damping_work_j,
+            mechanical_energy_change_j,
+            algorithmic_energy_defect_j,
+        };
+        let state = DynamicState {
             time_s: next_time,
             step: next_step,
             displacement: u_next,
@@ -498,7 +740,9 @@ impl<'a> PreparedNewmark<'a> {
             kinetic_energy_j: kinetic_energy,
             strain_energy_j: strain_energy,
             total_energy_j: total_energy,
-        })
+        };
+        self.last_step_work = Some(work);
+        Ok(NewmarkStep { state, work })
     }
 }
 
@@ -536,5 +780,6 @@ pub fn step_newmark(
     check_system(n, mass, damping, stiffness, config)?;
     let next_step = check_state(n, current, f_next)?;
     PreparedNewmark::from_admitted(n, mass, damping, stiffness, config)?
-        .advance(current, f_next, next_time, next_step)
+        .advance(current, None, f_next, next_time, next_step)
+        .map(|result| result.state)
 }

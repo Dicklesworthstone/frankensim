@@ -31,25 +31,13 @@ fn shell_time_undamped_free_oscillation_conserves_energy() {
         gamma: 0.50,
     };
 
-    let mut state = DynamicState {
-        time_s: 0.0,
-        step: 0,
-        displacement: vec![1.0, 0.5],
-        velocity: vec![0.0, 0.0],
-        acceleration: vec![0.0, 0.0],
-        kinetic_energy_j: 0.0,
-        strain_energy_j: 3.5, // 0.5 * (1*6*1 + 2*1*(-2)*0.5 + 0.5*4*0.5) = 0.5 * (6 - 2 + 1) = 2.5 + ...
-        total_energy_j: 3.5,
-    };
-
     let f_zero = vec![0.0; n];
-    let initial_energy = 0.5
-        * (state.displacement[0]
-            * (stiffness[0] * state.displacement[0] + stiffness[1] * state.displacement[1])
-            + state.displacement[1]
-                * (stiffness[2] * state.displacement[0] + stiffness[3] * state.displacement[1]));
-    state.strain_energy_j = initial_energy;
-    state.total_energy_j = initial_energy;
+    let mut prepared = PreparedNewmark::new(n, &mass, None, &stiffness, &config).unwrap();
+    let mut state = prepared
+        .initialize(0.0, &[1.0, 0.5], &[0.0, 0.0], &f_zero)
+        .unwrap();
+    let initial_energy = state.total_energy_j;
+    assert_eq!(state.acceleration, [-2.5, 0.0]);
 
     let num_steps = 100;
     for _ in 0..num_steps {
@@ -57,11 +45,12 @@ fn shell_time_undamped_free_oscillation_conserves_energy() {
             .expect("undamped step succeeds");
     }
 
-    // Newmark average acceleration is unconditionally stable and symplectic-like; energy oscillates slightly around initial
+    // G0: average acceleration conserves the quadratic energy from the very
+    // first step when the initial acceleration satisfies the actual equation.
     let energy_rel_diff = (state.total_energy_j - initial_energy).abs() / initial_energy;
     assert!(
-        energy_rel_diff < 1.0e-2,
-        "undamped energy relative drift {energy_rel_diff} must be < 1%"
+        energy_rel_diff < 1.0e-13,
+        "undamped energy relative drift {energy_rel_diff}"
     );
 }
 
@@ -76,52 +65,34 @@ fn shell_time_passive_damping_dissipates_energy_monotonically() {
         gamma: 0.50,
     };
 
-    let mut state = DynamicState {
-        time_s: 0.0,
-        step: 0,
-        displacement: vec![1.0, 0.5],
-        velocity: vec![0.5, -0.5],
-        acceleration: vec![0.0, 0.0],
-        kinetic_energy_j: 0.0,
-        strain_energy_j: 0.0,
-        total_energy_j: 0.0,
-    };
-    let initial_energy = 0.5
-        * (mass[0] * state.velocity[0] * state.velocity[0]
-            + mass[3] * state.velocity[1] * state.velocity[1])
-        + 0.5
-            * (state.displacement[0]
-                * (stiffness[0] * state.displacement[0] + stiffness[1] * state.displacement[1])
-                + state.displacement[1]
-                    * (stiffness[2] * state.displacement[0]
-                        + stiffness[3] * state.displacement[1]));
-    state.total_energy_j = initial_energy;
-
     let f_zero = vec![0.0; n];
+    let mut prepared = PreparedNewmark::new(n, &mass, Some(&damping), &stiffness, &config).unwrap();
+    let mut state = prepared
+        .initialize(0.0, &[1.0, 0.5], &[0.5, -0.5], &f_zero)
+        .unwrap();
+    let initial_energy = state.total_energy_j;
     let num_steps = 100;
-    let mut prev_energy = f64::INFINITY;
+    let mut prev_energy = initial_energy;
+    let mut heat = 0.0;
 
     for _ in 0..num_steps {
-        state = step_newmark(
-            n,
-            &mass,
-            Some(&damping),
-            &stiffness,
-            &state,
-            &f_zero,
-            &config,
-        )
-        .expect("damped step succeeds");
-        if prev_energy.is_finite() {
-            assert!(
-                state.total_energy_j <= prev_energy + 1.0e-12,
-                "energy must be non-increasing under passive damping: {} > {}",
-                state.total_energy_j,
-                prev_energy
-            );
-        }
+        state = prepared
+            .step(&state, &f_zero)
+            .expect("damped step succeeds");
+        let work = prepared.last_step_work().unwrap();
+        assert!(work.damping_work_j >= 0.0);
+        assert!(work.algorithmic_energy_defect_j.abs() < 2.0e-15);
+        heat += work.damping_work_j;
+        assert!(
+            state.total_energy_j <= prev_energy + 1.0e-12,
+            "energy must be non-increasing under passive damping: {} > {}",
+            state.total_energy_j,
+            prev_energy
+        );
         prev_energy = state.total_energy_j;
     }
+
+    assert!((state.total_energy_j + heat - initial_energy).abs() < 1.0e-13);
 
     assert!(
         state.total_energy_j < initial_energy,
@@ -583,20 +554,19 @@ fn shell_time_full_matrices_balance_forcing_work_and_damping_loss() {
     ];
     let kinetic = 0.5 * dot_2d(&v, &action_2d(&mass, &v));
     let strain = 0.5 * dot_2d(&u, &ku);
-    let mut state = DynamicState {
-        time_s: 0.0,
-        step: 0,
-        displacement: u,
-        velocity: v,
-        acceleration: a,
-        kinetic_energy_j: kinetic,
-        strain_energy_j: strain,
-        total_energy_j: kinetic + strain,
-    };
+    let mut state = prepared.initialize(0.0, &u, &v, &f0).unwrap();
+    for (actual, expected) in state.acceleration.iter().zip(a) {
+        assert!((actual - expected).abs() < 3.0e-16);
+    }
+    assert_eq!(state.kinetic_energy_j, kinetic);
+    assert_eq!(state.strain_energy_j, strain);
+    assert!(prepared.last_step_work().is_none());
     for _ in 0..500 {
         let f_prev = force(state.time_s);
         let f_next = force(state.time_s + config.dt_s);
-        let next = prepared.step(&state, &f_next).unwrap();
+        let result = prepared.step_with_work(&state, &f_prev, &f_next).unwrap();
+        let next = result.state;
+        assert_eq!(prepared.last_step_work(), Some(&result.work));
         assert_eq!(
             next,
             step_newmark(
@@ -619,6 +589,15 @@ fn shell_time_full_matrices_balance_forcing_work_and_damping_loss() {
         let loss = config.dt_s * dot_2d(&mean_v, &action_2d(&damping, &mean_v));
         let balance = next.total_energy_j - state.total_energy_j - work + loss;
         assert!(balance.abs() < 2.0e-14, "step {}: {balance:e}", next.step);
+        assert!((result.work.applied_work_j - work).abs() < 5.0e-17);
+        assert!((result.work.damping_work_j - loss).abs() < 5.0e-17);
+        assert!(result.work.damping_work_j >= 0.0);
+        assert!(result.work.algorithmic_energy_defect_j.abs() < 2.0e-14);
+        assert!(
+            (result.work.mechanical_energy_change_j - (next.total_energy_j - state.total_energy_j))
+                .abs()
+                < 2.0e-14
+        );
         let ma = action_2d(&mass, &next.acceleration);
         let cv = action_2d(&damping, &next.velocity);
         let ku = action_2d(&stiffness, &next.displacement);
@@ -640,11 +619,13 @@ fn shell_time_full_matrices_balance_forcing_work_and_damping_loss() {
             };
             let mut rebuilt =
                 PreparedNewmark::new(2, &mass, Some(&damping), &stiffness, &config).unwrap();
+            assert!(rebuilt.last_step_work().is_none());
             let following_force = force(next.time_s + config.dt_s);
             assert_eq!(
                 prepared.step(&next, &following_force).unwrap(),
                 rebuilt.step(&restored, &following_force).unwrap()
             );
+            assert_eq!(prepared.last_step_work(), rebuilt.last_step_work());
         }
         state = next;
     }
@@ -677,4 +658,137 @@ fn shell_time_forced_response_converges_at_second_order() {
         "errors {coarse:e}, {fine:e}"
     );
     assert!(fine < 5.0e-4, "fine-step error {fine:e}");
+}
+
+#[test]
+fn shell_time_viscous_heat_and_applied_work_converge_to_physical_integrals() {
+    // G1: exact forced motion u=sin(2t). The discrete midpoint-power sums
+    // converge to the independent continuous integrals; a zero discrete
+    // energy defect alone would not establish this physical heat accuracy.
+    let exact_heat = 1.4 + 0.35 * 4.0_f64.sin();
+    let exact_work = exact_heat + 1.25 * (1.0 - 4.0_f64.cos());
+    let errors = |steps: usize| {
+        let config = ShellTimeConfig {
+            dt_s: 1.0 / steps as f64,
+            ..Default::default()
+        };
+        let mut prepared = PreparedNewmark::new(1, &[2.0], Some(&[0.7]), &[13.0], &config).unwrap();
+        let mut state = prepared.initialize(0.0, &[0.0], &[2.0], &[1.4]).unwrap();
+        let initial_energy = state.total_energy_j;
+        let mut heat = 0.0;
+        let mut work = 0.0;
+        for _ in 0..steps {
+            let phase = 2.0 * (state.time_s + config.dt_s);
+            state = prepared
+                .step(&state, &[5.0 * phase.sin() + 1.4 * phase.cos()])
+                .unwrap();
+            let interval = prepared.last_step_work().unwrap();
+            assert!(interval.damping_work_j >= 0.0);
+            heat += interval.damping_work_j;
+            work += interval.applied_work_j;
+        }
+        assert!((state.total_energy_j - initial_energy + heat - work).abs() < 2.0e-13);
+        [(heat - exact_heat).abs(), (work - exact_work).abs()]
+    };
+    for (coarse, fine) in errors(40).into_iter().zip(errors(80)) {
+        assert!(
+            (3.8..4.2).contains(&(coarse / fine)),
+            "errors {coarse:e}, {fine:e}"
+        );
+        assert!(fine < 1.0e-3);
+    }
+}
+
+#[test]
+fn shell_time_numerical_energy_loss_is_not_viscous_heat() {
+    // G0: a dissipative Newmark parameter choice removes energy even with no
+    // physical damping. That signed defect must remain separate from heat.
+    let config = ShellTimeConfig {
+        dt_s: 0.1,
+        beta: 0.3025,
+        gamma: 0.6,
+        ..Default::default()
+    };
+    let mut prepared = PreparedNewmark::new(1, &[1.0], None, &[4.0], &config).unwrap();
+    let state = prepared.initialize(0.0, &[1.0], &[0.0], &[0.0]).unwrap();
+    let result = prepared.step_with_work(&state, &[0.0], &[0.0]).unwrap();
+    assert_eq!(result.work.applied_work_j, 0.0);
+    assert_eq!(result.work.damping_work_j, 0.0);
+    assert!(result.work.algorithmic_energy_defect_j < -1.0e-5);
+    assert_eq!(
+        result.work.algorithmic_energy_defect_j,
+        result.work.mechanical_energy_change_j
+    );
+
+    // Operator admission deliberately does not certify passivity. A supplied
+    // active C retains its signed work instead of silently clipping it to heat.
+    let config = ShellTimeConfig {
+        dt_s: 0.1,
+        ..Default::default()
+    };
+    let mut active = PreparedNewmark::new(1, &[1.0], Some(&[-0.5]), &[0.0], &config).unwrap();
+    let state = active.initialize(0.0, &[0.0], &[1.0], &[0.0]).unwrap();
+    let result = active.step_with_work(&state, &[0.0], &[0.0]).unwrap();
+    assert!(result.work.damping_work_j < 0.0);
+    assert!(result.work.mechanical_energy_change_j > 0.0);
+    assert!(result.work.algorithmic_energy_defect_j.abs() < 1.0e-15);
+}
+
+#[test]
+fn shell_time_actual_old_force_exposes_inconsistent_start_and_preserves_accepted_work() {
+    let config = ShellTimeConfig {
+        dt_s: 0.1,
+        ..Default::default()
+    };
+    let mut prepared = PreparedNewmark::new(1, &[1.0], None, &[4.0], &config).unwrap();
+    let mut state = prepared.initialize(0.0, &[1.0], &[0.0], &[0.0]).unwrap();
+    // Legacy callers may supply guessed acceleration and stale energy caches.
+    // Explicit physical endpoint forces reveal that defect; work is never
+    // manufactured by subtracting those caches or balancing the endpoint loss.
+    state.acceleration[0] = 0.0;
+    state.kinetic_energy_j = f64::NAN;
+    state.strain_energy_j = f64::NAN;
+    state.total_energy_j = f64::NAN;
+    let result = prepared.step_with_work(&state, &[0.0], &[0.0]).unwrap();
+    assert_eq!(result.work.applied_work_j, 0.0);
+    assert_eq!(result.work.damping_work_j, 0.0);
+    assert!(result.work.algorithmic_energy_defect_j < -0.01);
+    assert_eq!(prepared.last_step_work(), Some(&result.work));
+
+    assert!(
+        prepared
+            .step_with_work(&result.state, &[f64::NAN], &[0.0])
+            .is_err()
+    );
+    assert_eq!(prepared.last_step_work(), Some(&result.work));
+    assert!(prepared.initialize(0.0, &[], &[0.0], &[0.0]).is_err());
+    assert_eq!(prepared.last_step_work(), Some(&result.work));
+    prepared.initialize(0.0, &[1.0], &[0.0], &[0.0]).unwrap();
+    assert!(prepared.last_step_work().is_none());
+}
+
+#[test]
+fn shell_time_work_retains_small_quadratic_energy_change_on_large_preload() {
+    // G3: endpoint energy subtraction loses part of this representable
+    // displacement's energy. The interval calculation uses vector increments
+    // and still exposes the energy defect caused by rounded absolute motion.
+    let config = ShellTimeConfig {
+        dt_s: 1.0e-8,
+        ..Default::default()
+    };
+    let mut prepared = PreparedNewmark::new(1, &[1.0], None, &[1.0], &config).unwrap();
+    let state = prepared
+        .initialize(0.0, &[1.0e8], &[1.0], &[1.0e8])
+        .unwrap();
+    let result = prepared.step_with_work(&state, &[1.0e8], &[1.0e8]).unwrap();
+    let du = result.state.displacement[0] - state.displacement[0];
+    let expected_change = du * state.displacement[0] + 0.5 * du * du;
+    assert!((result.work.mechanical_energy_change_j - expected_change).abs() < 1.0e-14);
+    assert!(
+        (result.work.mechanical_energy_change_j
+            - (result.state.total_energy_j - state.total_energy_j))
+            .abs()
+            > 0.1
+    );
+    assert!((result.work.applied_work_j - 1.0).abs() < 1.0e-14);
 }

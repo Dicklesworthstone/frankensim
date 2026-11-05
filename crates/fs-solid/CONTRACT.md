@@ -1835,6 +1835,25 @@ force-work balance, prepared/fresh equality over a forced trajectory, exact
 checkpoint continuation after rebuilding factors, and second-order convergence
 to a manufactured forced response.
 
+`PreparedNewmark::initialize` solves the complete initial mass equation
+`M a = f - C v - K u` through the same LU owner and evaluates the actual
+quadratic energies. `step_with_work` accepts both physical endpoint loads and
+returns the accepted motion with independently evaluated applied work and
+full-matrix damping work. Ordinary prepared `step` calls expose the same
+per-interval quantities through `last_step_work`, inferring the old load from
+the supplied acceleration equilibrium. Work uses midpoint power quadrature;
+it is not an exact continuous-time heat integral. Symmetric PSD damping gives
+nonnegative discrete heat, but this generic integrator does not certify PSD or
+clip an active operator's signed work. The signed algorithmic energy defect
+remains separate from material heat, including for non-default Newmark
+parameters and inconsistent startup acceleration. Quadratic energy changes use
+endpoint vector differences rather than cancellation-prone subtraction of
+large cached energies. Accepted work is replaced per step, preserved on refusal,
+and cleared on successful initialization; checkpoint continuation requires no
+accumulated work state. G0/G1/G3 regressions cover first-step conservation and
+passivity, full-operator force work, independently integrated manufactured heat,
+algorithmic versus physical loss, and resolved energy changes on large preload.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). The elasticity core (plan §8.2, bead tfz.13):
