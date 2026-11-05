@@ -22,13 +22,15 @@ fn invalid(quantity: &'static str) -> MaterialStatePointError {
 ///
 /// Preparation checks the complete original source path once, including all
 /// intervening table segments and surface cells. Evaluation allocates nothing:
-/// a point lookup is logarithmic in the knot count, and an integral visits only
-/// the crossed segments. The existing source owner bounds the knot count.
+/// both point and interval queries take logarithmic work in the knot count.
+/// A balanced tree of nonnegative interval means takes linear preparation work
+/// and storage. The existing source owner bounds the knot count.
 /// Integration is exact for its piecewise-affine interpolation, up to floating
 /// point roundoff; this is not an uncertainty or continuum-error certificate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KirchhoffMoistureDiffusivity {
     knots: Box<[(f64, f64)]>,
+    interval_means: Box<[f64]>,
     selected_claim: ClaimId,
     identity: ContentHash,
 }
@@ -138,8 +140,18 @@ impl KirchhoffMoistureDiffusivity {
             identity.update(answer.receipt.content_hash().as_bytes());
             knots.push((moisture, value));
         }
+        let segments = knots.len() - 1;
+        let mut interval_means = if segments == 0 {
+            Vec::new()
+        } else {
+            vec![0.0; 2 * segments.next_power_of_two()]
+        };
+        if segments != 0 {
+            prepare_means(&knots, &mut interval_means, 1, 0, segments);
+        }
         Ok(Self {
             knots: knots.into_boxed_slice(),
+            interval_means: interval_means.into_boxed_slice(),
             selected_claim,
             identity: identity.finalize(),
         })
@@ -150,8 +162,8 @@ impl KirchhoffMoistureDiffusivity {
         [self.knots[0].0, self.knots[self.knots.len() - 1].0]
     }
 
-    /// Work bound: an interval evaluation visits at most this many knots.
-    /// The canonical source-line owner admits at most 4096.
+    /// Number of admitted source knots; the canonical owner admits at most 4096.
+    /// Interval queries reuse prepared means rather than visiting every knot.
     pub fn knot_count(&self) -> usize {
         self.knots.len()
     }
@@ -184,10 +196,7 @@ impl KirchhoffMoistureDiffusivity {
         if i == 0 || self.knots[i].0 == moisture {
             return Ok(self.knots[i].1);
         }
-        let (left, a) = self.knots[i - 1];
-        let (right, b) = self.knots[i];
-        let fraction = (moisture - left) / (right - left);
-        let value = (1.0 - fraction).mul_add(a, fraction * b);
+        let value = interpolate(self.knots[i - 1], self.knots[i], moisture);
         if value.is_finite() && value >= 0.0 {
             Ok(value)
         } else {
@@ -197,9 +206,11 @@ impl KirchhoffMoistureDiffusivity {
 
     /// Integral mean D across an interval, with the continuous equal-state limit.
     ///
-    /// Contributions are averaged directly over the requested interval, never
-    /// obtained by subtracting two large cumulative potentials. This preserves
-    /// a small local driving gradient even far from the chart's lower bound.
+    /// Fully covered source intervals reuse their prepared nonnegative means;
+    /// only the two partial end segments require interpolation. Means combine
+    /// by physical interval length, never by subtracting cumulative potentials
+    /// or forming potentially overflowing absolute integrals. This preserves a
+    /// small local driving gradient even far from the chart's lower bound.
     /// The result is symmetric in its endpoints and nonnegative without clipping.
     pub fn mean_diffusivity(&self, a: f64, b: f64) -> Result<f64> {
         self.admit(a)?;
@@ -208,38 +219,36 @@ impl KirchhoffMoistureDiffusivity {
             return self.diffusivity(a);
         }
         let (lower, upper) = if a < b { (a, b) } else { (b, a) };
-        let width = upper - lower;
-        let mut x = lower;
-        let mut left_value = self.diffusivity(lower)?;
-        let mut i = self.knots.partition_point(|&(x, _)| x <= lower);
-        let mut result = 0.0;
-        let mut correction = 0.0;
-        loop {
-            let end = self.knots[i].0.min(upper);
-            let right_value = if end == self.knots[i].0 {
-                self.knots[i].1
-            } else {
-                self.diffusivity(end)?
-            };
-            let low = left_value.min(right_value);
-            let mean = low + 0.5 * (left_value.max(right_value) - low);
-            let term = mean * ((end - x) / width);
-            // Compensated nonnegative accumulation; no cancelling K(b)-K(a).
-            let add = term - correction;
-            let next = result + add;
-            correction = (next - result) - add;
-            result = next;
-            if end == upper {
-                break;
-            }
-            x = end;
-            left_value = right_value;
-            i += 1;
-        }
+        let result = self.interval_mean(lower, upper, 1, 0, self.knots.len() - 1);
         if result.is_finite() && result >= 0.0 {
             Ok(result)
         } else {
             Err(invalid("unrepresentable mean source diffusivity"))
+        }
+    }
+
+    fn interval_mean(&self, lower: f64, upper: f64, node: usize, l: usize, r: usize) -> f64 {
+        if lower == self.knots[l].0 && upper == self.knots[r].0 {
+            return self.interval_means[node];
+        }
+        if r - l == 1 {
+            return midpoint(
+                interpolate(self.knots[l], self.knots[r], lower),
+                interpolate(self.knots[l], self.knots[r], upper),
+            );
+        }
+        let m = l + (r - l) / 2;
+        let split = self.knots[m].0;
+        if upper <= split {
+            self.interval_mean(lower, upper, 2 * node, l, m)
+        } else if lower >= split {
+            self.interval_mean(lower, upper, 2 * node + 1, m, r)
+        } else {
+            join_means(
+                self.interval_mean(lower, split, 2 * node, l, m),
+                self.interval_mean(split, upper, 2 * node + 1, m, r),
+                [lower, split, upper],
+            )
         }
     }
 
@@ -251,5 +260,95 @@ impl KirchhoffMoistureDiffusivity {
         } else {
             Err(invalid("unrepresentable integrated source diffusivity"))
         }
+    }
+}
+
+fn interpolate((left, a): (f64, f64), (right, b): (f64, f64), x: f64) -> f64 {
+    if x == left {
+        return a;
+    }
+    if x == right {
+        return b;
+    }
+    let fraction = (x - left) / (right - left);
+    (1.0 - fraction).mul_add(a, fraction * b)
+}
+
+fn midpoint(a: f64, b: f64) -> f64 {
+    a.min(b) + 0.5 * (a.max(b) - a.min(b))
+}
+
+fn prepare_means(knots: &[(f64, f64)], means: &mut [f64], node: usize, l: usize, r: usize) -> f64 {
+    let mean = if r - l == 1 {
+        midpoint(knots[l].1, knots[r].1)
+    } else {
+        let m = l + (r - l) / 2;
+        join_means(
+            prepare_means(knots, means, 2 * node, l, m),
+            prepare_means(knots, means, 2 * node + 1, m, r),
+            [knots[l].0, knots[m].0, knots[r].0],
+        )
+    };
+    means[node] = mean;
+    mean
+}
+
+// Convex averaging uses the smaller side's weight and never sums two large
+// positive products. Equal laws retain their exact constant limit. Coordinates
+// supply the complete width directly, without accumulating rounded lengths.
+fn join_means(a: f64, b: f64, [left, split, right]: [f64; 3]) -> f64 {
+    if a == b {
+        return a;
+    }
+    let (low, high, low_width, high_width) = if a < b {
+        (a, b, split - left, right - split)
+    } else {
+        (b, a, right - split, split - left)
+    };
+    if high_width <= low_width {
+        low + weighted_difference(high - low, high_width, right - left)
+    } else {
+        high - weighted_difference(high - low, low_width, right - left)
+    }
+}
+
+// A tiny geometric weight can underflow even when its product with a large D
+// remains significant. Keep the ordinary path cheap; only subnormal weights
+// need normalized mantissas and one final gradual-underflow rounding.
+fn weighted_difference(value: f64, width: f64, total: f64) -> f64 {
+    let weight = width / total;
+    if weight >= f64::MIN_POSITIVE || value == 0.0 {
+        return value * weight;
+    }
+    let parts = |x: f64| {
+        let (x, shift) = if x < f64::MIN_POSITIVE {
+            (x * 18_014_398_509_481_984.0, -54)
+        } else {
+            (x, 0)
+        };
+        let bits = x.to_bits();
+        (
+            f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000),
+            ((bits >> 52) as i32) - 1023 + shift,
+        )
+    };
+    let (v, ve) = parts(value);
+    let (w, we) = parts(width);
+    let (t, te) = parts(total);
+    let mut mantissa = v * w / t;
+    let mut exponent = ve + we - te;
+    if mantissa >= 2.0 {
+        mantissa *= 0.5;
+        exponent += 1;
+    } else if mantissa < 1.0 {
+        mantissa *= 2.0;
+        exponent -= 1;
+    }
+    if exponent >= -1022 {
+        mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+    } else if exponent < -1075 {
+        0.0
+    } else {
+        (mantissa * f64::MIN_POSITIVE) * f64::from_bits(((exponent + 2045) as u64) << 52)
     }
 }

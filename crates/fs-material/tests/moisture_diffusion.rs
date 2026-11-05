@@ -32,6 +32,13 @@ fn point(m: f64) -> QueryPoint {
         .unwrap()
 }
 fn card(value: PropertyValue, interpolation: InterpolationPolicy) -> MaterialCard {
+    card_on_interval(value, interpolation, [0.0, 1.0])
+}
+fn card_on_interval(
+    value: PropertyValue,
+    interpolation: InterpolationPolicy,
+    moisture: [f64; 2],
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
@@ -47,8 +54,8 @@ fn card(value: PropertyValue, interpolation: InterpolationPolicy) -> MaterialCar
                 .with_quantity(
                     "moisture_content",
                     quantity(QuantityKind::Moisture(MoistureBasis::DryMass)),
-                    0.0,
-                    1.0,
+                    moisture[0],
+                    moisture[1],
                 ),
             uncertainty: UncertaintyModel::Unstated,
             interpolation,
@@ -240,4 +247,114 @@ fn held_temperature_surface_integrates_crossed_cells_and_cannot_bridge_a_hole() 
         KirchhoffMoistureDiffusivity::from_binding(&gap, &bound, NAME, [0.0, 1.0]),
         Err(MaterialStatePointError::Support { .. })
     ));
+}
+
+// Independent direct trapezoid integral for moderate-scale manufactured laws.
+// This intentionally traverses every source segment rather than using the
+// prepared tree, its interpolation helper or its positive-mean combination.
+fn trapezoid_mean(knots: &[(f64, f64)], lower: f64, upper: f64) -> f64 {
+    let mut integral = 0.0;
+    for pair in knots.windows(2) {
+        let [(x0, d0), (x1, d1)] = [pair[0], pair[1]];
+        let left = lower.max(x0);
+        let right = upper.min(x1);
+        if left < right {
+            let slope = (d1 - d0) / (x1 - x0);
+            let a = d0 + slope * (left - x0);
+            let b = d0 + slope * (right - x0);
+            integral += 0.5 * (a + b) * (right - left);
+        }
+    }
+    integral / (upper - lower)
+}
+
+#[test]
+fn prepared_intervals_match_independent_trapezoids_for_partial_and_full_subtrees() {
+    // Uneven and power-of-two segment counts exercise every tree shape, plus
+    // source cuts that add nonoriginal endpoints to the prepared chart.
+    for count in [3, 16, 63, 258, 513] {
+        let knots: Vec<_> = (0..count)
+            .map(|i| {
+                (
+                    i as f64 / (count - 1) as f64,
+                    ((i * 37 + 13) % 97) as f64 * 1e-10,
+                )
+            })
+            .collect();
+        let c = curve(knots.clone());
+        for bounds in [[0.0, 1.0], [0.125, 0.875]] {
+            let k = chart(&c, bounds);
+            for i in 0..64 {
+                let lower = bounds[0] + (bounds[1] - bounds[0]) * i as f64 / 128.0;
+                let upper = bounds[1] - (bounds[1] - bounds[0]) * ((i * 11) % 64) as f64 / 128.0;
+                let expected = trapezoid_mean(&knots, lower, upper);
+                let actual = k.mean_diffusivity(lower, upper).unwrap();
+                near(actual, expected, expected * 3e-14);
+                assert_eq!(k.mean_diffusivity(upper, lower).unwrap(), actual);
+                near(
+                    k.integral(lower, upper).unwrap(),
+                    expected * (upper - lower),
+                    expected * (upper - lower) * 3e-14,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_means_preserve_small_queries_when_absolute_potentials_overflow() {
+    let value = f64::MAX * 0.5;
+    let c = card_on_interval(
+        PropertyValue::Curve {
+            abscissa: "moisture_content".into(),
+            abscissa_dims: Dims::NONE,
+            knots: (0..=32).map(|i| (i as f64, value)).collect(),
+            dims: D,
+        },
+        InterpolationPolicy::LinearInside,
+        [0.0, 32.0],
+    );
+    let k = chart(&c, [0.0, 32.0]);
+    assert_eq!(k.mean_diffusivity(0.0, 32.0).unwrap(), value);
+    assert!(k.integral(0.0, 32.0).is_err()); // The true full integral overflows.
+    for center in [8.0_f64, 16.0, 24.0, 31.5] {
+        let lower = f64::from_bits(center.to_bits() - 1);
+        let upper = f64::from_bits(center.to_bits() + 1);
+        assert_eq!(k.mean_diffusivity(lower, upper).unwrap(), value);
+        assert_eq!(k.integral(lower, upper).unwrap(), value * (upper - lower));
+    }
+}
+
+#[test]
+fn a_subnormal_geometric_weight_does_not_erase_representable_diffusion() {
+    // The left triangular segment's WIDTH / total width rounds to zero, but
+    // its contribution to the mean remains O(1e-16). Raw prefix integrals are
+    // also unnecessary: the scaled mean retains this source-defined transport.
+    let width = f64::from_bits(1);
+    let peak = f64::MAX;
+    let c = card_on_interval(
+        PropertyValue::Curve {
+            abscissa: "moisture_content".into(),
+            abscissa_dims: Dims::NONE,
+            knots: vec![(0.0, peak), (width, 0.0), (4.0, 0.0)],
+            dims: D,
+        },
+        InterpolationPolicy::LinearInside,
+        [0.0, 4.0],
+    );
+    let k = chart(&c, [0.0, 4.0]);
+    assert_eq!(width / 4.0, 0.0);
+    let expected = ((0.5 * peak) * width) / 4.0;
+    near(
+        k.mean_diffusivity(0.0, 4.0).unwrap(),
+        expected,
+        expected * 2e-15,
+    );
+    near(
+        k.integral(0.0, 4.0).unwrap(),
+        4.0 * expected,
+        expected * 8e-15,
+    );
+    assert_eq!(k.mean_diffusivity(width, 4.0).unwrap(), 0.0);
+    assert_eq!(k.mean_diffusivity(0.0, width).unwrap(), 0.5 * peak);
 }
