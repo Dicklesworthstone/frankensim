@@ -8088,8 +8088,11 @@ clarinet is one filling of those objects.
   accept in-plane pretension and clamped edges. Von Karman is the
   isotropic SS sine path when `e1 = e2` and edges are free to
   rotate; clamped or orthotropic bending uses DKT-sampled
-  displacement with the same sine Airy membrane channel
-  (`von_karman_sampled_plate`). The compact far-field observer is
+  displacement with the same sine Airy basis and the complete oriented
+  membrane stiffness `A = 12 D / h²`
+  (`von_karman_sampled_plate_with_membrane`). Independent shear,
+  Poisson and rotated normal/shear coupling survive the reduction.
+  The compact far-field observer is
   the baffled on-axis piston `p = ρ A ÿ / (2 π r)`, the same
   half-space as the self-load. A full BEM observer is the
   solver-neutral `DirectionalFarFieldTable` /
@@ -8483,8 +8486,8 @@ clarinet is one filling of those objects.
   this adds neither thermal evolution nor exterior plate-radiation back-reaction.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
   analytic primitive when those hypotheses hold, and the FE-sampled
-  Airy construction otherwise. The membrane channel remains the
-  sine Airy basis (in-plane movable).
+  Airy construction otherwise. The full oriented plane-stress membrane
+  tensor is retained; the stress basis remains sine Airy (in-plane movable).
 - Reed observer adds the compact far-field dipole of the slit force
   `F = Δp · w · y`. That is not 3-D jet broadband and not the
   fs-aeroac 2-D Curle Hankel kernel. 3-D jet broadband remains a

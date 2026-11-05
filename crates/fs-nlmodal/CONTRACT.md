@@ -107,10 +107,25 @@ the crash cascade with structurally exact energy accounting.
   must agree to `0.9` of the (dimensional) channel scale or
   construction refuses; signed sine-mode interactions must converge
   quadratically to the analytic Airy overlaps under grid refinement.
-  Nonfinite inputs and assembled storage are refused. Clamped and orthotropic bending
-  enter as FE-sampled displacement; the membrane channel stays the
-  analytic sine Airy basis (in-plane movable). Callers with
-  orthotropic `E1 ≠ E2` pass `(E1+E2)/2` as `params.young`.
+  Nonfinite inputs and assembled storage are refused. Clamped bending
+  enters as FE-sampled displacement; this constructor retains isotropic
+  membrane elasticity and the analytic sine Airy basis (in-plane movable).
+- `von_karman_sampled_plate_with_membrane` / `VkSampledPlateParams` —
+  the same sampled kinematics with an admitted uniform `SheetMatrix` [N/m]
+  and structural mass per area. The complete plane-stress tensor supplies
+  the complementary Airy matrix `C_jk = integral b_j^T A^-1 b_k`, with
+  `b_j = [Psi_j,yy, Psi_j,xx, -Psi_j,xy]`. Exact sine/cosine integrals
+  retain the off-diagonal Airy coupling from rotated normal/shear compliance.
+  Construction factors `C = L L^T` and transforms each geometric coupling
+  by `L^-1`, so `Vnl = 1/8 e^T C^-1 e` remains positive sum-of-squares
+  storage with no time-step matrix solve or added evaluation allocation.
+  The isotropic limit is exactly `C_jj = xi_j^4/(E h)`. Independent
+  area integration in material axes checks rotated compliance; hand
+  orthotropic formulas check shear/Poisson dependence, and covariance
+  tests check stiffness and mass normalization. Singular, nonfinite or
+  numerically unresolved compliance refuses. This is a uniform membrane
+  model; it does not add spatially varying material, laminate extension/
+  bending coupling, nonlinear constitutive elasticity, or in-plane inertia.
 - `kirchhoff_carrier_string` — one diagonal channel
   `E[k,k] = (k pi/L)^2 * 2/(mu L)`, coefficient `E A L / 8`: exactly
   the averaged-tension Kirchhoff-Carrier form in mass-normalized
