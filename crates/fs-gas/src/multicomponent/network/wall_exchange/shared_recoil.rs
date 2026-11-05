@@ -2,8 +2,8 @@
 //!
 //! Mechanical inertia and thermal storage have separate identities. The shared
 //! friction solve runs before the original caloric/thermal owner. Slip loss
-//! heats gas and its assigned finite wall exactly once; the thermal owner
-//! deposits the combined wall share into each original inventory.
+//! heats gas and its finite wall exactly once: local regions use their original
+//! storage and shared inventories receive the combined assigned wall share.
 
 use super::{
     Cell, MixtureGas, MixtureNetwork1d, NetworkWallOperator, SupportExchange, WallCellReport,
@@ -11,8 +11,8 @@ use super::{
     poll, positive, recoil, sum,
 };
 use crate::multicomponent::wall_exchange::{
-    RecoilControl, SharedRecoilCell, SharedRecoilControl, SharedRecoilWorkspace, SlidingSupport,
-    WallUpdate,
+    MaterialWallCaloric, RecoilControl, SharedRecoilCell, SharedRecoilControl,
+    SharedRecoilWorkspace, SlidingSupport, WallUpdate,
 };
 use fs_qty::Time;
 
@@ -31,7 +31,7 @@ struct BranchSupport {
     workspace: SharedRecoilWorkspace,
     inputs: Vec<SharedRecoilCell>,
     motions: Vec<WallUpdate>,
-    gas_heat_fractions: Vec<f64>,
+    gas_heat_fractions: Option<Vec<f64>>,
 }
 
 impl NetworkWallOperator<'_> {
@@ -49,7 +49,7 @@ impl NetworkWallOperator<'_> {
     /// actual support-relative endpoints retain the original material checks.
     /// By default all frictional slip heat stays in gas.
     /// [`Self::with_shared_branch_heat_partition`] can assign a share to the
-    /// original shared wall inventory. The original local, caloric, conduction
+    /// original local or shared wall inventory. The original caloric, conduction
     /// or shared thermal owner then performs heat exchange.
     ///
     /// Supports follow both original source halves and publish with gas and
@@ -112,7 +112,6 @@ impl NetworkWallOperator<'_> {
                 },
             )?;
             let motions = allocated(count, empty_motion())?;
-            let gas_heat_fractions = allocated(count, 1.0)?;
             let workspace = SharedRecoilWorkspace::new(count, &mut cancelled)?;
             for contact in &mut self.contacts[shape.start..shape.start + count] {
                 poll(&mut cancelled)?;
@@ -126,7 +125,7 @@ impl NetworkWallOperator<'_> {
                 workspace,
                 inputs,
                 motions,
-                gas_heat_fractions,
+                gas_heat_fractions: None,
             }));
         }
         poll(&mut cancelled)?;
@@ -140,23 +139,25 @@ impl NetworkWallOperator<'_> {
     }
 
     /// Partition each shared support's frictional slip heat between its gas
-    /// cells and their original shared thermal inventories.
+    /// cells and their original local or shared thermal inventories.
     ///
     /// Rows and entries follow the original branch/cell order. Every value is
     /// the gas fraction in `[0, 1]`; a branch without a shared support must
-    /// retain `1`. Bind once after supports and shared walls, before evolution.
-    /// An all-gas partition requires no shared thermal storage.
+    /// retain `1`. Bind once after supports and wall storage, before evolution.
+    /// An all-gas partition requires no finite thermal storage.
     ///
-    /// A fraction below one needs an original finite shared wall with internal
+    /// A fraction below one needs an original finite local or shared wall with internal
     /// energy or an explicit negligible-expansion assumption. Each heated
     /// inventory belongs to one mechanical support; its thermal amount is
     /// already included in that support's inertia. Other gas ports may exchange
     /// heat with the same inventory without creating additional wall mass.
     ///
-    /// Mechanics assigns each wall share before admitting returned gas energy. The
-    /// existing shared thermal owner deposits the sum once, then performs the
-    /// original simultaneous heat solve and complete storage audit. No new
-    /// caloric curve, thermal solver, or per-step allocation is introduced.
+    /// Mechanics assigns each wall share before admitting returned gas energy.
+    /// Local regions deposit through their original capacity or native energy
+    /// coordinate; an adiabatic local contact routes heat to its shared wall.
+    /// The original thermal/conduction owners then exchange heat and audit
+    /// complete storage endpoints. Prepared fractions reuse the supplied rows;
+    /// the default needs no fraction buffer and stepping adds no allocation.
     pub fn with_shared_branch_heat_partition(
         mut self,
         branches: Vec<Vec<f64>>,
@@ -180,7 +181,7 @@ impl NetworkWallOperator<'_> {
                 "shared support heat partition must bind once",
             ));
         }
-        let mut needs_wall = false;
+        let mut needs_shared_wall = false;
         for ((shape, input), support) in self.branches.iter().zip(&branches).zip(&supports.branches)
         {
             if input.len() != shape.mesh.cell_count() {
@@ -188,7 +189,7 @@ impl NetworkWallOperator<'_> {
                     "shared support heat partition cell axis",
                 ));
             }
-            for &fraction in input {
+            for (cell, &fraction) in input.iter().enumerate() {
                 poll(&mut cancelled)?;
                 if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
                     return Err(WallExchangeError::Invalid(
@@ -201,17 +202,30 @@ impl NetworkWallOperator<'_> {
                             "wall slip heat requires a shared branch support",
                         ));
                     }
-                    needs_wall = true;
+                    let index = shape.start + cell;
+                    let contact = self.contacts[index];
+                    if contact.thermal == WallThermal::Adiabatic {
+                        needs_shared_wall = true;
+                    } else {
+                        recoil::friction_wall_conductance(contact, self.caloric[index].as_ref())?;
+                    }
                 }
             }
         }
-        if needs_wall {
+        if needs_shared_wall {
             self.shared
                 .as_ref()
                 .ok_or(WallExchangeError::Invalid(
                     "shared support wall heat requires original shared storage",
                 ))?
-                .admit_support_partitions(&branches, &mut cancelled)?;
+                .admit_support_partitions(
+                    &branches,
+                    |branch, cell| {
+                        self.contacts[self.branches[branch].start + cell].thermal
+                            == WallThermal::Adiabatic
+                    },
+                    &mut cancelled,
+                )?;
         }
         let supports = self
             .shared_supports
@@ -220,11 +234,9 @@ impl NetworkWallOperator<'_> {
                 "shared support owner disappeared",
             ))?;
         for (input, support) in branches.into_iter().zip(&mut supports.branches) {
+            poll(&mut cancelled)?;
             if let Some(support) = support {
-                for (stored, fraction) in support.gas_heat_fractions.iter_mut().zip(input) {
-                    poll(&mut cancelled)?;
-                    *stored = fraction;
-                }
+                support.gas_heat_fractions = Some(input);
             }
         }
         poll(&mut cancelled)?;
@@ -248,9 +260,9 @@ impl NetworkWallOperator<'_> {
     ///
     /// Gas energy and impulse are summed over its cells and all source halves;
     /// support momentum and kinetic energy use the actual complete endpoints.
-    /// Wall heating is the assigned transfer into the original shared storage.
-    /// Its actual caloric deposition and subsequent heat exchange are audited
-    /// by the shared thermal owner and retained in `NetworkWallReport`.
+    /// Wall heating sums actual local storage gains and assigned transfers into
+    /// shared storage. The shared owner audits those deposits; complete local
+    /// and shared storage after heat exchange remains in `NetworkWallReport`.
     pub fn accepted_branch_shared_support_exchange(
         &self,
         branch: usize,
@@ -335,6 +347,7 @@ impl NetworkWallOperator<'_> {
                 &branch.states,
                 shape.mesh.volumes(),
                 &self.candidate_contacts[shape.start..shape.start + count],
+                &self.caloric[shape.start..shape.start + count],
                 duration,
                 shared.control,
                 RecoilControl {
@@ -380,6 +393,7 @@ impl SharedBranchSupports {
     /// inventory consumes the sum over its ports exactly once.
     pub(super) fn wall_slip_heat(&self, branch: usize, cell: usize) -> f64 {
         self.motion(branch, cell)
+            .filter(|motion| motion.contact.thermal == WallThermal::Adiabatic)
             .map_or(0.0, |motion| motion.report.wall_energy_change_j)
     }
 
@@ -399,6 +413,7 @@ impl BranchSupport {
         states: &[f64],
         volumes: &[f64],
         contacts: &[WallContact],
+        caloric: &[Option<MaterialWallCaloric<'_>>],
         duration: Time,
         control: SharedRecoilControl,
         balance: RecoilControl,
@@ -435,8 +450,8 @@ impl BranchSupport {
         let mut corrections = [0.0; 5];
         for (i, (values, cell)) in states.chunks_exact(width).zip(motion.cells).enumerate() {
             poll(cancelled)?;
-            let wall_heat =
-                cell.slip_dissipation_j - self.gas_heat_fractions[i] * cell.slip_dissipation_j;
+            let fraction = self.gas_heat_fractions.as_ref().map_or(1.0, |row| row[i]);
+            let wall_heat = cell.slip_dissipation_j - fraction * cell.slip_dissipation_j;
             let change = cell.work_to_gas_j - wall_heat;
             let energy = values[n + 1] + change / volumes[i];
             let gas_energy = (energy - values[n + 1]) * volumes[i];
@@ -461,6 +476,12 @@ impl BranchSupport {
             }
             let mut contact = contacts[i];
             contact.drag = recoil::at_velocity(contact.drag, motion.support.velocity_m_s);
+            let (contact, wall_change) =
+                if wall_heat > 0.0 && contact.thermal != WallThermal::Adiabatic {
+                    deposit_local(contact, caloric[i].as_ref(), wall_heat, balance.wall)?
+                } else {
+                    (contact, wall_heat)
+                };
             self.motions[i] = WallUpdate {
                 momentum: cell.momentum,
                 energy,
@@ -471,8 +492,8 @@ impl BranchSupport {
                     mechanical_work_to_gas_j: cell.work_to_gas_j,
                     drag_heating_j: cell.slip_dissipation_j,
                     heat_to_gas_j: if wall_heat == 0.0 { 0.0 } else { -wall_heat },
-                    wall_energy_change_j: wall_heat,
-                    energy_residual_j: residual,
+                    wall_energy_change_j: wall_change,
+                    energy_residual_j: residual + (wall_change - wall_heat),
                     ..empty_motion().report
                 },
             };
@@ -481,7 +502,7 @@ impl BranchSupport {
                 cell.work_to_gas_j,
                 gas_energy,
                 cell.slip_dissipation_j,
-                wall_heat,
+                wall_change,
             ]
             .into_iter()
             .enumerate()
@@ -552,6 +573,57 @@ impl BranchSupport {
         self.candidate_exchange = report;
         Ok(())
     }
+}
+
+/// Original local storage receives its assigned frictional share before the
+/// existing heat/conduction stage. A rounded storage increment is audited,
+/// never repaired by changing the gas or the authored partition.
+fn deposit_local(
+    contact: WallContact,
+    source: Option<&MaterialWallCaloric<'_>>,
+    heat: f64,
+    control: WallControl,
+) -> Result<(WallContact, f64), WallExchangeError> {
+    recoil::friction_wall_conductance(contact, source)?;
+    let (updated, change) = if let Some(source) = source {
+        let state = source.after(contact, heat)?;
+        (state.contact, state.energy_change_j)
+    } else if let WallThermal::Lumped {
+        temperature_k,
+        heat_capacity_j_per_k,
+        conductance_w_per_k,
+    } = contact.thermal
+    {
+        let next = temperature_k + heat / heat_capacity_j_per_k;
+        (
+            WallContact {
+                thermal: WallThermal::Lumped {
+                    temperature_k: next,
+                    heat_capacity_j_per_k,
+                    conductance_w_per_k,
+                },
+                ..contact
+            },
+            heat_capacity_j_per_k * (next - temperature_k),
+        )
+    } else {
+        return Err(WallExchangeError::Invalid(
+            "shared support lost original local wall storage",
+        ));
+    };
+    updated.validate()?;
+    let residual = change - heat;
+    if !change.is_finite()
+        || change < 0.0
+        || !residual.is_finite()
+        || residual.abs() > control.tolerance(heat.abs().max(change.abs()))
+    {
+        return Err(WallExchangeError::Balance {
+            energy_residual_j: residual,
+            thermal_residual_j: 0.0,
+        });
+    }
+    Ok((updated, change))
 }
 
 fn empty_motion() -> WallUpdate {

@@ -4584,18 +4584,22 @@ checks actual relative-slip endpoints, including after shared thermal exchange.
 No thermal inventory, mass, mesh volume or flow clock is added.
 
 `with_shared_branch_heat_partition` binds a gas fraction per original branch
-cell after common support and shared thermal binding. The remainder of each
-cell's slip loss is debited from gas before its caloric admission. The existing
-shared thermal owner deposits the compensated sum once through the original
-material energy coordinate, then runs its simultaneous gas heat solve and
-existing wall links. Nonlinear capacity and latent plateaus retain their native
-source and inventory. Each heated wall belongs to one mechanical support;
+cell after common support and original thermal binding. The remainder of each
+cell's slip loss is debited from gas before its caloric admission. A finite
+local region receives its own share through the original material integral or
+native energy coordinate before the existing local heat/conduction owner runs.
+An adiabatic local contact instead delivers its share to the bound shared wall:
+that owner deposits the compensated sum once, then runs its simultaneous gas
+heat solve and existing wall links. Local and shared regions may coexist on a
+branch; their stored thermal amounts are already part of its common inertia.
+Nonlinear capacity and latent plateaus retain their native source and inventory.
+Each heated shared wall belongs to one mechanical support;
 other gas ports can exchange heat with that body without claiming its inertia.
 Internal energy or explicit negligible expansion is required for material
 friction heating. All-gas partition retains the original default path.
 
-The support receipt identifies the assigned frictional transfer. The shared
-owner checks its actual deposition and computes wall storage from the complete
+The support receipt records actual local deposits and assigned shared transfers.
+The shared owner checks its actual deposition and computes wall storage from the complete
 pre-friction and post-thermal endpoints. The network combines that physical
 change with each gas debit once; represented storage differences remain visible
 in residuals instead of being repaired by modifying energy. Source work, both
@@ -4609,14 +4613,18 @@ work, original source-domain failures and balance refusals preserve accepted
 gas, support, thermal states and reports. Preparation allocates the work arrays;
 stepping does not allocate. The fixed-axis/frozen-geometry and local estimated
 mechanical accuracy limits of the shared solver remain explicit.
+Authored heat-fraction rows move into prepared support storage only at binding;
+the default all-gas path keeps no extra per-cell fraction vector.
 
 Seven existing shared-support network regressions use the original mixture,
-transport, mechanics and thermal implementations. Four further G1/G4 test
+transport, mechanics and thermal implementations. Six further G1/G4 test
 groups exercise nonlinear Cv and wall calorimetry against independent integral
 equations, unequal heat fractions and films, latent storage through both source
 halves of continuing molecular/wave flow, prior accepted-state refusal/replay,
 and physical ownership admission. Two regional material inventories connected
 by the existing wall-link owner share one support without duplicating its mass.
+Local nonlinear and latent regions, mixed local/shared routing, the constant-C
+limit, and accepted-state rollback retain their original material sources.
 Full Cargo and optional material-feature verification remain separate.
 
 ## Two reacting molecular chambers driving one shared piston

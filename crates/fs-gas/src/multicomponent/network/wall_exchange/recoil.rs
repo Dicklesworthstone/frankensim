@@ -453,7 +453,7 @@ pub(super) fn finish(
     Ok(thermal)
 }
 
-fn friction_wall_conductance(
+pub(super) fn friction_wall_conductance(
     contact: WallContact,
     wall: Option<&MaterialWallCaloric<'_>>,
 ) -> Result<f64, WallExchangeError> {

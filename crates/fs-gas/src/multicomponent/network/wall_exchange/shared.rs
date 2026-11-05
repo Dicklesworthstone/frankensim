@@ -249,9 +249,18 @@ impl SharedWalls<'_> {
     pub(super) fn admit_support_partitions(
         &self,
         fractions: &[Vec<f64>],
+        is_shared: impl Fn(usize, usize) -> bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), WallExchangeError> {
-        let expected = fractions.iter().flatten().filter(|&&f| f < 1.0).count();
+        let mut expected = 0;
+        for (branch, cells) in fractions.iter().enumerate() {
+            for (cell, &fraction) in cells.iter().enumerate() {
+                poll(cancelled)?;
+                if fraction < 1.0 && is_shared(branch, cell) {
+                    expected += 1;
+                }
+            }
+        }
         let mut found = 0;
         for bound in &self.groups {
             poll(cancelled)?;
@@ -265,7 +274,7 @@ impl SharedWalls<'_> {
                     .get(branch)
                     .and_then(|cells| cells.get(cell))
                     .ok_or(WallExchangeError::Invalid("shared support heat shape"))?;
-                if *fraction == 1.0 {
+                if *fraction == 1.0 || !is_shared(branch, cell) {
                     continue;
                 }
                 if support_branch.is_some_and(|owner| owner != branch) {

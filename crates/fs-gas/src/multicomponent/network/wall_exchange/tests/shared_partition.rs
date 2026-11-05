@@ -628,3 +628,366 @@ fn g0_shared_partition_admits_one_original_thermal_owner_for_each_heated_support
         5e-11,
     );
 }
+
+#[test]
+fn g1_local_and_mixed_regions_preserve_original_heat_laws_films_and_support_motion() {
+    let g = gas(1, true, 1e6);
+    let (fractions, films, dt) = ([0.2, 0.8], [0.3, 0.6], 0.2);
+    let loss = slip_loss(dt);
+    let mut local_endpoints = None;
+    for route in 0..3 {
+        let (mixed, constant) = (route == 1, route == 2);
+        let mut n = network(&g, &[2.0], false);
+        let before = fields(&n);
+        let sources: [MaterialWallCaloric<'static>; 2] = core::array::from_fn(|i| {
+            source_amount(
+                ThermalStorageBasis::InternalEnergy,
+                false,
+                [0.01, 50.0],
+                70 + i as u64,
+                0.5 * WALL_MASS,
+            )
+        });
+        let drag = WallDrag::Linear { rate_per_s: 3.0 };
+        let contacts = (0..2)
+            .map(|i| {
+                if mixed && i == 1 {
+                    WallContact {
+                        drag,
+                        thermal: WallThermal::Adiabatic,
+                    }
+                } else if constant {
+                    WallContact {
+                        drag,
+                        thermal: WallThermal::Lumped {
+                            temperature_k: 5.0,
+                            heat_capacity_j_per_k: 0.6,
+                            conductance_w_per_k: films[i],
+                        },
+                    }
+                } else {
+                    sources[i].initial_contact(films[i], drag).unwrap()
+                }
+            })
+            .collect();
+        let mut wall = NetworkWallOperator::new(&n, vec![contacts], vec![], || false)
+            .unwrap()
+            .with_shared_branch_supports(
+                vec![Some(support())],
+                SharedRecoilControl::default(),
+                1e-11,
+                || false,
+            )
+            .unwrap();
+        if !constant {
+            wall = wall
+                .with_material_heat_storage(
+                    vec![vec![
+                        Some(sources[0].clone()),
+                        if mixed {
+                            None
+                        } else {
+                            Some(sources[1].clone())
+                        },
+                    ]],
+                    vec![],
+                    || false,
+                )
+                .unwrap();
+        }
+        if mixed {
+            let mut region = group(sources[1].clone(), &[0], films);
+            region.ports = vec![region.ports[1]];
+            wall = wall
+                .with_shared_walls(&n, vec![region], SharedWallControl::default(), || false)
+                .unwrap();
+        }
+        let mut wall = wall
+            .with_shared_branch_heat_partition(vec![fractions.to_vec()], || false)
+            .unwrap();
+        let report = wall
+            .advance_for(&mut n, Time::new(dt), controls(), || false)
+            .unwrap();
+        let support = wall.branch_shared_support(0).unwrap();
+        let mut gas_change = 0.0;
+        let mut wall_change = 0.0;
+        let mut endpoints = [[0.0; 2]; 2];
+        for i in 0..2 {
+            let contact = wall.branch_contacts(0).unwrap()[i];
+            assert_eq!(
+                contact.drag,
+                WallDrag::MovingLinear {
+                    rate_per_s: 3.0,
+                    wall_velocity_m_s: support.velocity_m_s
+                }
+            );
+            let thermal = if mixed && i == 1 {
+                let shared = wall.shared_wall(0).unwrap();
+                assert_eq!(shared.ports[0].conductance_w_per_k, films[i]);
+                assert_eq!(contact.thermal, WallThermal::Adiabatic);
+                shared.storage.thermal
+            } else {
+                contact.thermal
+            };
+            let (tw, stored_change) = match thermal {
+                WallThermal::Caloric {
+                    mass_kg,
+                    specific_energy_j_kg,
+                    conductance_w_per_k,
+                } => {
+                    assert_eq!(mass_kg, 0.5 * WALL_MASS);
+                    assert_eq!(
+                        conductance_w_per_k,
+                        if mixed && i == 1 { 0.0 } else { films[i] }
+                    );
+                    (
+                        (5.0 * specific_energy_j_kg).sqrt(),
+                        mass_kg * (specific_energy_j_kg - 5.0),
+                    )
+                }
+                WallThermal::Lumped {
+                    temperature_k,
+                    heat_capacity_j_per_k,
+                    conductance_w_per_k,
+                } => {
+                    assert_eq!(heat_capacity_j_per_k, 0.6);
+                    assert_eq!(conductance_w_per_k, films[i]);
+                    (temperature_k, heat_capacity_j_per_k * (temperature_k - 5.0))
+                }
+                _ => panic!("original finite regional storage"),
+            };
+            let cell = n.branches()[0].cell(i).unwrap();
+            let primitive = g.primitive(cell, || false).unwrap();
+            // Independent original Cv polynomial: the positive root is the
+            // gas endpoint for this observed wall temperature and authored film.
+            let tg = quadratic(
+                0.01,
+                0.5 + dt * films[i],
+                -1.04 - 0.5 * fractions[i] * loss - dt * films[i] * tw,
+            );
+            close(primitive.temperature, tg, 3e-10);
+            let heat = dt * films[i] * (tw - tg);
+            let assigned = 0.5 * (1.0 - fractions[i]) * loss;
+            close(stored_change, assigned - heat, 3e-11);
+            let change = 0.2 * (cell.energy - before.0[0][i].energy);
+            let sensible = 0.2 * (tg - 2.0) * (2.5 + 0.05 * (tg + 2.0));
+            close(
+                change,
+                0.1 * (primitive.velocity - 2.0) * (primitive.velocity + 2.0) + sensible,
+                3e-11,
+            );
+            assert_eq!(cell.partial_densities, before.0[0][i].partial_densities);
+            if constant {
+                // Closed constant-wall limit, with the same variable-Cv gas.
+                let after_friction = 5.0 + assigned / 0.6;
+                let effective = dt * films[i] / (1.0 + dt * films[i] / 0.6);
+                let expected = quadratic(
+                    0.01,
+                    0.5 + effective,
+                    -1.04 - 0.5 * fractions[i] * loss - effective * after_friction,
+                );
+                close(tg, expected, 3e-10);
+                close(
+                    tw,
+                    after_friction - effective * (after_friction - expected) / 0.6,
+                    3e-10,
+                );
+            }
+            endpoints[i] = [cell.energy, tw];
+            gas_change += change;
+            wall_change += stored_change;
+        }
+        let receipt = wall.accepted_branch_shared_support_exchange(0).unwrap();
+        close(receipt.wall_slip_heating_j, 0.5 * loss, 3e-12);
+        close(
+            gas_change + wall_change + receipt.kinetic_energy_change_j,
+            0.0,
+            5e-11,
+        );
+        close(report.wall_energy_change_j, wall_change, 4e-11);
+        close(report.heat_to_gas_j, -wall_change, 4e-11);
+        close(receipt.energy_residual_j, 0.0, 3e-12);
+        assert_eq!(report.external_heat_to_gas_j, 0.0);
+        if mixed {
+            let expected: [[f64; 2]; 2] = local_endpoints.unwrap();
+            for (actual, expected) in endpoints
+                .into_iter()
+                .flatten()
+                .zip(expected.into_iter().flatten())
+            {
+                close(actual, expected, 4e-10);
+            }
+        } else if !constant {
+            local_endpoints = Some(endpoints);
+        }
+    }
+}
+
+#[test]
+fn g4_local_latent_heat_and_mixed_refusals_preserve_all_accepted_endpoints() {
+    let g = gas(1, true, 0.0);
+    let snapshot = |n: &MixtureNetwork1d, wall: &NetworkWallOperator<'_>| {
+        (
+            fields(n),
+            wall.branch_contacts(0).unwrap().to_vec(),
+            wall.shared_wall(0).unwrap().storage.thermal,
+            wall.branch_shared_support(0),
+            wall.accepted_branch_shared_support_exchange(0),
+            wall.last_report(),
+            wall.last_shared_wall_report(),
+        )
+    };
+    for narrow in [false, true] {
+        let make = || {
+            let mut n = network(&g, &[2.0], false);
+            let local = source_amount(
+                ThermalStorageBasis::InternalEnergy,
+                true,
+                if narrow {
+                    [5.99999, 6.00001]
+                } else {
+                    [0.01, 50.0]
+                },
+                80,
+                0.5 * WALL_MASS,
+            );
+            let shared = source_amount(
+                ThermalStorageBasis::InternalEnergy,
+                false,
+                [0.01, 50.0],
+                81,
+                0.5 * WALL_MASS,
+            );
+            let drag = WallDrag::Linear { rate_per_s: 3.0 };
+            let contacts = vec![
+                local.initial_contact(0.1, drag).unwrap(),
+                WallContact {
+                    drag,
+                    thermal: WallThermal::Adiabatic,
+                },
+            ];
+            let mut region = group(shared, &[0], [0.0, 0.3]);
+            region.ports = vec![region.ports[1]];
+            let mut wall = NetworkWallOperator::new(&n, vec![contacts], vec![], || false)
+                .unwrap()
+                .with_material_heat_storage(vec![vec![Some(local), None]], vec![], || false)
+                .unwrap()
+                .with_shared_walls(&n, vec![region], SharedWallControl::default(), || false)
+                .unwrap()
+                .with_shared_branch_supports(
+                    vec![Some(support())],
+                    SharedRecoilControl::default(),
+                    1e-11,
+                    || false,
+                )
+                .unwrap()
+                .with_shared_branch_heat_partition(vec![vec![0.0, 0.5]], || false)
+                .unwrap();
+            wall.advance_for(&mut n, Time::new(1e-8), controls(), || false)
+                .unwrap();
+            (n, wall)
+        };
+        let (mut n, mut wall) = make();
+        let (mut expected, mut reference) = make();
+        let retry_dt = if narrow { 1e-8 } else { 0.2 };
+        let mut polls = 0;
+        let expected_report = reference
+            .advance_for(&mut expected, Time::new(retry_dt), controls(), || {
+                polls += 1;
+                false
+            })
+            .unwrap();
+        let thermal = reference.branch_contacts(0).unwrap()[0].thermal;
+        let source = reference.branch_heat_storage(0).unwrap()[0]
+            .as_ref()
+            .unwrap();
+        assert_eq!(source.temperature_k(thermal).unwrap(), 5.0);
+        let WallThermal::Caloric {
+            specific_energy_j_kg,
+            ..
+        } = thermal
+        else {
+            panic!()
+        };
+        assert!(specific_energy_j_kg > 6.0);
+        let accepted = snapshot(&n, &wall);
+        let mut visits = 0;
+        let refused = wall.advance_for(&mut n, Time::new(0.2), controls(), || {
+            visits += 1;
+            !narrow && visits == polls
+        });
+        if narrow {
+            assert!(refused.is_err());
+        } else {
+            assert_eq!(refused, Err(WallExchangeError::Cancelled));
+        }
+        assert_eq!(snapshot(&n, &wall), accepted);
+        assert_eq!(
+            wall.advance_for(&mut n, Time::new(retry_dt), controls(), || false)
+                .unwrap(),
+            expected_report
+        );
+        assert_eq!(snapshot(&n, &wall), snapshot(&expected, &reference));
+    }
+
+    let n = network(&g, &[2.0], false);
+    let drag = WallDrag::Linear { rate_per_s: 3.0 };
+    let missing = source_amount(
+        ThermalStorageBasis::InternalEnergy,
+        false,
+        [0.01, 50.0],
+        90,
+        0.5 * WALL_MASS,
+    );
+    for thermal in [
+        WallThermal::Reservoir {
+            temperature_k: 5.0,
+            conductance_w_per_k: 0.3,
+        },
+        missing.initial_contact(0.3, drag).unwrap().thermal,
+    ] {
+        let wall = uniform_operator(&n, WallContact { drag, thermal })
+            .with_shared_branch_supports(
+                vec![Some(support())],
+                SharedRecoilControl::default(),
+                1e-11,
+                || false,
+            )
+            .unwrap();
+        assert!(
+            wall.with_shared_branch_heat_partition(vec![vec![0.35; 2]], || false)
+                .is_err()
+        );
+    }
+    for basis in [
+        ThermalStorageBasis::Enthalpy,
+        ThermalStorageBasis::DeclaredSensibleStorage,
+    ] {
+        let sources: [MaterialWallCaloric<'static>; 2] = core::array::from_fn(|i| {
+            source_amount(basis, false, [0.01, 50.0], 91 + i as u64, 0.5 * WALL_MASS)
+        });
+        let contacts = sources
+            .iter()
+            .map(|s| s.initial_contact(0.3, drag).unwrap())
+            .collect();
+        let wall = NetworkWallOperator::new(&n, vec![contacts], vec![], || false)
+            .unwrap()
+            .with_shared_branch_supports(
+                vec![Some(support())],
+                SharedRecoilControl::default(),
+                1e-11,
+                || false,
+            )
+            .unwrap()
+            .with_material_heat_storage(
+                vec![sources.into_iter().map(Some).collect()],
+                vec![],
+                || false,
+            )
+            .unwrap();
+        assert!(
+            wall.with_shared_branch_heat_partition(vec![vec![0.35; 2]], || false)
+                .is_err()
+        );
+    }
+}
