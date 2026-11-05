@@ -11,6 +11,8 @@
 //! Do not add another gas law for the same aperture or use this interface as a
 //! long accommodating pore without a separate wall-energy/transport owner.
 
+/// Finite circular molecular channels with explicitly held thermal walls.
+pub mod channel;
 /// Conservative first filling of an exactly evacuated finite receiver.
 pub mod filling;
 /// Prescribed molecular reservoirs and vacuum outlets in one open transaction.

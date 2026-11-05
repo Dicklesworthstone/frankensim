@@ -23,6 +23,8 @@
 //! of the retained gas catalog over the entire authored T/p support. No mean
 //! free path, thinness, species selectivity or empirical accuracy is inferred.
 
+/// Finite diffuse-wall molecular channels with explicit accommodation heat.
+pub mod channel;
 /// Actual-mixture collision lengths from explicitly declared binary cross sections.
 pub mod collision;
 /// Source-qualified aperture incidence from a drifting local Maxwellian.

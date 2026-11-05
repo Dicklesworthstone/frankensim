@@ -34,7 +34,7 @@ fn regime() -> EffusiveRegime {
     )
     .unwrap()
 }
-fn interface(gas: ThermochemicalGasModel, probability: f64) -> EffusiveInterface {
+pub(super) fn interface(gas: ThermochemicalGasModel, probability: f64) -> EffusiveInterface {
     let rows = gas
         .thermodynamics()
         .components()
@@ -70,7 +70,14 @@ fn pure_model(
     )
     .unwrap()
 }
-fn pure(mass: f64, cp_r: f64, slope: f64, reference: f64, t: f64, p: f64) -> ClosedGasParcel {
+pub(super) fn pure(
+    mass: f64,
+    cp_r: f64,
+    slope: f64,
+    reference: f64,
+    t: f64,
+    p: f64,
+) -> ClosedGasParcel {
     ClosedGasParcel::new(
         pure_model("A", mass, cp_r, slope, reference),
         point(t, p),
@@ -78,7 +85,7 @@ fn pure(mass: f64, cp_r: f64, slope: f64, reference: f64, t: f64, p: f64) -> Clo
     )
     .unwrap()
 }
-fn near(actual: f64, expected: f64) {
+pub(super) fn near(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() <= 8e-12 * actual.abs().max(expected.abs()).max(1e-100),
         "{actual:.17e} != {expected:.17e}"

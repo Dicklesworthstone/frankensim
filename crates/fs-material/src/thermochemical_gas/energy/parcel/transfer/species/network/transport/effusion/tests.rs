@@ -46,10 +46,10 @@ fn model(datum: f64) -> ThermochemicalGasModel {
     )
     .unwrap()
 }
-fn gas(t: f64, p: f64, datum: f64) -> ClosedGasParcel {
+pub(super) fn gas(t: f64, p: f64, datum: f64) -> ClosedGasParcel {
     ClosedGasParcel::new(model(datum), point(t, p), VOLUME).unwrap()
 }
-fn interface(datum: f64) -> EffusiveInterface {
+pub(super) fn interface(datum: f64) -> EffusiveInterface {
     EffusiveInterface::try_new(
         model(datum),
         vec![
@@ -74,7 +74,7 @@ fn interface(datum: f64) -> EffusiveInterface {
     )
     .unwrap()
 }
-fn energy() -> GasEnergySolve {
+pub(super) fn energy() -> GasEnergySolve {
     GasEnergySolve {
         minimum_temperature_k: 200.0,
         maximum_temperature_k: 1800.0,
@@ -82,7 +82,7 @@ fn energy() -> GasEnergySolve {
         maximum_iterations: 128,
     }
 }
-fn controls() -> GasTransportSolve {
+pub(super) fn controls() -> GasTransportSolve {
     GasTransportSolve {
         exchange: SpeciesNetworkSolve {
             maximum_species_fraction: 0.1,
@@ -103,7 +103,7 @@ fn link(interface: &EffusiveInterface, area_m2: f64) -> EffusionNetworkLink<'_> 
 fn rate(t: f64, p: f64, area: f64) -> f64 {
     area * p / (2.0 * core::f64::consts::PI * M * R * t).sqrt()
 }
-fn near(actual: f64, expected: f64, absolute: f64) {
+pub(super) fn near(actual: f64, expected: f64, absolute: f64) {
     assert!(
         (actual - expected).abs() <= absolute,
         "{actual:.17e} != {expected:.17e}"
