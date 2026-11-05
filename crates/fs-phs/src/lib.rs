@@ -70,6 +70,9 @@ use fs_math::det;
 mod relaxation_map;
 mod port_conductance;
 pub use relaxation_map::{MappedRelaxationBranch, RelaxationStrainMap};
+
+mod gap_flow;
+pub use gap_flow::{GapFlowError, GapFlowLaw};
 use relaxation_map::RelaxationCoupling;
 pub use newton::{
     NewtonSite, SolveBudget, SolveCertificate, admit_default_newton_iterate, admit_newton_iterate,
@@ -5692,6 +5695,12 @@ pub fn duffing_oscillator(m: f64, k: f64, k3: f64, c: f64) -> Result<PortHamilto
 /// reverses with the pressure difference. This is the same port for a
 /// relief valve, a vocal fold, a leaflet, or a beating reed — music
 /// is not a special case.
+///
+/// This is the declared **inviscid rung**. A valve path with a channel
+/// length and a gas viscosity must use [`GapFlowLaw`] (IRP M3.1-W3,
+/// DEF-13), whose inviscid limit is this function bit for bit and which
+/// adds the laminar `12 µ L_c U/(w h³)` term and a regular Jacobian at
+/// closure.
 #[must_use]
 pub fn bernoulli_volume_flow(width_m: f64, opening_m: f64, dp_pa: f64, density: f64) -> f64 {
     if !(opening_m > 0.0)
