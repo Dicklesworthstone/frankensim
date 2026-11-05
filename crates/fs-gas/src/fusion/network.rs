@@ -14,6 +14,7 @@
 //! refinement applies to smooth admitted evolution; the local estimate is not
 //! a global bound or experimental validation of this thermal closure.
 
+use super::volume::FusionVolumeHistory;
 use super::{AVOGADRO, CV_MOLAR, poll, positive};
 use fs_qty::{Amount, Energy, Power, Time};
 use fs_thermochem::equilibrium::composition::FrozenIonizedGasStateV1;
@@ -141,11 +142,16 @@ pub struct FusionNetworkBalance {
     pub external_electron_energy_j: f64,
     /// Held external ion energy [J].
     pub external_heavy_energy_j: f64,
+    /// Mechanical work on ions [J]; positive during compression.
+    pub boundary_work_on_heavy_j: f64,
+    /// Mechanical work on electrons [J]; positive during compression.
+    pub boundary_work_on_electrons_j: f64,
     /// Final source electron energy minus its independent transfer account [J].
     pub electron_energy_residual_j: f64,
     /// Final source ion energy minus its independent transfer account [J].
     pub heavy_energy_residual_j: f64,
-    /// Delta thermal U + escaped neutron/photon energy - Q - external heat [J].
+    /// Delta thermal U + escaped neutron/photon energy - Q - external heat
+    /// - work on ions - work on electrons [J].
     pub total_energy_residual_j: f64,
     /// Relative baryon drift, including all emitted neutrons.
     pub relative_baryon_residual: f64,
@@ -170,6 +176,7 @@ pub struct FusionNetworkResult {
     channels: FusionNetworkChannels,
     heating: FusionNetworkHeating,
     transport: FusionNetworkTransport,
+    volume_history: Option<FusionVolumeHistory>,
     controls: FusionNetworkSolve,
     elapsed: Time,
     balance: FusionNetworkBalance,
@@ -199,6 +206,10 @@ impl FusionNetworkResult {
     pub const fn transport(&self) -> &FusionNetworkTransport {
         &self.transport
     }
+    /// Original prescribed geometry, or `None` for the rigid-volume entry point.
+    pub fn volume_history(&self) -> Option<&FusionVolumeHistory> {
+        self.volume_history.as_ref()
+    }
     /// Retained domain and numerical controls.
     pub const fn controls(&self) -> FusionNetworkSolve {
         self.controls
@@ -223,6 +234,12 @@ impl FusionNetworkResult {
     pub const fn escaped_photon_energy(&self) -> Energy {
         Energy::new(self.balance.photon_energy_escaped_j)
     }
+    /// Signed total mechanical work on both thermal pools [J].
+    pub fn total_boundary_work(&self) -> Energy {
+        Energy::new(
+            self.balance.boundary_work_on_heavy_j + self.balance.boundary_work_on_electrons_j,
+        )
+    }
 }
 
 /// Evolve an explicitly selected network with shared thermal feedback.
@@ -242,6 +259,60 @@ pub fn advance_fusion_network(
     transport: &FusionNetworkTransport,
     duration: Time,
     controls: FusionNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FusionNetworkResult, FusionNetworkError> {
+    advance(
+        initial, plasma, channels, heating, transport, duration, None, controls, cancelled,
+    )
+}
+
+/// Evolve the same fusion network through prescribed compression and expansion.
+///
+/// The history starts at the input state's exact volume and supplies the full
+/// interval duration. Every stage uses its current volume for reaction exposure,
+/// Coulomb exchange, radiation and physical-domain admission. For each thermal
+/// pool, reversible isotropic work obeys `dU = -(2/3) U d(ln V)` at fixed stock.
+/// Positive work on the gas is compression; heat and nuclear energy remain
+/// separate accounts. No source clock is advanced by a geometric substep.
+///
+/// Exact adiabatic maps surround the midpoint source solve, and adaptive steps
+/// stop at every authored knot. Work increments participate in the local error
+/// estimate. Smooth segments have second-order refinement; this estimate is
+/// not a global or experimental error certificate. The original history and
+/// material sources are retained in the result. Boundary dynamics, shocks,
+/// anisotropic magnetic work and fast-particle confinement require other models.
+pub fn advance_fusion_network_with_volume(
+    initial: &FrozenIonizedGasStateV1,
+    plasma: &LightIonFusionPlasmaV1,
+    channels: FusionNetworkChannels,
+    heating: FusionNetworkHeating,
+    transport: &FusionNetworkTransport,
+    volume_history: &FusionVolumeHistory,
+    controls: FusionNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FusionNetworkResult, FusionNetworkError> {
+    advance(
+        initial,
+        plasma,
+        channels,
+        heating,
+        transport,
+        volume_history.duration(),
+        Some(volume_history),
+        controls,
+        cancelled,
+    )
+}
+
+fn advance(
+    initial: &FrozenIonizedGasStateV1,
+    plasma: &LightIonFusionPlasmaV1,
+    channels: FusionNetworkChannels,
+    heating: FusionNetworkHeating,
+    transport: &FusionNetworkTransport,
+    duration: Time,
+    volume_history: Option<&FusionVolumeHistory>,
+    controls: FusionNetworkSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<FusionNetworkResult, FusionNetworkError> {
     controls.validate()?;
@@ -252,12 +323,18 @@ pub fn advance_fusion_network(
             "finite nonnegative network duration required",
         ));
     }
+    if volume_history.is_some_and(|history| history.initial_volume() != initial.volume()) {
+        return Err(FusionNetworkError::Invalid(
+            "volume history must start at the original state volume",
+        ));
+    }
     let problem = solve::Problem::new(
         initial,
         plasma,
         channels,
         heating,
         transport,
+        volume_history,
         controls,
         &mut cancelled,
     )?;
@@ -271,6 +348,7 @@ pub fn advance_fusion_network(
         channels,
         heating,
         transport: transport.clone(),
+        volume_history: volume_history.cloned(),
         controls,
         elapsed: duration,
         balance,

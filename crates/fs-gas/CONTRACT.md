@@ -1,5 +1,70 @@
 # fs-gas contract
 
+## Prescribed fusion compression and separate thermal pressure work
+
+`fusion::volume::advance_adiabatic_fusion_volume` moves either original D-T or
+six-species light-ion plasma to an explicitly prescribed volume without
+advancing time. Both monatomic thermal pools obey `p_s = 2 U_s/(3 V)` and
+`T_s V^(2/3) = constant` at fixed populations. Mechanical work **on** each pool
+is positive for compression and negative for expansion. Original source
+energies independently check the separate work receipts; populations and source
+identity are retained. Every possible source must cover the complete monotone
+temperature path, including unpopulated products. Endpoint physical admission
+suffices for this ideal adiabatic path: coupling scales as `V^(1/3)`, phase-space
+density is constant, and thermal/rest-energy ratio scales as `V^(-2/3)`.
+
+`FusionVolumeHistory` retains 1–256 original finite, positive volume knots at
+strictly increasing times beginning at zero. Interpolation is explicitly linear
+in log volume, giving constant fractional compression rate per segment. Holds
+and authored endpoints retain their exact values, queries do not extrapolate,
+and one knot describes a zero-duration history. Precomputed log ratios and
+bounded binary search keep successful lookups allocation-free.
+
+`fusion::network::advance_fusion_network_with_volume` couples that history to
+the existing selected D-T, both D-D branches and D-He3 network. Every reaction,
+Coulomb and radiation evaluation uses the actual stage volume and populations.
+Exact adiabatic maps surround the midpoint source solve. Only the source solve
+advances the external-heating clock; every accepted or attempted interval stops
+at the next authored knot. The adaptive comparison includes both signed work
+increments. An unrepresentable comparison midpoint refuses rather than
+claiming zero local error. Smooth-segment refinement is second order; the
+estimate remains numerical, not a global or experimental error certificate.
+
+Moving states carry positive thermal energies independently of cumulative
+transfer/work accounts. Compensated small increments retain tiny work; direct
+positive scaling preserves the survivor after deep expansion. This avoids
+recovering a small thermal energy as the difference of nearly equal large
+initial-energy and work accounts. Publication checks both original caloric
+energies, charge, baryons including emitted neutrons, and every species against
+the reaction extents. The complete balance is
+`delta(Uh+Ue) + En + Ephotons - sum(Qr*xir) - Eexternal - Wh_on - We_on = 0`.
+Result objects retain the authored geometry, sources and numerical controls.
+The rigid entry point remains available and reports exactly zero boundary work.
+
+Fourteen new focused checks cover both source bindings, exact adiabatic scaling,
+tiny volume changes, deep expansion, reversibility, source gaps, knot handling,
+constant-history compatibility, atomic cancellation and physical-domain refusal.
+The external-power benchmark solves `dU_s/dt = a U_s + P_s` independently and
+checks fourfold error reduction on step halving. A separate direct-SI RK4
+reference resolves the full compression/hold/expansion history, all five ion
+amounts, four extents, eight product energies, both work accounts and thermal
+transfers. Its 512/1024-step-per-segment refinement differs by less than
+`5.5e-12` relatively in final temperatures and `4.7e-11` in extents; the net
+electron work changes by `5.1e-7 J` after opposing work contributions cancel.
+The runnable `compressed_fusion` example compares that history with a rigid
+same-duration baseline using the same original source builder.
+
+The ideal isotropic scaling is the fixed-ionization monatomic limit described
+by Davidovits and Fisch, *Modeling turbulent energy behavior and sudden viscous
+dissipation in compressing plasma turbulence*,
+<https://www.osti.gov/servlets/purl/1432486>. Separate electron/ion pressure work
+and reciprocal thermal exchange follow the two-temperature energy accounting
+in *ALEGRA-HEDP v4.6*, SAND2004-5996, section 10,
+<https://doi.org/10.2172/920747>. This owner prescribes homogeneous geometry;
+it supplies no piston dynamics, shocks, anisotropic magnetic work, nonideal
+correlation pressure or confinement. Charged products still thermalize
+immediately, and selected neutron/photon escape remains explicit.
+
 ## Competing light-ion fusion and secondary-fuel burn
 
 `fusion::network::advance_fusion_network` evolves explicitly selected D-T,

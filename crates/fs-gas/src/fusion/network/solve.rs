@@ -1,8 +1,9 @@
 use super::super::solve::{Sum, frozen_depletion};
 use super::super::thermal::{self, ThermalSources};
+use super::super::volume::{adiabatic_work_on_pools, log_volume_ratio};
 use super::*;
-use fs_math::det::pow;
-use fs_qty::Temperature;
+use fs_math::det::{exp, pow};
+use fs_qty::{Temperature, Volume};
 use fs_thermochem::coulomb::CoulombErrorV1;
 use fs_thermochem::equilibrium::composition::FrozenIonizedGasStateErrorV1;
 use fs_thermochem::fusion::FusionThermalEventV1;
@@ -12,6 +13,11 @@ use fs_thermochem::plasma_radiation::BremsstrahlungErrorV1;
 #[derive(Clone, Copy)]
 pub(super) struct Point {
     time: f64,
+    volume: Volume,
+    // Moving-volume states carry the positive thermal survivor directly.
+    // Reconstructing it as U_initial + W can erase it after deep expansion.
+    thermal_energy: [Sum; 2],
+    work_on_pools: [Sum; 2],
     amounts: [Sum; 6],
     extents: [Sum; 4],
     products: [[Sum; 2]; 4],
@@ -34,6 +40,7 @@ pub(super) struct Problem<'a> {
     channels: FusionNetworkChannels,
     heating: FusionNetworkHeating,
     transport: &'a FusionNetworkTransport,
+    volume_history: Option<&'a FusionVolumeHistory>,
     controls: FusionNetworkSolve,
     initial_amounts: [f64; 6],
     initial_energy: [f64; 2],
@@ -47,6 +54,7 @@ impl<'a> Problem<'a> {
         channels: FusionNetworkChannels,
         heating: FusionNetworkHeating,
         transport: &'a FusionNetworkTransport,
+        volume_history: Option<&'a FusionVolumeHistory>,
         controls: FusionNetworkSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, FusionNetworkError> {
@@ -93,6 +101,7 @@ impl<'a> Problem<'a> {
             channels,
             heating,
             transport,
+            volume_history,
             controls,
             initial_amounts: core::array::from_fn(|i| initial.amounts()[i].value()),
             initial_energy: [
@@ -108,6 +117,9 @@ impl<'a> Problem<'a> {
     fn start(&self) -> Point {
         Point {
             time: 0.0,
+            volume: self.initial.volume(),
+            thermal_energy: self.initial_energy.map(sum),
+            work_on_pools: [Sum::default(); 2],
             amounts: self.initial_amounts.map(sum),
             extents: [Sum::default(); 4],
             products: [[Sum::default(); 2]; 4],
@@ -134,17 +146,34 @@ impl<'a> Problem<'a> {
         ]
     }
     fn pool_energy(&self, point: Point) -> [f64; 2] {
+        if self.volume_history.is_some() {
+            return point.thermal_energy.map(|x| x.value);
+        }
+        self.accounted_energy(point)
+    }
+    /// Independent cumulative transfer accounts, also used to verify moving
+    /// states. The rigid path retains its original arithmetic and fast path.
+    fn accounted_energy(&self, point: Point) -> [f64; 2] {
         [
             self.initial_energy[0]
                 + self.heating.heavy_power.value() * point.time
                 + (point.deposited[0].value - point.ion_removal.value)
-                + point.exchange.value,
+                + point.exchange.value
+                + point.work_on_pools[0].value,
             self.initial_energy[1]
                 + self.heating.electron_power.value() * point.time
                 + point.deposited[1].value
                 - point.exchange.value
-                - point.photons.value,
+                - point.photons.value
+                + point.work_on_pools[1].value,
         ]
+    }
+    fn add_pool_energy(&self, point: &mut Point, increments: [f64; 2]) {
+        if self.volume_history.is_some() {
+            for (energy, increment) in point.thermal_energy.iter_mut().zip(increments) {
+                energy.add(increment);
+            }
+        }
     }
     fn temperatures(&self, point: Point) -> Result<[f64; 2], FusionNetworkError> {
         // Keep exact authored endpoints when no physical transfer has occurred.
@@ -152,6 +181,8 @@ impl<'a> Problem<'a> {
         if point.extents.iter().all(|x| x.value == 0.0)
             && point.exchange.value == 0.0
             && point.photons.value == 0.0
+            && point.work_on_pools.iter().all(|x| x.value == 0.0)
+            && point.volume == self.initial.volume()
             && (point.time == 0.0
                 || (self.heating.heavy_power.value() == 0.0
                     && self.heating.electron_power.value() == 0.0))
@@ -178,6 +209,10 @@ impl<'a> Problem<'a> {
         if !point.time.is_finite()
             || point.time < 0.0
             || !point.exchange.value.is_finite()
+            || !positive(point.volume.value())
+            || point.work_on_pools.iter().any(|x| !x.value.is_finite())
+            || (self.volume_history.is_some()
+                && point.thermal_energy.iter().any(|x| !x.value.is_finite()))
             || point
                 .amounts
                 .iter()
@@ -205,7 +240,7 @@ impl<'a> Problem<'a> {
                 Temperature::new(th),
                 Temperature::new(te),
                 &self.amounts(point),
-                self.initial.volume(),
+                point.volume,
                 c.plasma_limits,
                 &mut *cancelled,
             )
@@ -232,7 +267,7 @@ impl<'a> Problem<'a> {
         let thermal = thermal::evaluate(
             self.transport,
             &self.amounts(point),
-            self.initial.volume(),
+            point.volume,
             temperatures,
             cancelled,
         )?;
@@ -256,7 +291,7 @@ impl<'a> Problem<'a> {
             return Ok(old);
         }
         let rate = event.reactivity().value_m3_s();
-        let volume = self.initial.volume().value();
+        let volume = old.volume.value();
         let mut next = old;
         let extent = if a == b {
             let (remaining, extent) = dd_depletion(na, rate, volume, dt)?;
@@ -271,8 +306,9 @@ impl<'a> Problem<'a> {
             extent
         };
         next.extents[r].add(extent);
-        next.ion_removal
-            .add((event.reacting_ion_energy_j() * AVOGADRO) * extent);
+        let ion_removal = (event.reacting_ion_energy_j() * AVOGADRO) * extent;
+        next.ion_removal.add(ion_removal);
+        let mut thermal_increment = [-ion_removal, 0.0];
         for (p, product) in reaction.products().iter().enumerate() {
             let energy = (event.product_kinetic_energies_j()[p] * AVOGADRO) * extent;
             next.products[r][p].add(energy);
@@ -283,8 +319,11 @@ impl<'a> Problem<'a> {
                 let f = self.heating.product_electron_fractions[r][p];
                 next.deposited[0].add((1.0 - f) * energy);
                 next.deposited[1].add(f * energy);
+                thermal_increment[0] += (1.0 - f) * energy;
+                thermal_increment[1] += f * energy;
             }
         }
+        self.add_pool_energy(&mut next, thermal_increment);
         Ok(next)
     }
 
@@ -300,6 +339,7 @@ impl<'a> Problem<'a> {
         )?;
         let mut next = old;
         next.photons.add(loss);
+        self.add_pool_energy(&mut next, [0.0, -loss]);
         Ok(next)
     }
     fn thermal_step(
@@ -323,6 +363,7 @@ impl<'a> Problem<'a> {
         )?;
         let mut exchanged = first;
         exchanged.exchange.add(transfer);
+        self.add_pool_energy(&mut exchanged, [transfer, -transfer]);
         self.admit(exchanged, cancelled)?;
         let next = self.radiate(exchanged, 0.5 * dt, sources.radiation_w_per_sqrt_k)?;
         self.admit(next, cancelled)?;
@@ -352,7 +393,14 @@ impl<'a> Problem<'a> {
                 self.admit(next, cancelled)?;
             }
         }
-        next.time = old.time + dt; // held external work enters exactly once
+        next.time = old.time + dt; // held external heat enters exactly once
+        self.add_pool_energy(
+            &mut next,
+            [
+                self.heating.heavy_power.value() * dt,
+                self.heating.electron_power.value() * dt,
+            ],
+        );
         self.admit(next, cancelled)?;
         let next = self.thermal_step(next, 0.5 * dt, sources.thermal, cancelled)?;
         self.admit(next, cancelled)?;
@@ -361,13 +409,59 @@ impl<'a> Problem<'a> {
     fn midpoint(
         &self,
         old: Point,
-        dt: f64,
+        end_time: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, FusionNetworkError> {
-        let first = self.sources(old, cancelled)?;
-        let middle = self.frozen_step(old, 0.5 * dt, first, cancelled)?;
+        let dt = end_time - old.time;
+        let middle_time = old.time + 0.5 * dt;
+        if middle_time <= old.time || middle_time >= end_time {
+            return Err(FusionNetworkError::StepBudget);
+        }
+        let prepared = if let Some(history) = self.volume_history {
+            self.volume_step(old, history.volume_at(Time::new(middle_time))?, cancelled)?
+        } else {
+            old
+        };
+        let first = self.sources(prepared, cancelled)?;
+        let middle = self.frozen_step(prepared, 0.5 * dt, first, cancelled)?;
         let sources = self.sources(middle, cancelled)?;
-        self.frozen_step(old, dt, sources, cancelled)
+        let mut burned = self.frozen_step(prepared, dt, sources, cancelled)?;
+        burned.time = end_time;
+        if let Some(history) = self.volume_history {
+            self.volume_step(burned, history.volume_at(Time::new(end_time))?, cancelled)
+        } else {
+            Ok(burned)
+        }
+    }
+
+    /// Exact fixed-inventory geometric map; its source clock never advances.
+    fn volume_step(
+        &self,
+        old: Point,
+        volume: Volume,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, FusionNetworkError> {
+        poll(cancelled)?;
+        if old.volume == volume {
+            return Ok(old);
+        }
+        let energies = self.pool_energy(old);
+        let work = adiabatic_work_on_pools(energies, old.volume, volume)?;
+        let factor = exp((-2.0 / 3.0) * log_volume_ratio(old.volume, volume)?);
+        let mut next = old;
+        next.volume = volume;
+        for i in 0..2 {
+            next.work_on_pools[i].add(work[i]);
+            if work[i] < -0.5 * energies[i] {
+                // A direct positive survivor avoids subtracting almost all U.
+                next.thermal_energy[i] = sum(energies[i] * factor);
+            } else {
+                // Compensate small work against repeated finite-volume motion.
+                next.thermal_energy[i].add(work[i]);
+            }
+        }
+        self.admit(next, cancelled)?;
+        Ok(next)
     }
 
     fn error(&self, old: Point, full: Point, fine: Point) -> Result<f64, FusionNetworkError> {
@@ -410,6 +504,16 @@ impl<'a> Problem<'a> {
             (full.ion_removal, fine.ion_removal, old.ion_removal),
             (full.exchange, fine.exchange, old.exchange),
             (full.photons, fine.photons, old.photons),
+            (
+                full.work_on_pools[0],
+                fine.work_on_pools[0],
+                old.work_on_pools[0],
+            ),
+            (
+                full.work_on_pools[1],
+                fine.work_on_pools[1],
+                old.work_on_pools[1],
+            ),
         ] {
             add(
                 a.value - before.value,
@@ -431,6 +535,9 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Point, FusionNetworkBalance), FusionNetworkError> {
         let mut point = self.start();
+        // Compensate accepted elapsed increments. Repeatedly rounding t+h
+        // can otherwise leave an unresolvable sliver at an authored endpoint.
+        let mut clock = Sum::default();
         let mut balance = FusionNetworkBalance::default();
         let mut step = self.controls.initial_step_s;
         for _ in 0..self.controls.maximum_steps {
@@ -438,17 +545,28 @@ impl<'a> Problem<'a> {
             if point.time == duration {
                 return Ok((point, balance));
             }
-            let dt = step
-                .min(self.controls.maximum_step_s)
-                .min(duration - point.time);
-            if dt <= 0.0 || point.time + dt == point.time {
+            let next_boundary = if let Some(history) = self.volume_history {
+                history
+                    .next_knot_after(Time::new(point.time))?
+                    .map_or(duration, |time| time.value())
+            } else {
+                duration
+            };
+            let mut next_clock = clock;
+            next_clock.add(step.min(self.controls.maximum_step_s));
+            let end_time = next_clock.value.min(next_boundary);
+            if end_time == next_boundary {
+                next_clock = sum(next_boundary);
+            }
+            let dt = end_time - point.time;
+            let middle_time = point.time + 0.5 * dt;
+            if dt <= 0.0 || middle_time <= point.time || middle_time >= end_time {
                 return Err(FusionNetworkError::StepBudget);
             }
             let trial = (|| {
-                let full = self.midpoint(point, dt, cancelled)?;
-                let half = self.midpoint(point, 0.5 * dt, cancelled)?;
-                let mut fine = self.midpoint(half, 0.5 * dt, cancelled)?;
-                fine.time = point.time + dt;
+                let full = self.midpoint(point, end_time, cancelled)?;
+                let half = self.midpoint(point, middle_time, cancelled)?;
+                let fine = self.midpoint(half, end_time, cancelled)?;
                 self.admit(fine, cancelled)?;
                 let error = self.error(point, full, fine)?;
                 Ok::<_, FusionNetworkError>((fine, error))
@@ -456,6 +574,7 @@ impl<'a> Problem<'a> {
             let error = match trial {
                 Ok((next, error)) if error <= 1.0 => {
                     point = next;
+                    clock = next_clock;
                     balance.accepted_steps += 1;
                     balance.maximum_normalized_local_error =
                         balance.maximum_normalized_local_error.max(error);
@@ -508,7 +627,7 @@ impl<'a> Problem<'a> {
             FrozenIonizedGasStateV1::new(
                 self.plasma.thermodynamics(),
                 &amounts,
-                self.initial.volume(),
+                point.volume,
                 Temperature::new(th),
                 Temperature::new(te),
                 64.0 * f64::EPSILON,
@@ -525,7 +644,7 @@ impl<'a> Problem<'a> {
             released.add(q * extent);
         }
         let neutron_amount = extents[0] + extents[1];
-        let expected = self.pool_energy(point);
+        let expected = self.accounted_energy(point);
         let heavy_residual = state.heavy_internal_energy().value() - expected[0];
         let electron_residual = state.electron_internal_energy().value() - expected[1];
         let external_heavy = self.heating.heavy_power.value() * point.time;
@@ -535,7 +654,9 @@ impl<'a> Problem<'a> {
         let total_residual = change + point.neutrons.value + point.photons.value
             - released.value
             - external_heavy
-            - external_electron;
+            - external_electron
+            - point.work_on_pools[0].value
+            - point.work_on_pools[1].value;
         let nuclei = [
             NuclearSpeciesV1::Proton,
             NuclearSpeciesV1::Deuterium,
@@ -579,6 +700,8 @@ impl<'a> Problem<'a> {
                 * (released.value.abs()
                     + external_heavy.abs()
                     + external_electron.abs()
+                    + point.work_on_pools[0].value.abs()
+                    + point.work_on_pools[1].value.abs()
                     + self.initial_energy[0].abs()
                     + self.initial_energy[1].abs());
         if [
@@ -613,6 +736,8 @@ impl<'a> Problem<'a> {
             photon_energy_escaped_j: point.photons.value,
             external_electron_energy_j: external_electron,
             external_heavy_energy_j: external_heavy,
+            boundary_work_on_heavy_j: point.work_on_pools[0].value,
+            boundary_work_on_electrons_j: point.work_on_pools[1].value,
             electron_energy_residual_j: electron_residual,
             heavy_energy_residual_j: heavy_residual,
             total_energy_residual_j: total_residual,

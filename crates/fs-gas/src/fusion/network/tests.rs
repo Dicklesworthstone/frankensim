@@ -11,6 +11,7 @@ use fs_thermochem::plasma_radiation::{
     BremsstrahlungControlsV1, BremsstrahlungGauntFactorV1, ElectronIonBremsstrahlungV1,
 };
 
+mod compression;
 mod fixture;
 
 const MIXED_DENSITY: [f64; 5] = [2e19, 3e20, 7e19, 4e19, 1e19];
