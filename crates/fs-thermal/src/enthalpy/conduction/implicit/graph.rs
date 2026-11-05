@@ -46,6 +46,20 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Solve original local heat-generation feedback with graph conduction.
+    /// The chain attachment documents caloric identity, signed-power units and
+    /// additive source ownership. Sparse topology and linear budgets are kept.
+    pub fn with_heat_sources(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        sources: &[(CellId, &'a dyn super::source::ImplicitHeatSourceLaw)],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_heat_sources(thermal, sources, checkpoint)?,
+        })
+    }
+
     /// Resolve two actual prescribed baths through one selected physical face.
     /// The original rate/entropy owner retains each signed bath contribution
     /// through backward Euler and native SDIRK stages. See the chain attachment

@@ -1743,7 +1743,30 @@ before native solving and acceptance. Native external heat already contains
 observed sources, so component accounts are parallel descriptions of the same
 energy, not additional credits. Generated-source and transfer entropy retain
 their original unclassified status; an opted-in advection entropy account keeps
-its own flow/mixing semantics. The adaptive step-doubling path remains source-free.
+its own flow/mixing semantics. The adaptive step-doubling path does not accept
+observed source owners; autonomous endpoint laws below remain supported.
+
+`ImplicitConductionChain::with_heat_sources` and the graph attachment admit
+immutable local `ImplicitHeatSourceLaw` objects bound to the original caloric
+owner of each selected cell. Each law supplies signed total cell power [W] and
+its analytic derivative with respect to original specific stored energy.
+Temperature-dependent electrical or reaction-heating closures can therefore
+join Fourier transport at the same nonlinear endpoint without freezing their
+feedback at the interval start. Phase-dependent generation may vary with
+enthalpy even when the original caloric temperature is on a latent plateau.
+The caller owns source units, calibration, state bounds and the chain rule;
+this seam infers no circuit, reaction inventory or cross-cell feedback.
+
+These powers and tangents enter the existing joule residual and diagonal
+Jacobian once, alongside independent authored and observed watts. The same
+evaluation serves backward Euler, both native SDIRK2 stages and adaptive
+step doubling. Original generated-source entropy remains unclassified. No
+source evaluation advances physical history; invalid identities, nonfinite
+powers/tangents, out-of-domain trials, cancellation or failed nonlinear gates
+publish no candidate. Positive feedback still needs a physically admissible
+endpoint and bounded nonlinear convergence. Independent two-cell solutions,
+nonlinear Fourier/source finite differences, latent-energy feedback and
+second-order time refinement exercise these paths.
 
 G1/G3/G4 checks cover independent stiff chain/graph forced solutions, implicit
 Robin cooling with authored/start/interval sources, nonlinear halving of ramp

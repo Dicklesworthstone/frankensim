@@ -1207,3 +1207,6 @@ mod radiative_link;
 #[path = "tests/advection.rs"]
 mod advection;
 
+#[path = "tests/source.rs"]
+mod heat_source;
+

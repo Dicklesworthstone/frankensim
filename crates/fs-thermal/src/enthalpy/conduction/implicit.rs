@@ -48,6 +48,11 @@ pub use graph::{ImplicitConductionGraph, ImplicitConductionLinearControls};
 mod observed;
 pub use observed::ImplicitConductionObservedError;
 
+/// Local heat-generation feedback evaluated with the conductive endpoint.
+#[path = "implicit/source.rs"]
+pub mod source;
+use source::{ImplicitHeatSourceLaw, ImplicitHeatSourceState};
+
 /// Source-owned state-dependent contact resistance in the same implicit solve.
 #[path = "implicit/contact.rs"]
 pub mod contact;
@@ -253,6 +258,7 @@ pub struct ImplicitConductionChain<'a> {
     ambient_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
     reservoir_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
     ambient_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
+    heat_sources: BTreeMap<CellId, &'a dyn ImplicitHeatSourceLaw>,
     advection: Option<ImplicitAdvection>,
 }
 
@@ -267,6 +273,7 @@ struct Endpoint {
     ambient_states: BTreeMap<CellId, ImplicitBoundaryState>,
     reservoir_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     ambient_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
+    heat_source_states: BTreeMap<CellId, ImplicitHeatSourceState>,
     reconstruction_tangent: Vec<(usize, usize, f64)>,
 }
 
@@ -337,6 +344,7 @@ impl<'a> ImplicitConductionChain<'a> {
             ambient_laws: BTreeMap::new(),
             reservoir_exchanges: BTreeMap::new(),
             ambient_exchanges: BTreeMap::new(),
+            heat_sources: BTreeMap::new(),
             advection: None,
         };
         result.admit(thermal, &mut checkpoint)?;
@@ -664,6 +672,16 @@ impl<'a> ImplicitConductionChain<'a> {
             )?;
             boundary_values.ambient_w_k.insert(id, g);
         }
+        let mut heat_source_states = BTreeMap::new();
+        for (&id, law) in &self.heat_sources {
+            checkpoint()?;
+            let state = law.state_at_specific_enthalpy(
+                thermal.cells[&id].specific_h_j_kg,
+                checkpoint,
+            )?;
+            state.admit()?;
+            heat_source_states.insert(id, state);
+        }
         checkpoint()?;
         Ok(Endpoint {
             states,
@@ -676,6 +694,7 @@ impl<'a> ImplicitConductionChain<'a> {
             ambient_states,
             reservoir_exchange_states,
             ambient_exchange_states,
+            heat_source_states,
             reconstruction_tangent: Vec::new(),
         })
     }
@@ -723,6 +742,10 @@ impl<'a> ImplicitConductionChain<'a> {
             // Jacobian retains only the already prepared exchange states.
             let exchanges = std::mem::take(&mut endpoint.exchange_values);
             let mut sources_w = sources_w.clone();
+            for (&id, state) in &endpoint.heat_source_states {
+                let value = sources_w.entry(id).or_default();
+                *value = finite(*value + state.power_w)?;
+            }
             let mut transfers = transfers.to_vec();
             if let Some(advection) = &self.advection {
                 let (transport, tangent) = advection.endpoint(
@@ -887,6 +910,9 @@ impl<'a> ImplicitConductionChain<'a> {
                     derivative += dg * (reservoir.temperature_k - state.temperature_k)
                         - g * state.temperature_slope_kg_k_j;
                 }
+            }
+            if let Some(source) = endpoint.heat_source_states.get(&id) {
+                derivative = finite(derivative + source.power_enthalpy_derivative_w_kg_j)?;
             }
             add_entry(workspace, i, i, -dt * derivative / cell.mass_kg)?;
         }
