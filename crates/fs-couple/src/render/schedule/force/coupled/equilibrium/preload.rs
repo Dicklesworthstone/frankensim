@@ -90,18 +90,21 @@ pub(super) fn initialize(
         }
         let q = response.solve(network, &forces, true, true, gate)?;
         let staged = network.stage_static_equilibrium(&q, &forces, gate)?;
-        let Some(set) = condensed else { break staged };
         if corrected { break staged; }
-        // The solve's closure `free_x - A R` and the actual `N^T q - G R` each cancel
-        // terms far larger than the closure, along different sums. A stiff stop turns
-        // their rounded difference into a force past its tolerance. Where the gate
-        // below would refuse for that, carry the measured difference into `free_x`
-        // and solve once more. The law, load, tolerances and gate don't change.
+        // The solve's closure `free_x - A R` and the actual `N^T q - G R` (G is zero
+        // without omitted modes) each cancel terms far larger than the closure, along
+        // different sums. A stiff stop turns their rounded difference into a force past
+        // its tolerance. Where the gate below would refuse for that, carry the measured
+        // difference into `free_x` and solve once more. The law, load, tolerances and
+        // gate don't change.
         let mut measured = free_x.clone();
         let mut misses = false;
         for index in 0..p {
             let point = &points[index];
-            let lag = dot(&set.compliance[index*p..(index+1)*p], &reactions)?;
+            let lag = match condensed {
+                Some(set) => dot(&set.compliance[index*p..(index+1)*p], &reactions)?,
+                None => 0.0,
+            };
             let actual = finite(extension(&network.candidates, &point.column, 0.0)?-lag)?;
             let expected = point.force(actual)?;
             let tolerance = force_tolerance(reactions[index], expected, point.config)?;

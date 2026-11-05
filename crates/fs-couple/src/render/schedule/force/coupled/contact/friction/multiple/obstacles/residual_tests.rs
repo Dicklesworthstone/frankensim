@@ -261,22 +261,26 @@ fn a_stop_stiff_enough_to_miss_on_rounding_settles_on_the_measured_difference() 
             None => joint,
         }
     };
-    let mut misses_without_omitted_modes = 0;
+    // Without the correction both paths miss on some of these loads (35db3c6df counted
+    // misses without omitted modes, and its one-word mutation missed with them).
     for i in 0..256 {
         let scale = 2.0+f64::from(i)/128.0;
         let load: Vec<f64> = shape.iter().map(|s| s*scale).collect();
-        // No correction on this path, so a miss here shows the family can fail.
-        if joint(None).initialize_released_equilibrium(&load, &gate).is_err() { misses_without_omitted_modes += 1; }
-        let mut settled = joint(Some(OMITTED));
-        let energy = settled.initialize_released_equilibrium(&load, &gate)
-            .unwrap_or_else(|error| panic!("load scale {scale}: {error}"));
-        // The law on the accepted states, by this test's own sum.
-        let reaction = accepted_reactions(&settled)[0];
-        let closure = shape.iter().zip(displacements(&settled)).map(|(a, b)| a*b).sum::<f64>()-OMITTED*reaction;
-        assert!((reaction-STIFFNESS*closure.powf(1.5)).abs() <= 1e-12+1e-9*reaction, "load scale {scale}");
-        assert!((energy-settled.total_energy_j().unwrap()).abs() <= 1e-15, "the ledger reads a different start");
+        for omitted in [None, Some(OMITTED)] {
+            let mut settled = joint(omitted);
+            let energy = settled.initialize_released_equilibrium(&load, &gate)
+                .unwrap_or_else(|error| panic!("load scale {scale}, omitted {omitted:?}: {error}"));
+            // Without omitted modes the solve is the network's own contact equilibrium, whose
+            // gate checks this law on the actual rounded states before it returns; the obstacle
+            // frames publish no reaction until a sample, so settling is what this path shows.
+            let Some(g) = omitted else { continue };
+            // The law on the accepted states, by this test's own sum.
+            let reaction = accepted_reactions(&settled)[0];
+            let closure = shape.iter().zip(displacements(&settled)).map(|(a, b)| a*b).sum::<f64>()-g*reaction;
+            assert!((reaction-STIFFNESS*closure.powf(1.5)).abs() <= 1e-12+1e-9*reaction, "load scale {scale}");
+            assert!((energy-settled.total_energy_j().unwrap()).abs() <= 1e-15, "the ledger reads a different start");
+        }
     }
-    assert!(misses_without_omitted_modes > 0, "no load missed, so this test cannot fail");
 }
 
 #[test]
