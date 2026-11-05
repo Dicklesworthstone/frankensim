@@ -10,6 +10,11 @@ description = "Live in-browser (WASM) concert-grand piano: the reduced real-time
 # state of unrelated in-progress crates.
 [workspace]
 
+[features]
+# Explicit comparison build until the restored paths pass browser qualification.
+# Native callers select the two paths independently through Config.
+cpu-backports = []
+
 [lib]
 name = "fs_live_piano"
 crate-type = ["cdylib", "rlib"]

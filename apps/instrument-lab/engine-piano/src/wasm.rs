@@ -99,6 +99,10 @@ fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
     // The silent strings move: every partial to 600 Hz of every string not sounding
     // (671 partials; frankensim-ie2zx). The board and mode cap are timed with them.
     cfg.silent_bank_hz = 600.0;
+    // Keep the shipping build unchanged while comparing the restored receiver
+    // and coefficient cache against the same current physical model.
+    cfg.partitioned_receiver = cfg!(feature = "cpu-backports");
+    cfg.active_coefficients = cfg!(feature = "cpu-backports");
     if course_mode_budget > 0 { cfg.course_mode_budget = course_mode_budget; }
     if max_dynamic_modes > 0 { cfg.max_dynamic_modes = max_dynamic_modes.min(1 << 24); }
     if full_scale_pa > 0.0 { cfg.full_scale_pa = full_scale_pa; }
