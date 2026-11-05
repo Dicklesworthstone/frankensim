@@ -445,7 +445,7 @@ fn buffer<T>(capacity: usize) -> Result<Vec<T>, BrittleTetPathError> {
         .map_err(|_| BrittleTetPathError::Allocation)?;
     Ok(result)
 }
-fn interpolate(start: f64, end: f64, fraction: f64) -> f64 {
+pub(super) fn interpolate(start: f64, end: f64, fraction: f64) -> f64 {
     // Preserve the caller's exact endpoint and avoid forming end-start,
     // which can overflow for finite endpoints of opposite sign.
     if fraction == 1.0 {
@@ -483,12 +483,12 @@ fn refine(
     }
 }
 #[derive(Clone, Copy, Default)]
-struct Sum {
+pub(super) struct Sum {
     sum: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, value: f64) {
+    pub(super) fn add(&mut self, value: f64) {
         let next = self.sum + value;
         self.correction += if self.sum.abs() >= value.abs() {
             (self.sum - next) + value
@@ -497,7 +497,7 @@ impl Sum {
         };
         self.sum = next;
     }
-    fn value(self) -> f64 {
+    pub(super) fn value(self) -> f64 {
         self.sum + self.correction
     }
 }

@@ -533,3 +533,6 @@ fn dynamic_admission_late_energy_refusal_and_cancellation_preserve_the_accepted_
 
 #[path = "dynamics/temperature.rs"]
 mod temperature;
+
+#[path = "dynamics/time.rs"]
+mod time;

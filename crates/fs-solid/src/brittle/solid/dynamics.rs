@@ -10,11 +10,15 @@
 //! fracture loss, kinetic change, constitutive endpoint quadrature error and
 //! backward-Euler numerical kinetic loss as SEPARATE accounts. Numerical
 //! damping is not fracture dissipation or heat. First-order time and fixed-plane
-//! small-strain limitations remain; the caller resolves physical timesteps.
+//! small-strain limitations remain. The [`time`] path refines native timesteps
+//! against local state comparisons, damage jumps and numerical-loss budgets.
 //! This adds no crack topology, fragment contact or finite-strain mass mapping.
 
 /// Temperature-dependent strength with unchanged reference mass and retained motion.
 pub mod temperature;
+
+/// Native step doubling with bounded damage, state error and numerical losses.
+pub mod time;
 
 use std::sync::Arc;
 

@@ -2,6 +2,7 @@
 use super::*;
 
 use fs_solid::brittle::solid::dynamics::temperature::BrittleTetDynamicTemperatureError;
+use fs_solid::brittle::solid::dynamics::time::{BrittleTetTimeControls, BrittleTetTimeError};
 
 fn density_curve_card(tag: &str) -> MaterialCard {
     let base = source_card(STRENGTH, tag, true);
@@ -473,5 +474,135 @@ fn late_inertial_source_time_and_budget_refusals_keep_the_cold_motion_retryable(
         ));
         assert_eq!(old.solid().solution(), &snapshot);
         assert_eq!(old.time_s(), 4.0);
+    });
+}
+
+#[test]
+fn adaptive_heated_motion_keeps_original_mass_and_refuses_partial_duration_publication() {
+    with_cx(false, |cx| {
+        let nodes = points(0.03);
+        let geometry =
+            TetLoadGeometry3::new(&nodes, &TETS, TetAssemblyBudget::standard(), 4, cx).unwrap();
+        let source = density_curve_card("adaptive thermal motion");
+        let cold = [dynamic_material(&source, &geometry)];
+        let hot = [cold[0].at_temperature(&source, "T", 600.0).unwrap()];
+        let solid =
+            BrittleTetSolid::try_new(&geometry, &cold, TetAssemblyBudget::standard(), cx).unwrap();
+        let velocity = [0.2, -0.1, 0.05];
+        let old = BrittleTetMotion::try_from_solid(&solid, &[velocity; 4], 0.0, 8, cx).unwrap();
+        let snapshot = old.solid().solution().clone();
+        let duration = 4e-6;
+        let force = 2.0;
+        let forces: Vec<_> = (0..4).map(|node| (3 * node, [force / 4.0; 2])).collect();
+        let controls = BrittleTetTimeControls {
+            initial_interval_s: 2e-6,
+            minimum_interval_s: 2e-6,
+            maximum_interval_s: 2e-6,
+            maximum_intervals: 2,
+            maximum_trials: 6,
+            displacement_tolerance_m: 1e-8,
+            velocity_tolerance_mps: 1e-6,
+            damage_tolerance: 1e-6,
+            fracture_dissipation_tolerance_j: 1e-10,
+            relative_tolerance: 0.0,
+            maximum_damage_increment: 0.05,
+            work: dynamic_controls(),
+        };
+        // One complete fine pair can be accepted internally, but an exhausted
+        // duration budget must not publish its new source, time or velocity.
+        assert!(matches!(
+            old.advance_time_at_temperature(
+                duration,
+                &hot,
+                "T",
+                &[],
+                &forces,
+                IncrementSettings::default(),
+                BrittleTetTimeControls {
+                    maximum_intervals: 1,
+                    ..controls
+                },
+                cx,
+            ),
+            Err(BrittleTetDynamicTemperatureError::Time(
+                BrittleTetTimeError::WorkLimit {
+                    accepted_intervals: 1,
+                    trials: 3,
+                }
+            ))
+        ));
+        assert_eq!(old.solid().solution(), &snapshot);
+        assert_eq!(old.velocity_mps(), &[velocity; 4]);
+        assert_eq!(old.time_s(), 0.0);
+        assert_eq!(old.accepted_steps(), 0);
+        assert_eq!(
+            old.solid().materials()[0].material().state_coordinate("T"),
+            Some(300.0)
+        );
+
+        let accepted = old
+            .advance_time_at_temperature(
+                duration,
+                &hot,
+                "T",
+                &[],
+                &forces,
+                IncrementSettings::default(),
+                controls,
+                cx,
+            )
+            .unwrap();
+        let motion = &accepted.mechanical.motion;
+        let mass = 2000.0 * geometry.element_volumes_m3()[0];
+        let change = force * duration / mass;
+        let half_dt = 1e-6;
+        let numerical_loss = 4.0 * 0.5 * mass * (force * half_dt / mass).powi(2);
+        assert_eq!(accepted.mechanical.records.len(), 2);
+        assert_eq!(accepted.mechanical.trials, 6);
+        assert_eq!(accepted.mechanical.rejected_intervals, 0);
+        assert_eq!(motion.accepted_steps(), 4);
+        assert_eq!(motion.remaining_steps(), 4);
+        assert_eq!(motion.time_s(), duration);
+        assert_eq!(motion.reference_density_kg_m3(), &[2000.0]);
+        assert_eq!(motion.reference_mass_kg(), old.reference_mass_kg());
+        assert_eq!(
+            motion.solid().materials()[0]
+                .reference_density_kg_m3()
+                .unwrap(),
+            1000.0
+        );
+        assert!(std::ptr::eq(
+            motion.solid().materials()[0].law(),
+            hot[0].law()
+        ));
+        for v in motion.velocity_mps() {
+            close(v[0], velocity[0] + change, 2e-8);
+            close(v[1], velocity[1], 2e-8);
+            close(v[2], velocity[2], 2e-8);
+        }
+        for record in &accepted.mechanical.records {
+            for energy in record.energy {
+                assert_eq!(energy.inertia.reference_mass_kg, old.reference_mass_kg());
+            }
+        }
+        close(
+            accepted.mechanical.energy.inertia.numerical_loss_j,
+            numerical_loss,
+            2e-7,
+        );
+        close(
+            accepted.mechanical.energy.inertia.kinetic_change_j,
+            mass * (velocity[0] * change + 0.5 * change * change),
+            2e-8,
+        );
+        assert_eq!(accepted.transfer.parameter_work_j, 0.0);
+        assert_eq!(accepted.transfer.fracture_dissipation_j, 0.0);
+        assert!(accepted.total_balance_error_j.abs() < 1e-10);
+        assert_eq!(old.solid().solution(), &snapshot);
+        assert_eq!(old.velocity_mps(), &[velocity; 4]);
+        assert_eq!(
+            old.solid().materials()[0].material().state_coordinate("T"),
+            Some(300.0)
+        );
     });
 }
