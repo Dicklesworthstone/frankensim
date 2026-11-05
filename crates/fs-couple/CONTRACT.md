@@ -5583,6 +5583,20 @@ through real contact, support reversal, accepted work and callback invariance.
 
 ### Material gas loading in the file-driven plate renderer
 
+The optional `kinetic-mass lumped|consistent-dkt` record after `mechanics`
+selects the actual assembled kinetic operator. Omission retains legacy
+arithmetic. `consistent-dkt` uses the exact P1 transverse integral and the
+original quadratic DKT rotation-field integral from `fs-plate`, with each
+triangle's authored or source-resolved density and thickness. The existing P1
+force and signed-area pressure observations retain that same transverse field.
+`certified_chart_radiators_with_mass` exposes this choice to code consumers;
+modal frequencies, normalization, force response and any piston reaction all
+use the resulting mass matrix. Integration occurs only during preparation,
+with no added callback cost. The input hash, `PlatePerformanceInfo` and CLI
+sidecar retain the choice. Native file/WAV regressions check changed physical
+output, legacy parity and block-independent replay. This remains thin-plate
+rotary inertia, without transverse shear or a spatial-convergence guarantee.
+
 The optional `radiation-load none|baffled-piston` record after `observer` in a
 plate performance selects the existing compact piston reaction. The one
 resolved ambient gas and output clock supply both mechanical loading and the

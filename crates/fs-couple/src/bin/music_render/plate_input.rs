@@ -106,6 +106,7 @@ pub(super) fn run_with_gas_sources(
     let input_hash = info.input_hash.to_hex();
     let wav_hash = rendered.hash.to_hex();
     let radiation_load = if info.baffled_piston_loading { "baffled-piston" } else { "none" };
+    let kinetic_mass = info.kinetic_mass.name();
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"plate-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -114,7 +115,7 @@ pub(super) fn run_with_gas_sources(
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",\
          \"plate_input\":{{\"schema\":\"{PLATE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\
          \"nodes\":{},\"triangles\":{},\"sections\":{},\"requested_modes\":{},\
-         \"retained_modes\":{},\"force_events\":{},\
+         \"retained_modes\":{},\"force_events\":{},\"kinetic_mass\":\"{kinetic_mass}\",\
          \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
          \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}},\
          \"listener_m\":{:e},\"propagation_delay_s\":{:e},\"radiation_load\":\"{radiation_load}\"{section_sources}{observer},\

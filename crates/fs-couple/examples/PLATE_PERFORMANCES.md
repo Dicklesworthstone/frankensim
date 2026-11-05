@@ -28,6 +28,7 @@ observer DISTANCE_M
 radiation-load none|baffled-piston
 limits MAX_MODES NYQUIST_FRACTION MAX_ABS_FORCE_N MAX_ABS_PRESSURE_PA MAX_EVENTS
 mechanics SUPPORT PRETENSION_N_M DAMPING_RATIO LOW_HZ HIGH_HZ RETAINED_MODES
+kinetic-mass lumped|consistent-dkt
 sections COUNT
 section THICKNESS_M DENSITY_KG_M3 E1_PA E2_PA NU12 G12_PA ANGLE_RAD fixture LABEL
 nodes COUNT
@@ -66,6 +67,21 @@ preserved. It does not include the mutual radiation between modes or the full
 finite-wavelength pressure field. The fitted filter and sampled reaction retain
 their original approximation and time-resolution requirements. A retained load
 from a different gas or sample clock refuses instead of being silently reused.
+
+The optional `kinetic-mass` row immediately follows `mechanics`. Omission or
+`lumped` keeps the original nodal translational and rotary inertia.
+`consistent-dkt` integrates the P1 transverse field and the actual quadratic DKT
+rotation field using each triangle's density and thickness. This assembles a
+different mass matrix before the eigenproblem: frequencies, modal masses and
+force-driven motion all follow that matrix. It does not retune solved pitches.
+The rotational contribution becomes more relevant as bending wavelengths
+shorten. Integration uses a fixed six-point rule exact for these polynomial
+rotations, entirely during preparation; there is no added audio callback work.
+The existing P1 force and pressure projections remain consistent with the
+transverse field. The sidecar records the choice in `kinetic_mass`.
+This remains a thin-plate DKT model with rotary inertia; shear deformation and
+thickness resonances are not introduced. Mesh and modal refinement are still
+needed to resolve short wavelengths.
 
 `SUPPORT` is `simply-supported` (zero transverse displacement) or `clamped`
 (zero displacement and slopes), applied to exactly the listed support nodes.

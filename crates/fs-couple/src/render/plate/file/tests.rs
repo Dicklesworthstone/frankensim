@@ -1,5 +1,5 @@
 use super::*;
-use crate::thin_plate::CompactBody;
+use crate::thin_plate::{CompactBody, certified_chart_radiators};
 
 const SOURCE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/plate-mesh.performance"));
 
@@ -78,6 +78,7 @@ fn source_triangle_sections_and_force_footprint_are_the_real_operator_inputs() {
     assert_eq!(parsed.config.gas, source_air());
     assert_eq!(parsed.gas_record, GasRecord::Legacy(source_air()));
     assert_eq!(parsed.config.listener_m, 1.0);
+    assert_eq!(parsed.kinetic_mass, PlateMassModel::Lumped);
 }
 
 #[test]
@@ -96,6 +97,7 @@ fn public_loader_renders_geometry_derived_modes_like_direct_chart_mechanics() {
         assert_eq!(info.gas, source_air());
         assert_eq!(info.propagation_delay_s, 1.0 / source_air().sound_speed);
         assert!(!info.baffled_piston_loading);
+        assert_eq!(info.kinetic_mass, PlateMassModel::Lumped);
         assert!(info.retained_modes > 0 && info.retained_modes <= 3);
         let mut renderer = performance.into_renderer();
         let mut actual = vec![0.0; 4801];
@@ -103,6 +105,44 @@ fn public_loader_renders_geometry_derived_modes_like_direct_chart_mechanics() {
         assert_eq!(actual.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
             expected.iter().map(|p| p.to_bits()).collect::<Vec<_>>());
         assert!(renderer.pending_controls().is_empty());
+    }
+}
+
+#[test]
+fn consistent_dkt_inertia_reaches_the_modal_response_and_preserves_block_replay() {
+    let text = std::str::from_utf8(SOURCE).unwrap();
+    let (chart, options) = independent_chart();
+    let lumped = direct(certified_chart_radiators(&chart, &options).unwrap(), &source_air());
+    let expected = direct(certified_chart_radiators_with_mass(
+        &chart, &options, PlateMassModel::ConsistentDkt,
+    ).unwrap(), &source_air());
+    let reference_energy = lumped.iter().map(|p| p*p).sum::<f64>();
+    let difference = expected.iter().zip(&lumped).map(|(a,b)| (a-b).powi(2)).sum::<f64>();
+    assert!(difference > 1e-8 * reference_energy, "assembled inertia must change the physical response");
+    for (name, model, reference) in [
+        ("lumped", PlateMassModel::Lumped, &lumped),
+        ("consistent-dkt", PlateMassModel::ConsistentDkt, &expected),
+    ] {
+        let source = text.replace("sections 2\n", &format!("kinetic-mass {name}\nsections 2\n"));
+        for block in [37, 571] {
+            let performance = PlatePerformance::from_bytes(source.as_bytes(), block).unwrap();
+            assert_eq!(performance.info().kinetic_mass, model);
+            let mut renderer = performance.into_renderer();
+            let mut actual = vec![0.0; 4801];
+            for chunk in actual.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+            assert_eq!(actual.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
+                reference.iter().map(|p| p.to_bits()).collect::<Vec<_>>(), "{name}, block {block}");
+        }
+    }
+}
+
+#[test]
+fn kinetic_model_is_explicit_and_malformed_or_duplicate_selections_refuse() {
+    let text = std::str::from_utf8(SOURCE).unwrap();
+    for row in ["kinetic-mass", "kinetic-mass automatic", "kinetic-mass consistent-dkt extra",
+        "kinetic-mass lumped\nkinetic-mass consistent-dkt"] {
+        let source = text.replace("sections 2\n", &format!("{row}\nsections 2\n"));
+        assert!(Parsed::read(source.as_bytes(), 64, None).is_err(), "{row}");
     }
 }
 

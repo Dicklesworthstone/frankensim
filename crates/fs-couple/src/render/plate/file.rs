@@ -26,6 +26,11 @@
 //! caller-supplied material-card pack compiled at the named STATE. Bare
 //! numbers without a label refuse (bead pexfp.32). `section_provenance` keeps
 //! each section's pack, hash, state and point, or its fixture label.
+//!
+//! Optional `kinetic-mass lumped|consistent-dkt` immediately after `mechanics`
+//! selects the assembled inertia. `consistent-dkt` integrates P1 transverse
+//! motion and the original quadratic DKT rotations, with the same P1 pressure
+//! observation. Omission retains the original lumped model.
 
 use std::collections::BTreeSet;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
@@ -41,7 +46,7 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{ObserverFilterReceipt, input::{ObserverLawInput, observer_filter}};
 use crate::render::{ControlDelta, RenderContext, RenderError, RenderVoice};
 use crate::render::schedule::{ScheduledControl, ScheduledRenderer};
-use crate::thin_plate::{PlateChartRadiation, certified_chart_radiators};
+use crate::thin_plate::{PlateChartRadiation, PlateMassModel, certified_chart_radiators_with_mass};
 use super::{CompactPlateVoice, PlateVoiceConfig};
 
 /// Versioned grammar for the source geometry, mechanics and force history.
@@ -121,6 +126,8 @@ pub struct PlatePerformanceInfo {
     pub observer_filter: Option<ObserverFilterReceipt>,
     /// Whether the input explicitly requested the compact piston reaction.
     pub baffled_piston_loading: bool,
+    /// Kinetic discretization actually consumed by the plate eigensolve.
+    pub kinetic_mass: PlateMassModel,
     /// Geometry counts of the actual assembled chart.
     pub nodes: usize,
     /// Triangle count of the actual assembled chart.
@@ -187,7 +194,7 @@ impl PlatePerformance {
         mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, PlatePerformanceError> {
         let input = Parsed::read_with_materials(bytes, max_block, sources, &mut load_material)?;
-        let bodies = certified_chart_radiators(&input.chart, &input.options)
+        let bodies = certified_chart_radiators_with_mass(&input.chart, &input.options, input.kinetic_mass)
             .map_err(PlatePerformanceError::Reduction)?;
         let retained_modes = bodies.len();
         let voice = if input.baffled_piston_loading {
@@ -213,6 +220,7 @@ impl PlatePerformance {
             propagation_delay_s: input.config.listener_m / input.config.gas.sound_speed,
             observer_filter: voice.observer_receipt().copied(),
             baffled_piston_loading: input.baffled_piston_loading,
+            kinetic_mass: input.kinetic_mass,
             nodes: input.chart.mesh.nodes.len(),
             triangles: input.chart.mesh.tris.len(), sections: input.sections,
             requested_modes: input.options.n_modes, retained_modes,
@@ -249,6 +257,7 @@ struct Parsed {
     options: PlateChartRadiation,
     config: PlateVoiceConfig,
     baffled_piston_loading: bool,
+    kinetic_mass: PlateMassModel,
     observer_law: Option<ObserverLawInput>,
     samples: u64,
     full_scale_pa: f64,
@@ -342,6 +351,18 @@ impl Parsed {
         { return Err(bad(r.line, "nonnegative prestress/damping, ordered sub-Nyquist window and positive mode count required")); }
         let eigenvalue_window = ((core::f64::consts::TAU * low_hz).powi(2),
             (core::f64::consts::TAU * high_hz).powi(2));
+        let kinetic_mass = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("kinetic-mass")
+        {
+            let mut row = r.row("kinetic-mass")?;
+            let model = match row.word()? {
+                "lumped" => PlateMassModel::Lumped,
+                "consistent-dkt" => PlateMassModel::ConsistentDkt,
+                _ => return Err(bad(row.line, "kinetic-mass must be lumped or consistent-dkt")),
+            };
+            row.finish()?;
+            model
+        } else { PlateMassModel::Lumped };
         let sections_count = r.count("sections", MAX_SECTIONS)?;
         if sections_count == 0 { return Err(bad(r.line, "at least one section is required")); }
         let mut sections = Vec::with_capacity(sections_count);
@@ -459,7 +480,7 @@ impl Parsed {
         if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing record")); }
         let options = PlateChartRadiation { assembly: AssemblyOptions { pretension, support },
             eigenvalue_window, n_modes, damping_ratio, unit_force_weights };
-        Ok(Self { gas_record, chart, options, config, baffled_piston_loading, observer_law,
+        Ok(Self { gas_record, chart, options, config, baffled_piston_loading, kinetic_mass, observer_law,
             samples, full_scale_pa, initial_force_n,
             sections: sections_count, section_provenance, events, max_events })
     }

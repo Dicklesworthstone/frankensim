@@ -51,7 +51,8 @@ fn command_matches_public_physics_and_pcm_across_partitions_and_relocation() {
     for output in [&a,&b] {
         let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
         for fragment in ["\"nodes\":30", "\"triangles\":40", "\"sections\":2",
-            "\"requested_modes\":3", "\"force_events\":3", "\"samples\":4801"] {
+            "\"requested_modes\":3", "\"force_events\":3", "\"samples\":4801",
+            "\"kinetic_mass\":\"lumped\""] {
             assert!(sidecar.contains(fragment));
         }
         assert!(sidecar.contains(&format!("\"clipped_samples\":{clips}")));
@@ -74,6 +75,30 @@ fn modifying_a_constitutive_region_changes_the_produced_sound() {
     let first = rendered(&a, &root.join("first.wav"), 64);
     let second = rendered(&b, &root.join("stiffer.wav"), 64);
     assert_ne!(&first[44..], &second[44..], "material assignment must reach the audio, not only metadata");
+}
+
+#[test]
+fn consistent_dkt_mass_changes_the_rendered_sound_and_is_recorded() {
+    use fs_couple::thin_plate::PlateMassModel;
+    let root = scratch();
+    let source = std::str::from_utf8(SOURCE).unwrap().replace("sections 2\n",
+        "kinetic-mass consistent-dkt\nsections 2\n");
+    let input = root.join("consistent.performance");
+    let output = root.join("consistent.wav");
+    std::fs::write(&input, &source).unwrap();
+    let performance = PlatePerformance::from_bytes(source.as_bytes(), 4801).unwrap();
+    assert_eq!(performance.info().kinetic_mass, PlateMassModel::ConsistentDkt);
+    let mut pressure = vec![0.0; 4801];
+    performance.into_renderer().block(&mut pressure).unwrap();
+    let (expected, _) = encode_pcm16_wav(&pressure, 48_000, 1.0).unwrap();
+    assert_eq!(rendered(&input, &output, 37), expected);
+    assert_eq!(rendered(&input, &root.join("different-block.wav"), 571), expected);
+    let mut original = vec![0.0; 4801];
+    PlatePerformance::from_bytes(SOURCE, 4801).unwrap().into_renderer().block(&mut original).unwrap();
+    let (lumped, _) = encode_pcm16_wav(&original, 48_000, 1.0).unwrap();
+    assert_ne!(&expected[44..], &lumped[44..], "kinetic selection must reach the WAV samples");
+    let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    assert!(sidecar.contains("\"kinetic_mass\":\"consistent-dkt\""));
 }
 
 #[test]

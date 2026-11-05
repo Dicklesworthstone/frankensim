@@ -1038,6 +1038,30 @@ pub struct PlateChartRadiation {
     pub unit_force_weights: Vec<f64>,
 }
 
+/// Kinetic discretization for the existing P1 transverse plate observation.
+/// This changes the assembled mass and therefore the solved frequencies and
+/// force response; it does not adjust frequencies after the eigensolve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlateMassModel {
+    /// Original nodal translational and rotary inertia.
+    #[default]
+    Lumped,
+    /// Exact P1 transverse inertia and exact quadratic DKT rotation-field
+    /// inertia, using each element's original density and thickness. The
+    /// transverse pressure/force projection remains the same P1 field.
+    ConsistentDkt,
+}
+
+impl PlateMassModel {
+    /// Stable name used by native plate performance files and render receipts.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Lumped => "lumped",
+            Self::ConsistentDkt => "consistent-dkt",
+        }
+    }
+}
+
 /// Derive radiators from the chart's actual element sections and geometry.
 /// Uses the same modal mass, signed area, force projection and piston model as
 /// [`certified_radiators`]. This is a perfectly bonded, flat linear plate with
@@ -1049,7 +1073,33 @@ pub fn certified_chart_radiators(
     chart: &PlateChart,
     options: &PlateChartRadiation,
 ) -> Result<Vec<CompactBody>, AcousticRealizeError> {
-    let model = chart.assemble(&[], &options.assembly).map_err(map_plate)?;
+    certified_chart_radiators_with_mass(chart, options, PlateMassModel::Lumped)
+}
+
+/// Derive the same material/geometry radiators with an explicit kinetic model.
+/// Both choices retain P1 transverse observation and nodal work-conjugate
+/// forcing. Consistent DKT inertia resolves the original rotation field rather
+/// than independently lumping its slope samples; it is not a shear-deformable
+/// thick-plate model or a guarantee of spatial wavelength convergence.
+///
+/// # Errors
+/// Invalid chart, force footprint, modal controls or eigenproblem refuse.
+pub fn certified_chart_radiators_with_mass(
+    chart: &PlateChart,
+    options: &PlateChartRadiation,
+    mass: PlateMassModel,
+) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    let model = match mass {
+        PlateMassModel::Lumped => chart.assemble(&[], &options.assembly),
+        PlateMassModel::ConsistentDkt => chart.assemble_with_kinetic_mass(
+            &[],
+            &options.assembly,
+            fs_plate::TransverseMass::Linear,
+            fs_plate::RotaryMass::Dkt,
+            fs_plate::StiffenerMass::Lumped,
+        ),
+    }
+    .map_err(map_plate)?;
     let projection = PlateProjection::with_force_weights(&chart.mesh, &options.unit_force_weights)?;
     harvest_radiators(
         &model,
