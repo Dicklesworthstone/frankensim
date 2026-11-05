@@ -7850,3 +7850,53 @@ condensation, thermal-contact traversal or true absorption. Focused G1/G3 tests
 connect an original generated conduction solution to rotated density jets,
 independent Lorentz--Lorenz derivatives, analytic divergent-lens footprints,
 curved-ray Snell invariants, phase/group paths and source-domain refusals.
+
+## Original scene media driven by accepted thermal material fields
+
+With `photometry` and `material-state`, `NativeThermoOpticBinding` connects an
+original `Ambient` or `InteriorOf` medium to its accepted
+`MaterialThermoOpticField`. `with_thermo_optic_scene` and
+`with_thermo_optic_camera` use that actual spatial field throughout native
+propagation and local interface scattering. The original reference glass must
+match in all dispersion, absorption and provenance values. Distinct physical
+medium slots remain distinct even when their reference indices agree; each
+slot accepts at most one field, and unlisted slots retain their original law.
+
+The borrowed field supplies temperature-derived phase and group indices,
+analytic spatial gradient, reference absorption and, when explicitly admitted,
+the analytic Hessian. First-order bindings support rays and cameras but refuse
+differentiated bundle connections. The differentiated binding carries the
+original chain rule through curved boundary arrival and Snell/Fresnel maps,
+so native point/area connections and detector footprints see actual thermal
+focusing. It does not infer a Hessian from a locally zero gradient. The native
+field identity binds the complete reference optics, thermo-optic constitutive
+law and frozen temperature/reconstruction snapshot; derivative capability does
+not alter that physical identity.
+
+Positions are world metres, temperatures kelvin, absorption inverse metres and
+wavelength vacuum nanometres. The accepted snapshot stays fixed throughout an
+observation batch. Field source domains, optical step resolution and native
+boundary contact collars remain authoritative; an unsupported spatial point,
+temperature or wavelength refuses the observation without nominal-glass
+fallback. Internal discontinuities still require their original separate
+region/event treatment. Thermal deformation, missing constitutive response,
+heat evolution and thermal source emission are not inferred from this binding.
+
+Both entry points reuse the original immutable geometry, topology and optical
+materials. Camera preparation is shared with `with_curved_camera`, including
+the original physical camera, calibrated authored emission, environment and
+exact SI thermal sources. The ordinary `render_scene()` retains the original
+reference-glass rendering view. Medium preparation is linear in the original
+medium/binding counts, allocates one bounded medium table, and borrows fields
+without copies; native geometry is prepared once per callback. Existing query
+budgets and cancellation remain in force.
+
+Focused regressions compare spectral thermal bending inside the original ball
+and refraction onto an off-axis original emitter against a conserved-momentum
+analytic path, including phase/group lengths, Beer depth and immersed-camera
+radiance. A quadratic-temperature field compares differentiated focusing after
+the actual spherical interface against the analytic paraxial area map. Further
+controls retain the homogeneous reference limit, physical snapshot identity,
+explicit Hessian capability and source/domain/work refusals. These native Rust
+regressions are authored; this environment permits scoped parser/format checks
+and source/math review but does not provide native Cargo execution.

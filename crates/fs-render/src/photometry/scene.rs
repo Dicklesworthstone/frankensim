@@ -21,6 +21,10 @@
 //! with an explicit [`NativeRadianceCalibration`] to observe the original scene
 //! emitters and environment through its own pinhole camera. The reciprocal
 //! camera and area-light strategies retain the same geometry and source laws.
+//! With `material-state`, `with_thermo_optic_scene` and
+//! `with_thermo_optic_camera` bind accepted thermal fields to these same medium
+//! references. Their native rays and bundles then see the actual local index,
+//! its analytic derivatives, group delay and original absorption.
 
 use core::fmt;
 use std::sync::Arc;
@@ -46,6 +50,10 @@ use crate::tracer::{Material, Primitive, Scene, Shape};
 
 mod camera;
 pub use camera::{NativeCameraError, NativeRadianceCalibration};
+#[cfg(feature = "material-state")]
+mod fields;
+#[cfg(feature = "material-state")]
+pub use fields::NativeThermoOpticBinding;
 
 /// Stable identity for geometry that an ordinary tracer scene has not placed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +134,16 @@ pub enum NativeOpticalSceneError {
         primitive: usize,
     },
     MediumBudgetExceeded,
+    TooManyFieldBindings {
+        bindings: usize,
+        media: usize,
+    },
+    DuplicateFieldBinding {
+        medium: NativeOpticalMedium,
+    },
+    ReferenceGlassMismatch {
+        medium: NativeOpticalMedium,
+    },
     Geometry(InstanceError),
     Curved(CurvedSceneError),
     AllocationRefused,
@@ -514,12 +532,28 @@ impl NativeOpticalScene {
         max_build_work: u64,
         observe: impl FnOnce(&CurvedPolarizedScene<'_>) -> R,
     ) -> Result<R, NativeOpticalSceneError> {
+        let media = self.native_media(cx)?;
+        self.with_native_media(cx, max_build_work, &media, observe)
+    }
+
+    fn native_media(&self, cx: &Cx<'_>) -> Result<Vec<SceneMedium<'_>>, NativeOpticalSceneError> {
         cx.checkpoint()?;
         let mut media = reserved(self.media.len())?;
         for medium in &self.media {
             cx.checkpoint()?;
             media.push(SceneMedium::Homogeneous(medium));
         }
+        Ok(media)
+    }
+
+    fn with_native_media<R>(
+        &self,
+        cx: &Cx<'_>,
+        max_build_work: u64,
+        media: &[SceneMedium<'_>],
+        observe: impl FnOnce(&CurvedPolarizedScene<'_>) -> R,
+    ) -> Result<R, NativeOpticalSceneError> {
+        cx.checkpoint()?;
         let mut bindings = reserved(self.bindings.len())?;
         for binding in &self.bindings {
             cx.checkpoint()?;
@@ -528,7 +562,7 @@ impl NativeOpticalScene {
         let scene = CurvedPolarizedScene::try_new_with_materials(
             cx,
             &self.geometry,
-            &media,
+            media,
             &self.conductors,
             &[],
             &self.reflectances,

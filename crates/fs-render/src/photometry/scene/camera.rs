@@ -5,9 +5,12 @@
 //! they never register a second emitter. Native area proposals can be prepared
 //! from the returned camera owner with their existing geometric and image budgets.
 
+#[cfg(feature = "material-state")]
+use super::NativeThermoOpticBinding;
 use super::{NativeOpticalScene, NativeOpticalSceneError, reserved};
 use crate::camera::{Aperture, CameraError, PhysicalCamera};
 use crate::lighting::{AdmittedLighting, LightingError};
+use crate::polarization::dielectric::scene::curved::CurvedPolarizedScene;
 use crate::polarization::dielectric::scene::curved::camera::{
     CameraRadianceError, CurvedCameraScene, EmissionSides, EnvironmentRadiance, RadianceSpectrum,
     SurfaceEmitter,
@@ -98,6 +101,12 @@ impl core::fmt::Display for NativeCameraError {
 }
 impl core::error::Error for NativeCameraError {}
 
+struct CameraSources<'a> {
+    camera: PhysicalCamera,
+    emitters: Vec<SurfaceEmitter>,
+    environment: Option<EnvironmentRadiance<'a>>,
+}
+
 impl NativeOpticalScene {
     /// Prepare original surface/environment emission and the original pinhole
     /// camera over the shared native optical scene for one observation batch.
@@ -138,6 +147,41 @@ impl NativeOpticalScene {
         calibration: NativeRadianceCalibration,
         observe: impl FnOnce(&CurvedCameraScene<'_, '_>, &PhysicalCamera) -> R,
     ) -> Result<R, NativeCameraError> {
+        let sources = self.camera_sources(cx, calibration)?;
+        self.with_curved_scene(cx, max_build_work, |scene| {
+            self.observe_camera(cx, scene, &sources, observe)
+        })?
+    }
+
+    /// Observe the original camera and sources through accepted thermal-index
+    /// fields bound to original media. Every wavelength retains its actual
+    /// local phase/group law, gradient and absorption. Differentiable bindings
+    /// also serve native point/area-light bundle connections in this callback.
+    ///
+    /// Reference-glass, snapshot, capability and contact-domain rules are those
+    /// of `with_thermo_optic_scene`. Source preparation and radiance calibration
+    /// are shared with `with_curved_camera`: field temperature never invents
+    /// surface emission or changes the original accepted thermal emitters.
+    #[cfg(feature = "material-state")]
+    pub fn with_thermo_optic_camera<R>(
+        &self,
+        cx: &Cx<'_>,
+        max_build_work: u64,
+        calibration: NativeRadianceCalibration,
+        bindings: &[NativeThermoOpticBinding<'_>],
+        observe: impl FnOnce(&CurvedCameraScene<'_, '_>, &PhysicalCamera) -> R,
+    ) -> Result<R, NativeCameraError> {
+        let sources = self.camera_sources(cx, calibration)?;
+        self.with_thermo_optic_scene(cx, max_build_work, bindings, |scene| {
+            self.observe_camera(cx, scene, &sources, observe)
+        })?
+    }
+
+    fn camera_sources(
+        &self,
+        cx: &Cx<'_>,
+        calibration: NativeRadianceCalibration,
+    ) -> Result<CameraSources<'_>, NativeCameraError> {
         cx.checkpoint()?;
         let original = &self.render.camera;
         let camera = PhysicalCamera::try_legacy_compatible(
@@ -198,12 +242,25 @@ impl NativeOpticalScene {
             })
             .transpose()?;
         cx.checkpoint()?;
-        self.with_curved_scene(cx, max_build_work, |scene| {
-            let radiance = CurvedCameraScene::try_new(cx, scene, &emitters, environment)?
+        Ok(CameraSources {
+            camera,
+            emitters,
+            environment,
+        })
+    }
+
+    fn observe_camera<R>(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedPolarizedScene<'_>,
+        sources: &CameraSources<'_>,
+        observe: impl FnOnce(&CurvedCameraScene<'_, '_>, &PhysicalCamera) -> R,
+    ) -> Result<R, NativeCameraError> {
+        let radiance =
+            CurvedCameraScene::try_new(cx, scene, &sources.emitters, sources.environment)?
                 .with_diffuse_thermal_emitters(cx, &self.thermal_emitters)?;
-            cx.checkpoint()?;
-            Ok::<R, NativeCameraError>(observe(&radiance, &camera))
-        })?
+        cx.checkpoint()?;
+        Ok(observe(&radiance, &sources.camera))
     }
 
     fn admit_camera_rectangles(&self, cx: &Cx<'_>) -> Result<(), NativeCameraError> {
