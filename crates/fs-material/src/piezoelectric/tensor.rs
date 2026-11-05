@@ -36,6 +36,8 @@ use crate::state_point::{
 };
 use crate::tensor::{mandel_basis, mandel_rotation, matmul3, rotate_mandel};
 
+/// Source-bound mechanical and dielectric relaxation of the same reciprocal law.
+pub mod relaxation;
 /// Directional bulk acoustic modes with the electrical wave constraint explicit.
 pub mod waves;
 

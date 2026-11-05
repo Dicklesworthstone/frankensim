@@ -1,4 +1,7 @@
 //! G0/G1/G3 synthetic tensor and source checks; no measured-material claim.
+#[path = "piezoelectric_tensor/relaxation.rs"]
+mod relaxation;
+
 use fs_blake3::ContentHash;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

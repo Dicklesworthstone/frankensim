@@ -5497,6 +5497,53 @@ fringing fields, finite-wavelength rod modes or bulk charge-free waves. The
 scalar affine thermal owner refuses tensor reductions until a tensor-aware
 caloric law is supplied.
 
+### Source-bound intrinsic piezoelectric relaxation
+
+`piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric` binds
+anisotropic native Maxwell branches and directed Debye polarization poles to
+the original tensor card, physical query and frame. This is explicit model
+selection: base `C^E` is the RELAXED stiffness and base `epsilon^S` is the
+INSTANTANEOUS clamped permittivity. A single-frequency datasheet value does not
+establish either limiting role. The original real coupling remains reciprocal;
+no dissipative coupling coefficient, modal damping ratio or pole fit is inferred.
+
+Mechanical sources name all 21 symmetric Mandel increment entries and a
+positive time, using the existing native PSD/Gram branch admission. Signed
+off-diagonal entries and rank-deficient loss remain physical. Each dielectric
+pole names a positive absolute permittivity increment, positive time and all
+three components of an explicitly unit direction in the original source frame.
+Directions are never normalized to repair data. Frame changes rotate the
+original mechanical factors and dielectric directions together with the base.
+
+The common source owner admits at most 64 distinct auxiliary property names;
+same-unit names may be shared explicitly. Retained process counts also have
+separate finite limits of 64 mechanical branches and 16 dielectric poles.
+Every coefficient keeps its source selection and exact units. Frequency may
+restrict applicability but cannot be a frozen value-dependence; the complete
+admitted band applies to every evaluation.
+
+The positive strain/charge potential includes original base storage, native
+Maxwell memory norms and directed polarization storage. With peak phasors
+under `exp(-i omega t)`, mechanical increments use
+`(-i omega tau)/(1-i omega tau)`; dielectric increments use
+`1/(1-i omega tau)`. Direct increment accumulation preserves weak terms beside
+large base tensors. Reciprocal-scaled factors avoid squaring a large rate ratio.
+Recovered heat is an independent sum of positive memory/friction norms,
+reported separately for mechanical and dielectric processes. Memory energy is
+part of total storage, not an extra heat source. Frequency evaluation and
+constitutive recovery allocate nothing; source preparation occurs at binding.
+
+Five focused synthetic groups in `tests/piezoelectric_tensor/relaxation.rs`
+specify independent coefficient limits, branch storage and constitutive work,
+anisotropic null spaces, frame covariance and source/domain refusals. They do
+not qualify a measured ceramic. This owner supplies a held-condition harmonic
+law; transient integration, thermal coefficient work, intrinsic coupling loss,
+DC leakage, domain switching, hysteresis and depoling remain separate work.
+
+The model conventions follow the primary Debye and piezoelectric-loss theory:
+<https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_theory.05.36.html>
+and <https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_modeling.05.109.html>.
+
 ## Explicit liquid source admission for evolving shear rate
 
 `ResolvedLiquidSurfaceState::try_for_shear_rate_evolution` retains the original
