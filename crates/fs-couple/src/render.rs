@@ -280,6 +280,10 @@ pub struct ReedBoreVoice {
     lay: Option<Obstacle>,
     inlet_gas: GasState,
     viscous_slit: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
+    /// Opt-in staple pressure recovery (`set_staple_recovery`): Almeida, Vergez and Caussé 2007's double-reed law, the blade
+    /// driven by the constriction drop and the bore input pressure raised by the recovered head. `None` is the original
+    /// voice, bit for bit.
+    staple_recovery: Option<crate::bernoulli_aperture::viscous::StapleRecovery>,
     /// Opt-in duct-constriction noise on the reed channel (`set_constriction_noise`): a series pressure source on the
     /// mouth side, the brass lip's law carried to the reed slit. `None` is the original voice, bit for bit.
     constriction_noise: Option<crate::turbulence_noise::ConstrictionNoise>,
@@ -703,6 +707,7 @@ impl ReedBoreVoice {
             lay,
             inlet_gas: *gas,
             viscous_slit: None,
+            staple_recovery: None,
             constriction_noise: None,
             rho: gas.density,
             jet_observer,
@@ -778,6 +783,37 @@ impl ReedBoreVoice {
         let slit = crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&self.inlet_gas, length_m)?;
         self.viscous_slit = Some(slit);
         Ok(())
+    }
+
+    /// Select the double-reed staple's pressure recovery ([`crate::bernoulli_aperture::viscous::StapleRecovery`], Almeida,
+    /// Vergez and Caussé 2007 eqs. 14-17): the flow through the reed opening follows the viscous slit law on the constriction
+    /// drop `(dp)_c`, the blade is driven by `(dp)_c` and not by the total mouth-to-bore drop, and the bore input pressure is
+    /// raised by `C_P (1/2) rho (q/S_c)^2`. It needs the viscous slit (`set_viscous_slit_length`), a massive reed and a voice
+    /// that has not advanced, and the reed's rest opening area must be inside the law's domain. `C_P = 0` is the original
+    /// law and installs nothing, so the voice stays bit for bit what it was.
+    ///
+    /// # Errors
+    /// No viscous slit selected, a massless reed, an advanced voice, or a rest opening area at or above `S_c / sqrt(C_P)`
+    /// (the refusal text is [`crate::bernoulli_aperture::viscous::STAPLE_RECOVERY_DOMAIN`]).
+    pub fn set_staple_recovery(
+        &mut self,
+        recovery: crate::bernoulli_aperture::viscous::StapleRecovery,
+    ) -> Result<(), AcousticRealizeError> {
+        if self.reed.mass_kg <= 0.0 || self.viscous_slit.is_none() || self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "staple pressure recovery needs a massive reed, the viscous slit and a voice that has not advanced",
+            });
+        }
+        // The reed starts at its rest opening, so the law must be defined there.
+        recovery.forward_factor(self.reed.width_m * self.reed.rest_opening_m)?;
+        self.staple_recovery = if recovery.c_p() == 0.0 { None } else { Some(recovery) };
+        Ok(())
+    }
+
+    /// The selected staple pressure recovery, if any (`C_P = 0` selects none).
+    #[must_use]
+    pub const fn staple_recovery(&self) -> Option<&crate::bernoulli_aperture::viscous::StapleRecovery> {
+        self.staple_recovery.as_ref()
     }
 
     /// Add the opt-in duct-constriction noise ([`crate::turbulence_noise::ConstrictionNoise`]) to the reed channel: Oldham

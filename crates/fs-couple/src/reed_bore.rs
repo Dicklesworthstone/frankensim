@@ -18,7 +18,7 @@ use fs_math::det;
 use fs_scenario::BeatingReed;
 
 mod contact;
-pub(crate) use contact::{OpeningPropagator, step_with_opening as step_profiled_aperture};
+pub(crate) use contact::{JunctionPressure, OpeningPropagator, step_with_opening as step_profiled_aperture};
 pub(crate) mod loaded;
 
 /// Realize mouthpiece pressure from a beating reed on a TMM bore.

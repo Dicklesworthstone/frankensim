@@ -6730,6 +6730,36 @@ Poiseuille/closure limits, ten beating/reopening cycles with a pressure-work
 account, inlet-material binding, and callback invariance. Quasisteady planar
 flow does not establish unsteady channel, turbulence, or instrument realism.
 
+Staple pressure recovery (`staple_recovery C_P S_C_M2`, MB 5047, 2026-11-05). A double reed's channel
+widens from the constriction of area `S_c` into the conical staple, and a fraction `C_P` of the dynamic
+head at the constriction comes back as pressure (Almeida, Vergez and Caussé 2007, J. Acoust. Soc. Am.
+121(1) 536-546, arXiv physics/0607011v1 pp. 8-9, eqs. 14-17). An optional reed-card record
+`staple_recovery C_P S_C_M2` right after `slit_length` (so it needs that row, a massive reed and a fresh
+voice) selects it through `ReedBoreVoice::set_staple_recovery`. The flow through the opening follows
+the viscous slit law on the constriction drop `(dp)_c = p_m - p_c`; the blade is driven by `(dp)_c`
+(eq. 16), not by the total mouth-to-bore drop (`JunctionPressure::blade_drop_pa` in `reed_bore::contact`,
+taken by the momentum balance of both propagators); and the bore input is
+`p_r = p_m - (dp)_c + C_P (1/2) rho (q/S_c)^2` (eq. 17), with `q` the flow through the opening.
+`ViscousSlit::characteristic_junction_with_recovery` solves the same-sample characteristic junction: for
+forward flow the slit's quadratic term takes the density `rho (1 - C_P (S/S_c)^2)`. Recovery acts on
+forward flow only (in reverse the staple is upstream of the jet, so there is nothing to recover) and on
+the JET flow: the moving blade's swept flow and any
+body flow are not carried through the staple, which is where the quasi-static measurement stops being
+one. The law is singular where `C_P (S/S_c)^2 >= 1`, where it would cancel the whole jet loss; there it
+refuses (`STAPLE_RECOVERY_DOMAIN`), and `set_staple_recovery` refuses a reed whose rest opening already
+is there. `C_P = 0` is the original law and installs nothing: the row absent, or with `C_P = 0`, is the
+voice as it was, bit for bit. The only printed numbers are one measured reed's, `C_P = 0.8` (fitted on both
+pressure branches, Fig. 15) and `S_c = 4e-6 m^2` (Fig. 14): a ready-to-play natural-cane oboe reed in
+humid air, masses added, no lips. A card that uses them borrows them for another reed, and says so.
+Energy: inside the domain the slit and staple element dissipates `(dp)_total q = viscous + (1/2) rho v^2 q
+(1 - C_P (S/S_c)^2)`, never negative. Because the blade feels `p_c` while its swept flow enters the bore
+at `p_r`, the step's energy account carries one exchange term, `-(C_P (1/2) rho (q/S_c)^2) * swept flow`,
+which has either sign. G1 tests: the flow maximum of the printed characteristic sits where the closed
+form of eqs. 15-17 puts it (the total drop there is `x (1 - C_P S^2/S_c^2)` at `x = p_M/3`,
+`S = 2 S_0/3`, computed in the test); the domain refusal by name; the junction's power balance and
+passivity; the blade momentum under `(dp)_c` and the step's energy account; bit-identical absence;
+callback invariance; the card rows' refusals.
+
 The music lane's render CLI (bead ib15w): `music_render <reed|string>
 <out.wav> [--seconds S] [--block N] [--full-scale-pa P]`. Pinned fixture
 compositions render through the block API and encode through the ONE

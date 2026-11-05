@@ -84,3 +84,61 @@ fn malformed_slit_geometry_refuses_before_rendering() {
     }
     assert!(ReedPerformance::from_bytes(INPUT.as_bytes(), 37).unwrap().viscous_slit().is_none());
 }
+
+// ---- staple pressure recovery (Almeida, Vergez and Caussé 2007, eqs. 14-17) ----------------------------------------
+
+/// The oboe description's reed (rest gap 357 um on 5.6 mm: 2.0 mm^2, inside the law's domain) on the slit fixture, with
+/// or without the `staple_recovery` row right after `slit_length`.
+fn staple_source(row: Option<&str>) -> String {
+    let base = VISCOUS_INPUT.replace("reed 0.0004 0.013 6000 0.00001 100 0.35",
+        "reed 0.000357 0.0056 17720 2.2e-5 3464 0.114");
+    match row {
+        Some(row) => base.replace("slit_length 0.001\n", &format!("slit_length 0.001\n{row}\n")),
+        None => base,
+    }
+}
+
+#[test]
+fn staple_recovery_row_selects_the_law_changes_the_sound_and_zero_changes_nothing() {
+    let plain = pressure(&staple_source(None), 37);
+    let staple_text = staple_source(Some("staple_recovery 0.8 4e-6"));
+    let loaded = ReedPerformance::from_bytes(staple_text.as_bytes(), 37).unwrap();
+    let recovery = loaded.staple_recovery().unwrap();
+    assert_eq!((recovery.c_p(), recovery.constriction_area_m2()), (0.8, 4e-6));
+    let staple = pressure(&staple_text, 37);
+    assert_eq!(staple, pressure(&staple_text, 113), "callback partition");
+    let energy: f64 = plain.iter().map(|p| p * p).sum();
+    let changed: f64 = plain.iter().zip(&staple).map(|(a, b)| (a - b).powi(2)).sum();
+    assert!(energy > 0.0 && changed > 1e-8 * energy, "the recovery must change the sound");
+    // C_P = 0 is the original law: nothing installed, the same bits.
+    let zero_text = staple_source(Some("staple_recovery 0 4e-6"));
+    assert!(ReedPerformance::from_bytes(zero_text.as_bytes(), 37).unwrap().staple_recovery().is_none());
+    let zero = pressure(&zero_text, 37);
+    assert_eq!(plain.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
+        zero.iter().map(|p| p.to_bits()).collect::<Vec<_>>());
+    assert!(ReedPerformance::from_bytes(staple_source(None).as_bytes(), 37).unwrap().staple_recovery().is_none());
+}
+
+#[test]
+fn staple_recovery_row_is_refused_without_its_slit_a_massive_reed_or_a_defined_opening() {
+    use crate::acoustic_realize::AcousticRealizeError;
+    use crate::bernoulli_aperture::viscous::STAPLE_RECOVERY_DOMAIN;
+    let refusal = |text: &str| match ReedPerformance::from_bytes(text.as_bytes(), 37) {
+        Err(ReedPerformanceError::Input { what, .. }) => what.to_string(),
+        Err(ReedPerformanceError::Model(AcousticRealizeError::Reed { what })) => what.to_string(),
+        other => panic!("expected a refusal, got {:?}", other.err()),
+    };
+    let row = Some("staple_recovery 0.8 4e-6");
+    assert!(refusal(&staple_source(row).replace("slit_length 0.001\n", "")).contains("slit_length"));
+    assert!(refusal(&staple_source(row).replace("reed 0.000357 0.0056 17720 2.2e-5 3464 0.114",
+        "reed 0.000357 0.0056 17720 0 0 0.114")).contains("massive reed"));
+    for bad in ["staple_recovery", "staple_recovery 0.8", "staple_recovery 0.8 4e-6 extra",
+        "staple_recovery 1.1 4e-6", "staple_recovery -0.1 4e-6", "staple_recovery 0.8 0",
+        "staple_recovery 0.8 -1e-6", "staple_recovery NaN 4e-6",
+        "staple_recovery 0.8 4e-6\nstaple_recovery 0.8 4e-6"] {
+        assert!(ReedPerformance::from_bytes(staple_source(Some(bad)).as_bytes(), 37).is_err(), "{bad}");
+    }
+    // The fixture's own clarinet-sized reed (0.4 mm x 13 mm = 5.2 mm^2) is above S_c / sqrt(C_P) = 4.47 mm^2.
+    let wide = VISCOUS_INPUT.replace("slit_length 0.001\n", "slit_length 0.001\nstaple_recovery 0.8 4e-6\n");
+    assert_eq!(refusal(&wide), STAPLE_RECOVERY_DOMAIN);
+}

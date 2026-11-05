@@ -47,15 +47,35 @@ impl ReedBoreVoice {
             };
         let (outgoing, opening, velocity) = if let Some(slit) = self.viscous_slit {
             let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
-            let result = crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
-                self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
-                self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
-                |opening| Ok(opening.max(0.0)), material_force,
-                |opening, moving| slit.characteristic_pressure(
-                    self.reed.width_m, opening, self.rho, impedance, incoming,
-                    mouth_pressure_pa, moving,
-                ),
-            )?;
+            let result = if let Some(recovery) = self.staple_recovery {
+                // Almeida, Vergez and Caussé 2007: the flow follows the slit law on the constriction drop (dp)_c, the
+                // blade is driven by (dp)_c (eq. 16), and the bore input is raised by the recovered head (eq. 17).
+                crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
+                    self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
+                    self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
+                    |opening| Ok(opening.max(0.0)), material_force,
+                    |opening, moving| {
+                        let junction = slit.characteristic_junction_with_recovery(
+                            recovery, self.reed.width_m, opening, self.rho, impedance,
+                            incoming, mouth_pressure_pa, moving,
+                        )?;
+                        Ok(crate::reed_bore::JunctionPressure {
+                            outgoing: junction.outgoing_pa,
+                            blade_drop_pa: Some(junction.constriction_drop_pa),
+                        })
+                    },
+                )?
+            } else {
+                crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
+                    self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
+                    self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
+                    |opening| Ok(opening.max(0.0)), material_force,
+                    |opening, moving| slit.characteristic_pressure(
+                        self.reed.width_m, opening, self.rho, impedance, incoming,
+                        mouth_pressure_pa, moving,
+                    ),
+                )?
+            };
             if self.solver_mode == ReedSolverMode::FastNewton {
                 self.fast_stats.fallback_samples += 1;
             }
@@ -99,15 +119,18 @@ mod tests {
     use fs_vfit::discretize::DelayedFilter;
 
     fn voice(direct: f64, massive: bool) -> ReedBoreVoice {
+        voice_with(direct, BeatingReed {
+            rest_opening_m: 0.0004, width_m: 0.013,
+            closing_pressure_pa: 6000.0, blowing_pressure_pa: 100.0,
+            attack_s: 0.0, mass_kg: if massive { 0.00001 } else { 0.0 },
+            stiffness_n_m: if massive { 100.0 } else { 0.0 }, damping_ratio: 0.35,
+        })
+    }
+
+    fn voice_with(direct: f64, reed: BeatingReed) -> ReedBoreVoice {
         let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
         ReedBoreVoice::with_inlet_line(
-            || Ok(0.007), &gas,
-            BeatingReed {
-                rest_opening_m: 0.0004, width_m: 0.013,
-                closing_pressure_pa: 6000.0, blowing_pressure_pa: 100.0,
-                attack_s: 0.0, mass_kg: if massive { 0.00001 } else { 0.0 },
-                stiffness_n_m: if massive { 100.0 } else { 0.0 }, damping_ratio: 0.35,
-            },
+            || Ok(0.007), &gas, reed,
             PlateBank::default(), 1.0, 48000,
             |_| Ok((
                 DelayedFilter::from_impulse_response(1.0/48000.0,
@@ -180,6 +203,86 @@ mod tests {
         assert_eq!(plain[0].to_bits(), a[0].to_bits(), "silent until the last sample's flow was forward");
         assert!(ConstrictionNoiseCard { seed: 1, duct_radius_m: 0.0 }.validate().is_err());
         assert!(voice(-0.2, true).set_constriction_noise(ConstrictionNoiseCard { seed: 1, duct_radius_m: -1.0 }).is_err());
+    }
+
+    // ---- staple pressure recovery (Almeida, Vergez and Caussé 2007, eqs. 14-17) -----------------------------------
+    // Opt-in; absent, or with C_P = 0, the voice is bit for bit the original; refused outside its domain, by name.
+
+    /// The oboe description's reed: 357 um rest gap on 5.6 mm (2.0 mm^2 at rest), mass and stiffness as its card.
+    fn oboe_reed() -> BeatingReed {
+        BeatingReed {
+            rest_opening_m: 3.57e-4, width_m: 0.0056, closing_pressure_pa: 17720.0,
+            blowing_pressure_pa: 7400.0, attack_s: 0.008, mass_kg: 2.2e-5,
+            stiffness_n_m: 3464.0, damping_ratio: 0.114,
+        }
+    }
+
+    fn staple_voice(recovery: Option<(f64, f64)>) -> ReedBoreVoice {
+        use crate::bernoulli_aperture::viscous::StapleRecovery;
+        let mut v = voice_with(-0.2, oboe_reed());
+        v.set_viscous_slit_length(2.5e-2).unwrap(); // the cards' slit_length
+        if let Some((c_p, s_c)) = recovery {
+            v.set_staple_recovery(StapleRecovery::new(c_p, s_c).unwrap()).unwrap();
+        }
+        v
+    }
+
+    fn staple_run(recovery: Option<(f64, f64)>, samples: usize) -> Vec<f64> {
+        let mut v = staple_voice(recovery);
+        let mut out = vec![0.0; samples];
+        v.step_block(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn g0_zero_or_absent_staple_recovery_is_the_original_voice_bit_for_bit() {
+        let absent = staple_run(None, 1200);
+        let zero = staple_run(Some((0.0, 4e-6)), 1200);
+        assert!(absent.iter().all(|x| x.is_finite()));
+        assert_eq!(
+            absent.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            zero.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        );
+        assert!(staple_voice(Some((0.0, 4e-6))).staple_recovery().is_none(), "C_P = 0 installs nothing");
+        assert_eq!(staple_voice(Some((0.8, 4e-6))).staple_recovery().map(|r| r.c_p()), Some(0.8));
+    }
+
+    #[test]
+    fn g1_staple_recovery_reaches_the_sample_and_keeps_the_callback_partition() {
+        let plain = staple_run(None, 2400);
+        let staple = staple_run(Some((0.8, 4e-6)), 2400);
+        assert!(staple.iter().all(|x| x.is_finite()));
+        let scale = plain.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let difference = plain.iter().zip(&staple).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(difference > 1e-3 * scale, "the recovery must change the voice: {difference:e} of {scale:e}");
+        let (mut a, mut b) = (staple_voice(Some((0.8, 4e-6))), staple_voice(Some((0.8, 4e-6))));
+        let (mut x, mut y) = ([0.0; 600], [0.0; 600]);
+        a.step_block(&mut x).unwrap();
+        for chunk in y.chunks_mut(37) { b.step_block(chunk).unwrap(); }
+        assert_eq!(x, y);
+        assert_eq!((a.reed_y, a.reed_v), (b.reed_y, b.reed_v));
+    }
+
+    #[test]
+    fn g0_staple_recovery_is_refused_without_its_slit_a_massive_reed_a_fresh_voice_or_a_defined_rest_opening() {
+        use crate::bernoulli_aperture::viscous::{StapleRecovery, STAPLE_RECOVERY_DOMAIN};
+        let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
+        assert!(voice_with(-0.2, oboe_reed()).set_staple_recovery(recovery).is_err(), "no viscous slit");
+        let mut massless = voice(-0.2, false);
+        massless.set_viscous_slit_length(1e-3).unwrap();
+        assert!(massless.set_staple_recovery(recovery).is_err(), "massless reed");
+        let mut advanced = voice_with(-0.2, oboe_reed());
+        advanced.set_viscous_slit_length(2.5e-2).unwrap();
+        advanced.step_block(&mut [0.0]).unwrap();
+        assert!(advanced.set_staple_recovery(recovery).is_err(), "advanced voice");
+        // Rest area 0.4 mm x 13 mm = 5.2 mm^2 is above S_c / sqrt(C_P) = 4.47 mm^2: refused, by name.
+        let mut wide = voice(-0.2, true);
+        wide.set_viscous_slit_length(1e-3).unwrap();
+        match wide.set_staple_recovery(recovery) {
+            Err(AcousticRealizeError::Reed { what }) => assert_eq!(what, STAPLE_RECOVERY_DOMAIN),
+            other => panic!("expected the staple domain refusal, got {other:?}"),
+        }
+        assert!(wide.staple_recovery().is_none());
     }
 
     // G5: the physical source, its history and receiver are independent of the

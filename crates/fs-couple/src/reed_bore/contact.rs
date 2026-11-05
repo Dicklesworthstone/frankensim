@@ -31,16 +31,32 @@ pub(crate) enum OpeningPropagator<'a> {
     },
 }
 
+/// What a characteristic junction hands the momentum balance: the outgoing wave and, when the blade is not driven by the
+/// total mouth-to-bore drop, the drop that does drive it (the staple recovery's constriction drop, Almeida, Vergez and
+/// Caussé 2007 eq. 16). A junction that returns only the outgoing wave (an `f64`) drives the blade by the total drop,
+/// `p_m - (outgoing + p_minus)`, bit for bit as before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct JunctionPressure {
+    pub(crate) outgoing: f64,
+    pub(crate) blade_drop_pa: Option<f64>,
+}
+
+impl From<f64> for JunctionPressure {
+    fn from(outgoing: f64) -> Self {
+        Self { outgoing, blade_drop_pa: None }
+    }
+}
+
 impl OpeningPropagator<'_> {
     // A selected constitutive junction shares the existing mechanics/contact
     // solve. Keep the original free function for inviscid callers.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn step_with_junction(
+    pub(crate) fn step_with_junction<J: Into<JunctionPressure>>(
         self, reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
         y: f64, v: f64, dt: f64, u_body: f64, lay: &Obstacle,
         flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
         material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
-        junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
+        junction_pressure: impl Fn(f64, f64) -> Result<J, AcousticRealizeError>,
     ) -> Result<(f64, f64, f64), AcousticRealizeError> {
         step_with_opening_and_junction(reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
             lay, flow_opening, material_force, self, junction_pressure)
@@ -137,13 +153,13 @@ pub(crate) fn step_with_opening(
 // The constitutive junction is evaluated at each trial gap and swept flow,
 // not applied as an after-the-fact pressure or energy correction.
 #[allow(clippy::too_many_arguments)]
-fn step_with_opening_and_junction(
+fn step_with_opening_and_junction<J: Into<JunctionPressure>>(
     reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
     y: f64, v: f64, dt: f64, u_body: f64, lay: &Obstacle,
     flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
     material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
     propagator: OpeningPropagator<'_>,
-    junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
+    junction_pressure: impl Fn(f64, f64) -> Result<J, AcousticRealizeError>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     let contact = ApertureContactStep::new(lay, y)
         .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
@@ -159,13 +175,13 @@ fn step_with_opening_and_junction(
 /// owner; existing characteristic callers retain their original contact path.
 /// The reed cannot pass through its mouthpiece: see [`step_with_contact_response_and_stop`].
 #[allow(clippy::too_many_arguments)]
-pub(super) fn step_with_contact_response(
+pub(super) fn step_with_contact_response<J: Into<JunctionPressure>>(
     reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
     y: f64, v: f64, dt: f64, u_body: f64,
     flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
     material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
     propagator: OpeningPropagator<'_>,
-    junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
+    junction_pressure: impl Fn(f64, f64) -> Result<J, AcousticRealizeError>,
     contact_response: impl Fn(f64, f64) -> Result<fs_dcontact::AffineContactResponse, AcousticRealizeError>,
 ) -> Result<OpeningStep, AcousticRealizeError> {
     step_with_contact_response_and_stop(reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
@@ -185,13 +201,13 @@ pub(super) fn step_with_contact_response(
 /// enters the step already below zero is left to the free solve. With `closure_stop` false, or when
 /// the free solve ends at or above zero, the result is the original one bit for bit.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn step_with_contact_response_and_stop(
+pub(super) fn step_with_contact_response_and_stop<J: Into<JunctionPressure>>(
     reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
     y: f64, v: f64, dt: f64, u_body: f64,
     flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
     material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
     propagator: OpeningPropagator<'_>,
-    junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
+    junction_pressure: impl Fn(f64, f64) -> Result<J, AcousticRealizeError>,
     contact_response: impl Fn(f64, f64) -> Result<fs_dcontact::AffineContactResponse, AcousticRealizeError>,
     closure_stop: bool,
 ) -> Result<OpeningStep, AcousticRealizeError> {
@@ -269,8 +285,12 @@ pub(super) fn step_with_contact_response_and_stop(
         // Clamp the MIDPOINT opening, not each endpoint separately. This is
         // the same configuration used by the midpoint spring and velocity.
         let opening = flow_opening(f64::midpoint(y, next_y))?;
-        let outgoing = junction_pressure(opening, u_body + reed_swept_flow(face, velocity))?;
-        let pressure_impulse = half_dt * face * (p_m - (outgoing + p_minus));
+        let junction: JunctionPressure =
+            junction_pressure(opening, u_body + reed_swept_flow(face, velocity))?.into();
+        let outgoing = junction.outgoing;
+        // The blade is driven by the total mouth-to-bore drop unless the junction names the drop that drives it.
+        let blade_drop = junction.blade_drop_pa.unwrap_or(p_m - (outgoing + p_minus));
+        let pressure_impulse = half_dt * face * blade_drop;
         let contact_impulse = half_dt * force;
         let inertial = mass_mid * velocity;
         let mut residual = inertial - rhs + pressure_impulse - contact_impulse;
@@ -291,11 +311,10 @@ pub(super) fn step_with_contact_response_and_stop(
         let next_v = match propagator {
             OpeningPropagator::Midpoint => 2.0 * velocity - v,
             OpeningPropagator::Exact { blade, external_n, memory } => {
-                let dp = p_m - (outgoing + p_minus);
-                blade.end_velocity(start, external_n + force - face * dp, memory)
+                blade.end_velocity(start, external_n + force - face * blade_drop, memory)
             }
         };
-        if ![residual, scale, floor, outgoing, next_y, next_v]
+        if ![residual, scale, floor, outgoing, blade_drop, next_y, next_v]
             .iter()
             .all(|x| x.is_finite())
         {
@@ -430,6 +449,7 @@ mod tests {
     use super::*;
     use crate::reed_bore::{FastSolveStats, ReedSolverMode};
     use crate::unilateral_contact::slit_lay;
+    use crate::bernoulli_aperture::viscous::{StapleRecovery, ViscousSlit};
 
     fn reed() -> BeatingReed {
         BeatingReed {
@@ -784,5 +804,184 @@ mod tests {
             Err(AcousticRealizeError::Reed { what }) => assert!(what.contains("pull the reed shut"), "{what}"),
             other => panic!("expected the closure stop to refuse, got {:?}", other.map(|s| s.opening)),
         }
+    }
+
+    // ---- staple pressure recovery (Almeida, Vergez and Caussé 2007, eqs. 14-17): the blade is driven by (dp)_c --------
+
+    /// The oboe description's reed: rest gap 357 um on 5.6 mm (2.0 mm^2 at rest, inside S_c / sqrt(C_P) = 4.47 mm^2).
+    fn oboe_reed() -> BeatingReed {
+        BeatingReed {
+            rest_opening_m: 3.57e-4,
+            width_m: 0.0056,
+            closing_pressure_pa: 17720.0,
+            blowing_pressure_pa: 7400.0,
+            attack_s: 0.008,
+            mass_kg: 2.2e-5,
+            stiffness_n_m: 3464.0,
+            damping_ratio: 0.114,
+        }
+    }
+
+    /// One free midpoint step against a lay through the viscous slit junction, with the staple recovery on or off. Off is
+    /// the junction as the voice has always called it: `characteristic_pressure` handing back a bare `f64`.
+    #[allow(clippy::too_many_arguments)]
+    fn step_through_the_slit(
+        reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64, y: f64, v: f64, dt: f64, u_body: f64,
+        lay: &Obstacle, slit: ViscousSlit, recovery: Option<StapleRecovery>,
+    ) -> OpeningStep {
+        let contact = ApertureContactStep::new(lay, y).unwrap();
+        let response = |after: f64, velocity: f64| contact.response(after, velocity)
+            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()));
+        let result = match recovery {
+            Some(recovery) => step_with_contact_response_and_stop(
+                reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+                |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint,
+                |opening, moving| {
+                    let junction = slit.characteristic_junction_with_recovery(
+                        recovery, reed.width_m, opening, rho, zc, p_minus, p_m, moving)?;
+                    Ok(JunctionPressure {
+                        outgoing: junction.outgoing_pa,
+                        blade_drop_pa: Some(junction.constriction_drop_pa),
+                    })
+                },
+                response, false,
+            ),
+            None => step_with_contact_response_and_stop(
+                reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+                |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint,
+                |opening, moving| slit.characteristic_pressure(
+                    reed.width_m, opening, rho, zc, p_minus, p_m, moving),
+                response, false,
+            ),
+        };
+        result.unwrap()
+    }
+
+    #[test]
+    fn g0_a_junction_that_names_no_blade_drop_is_the_original_step_bit_for_bit() {
+        let reed = oboe_reed();
+        let slit = ViscousSlit::new(1.81e-5, 1e-3).unwrap();
+        let lay = slit_lay(1e8, 2.0).unwrap();
+        for y in [1e-5, 2e-4, 3.57e-4] {
+            for mouth in [-500.0, 500.0, 7400.0] {
+                for dt in [1e-6, 2e-5] {
+                    // A bare f64 and the same value wrapped without a blade drop take the same arithmetic.
+                    let bare = step_through_the_slit(reed, 1.2, 5.9e7, 75.0, mouth, y, 0.3, dt, 1e-7, &lay, slit, None);
+                    let contact = ApertureContactStep::new(&lay, y).unwrap();
+                    let wrapped = step_with_contact_response_and_stop(
+                        reed, 1.2, 5.9e7, 75.0, mouth, y, 0.3, dt, 1e-7,
+                        |opening| Ok(opening.max(0.0)), None, OpeningPropagator::Midpoint,
+                        |opening, moving| slit.characteristic_pressure(
+                            reed.width_m, opening, 1.2, 5.9e7, 75.0, mouth, moving)
+                            .map(|outgoing| JunctionPressure { outgoing, blade_drop_pa: None }),
+                        |after, velocity| contact.response(after, velocity)
+                            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string())),
+                        false,
+                    ).unwrap();
+                    assert_eq!(
+                        (bare.outgoing.to_bits(), bare.opening.to_bits(), bare.velocity.to_bits()),
+                        (wrapped.outgoing.to_bits(), wrapped.opening.to_bits(), wrapped.velocity.to_bits()),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_staple_blade_force_follows_the_constriction_drop_and_the_step_balances_energy() {
+        let reed = oboe_reed();
+        let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
+        let slit = ViscousSlit::new(1.81e-5, 1e-3).unwrap();
+        let (rho, zc, incoming, body) = (1.2, 5.9e7, 75.0, 1e-7);
+        let face = reed_pressure_face(reed);
+        let (_, damping) = reed_structural(reed);
+        let (mut recovering, mut driven_by_total) = (0, 0);
+        for alpha in [2.0, 2.3] {
+            for internal_loss in [0.0, 5.0] {
+                let lay = slit_lay(1e8, alpha).unwrap().with_internal_loss(internal_loss).unwrap();
+                // Independent analytical potential, not the solver's gradient.
+                let potential = |opening: f64| 1e8 * (-opening).max(0.0).powf(alpha + 1.0) / (alpha + 1.0);
+                let energy = |opening: f64, velocity: f64| {
+                    0.5 * reed.mass_kg * velocity * velocity
+                        + 0.5 * reed.stiffness_n_m * (opening - reed.rest_opening_m).powi(2)
+                        + potential(opening)
+                };
+                for y in [-5e-5, 1e-5, 2e-4, 3.57e-4, 4.5e-4] {
+                    for v in [-2.0, -0.2, 0.1, 1.0] {
+                        for dt in [1e-6, 1e-5, 5e-5] {
+                            for mouth in [-500.0, 500.0, 7400.0, 15000.0] {
+                                let step = step_through_the_slit(
+                                    reed, rho, zc, incoming, mouth, y, v, dt, body, &lay, slit, Some(recovery));
+                                let (pressure, y1, v1) = (step.outgoing, step.opening, step.velocity);
+                                let vm = 0.5 * (v + v1);
+                                let drop_total = mouth - (pressure + incoming);
+                                let swept = -face * vm;
+                                let wave = (pressure - incoming) / zc;
+                                let jet = wave - body - swept; // the junction's flow balance
+                                let recovered = recovery.recovered_pressure_pa(rho, jet);
+                                let drop_c = drop_total + recovered; // (dp)_c = p_m - p_c, eq. 17 rearranged
+                                // The blade is in balance under (dp)_c: inertia + spring + damper + face (dp)_c = lay force.
+                                let inertia = reed.mass_kg * (v1 - v) / dt;
+                                let spring = reed.stiffness_n_m * (0.5 * (y + y1) - reed.rest_opening_m);
+                                let viscous = damping * vm;
+                                let pressure_force = face * drop_c;
+                                let force = inertia + spring + viscous + pressure_force;
+                                // The solver stops at a momentum residual of 2e-11 of its own scale, or at the rounding floor of
+                                // the pressures it differences (8 eps of their magnitudes, with the bore load z*moving among
+                                // them), whichever is larger. In force units that is the most the balance can be off by here.
+                                let half = 0.5 * dt;
+                                let solver_scale = (reed.mass_kg * vm / half + damping * vm + half * reed.stiffness_n_m * vm).abs()
+                                    + (reed.mass_kg * v / half - reed.stiffness_n_m * (y - reed.rest_opening_m)).abs()
+                                    + pressure_force.abs() + force.abs();
+                                let pressure_magnitude = face.abs()
+                                    * (mouth.abs() + incoming.abs() + pressure.abs() + (zc * (body + swept)).abs());
+                                let force_tolerance = (2e-11 * solver_scale)
+                                    .max(8.0 * f64::EPSILON * (pressure_magnitude + solver_scale))
+                                    .max(f64::MIN_POSITIVE);
+                                let contact_loss = potential(y) - potential(y1) - dt * force * vm;
+                                // Energy with the recovery in it. The slit and staple element dissipate drop_total * jet, which
+                                // is not negative; the blade feels p_c while the swept flow enters the bore at p_r, and that
+                                // exchange, -recovered * swept, is the only term of either sign.
+                                let element = drop_total * jet;
+                                let exchange = -recovered * swept;
+                                let before = energy(y, v);
+                                let after = energy(y1, v1);
+                                let supplied = dt * drop_total * (wave - body);
+                                let loss = dt * (damping * vm * vm + element + exchange) + contact_loss;
+                                let scale = before.abs() + after.abs() + supplied.abs() + loss.abs();
+                                // The contact loss is a difference of potentials and a force-times-path term: the force the solver
+                                // may leave unresolved (above) is an energy of at most dt * force_tolerance * |vm| there.
+                                let tolerance = 2e-11 * scale.max(f64::MIN_POSITIVE) + dt * force_tolerance * vm.abs();
+                                assert!((after - before + loss - supplied).abs() <= tolerance,
+                                    "y={y} v={v} dt={dt} mouth={mouth}");
+                                let flow_scale = wave.abs() + body.abs() + swept.abs();
+                                assert!(element >= -1e-9 * drop_total.abs() * flow_scale,
+                                    "the slit and staple element created energy: y={y} v={v} dt={dt} mouth={mouth} element={element:e}");
+                                assert!(contact_loss >= -tolerance,
+                                    "the contact created energy: y={y} v={v} dt={dt} mouth={mouth} {contact_loss:e} vs {tolerance:e}");
+                                assert!(force >= -force_tolerance,
+                                    "adhesive lay: y={y} v={v} dt={dt} mouth={mouth} force={force:e} tolerance={force_tolerance:e}");
+                                if (y1 - y).abs() > 1e-10 * y.abs().max(y1.abs()) {
+                                    let elastic = (potential(y) - potential(y1)) / (y1 - y);
+                                    let expected = (elastic * (1.0 - internal_loss * vm)).max(0.0);
+                                    assert!((force - expected).abs() <= force_tolerance,
+                                        "the blade is not driven by (dp)_c: y={y} v={v} dt={dt} mouth={mouth} {force:e} vs {expected:e} tolerance={force_tolerance:e}");
+                                    // Where the recovery matters, the total drop would NOT balance the same blade.
+                                    if face * recovered > 100.0 * force_tolerance {
+                                        recovering += 1;
+                                        let by_total = inertia + spring + viscous + face * drop_total;
+                                        if (by_total - expected).abs() > force_tolerance {
+                                            driven_by_total += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(recovering > 50, "the grid must exercise the recovery, got {recovering}");
+        assert_eq!(driven_by_total, recovering, "the test must be able to tell (dp)_c from the total drop");
     }
 }

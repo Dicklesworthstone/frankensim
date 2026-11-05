@@ -18,6 +18,12 @@
 //! attack envelope; all retained reed and bore state survives release and resume.
 //! Optional `slit_length LENGTH_M` after the reed record selects the shared
 //! quasisteady viscous slit from the exact inlet gas, including axial fields.
+//! Optional `staple_recovery C_P S_C_M2` right after `slit_length` (so it needs that row, and a massive reed) selects the
+//! double reed's staple pressure recovery of Almeida, Vergez and Caussé (J. Acoust. Soc. Am. 121(1) 536-546, 2007, eqs.
+//! 14-17): the flow follows the slit law on the constriction drop, the blade is driven by that drop and not by the total
+//! mouth-to-bore drop, and the bore input is raised by `C_P (1/2) rho (q/S_c)^2`. The only printed numbers are one
+//! oboe reed's (`C_P` 0.8, `S_c` 4e-6 m^2), borrowed for any other reed; the law refuses where `C_P (S/S_c)^2` reaches 1.
+//! `C_P` 0 is the original law and changes nothing. See `ReedBoreVoice::set_staple_recovery`.
 //! Optional `open_hole_interaction tmmi EPSILON` before `compile_limits`, on a
 //! `gas_field continuous` binding, couples the radiation of the open holes and the
 //! bell through the TMMI mutual impedance (EPSILON 2 as the paper prints it).
@@ -683,6 +689,24 @@ impl ReedPerformance {
             row.finish()?;
             Some(length)
         } else { None };
+        // `staple_recovery C_P S_C_M2`, right after `slit_length`: the double reed's staple pressure recovery (Almeida,
+        // Vergez and Caussé 2007 eqs. 14-17). It acts through the viscous slit law, so it needs that row.
+        let staple_recovery = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("staple_recovery") {
+            let mut row = r.row("staple_recovery")?;
+            let line = row.line;
+            let c_p = row.scalar()?;
+            let constriction_area_m2 = row.positive()?;
+            row.finish()?;
+            if slit_length_m.is_none() {
+                return Err(bad(line, "staple_recovery needs the slit_length row before it: the recovery acts through the viscous slit law"));
+            }
+            if reed.mass_kg <= 0.0 {
+                return Err(bad(line, "staple_recovery requires a massive reed"));
+            }
+            Some(crate::bernoulli_aperture::viscous::StapleRecovery::new(c_p, constriction_area_m2)
+                .map_err(|_| bad(line, "staple_recovery needs C_P in [0, 1] and a positive constriction area in m^2"))?)
+        } else { None };
         let tongue_contact = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("tongue_contact") {
             let mut row = r.row("tongue_contact")?;
@@ -1132,6 +1156,9 @@ impl ReedPerformance {
         if let Some(length_m) = slit_length_m {
             voice.set_viscous_slit_length(length_m).map_err(ReedPerformanceError::Model)?;
         }
+        if let Some(recovery) = staple_recovery {
+            voice.set_staple_recovery(recovery).map_err(ReedPerformanceError::Model)?;
+        }
         if let Some(card) = constriction_noise {
             voice.set_constriction_noise(card).map_err(ReedPerformanceError::Model)?;
         }
@@ -1248,6 +1275,10 @@ impl ReedPerformance {
     /// The field inlet can differ from the first propagation cell's midpoint.
     pub fn viscous_slit(&self) -> Option<&crate::bernoulli_aperture::viscous::ViscousSlit> {
         self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::viscous_slit)
+    }
+    /// The selected staple pressure recovery, if the card has a `staple_recovery` row with `C_P` above zero.
+    pub fn staple_recovery(&self) -> Option<&crate::bernoulli_aperture::viscous::StapleRecovery> {
+        self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::staple_recovery)
     }
     /// Original molecular gas, wall and geometry owner used for both bore
     /// feedback and physical outlet pressure. None preserves the existing

@@ -50,6 +50,87 @@ pub struct ViscousProfileFlow {
     pub flow_per_pressure_m3_s_pa: f64,
 }
 
+/// Refusal text when the staple-recovery law leaves its domain. Tests match it by name.
+pub const STAPLE_RECOVERY_DOMAIN: &str = "staple pressure recovery left its domain: C_P (S/S_c)^2 reached 1, so the reed opening area S is at or above S_c/sqrt(C_P) and the recovery would cancel the whole jet loss";
+
+/// Pressure recovery in the conical staple of a double reed: Almeida, Vergez and Caussé 2007 (JASA 121(1) 536-546,
+/// arXiv physics/0607011v1 pp. 8-9, eqs. 14-17). The reed opening S passes the jet; the channel then widens from the
+/// constriction of area `S_c` into a cone, and a fraction `C_P` of the dynamic head at the constriction comes back as
+/// pressure. With `(dp)_c = p_m - p_c` the drop across the opening and `q` the flow through it,
+///
+/// * flow: `q = S sqrt(2 (dp)_c / rho)` (here the viscous slit law of [`ViscousSlit`], which keeps its own linear term);
+/// * the blade is driven by `(dp)_c` (eq. 16), not by the total mouth-to-bore drop;
+/// * bore input: `p_r = p_m - (dp)_c + C_P (1/2) rho (q / S_c)^2` (eq. 17).
+///
+/// Both numbers are one measured reed's: `C_P = 0.8` (fitted on both pressure branches, Fig. 15) and
+/// `S_c = 4e-6 m^2` (Fig. 14), a ready-to-play natural-cane oboe reed, humid air, masses added, no lips. They are borrowed
+/// for any other reed. The law is a quasi-static one: `q` is the JET flow (the flow through the opening), and the swept
+/// flow of the moving blade and any body flow are not carried through the staple. Recovery acts on forward flow only; a
+/// reversed flow has none. It is singular where `C_P (S/S_c)^2 >= 1` (the recovery would cancel the whole jet loss and
+/// the junction would create energy): there it refuses, by [`STAPLE_RECOVERY_DOMAIN`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StapleRecovery {
+    c_p: f64,
+    constriction_area_m2: f64,
+}
+
+impl StapleRecovery {
+    /// Admit a recovery coefficient `C_P` in `[0, 1]` (0 is no recovery, 1 complete recovery) and a positive constriction area.
+    ///
+    /// # Errors
+    /// A coefficient outside `[0, 1]` or a nonpositive or nonfinite area.
+    pub fn new(c_p: f64, constriction_area_m2: f64) -> Result<Self, AcousticRealizeError> {
+        if !c_p.is_finite() || !(0.0..=1.0).contains(&c_p)
+            || !constriction_area_m2.is_finite() || constriction_area_m2 <= 0.0
+        {
+            return Err(invalid("staple recovery needs a coefficient C_P in [0, 1] and a positive finite constriction area"));
+        }
+        Ok(Self { c_p, constriction_area_m2 })
+    }
+
+    /// The pressure recovery coefficient `C_P` (eq. 14).
+    #[must_use]
+    pub const fn c_p(self) -> f64 { self.c_p }
+
+    /// The constriction area `S_c` at the diffuser input [m^2].
+    #[must_use]
+    pub const fn constriction_area_m2(self) -> f64 { self.constriction_area_m2 }
+
+    /// `1 - C_P (S/S_c)^2` for an opening area `S`: the factor on the jet's dynamic head once the recovery is in.
+    ///
+    /// # Errors
+    /// [`STAPLE_RECOVERY_DOMAIN`] where it is not positive.
+    pub fn forward_factor(self, area_m2: f64) -> Result<f64, AcousticRealizeError> {
+        let ratio = area_m2 / self.constriction_area_m2;
+        let factor = 1.0 - (self.c_p * ratio) * ratio;
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(AcousticRealizeError::Reed { what: STAPLE_RECOVERY_DOMAIN });
+        }
+        Ok(factor)
+    }
+
+    /// The recovered pressure `C_P (1/2) rho (q / S_c)^2` [Pa] for a forward flow, and zero for none or a reversed one.
+    #[must_use]
+    pub fn recovered_pressure_pa(self, density_kg_m3: f64, flow_m3_s: f64) -> f64 {
+        if flow_m3_s <= 0.0 { return 0.0; }
+        let velocity = flow_m3_s / self.constriction_area_m2;
+        self.c_p * ((0.5 * density_kg_m3) * velocity) * velocity
+    }
+}
+
+/// One same-sample characteristic junction of the slit with staple recovery.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecoveredJunction {
+    /// Outgoing characteristic wave [Pa]; the bore input pressure is this plus the incoming wave.
+    pub outgoing_pa: f64,
+    /// Signed flow through the reed opening [m^3/s].
+    pub flow_m3_s: f64,
+    /// `(dp)_c`: the drop across the opening itself (the viscous plus separated-jet law), which drives the blade [Pa].
+    pub constriction_drop_pa: f64,
+    /// Pressure recovered downstream of the constriction [Pa].
+    pub recovered_pa: f64,
+}
+
 impl ViscousSlitFlow {
     /// Sum of the two physical losses [W]. Equal to dp * U up to rounding.
     #[must_use]
@@ -211,6 +292,67 @@ impl ViscousSlit {
         };
         if ![dp, jet_pressure, outgoing].iter().all(|v| v.is_finite()) { return Err(numerical()); }
         Ok(outgoing)
+    }
+
+    /// [`Self::characteristic_pressure`] with the staple's pressure recovery ([`StapleRecovery`]): the SAME-sample
+    /// junction `(dp)_c(q) - C_P (1/2) rho (q/S_c)^2 + Z q = d` for forward flow, with `d = Pmouth - 2 Pminus - Z Umoving`
+    /// and `(dp)_c(q) = linear U/A + rho (U/A)|U/A| / 2` the slit law. For forward flow that is the slit's own quadratic with
+    /// the density scaled by `1 - C_P (S/S_c)^2`; reversed flow has no recovery and is exactly the original junction.
+    /// Returns the outgoing wave and the pieces the blade and the energy account need.
+    ///
+    /// # Errors
+    /// As [`Self::characteristic_pressure`], and [`STAPLE_RECOVERY_DOMAIN`] where forward flow meets `C_P (S/S_c)^2 >= 1`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn characteristic_junction_with_recovery(
+        self, recovery: StapleRecovery, width_m: f64, opening_m: f64, density_kg_m3: f64,
+        impedance_pa_s_m3: f64, incoming_pressure_pa: f64,
+        upstream_pressure_pa: f64, moving_flow_m3_s: f64,
+    ) -> Result<RecoveredJunction, AcousticRealizeError> {
+        let area = admitted_area(width_m, opening_m, density_kg_m3)?;
+        self.admit_density(density_kg_m3)?;
+        if ![impedance_pa_s_m3, incoming_pressure_pa, upstream_pressure_pa, moving_flow_m3_s]
+            .iter().all(|v| v.is_finite()) || impedance_pa_s_m3 <= 0.0
+        {
+            return Err(invalid("viscous slit junction requires finite pressures/flow and positive impedance"));
+        }
+        let no_jet = incoming_pressure_pa + impedance_pa_s_m3 * moving_flow_m3_s;
+        let no_drop = upstream_pressure_pa - incoming_pressure_pa;
+        let drive = no_drop - no_jet;
+        if ![no_jet, no_drop, drive].iter().all(|v| v.is_finite()) { return Err(numerical()); }
+        if opening_m == 0.0 || drive == 0.0 {
+            // No flow, so no recovery: the whole mouth-to-bore difference `drive` falls across the shut reed, and it is
+            // that difference the blade feels (zero only when there is no difference).
+            return Ok(RecoveredJunction {
+                outgoing_pa: no_jet, flow_m3_s: 0.0, constriction_drop_pa: drive, recovered_pa: 0.0,
+            });
+        }
+        let linear = self.linear_pressure(opening_m)?;
+        let wave_load = impedance_pa_s_m3 * area;
+        // The junction is monotone in the mean velocity and zero at rest, so forward flow is a positive drive.
+        let jet_density = if drive > 0.0 {
+            density_kg_m3 * recovery.forward_factor(area)?
+        } else {
+            density_kg_m3
+        };
+        let velocity = solve_velocity(linear + wave_load, jet_density, drive)?;
+        let flow = area * velocity;
+        let jet_pressure = wave_load * velocity;
+        // The constitutive drops, kept as such: reconstructing them from the drive would erase small drops.
+        let constriction_drop = linear * velocity + (0.5 * density_kg_m3 * velocity) * velocity.abs();
+        let recovered = recovery.recovered_pressure_pa(density_kg_m3, flow);
+        let dp = constriction_drop - recovered;
+        let outgoing = if no_drop.abs().max(dp.abs()) <= no_jet.abs().max(jet_pressure.abs()) {
+            no_drop - dp
+        } else {
+            no_jet + jet_pressure
+        };
+        if ![flow, constriction_drop, recovered, dp, outgoing].iter().all(|v| v.is_finite()) {
+            return Err(numerical());
+        }
+        Ok(RecoveredJunction {
+            outgoing_pa: outgoing, flow_m3_s: flow, constriction_drop_pa: constriction_drop,
+            recovered_pa: recovered,
+        })
     }
 
     /// Eliminate dp + Z U(dp) = drive after condensing mechanical swept flow.
@@ -539,5 +681,198 @@ mod tests {
         assert!(law().evaluate(0.013, 0.0, 1.2, f64::NAN).is_err());
         assert!(law().evaluate(0.013, 1e-200, 1.2, 100.0).is_err());
         assert!(ViscousSlit::new(f64::MAX, f64::MAX).is_err());
+    }
+
+    // ---- staple pressure recovery (Almeida, Vergez and Caussé 2007, eqs. 14-17) -----------------------------------
+    // Fig. 13, increasing branch: p_M = 35 kPa, k_s = 1.04e10 kg m^-3 s^-2. Fig. 14 and Fig. 15: S_c = 4e-6 m^2, C_P = 0.8.
+    const P_M: f64 = 35e3;
+    const K_S: f64 = 1.04e10;
+    const S_C: f64 = 4e-6;
+    const C_P: f64 = 0.8;
+
+    /// The junction with the viscous term and the bore impedance negligible, so it is the printed inviscid curve: the
+    /// bore input pressure is then zero and the total drop is the mouth pressure. Returns (total drop, flow, constriction drop).
+    fn quasistatic(recovery: StapleRecovery, area: f64, mouth: f64) -> (f64, f64, f64) {
+        let slit = ViscousSlit::new(1e-12, 1e-9).unwrap();
+        let width = 0.0056;
+        let j = slit.characteristic_junction_with_recovery(
+            recovery, width, area / width, 1.2, 1.0, 0.0, mouth, 0.0).unwrap();
+        (mouth - j.outgoing_pa, j.flow_m3_s, j.constriction_drop_pa)
+    }
+
+    /// One point of the printed characteristic: the constriction drop `x` sets the opening `S = S_0 - x/k_s` (eq. 16); the
+    /// junction is solved for the total drop at which its own constriction drop is `x`. Returns (total drop, flow).
+    fn characteristic_point(recovery: StapleRecovery, x: f64) -> (f64, f64) {
+        let area = P_M / K_S - x / K_S;
+        let (mut lo, mut hi) = (0.0, x);
+        for _ in 0..90 {
+            let mid = 0.5 * (lo + hi);
+            if quasistatic(recovery, area, mid).2 < x { lo = mid; } else { hi = mid; }
+        }
+        let (total, flow, _) = quasistatic(recovery, area, 0.5 * (lo + hi));
+        (total, flow)
+    }
+
+    /// Golden-section maximum of the flow over the constriction drop. Returns (x, flow).
+    fn flow_maximum(recovery: StapleRecovery) -> (f64, f64) {
+        let phi = (5.0_f64.sqrt() - 1.0) / 2.0;
+        let f = |x: f64| characteristic_point(recovery, x).1;
+        let (mut a, mut b) = (0.15 * P_M, 0.6 * P_M);
+        let (mut c, mut d) = (b - phi * (b - a), a + phi * (b - a));
+        let (mut fc, mut fd) = (f(c), f(d));
+        for _ in 0..80 {
+            if fc > fd {
+                b = d; d = c; fd = fc;
+                c = b - phi * (b - a); fc = f(c);
+            } else {
+                a = c; c = d; fc = fd;
+                d = a + phi * (b - a); fd = f(d);
+            }
+        }
+        let x = 0.5 * (a + b);
+        (x, f(x))
+    }
+
+    #[test]
+    fn g1_staple_recovery_puts_the_flow_maximum_where_the_printed_model_says() {
+        let recovery = StapleRecovery::new(C_P, S_C).unwrap();
+        let s0 = P_M / K_S; // p_M = k_s S_0
+        // Closed form from eqs. 15-17: q^2 = S^2 2x/rho with S = S_0 - x/k_s is largest at x = p_M/3, S = 2 S_0/3, and the
+        // total drop there is x (1 - C_P S^2/S_c^2), because (1/2) rho (q/S_c)^2 = x S^2/S_c^2. Nothing here is a typed ratio.
+        let x_star = P_M / 3.0;
+        let s_star = 2.0 * s0 / 3.0;
+        let expected_drop = x_star * (1.0 - C_P * (s_star / S_C) * (s_star / S_C));
+        let expected_flow = s_star * (2.0 * x_star / 1.2).sqrt();
+        let (x, flow) = flow_maximum(recovery);
+        let (drop, _) = characteristic_point(recovery, x);
+        // The recovery moves where the maximum sits on the total-drop axis, not how large it is.
+        close(flow, expected_flow, 1e-6);
+        close(drop, expected_drop, 1e-5);
+        assert!(drop < 0.9 * x_star, "the recovery must pull the maximum below the elementary model's");
+        // Without recovery the maximum is the elementary model's, at p_M/3.
+        let (x0, flow0) = flow_maximum(StapleRecovery::new(0.0, S_C).unwrap());
+        close(x0, x_star, 1e-5);
+        close(flow0, expected_flow, 1e-6);
+    }
+
+    #[test]
+    fn g0_staple_recovery_refuses_where_the_jet_loss_would_be_cancelled() {
+        let recovery = StapleRecovery::new(C_P, S_C).unwrap();
+        let width = 0.0056;
+        let limit = S_C / C_P.sqrt(); // C_P (S/S_c)^2 = 1
+        let junction = |area: f64, mouth: f64| law().characteristic_junction_with_recovery(
+            recovery, width, area / width, 1.2, 1e7, 0.0, mouth, 0.0);
+        assert!(junction(limit * (1.0 - 1e-9), 500.0).is_ok());
+        for area in [limit * (1.0 + 1e-9), 1.5 * limit] {
+            match junction(area, 500.0) {
+                Err(AcousticRealizeError::Reed { what }) => assert_eq!(what, STAPLE_RECOVERY_DOMAIN),
+                other => panic!("expected the staple domain refusal, got {other:?}"),
+            }
+        }
+        // Reversed flow has no recovery: the same opening is admitted there and is exactly the original junction.
+        let reverse = junction(1.5 * limit, -500.0).unwrap();
+        let original = law().characteristic_pressure(width, 1.5 * limit / width, 1.2, 1e7, 0.0, -500.0, 0.0).unwrap();
+        assert_eq!(reverse.outgoing_pa, original);
+        assert_eq!(reverse.recovered_pa, 0.0);
+        // A coefficient or an area outside the printed range never builds.
+        for (c, s) in [(-0.1, S_C), (1.1, S_C), (f64::NAN, S_C), (C_P, 0.0), (C_P, -1e-6), (C_P, f64::INFINITY)] {
+            assert!(StapleRecovery::new(c, s).is_err(), "{c} {s}");
+        }
+    }
+
+    #[test]
+    fn g1_staple_junction_is_passive_and_its_power_balance_closes_with_the_recovery_in_it() {
+        let recovery = StapleRecovery::new(C_P, S_C).unwrap();
+        let (width, rho) = (0.0056, 1.2);
+        let (mut forward, mut reverse) = (0, 0);
+        // Openings up to 0.6 mm (3.4 mm^2) stay inside S_c / sqrt(C_P) = 4.47 mm^2.
+        for h in [5e-5, 1.5e-4, 3.57e-4, 6e-4] {
+            for z in [3e5, 6e7, 5e9] {
+                for incoming in [-300.0, 0.0, 1000.0] {
+                    for mouth in [-4000.0, -50.0, 50.0, 800.0, 7400.0, 30000.0] {
+                        for moving in [-8e-5, 0.0, 6e-5] {
+                            let j = law().characteristic_junction_with_recovery(
+                                recovery, width, h, rho, z, incoming, mouth, moving).unwrap();
+                            let area = width * h;
+                            let (q, v) = (j.flow_m3_s, j.flow_m3_s / area);
+                            let bore = j.outgoing_pa + incoming;
+                            // The characteristic junction's flow balance: wave flow = jet + swept/body flow.
+                            let wave = (j.outgoing_pa - incoming) / z;
+                            let flow_scale = q.abs() + moving.abs() + wave.abs();
+                            assert!((q + moving - wave).abs() <= 1e-9 * flow_scale + 1e-30,
+                                "h={h} z={z} in={incoming} m={mouth} mv={moving}");
+                            // Independent power pieces: viscous, separated jet, and the recovery giving a part back.
+                            let linear = 12.0 * 1.81e-5 * 1e-3 / h / h;
+                            let viscous = linear * v * q;
+                            let separation = 0.5 * rho * v * v.abs() * q;
+                            let recovery_power = if q > 0.0 {
+                                C_P * 0.5 * rho * (q / S_C) * (q / S_C) * q
+                            } else {
+                                0.0
+                            };
+                            let loss = viscous + separation - recovery_power;
+                            let delivered = (mouth - bore) * q;
+                            let scale = (mouth * q).abs() + (bore * q).abs() + viscous.abs()
+                                + separation.abs() + recovery_power.abs();
+                            // The power taken from the mouth and not delivered to the bore is the net loss.
+                            assert!((delivered - loss).abs() <= 1e-9 * scale + 1e-30,
+                                "h={h} z={z} in={incoming} m={mouth} mv={moving}: {delivered:e} vs {loss:e}");
+                            // Passive: the viscous part is nonnegative, and the jet loss after the recovery is
+                            // (1/2) rho v^2 q (1 - C_P S^2/S_c^2) >= 0 for forward flow.
+                            assert!(loss >= -1e-9 * scale, "creates energy: {loss:e}");
+                            if q > 0.0 {
+                                forward += 1;
+                                let net_jet = 0.5 * rho * v * v * q * (1.0 - C_P * (area / S_C) * (area / S_C));
+                                assert!(net_jet > 0.0);
+                                assert!((separation - recovery_power - net_jet).abs() <= 1e-9 * separation.abs());
+                                assert!(j.recovered_pa > 0.0 && j.recovered_pa < j.constriction_drop_pa);
+                            } else if q < 0.0 {
+                                reverse += 1;
+                                assert_eq!(j.recovered_pa, 0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(forward > 100 && reverse > 100, "forward {forward}, reverse {reverse}");
+    }
+
+    #[test]
+    fn g0_a_shut_slit_hands_the_blade_the_whole_pressure_difference() {
+        // With no flow there is no recovery: the constriction drop is the whole mouth-to-bore difference, which is what
+        // presses a shut reed on its lay (found by the step-level energy test: an earlier draft returned zero here).
+        let recovery = StapleRecovery::new(C_P, S_C).unwrap();
+        for (mouth, incoming, z, moving) in [(7400.0, 75.0, 5.9e7, 1e-7), (-300.0, 20.0, 3e5, -2e-8), (1000.0, 0.0, 6e7, 0.0)] {
+            let j = law().characteristic_junction_with_recovery(
+                recovery, 0.0056, 0.0, 1.2, z, incoming, mouth, moving).unwrap();
+            let original = law().characteristic_pressure(0.0056, 0.0, 1.2, z, incoming, mouth, moving).unwrap();
+            assert_eq!(j.outgoing_pa, original);
+            assert_eq!((j.flow_m3_s, j.recovered_pa), (0.0, 0.0));
+            let difference = mouth - (j.outgoing_pa + incoming);
+            assert!((j.constriction_drop_pa - difference).abs() <= 1e-12 * (mouth.abs() + j.outgoing_pa.abs() + incoming.abs()),
+                "{} vs {difference}", j.constriction_drop_pa);
+        }
+        // No difference at all: nothing presses the blade.
+        // (the drive is mouth - 2 incoming - z moving = 100 - 2 * 50 - 0)
+        let still = law().characteristic_junction_with_recovery(
+            recovery, 0.0056, 3e-4, 1.2, 6e7, 50.0, 100.0, 0.0).unwrap();
+        assert_eq!((still.flow_m3_s, still.constriction_drop_pa, still.recovered_pa), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn g1_vanishing_recovery_is_the_original_junction() {
+        let recovery = StapleRecovery::new(1e-14, S_C).unwrap();
+        let (width, rho) = (0.0056, 1.2);
+        for (h, mouth, incoming, z, moving) in [
+            (3.57e-4, 7400.0, 75.0, 6e7, 1e-7), (1e-4, 800.0, -30.0, 3e5, -5e-8),
+            (6e-4, -2000.0, 10.0, 5e9, 0.0), (2e-4, 30000.0, 0.0, 6e7, 6e-5),
+        ] {
+            let j = law().characteristic_junction_with_recovery(
+                recovery, width, h, rho, z, incoming, mouth, moving).unwrap();
+            let original = law().characteristic_pressure(width, h, rho, z, incoming, mouth, moving).unwrap();
+            assert!((j.outgoing_pa - original).abs() <= 1e-10 * (1.0 + original.abs()),
+                "{} vs {original}", j.outgoing_pa);
+        }
     }
 }
