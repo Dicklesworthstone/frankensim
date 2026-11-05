@@ -17,6 +17,8 @@
 //! This is an in-plane membrane with solved transverse stretch and shear, not
 //! a bending shell or a model of wrinkling, necking, fracture or contact.
 
+mod transfer;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;

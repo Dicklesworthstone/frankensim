@@ -1253,6 +1253,30 @@ relaxation and heated dead-load creep. These tests solve free lateral and
 interior displacements and compare full deformation, thickness, retained
 history and thermal work accounts; their coefficients are synthetic.
 
+### Conservative nodal temperature and caloric transfer
+
+`quadrature_temperatures_from_nodes` interpolates one positive absolute
+temperature per original node with the native P1/Q1 shape functions.
+`advance_from_nodal_temperatures` feeds that point field into the same
+physical-duration, frozen-history endpoint solve. Cached shapes are admitted
+once with the immutable reference geometry; constant fields are preserved
+exactly, and no node-to-element average replaces a point's temperature.
+
+An accepted step's `nodal_caloric_heat_j` returns signed joules on the original
+nodes through the transpose transfer, `Q_a = sum_q N_a(q) V0(q) h_q`.
+The density `h_q` is native plastic/creep loss plus reversible caloric exchange.
+Original quadrature volume includes the original thickness. Reversible cooling
+remains negative; current volume, work-quadrature defects and kinetic potentials
+never replace physical heat. The transpose conserves the integrated signed
+energy and its pairing with every representable nodal temperature field.
+The receiving thermal owner applies the returned energy once and retains its
+own caloric storage and transport law.
+
+`tests/finite_thermoplastic_sheet_transfer.rs` checks exact constant and affine
+temperature reproduction on translated/sheared P1/Q1 meshes, independent signed
+heat conservation and polynomial duality through cooling, forming and spatial
+warming, and transactional input/cancellation refusals.
+
 ## Exactly incompressible finite-strain plane stress
 
 `HyperProblem::solve_incompressible_plane_stress(PlaneStressSettings, &Cx)`

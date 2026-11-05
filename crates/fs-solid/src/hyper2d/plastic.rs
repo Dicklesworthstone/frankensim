@@ -109,6 +109,8 @@ impl FinitePlasticSheetEnergy {
 
 #[derive(Debug)]
 struct Point {
+    // Original P1/Q1 interpolation, admitted once with the immutable geometry.
+    shape: [f64; 4],
     gradients: [[f64; 2]; 4],
     volume_m3: f64,
 }
@@ -284,7 +286,7 @@ fn prepare_geometry(
             quad_points(4)
         };
         for (xi, eta, weight) in rule {
-            let (_, gradients, determinant) =
+            let (shape, gradients, determinant) =
                 shapes_at(&element.reference, &[0, 1, 2, 3][..arity], xi, eta);
             let volume_m3 = weight * determinant * thickness_m[e];
             if !volume_m3.is_finite()
@@ -295,10 +297,24 @@ fn prepare_geometry(
                     "sheet element {e} has unrepresentable reference geometry"
                 )));
             }
+            let partition: f64 = shape.iter().sum();
+            if shape.len() != arity
+                || shape
+                    .iter()
+                    .any(|value| !value.is_finite() || *value < 0.0 || *value > 1.0)
+                || !partition.is_finite()
+                || (partition - 1.0).abs() > 64.0 * f64::EPSILON
+            {
+                return Err(invalid(
+                    "sheet reference shapes must form a finite nonnegative partition of unity",
+                ));
+            }
             let mut point = Point {
+                shape: [0.0; 4],
                 gradients: [[0.0; 2]; 4],
                 volume_m3,
             };
+            point.shape[..arity].copy_from_slice(&shape);
             point.gradients[..arity].copy_from_slice(&gradients);
             element.points.push(point);
             reference_volume_m3 += volume_m3;
