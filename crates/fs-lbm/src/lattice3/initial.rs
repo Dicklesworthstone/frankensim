@@ -113,6 +113,14 @@ pub(super) fn admit_velocity<L: EquilibriumLattice3<Q>, const Q: usize>(
     Ok(())
 }
 
+pub(super) fn equilibrium<L: EquilibriumLattice3<Q>, const Q: usize>(
+    collision: L::Collision,
+    rho: f64,
+    velocity: [f64; 3],
+) -> [f64; Q] {
+    L::equilibrium(collision, rho, velocity)
+}
+
 pub(super) fn attach_force<L: EquilibriumLattice3<Q>, const Q: usize>(
     populations: &mut [f64; Q],
     collision: L::Collision,

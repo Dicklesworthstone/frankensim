@@ -1,5 +1,36 @@
 # CONTRACT: fs-lbm
 
+## Native D3Q19/D3Q27 open velocity and pressure faces
+
+`lattice3::open_boundaries::OpenBoundaryGrid3` binds existing face specifications
+to the original dense native collision, pull stencil and three population
+buffers. Physical donor moments include the uniform half force. The prescribed
+velocity or density combines with the first interior cell's other moment and
+physical nonequilibrium stress, then the native equilibrium, second-moment
+projection and complete half source reconstruct the accepted populations.
+Quadratic/product equilibrium and collision rates remain explicit choices.
+
+Open faces occupy one axis, with a fluid donor one cell inward. Fixed exterior
+and voxel wall links retain their original populations at open/wall seams;
+only open-owned rows change there, so exact full prescribed moments apply to
+face interiors. Nonzero wall motion and incompatible topology refuse. Both
+grid and selected cell-collision Mach envelopes apply before publication.
+
+Serial and pooled steps share the original 64-cell kernels. No provisional
+open reflection is admitted as a final reservoir state. Populations, step count
+and the measured mass/linear/angular reservoir exchange publish together after
+the final cancellation checkpoint. The receipt includes temporary open-link
+reflection and every actual regularization change, with canonical compensated
+reduction; it is not a pressure-work or thermodynamic-energy balance. Target
+rebinds alter held values atomically without advancing or resetting fluid state.
+
+`tests/lattice3_open_boundaries.rs` covers uniform flow for native collision
+families, physical forced velocities/stress, independent total momentum/mass
+balance, wall/open ownership, moment-origin covariance, worker invariance and
+late cancellation/admission rollback. This owner currently retains uniform
+body forces and fixed geometry; spatial/endpoint force fields, moving walls,
+spatial inlet profiles and nonreflecting characteristics remain separate.
+
 ## Physical velocity initialization on shared D3Q19/D3Q27 grids
 
 `Grid3::try_new_equilibrium` accepts physical lattice density and velocity.

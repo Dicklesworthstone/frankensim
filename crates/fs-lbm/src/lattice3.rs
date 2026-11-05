@@ -15,6 +15,8 @@ pub mod impulse;
 mod initial;
 /// Prescribed tangential surface motion on the same fixed halfway walls.
 pub mod moving_walls;
+/// Regularized velocity/pressure reservoirs on the original native transport.
+pub mod open_boundaries;
 /// Source-preserving generalized-Newtonian viscosity on the existing 3-D step.
 pub mod rheology;
 mod sgs;
@@ -696,6 +698,28 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
         mut endpoint: impl FnMut(
             usize,
             &[f64; Q],
+            crate::d3q19::PeriodicMomentumTransport3,
+        ) -> Result<(), GridError3<L::Error>>,
+    ) -> Result<(), GridError3<L::Error>> {
+        self.process_stream_with_update::<MEASURE_PERIODIC>(
+            src,
+            dst,
+            base,
+            |cell, output, transport| endpoint(cell, output, transport),
+        )
+    }
+
+    // A boundary owner completes the same native pull before final physical
+    // admission. No provisional reflected open row is published or tested as
+    // though it were a finished reservoir condition.
+    fn process_stream_with_update<const MEASURE_PERIODIC: bool>(
+        &self,
+        src: &[[f64; Q]],
+        dst: &mut [[f64; Q]],
+        base: usize,
+        mut endpoint: impl FnMut(
+            usize,
+            &mut [f64; Q],
             crate::d3q19::PeriodicMomentumTransport3,
         ) -> Result<(), GridError3<L::Error>>,
     ) -> Result<(), GridError3<L::Error>> {
