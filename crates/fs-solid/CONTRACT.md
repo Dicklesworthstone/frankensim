@@ -1087,6 +1087,47 @@ Coefficients are synthetic. This is an isothermal in-plane continuum; it does no
 bending, wrinkling, necking, contact, anisotropic yielding, fracture, calibrated
 forming limits or a general mesh-convergence result.
 
+## Thermally evolving finite-plastic sheets
+
+`hyper2d::plastic::thermal::FiniteThermoplasticSheet` retains the original
+borrowed `FiniteThermalJ2Material` families and uses the same prepared P1/Q1
+geometry, condensed plane-stress assembly and increment solver as the
+fixed-temperature sheet. `try_new` admits virgin identity deformation only at
+each family's own reference temperature, using duration-free inspection.
+Every `advance` receives an exact element-temperature field and positive
+physical duration. Native thermal expansion, coefficient softening and selected
+rate-independent, Perzyna, Norton or simultaneous Norton/J2 evolution remain
+inside the original family; no mechanical backbone or averaged property field
+replaces it. Old history is inspected at its accepted old temperature, so a
+new hotter endpoint can legitimately cause flow while displacement is held.
+
+Each element freezes its new temperature and actual duration through all
+Newton/backtracking trials. The accepted temperature, time, full deformation,
+traction-free thickness and inelastic history advance atomically. The endpoint
+audit calls `checked_increment_for_step` from the original accepted deformation,
+temperature and history, independently matching the solver's candidate history
+and assembled potential. `evaluate_trial` accepts endpoint temperatures first,
+then displacements, duration and tangent selection, without committing them.
+
+`quadrature_energy` reuses the established original-volume
+`FiniteThermoplasticElementEnergy` accounts in element/quadrature order;
+`quadrature_volume_m3` supplies their original integration weights. The whole
+sheet energy account retains free and mechanical internal-energy changes,
+plastic/creep dissipation, reversible caloric transfer, coefficient and entropy
+storage changes, actual kinetic potential, support/dead-load work and signed
+endpoint defect separately. Total caloric transfer is native irreversible loss
+plus reversible exchange; the endpoint quadrature defect never becomes heat.
+Point balances, retained energy, assembled potential, external/internal work
+and the complete thermal balance are gated before acceptance. Temperature is
+caller-supplied; this is not a thermal-equation or caloric-material owner.
+
+`tests/finite_thermoplastic_sheet.rs` covers free thermal expansion/cooling,
+held-strain thermal softening, explicit-duration viscous relaxation, heterogeneous
+original families and temperatures, native point/whole-sheet work accounts,
+and transactional domain, duration and cancellation refusals. Coefficients
+are synthetic and carry the same in-plane continuum limitations as the
+fixed-temperature sheet.
+
 ## Exactly incompressible finite-strain plane stress
 
 `HyperProblem::solve_incompressible_plane_stress(PlaneStressSettings, &Cx)`

@@ -31,6 +31,9 @@ use crate::mesh2::{Mesh2, quad_points, shapes_at};
 use crate::plastic3::increment::{self, IncrementControls, IncrementOperator};
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
+/// Source-bound, frozen-temperature forming with native thermal work accounts.
+pub mod thermal;
+
 /// Explicit size and reference-element quality envelope.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SheetAssemblyBudget {
@@ -234,6 +237,164 @@ fn shared_duration_s<L: FinitePlaneStressMaterial>(
     Ok(duration)
 }
 
+fn prepare_elements(
+    mesh: &Mesh2,
+    thickness_m: &[f64],
+    budget: SheetAssemblyBudget,
+    cx: &Cx<'_>,
+) -> Result<Arc<Vec<Element>>, SmallStrainTetError> {
+    checkpoint(cx)?;
+    if mesh.nodes.is_empty()
+        || mesh.elems.is_empty()
+        || mesh.nodes.len() > budget.maximum_nodes
+        || mesh.elems.len() > budget.maximum_elements
+        || mesh.nodes.len().checked_mul(2).is_none()
+        || mesh.elems.len().checked_mul(4).is_none()
+        || thickness_m.len() != mesh.elems.len()
+        || thickness_m.iter().any(|x| !x.is_finite() || *x <= 0.0)
+        || mesh.nodes.iter().flatten().any(|x| !x.is_finite())
+        || !budget.minimum_scaled_jacobian.is_finite()
+        || budget.minimum_scaled_jacobian <= 0.0
+    {
+        return Err(invalid(
+            "finite sheet mesh, exact positive thicknesses and explicit size/quality bounds required",
+        ));
+    }
+    let mut elements = Vec::with_capacity(mesh.elems.len());
+    let mut reference_volume_m3 = 0.0;
+    let mut point_count = 0;
+    let mut used = vec![false; mesh.nodes.len()];
+    let mut seen = BTreeSet::new();
+    for (e, conn) in mesh.elems.iter().enumerate() {
+        checkpoint(cx)?;
+        let arity = conn.len();
+        if !(arity == 3 || arity == 4)
+            || conn.iter().any(|&a| a >= mesh.nodes.len())
+            || (0..arity).any(|a| (0..a).any(|b| conn[a] == conn[b]))
+        {
+            return Err(invalid(format!(
+                "sheet element {e} must be a P1 triangle or Q1 quad with distinct in-range nodes"
+            )));
+        }
+        let mut key = conn.clone();
+        key.sort_unstable();
+        if !seen.insert(key) {
+            return Err(invalid("duplicate sheet element"));
+        }
+        let mut element = Element {
+            nodes: [0; 4],
+            arity,
+            reference: [[0.0; 2]; 4],
+            points: Vec::new(),
+            offset: point_count,
+        };
+        element.nodes[..arity].copy_from_slice(conn);
+        for (a, &node) in conn.iter().enumerate() {
+            used[node] = true;
+            element.reference[a] = [0, 1].map(|i| mesh.nodes[node][i] - mesh.nodes[conn[0]][i]);
+        }
+        let mut edge_squared = 0.0_f64;
+        for a in 0..arity {
+            let b = (a + 1) % arity;
+            let d = [0, 1].map(|i| element.reference[b][i] - element.reference[a][i]);
+            edge_squared = edge_squared.max(d[0] * d[0] + d[1] * d[1]);
+        }
+        let scaled = element.minimum_corner_cross(None) / edge_squared;
+        if !scaled.is_finite() || scaled < budget.minimum_scaled_jacobian {
+            return Err(invalid(format!(
+                "sheet element {e} has inadmissible corner scaled Jacobian {scaled:e}"
+            )));
+        }
+        // Constant P1 F is exactly integrated at one centroid. Q1 retains
+        // independent histories at all four native Gauss points.
+        let rule = if arity == 3 {
+            vec![(1.0 / 3.0, 1.0 / 3.0, 0.5)]
+        } else {
+            quad_points(4)
+        };
+        for (xi, eta, weight) in rule {
+            let (_, gradients, determinant) =
+                shapes_at(&element.reference, &[0, 1, 2, 3][..arity], xi, eta);
+            let volume_m3 = weight * determinant * thickness_m[e];
+            if !volume_m3.is_finite()
+                || volume_m3 <= 0.0
+                || gradients.iter().flatten().any(|x| !x.is_finite())
+            {
+                return Err(invalid(format!(
+                    "sheet element {e} has unrepresentable reference geometry"
+                )));
+            }
+            let mut point = Point {
+                gradients: [[0.0; 2]; 4],
+                volume_m3,
+            };
+            point.gradients[..arity].copy_from_slice(&gradients);
+            element.points.push(point);
+            reference_volume_m3 += volume_m3;
+            point_count += 1;
+        }
+        elements.push(element);
+    }
+    if used.iter().any(|used| !used) || !reference_volume_m3.is_finite() {
+        return Err(invalid(
+            "sheet contains an unused node or unrepresentable volume",
+        ));
+    }
+    checkpoint(cx)?;
+    Ok(Arc::new(elements))
+}
+
+fn validate_step_inputs(
+    dofs: usize,
+    budget: SheetAssemblyBudget,
+    prescribed_m: &[(usize, f64)],
+    nodal_forces_n: &[(usize, f64)],
+    settings: IncrementSettings,
+    controls: FinitePlasticStepControls,
+) -> Result<Vec<f64>, SmallStrainTetError> {
+    if settings.max_newton_iterations == 0
+        || settings.max_linear_iterations == 0
+        || !settings.relative_tolerance.is_finite()
+        || settings.relative_tolerance <= 0.0
+        || settings.relative_tolerance >= 1.0
+        || !settings.linear_tolerance.is_finite()
+        || settings.linear_tolerance <= 0.0
+        || settings.linear_tolerance >= 1.0
+        || [
+            controls.equilibrium_work_tolerance_j,
+            controls.maximum_endpoint_work_defect_j,
+            controls.yield_tolerance_pa,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+    {
+        return Err(invalid(
+            "sheet needs finite positive solver controls and nonnegative energy/yield gates",
+        ));
+    }
+    let mut fixed = vec![false; dofs];
+    for &(dof, value) in prescribed_m {
+        if dof >= dofs || !value.is_finite() || fixed[dof] {
+            return Err(invalid("invalid or repeated sheet prescribed DOF"));
+        }
+        fixed[dof] = true;
+    }
+    if dofs - prescribed_m.len() > budget.maximum_free_dofs {
+        return Err(invalid("sheet free displacement count exceeds budget"));
+    }
+    let mut external = vec![0.0; dofs];
+    for &(dof, value) in nodal_forces_n {
+        if dof >= dofs || !value.is_finite() {
+            return Err(invalid("invalid sheet dead nodal force"));
+        }
+        external[dof] += value;
+    }
+    if external.iter().any(|x| !x.is_finite()) {
+        return Err(invalid("sheet summed force is not representable"));
+    }
+    Ok(external)
+}
+
 impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
     /// Admit a virgin P1/Q1 reference sheet. Thickness has one positive value
     /// per element; a graded sheet retains those original volume weights.
@@ -247,21 +408,7 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
         budget: SheetAssemblyBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, FinitePlasticSheetError> {
-        checkpoint(cx)?;
-        if mesh.nodes.is_empty()
-            || mesh.elems.is_empty()
-            || mesh.nodes.len() > budget.maximum_nodes
-            || mesh.elems.len() > budget.maximum_elements
-            || mesh.nodes.len().checked_mul(2).is_none()
-            || mesh.elems.len().checked_mul(4).is_none()
-            || thickness_m.len() != mesh.elems.len()
-            || thickness_m.iter().any(|x| !x.is_finite() || *x <= 0.0)
-            || mesh.nodes.iter().flatten().any(|x| !x.is_finite())
-            || !budget.minimum_scaled_jacobian.is_finite()
-            || budget.minimum_scaled_jacobian <= 0.0
-        {
-            return Err(invalid("finite sheet mesh, exact positive thicknesses and explicit size/quality bounds required").into());
-        }
+        let elements = prepare_elements(mesh, thickness_m, budget, cx)?;
         if let FinitePlasticLawField::PerElement(materials) = laws
             && materials.len() != mesh.elems.len()
         {
@@ -272,53 +419,12 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
             .into());
         }
         let physical_time_s = shared_duration_s(laws, cx)?.map(|_| 0.0);
-        let mut elements = Vec::with_capacity(mesh.elems.len());
         let mut states = Vec::new();
         let mut deformation = Vec::new();
         let mut piola_pa = Vec::new();
         let mut stored_energy_j = 0.0;
-        let mut reference_volume_m3 = 0.0;
-        let mut used = vec![false; mesh.nodes.len()];
-        let mut seen = BTreeSet::new();
-        for (e, conn) in mesh.elems.iter().enumerate() {
+        for (e, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
-            let arity = conn.len();
-            if !(arity == 3 || arity == 4)
-                || conn.iter().any(|&a| a >= mesh.nodes.len())
-                || (0..arity).any(|a| (0..a).any(|b| conn[a] == conn[b]))
-            {
-                return Err(invalid(format!("sheet element {e} must be a P1 triangle or Q1 quad with distinct in-range nodes")).into());
-            }
-            let mut key = conn.clone();
-            key.sort_unstable();
-            if !seen.insert(key) {
-                return Err(invalid("duplicate sheet element").into());
-            }
-            let mut element = Element {
-                nodes: [0; 4],
-                arity,
-                reference: [[0.0; 2]; 4],
-                points: Vec::new(),
-                offset: states.len(),
-            };
-            element.nodes[..arity].copy_from_slice(conn);
-            for (a, &node) in conn.iter().enumerate() {
-                used[node] = true;
-                element.reference[a] = [0, 1].map(|i| mesh.nodes[node][i] - mesh.nodes[conn[0]][i]);
-            }
-            let mut edge_squared = 0.0_f64;
-            for a in 0..arity {
-                let b = (a + 1) % arity;
-                let d = [0, 1].map(|i| element.reference[b][i] - element.reference[a][i]);
-                edge_squared = edge_squared.max(d[0] * d[0] + d[1] * d[1]);
-            }
-            let scaled = element.minimum_corner_cross(None) / edge_squared;
-            if !scaled.is_finite() || scaled < budget.minimum_scaled_jacobian {
-                return Err(invalid(format!(
-                    "sheet element {e} has inadmissible corner scaled Jacobian {scaled:e}"
-                ))
-                .into());
-            }
             let material = match laws {
                 FinitePlasticLawField::Uniform(law) => law,
                 FinitePlasticLawField::PerElement(laws) => &laws[e],
@@ -342,55 +448,22 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
                 ))
                 .into());
             }
-            // Constant P1 F is exactly integrated at one centroid. Q1 retains
-            // independent histories at all four native Gauss points.
-            let rule = if arity == 3 {
-                vec![(1.0 / 3.0, 1.0 / 3.0, 0.5)]
-            } else {
-                quad_points(4)
-            };
-            for (xi, eta, weight) in rule {
-                let (_, gradients, determinant) =
-                    shapes_at(&element.reference, &[0, 1, 2, 3][..arity], xi, eta);
-                let volume_m3 = weight * determinant * thickness_m[e];
-                if !volume_m3.is_finite()
-                    || volume_m3 <= 0.0
-                    || gradients.iter().flatten().any(|x| !x.is_finite())
-                {
-                    return Err(invalid(format!(
-                        "sheet element {e} has unrepresentable reference geometry"
-                    ))
-                    .into());
-                }
-                let mut point = Point {
-                    gradients: [[0.0; 2]; 4],
-                    volume_m3,
-                };
-                point.gradients[..arity].copy_from_slice(&gradients);
-                element.points.push(point);
+            for point in &element.points {
                 states.push(initial.material.state.clone());
                 deformation.push(initial.deformation_gradient);
                 piola_pa.push(initial.material.first_piola_pa);
-                stored_energy_j += volume_m3 * initial.material.stored_energy_j_m3;
-                reference_volume_m3 += volume_m3;
+                stored_energy_j += point.volume_m3 * initial.material.stored_energy_j_m3;
             }
-            elements.push(element);
         }
-        if used.iter().any(|used| !used)
-            || !stored_energy_j.is_finite()
-            || !reference_volume_m3.is_finite()
-        {
-            return Err(invalid(
-                "sheet contains an unused node or unrepresentable volume/initial energy",
-            )
-            .into());
+        if !stored_energy_j.is_finite() {
+            return Err(invalid("sheet initial energy is not representable").into());
         }
         checkpoint(cx)?;
         Ok(Self {
             mesh,
             laws,
             thickness_m,
-            elements: Arc::new(elements),
+            elements,
             local,
             budget,
             displacement_m: vec![[0.0; 2]; mesh.nodes.len()],
@@ -505,27 +578,14 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
     ) -> Result<FinitePlasticSheetStep<'a, L>, FinitePlasticSheetError> {
         checkpoint(cx)?;
         let dofs = 2 * self.mesh.nodes.len();
-        if settings.max_newton_iterations == 0
-            || settings.max_linear_iterations == 0
-            || !settings.relative_tolerance.is_finite()
-            || settings.relative_tolerance <= 0.0
-            || settings.relative_tolerance >= 1.0
-            || !settings.linear_tolerance.is_finite()
-            || settings.linear_tolerance <= 0.0
-            || settings.linear_tolerance >= 1.0
-            || [
-                controls.equilibrium_work_tolerance_j,
-                controls.maximum_endpoint_work_defect_j,
-                controls.yield_tolerance_pa,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x < 0.0)
-        {
-            return Err(invalid(
-                "sheet needs finite positive solver controls and nonnegative energy/yield gates",
-            )
-            .into());
-        }
+        let external = validate_step_inputs(
+            dofs,
+            self.budget,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+        )?;
         let physical_time_s = match (self.physical_time_s, shared_duration_s(self.laws, cx)?) {
             (None, None) => None,
             (Some(time), Some(dt)) => {
@@ -537,26 +597,6 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
             }
             _ => return Err(invalid("sheet material clock changed after admission").into()),
         };
-        let mut fixed = vec![false; dofs];
-        for &(dof, value) in prescribed_m {
-            if dof >= dofs || !value.is_finite() || fixed[dof] {
-                return Err(invalid("invalid or repeated sheet prescribed DOF").into());
-            }
-            fixed[dof] = true;
-        }
-        if dofs - prescribed_m.len() > self.budget.maximum_free_dofs {
-            return Err(invalid("sheet free displacement count exceeds budget").into());
-        }
-        let mut external = vec![0.0; dofs];
-        for &(dof, value) in nodal_forces_n {
-            if dof >= dofs || !value.is_finite() {
-                return Err(invalid("invalid sheet dead nodal force").into());
-            }
-            external[dof] += value;
-        }
-        if external.iter().any(|x| !x.is_finite()) {
-            return Err(invalid("sheet summed force is not representable").into());
-        }
         let mut old_storage = 0.0;
         for (e, element) in self.elements.iter().enumerate() {
             for (q, point) in element.points.iter().enumerate() {
@@ -738,8 +778,46 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
     }
 }
 
-struct SheetOperator<'s, 'a, L: FinitePlaneStressMaterial> {
-    sheet: &'s FinitePlasticSheet<'a, L>,
+// Both fixed-temperature and thermal owners use this same geometry, assembly
+// and Newton adapter. The thermal owner retains its native error and work audit.
+trait SheetPointResponse {
+    type Error: core::fmt::Display;
+    fn node_count(&self) -> usize;
+    fn elements(&self) -> &[Element];
+    fn states(&self) -> &[FiniteJ2State];
+    fn response(
+        &self,
+        element: usize,
+        point: usize,
+        displacement: &[f64],
+        states: &[FiniteJ2State],
+    ) -> Result<FinitePlaneStressResponse, Self::Error>;
+}
+
+impl<L: FinitePlaneStressMaterial> SheetPointResponse for FinitePlasticSheet<'_, L> {
+    type Error = FiniteJ2Error;
+    fn node_count(&self) -> usize {
+        self.mesh.nodes.len()
+    }
+    fn elements(&self) -> &[Element] {
+        &self.elements
+    }
+    fn states(&self) -> &[FiniteJ2State] {
+        &self.states
+    }
+    fn response(
+        &self,
+        element: usize,
+        point: usize,
+        displacement: &[f64],
+        states: &[FiniteJ2State],
+    ) -> Result<FinitePlaneStressResponse, Self::Error> {
+        FinitePlasticSheet::response(self, element, point, displacement, states)
+    }
+}
+
+struct SheetOperator<'s, S: SheetPointResponse> {
+    sheet: &'s S,
 }
 struct Assembled {
     force: Vec<f64>,
@@ -747,7 +825,7 @@ struct Assembled {
     potential: f64,
 }
 
-impl<L: FinitePlaneStressMaterial> SheetOperator<'_, '_, L> {
+impl<S: SheetPointResponse> SheetOperator<'_, S> {
     fn assemble(
         &self,
         states: &[FiniteJ2State],
@@ -758,8 +836,10 @@ impl<L: FinitePlaneStressMaterial> SheetOperator<'_, '_, L> {
     ) -> Result<(Assembled, f64), SmallStrainTetError> {
         checkpoint(cx)?;
         let sheet = self.sheet;
-        let dofs = 2 * sheet.mesh.nodes.len();
-        if u.len() != dofs || states.len() != sheet.states.len() || u.iter().any(|x| !x.is_finite())
+        let dofs = 2 * sheet.node_count();
+        if u.len() != dofs
+            || states.len() != sheet.states().len()
+            || u.iter().any(|x| !x.is_finite())
         {
             return Err(invalid(
                 "sheet trial needs complete finite displacements and point history",
@@ -769,7 +849,7 @@ impl<L: FinitePlaneStressMaterial> SheetOperator<'_, '_, L> {
         let mut matrix = need_tangent.then(|| Coo::new(dofs, dofs));
         let mut potential = 0.0;
         let mut force_cap = 0.0;
-        for (e, element) in sheet.elements.iter().enumerate() {
+        for (e, element) in sheet.elements().iter().enumerate() {
             let orientation = element.minimum_corner_cross(Some(u));
             if !orientation.is_finite() || orientation <= 0.0 {
                 return Err(invalid(format!(
@@ -849,10 +929,10 @@ impl<L: FinitePlaneStressMaterial> SheetOperator<'_, '_, L> {
     }
 }
 
-impl<L: FinitePlaneStressMaterial> IncrementOperator for SheetOperator<'_, '_, L> {
+impl<S: SheetPointResponse> IncrementOperator for SheetOperator<'_, S> {
     type State = FiniteJ2State;
     fn initial_states(&self) -> Vec<Self::State> {
-        self.sheet.states.clone()
+        self.sheet.states().to_vec()
     }
     fn components_per_node(&self) -> usize {
         2
@@ -890,7 +970,7 @@ impl<L: FinitePlaneStressMaterial> IncrementOperator for SheetOperator<'_, '_, L
         cx: &Cx<'_>,
     ) -> Result<usize, SmallStrainTetError> {
         let mut changed = 0;
-        for (e, element) in self.sheet.elements.iter().enumerate() {
+        for (e, element) in self.sheet.elements().iter().enumerate() {
             let mut evolving = false;
             for q in 0..element.points.len() {
                 checkpoint(cx)?;
