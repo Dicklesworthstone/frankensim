@@ -63,7 +63,7 @@ pub(super) struct RotationHistory {
     velocities: Vec<Vec3>,
 }
 
-/// Initially comoving translation and rest-started spin with separate memories.
+/// Explicitly prepared translation and rest-started spin with separate memories.
 /// The original material rigid body remains the sole owner of pose/momentum.
 /// The continuum/nonlinear-convection limits of the parent sphere still apply.
 pub struct RotatingSphereMotion<'s, 'f, 'b, F: FluidTransport + ?Sized> {
@@ -93,6 +93,30 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RotatingSphereMotion<'s, 'f, 'b, F>, Error> {
         let mut inner = self.unsteady_motion(body, state, resolution, &mut cancelled)?;
+        inner.rotation = Some(RotationHistory::prepare(&inner, &mut cancelled)?);
+        poll(&mut cancelled)?;
+        Ok(RotatingSphereMotion { inner })
+    }
+
+    /// Prepare translational slip history while retaining zero initial spin.
+    /// The declared ramp or steady slip seeds only the translational branches;
+    /// no angular momentum, rotary wake or vorticity is invented. Both memories
+    /// subsequently share the existing native Cayley body and physical clock.
+    pub fn unsteady_rotating_motion_with_prehistory<'s, 'b>(
+        &'s self,
+        body: &'b PrincipalBody<'b>,
+        state: RigidBodyState,
+        resolution: BassetResolution,
+        prehistory: SlipPrehistory,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RotatingSphereMotion<'s, 'f, 'b, F>, Error> {
+        let mut inner = self.unsteady_motion_with_prehistory(
+            body,
+            state,
+            resolution,
+            prehistory,
+            &mut cancelled,
+        )?;
         inner.rotation = Some(RotationHistory::prepare(&inner, &mut cancelled)?);
         poll(&mut cancelled)?;
         Ok(RotatingSphereMotion { inner })

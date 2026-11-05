@@ -30,6 +30,9 @@ use std::sync::Arc;
 /// Rotational fluid memory coupled to the same translating native body.
 pub mod rotation;
 
+mod prehistory;
+pub use prehistory::SlipPrehistory;
+
 /// Numerical approximation of the continuum history kernel, not material data.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BassetResolution {
@@ -154,6 +157,37 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         body: &'b PrincipalBody<'b>,
         state: RigidBodyState,
         resolution: BassetResolution,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<UnsteadySphereMotion<'s, 'f, 'b, F>, Error> {
+        self.prepare_unsteady_motion(body, state, resolution, None, cancelled)
+    }
+
+    /// Start with explicit translational preparation instead of discarding
+    /// the history of an already moving particle.
+    ///
+    /// The current native momentum supplies the endpoint slip; [`SlipPrehistory`]
+    /// declares how it was reached. Its exact branch responses and nonzero
+    /// kinetic storage enter the SAME subsequent native midpoint, including
+    /// when ambient acceleration or an applied force changes at time zero.
+    /// No past work is charged to the new accounting window. Zero spin and
+    /// all original material, geometry, Reynolds and resolution gates remain.
+    pub fn unsteady_motion_with_prehistory<'s, 'b>(
+        &'s self,
+        body: &'b PrincipalBody<'b>,
+        state: RigidBodyState,
+        resolution: BassetResolution,
+        prehistory: SlipPrehistory,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<UnsteadySphereMotion<'s, 'f, 'b, F>, Error> {
+        self.prepare_unsteady_motion(body, state, resolution, Some(prehistory), cancelled)
+    }
+
+    fn prepare_unsteady_motion<'s, 'b>(
+        &'s self,
+        body: &'b PrincipalBody<'b>,
+        state: RigidBodyState,
+        resolution: BassetResolution,
+        prehistory: Option<SlipPrehistory>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<UnsteadySphereMotion<'s, 'f, 'b, F>, Error> {
         poll(&mut cancelled)?;
@@ -168,8 +202,12 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         let hi = resolution.maximum_wavenumber_radius;
         let comoving_momentum =
             vector(self.ambient_velocity_world.scale(body.properties().mass()))?;
-        if state.linear_momentum_world() != comoving_momentum
-            || state.angular_momentum_body() != Vec3::ZERO
+        if prehistory.is_none() && state.linear_momentum_world() != comoving_momentum {
+            return Err(Error::Invalid(
+                "unsteady sphere needs canonical comoving momentum or explicit slip prehistory",
+            ));
+        }
+        if state.angular_momentum_body() != Vec3::ZERO
             || !lo.is_finite()
             || lo <= 0.0
             || !hi.is_finite()
@@ -177,12 +215,20 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
             || !(1..=4096).contains(&resolution.intervals)
         {
             return Err(Error::Invalid(
-                "unsteady sphere needs initial comoving translation, zero spin and finite positive ordered spectral cutoffs with 1..=4096 intervals",
+                "unsteady sphere needs zero spin and finite positive ordered spectral cutoffs with 1..=4096 intervals",
             ));
         }
-        positive(0.5 * self.fluid_mass_kg)?;
+        let slip = vector(
+            state
+                .linear_momentum_world()
+                .sub(comoving_momentum)
+                .scale(body.properties().mass().recip()),
+        )?;
+        let added_mass = positive(0.5 * self.fluid_mass_kg)?;
+        let mut fluid_storage = 0.5 * added_mass * slip.norm_squared();
         let width = positive((hi.ln() - lo.ln()) / resolution.intervals as f64)?;
         let mut branches = Vec::with_capacity(resolution.intervals);
+        let mut fluid_velocities = Vec::with_capacity(resolution.intervals);
         for i in 0..resolution.intervals {
             poll(&mut cancelled)?;
             let x = positive((lo.ln() + (i as f64 + 0.5) * width).exp())?;
@@ -192,19 +238,32 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
             let mass = positive(
                 12.0 * self.transport.density_kg_m3() * self.radius_m.powi(3) * width / x,
             )?;
+            let rate = positive(resistance / mass)?;
+            let fraction = match prehistory {
+                None => 0.0,
+                Some(preparation) => preparation.memory_fraction(rate).ok_or(Error::Invalid(
+                    "slip prehistory requires a finite positive representable preparation timescale",
+                ))?,
+            };
+            let velocity = vector(slip.scale(fraction))?;
+            fluid_storage += 0.5 * mass * velocity.norm_squared();
+            fluid_velocities.push(velocity);
             branches.push(BassetBranch {
                 resistance_kg_s: resistance,
                 mass_kg: mass,
-                rate_per_s: positive(resistance / mass)?,
+                rate_per_s: rate,
             });
         }
+        // Nonzero prehistory brings initial added/branch storage into the
+        // accounting window; its finite spectral reference must be representable.
+        finite(fluid_storage)?;
         poll(&mut cancelled)?;
         Ok(UnsteadySphereMotion {
             sphere: self,
             body,
             resolution,
             branches: branches.into(),
-            fluid_velocities: vec![Vec3::ZERO; resolution.intervals],
+            fluid_velocities,
             rotation: None,
             ambient_velocity_world: self.ambient_velocity_world,
             state,

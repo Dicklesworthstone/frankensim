@@ -3,7 +3,9 @@ use super::*;
 use fs_ga::{So3, So3Tangent};
 use fs_mbd::{Vec3 as NativeVec3, Wrench};
 use fs_mbd_material::creeping_flow::unsteady::rotation::RotatingStepControls;
-use fs_mbd_material::creeping_flow::unsteady::{BassetResolution, UnsteadyStepControls};
+use fs_mbd_material::creeping_flow::unsteady::{
+    BassetResolution, SlipPrehistory, UnsteadyStepControls,
+};
 
 fn resolution(lo: f64, hi: f64, intervals: usize) -> BassetResolution {
     BassetResolution {
@@ -33,6 +35,108 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 fn vector_near(a: NativeVec3, b: NativeVec3, tolerance: f64) {
     assert!(magnitude(a.sub(b)) <= tolerance, "{a:?} != {b:?}");
+}
+
+#[test]
+fn prepared_translation_survives_accelerating_flow_without_inventing_rotary_prehistory() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let ambient = NativeVec3::new(0.13, -0.07, 0.2);
+    let medium = CreepingSphere::new(&material, RADIUS, Gravity::ZERO, ambient, limits()).unwrap();
+    let initial = body
+        .state_from_kinematics(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(0.131, -0.0704, 0.2002)),
+        )
+        .unwrap();
+    for prehistory in [
+        SlipPrehistory::LinearRamp { duration_s: 0.03 },
+        SlipPrehistory::SteadySlip,
+    ] {
+        let mut translation = medium
+            .unsteady_motion_with_prehistory(
+                &body,
+                initial,
+                resolution(0.001, 1000.0, 64),
+                prehistory,
+                || false,
+            )
+            .unwrap();
+        let mut rotating = medium
+            .unsteady_rotating_motion_with_prehistory(
+                &body,
+                initial,
+                resolution(0.001, 1000.0, 64),
+                prehistory,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(rotating.state(), initial);
+        assert_eq!(
+            rotating.fluid_velocities_world_m_s(),
+            translation.fluid_velocities_world_m_s()
+        );
+        assert!(
+            rotating
+                .fluid_angular_velocities_world_rad_s()
+                .iter()
+                .all(|w| *w == NativeVec3::ZERO)
+        );
+        let applied = Wrench {
+            force_world: NativeVec3::new(1e-5, -2e-5, 3e-5),
+            torque_body: NativeVec3::new(1e-7, -2e-7, 3e-7),
+        };
+        let acceleration = NativeVec3::new(0.01, -0.02, 0.03);
+        for _ in 0..20 {
+            let (next_translation, translation_audit) = translation
+                .step_with_flow_acceleration(
+                    Wrench {
+                        torque_body: NativeVec3::ZERO,
+                        ..applied
+                    },
+                    acceleration,
+                    controls(0.001).mechanical,
+                    || false,
+                )
+                .unwrap();
+            let (next_rotating, audit) = rotating
+                .step_with_flow_acceleration(applied, acceleration, controls(0.001), || false)
+                .unwrap();
+            assert_eq!(
+                next_rotating.state().linear_momentum_world(),
+                next_translation.state().linear_momentum_world()
+            );
+            assert_eq!(
+                next_rotating.state().pose().position_world(),
+                next_translation.state().pose().position_world()
+            );
+            assert_eq!(
+                next_rotating.fluid_velocities_world_m_s(),
+                next_translation.fluid_velocities_world_m_s()
+            );
+            assert_eq!(
+                audit.fluid_wrench.force_world,
+                translation_audit.fluid_wrench.force_world
+            );
+            assert_eq!(audit.background_work_j, translation_audit.background_work_j);
+            assert_eq!(next_rotating.time_s(), next_translation.time_s());
+            let replay = RigidBodyIntegrator::new(Gravity::ZERO)
+                .step_cayley(
+                    rotating.state(),
+                    body.properties(),
+                    Wrench {
+                        force_world: audit.fluid_wrench.force_world.add(applied.force_world),
+                        torque_body: audit.fluid_wrench.torque_body.add(applied.torque_body),
+                    },
+                    0.001,
+                )
+                .unwrap();
+            assert_eq!(audit.dynamics, replay);
+            translation = next_translation;
+            rotating = next_rotating;
+        }
+    }
 }
 
 #[test]

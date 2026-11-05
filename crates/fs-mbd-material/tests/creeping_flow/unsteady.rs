@@ -1,7 +1,9 @@
 //! G1/G3/G4: analytic Basset impedance/settling, source changes and atomic memory.
 use super::*;
 use fs_mbd::{Vec3 as NativeVec3, Wrench};
-use fs_mbd_material::creeping_flow::unsteady::{BassetResolution, UnsteadyStepControls};
+use fs_mbd_material::creeping_flow::unsteady::{
+    BassetResolution, SlipPrehistory, UnsteadyStepControls,
+};
 
 fn resolution(lo: f64, hi: f64, intervals: usize) -> BassetResolution {
     BassetResolution {
@@ -17,6 +19,367 @@ fn step_controls(dt: f64) -> UnsteadyStepControls {
         maximum_energy_defect_j: 1e-18,
         maximum_momentum_defect_ns: 1e-16,
     }
+}
+
+#[test]
+fn explicit_ramp_prepares_actual_branch_memory_without_changing_native_state() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let ambient = NativeVec3::new(0.13, -0.07, 0.2);
+    let medium = CreepingSphere::new(&material, RADIUS, Gravity::ZERO, ambient, limits()).unwrap();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let mass = body.properties().mass();
+    let state = fs_mbd::RigidBodyState::new(
+        rest.pose(),
+        ambient
+            .scale(mass)
+            .add(NativeVec3::new(0.001, -0.0004, 0.0002).scale(mass)),
+        NativeVec3::ZERO,
+    )
+    .unwrap();
+    let slip = state
+        .linear_momentum_world()
+        .sub(ambient.scale(mass))
+        .scale(mass.recip());
+    assert!(
+        medium
+            .unsteady_motion(&body, state, resolution(0.001, 1000.0, 64), || false)
+            .is_err()
+    );
+    for duration_s in [1e-15, 0.03] {
+        let motion = medium
+            .unsteady_motion_with_prehistory(
+                &body,
+                state,
+                resolution(0.001, 1000.0, 64),
+                SlipPrehistory::LinearRamp { duration_s },
+                || false,
+            )
+            .unwrap();
+        assert_eq!(motion.state(), state);
+        assert_eq!(motion.time_s(), 0.0);
+        assert_eq!(motion.ambient_velocity_world_m_s(), ambient);
+        let mut storage = 0.0;
+        for (branch, velocity) in motion
+            .branches()
+            .iter()
+            .zip(motion.fluid_velocities_world_m_s())
+        {
+            let alpha = branch.rate_per_s * duration_s;
+            let fraction = if alpha < 0.1 {
+                // Independent quadrature of the exact branch ODE convolution.
+                let n = 64;
+                let f = |t: f64| alpha * t * (-alpha * (1.0 - t)).exp();
+                let mut sum = f(0.0) + f(1.0);
+                for i in 1..n {
+                    sum += if i % 2 == 0 { 2.0 } else { 4.0 } * f(f64::from(i) / f64::from(n));
+                }
+                sum / (3.0 * f64::from(n))
+            } else {
+                1.0 + (-alpha).exp_m1() / alpha
+            };
+            let expected = slip.scale(fraction);
+            assert!(
+                velocity.sub(expected).norm_squared().sqrt()
+                    < 3e-12 * expected.norm_squared().sqrt()
+            );
+            storage += 0.5 * branch.mass_kg * velocity.norm_squared();
+        }
+        assert!(storage.is_finite() && storage > 0.0);
+    }
+    let steady = medium
+        .unsteady_motion_with_prehistory(
+            &body,
+            state,
+            resolution(0.001, 1000.0, 64),
+            SlipPrehistory::SteadySlip,
+            || false,
+        )
+        .unwrap();
+    assert!(
+        steady
+            .fluid_velocities_world_m_s()
+            .iter()
+            .all(|u| *u == slip)
+    );
+}
+
+#[test]
+fn prepared_ramp_converges_to_the_continuum_acceleration_history_force() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let state = body
+        .state_from_kinematics(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(0.001, 0.0, 0.0)),
+        )
+        .unwrap();
+    let slip = state
+        .center_of_mass_velocity_world(body.properties())
+        .unwrap();
+    let duration_s: f64 = 0.03;
+    let c = 6.0 * core::f64::consts::PI * RADIUS;
+    let b = c * (RADIUS.powi(2) / 0.001).sqrt();
+    // Direct Basset integral of constant relative acceleration over [-T,0].
+    let expected = slip.scale(-2.0 * b / (core::f64::consts::PI * duration_s).sqrt());
+    let mut previous = f64::INFINITY;
+    for (lo, hi, n) in [
+        (0.02, 40.0, 32),
+        (0.001, 1000.0, 128),
+        (0.0001, 10000.0, 256),
+    ] {
+        let motion = medium
+            .unsteady_motion_with_prehistory(
+                &body,
+                state,
+                resolution(lo, hi, n),
+                SlipPrehistory::LinearRamp { duration_s },
+                || false,
+            )
+            .unwrap();
+        let initial_force = motion
+            .branches()
+            .iter()
+            .zip(motion.fluid_velocities_world_m_s())
+            .fold(NativeVec3::ZERO, |f, (branch, u)| {
+                f.sub(slip.sub(*u).scale(branch.resistance_kg_s))
+            });
+        let error = (initial_force.x / expected.x - 1.0).abs();
+        assert!(
+            error < previous * 0.15,
+            "ramp history ladder: {error} >= {previous}"
+        );
+        previous = error;
+    }
+    assert!(previous < 2e-4);
+}
+
+#[test]
+fn steady_slip_release_converges_to_continuum_relaxation_with_stored_fluid_energy() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let state = body
+        .state_from_kinematics(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(0.001, 0.0, 0.0)),
+        )
+        .unwrap();
+    let speed = state
+        .center_of_mass_velocity_world(body.properties())
+        .unwrap()
+        .x;
+    let mass = body.properties().mass();
+    let c = 6.0 * core::f64::consts::PI * RADIUS;
+    let b = c * (RADIUS.powi(2) / 0.001).sqrt();
+    let added_mass =
+        0.5 * material.density_kg_m3() * 4.0 * core::f64::consts::PI * RADIUS.powi(3) / 3.0;
+    let target = 0.1;
+    // Remove the force that held the established flow: superposition of the
+    // original continuum step response gives w(t)/w(0) = 1 - settling_fraction.
+    let expected = speed * (1.0 - settling_fraction(target, mass + added_mass, c, b));
+    let mut previous = f64::INFINITY;
+    for (lo, hi, n, steps) in [
+        (0.01, 100.0, 32, 50),
+        (0.001, 1000.0, 128, 200),
+        (0.0001, 10000.0, 256, 800),
+    ] {
+        let mut motion = medium
+            .unsteady_motion_with_prehistory(
+                &body,
+                state,
+                resolution(lo, hi, n),
+                SlipPrehistory::SteadySlip,
+                || false,
+            )
+            .unwrap();
+        let initial_energy = 0.5 * (mass + added_mass) * speed * speed
+            + motion
+                .branches()
+                .iter()
+                .zip(motion.fluid_velocities_world_m_s())
+                .map(|(branch, u)| 0.5 * branch.mass_kg * u.norm_squared())
+                .sum::<f64>();
+        let mut heat = 0.0;
+        for _ in 0..steps {
+            let (next, audit) = motion
+                .step(step_controls(target / f64::from(steps)), || false)
+                .unwrap();
+            heat += audit.viscous_heat_j;
+            assert_eq!(audit.applied_work_j, 0.0);
+            assert_eq!(audit.background_work_j, 0.0);
+            motion = next;
+        }
+        let actual = motion
+            .state()
+            .center_of_mass_velocity_world(body.properties())
+            .unwrap()
+            .x;
+        let error = (actual / expected - 1.0).abs();
+        assert!(
+            error < previous * 0.2,
+            "release ladder: {error} >= {previous}"
+        );
+        previous = error;
+        let final_energy = 0.5 * (mass + added_mass) * actual * actual
+            + motion
+                .branches()
+                .iter()
+                .zip(motion.fluid_velocities_world_m_s())
+                .map(|(branch, u)| 0.5 * branch.mass_kg * u.norm_squared())
+                .sum::<f64>();
+        assert!(heat > 0.0);
+        assert!((final_energy - initial_energy + heat).abs() < 2e-10 * heat);
+    }
+    assert!(previous < 3e-4);
+}
+
+#[test]
+fn explicit_prehistory_refuses_bad_preparation_spin_and_late_cancellation() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let state = body
+        .state_from_kinematics(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(0.001, 0.0, 0.0)),
+        )
+        .unwrap();
+    let resolution = resolution(0.001, 1000.0, 64);
+    for duration_s in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e-320, 1e308] {
+        assert!(
+            medium
+                .unsteady_motion_with_prehistory(
+                    &body,
+                    state,
+                    resolution,
+                    SlipPrehistory::LinearRamp { duration_s },
+                    || false,
+                )
+                .is_err()
+        );
+    }
+    let spinning = fs_mbd::RigidBodyState::new(
+        state.pose(),
+        state.linear_momentum_world(),
+        NativeVec3::new(0.0, 0.0, 1e-9),
+    )
+    .unwrap();
+    assert!(
+        medium
+            .unsteady_motion_with_prehistory(
+                &body,
+                spinning,
+                resolution,
+                SlipPrehistory::SteadySlip,
+                || false,
+            )
+            .is_err()
+    );
+    let lifted = CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits())
+        .unwrap()
+        .with_rotational_lift();
+    for preparation in [
+        SlipPrehistory::LinearRamp { duration_s: 0.03 },
+        SlipPrehistory::SteadySlip,
+    ] {
+        assert!(matches!(
+            lifted
+                .unsteady_motion_with_prehistory(&body, state, resolution, preparation, || false,),
+            Err(CreepingFlowError::Invalid(
+                "quasi-steady rotational lift cannot be combined with unsteady sphere history"
+            ))
+        ));
+        assert!(matches!(
+            lifted.unsteady_rotating_motion_with_prehistory(
+                &body,
+                state,
+                resolution,
+                preparation,
+                || false,
+            ),
+            Err(CreepingFlowError::Invalid(
+                "quasi-steady rotational lift cannot be combined with unsteady sphere history"
+            ))
+        ));
+    }
+    // The body and instantaneous drag can be representable while the chosen
+    // steady spectral reference carries unrepresentable initial fluid energy.
+    let viscous = fluid(1000.0, 1e84);
+    let viscous_medium =
+        CreepingSphere::new(&viscous, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let fast = fs_mbd::RigidBodyState::new(
+        state.pose(),
+        NativeVec3::new(1e80 * body.properties().mass(), 0.0, 0.0),
+        NativeVec3::ZERO,
+    )
+    .unwrap();
+    viscous_medium.load(&body, fast, || false).unwrap();
+    assert!(
+        viscous_medium
+            .unsteady_motion_with_prehistory(
+                &body,
+                fast,
+                BassetResolution {
+                    minimum_wavenumber_radius: 1e-155,
+                    maximum_wavenumber_radius: 2e-155,
+                    intervals: 1,
+                },
+                SlipPrehistory::SteadySlip,
+                || false,
+            )
+            .is_err()
+    );
+    let prehistory = SlipPrehistory::LinearRamp { duration_s: 0.03 };
+    let mut polls = 0;
+    let expected = medium
+        .unsteady_motion_with_prehistory(&body, state, resolution, prehistory, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    for stop in [1, polls / 2, polls] {
+        let mut visited = 0;
+        assert!(matches!(
+            medium.unsteady_motion_with_prehistory(&body, state, resolution, prehistory, || {
+                visited += 1;
+                visited == stop
+            }),
+            Err(CreepingFlowError::Cancelled)
+        ));
+    }
+    let retry = medium
+        .unsteady_motion_with_prehistory(&body, state, resolution, prehistory, || false)
+        .unwrap();
+    assert_eq!(retry.state(), state);
+    assert_eq!(
+        retry.fluid_velocities_world_m_s(),
+        expected.fluid_velocities_world_m_s()
+    );
+    let acceleration = NativeVec3::new(0.01, -0.02, 0.015);
+    let (a, receipt_a) = expected
+        .clone()
+        .step_with_flow_acceleration(Wrench::ZERO, acceleration, step_controls(0.001), || false)
+        .unwrap();
+    let (b, receipt_b) = retry
+        .step_with_flow_acceleration(Wrench::ZERO, acceleration, step_controls(0.001), || false)
+        .unwrap();
+    assert_eq!(a.state(), b.state());
+    assert_eq!(
+        a.fluid_velocities_world_m_s(),
+        b.fluid_velocities_world_m_s()
+    );
+    assert_eq!(receipt_a, receipt_b);
 }
 
 #[test]

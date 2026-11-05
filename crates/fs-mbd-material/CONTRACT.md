@@ -1400,6 +1400,40 @@ transformation of both applied and background work, including buoyancy.
 The rotating wrapper exposes the same explicit flow-acceleration operation;
 uniform translation leaves its world-fixed rotary memory unchanged.
 
+### Explicit translational acceleration prehistory
+
+`unsteady_motion_with_prehistory` admits an already moving particle only with
+an explicit `SlipPrehistory`. The original constructor still requires exact
+canonical comoving momentum. Both use the same source-bound branch compiler;
+the accepted native body state and time-zero pose/momentum are never changed.
+Endpoint slip is `(p-mass*U)/mass`, retaining the original momentum convention.
+
+`LinearRamp { duration_s }` declares zero slip before `-duration_s`, followed
+by constant relative acceleration to the current slip `w0` at time zero.
+For each original rate `lambda`, exact integration of `u_dot=lambda*(w-u)`
+gives `u0=w0*(1+expm1(-lambda*T)/(lambda*T))`. A convergent small-argument
+series retains slow-mode history without subtracting nearly equal scalars;
+the remaining range uses the existing deterministic exponential owner.
+This finite preparation has finite relative continuum fluid storage.
+
+`SteadySlip` declares the endpoint slip throughout the infinite past, so each
+finite spectral branch starts at `u0=w0`, with zero history force and nonzero
+storage. Its absolute storage depends on the slow cutoff and diverges in the
+unbounded steady Stokes continuum. Only the explicitly resolved finite-model
+reference and subsequent convergent changes are represented; this is not a
+claim of finite total exterior energy. Preparation work and holding forces
+precede the new accounting window. Neither option resets or fabricates future
+heat, applied work, ambient work or added-mass energy. Nonrepresentable initial
+spectral storage or preparation timescales refuse atomically.
+
+`unsteady_rotating_motion_with_prehistory` seeds these same translational modes
+and keeps zero spin/rotary memory. Subsequent ambient acceleration and torque
+use the original coupled Cayley step, with no new solver or growing history.
+Focused tests cover exact branch convolution, the continuum Basset force of
+a finite ramp, independent continuum release/refinement from steady slip,
+initial/final storage plus heat, original native replay under acceleration
+and spin, strict original admission, bad preparation and late cancellation.
+
 ## Finite-rotation hydrostatic restoring motion
 
 `HydrostaticMedium::step` and `LayeredHydrostaticMedium::step` share one load
