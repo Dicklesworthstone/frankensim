@@ -5,13 +5,19 @@ mod solve;
 #[path = "tests/timeline.rs"]
 mod timeline;
 
+#[path = "tests/network.rs"]
+mod network;
+
 use super::*;
-use crate::enthalpy::backward_euler::{BoundaryExchanges, PrescribedBathHeat};
+use crate::enthalpy::backward_euler::{
+    BoundaryExchanges, BoundaryStepCoefficients, PrescribedBathHeat, StepCoefficients,
+    TransportStepCoefficients,
+};
 use crate::enthalpy::{
     Boundary, CellGeometry, DepositedCell, DepositionBudget, Event, HeatTransfer, MaterialId,
     Reservoir, StepConfig, ThermalLaw, ThermalLink, TimedEvent,
 };
-use crate::evaporation::{EvaporationProperties, MOLAR_GAS_CONSTANT};
+use crate::evaporation::{EvaporationError, EvaporationProperties, MOLAR_GAS_CONSTANT};
 use std::collections::BTreeMap;
 
 const CP: f64 = 4000.0;

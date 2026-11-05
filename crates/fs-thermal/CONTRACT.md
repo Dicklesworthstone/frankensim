@@ -1720,6 +1720,27 @@ maximum timestep still controls physical time error independently of algebraic
 convergence. No automatic time-error controller or evolving gas/geometry is
 inferred.
 
+`EvaporatingNetworkBackwardEulerStep` and
+`DepositionSimulation::solve_implicit_evaporating_network_step` bind multiple
+liquid interfaces to that same original heat graph. Each `EvaporatingCellBinding`
+owns its cell id, original evaporation law, prescribed film and admitted liquid
+enthalpy range. Heterogeneous laws and simultaneous evaporation/condensation
+retain separate local receipts and acceptance gates; signed transfers cannot
+hide another surface's energy or represented-mass-rate defect. Unselected cells
+keep their original caloric response, including latent storage, and an empty
+binding slice explicitly selects heat-only transport.
+
+Every endpoint source callback sees all proposed liquid inventories in canonical
+cell order. One interface query per surface and two original thermal-rate passes
+resolve the whole network; there is no per-surface heat solve or sequential phase
+split. Exposed areas are prepared by one traversal of the original contact graph,
+preserving asymmetric coverage and reservoir areas. All masses are installed
+atomically after native local/total heat gates, independent open-system balances
+and every original material validation pass. The original single-cell residual
+and automatic solve delegate to these shared owners, preserving their explicit
+liquid range, callback and unsized-law support. Geometry and films remain
+prescribed, and endpoint convergence alone does not establish time accuracy.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry
