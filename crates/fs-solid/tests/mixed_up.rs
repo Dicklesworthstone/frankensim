@@ -16,6 +16,9 @@ use fs_solid::linear3::tet10::{TET10_EDGES, promote_p1_to_p2};
 use fs_solid::linear3::{TetAssemblyBudget, TetElasticError};
 use fs_solver::nonlinear::NewtonKrylovConfig;
 
+#[path = "mixed_up/reference_density.rs"]
+mod reference_density;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>)) {
     let gate = CancelGate::new();
     with_gate(&gate, f);

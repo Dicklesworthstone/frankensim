@@ -17,9 +17,13 @@ use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::linear3::tet10::{TET10_EDGES, promote_p1_to_p2};
 use fs_solver::nonlinear::NewtonKrylovConfig;
 
+#[path = "mixed_visco_dynamics/impulse.rs"]
 mod impulse;
+#[path = "mixed_visco_dynamics/momentum.rs"]
 mod momentum;
+#[path = "mixed_visco_dynamics/reference_density.rs"]
 mod reference_density;
+#[path = "mixed_visco_dynamics/split.rs"]
 mod split;
 
 const VOLUME: f64 = 1.0 / 6.0;

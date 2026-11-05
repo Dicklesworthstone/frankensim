@@ -373,6 +373,35 @@ signed supported quadratic loads on a deformed body and one retained Maxwell
 history update. Independent polynomial moment arithmetic and source formatting
 were checked; native Rust execution remains unverified under the resource blocker.
 
+## Graded reference inertia in loaded mixed-solid vibration
+
+`MixedUpProblem::solve_vibration_with_reference_density` and
+`solve_incompressible_vibration_with_reference_density`, including their
+`_from_with_reference_density` entries, retain four positive P1 reference-density
+values per original Tet10. The cached reference quadrature integrates that field
+against the signed consistent P2 mass before finite-compliance condensation or
+exact-pressure nullspace projection. Changing a density distribution can change
+the modes while total mass and mean density remain fixed. Pressure still has
+zero inertia; equilibrium, material tangent, supports and gauge admission keep
+their original owners.
+
+Both returned spectra expose the original corner field, reference-volume cell
+means and total reference mass. Their `reference_acceleration_load_n` applies
+the retained full mass to authored nodal acceleration, including prescribed
+coordinates and signed corner weights. Modal forcing selects the free force
+entries; exact-pressure modal forcing additionally applies the original
+nullspace transpose. The reduced mass does not replace that full load projection.
+The full operator is assembled once under the existing mass budget and retained.
+Graded curved quadratic maps require six Duffy points per direction; affine
+maps use four. Uniform profiles preserve the original scalar arithmetic.
+
+Focused analytical regressions in `tests/mixed_up/reference_density.rs` check
+loaded finite-stretch modal frequencies at equal total mass, exact-pressure
+gauge and mode normalization, full gravity force/centroid moments, every affine
+and curved mass coefficient, scalar parity and explicit admission refusals.
+These entries cover the original dead-load problem; existing dedicated gravity
+and follower-pressure adapters retain their separately declared density APIs.
+
 ## Graded inventory in quadratic Maxwell motion
 
 `MixedViscoTetMotion::try_new_with_reference_density` binds four positive P1

@@ -29,6 +29,7 @@ use super::{
 };
 use crate::hyper3::vibration::{MAX_DENSE_FREE_DOFS, VibrationSettings};
 use crate::inertia::ReferenceMass;
+use crate::linear3::tet10::TET10_EDGES;
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::HyperelasticMaterial;
@@ -41,7 +42,8 @@ use fs_sparse::{Coo, Csr, DirectOrdering, Inertia, LdltOptions, SymbolicLdlt};
 #[derive(Clone, Copy, Debug)]
 pub struct MixedVibrationSettings {
     pub spectrum: VibrationSettings,
-    /// Native full signed P2 reference-mass assembly payload, separate from KKT.
+    /// Native full signed P2 reference-mass assembly and retained operator
+    /// payload, separate from KKT and dense modal storage.
     pub maximum_mass_assembly_bytes: usize,
     /// Conservative pressure reduction (finite-compliance condensation or
     /// exact-constraint nullspace), dense work and retained modal payload.
@@ -106,7 +108,7 @@ pub struct MixedUpVibration<'a, L: HyperelasticMaterial + MixedFiniteStrainPoten
     boundary_pressure: Option<UniformBoundaryPressure>,
     gravity: Option<HeldMixedGravity<'a>>,
     settings: MixedVibrationSettings,
-    reference_density_kg_m3: Vec<f64>,
+    reference_mass: ModalReferenceMass,
     equilibrium: MixedUpSolution,
     free_dofs: Vec<usize>,
     mixed_tangent: Csr,
@@ -114,6 +116,166 @@ pub struct MixedUpVibration<'a, L: HyperelasticMaterial + MixedFiniteStrainPoten
     stiffness_n_m: Vec<f64>,
     mass_kg: Vec<f64>,
     modes: Vec<MixedVibrationMode>,
+}
+
+#[derive(Clone, Copy)]
+enum ReferenceDensity<'a> {
+    PerElement(&'a [f64]),
+    Corners(&'a [[f64; 4]]),
+}
+
+/// The complete original operator remains available after support reduction.
+/// Cell means describe inventory; they never replace a graded mass or load.
+#[derive(Debug)]
+struct ModalReferenceMass {
+    operator: ReferenceMass,
+    means_kg_m3: Vec<f64>,
+    corners_kg_m3: Option<Vec<[f64; 4]>>,
+}
+
+impl ModalReferenceMass {
+    fn assemble<L: HyperelasticMaterial + MixedFiniteStrainPotential>(
+        prepared: &PreparedMixedUpProblem<'_, L>,
+        density: ReferenceDensity<'_>,
+        maximum_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MixedUpError> {
+        checkpoint(cx)?;
+        let elements = &prepared.mesh.elements;
+        let ndofs = 3 * prepared.mesh.nodes_count;
+        let ReferenceDensity::Corners(corners) = density else {
+            let ReferenceDensity::PerElement(values) = density else {
+                unreachable!()
+            };
+            let operator = ReferenceMass::from_tet10_quadrature(
+                elements.iter().map(|element| {
+                    (
+                        element.connectivity,
+                        element.points.iter().map(|q| (q.shapes, q.weight_m3)),
+                    )
+                }),
+                values,
+                ndofs,
+                maximum_bytes,
+                cx,
+            )
+            .map_err(inertia_error)?;
+            return Ok(Self {
+                operator,
+                means_kg_m3: values.to_vec(),
+                corners_kg_m3: None,
+            });
+        };
+        if corners.len() != elements.len() {
+            return Err(invalid(
+                "one reference-density corner profile per Tet10 required",
+            ));
+        }
+        for (element, values) in elements.iter().zip(corners) {
+            checkpoint(cx)?;
+            if values.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+                return Err(invalid(
+                    "reference corner densities must be finite and positive",
+                ));
+            }
+            if values.iter().all(|rho| *rho == values[0]) {
+                continue;
+            }
+            let nodes = element.connectivity;
+            let affine = TET10_EDGES.iter().enumerate().all(|(edge, &[a, b])| {
+                (0..3).all(|c| {
+                    prepared.problem.nodes_m[nodes[edge + 4]][c]
+                        == f64::midpoint(
+                            prepared.problem.nodes_m[nodes[a]][c],
+                            prepared.problem.nodes_m[nodes[b]][c],
+                        )
+                })
+            });
+            if !affine && prepared.problem.quadrature_points_per_dir < 6 {
+                return Err(invalid(
+                    "curved Tet10 graded reference density requires at least six Duffy points",
+                ));
+            }
+        }
+        let sample = |values: [f64; 4], lambda: [f64; 4]| {
+            if values.iter().all(|rho| *rho == values[0]) {
+                values[0]
+            } else {
+                (0..4).map(|a| values[a] * lambda[a]).sum()
+            }
+        };
+        let operator = ReferenceMass::from_tet10_density_quadrature(
+            elements.iter().zip(corners).map(|(element, &values)| {
+                (
+                    element.connectivity,
+                    element
+                        .points
+                        .iter()
+                        .map(move |q| (q.shapes, q.weight_m3, sample(values, q.pressure_shapes))),
+                )
+            }),
+            ndofs,
+            maximum_bytes,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        let mut means = Vec::with_capacity(corners.len());
+        for (element, &values) in elements.iter().zip(corners) {
+            checkpoint(cx)?;
+            let mean = if values.iter().all(|rho| *rho == values[0]) {
+                values[0]
+            } else {
+                element
+                    .points
+                    .iter()
+                    .map(|q| {
+                        sample(values, q.pressure_shapes)
+                            * (q.weight_m3 / element.reference_volume_m3)
+                    })
+                    .sum::<f64>()
+            };
+            if !mean.is_finite() || mean <= 0.0 {
+                return Err(invalid("reference-volume mean density is unrepresentable"));
+            }
+            means.push(mean);
+        }
+        checkpoint(cx)?;
+        Ok(Self {
+            operator,
+            means_kg_m3: means,
+            corners_kg_m3: Some(corners.to_vec()),
+        })
+    }
+
+    fn acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, MixedUpError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.operator.ndofs() / 3
+            || acceleration_m_s2.iter().flatten().any(|a| !a.is_finite())
+        {
+            return Err(invalid(
+                "one finite acceleration vector per original node required",
+            ));
+        }
+        let forces = self
+            .operator
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(inertia_error)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
+    }
 }
 
 fn tolerance(value: f64) -> bool {
@@ -197,6 +359,42 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
             cx,
         )
     }
+
+    /// Equilibrate with positive P1 reference density at each Tet10's four
+    /// corners. The signed P2 inertia retains the complete original profile;
+    /// density is not averaged or updated on the deformed configuration.
+    /// Graded curved maps require at least six Duffy points per direction.
+    pub fn solve_vibration_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 4]],
+        settings: MixedVibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<MixedUpVibration<'a, L>, MixedVibrationError> {
+        self.prepare(cx)?.solve_vibration_density_impl(
+            None,
+            ReferenceDensity::Corners(corner_density_kg_m3),
+            settings,
+            cx,
+        )
+    }
+
+    /// Re-equilibrate the original iterate with the same graded reference
+    /// inventory used for the full mass and acceleration loading.
+    pub fn solve_vibration_from_with_reference_density(
+        &self,
+        displacement_m: &[[f64; 3]],
+        pressure_pa: &[f64],
+        corner_density_kg_m3: &[[f64; 4]],
+        settings: MixedVibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<MixedUpVibration<'a, L>, MixedVibrationError> {
+        self.prepare(cx)?.solve_vibration_density_impl(
+            Some((displacement_m, pressure_pa)),
+            ReferenceDensity::Corners(corner_density_kg_m3),
+            settings,
+            cx,
+        )
+    }
 }
 
 impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpProblem<'a, L> {
@@ -204,6 +402,21 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
         &self,
         initial: Option<(&[[f64; 3]], &[f64])>,
         density: &[f64],
+        settings: MixedVibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<MixedUpVibration<'a, L>, MixedVibrationError> {
+        self.solve_vibration_density_impl(
+            initial,
+            ReferenceDensity::PerElement(density),
+            settings,
+            cx,
+        )
+    }
+
+    fn solve_vibration_density_impl(
+        &self,
+        initial: Option<(&[[f64; 3]], &[f64])>,
+        density: ReferenceDensity<'_>,
         settings: MixedVibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<MixedUpVibration<'a, L>, MixedVibrationError> {
@@ -259,28 +472,20 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
             .into());
         }
         let free_dofs = prepared.free[..n].to_vec();
-        let mass = ReferenceMass::from_tet10_quadrature(
-            prepared.mesh.elements.iter().map(|element| {
-                (
-                    element.connectivity,
-                    element.points.iter().map(|q| (q.shapes, q.weight_m3)),
-                )
-            }),
+        let reference_mass = ModalReferenceMass::assemble(
+            prepared,
             density,
-            nu,
             settings.maximum_mass_assembly_bytes,
             cx,
-        )
-        .map_err(inertia_error)?;
+        )?;
         let mut mass_kg = Vec::with_capacity(n * n);
         for &row in &free_dofs {
             checkpoint(cx)?;
             for &col in &free_dofs {
-                mass_kg.push(mass.matrix().get(row, col));
+                mass_kg.push(reference_mass.operator.matrix().get(row, col));
             }
         }
         symmetric_dense(&mass_kg, n)?;
-        drop(mass);
         let equilibrium = match initial {
             None => prepared.solve(cx)?,
             Some((u, p)) => prepared.solve_from(u, p, cx)?,
@@ -461,7 +666,7 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
             boundary_pressure: prepared.boundary_pressure,
             gravity: prepared.gravity,
             settings,
-            reference_density_kg_m3: density.to_vec(),
+            reference_mass,
             equilibrium,
             free_dofs,
             mixed_tangent: full,
@@ -494,8 +699,31 @@ impl<L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpVibration<'_, 
     pub const fn settings(&self) -> MixedVibrationSettings {
         self.settings
     }
+    /// Reference-volume mean densities for reporting. The original full field
+    /// supplies graded inertia and acceleration loading.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
-        &self.reference_density_kg_m3
+        &self.reference_mass.means_kg_m3
+    }
+    pub fn reference_corner_density_kg_m3(&self) -> Option<&[[f64; 4]]> {
+        self.reference_mass.corners_kg_m3.as_deref()
+    }
+    /// Total original mass before support or pressure reduction [kg].
+    pub fn reference_mass_kg(&self) -> f64 {
+        self.reference_mass.operator.reference_mass_kg()
+    }
+    /// Project P2 nodal acceleration through the SAME full reference mass.
+    /// Returned original displacement forces [N] include support coordinates
+    /// and signed corner weights. They have no pressure inertia. Select the
+    /// free entries for modal forcing; do not add this load a second time as
+    /// body-force density. Evolving force laws keep their own work convention.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, MixedVibrationError> {
+        Ok(self
+            .reference_mass
+            .acceleration_load_n(acceleration_m_s2, cx)?)
     }
     pub const fn equilibrium(&self) -> &MixedUpSolution {
         &self.equilibrium

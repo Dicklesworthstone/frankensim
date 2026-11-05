@@ -24,12 +24,13 @@
 use super::super::gravity::HeldMixedGravity;
 use super::super::pressure::UniformBoundaryPressure;
 use super::super::{
-    MixedUpError, MixedUpProblem, MixedUpSolution, PreparedMixedUpProblem, checkpoint,
-    inertia_error, invalid,
+    MixedUpError, MixedUpProblem, MixedUpSolution, PreparedMixedUpProblem, checkpoint, invalid,
 };
-use super::{MixedVibrationError, MixedVibrationSettings, symmetric_dense, tolerance};
+use super::{
+    MixedVibrationError, MixedVibrationSettings, ModalReferenceMass, ReferenceDensity,
+    symmetric_dense, tolerance,
+};
 use crate::hyper3::vibration::MAX_DENSE_FREE_DOFS;
-use crate::inertia::ReferenceMass;
 use fs_exec::Cx;
 use fs_la::factor::qr;
 use fs_material::hyper::Hyperelastic;
@@ -70,7 +71,7 @@ pub struct IncompressibleMixedVibration<
     boundary_pressure: Option<UniformBoundaryPressure>,
     gravity: Option<HeldMixedGravity<'a>>,
     settings: MixedVibrationSettings,
-    reference_density_kg_m3: Vec<f64>,
+    reference_mass: ModalReferenceMass,
     equilibrium: MixedUpSolution,
     free_dofs: Vec<usize>,
     independent_pressure_indices: Vec<usize>,
@@ -172,6 +173,44 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> MixedUpProblem<'a
             cx,
         )
     }
+
+    /// Equilibrate the exact-constraint solid with positive P1 reference
+    /// density at each Tet10's four corners. The constraint retains zero
+    /// inertia; the full graded P2 mass supplies the projected pencil.
+    /// Graded curved maps require at least six Duffy points per direction.
+    pub fn solve_incompressible_vibration_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 4]],
+        settings: MixedVibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<IncompressibleMixedVibration<'a, L>, MixedVibrationError> {
+        self.prepare(cx)?
+            .solve_incompressible_vibration_density_impl(
+                None,
+                ReferenceDensity::Corners(corner_density_kg_m3),
+                settings,
+                cx,
+            )
+    }
+
+    /// Re-equilibrate the original constrained iterate with the same graded
+    /// reference mass used for its modes and acceleration loading.
+    pub fn solve_incompressible_vibration_from_with_reference_density(
+        &self,
+        displacement_m: &[[f64; 3]],
+        pressure_pa: &[f64],
+        corner_density_kg_m3: &[[f64; 4]],
+        settings: MixedVibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<IncompressibleMixedVibration<'a, L>, MixedVibrationError> {
+        self.prepare(cx)?
+            .solve_incompressible_vibration_density_impl(
+                Some((displacement_m, pressure_pa)),
+                ReferenceDensity::Corners(corner_density_kg_m3),
+                settings,
+                cx,
+            )
+    }
 }
 
 impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpProblem<'a, L> {
@@ -179,6 +218,21 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
         &self,
         initial: Option<(&[[f64; 3]], &[f64])>,
         density: &[f64],
+        settings: MixedVibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<IncompressibleMixedVibration<'a, L>, MixedVibrationError> {
+        self.solve_incompressible_vibration_density_impl(
+            initial,
+            ReferenceDensity::PerElement(density),
+            settings,
+            cx,
+        )
+    }
+
+    fn solve_incompressible_vibration_density_impl(
+        &self,
+        initial: Option<(&[[f64; 3]], &[f64])>,
+        density: ReferenceDensity<'_>,
         settings: MixedVibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<IncompressibleMixedVibration<'a, L>, MixedVibrationError> {
@@ -237,28 +291,20 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
         let free_dofs = prepared.free[..n].to_vec();
         let independent_pressure_indices: Vec<_> =
             prepared.free[n..].iter().map(|&d| d - nu).collect();
-        let mass = ReferenceMass::from_tet10_quadrature(
-            prepared.mesh.elements.iter().map(|element| {
-                (
-                    element.connectivity,
-                    element.points.iter().map(|q| (q.shapes, q.weight_m3)),
-                )
-            }),
+        let reference_mass = ModalReferenceMass::assemble(
+            prepared,
             density,
-            nu,
             settings.maximum_mass_assembly_bytes,
             cx,
-        )
-        .map_err(inertia_error)?;
+        )?;
         let mut mass_kg = Vec::with_capacity(n * n);
         for &row in &free_dofs {
             checkpoint(cx)?;
             for &col in &free_dofs {
-                mass_kg.push(mass.matrix().get(row, col));
+                mass_kg.push(reference_mass.operator.matrix().get(row, col));
             }
         }
         symmetric_dense(&mass_kg, n)?;
-        drop(mass);
         // This solve retains final KKT inertia admission, even for a starting
         // iterate that already satisfies equilibrium exactly.
         let equilibrium = match initial {
@@ -459,7 +505,7 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
             boundary_pressure: prepared.boundary_pressure,
             gravity: prepared.gravity,
             settings,
-            reference_density_kg_m3: density.to_vec(),
+            reference_mass,
             equilibrium,
             free_dofs,
             independent_pressure_indices,
@@ -495,8 +541,29 @@ impl<L: HyperelasticMaterial + MixedFiniteStrainPotential> IncompressibleMixedVi
     pub const fn settings(&self) -> MixedVibrationSettings {
         self.settings
     }
+    /// Original reference-volume means; graded physical inertia retains the
+    /// complete corner field in the full original mass operator.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
-        &self.reference_density_kg_m3
+        &self.reference_mass.means_kg_m3
+    }
+    pub fn reference_corner_density_kg_m3(&self) -> Option<&[[f64; 4]]> {
+        self.reference_mass.corners_kg_m3.as_deref()
+    }
+    pub fn reference_mass_kg(&self) -> f64 {
+        self.reference_mass.operator.reference_mass_kg()
+    }
+    /// Original nodal forces M*a [N], including held displacement coordinates
+    /// and signed P2 weights. Pressure has no inertia. For constrained modal
+    /// forcing, select the free force entries and apply the retained Z^T;
+    /// do not substitute the reduced mass for the full load projection.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, MixedVibrationError> {
+        Ok(self
+            .reference_mass
+            .acceleration_load_n(acceleration_m_s2, cx)?)
     }
     pub const fn equilibrium(&self) -> &MixedUpSolution {
         &self.equilibrium
