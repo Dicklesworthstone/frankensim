@@ -10842,6 +10842,13 @@ frozen-composition homogeneous source domain and bounded entropy/sonic roots.
 Regression sources cover positive and negative formation-reference shifts,
 near-shut pressure drives, and independent variable-Cp PR throat references.
 
+Real-gas energy/enthalpy trial samples use the original PR scalar density
+evaluator and NASA property-only calorics. The repeated reconstruction path
+therefore needs no component-vector allocation or fugacity calculation; it
+retains the same residual U, complete Cv, pressure and temperature derivative.
+The accepted material state still resolves the full EOS and original transport
+sources, preserving source-domain, fugacity and complete caloric/acoustic checks.
+
 ## Reversible volume work on source-bound real gas
 
 `IsochoricRealGasParcel::at_volume_isentropic` constructs an immutable reversible

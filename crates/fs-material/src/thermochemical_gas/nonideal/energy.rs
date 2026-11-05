@@ -50,18 +50,18 @@ struct CaloricSample {
 
 impl ThermochemicalPengRobinsonModel {
     fn caloric_at_density(&self, density: f64, t: f64) -> Result<CaloricSample, GasEnergyError> {
-        let direct = self.mechanics().evaluate_density_temperature(
+        let direct = self.mechanics().evaluate_density_caloric(
             Temperature::new(t), Density::new(density),
         ).map_err(|error| failure("real-gas density mechanics", error))?;
         let properties = self.source().thermodynamics()
             .evaluate_properties(Temperature::new(t), direct.pressure())
             .map_err(|error| failure("real-gas reference calorics", error))?;
         let molar_mass = properties.molar_mass().value();
-        let residual_energy_j_kg = direct.root().residual_internal_energy_j_mol() / molar_mass;
+        let residual_energy_j_kg = direct.residual_internal_energy_j_mol() / molar_mass;
         let internal_energy_j_kg = properties.u().value() / molar_mass + residual_energy_j_kg;
         let cv_j_kg_k = properties.mass_specific_cv().value()
-            + direct.root().residual_cv_j_mol_k() / molar_mass;
-        let pressure_temperature_derivative = direct.root().pressure_derivatives().0;
+            + direct.residual_cv_j_mol_k() / molar_mass;
+        let pressure_temperature_derivative = direct.pressure_derivatives().0;
         if !internal_energy_j_kg.is_finite() || !residual_energy_j_kg.is_finite()
             || !positive(cv_j_kg_k) || !pressure_temperature_derivative.is_finite() {
             return Err(GasEnergyError::Invalid("finite real-gas energy and positive complete Cv required"));

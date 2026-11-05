@@ -2630,6 +2630,19 @@ unrepresentable arithmetic and mechanical instability `(dp/dv)_T >= 0` refuse.
 The returned homogeneous root is not an inventory of all PT roots. Mechanical
 stability does not establish equilibrium against phase separation.
 
+`evaluate_density_caloric` supplies the same homogeneous pressure, residual
+U/H/entropy/Cv and pressure derivatives in a fixed-size result. Its shared
+mixing reduction uses four stack arrays bounded by the admitted 64 components;
+no successful scalar evaluation allocates or calculates component fugacities.
+The original pair arithmetic, including `sqrt(a_i*a_j)` on either side of an
+alpha-base sign change, is retained. Full evaluations record the same pair
+values for their fugacity owner. Both paths share the residual and derivative
+arithmetic and the pressure/covolume/mechanical-stability checks. Scalar trials
+produce no Gibbs or phase-equilibrium result; a consumer needing fugacity or
+phase admission must still request the full state. Focused tests require bitwise
+agreement in dilute, dense, metastable, alpha-sign and 64-component cases, and
+matching physical refusals. The original fixed operation-tree version remains 4.
+
 G1/G3 tests compare PT and density-coordinate states, the independent pressure
 equation, residual-energy temperature derivatives and the dilute limit. The
 source adapter supplies ideal-reference Cv before complete caloric and acoustic
