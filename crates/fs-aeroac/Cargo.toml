@@ -10,7 +10,12 @@ authors.workspace = true
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Observe original three-dimensional compressible source states on demand.
+compressible-volume = ["dep:fs-flux"]
+
 [dependencies]
+fs-flux = { path = "../fs-flux", default-features = false, features = ["experimental-compressible"], optional = true }
 fs-exec = { path = "../fs-exec" }
 fs-fft = { path = "../fs-fft" }
 fs-ivl = { path = "../fs-ivl" }
@@ -19,6 +24,7 @@ fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
+fs-gas = { path = "../fs-gas", features = ["experimental-euler"] }
 fs-qty = { path = "../fs-qty" }
 fs-thermochem = { path = "../fs-thermochem" }
 fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.4.0" }

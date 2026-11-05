@@ -939,6 +939,8 @@ version = "0.0.1"
 dependencies = [
  "fs-exec",
  "fs-fft",
+ "fs-flux",
+ "fs-gas",
  "fs-ivl",
  "fs-lbm",
  "fs-material",

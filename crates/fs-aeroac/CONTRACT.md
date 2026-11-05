@@ -1029,8 +1029,9 @@ determinism.
   content hash is FNV-1a: deterministic correlation identity only,
   never authenticity.
 - Supplied symmetric 3D Lighthill volume-stress moments propagate through
-  `curle3d::quadrupole`; `quadrupole::lbm` extracts selected native D3Q19
-  Reynolds moments into the joint recorder. Automatic source-region completeness,
+  `curle3d::quadrupole`; `quadrupole::lbm` and optional `quadrupole::flux`
+  extract selected native 3D flow moments into the joint recorder.
+  Automatic source-region completeness,
   unresolved SGS completion and inclusion in the existing surface-only rigs
   remain out of scope; this capability alone does not qualify a jet-noise source.
 - Only orders 0 and 1 of the Bessel functions are provided (all the
@@ -1816,3 +1817,52 @@ flow through source acquisition, joint recording and the coherent observer.
 The end-to-end oracle checks the actual quadratic stress's doubled frequency
 and distributed coherent pressure/vector-velocity power. These fixtures add no
 measured-SPL, developed-turbulence or unresolved-noise qualification.
+
+## Resolved compressible volume-stress sources
+
+With `compressible-volume`, `curle3d::quadrupole::flux::PreparedCompressibleVolume3`
+extracts instantaneous sources from accepted `fs-flux` `Euler3d` or
+`MixtureEuler3d` cells. One prepared layout retains the complete original EOS,
+including the mixture species axis and caloric references, the native Cartesian
+grid/boundaries, and a nonempty increasing selection of cell indices. Native
+cell centers and volumes are in SI; an explicit stationary proper rotation and
+origin map them to the propagation frame. Velocity is absolute in that frame;
+no mean flow, reference temperature or alternate gamma is inferred.
+
+The six moments are the resolved inviscid Lighthill terms
+`Q_ij = [rho u_i u_j + ((p-p0)-c0^2(rho-rho0)) delta_ij] dV`.
+The retained `FluidAcousticState` supplies rho0/c0 and the caller supplies the
+positive absolute p0 of that same ambient medium. That medium can differ from
+the source gas; p0 is not guessed from its composition. Every sample decodes
+pressure through its original source owner. Double-double arithmetic retains
+the pressure-density difference before addition to the diagonal moments;
+trace, signed isotropic stress and physical cross stresses are preserved.
+The complete tensor convention follows NASA report 19770026218, equations
+(8)-(9): <https://ntrs.nasa.gov/api/citations/19770026218/downloads/19770026218.pdf>.
+
+Both constructors publish the initial accepted source sample. Later extraction
+requires the same full source/grid binding and a strictly later native accepted
+time. All selected moments are staged before a final cancellation check and
+buffer swap; refusal changes neither the accepted source sample nor its time,
+and never changes the flow. There is no caller-supplied replacement clock.
+`record_sample` forwards the accepted positions, moments and time to the
+original `QuadrupoleWelchStream`; that owner refuses a nonuniform cadence rather
+than resampling. Source positions/order remain bound through propagation.
+
+Prepared numerical payload comprises indices, positions and two six-moment
+buffers (nominally 128 bytes/cell on 64-bit hosts); actual vector capacities are
+admitted against the caller's bound. Original immutable EOS metadata is separate.
+The adapter sample loop reallocates no buffers, polls at bounded cell boundaries,
+and retains source-owned caloric work/cancellation controls. Kernel regressions
+cover isentropic cancellation, signed isotropic trace, full-tensor rotation,
+physical scaling and domain/overflow refusals. Native-owner fixtures exercise
+both original solvers, source/grid/clock/budget and cancellation transactions,
+and an actual Euler history through joint recording and the acoustic observer
+against an independent direct DFT.
+
+This is not complete viscous/LES Lighthill stress: molecular and unresolved SGS
+stresses, applied body-force dipoles and missing source-volume contributions are
+not inferred. Products of cell averages do not reconstruct unresolved products.
+Periodic fields supply only the selected physical box, with no implicit image
+sum. Cell quadrature and source-region truncation require their own refinement;
+wall scattering, noise calibration and measured-SPL qualification remain absent.
