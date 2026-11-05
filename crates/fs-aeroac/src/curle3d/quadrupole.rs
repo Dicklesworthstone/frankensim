@@ -18,20 +18,22 @@
 //! Sarkar & Hussaini, NASA-CR-191543 (1993),
 //! <https://ntrs.nasa.gov/citations/19940017407>.
 
+use super::array::IdealAcousticPlane;
 use super::statistics::{ComplexSum, StatisticsSum, finite, invalid, nonfinite};
 use super::{CoherenceBudget, CoherentCompactField, CompactFieldStatistics};
 use crate::AeroacError;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det};
 
-mod kernel;
 /// Native accepted compressible flow states as resolved inviscid stress sources.
 #[cfg(feature = "compressible-volume")]
 pub mod flux;
+mod kernel;
 /// Material-scaled volume-stress histories from the native D3Q19 fluid.
 pub mod lbm;
 /// Physical-clock acquisition and propagation of resolved volume histories.
 pub mod recorded;
+mod reflection;
 mod welch;
 
 /// Physical scope retained by every quadrupole observation.
@@ -85,6 +87,8 @@ pub struct PreparedQuadrupoleObserver {
     frequency_hz: f64,
     observer_m: [f64; 3],
     transfers: Vec<Transfer>,
+    reflection_planes: Vec<IdealAcousticPlane>,
+    reflection_wedge_order: Option<usize>,
 }
 
 impl PreparedQuadrupoleObserver {
@@ -179,6 +183,8 @@ impl PreparedQuadrupoleObserver {
             frequency_hz,
             observer_m,
             transfers,
+            reflection_planes: Vec::new(),
+            reflection_wedge_order: None,
         })
     }
 
@@ -202,9 +208,33 @@ impl PreparedQuadrupoleObserver {
     pub fn source_position_m(&self, index: usize) -> Option<[f64; 3]> {
         self.transfers.get(index).map(|t| t.source_m)
     }
-    /// Travel time r/c [s], already included in the harmonic transfer.
+    /// Direct-path travel time r/c [s], already included in the harmonic transfer.
+    /// Reflected transfers contain additional path delays; this value retains
+    /// the original physical source-to-receiver delay rather than an effective
+    /// delay for their coherent sum.
     pub fn source_delay_s(&self, index: usize) -> Option<f64> {
         self.transfers.get(index).map(|t| t.delay_s)
+    }
+
+    /// Physical boundaries folded into every original stress transfer.
+    pub fn reflection_planes(&self) -> &[IdealAcousticPlane] {
+        &self.reflection_planes
+    }
+
+    /// Exact wedge opening pi/m, or None for free space/perpendicular planes.
+    pub const fn reflection_wedge_order(&self) -> Option<usize> {
+        self.reflection_wedge_order
+    }
+
+    /// Physical propagation model and its explicit applicability boundary.
+    pub const fn scope(&self) -> &'static str {
+        if self.reflection_planes.is_empty() {
+            QUADRUPOLE_SCOPE
+        } else if self.reflection_wedge_order.is_some() {
+            reflection::WEDGE_SCOPE
+        } else {
+            reflection::ORTHOGONAL_SCOPE
+        }
     }
 
     /// Sum coherent stress sources before forming signed energy transport.
@@ -232,7 +262,7 @@ impl PreparedQuadrupoleObserver {
             particle_velocity_m_s: velocity,
             active_intensity_w_m2: intensity.map(|v| v.re),
             reactive_intensity_w_m2: intensity.map(|v| v.im),
-            scope: QUADRUPOLE_SCOPE,
+            scope: self.scope(),
         })
     }
 
@@ -274,7 +304,7 @@ impl PreparedQuadrupoleObserver {
         for mode in modes {
             statistics.add(self.amplitudes(mode, &mut || false)?)?;
         }
-        statistics.finish(QUADRUPOLE_SCOPE)
+        statistics.finish(self.scope())
     }
 
     fn amplitudes(

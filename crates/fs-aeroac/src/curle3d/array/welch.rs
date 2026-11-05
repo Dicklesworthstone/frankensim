@@ -11,6 +11,14 @@ bin-integrated Welch pressure/velocity moments, not deterministic cross-frequenc
 no source validation, boundaries, moving sources, mean-flow propagation, absorption, \
 unresolved SGS sound or measured-SPL qualification.";
 
+const MIXED_REFLECTED_QUADRUPOLE_SCOPE: &str = "Coherently recorded 3D compact volume/force \
+sources and symmetric Lighthill volume stresses in one homogeneous stationary lossless \
+ideal perpendicular-wall or pi/m-wedge domain; all physical source and image paths retain \
+their measured coherence. Caller supplies disjoint mechanisms without double counting. \
+Bin-integrated Welch pressure/velocity moments, not deterministic cross-frequency phases; \
+no source validation, finite wall impedance, general diffraction, enclosed-room reverberation, \
+motion, absorption, source feedback, unresolved SGS sound or measured-SPL qualification.";
+
 impl PreparedCompactSourceObserver {
     /// Propagate one measured interior Welch bin through the original medium.
     ///
@@ -82,10 +90,10 @@ impl PreparedCompactSourceObserver {
     /// phases across bins. Unknown source correlation is never independence.
     ///
     /// Both observers must have exactly the same acoustic state, receiver and
-    /// frequency. This owner currently admits homogeneous, stationary,
-    /// lossless free space only: molecular dispersion/absorption and folded
-    /// wall or wedge paths refuse because the quadrupole owner lacks those
-    /// propagation operators. All source-model, compact-cell, finite-record,
+    /// frequency and identical ideal boundary descriptions (including wedge
+    /// order and plane ordering). Free space, perpendicular walls and pi/m
+    /// wedges are admitted. Molecular dispersion/absorption remains unavailable
+    /// to the quadrupole owner. All source-model, compact-cell, finite-record,
     /// window and aliasing limits remain; no SGS sound is inferred.
     ///
     /// Allocation-free O((compact sources + cells) * segments), with bounded
@@ -105,11 +113,11 @@ impl PreparedCompactSourceObserver {
             || self.observer_position_m() != quadrupoles.observer_position_m()
             || self.frequency_hz().to_bits() != quadrupoles.frequency_hz().to_bits()
             || self.molecular_state().is_some()
-            || !self.reflection_planes().is_empty()
-            || self.reflection_wedge_order().is_some()
+            || self.reflection_planes() != quadrupoles.reflection_planes()
+            || self.reflection_wedge_order() != quadrupoles.reflection_wedge_order()
         {
             return Err(invalid(
-                "mixed recorded sources require one lossless free-space medium, receiver and frequency",
+                "mixed recorded sources require one lossless medium, receiver, frequency and boundary domain",
             ));
         }
         let measured = spectrum
@@ -153,7 +161,11 @@ impl PreparedCompactSourceObserver {
             statistics.add(sums.map(ComplexSum::value))?;
         }
         plane::poll(&mut cancelled)?;
-        statistics.finish(MIXED_QUADRUPOLE_SCOPE)
+        statistics.finish(if self.reflection_planes().is_empty() {
+            MIXED_QUADRUPOLE_SCOPE
+        } else {
+            MIXED_REFLECTED_QUADRUPOLE_SCOPE
+        })
     }
 }
 

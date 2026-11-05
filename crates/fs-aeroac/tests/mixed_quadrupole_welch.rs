@@ -209,6 +209,67 @@ fn g1_recorded_mixed_mechanisms_match_coherent_known_phasors_and_all_field_momen
 }
 
 #[test]
+fn g1_matching_reflecting_domains_preserve_recorded_cross_mechanism_coherence() {
+    let inputs = sources();
+    let spectrum = estimate(&inputs.map(channels));
+    let plane = IdealAcousticPlane::new(
+        [0.0, 0.0, -0.1],
+        [0.0, 0.0, 1.0],
+        IdealPlaneBoundary::PressureRelease,
+    )
+    .unwrap();
+    let wedge = [
+        IdealAcousticPlane::new([-0.1, 0.0, 0.0], [1.0, 0.0, 0.0], IdealPlaneBoundary::Rigid)
+            .unwrap(),
+        IdealAcousticPlane::new(
+            [0.0, -0.1, 0.0],
+            [0.0, 1.0, 0.0],
+            IdealPlaneBoundary::PressureRelease,
+        )
+        .unwrap(),
+    ];
+    for use_wedge in [false, true] {
+        let (compact, quadrupoles) = observers();
+        let (compact, quadrupoles) = if use_wedge {
+            (
+                compact.with_wedge(wedge, 2, 8).unwrap(),
+                quadrupoles.with_wedge(wedge, 2, 4).unwrap(),
+            )
+        } else {
+            (
+                compact.with_orthogonal_planes(&[plane], 4).unwrap(),
+                quadrupoles.with_orthogonal_planes(&[plane], 2).unwrap(),
+            )
+        };
+        let expected: Vec<_> = inputs
+            .iter()
+            .map(|(c, q)| {
+                let a = compact.evaluate(c).unwrap();
+                let b = quadrupoles.evaluate(&[*q]).unwrap();
+                core::array::from_fn(|i| {
+                    if i == 0 {
+                        a.pressure_pa + b.pressure_pa
+                    } else {
+                        a.particle_velocity_m_s[i - 1] + b.particle_velocity_m_s[i - 1]
+                    }
+                })
+            })
+            .collect();
+        let result = compact
+            .evaluate_welch_bin_with_quadrupoles(&quadrupoles, &spectrum, BIN, WORK, || false)
+            .unwrap();
+        check_moments(&result, &expected);
+        assert!(result.scope.contains("ideal"));
+        let (_, free_space) = observers();
+        assert!(
+            compact
+                .evaluate_welch_bin_with_quadrupoles(&free_space, &spectrum, BIN, WORK, || false,)
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn g3_cross_mechanism_cancellation_retains_velocity_and_changes_with_measured_correlation() {
     let acoustic = medium();
     let r = 0.21;

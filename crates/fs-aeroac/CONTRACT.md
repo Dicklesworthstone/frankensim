@@ -2011,6 +2011,32 @@ existing bounded statistics reduction without inferring independence or random
 phase. Source, geometry, finite-value, work and cancellation admission publish
 no partial prepared observer or field.
 
+`PreparedQuadrupoleObserver::with_orthogonal_planes` folds the complete 2^m
+image group of one to three perpendicular ideal walls into those same 24
+coefficients. `with_wedge` uses the existing 2m dihedral group for opening pi/m;
+equal rigid/release walls are admitted for m in 2..=128 and mixed walls require
+even m. Each original source stays strictly in every physical half-space;
+receivers may lie on a wall. The original direct path, source positions,
+material, frequency and source-count semantics are retained.
+
+For a source image H and pressure character s, the physical stress image is
+`s H Q H^T`, including trace and all cross stresses. Preparation equivalently
+uses the original tensor at virtual receiver `H^-1 x`, then pulls the complete
+velocity back by `(H^-1)^T`. This transpose matters for wedge rotations.
+Images remain coherent within every physical source and every recorded factor;
+pressure and particle velocity are summed before energy products. Preparation
+is bounded by physical sources times all image paths, checks cancellation per
+path/source, and uses O(N) scratch. Evaluation retains allocation-free O(N)
+work with no tensor transformation or transcendental work.
+
+G1/G3/G4 `quadrupole_reflection` tests compare with independently transformed
+source tensors at oblique walls, check each tensor basis against rigid/release
+conditions in a mixed three-wall corner, and verify rotated wedge faces,
+harmonic/statistical readouts and geometry/work/cancellation refusals.
+These ideal infinite boundaries do not model finite impedance, edge or general
+wedge diffraction, closed-room reverberation, absorption, motion or source
+feedback, and do not validate unresolved turbulent sound or measured SPL.
+
 `evaluate_welch_bin` consumes the original synchronized `WelchCrossSpectrum`
 factors with six source-major N m channels per prepared cell, ordered xx, yy,
 zz, xy, xz, yz. Every cell and tensor component is summed coherently within
@@ -2158,9 +2184,10 @@ interference is retained; separate mechanism powers are not substituted for
 their coherent sum. The original peak-equivalent bin normalization applies once.
 
 Both prepared observers must have identical acoustic state, receiver and exact
-frequency. Only homogeneous stationary lossless free-space propagation is
-admitted: molecular, reflected-plane and wedge compact paths refuse because
-the quadrupole owner does not provide those matching propagation operators.
+frequency. Homogeneous stationary lossless free space and matching ideal
+perpendicular-plane or pi/m-wedge domains are admitted. Original plane order,
+geometry, boundary conditions and wedge order must match exactly; mismatches
+refuse. Molecular compact paths remain unavailable to the quadrupole owner.
 The caller must provide disjoint physical mechanisms; a volume source already
 represented by a permeable acoustic surface must not be counted twice.
 

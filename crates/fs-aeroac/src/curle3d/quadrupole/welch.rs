@@ -61,7 +61,7 @@ impl PreparedQuadrupoleObserver {
             statistics.add(sums.map(ComplexSum::value))?;
         }
         poll(&mut cancelled)?;
-        statistics.finish(QUADRUPOLE_SCOPE)
+        statistics.finish(self.scope())
     }
 
     /// Accumulate one borrowed stress block into a caller's temporary field sum.
