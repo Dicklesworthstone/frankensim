@@ -4,8 +4,9 @@ use fs_phs::linear_exact::{
     integrated_resistance_loss, split_quadratic, step_render, step_split,
 };
 use fs_phs::{
-    AcousticSection, ChainOutlet, PortHamiltonian, QuadraticStorage, RelaxationBranch,
-    ViscothermalPin, acoustic_chain_outlet_wall, join_port, mass_spring_damper, transformer,
+    AcousticSection, ChainOutlet, DescriptorPortHamiltonian, PortHamiltonian, QuadraticStorage,
+    RelaxationBranch, ViscothermalPin, acoustic_chain_outlet_wall, join_port, mass_spring_damper,
+    transformer,
 };
 
 fn budget(n: usize) -> LinearSplitBudget {
@@ -109,6 +110,63 @@ fn integrated_work_retains_port_information_that_rounded_observations_cannot_hol
         assert!((record.supplied - dt).abs() < 1e-12 * dt);
         assert!((record.dissipated - dt).abs() < 1e-12 * dt);
         assert!(record.balance_residual().abs() < 1e-12 * dt);
+    }
+}
+
+#[test]
+fn coupled_storage_port_maps_preserve_weak_observation_and_held_work() {
+    let large = 2.0_f64.powi(54);
+    // x^T Q x = L*(x0-x2+x1/L)^2 + (1-1/L)*x1^2 is PSD.
+    // G^T Q=[1,1,-1]; ordinary column sums instead produce [0,1,0].
+    let q = vec![large, 1.0, -large, 1.0, 1.0, -1.0, -large, -1.0, large];
+    let sys = PortHamiltonian::new(
+        3, 1, vec![0.0; 9], vec![0.0; 9], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(q.clone(), 3).unwrap()),
+    ).unwrap();
+    let initial = [1.0, 0.0, 0.0];
+    assert_eq!(sys.output(&initial), vec![1.0]);
+    let split = split_quadratic(&sys, budget(3)).unwrap();
+    let dt = 0.25;
+    let prepared = PreparedExactZoh::new(&sys, dt, budget(3)).unwrap();
+    let zero = PreparedExactZoh::new(&sys, 0.0, budget(3)).unwrap();
+    assert_eq!(zero.average_relation(&initial, &[f64::NAN], 0).unwrap(), (1.0, 0.0));
+    let (free, mobility) = prepared.average_relation(&initial, &[f64::NAN], 0).unwrap();
+    assert!((free - 1.0).abs() < 1e-12);
+    assert!((mobility - 0.5 * dt).abs() < 1e-12);
+
+    // An independent fourth differential coordinate is constrained to zero.
+    // The common-flow owner must retain the same original coupled port map.
+    let mut differential_q = vec![0.0; 16];
+    for i in 0..3 {
+        differential_q[i * 4..i * 4 + 3].copy_from_slice(&q[i * 3..(i + 1) * 3]);
+    }
+    differential_q[15] = 1.0;
+    let mut j = vec![0.0; 25];
+    j[3 * 5 + 4] = 1.0;
+    j[4 * 5 + 3] = -1.0;
+    let descriptor = DescriptorPortHamiltonian::new(
+        5, 4, 1, j, vec![0.0; 25], vec![1.0, 1.0, 1.0, 0.0, 0.0],
+        Box::new(QuadraticStorage::new(differential_q, 4).unwrap()),
+    ).unwrap();
+    let constrained = PreparedCommonFlowZoh::new_owned(descriptor, dt, budget(5)).unwrap();
+    for input in [0.0, 1.0] {
+        // x(t)=[1+u*t,u*t,u*t], hence y(t)=1+u*t and
+        // integral u*y dt = u*dt + u^2*dt^2/2 independently of L.
+        let mean_output = 1.0 + 0.5 * input * dt;
+        let work = input * dt * mean_output;
+        for record in [
+            step_render(&sys, &split, &initial, &[input], dt).unwrap(),
+            prepared.step(&initial, &[input]).unwrap(),
+            constrained.step(&[1.0, 0.0, 0.0, 0.0, 0.0], &[input]).unwrap(),
+        ] {
+            for (actual, expected) in record.x[..3].iter()
+                .zip([1.0 + input * dt, input * dt, input * dt]) {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+            assert!((record.y[0] - mean_output).abs() < 1e-12);
+            assert!((record.supplied - work).abs() < 1e-12);
+            assert_eq!(record.dissipated, 0.0);
+        }
     }
 }
 

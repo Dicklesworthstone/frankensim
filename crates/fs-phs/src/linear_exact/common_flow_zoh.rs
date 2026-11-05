@@ -148,10 +148,11 @@ impl PreparedCommonFlowZoh {
             let outputs: Vec<Vec<f64>> = (0..m)
                 .map(|p| {
                     (0..n)
-                        .map(|j| (0..n).map(|i| original.g[i * m + p] * q[i * n + j]).sum())
-                        .collect()
+                        .map(|j| crate::port_output_component(&original.g, m, p, |i| q[i * n + j])
+                            .ok_or_else(|| refuse("common-flow port observation map is unrepresentable")))
+                        .collect::<Result<_, _>>()
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             let flow = PreparedQuadraticFlow::new(
                 &tangent,
                 &split,

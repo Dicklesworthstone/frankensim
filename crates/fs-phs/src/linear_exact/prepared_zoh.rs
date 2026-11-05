@@ -84,7 +84,9 @@ impl<'a> PreparedExactZoh<'a> {
         let scratch = Scratch::new(n, m);
         let q = split.quadratic_matrix();
         let outputs: Vec<Vec<f64>> = (0..m).map(|p| (0..n).map(|j|
-            (0..n).map(|k| system.g[k*m+p]*q[k*n+j]).sum()).collect()).collect();
+            crate::port_output_component(&system.g, m, p, |k| q[k*n+j])
+                .ok_or_else(|| refuse("prepared port observation map is unrepresentable")))
+            .collect::<Result<_, _>>()).collect::<Result<_, _>>()?;
         if duration == 0.0 {
             let mean_state: Vec<f64> = outputs.into_iter().flatten().collect();
             if !finite(&mean_state) {

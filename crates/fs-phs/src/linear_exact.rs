@@ -952,9 +952,9 @@ fn held_input_transition(
     // Integrators for EVERY port output, independently of the held input.
     for p in 0..split.m {
         for j in 0..n {
-            for a in 0..n {
-                b[(n + 1 + p) * d + j] += sys.g[a * split.m + p] * effort_map[a * n + j];
-            }
+            b[(n + 1 + p) * d + j] = crate::port_output_component(
+                &sys.g, split.m, p, |a| effort_map[a * n + j],
+            ).ok_or_else(|| refuse("exact port observation map is unrepresentable"))?;
         }
     }
     // Preserve the original dense capacity gate and held-input transition.
