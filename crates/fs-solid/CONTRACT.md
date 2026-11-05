@@ -5676,13 +5676,28 @@ The original material path derivative supplies the action
 are cached at each exact Newton iterate and reused throughout FGMRES; all
 original sparse jump columns and native mass/elastic couplings remain present.
 No global dense tangent or positive-definite softening approximation is used.
-Explicitly unsupported material switches and active damaged-area friction or
-Coulomb paths retain the existing fallible numerical-difference adapter.
+Velocity-regularized damaged-area friction differentiates the original
+path-integrated damaged compression together with the full vector slip law.
+Its local block retains normal/shear coupling, changing damaged area and the
+transverse derivative of the saturated slip direction; zero slip in the linear
+regularization branch has its finite shear slope. These contributions share
+the same cached material block and leave the physical force and work unchanged.
+Explicitly unsupported material switches, the Huber speed corner and ideal
+Coulomb constraints retain the existing fallible numerical-difference adapter.
 Residuals and analytic actions/preparation attempts share the original
 operator-evaluation allowance; numerical fallback counts its actual residual
 calls. The complete physical endpoint is independently replayed before
 acceptance. A source, stencil, cancellation or work-budget refusal preserves
 the original accepted motion and material history.
+
+The G1 friction regression reconstructs a three-coordinate inertial reclosure
+from independent momentum equations, including changing compression and both
+linear-regularized and saturated shear. It reproduces native displacement,
+velocity and friction work while remaining bit-identical under widely different
+inactive numerical-difference scales. Retained partial damage and physical
+viscosity retain their separate original loss accounts. This establishes the
+solver path and derivative behavior, not a wall-clock speedup or specimen
+calibration.
 
 The step reports original kinetic, bulk and cohesive endpoint energies,
 intrinsic fracture loss, physical bond-viscosity loss, optional damaged-area

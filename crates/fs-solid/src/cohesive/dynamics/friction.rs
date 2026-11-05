@@ -97,6 +97,62 @@ impl DamagedAreaFriction {
         let work = finite(magnitude * slip)?;
         Ok((traction, work))
     }
+
+    /// Derivative of the same mean shear traction with respect to the complete
+    /// endpoint jump. The original material supplies dP/dg, including changes
+    /// in compressed area as the bond damages. Freezing P would lose the
+    /// normal/shear coupling and the additional resistance during debonding.
+    ///
+    /// At the Huber corner there is no classical derivative. Unrepresentable
+    /// derivative arithmetic also requests the existing numerical fallback;
+    /// neither case changes the already admitted physical traction or work.
+    pub(super) fn response_tangent(
+        self,
+        pressure: f64,
+        pressure_gradient: [f64; 3],
+        delta: [f64; 2],
+        dt: f64,
+    ) -> Result<Option<[[f64; 3]; 2]>, Error> {
+        let slip = finite(delta[0].hypot(delta[1]))?;
+        let regularization = finite(self.regularization_speed_m_s * dt)?;
+        positive(regularization)?;
+        finite(pressure)?;
+        if pressure < 0.0 {
+            return Err(Error::Invalid("negative damaged compression measure"));
+        }
+        if self.kinetic_coefficient == 0.0 {
+            return Ok(Some([[0.0; 3]; 2]));
+        }
+        if slip == regularization || pressure_gradient.iter().any(|v| !v.is_finite()) {
+            return Ok(None);
+        }
+        let denominator = slip.max(regularization);
+        let direction = delta.map(|d| d / denominator);
+        let shear_scale = (self.kinetic_coefficient * pressure) / denominator;
+        let mut tangent = [[0.0; 3]; 2];
+        for i in 0..2 {
+            for (j, &gradient) in pressure_gradient.iter().enumerate() {
+                let material = self.kinetic_coefficient * direction[i] * gradient;
+                let sliding = if j == 0 {
+                    0.0
+                } else {
+                    let diagonal = if i + 1 == j { 1.0 } else { 0.0 };
+                    let projection = if slip > regularization {
+                        direction[i] * direction[j - 1]
+                    } else {
+                        0.0
+                    };
+                    shear_scale * (diagonal - projection)
+                };
+                tangent[i][j] = material + sliding;
+            }
+        }
+        Ok(tangent
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite())
+            .then_some(tangent))
+    }
 }
 
 impl<'m, 'a> CohesiveMotion<'m, 'a> {
@@ -181,5 +237,67 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
         Err(Error::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_shear_derivative_includes_pressure_direction_and_regularized_rest() {
+        let model = DamagedAreaFriction {
+            kinetic_coefficient: 0.4,
+            regularization_speed_m_s: 0.1,
+        };
+        let pressure = 2.0;
+        let gradient = [-80.0, 30.0, -20.0];
+        let dt = 0.01;
+        for delta in [[0.0, 0.0], [0.0001, -0.0002], [0.003, 0.004]] {
+            let tangent = model
+                .response_tangent(pressure, gradient, delta, dt)
+                .unwrap()
+                .unwrap();
+            for j in 0..3 {
+                let h = 1e-8;
+                let shifted = |sign: f64| {
+                    let mut slip = delta;
+                    if j > 0 {
+                        slip[j - 1] += sign * h;
+                    }
+                    model
+                        .response(pressure + sign * h * gradient[j], slip, dt)
+                        .unwrap()
+                        .0
+                };
+                let plus = shifted(1.0);
+                let minus = shifted(-1.0);
+                for i in 0..2 {
+                    let numerical = (plus[i] - minus[i]) / (2.0 * h);
+                    assert!(
+                        (tangent[i][j] - numerical).abs() < 2e-6,
+                        "slip={delta:?}, ({i},{j}): {} != {numerical}",
+                        tangent[i][j]
+                    );
+                }
+            }
+        }
+        assert!(
+            model
+                .response_tangent(pressure, gradient, [0.001, 0.0], dt)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            model
+                .response_tangent(pressure, [f64::INFINITY; 3], [0.0; 2], dt)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            model
+                .response_tangent(-1.0, gradient, [0.0; 2], dt)
+                .is_err()
+        );
     }
 }

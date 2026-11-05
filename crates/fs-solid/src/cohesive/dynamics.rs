@@ -5,8 +5,10 @@
 //! therefore conjugate to the actual straight jump path, including prescribed
 //! offsets. The material's path-mean tangent supplies native Newton/FGMRES
 //! actions, retaining damage and surviving-bond viscosity. Its local blocks are
-//! reused at each fixed iterate. Explicitly unsupported material switches and
-//! friction paths retain the existing fallible directional-difference adapter.
+//! reused at each fixed iterate. Regularized damaged-area friction includes the
+//! same path's pressure/damage gradient and the vector slip derivative. Material
+//! switches and ideal Coulomb constraints retain the existing fallible
+//! directional-difference adapter.
 //!
 //! The original reduced mass must be symmetric positive definite and the
 //! elastic operator symmetric positive semidefinite. Both must remain pure and
@@ -766,11 +768,18 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
     }
     fn charge(&self, analytic: bool) -> Result<(), Error> {
         self.poll()?;
-        let used = self.evaluations.get().saturating_add(self.jacobian_evaluations.get());
+        let used = self
+            .evaluations
+            .get()
+            .saturating_add(self.jacobian_evaluations.get());
         if used >= self.motion.config.solve.max_operator_evaluations {
             return Err(Error::Budget("dynamic residual/Jacobian evaluations"));
         }
-        let count = if analytic { &self.jacobian_evaluations } else { &self.evaluations };
+        let count = if analytic {
+            &self.jacobian_evaluations
+        } else {
+            &self.evaluations
+        };
         count.set(count.get() + 1);
         Ok(())
     }

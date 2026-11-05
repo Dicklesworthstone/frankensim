@@ -284,6 +284,7 @@ fn partial_and_complete_reclosure_drive_original_inertia_with_separate_losses() 
         let step = motion
             .advance_controlled(&[0.0], &[[-COMPRESSION, 0.0, 0.0]], dt, &mut || false)
             .unwrap();
+        assert!(step.analytic_jacobian_evaluations > 0);
         close(step.motion.state().displacements_m()[0], u, 1e-12);
         close(step.motion.velocity_m_s()[0], v, 1e-10);
         close(step.friction_dissipated_j, resistance * u, 1e-13);
@@ -416,6 +417,141 @@ fn zero_mu_is_exact_original_motion_and_low_speed_regularization_is_physical_tim
                 close(step.motion.state().displacements_m()[0], u, 1e-13);
                 close(step.friction_dissipated_j, c * u * u / dt, 1e-14);
             }
+        }
+    }
+}
+
+#[test]
+fn smooth_friction_uses_original_path_jacobian_independently_of_difference_scale() {
+    // G1: after fracture, compressive normal motion changes the available
+    // friction DURING the step. All three coordinates are native inertial DOFs.
+    // The independent triangular momentum equations expose the pressure/slip
+    // cross derivative that a frozen-pressure shear tangent would omit.
+    struct Diagonal([f64; 3]);
+    impl LinearOp for Diagonal {
+        fn n(&self) -> usize {
+            3
+        }
+        fn apply(&self, x: &[f64], y: &mut [f64]) {
+            for i in 0..3 {
+                y[i] = self.0[i] * x[i];
+            }
+        }
+    }
+    let source = resolve(&card([0.3; 2], false), false, true);
+    let elastic = Diagonal([10.0, 15.0, 15.0]);
+    let mass = Diagonal([0.1, 0.2, 0.2]);
+    let patch = CohesivePatch::from_interface(
+        7,
+        AREA,
+        &source,
+        [
+            &source.surfaces()[0].material,
+            &source.surfaces()[1].material,
+        ],
+        (0..3)
+            .map(|dof| JumpTerm {
+                dof,
+                local: core::array::from_fn(|i| if i == dof { 1.0 } else { 0.0 }),
+            })
+            .collect(),
+    )
+    .unwrap();
+    let system = CohesiveSystem::new(
+        &elastic,
+        vec![patch],
+        Budget {
+            max_dofs: 3,
+            max_patches: 1,
+            max_jump_terms: 3,
+            max_krylov_basis_entries: 128,
+        },
+    )
+    .unwrap();
+    let mut base_config = config();
+    base_config.solve.newton.linear_restart = 3;
+    let load = [-AREA * KC * COMPRESSION, 0.0, 0.0];
+    let offsets = [[-COMPRESSION, 0.0, 0.0]];
+    let broken = system
+        .bonded_state()
+        .solve_controlled(
+            &[0.0; 3],
+            &[[0.005, 0.0, 0.0]],
+            base_config.solve,
+            &mut || false,
+        )
+        .unwrap()
+        .state;
+    assert!(broken.points()[0].failed());
+    let closed = broken
+        .solve_controlled(&load, &offsets, base_config.solve, &mut || false)
+        .unwrap()
+        .state;
+    assert_eq!(closed.displacements_m(), &[0.0; 3]);
+    let velocity = [0.01, 0.03, 0.04];
+    let dt = 0.01;
+    let normal = (2.0 * mass.0[0] * velocity[0] / dt)
+        / (2.0 * mass.0[0] / (dt * dt) + 0.5 * (elastic.0[0] + AREA * KC));
+    let pressure = KC * (COMPRESSION - 0.5 * normal);
+    for regularization in [1.0, 1e-4] {
+        let expected: [f64; 3] = core::array::from_fn(|i| {
+            if i == 0 {
+                return normal;
+            }
+            let inertial = 2.0 * mass.0[i] / (dt * dt);
+            if regularization == 1.0 {
+                (2.0 * mass.0[i] * velocity[i] / dt)
+                    / (inertial
+                        + 0.5 * elastic.0[i]
+                        + AREA * 0.3 * pressure / (regularization * dt))
+            } else {
+                (2.0 * mass.0[i] * velocity[i] / dt - AREA * 0.3 * pressure * velocity[i] / 0.05)
+                    / (inertial + 0.5 * elastic.0[i])
+            }
+        });
+        let mut reference = None;
+        for difference_step in [1e-12, 0.5] {
+            // The large value is outside the original adhesive applicability.
+            // A smooth analytic path never probes there or needs that knob.
+            let mut cfg = base_config;
+            cfg.difference_step_m = difference_step;
+            let motion = closed
+                .clone()
+                .into_dynamics(&mass, velocity.to_vec(), 2.0, cfg)
+                .unwrap()
+                .with_damaged_area_friction_controlled(&[Some(regularization)], &mut || false)
+                .unwrap();
+            let before = motion.state().points()[0];
+            let step = motion
+                .advance_controlled(&load, &offsets, dt, &mut || false)
+                .unwrap();
+            assert!(step.analytic_jacobian_evaluations > 0);
+            for (i, &u) in step.motion.state().displacements_m().iter().enumerate() {
+                close(u, expected[i], 1e-12);
+                close(
+                    step.motion.velocity_m_s()[i],
+                    2.0 * expected[i] / dt - velocity[i],
+                    1e-10,
+                );
+            }
+            let slip = expected[1].hypot(expected[2]);
+            let expected_work =
+                AREA * 0.3 * pressure * slip * (slip / slip.max(regularization * dt));
+            close(step.friction_dissipated_j, expected_work, 1e-13);
+            close(step.energy_residual_j, 0.0, 1e-12);
+            assert_eq!(step.viscous_dissipated_j, 0.0);
+            assert_eq!(step.cohesive_energy_j.dissipated, 0.0);
+            assert_eq!(motion.state().points()[0], before);
+            let current = (
+                step.motion.state().displacements_m().to_vec(),
+                step.motion.velocity_m_s().to_vec(),
+                step.residual_evaluations,
+                step.analytic_jacobian_evaluations,
+            );
+            if let Some(original) = &reference {
+                assert_eq!(original, &current);
+            }
+            reference = Some(current);
         }
     }
 }

@@ -3,7 +3,7 @@ use super::*;
 use fs_solver::NonlinearProblem;
 
 /// Fallible native Jacobian with the existing source-domain-aware numerical
-/// adapter retained for material switches and friction laws without a tangent.
+/// adapter retained for material switches and unregularized Coulomb constraints.
 pub(super) struct StepJacobian<'s, 'p, 'm, 'a, F> {
     problem: &'s StepProblem<'p, 'm, 'a>,
     numerical: FallibleFiniteDifference<F, Error>,
@@ -72,15 +72,9 @@ where
     ) -> Result<bool, Error> {
         let problem = self.problem;
         problem.poll()?;
-        // These owners add their own damage-weighted pressure and projection
-        // derivatives; the cohesive tangent alone does not represent them.
-        if problem.motion.coulomb.is_some()
-            || problem
-                .motion
-                .friction
-                .as_ref()
-                .is_some_and(|models| models.iter().flatten().copied().any(DamagedAreaFriction::active))
-        {
+        // Ideal static/kinetic Coulomb adds independent constraint coordinates.
+        // Its natural-map blocks still use the existing fallible adapter.
+        if problem.motion.coulomb.is_some() {
             return Ok(false);
         }
         let state = &problem.motion.state;
@@ -113,21 +107,58 @@ where
             for (index, patch) in state.system.patches.iter().enumerate() {
                 problem.poll()?;
                 let jump = patch.jump(x, problem.offsets[index])?;
-                let (_, _, tangent) = state.points[index]
-                    .trial_over_time_with_mean_traction_tangent(
+                let old = state.points[index];
+                let friction = problem
+                    .motion
+                    .friction
+                    .as_ref()
+                    .and_then(|models| models[index])
+                    .filter(|model| model.active());
+                let tolerance = problem.motion.config.solve.local_energy_tolerance_j_m2;
+                let (tangent, pressure, pressure_gradient) = if friction.is_some() {
+                    old.trial_over_time_with_damage_weighted_compression_tangent(
                         jump,
                         problem.dt_s,
-                        problem.motion.config.solve.local_energy_tolerance_j_m2,
+                        tolerance,
                     )
-                    .map_err(|error| Error::Material {
-                        patch: patch.id,
-                        error,
-                    })?;
-                let Some(tangent) = tangent else {
+                    .map(|(_, _, pressure, tangent, gradient)| (tangent, pressure, gradient))
+                } else {
+                    old.trial_over_time_with_mean_traction_tangent(jump, problem.dt_s, tolerance)
+                        .map(|(_, _, tangent)| (tangent, 0.0, Some([0.0; 3])))
+                }
+                .map_err(|error| Error::Material {
+                    patch: patch.id,
+                    error,
+                })?;
+                let Some(mut tangent) = tangent else {
                     cache.point.copy_from_slice(x);
                     cache.valid = true;
                     return Ok(false);
                 };
+                if let Some(model) = friction {
+                    let Some(pressure_gradient) = pressure_gradient else {
+                        cache.point.copy_from_slice(x);
+                        cache.valid = true;
+                        return Ok(false);
+                    };
+                    let previous = old.jump_m();
+                    let slip = [
+                        finite(jump[1] - previous[1])?,
+                        finite(jump[2] - previous[2])?,
+                    ];
+                    let Some(shear) =
+                        model.response_tangent(pressure, pressure_gradient, slip, problem.dt_s)?
+                    else {
+                        cache.point.copy_from_slice(x);
+                        cache.valid = true;
+                        return Ok(false);
+                    };
+                    for i in 0..2 {
+                        for j in 0..3 {
+                            tangent[i + 1][j] = finite(tangent[i + 1][j] + shear[i][j])?;
+                        }
+                    }
+                }
                 cache.blocks[index] = tangent;
             }
             cache.point.copy_from_slice(x);
@@ -194,7 +225,9 @@ where
             || output.len() != n
             || x.iter().chain(direction).any(|value| !value.is_finite())
         {
-            self.fail(Error::Invalid("finite complete Jacobian coordinates required"));
+            self.fail(Error::Invalid(
+                "finite complete Jacobian coordinates required",
+            ));
             return;
         }
         if direction.iter().all(|&value| value == 0.0) {
