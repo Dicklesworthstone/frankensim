@@ -5,6 +5,8 @@
 //! analytically; a quadratic supplies path fraction at each radius. One scalar
 //! fold and, when earlier, one static-capacity root locate the first event.
 //! No fixture reconstruction or source query occurs inside those searches.
+//! The same admitted path can be traversed in reverse: normal compression and
+//! shear unloading restore the attached equilibrium and return reversible work.
 
 use super::events::JkrShearStageEvent;
 use super::{
@@ -67,6 +69,84 @@ impl JkrCombinedStageTransition {
 }
 
 impl JkrPullOffFixture {
+    /// Follow combined peel/shear loading or its reversible unloading path.
+    ///
+    /// Outward loading requires nonincreasing normal stage and nondecreasing
+    /// shear magnitude along the complete straight segment. It returns the
+    /// same first slip/fold handoff as [`Self::withdraw_and_shear_until_event`].
+    /// The reverse requires nondecreasing normal stage and nonincreasing shear
+    /// magnitude throughout the segment. The shear direction may turn: the
+    /// endpoint condition is D_t(1).(D_t(1)-D_t(0))<=0, not just a comparison
+    /// of endpoint magnitudes. Competing trends or an interior shear reversal
+    /// refuse; arbitrary held-normal reversals have their existing shear owner.
+    ///
+    /// Reverse continuation constructs the original-source endpoint, then
+    /// locates the first boundary on the same segment traversed backwards.
+    /// The existing monotone radius proof thereby admits the ENTIRE forward
+    /// unloading segment. The original radius/source envelope still limits
+    /// compression; no endpoint-only acceptance or branch scan is introduced.
+    /// One original Work budget covers the old state, successor and proof.
+    ///
+    /// No unloading event, damage reversal, rebonding or new energy release is
+    /// inferred. Actual work is the signed change of the complete potential.
+    /// Detached states preserve their accumulated release, and all refusals
+    /// leave the original fixture and state untouched.
+    pub fn advance_combined_stages(
+        &self,
+        previous: JkrPullOffState,
+        requested_stages_m: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<JkrCombinedStageTransition, JkrPullOffError> {
+        if previous.identity != self.identity {
+            return Err(JkrPullOffError::StateMismatch);
+        }
+        self.check_stage(requested_stages_m[0])?;
+        for value in requested_stages_m {
+            finite(value)?;
+        }
+        let from = [
+            previous.normal_stage_m,
+            self.tangential_stage[0],
+            self.tangential_stage[1],
+        ];
+        if previous.branch == JkrPullOffBranch::Detached
+            || from == requested_stages_m
+            || StagePath::new(self, from, requested_stages_m).is_ok()
+        {
+            return self.withdraw_and_shear_until_event(previous, requested_stages_m, gate);
+        }
+        // This constructor enforces the complete reversed segment's loading
+        // direction. In particular, a shear vector that turns through its
+        // minimum magnitude is not silently admitted from its two endpoints.
+        let reversed = StagePath::new(self, requested_stages_m, from)?;
+        let mut budget = Work::new(self.limits.maximum_evaluations, gate);
+        let before = self.shear_stage_before(previous, &mut budget)?;
+        let (source, response) = self.stage_successor(
+            before,
+            requested_stages_m[0],
+            [requested_stages_m[1], requested_stages_m[2]],
+            &mut budget,
+        )?;
+        let (limit, _, _) = source.combined_stage_limit(response, &reversed, &mut budget)?;
+        if limit.fraction < 1.0 {
+            return Err(JkrPullOffError::BeyondFirstBoundary);
+        }
+        let mechanical_work_j = response.total_stored_energy_j - before.total_stored_energy_j;
+        finite(mechanical_work_j)?;
+        budget.poll()?;
+        Ok(JkrCombinedStageTransition {
+            original_fixture_identity: self.identity,
+            source,
+            before,
+            response,
+            event: None,
+            requested_stages_m,
+            untraversed_stages_m: [0.0; 3],
+            mechanical_work_j,
+            evaluations: budget.evaluations,
+        })
+    }
+
     /// Move all three apparatus stages together until their first slip/fold.
     ///
     /// An attached path requires D_n(1)<=D_n(0) and

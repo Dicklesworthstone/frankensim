@@ -1825,11 +1825,31 @@ from the event uses a 128-epsilon stage-coordinate allowance; held coordinates
 remain bit-exact. All queries and the single successor share the original work
 budget. Detached paths keep their cumulative release and never rebond; attached
 event handoffs retain storage without inventing slip, snap dynamics or heat.
+
+`advance_combined_stages` also admits the reverse attached path: nondecreasing
+normal stage and shear magnitude that never increases along the complete
+straight segment. Shear direction may turn; its endpoint dot-product condition
+rules out a hidden interior minimum, so merely smaller endpoint magnitude is
+insufficient. The owner constructs the original-source endpoint, then applies
+the same first-boundary radius solve to the segment traversed backwards. The
+old state, successor construction and whole-path proof share one original
+evaluation budget. Outward requests retain the existing first-slip/fold result;
+reverse requests preserve attachment and cumulative release, return signed
+reversible actuator work, and still refuse excess contact radius, source-domain
+violations or an unresolved branch. No new release, heat, healing, rebonding or
+postfailure law is introduced. Detached motion retains its existing history
+and nonoverlap rule. Combined paths with competing normal/shear trends or an
+interior shear reversal remain outside this owner's monotone proof.
+
 Four native G1/G3/G4 regressions check independent normal-withdrawal boundaries,
 three-component reaction-work quadrature, subdivision and tangent rotation,
 single-axis recovery, initial/zero-capacity limits, detached history, and atomic
-nonmonotone/source/budget/cancellation refusal. The source-selected native
-pull-off test target passes all 23 tests, including the previous 19 regressions.
+nonmonotone/source/budget/cancellation refusal. Four additional regressions
+exercise complete noncollinear loading/unloading cycles, independent three-stage
+unloading-work quadrature, subdivision, tangent-frame covariance, original
+single-axis limits, detached release, and shared-budget/refusal behavior. Both
+first-boundary cases also reverse their retained attached handoff without
+creating a failure event or losing stored energy.
 
 ## Dynamic wetting, contact-line pinning and mechanical adhesion
 
