@@ -114,6 +114,25 @@ adjoints.
   nothing and stops at the first containing cell. The checked velocity entry
   returns `None` outside the mesh or for invalid local data; `velocity_at`
   panics in those cases. Neither entry performs a spatial-error estimate.
+- `ns::kinematics`: `try_cell_kinematics` and `cell_kinematics` reconstruct
+  native affine BDM velocity gradients, signed out-of-plane curl, divergence
+  and objective shear rate from the cached basis. Rates are in 1/s for a
+  metre mesh and m/s velocity; material density does not rescale them.
+  Material-flow callers pass the accepted `velocity_dofs()` to the native
+  `FluxSystem` originally bound at construction, retaining its SI geometry.
+  H(div) normal continuity does not imply tangential continuity:
+  `vorticity_sheet` retains the affine signed tangential jump at both endpoints
+  of each interior edge, including zero-mean sheets. Its strength is in m/s,
+  not a bulk 1/s vorticity or a square-integrable enstrophy density.
+  `vorticity_balance` adds cell and sheet circulation and compares with the
+  represented boundary trace. `weak_vorticity` integrates that distributional
+  curl exactly against continuous P1 vertex tests. Both use deterministic
+  compensated sums in linear, allocation-free traversals. Boundary orientation
+  follows fluid outward normals, including holes and disconnected components;
+  no outside-fluid extension, artificial wall sheet or prescribed-wall trace
+  is substituted. Nonfinite/incomplete queries are refused and trailing pressure
+  entries are ignored. Stokes balance is an accounting identity, not a spatial
+  accuracy claim; native curl convergence is tested on solved Poiseuille flow.
 - `FluxSystem::solve_adjoint_checked` solves the actual transposed assembled
   operator, including strong boundary rows, the pressure datum and nonsymmetric
   convection. It uses sparse counting-sort transposition, refined dense LU

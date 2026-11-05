@@ -25,6 +25,8 @@ mod sparse;
 pub mod adjoint;
 /// Checked steady velocity/total-traction boundary partition.
 pub mod boundary;
+/// Native BDM gradients and distributional curl, including tangential jumps.
+pub mod kinematics;
 /// Consistent constitutive and convecting-velocity residual derivatives.
 pub mod linearization;
 /// Bounded damped Newton integration of stiff generalized-Newtonian flow.
