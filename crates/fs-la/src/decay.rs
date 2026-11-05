@@ -38,6 +38,10 @@ use fs_math::det;
 #[path = "decay/source.rs"]
 pub mod source;
 
+/// General positive reaction networks, including cycles, sinks and multiplicity.
+#[path = "decay/reaction.rs"]
+pub mod reaction;
+
 /// Hard limit for the bounded dense prepared maps.
 pub const MAX_DECAY_NODES: usize = 64;
 /// Hard limit for explicit branches, including repeated parent/daughter pairs.
@@ -596,4 +600,5 @@ fn validate_maps(
 #[cfg(test)]
 #[path = "decay/tests.rs"]
 mod tests;
+
 

@@ -916,8 +916,8 @@ refuse. Large inventories cannot silently recover subnormal or vanished coeffici
 uncertain cases refuse unless a conservative tail bound proves the contribution
 unrepresentable in the caller's selected amount unit.
 
-Scope excludes cyclic reactions, fission/multiplication, external production,
-changing rates, adjoints and physical-data certification. Physical identities,
+The closed acyclic `DecayPlan` API excludes cyclic reactions, fission/multiplication,
+external production, changing rates, adjoints and physical-data certification. Physical identities,
 activity units, radiation products and energy partitions belong to the caller.
 
 ## Constant production on the shared decay owner
@@ -959,3 +959,36 @@ homogeneous tests plus eight production tests covering stable/zero intervals,
 analytic single-parent buildup, repeated-rate ingrowth, small mean-age losses,
 unrelated stiff components, semigroup composition, range refusal and bounded
 cancellation/work. This does not claim a full workspace Cargo gate.
+
+## Positive reaction networks with product multiplicity
+
+`decay::reaction::ReactionPlan` admits a separate, explicitly general network
+`N' = (Y-I) diag(lambda) N`. Supplied nonnegative removal rates and positive
+product yields may form sinks, cycles, repeated endpoints or self-return paths.
+Columns of Y need not sum to one. This supports product-forming reactions
+without altering the existing closed acyclic decay/source contracts or
+normalizing physical multiplicities away. Physical units and data stay with
+the caller. The dense resource limit is 64 represented nodes.
+
+Preparation retains both endpoint populations and independently integrated
+parent-removal maps. Nonnegative uniformization of the population/count block
+and semigroup composition avoid endpoint subtraction and negative-population
+clipping. Exact scalar survival/removal diagonals are refreshed at every scale
+for nodes without a nontrivial return cycle; cyclic nodes retain all return
+paths. For competing channels the physical owner attributes removal counts
+using each channel's fraction of its parent's total removal hazard.
+
+The original node/edge, work, series and squaring limits apply, with bounded
+cancellation checkpoints and immutable reusable maps. Preparation uses cubic
+dense products per series/scaling stage; applying a prepared map is quadratic.
+Admission checks nodewise production/removal and the independent total net-yield
+balance. Large cyclic event counts cannot justify an unbalanced total inventory.
+Structurally reachable underflowed coefficients refuse when a large inventory
+could amplify them; only conservatively exhausted acyclic tails are exempt.
+
+The positive-series tail target and balance tests are numerical admission,
+not a floating-point forward-error certificate. Extreme cyclic stiffness,
+growth or unrepresentable transfers can refuse. No spatial transport, adaptive
+changing-rate integration, sparse full-library depletion or isotope data is
+provided by this mathematical owner.
+
