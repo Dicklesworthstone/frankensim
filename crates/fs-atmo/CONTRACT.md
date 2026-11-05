@@ -292,8 +292,33 @@ model, conditional on its authored correlation times. It does not average
 nonlinear momentum or energy fluxes, supply unresolved stress/kinetic energy,
 validate physical eddy turnover, or make OU forcing temporally band-limited.
 
-Verification: all 33 native `mann_field::` unit tests pass. The five new groups
-include an independent continuous stochastic-convolution quadrature oracle,
+Verification: the native `mann_field::` tests include an independent continuous
+stochastic-convolution quadrature oracle,
 small-decay and rotating/extreme-phase limits, 4096-realization joint moments,
 unchanged endpoint/restart bits, every publication cancellation boundary, and
 all four spatial observations with divergence and gradient checks.
+
+`fixed_step::TranslatingMannStepAverage` observes the same OU source along
+`x(t) = x_end - V * (t_end - t)`, so encounter frequencies use `k·(U_adv - V)`.
+Its samples take the probe/footprint position at the interval end and return
+velocity components in the original frame; they do not subtract probe speed.
+Point and fixed-orientation footprint averages support three-dimensional uniform
+translation. Wall-blocked observations require `V_z = 0`: normal motion changes
+the evanescent amplitude during the interval and is explicitly refused. The
+distinct type cannot be passed as a stationary inlet observation. Every sample
+from one owner shares its one translation velocity and integral bridge; separate
+velocities do not establish a joint continuous-path covariance.
+
+`advance_one_with_translating_average` reuses the original endpoint transaction,
+work budget, storage and cancellation path. Ordinary endpoint bits and restart
+behavior remain unchanged. Focused regressions exercise a translating finite
+sensor against the exact Galilean-frame stationary observation, all spatial
+observations, wall admission, replay, and a complete wavelength traversal versus
+an observation travelling with the eddies in the nearly frozen limit.
+
+The older 120 Hz OU parameter constructor uses `-expm1(-2 dt/tau)` when
+`dt/tau < sqrt(epsilon)` and avoids overflowing `120 * tau`, preserving finite
+nonzero innovation variance at long correlation times. Ordinary-path arithmetic
+and its existing golden remain unchanged. At decay below f64 resolution, `rho`
+can still round to one; this correction preserves the representable short-step
+diffusion and does not claim to resolve mean reversion over that enormous time.

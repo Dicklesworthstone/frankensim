@@ -16,6 +16,10 @@
 //! The bridge is essential: endpoint interpolation is not an OU integral.
 //! Small-argument divided differences and variances are evaluated directly
 //! as analytic series, without subtracting almost equal covariances.
+//!
+//! A translating observer ending at `x1` follows `x(t) = x1 - V(t1-t)`.
+//! Substitution in `exp(i k.(x-U t))` changes only the interval frequency:
+//! `theta = k.(U-V) dt`. Synthesis still uses the original END phase at x1.
 
 use super::*;
 
@@ -195,6 +199,20 @@ impl MannStepAverage {
     pub fn prepare(
         source: &FixedStepMannField,
         maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Refusal> {
+        Self::prepare_with_advection(
+            source,
+            source.advection_mps(),
+            maximum_workspace_bytes,
+            cancelled,
+        )
+    }
+
+    fn prepare_with_advection(
+        source: &FixedStepMannField,
+        relative_advection_mps: [f64; 3],
+        maximum_workspace_bytes: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Refusal> {
         poll(&mut cancelled)?;
@@ -216,7 +234,7 @@ impl MannStepAverage {
             poll(&mut cancelled)?;
             coefficients.push(Coefficients::prepare(
                 source.dt_s() / source.definition.times[i],
-                dot(mode.k, source.advection_mps()) * source.dt_s(),
+                dot(mode.k, relative_advection_mps) * source.dt_s(),
                 source.definition.transition[i][1],
             )?);
         }
@@ -364,6 +382,141 @@ impl MannStepAverage {
     }
 }
 
+/// Exact interval-mean turbulence seen by a uniformly translating probe or
+/// footprint. Every sample position is the position at the interval END;
+/// the entire observation translates at `observer_velocity_mps` throughout
+/// that interval, with unchanged orientation and size.
+///
+/// The vector components remain in the original spatial frame. This is an
+/// observation of the original velocity, not velocity relative to the probe.
+/// A distinct type prevents a moving observation from being supplied to a
+/// stationary CFD inlet expecting [`MannStepAverage`]. All samples from this
+/// owner share one translation velocity and the same integral bridge. Separate
+/// owners with different velocities have correct marginal laws, but do not
+/// establish their joint continuous-path covariance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranslatingMannStepAverage {
+    average: MannStepAverage,
+    observer_velocity_mps: [f64; 3],
+}
+
+impl TranslatingMannStepAverage {
+    /// Prepare the original joint endpoint/mean law at relative advection
+    /// `U-V`. The endpoint RNG, transition and checkpoint remain unchanged.
+    /// The workspace ceiling counts the same 104 numerical bytes per mode;
+    /// the additional velocity is fixed-size metadata. Nonfinite velocities
+    /// and unrepresentable relative advection or displacements are refused.
+    pub fn prepare(
+        source: &FixedStepMannField,
+        observer_velocity_mps: [f64; 3],
+        maximum_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Refusal> {
+        poll(&mut cancelled)?;
+        let relative =
+            core::array::from_fn(|i| source.advection_mps()[i] - observer_velocity_mps[i]);
+        if !observer_velocity_mps
+            .iter()
+            .all(|v| v.is_finite() && (v * source.dt_s()).is_finite())
+            || !relative.iter().all(|v| v.is_finite())
+        {
+            return Err(error(
+                "mann-translating-average-velocity",
+                "observer velocity, displacement and relative advection must be finite",
+            ));
+        }
+        Ok(Self {
+            average: MannStepAverage::prepare_with_advection(
+                source,
+                relative,
+                maximum_workspace_bytes,
+                cancelled,
+            )?,
+            observer_velocity_mps,
+        })
+    }
+
+    /// Uniform observation velocity in the source's spatial frame [m/s].
+    pub const fn observer_velocity_mps(&self) -> [f64; 3] {
+        self.observer_velocity_mps
+    }
+
+    /// Numerical storage in the prepared coefficients and amplitude banks.
+    pub fn workspace_bytes(&self) -> usize {
+        self.average.workspace_bytes()
+    }
+
+    /// Accepted observation's physical start/end times, after its first advance.
+    pub fn interval(&self) -> Option<[f64; 2]> {
+        self.average.interval()
+    }
+
+    fn admit_path(&self, endpoint_m: [f64; 3]) -> Result<(), Refusal> {
+        finite_vector(endpoint_m)?;
+        if (0..3).any(|i| {
+            !(endpoint_m[i] - self.observer_velocity_mps[i] * self.average.dt_s()).is_finite()
+        }) {
+            return Err(error(
+                "mann-translating-average-position",
+                "observation path start must be representable",
+            ));
+        }
+        Ok(())
+    }
+
+    fn admit_wall_translation(&self) -> Result<(), Refusal> {
+        if self.observer_velocity_mps[2] != 0.0 {
+            return Err(error(
+                "mann-translating-average-wall-normal",
+                "wall-blocked averaging requires translation parallel to the plane",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Mean velocity and exact derivatives with respect to the path endpoint.
+    /// Sampling allocates no numerical storage and consumes no randomness.
+    pub fn sample(&self, endpoint_m: [f64; 3]) -> Result<FlowSample, Refusal> {
+        self.admit_path(endpoint_m)?;
+        self.average.sample(endpoint_m)
+    }
+
+    /// Mean of a fixed-orientation footprint translated along the same path.
+    pub fn sample_filtered(
+        &self,
+        endpoint_m: [f64; 3],
+        filter: &MannBoxFilter,
+    ) -> Result<FlowSample, Refusal> {
+        self.admit_path(endpoint_m)?;
+        self.average.sample_filtered(endpoint_m, filter)
+    }
+
+    /// Wall observation for parallel translation. Wall-normal translation
+    /// changes the evanescent amplitude as well as the encounter frequency;
+    /// that different integral is explicitly refused.
+    pub fn sample_wall_blocked(
+        &self,
+        endpoint_m: [f64; 3],
+        wall: MannPlaneWall,
+    ) -> Result<FlowSample, Refusal> {
+        self.admit_wall_translation()?;
+        self.admit_path(endpoint_m)?;
+        self.average.sample_wall_blocked(endpoint_m, wall)
+    }
+
+    /// Exact translated footprint above the plane, for parallel motion only.
+    pub fn sample_wall_blocked_filtered(
+        &self,
+        endpoint_m: [f64; 3],
+        filter: &MannWallBoxFilter,
+    ) -> Result<FlowSample, Refusal> {
+        self.admit_wall_translation()?;
+        self.admit_path(endpoint_m)?;
+        self.average
+            .sample_wall_blocked_filtered(endpoint_m, filter)
+    }
+}
+
 fn innovation(seed: u64, kernel: u32, path: usize, mode: usize, step: u64) -> f64 {
     let key = StreamKey {
         seed: seed ^ PATH_KEYS[path],
@@ -376,6 +529,18 @@ fn innovation(seed: u64, kernel: u32, path: usize, mode: usize, step: u64) -> f6
 }
 
 impl FixedStepMannField {
+    /// Advance the original endpoint and the velocity observed over one
+    /// translating path interval together. Work, cancellation and atomic
+    /// publication are identical to [`Self::advance_one_with_average`].
+    pub fn advance_one_with_translating_average(
+        &mut self,
+        average: &mut TranslatingMannStepAverage,
+        maximum_normal_draws: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Refusal> {
+        self.advance_one_with_average(&mut average.average, maximum_normal_draws, cancelled)
+    }
+
     /// Jointly publish the next endpoint and exact interval-mean velocity.
     /// The budget counts eight normal draws/mode: four unchanged endpoint
     /// draws and four independent bridge draws. No numerical allocation is
