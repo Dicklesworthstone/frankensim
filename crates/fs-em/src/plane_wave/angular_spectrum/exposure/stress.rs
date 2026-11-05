@@ -14,8 +14,8 @@ use super::*;
 /// Additional admission for a stress query. Original exposure preparation
 /// bounds spatial/frequency work, line reconstruction and FFT work. Stress
 /// performs twelve local and at most twenty-four modal scalar products per
-/// admitted pair unit at zero carrier. Nonzero real carriers use the bank's
-/// N²*F² rectangular Gram allowance; proper banks retain diagonal spatial work.
+/// admitted temporal pair unit. Nonzero real carriers also use the bank's
+/// F*N*(width+height) separable spatial pass; proper banks retain sparse work.
 /// This cap includes the original workspace, six compensated sums per point,
 /// the complete stress output and fixed modal quadrature scratch/accumulators.
 /// Borrowed owners, earlier outputs and allocator overhead are excluded.
@@ -109,9 +109,9 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     /// twelve local and at most twenty-four modal temporal contractions.
     /// Continuous-cell products are integrated before one in-place synthesis
     /// of each original frequency field; no extra FFT, constitutive or film
-    /// solve is performed. A nonzero carrier uses the shared exact rectangular
-    /// Gram contraction for real-bank cell integrals, with N²*F² modal work
-    /// included in the original bank's admission. Proper banks retain the
+    /// solve is performed. A nonzero carrier uses the shared exact separable
+    /// Gram contraction for real-bank cell integrals, with F*N*(width+height)
+    /// spatial-axis work included in the original bank's admission. Proper banks retain the
     /// original diagonal spatial contraction because their common carrier cancels.
     pub fn stress_field(
         &self,
@@ -334,7 +334,6 @@ where
                 distance,
                 epsilon,
                 mu,
-                window,
                 true,
                 |a, b| window.proper_product_kernel(a, b),
                 proper_product,
@@ -350,7 +349,6 @@ where
                 distance,
                 epsilon,
                 mu,
-                window,
                 false,
                 |a, b| window.product_kernel(a, b),
                 product,
@@ -407,7 +405,6 @@ fn accumulate_stress_bank<P: Copy>(
     distance: f64,
     epsilon: f64,
     mu: f64,
-    window: HarmonicWindow,
     proper: bool,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
@@ -421,28 +418,17 @@ fn accumulate_stress_bank<P: Copy>(
         return Ok(());
     }
     let mut observation =
-        ExposureObservationBank::prepare(bank, side, distance, kernel, cancelled)?;
-    let cell = if !proper && bank.anchor.carrier_rad_m != [0.0; 2] {
-        aperture::real_cell_dyad(
-            bank.anchor,
-            &bank.frequencies,
-            &observation.fields,
-            window,
-            epsilon,
-            mu,
-            cancelled,
-        )?
-    } else {
-        integrate_cell_dyad(
-            bank.anchor.grid(),
-            &observation.fields,
-            &observation.kernels,
-            epsilon,
-            mu,
-            product_parts,
-            cancelled,
-        )?
-    };
+        ExposureObservationBank::prepare(bank, side, distance, proper, kernel, cancelled)?;
+    let cell = integrate_cell_dyad(
+        bank.anchor.grid(),
+        &observation.fields,
+        observation.carrier.as_ref(),
+        &observation.kernels,
+        epsilon,
+        mu,
+        product_parts,
+        cancelled,
+    )?;
     for (sum, value) in integrated.iter_mut().zip(cell) {
         *sum = *sum + value;
     }
@@ -473,6 +459,7 @@ fn accumulate_stress_bank<P: Copy>(
 pub(super) fn integrate_cell_dyad<P: Copy>(
     grid: AngularSpectrumGrid,
     fields: &[Vec<[C64; 6]>],
+    carrier: Option<&cell::CarrierFields>,
     kernels: &[P],
     epsilon: f64,
     mu: f64,
@@ -485,6 +472,24 @@ pub(super) fn integrate_cell_dyad<P: Copy>(
     for mode in 0..grid.width * grid.height {
         if mode % 32 == 0 {
             poll(cancelled)?;
+        }
+        if let Some(carrier) = carrier {
+            let dyad = integrate_dyad(
+                fields.len(),
+                kernels,
+                |i| carrier.at(i, mode),
+                epsilon,
+                mu,
+                |kernel, a, b| {
+                    cell::product(kernel, a, b, &product_parts).map_err(MomentError::Product)
+                },
+                cancelled,
+            )
+            .map_err(dyad_error)?;
+            for (sum, value) in integrated.iter_mut().zip(dyad) {
+                *sum = *sum + area * value;
+            }
+            continue;
         }
         let opposite = opposite_mode(grid, mode);
         if opposite.is_some_and(|other| other < mode) {

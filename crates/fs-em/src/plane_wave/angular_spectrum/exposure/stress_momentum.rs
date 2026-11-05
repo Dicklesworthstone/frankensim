@@ -13,6 +13,8 @@ use super::*;
 /// Complete joint-query numerical storage. The original reconstruction/FFT
 /// workspace is counted once, together with both compensated accumulation
 /// planes, both outputs, the momentum frequency coefficients and modal scratch.
+/// Nonzero real carriers share one admitted separable spatial pass and one DD
+/// coefficient representation between stress and momentum.
 /// Borrowed owners, earlier outputs and allocator overhead are excluded.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumExposureStressMomentumLimits {
@@ -182,11 +184,6 @@ where
     'm: 's,
 {
     poll(cancelled)?;
-    if anchor.carrier_rad_m != [0.0; 2] {
-        return Err(bad(
-            "joint finite-window cell stress/momentum requires a zero transverse carrier",
-        ));
-    }
     if workspace > limits.maximum_workspace_bytes {
         return Err(bad(
             "exposure stress and momentum exceed their workspace budget",
@@ -292,6 +289,7 @@ fn accumulate_joint_bank<P: Copy>(
         bank,
         side,
         distance,
+        proper,
         |a, b| kernel(a, b).map(|product| MomentumKernel::new(a, b, product)),
         cancelled,
     )?;
@@ -300,6 +298,7 @@ fn accumulate_joint_bank<P: Copy>(
     let stress_cell = stress::integrate_cell_dyad(
         bank.anchor.grid(),
         &observation.fields,
+        observation.carrier.as_ref(),
         &observation.kernels,
         epsilon,
         mu,
@@ -309,6 +308,7 @@ fn accumulate_joint_bank<P: Copy>(
     let momentum_cell = momentum::integrate_cell_momentum(
         bank.anchor.grid(),
         &observation.fields,
+        observation.carrier.as_ref(),
         &observation.kernels,
         proper,
         &product_parts,

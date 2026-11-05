@@ -29,6 +29,10 @@ pub enum AngularSpectrumFactorStatistics {
 }
 
 /// Whole-ensemble work limits, including the optional deterministic mean.
+/// Pair work charges N*F² per proper bank and includes the admitted
+/// nonzero-carrier spatial-axis pass only for the mean and real factors.
+/// Query workspace still conservatively includes the generic prepared bank;
+/// preparing that reusable owner separately admits its deterministic cache.
 /// Workspace conservatively includes the largest original exposure query,
 /// the ensemble's compensated accumulation and the final output. Other
 /// borrowed banks/beam owners, earlier outputs and allocator overhead are
@@ -146,8 +150,18 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
             line_count = line_count
                 .checked_add(bank.line_count())
                 .ok_or_else(|| bad("exposure ensemble line work overflow"))?;
+            let bank_pairs = if proper {
+                anchor
+                    .modes
+                    .len()
+                    .checked_mul(bank.frequency_count())
+                    .and_then(|v| v.checked_mul(bank.frequency_count()))
+                    .ok_or_else(|| bad("exposure ensemble pair work overflow"))?
+            } else {
+                bank.point_frequency_pairs()
+            };
             point_frequency_pairs = point_frequency_pairs
-                .checked_add(bank.point_frequency_pairs())
+                .checked_add(bank_pairs)
                 .ok_or_else(|| bad("exposure ensemble pair work overflow"))?;
             field_fft_work = field_fft_work
                 .checked_add(bank.field_fft_work())
@@ -306,7 +320,6 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
                         bank,
                         side,
                         distance_from_face_m,
-                        window,
                         true,
                         |a, b| window.proper_product_kernel(a, b),
                         proper_product,
@@ -320,7 +333,6 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
                         bank,
                         side,
                         distance_from_face_m,
-                        window,
                         false,
                         |a, b| window.product_kernel(a, b),
                         product,
@@ -386,7 +398,6 @@ fn accumulate_bank<P: Copy>(
     bank: &AngularSpectrumExposure<'_, '_, '_>,
     side: ExposureSide,
     distance: f64,
-    window: HarmonicWindow,
     proper: bool,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
@@ -419,14 +430,12 @@ fn accumulate_bank<P: Copy>(
     for group in 0..f {
         fields.push(bank.frequency_modal_field(group, side, distance, cancelled)?);
     }
-    let normal_power = if !proper && bank.anchor.carrier_rad_m != [0.0; 2] {
-        aperture::real_cell_power(bank.anchor, &bank.frequencies, &fields, window, cancelled)?
-    } else {
-        // A common carrier cancels exactly in a proper covariance. Its
-        // difference-only whole-cell integral retains modal orthogonality.
+    let normal_power = {
+        let carrier = bank.carrier_fields(&fields, proper, cancelled)?;
         integrate_cell_power(
             bank.anchor.grid(),
             &fields,
+            carrier.as_ref(),
             &kernels,
             product_parts,
             cancelled,

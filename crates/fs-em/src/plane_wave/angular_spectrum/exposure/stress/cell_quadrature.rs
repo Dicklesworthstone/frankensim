@@ -136,12 +136,17 @@ fn g1_source_nyquist_stress_avoids_sample_alias_for_mean_real_and_proper_banks()
         };
         let samples: Vec<_> = [C64::ONE, -C64::ONE]
             .into_iter()
-            .map(|a| if along_y { [a, C64::ZERO] } else { [C64::ZERO, a] })
+            .map(|a| {
+                if along_y {
+                    [a, C64::ZERO]
+                } else {
+                    [C64::ZERO, a]
+                }
+            })
             .collect();
         let lines = [prepare(&stack, grid, &samples)];
-        let mean =
-            AngularSpectrumExposure::try_new(&lines[0], &lines, exposure_limits(), || false)
-                .unwrap();
+        let mean = AngularSpectrumExposure::try_new(&lines[0], &lines, exposure_limits(), || false)
+            .unwrap();
         let factors = [
             AngularSpectrumExposure::try_new(&lines[0], &lines, exposure_limits(), || false)
                 .unwrap(),
@@ -205,8 +210,8 @@ fn g1_source_nyquist_stress_avoids_sample_alias_for_mean_real_and_proper_banks()
             if matches!(profile, HarmonicWindowProfile::Uniform) {
                 let a = omega * window.start_s() - kz * distance;
                 let b = a + omega * window.duration_s();
-                let mean_square = 0.5 + ((2.0 * b).sin() - (2.0 * a).sin())
-                    / (4.0 * omega * window.duration_s());
+                let mean_square =
+                    0.5 + ((2.0 * b).sin() - (2.0 * a).sin()) / (4.0 * omega * window.duration_s());
                 for point in actual.points() {
                     close(
                         point.maxwell_stress_pa,
@@ -281,8 +286,8 @@ fn g3_true_opposite_modes_keep_real_interference_and_authored_properness() {
     let window = HarmonicWindow::new(0.17, 0.12).unwrap();
     let phase0 = omega * window.start_s();
     let phase1 = phase0 + omega * window.duration_s();
-    let sin2 = 0.5 - ((2.0 * phase1).sin() - (2.0 * phase0).sin())
-        / (4.0 * omega * window.duration_s());
+    let sin2 =
+        0.5 - ((2.0 * phase1).sin() - (2.0 * phase0).sin()) / (4.0 * omega * window.duration_s());
     let transverse2 = (core::f64::consts::FRAC_PI_2 / omega).powi(2);
     let limits = AngularSpectrumExposureStressLimits {
         maximum_workspace_bytes: proper.stress_workspace_bytes().unwrap(),
@@ -374,6 +379,7 @@ fn g4_modal_pass_preserves_work_admission_workspace_cancellation_and_retry() {
         integrate_cell_dyad(
             grid,
             &fields,
+            None,
             &kernels,
             1.0,
             1.0,

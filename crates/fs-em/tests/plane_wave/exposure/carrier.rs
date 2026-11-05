@@ -274,7 +274,7 @@ fn g1_modulated_carrier_refraction_matches_real_area_and_shutter_quadrature() {
             near(measured.normal_power_w, expected, 2e-9);
         }
     }
-    assert_eq!(bank.point_frequency_pairs(), 8 * (8 + 1) * 2 * 2);
+    assert_eq!(bank.point_frequency_pairs(), 8 * 2 * 2 + 2 * 8 * (4 + 2));
     for bounded in [
         AngularSpectrumExposureLimits {
             maximum_point_frequency_pairs: bank.point_frequency_pairs() - 1,

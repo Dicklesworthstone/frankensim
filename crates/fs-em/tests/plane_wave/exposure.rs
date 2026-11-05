@@ -1,6 +1,7 @@
 //! G1/G3 finite-window vector interference through the actual film operator.
 mod aperture;
 mod carrier;
+mod carrier_cell;
 mod carrier_stress;
 mod exterior_momentum;
 mod heat_spectrum;
