@@ -126,7 +126,8 @@ fn advance_inner<L: TransportLaw>(
     } else {
         mesh
     };
-    let area = mesh.face_areas()[0];
+    let uniform_area = mesh.uniform_cross_section();
+    let end_areas = [mesh.face_areas()[0], mesh.face_areas()[mesh.cell_count()]];
     // Widths are scratch, not accepted geometry: even an aborted moving trial
     // must not poison the next stationary update's gradients or parabolic bound.
     for (i, width) in widths.iter_mut().enumerate() {
@@ -135,14 +136,16 @@ fn advance_inner<L: TransportLaw>(
             || mesh.positions()[i + 1] - mesh.positions()[i],
             |w| w.value(),
         );
-        let expected = area * *width;
-        if !positive(expected)
-            || (mesh.volumes()[i] - expected).abs()
-                > 64.0 * f64::EPSILON * expected.max(mesh.volumes()[i])
-        {
-            return Err(DissipationError::Invalid(
-                "molecular trial volume differs from area times physical width",
-            ));
+        if let Some(area) = uniform_area {
+            let expected = area * *width;
+            if !positive(expected)
+                || (mesh.volumes()[i] - expected).abs()
+                    > 64.0 * f64::EPSILON * expected.max(mesh.volumes()[i])
+            {
+                return Err(DissipationError::Invalid(
+                    "molecular trial volume differs from area times physical width",
+                ));
+            }
         }
     }
     while elapsed < duration.value() {
@@ -253,21 +256,23 @@ fn advance_inner<L: TransportLaw>(
             match attempt {
                 Ok(b) => {
                     for k in 0..m {
-                        let change = 0.5
-                            * step
-                            * area
-                            * ((a.left[k] + b.left[k]) - (a.right[k] + b.right[k]));
+                        let transfers = [
+                            0.5 * step * end_areas[0] * (a.left[k] + b.left[k]),
+                            -0.5 * step * end_areas[1] * (a.right[k] + b.right[k]),
+                        ];
+                        let change = if let Some(area) = uniform_area {
+                            // Preserve the original constant-area operation tree.
+                            0.5 * step
+                                * area
+                                * ((a.left[k] + b.left[k]) - (a.right[k] + b.right[k]))
+                        } else {
+                            transfers[0] + transfers[1]
+                        };
                         let y = change - boundary_correction[k];
                         let next = boundary[k] + y;
                         boundary_correction[k] = (next - boundary[k]) - y;
                         boundary[k] = next;
-                        for (end, transfer) in [
-                            0.5 * step * area * (a.left[k] + b.left[k]),
-                            -0.5 * step * area * (a.right[k] + b.right[k]),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
+                        for (end, transfer) in transfers.into_iter().enumerate() {
                             let y = transfer - end_corrections[end][k];
                             let next = ends[end][k] + y;
                             end_corrections[end][k] = (next - ends[end][k]) - y;
@@ -357,13 +362,25 @@ pub(in crate::multicomponent) fn forward(
 ) -> Result<(), DissipationError> {
     let n = gas.species_count();
     let m = n + 2;
-    let area = mesh.face_areas()[0];
+    let uniform_area = mesh.uniform_cross_section();
     for (i, q) in states.chunks_exact(m).enumerate() {
         poll(cancelled)?;
-        let scale = dt * (area / mesh.volumes()[i]);
         let destination = &mut out[i * m..(i + 1) * m];
-        for k in 0..m {
-            destination[k] = q[k] + scale * (faces[i * m + k] - faces[(i + 1) * m + k]);
+        if let Some(area) = uniform_area {
+            let scale = dt * (area / mesh.volumes()[i]);
+            for k in 0..m {
+                destination[k] = q[k] + scale * (faces[i * m + k] - faces[(i + 1) * m + k]);
+            }
+        } else {
+            let scale = dt / mesh.volumes()[i];
+            for k in 0..m {
+                // One physical face transfer appears with opposite signs in
+                // its two neighbors, regardless of their different volumes.
+                destination[k] = q[k]
+                    + scale
+                        * (mesh.face_areas()[i] * faces[i * m + k]
+                            - mesh.face_areas()[i + 1] * faces[(i + 1) * m + k]);
+            }
         }
         if !gas.admissible(destination) {
             return Err(DissipationError::Invalid(
@@ -581,9 +598,14 @@ fn spatial_with_wall_motion<L: TransportLaw>(
             }
         }
     }
-    let area = mesh.face_areas()[0];
+    let uniform_area = mesh.uniform_cross_section();
     for i in 0..count {
-        let rate = (area / mesh.volumes()[i]) * (face_rates[i] + face_rates[i + 1]);
+        let rate = if let Some(area) = uniform_area {
+            (area / mesh.volumes()[i]) * (face_rates[i] + face_rates[i + 1])
+        } else {
+            (mesh.face_areas()[i] * face_rates[i] + mesh.face_areas()[i + 1] * face_rates[i + 1])
+                / mesh.volumes()[i]
+        };
         if !rate.is_finite() || rate < 0.0 {
             return Err(DissipationError::Invalid("parabolic scale overflow"));
         }

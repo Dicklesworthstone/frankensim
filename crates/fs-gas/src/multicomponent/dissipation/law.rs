@@ -116,6 +116,74 @@ pub trait TransportLaw {
     }
 }
 
+/// The axial diffusion-only geometry admits no constitutive stress. Keep this
+/// check beside every original-source evaluation: a state-dependent law may
+/// acquire viscosity after the initial state has already been accepted.
+pub(super) struct GeometryTransport<L> {
+    inner: L,
+    diffusion_only: bool,
+}
+impl<L> GeometryTransport<L> {
+    pub(super) const fn new(inner: L, diffusion_only: bool) -> Self {
+        Self {
+            inner,
+            diffusion_only,
+        }
+    }
+
+    pub(super) const fn original(&self) -> &L {
+        &self.inner
+    }
+}
+impl<L: TransportLaw> TransportLaw for GeometryTransport<L> {
+    fn source(&self) -> &IdealGasEquilibriumV1 {
+        self.inner.source()
+    }
+
+    fn evaluate(
+        &mut self,
+        temperature: Temperature,
+        pressure: Pressure,
+        mole_fractions: &[f64],
+        binary_diffusivities: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<TransportCoefficients, DissipationError> {
+        let coefficients = self.inner.evaluate(
+            temperature,
+            pressure,
+            mole_fractions,
+            binary_diffusivities,
+            cancelled,
+        )?;
+        if self.diffusion_only
+            && (coefficients.dynamic_viscosity.value() != 0.0
+                || coefficients.bulk_viscosity.value() != 0.0)
+        {
+            return Err(DissipationError::Invalid(
+                "diffusion-only geometry requires zero shear and bulk viscosity at every state",
+            ));
+        }
+        Ok(coefficients)
+    }
+
+    fn heats_of_transport(
+        &mut self,
+        temperature: Temperature,
+        pressure: Pressure,
+        mole_fractions: &[f64],
+        output_j_kg: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, DissipationError> {
+        self.inner.heats_of_transport(
+            temperature,
+            pressure,
+            mole_fractions,
+            output_j_kg,
+            cancelled,
+        )
+    }
+}
+
 /// Explicit constant Soret/Dufour cross coefficients on a declared source domain.
 ///
 /// Wraps an original molecular law without estimating missing transport data.

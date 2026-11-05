@@ -9,6 +9,7 @@ mod face;
 mod reservoir;
 mod stabilized;
 mod thermodiffusion;
+mod variable_area;
 
 fn gas(count: usize, formation: f64, unequal: bool) -> MixtureGas {
     let mut models = vec![source("A", R, 3.5, 0.0, formation)];

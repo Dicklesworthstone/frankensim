@@ -255,20 +255,28 @@ pub(in crate::multicomponent) fn recurrence(
 ) -> Result<(), DissipationError> {
     let [mu, nu, mu_tilde, gamma_tilde] = coefficients;
     let m = gas.species_count() + 2;
+    let uniform_area = mesh.uniform_cross_section();
     for (i, q) in older_and_next.chunks_exact_mut(m).enumerate() {
         poll(cancelled)?;
-        let scale = step * (mesh.face_areas()[0] / mesh.volumes()[i]);
         for (k, value) in q.iter_mut().enumerate() {
             let index = i * m + k;
             let base = anchor[index];
+            let change = if let Some(area) = uniform_area {
+                let scale = step * (area / mesh.volumes()[i]);
+                scale
+                    * (mu_tilde * (faces[index] - faces[index + m])
+                        + gamma_tilde * (anchor_faces[index] - anchor_faces[index + m]))
+            } else {
+                let left = mesh.face_areas()[i];
+                let right = mesh.face_areas()[i + 1];
+                (step / mesh.volumes()[i])
+                    * (mu_tilde * (left * faces[index] - right * faces[index + m])
+                        + gamma_tilde
+                            * (left * anchor_faces[index] - right * anchor_faces[index + m]))
+            };
             // Differences preserve an exactly stationary state without
             // multiplying a large constant caloric/partial-density offset.
-            *value = base
-                + mu * (previous[index] - base)
-                + nu * (*value - base)
-                + scale
-                    * (mu_tilde * (faces[index] - faces[index + m])
-                        + gamma_tilde * (anchor_faces[index] - anchor_faces[index + m]));
+            *value = base + mu * (previous[index] - base) + nu * (*value - base) + change;
         }
         if !gas.admissible(q) {
             return Err(DissipationError::Invalid(
@@ -343,7 +351,8 @@ pub(super) fn advance<L: TransportLaw>(
     if duration.value() > 0.0 && work.stabilized_faces.len() != work.faces.len() {
         work.stabilized_faces = allocated(work.faces.len(), 0.0)?;
     }
-    let area = mesh.face_areas()[0];
+    let uniform_area = mesh.uniform_cross_section();
+    let end_areas = [mesh.face_areas()[0], mesh.face_areas()[mesh.cell_count()]];
     // A previous aborted moving trial may have changed these scratch widths.
     for (i, width) in widths.iter_mut().enumerate() {
         poll(cancelled)?;
@@ -351,14 +360,16 @@ pub(super) fn advance<L: TransportLaw>(
             || mesh.positions()[i + 1] - mesh.positions()[i],
             |w| w.value(),
         );
-        let expected = area * *width;
-        if !positive(expected)
-            || (mesh.volumes()[i] - expected).abs()
-                > 64.0 * f64::EPSILON * expected.max(mesh.volumes()[i])
-        {
-            return Err(DissipationError::Invalid(
-                "molecular volume differs from area times physical width",
-            ));
+        if let Some(area) = uniform_area {
+            let expected = area * *width;
+            if !positive(expected)
+                || (mesh.volumes()[i] - expected).abs()
+                    > 64.0 * f64::EPSILON * expected.max(mesh.volumes()[i])
+            {
+                return Err(DissipationError::Invalid(
+                    "molecular volume differs from area times physical width",
+                ));
+            }
         }
     }
     while elapsed < duration.value() {
@@ -440,8 +451,8 @@ pub(super) fn advance<L: TransportLaw>(
                 )?;
                 work.candidate.copy_from_slice(&work.current);
                 for k in 0..m {
-                    previous_ends[0][k] = step * first_weight * area * a.left[k];
-                    previous_ends[1][k] = -step * first_weight * area * a.right[k];
+                    previous_ends[0][k] = step * first_weight * end_areas[0] * a.left[k];
+                    previous_ends[1][k] = -step * first_weight * end_areas[1] * a.right[k];
                 }
                 // Evaluate every intermediate and the final stage with the
                 // same original source, caloric and constitutive admission.
@@ -503,7 +514,7 @@ pub(super) fn advance<L: TransportLaw>(
                         {
                             let next = mu * previous_ends[end][k]
                                 + nu * older_ends[end][k]
-                                + step * area * (mu_tilde * now + gamma_tilde * anchor);
+                                + step * end_areas[end] * (mu_tilde * now + gamma_tilde * anchor);
                             older_ends[end][k] = previous_ends[end][k];
                             previous_ends[end][k] = next;
                         }

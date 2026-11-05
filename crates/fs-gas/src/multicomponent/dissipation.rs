@@ -1,4 +1,4 @@
-//! Conservative molecular transport on a constant-area gas mesh.
+//! Conservative molecular transport on an axial gas mesh.
 //!
 //! Maxwell--Stefan species fluxes use the mass-averaged frame. Their original
 //! partial enthalpies accompany diffusion; Fourier heat conduction and Newtonian
@@ -6,7 +6,8 @@
 //! heat-release or viscous-heating source is added to conservative total energy.
 //! Explicitly supplied heats of transport add Soret separation and its reciprocal
 //! Dufour energy flux together. Viscous stresses in variable-area geometry
-//! require additional closures and are not represented by this operator.
+//! require additional closures. An explicit diffusion-only constructor admits
+//! fixed varying areas while refusing shear and bulk viscosity at every state.
 
 pub(super) mod evolve;
 mod face;
@@ -207,7 +208,7 @@ struct Workspace {
 
 /// Prepared conservative molecular, heat and viscous field operator.
 ///
-/// The original flow source, constant-area mesh, boundaries and transport law
+/// The original flow source, physical mesh, boundaries and transport law
 /// are bound at construction. Complete requested-duration updates reuse one
 /// flat candidate, SSP-stage, face and molecular workspace; physical state is
 /// published once, after all internal substeps pass. The operator never moves
@@ -219,7 +220,7 @@ pub struct DissipationOperator<L: TransportLaw> {
     // after the entire molecular/chemical/mechanical transaction is accepted.
     motion_mesh: Option<Mesh1d>,
     boundaries: Boundaries,
-    law: L,
+    law: law::GeometryTransport<L>,
     maxwell_stefan: MaxwellStefanV1,
     widths: Vec<f64>,
     mass_ratio: f64,
@@ -230,6 +231,34 @@ impl<L: TransportLaw> DissipationOperator<L> {
     pub fn new(
         flow: &MixtureEuler1d,
         law: L,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DissipationError> {
+        Self::new_inner(flow, law, false, cancelled)
+    }
+
+    /// Bind heat and multicomponent diffusion to a fixed quasi-one-dimensional
+    /// channel, including varying cross-sectional area and nonuniform cells.
+    ///
+    /// Each original face area and integrated cell volume enters the same
+    /// conservative divergence and parabolic bound. Maxwell--Stefan pressure
+    /// diffusion, partial-enthalpy transport and any authored Soret/Dufour law
+    /// retain their existing source owner. The source must supply exactly zero
+    /// shear AND bulk viscosity at every evaluated state: nonzero stress is
+    /// refused rather than silently dropped. This supplies no lateral wall
+    /// flux, abrupt-junction mixing or variable-area viscous geometry closure.
+    /// Physical volume integration remains the original mesh producer's duty.
+    pub fn new_diffusion_only(
+        flow: &MixtureEuler1d,
+        law: L,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, DissipationError> {
+        Self::new_inner(flow, law, true, cancelled)
+    }
+
+    fn new_inner(
+        flow: &MixtureEuler1d,
+        law: L,
+        diffusion_only: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, DissipationError> {
         poll(&mut cancelled)?;
@@ -252,12 +281,12 @@ impl<L: TransportLaw> DissipationOperator<L> {
                 "molecular reservoir requires species-bearing state and energy references",
             ));
         }
-        let area = flow
-            .mesh()
-            .uniform_cross_section()
-            .ok_or(DissipationError::Invalid(
+        let area = flow.mesh().uniform_cross_section();
+        if area.is_none() && !diffusion_only {
+            return Err(DissipationError::Invalid(
                 "molecular operator requires constant cross-sectional area",
-            ))?;
+            ));
+        }
         let count = flow.cell_count();
         let n = flow.gas().species_count();
         let m = n + 2;
@@ -268,14 +297,16 @@ impl<L: TransportLaw> DissipationOperator<L> {
                 || flow.mesh().positions()[i + 1] - flow.mesh().positions()[i],
                 |w| w.value(),
             );
-            let expected = area * widths[i];
-            if !positive(expected)
-                || (flow.mesh().volumes()[i] - expected).abs()
-                    > 64.0 * f64::EPSILON * expected.max(flow.mesh().volumes()[i])
-            {
-                return Err(DissipationError::Invalid(
-                    "constant-area volume differs from area times cell width",
-                ));
+            if let Some(area) = area {
+                let expected = area * widths[i];
+                if !positive(expected)
+                    || (flow.mesh().volumes()[i] - expected).abs()
+                        > 64.0 * f64::EPSILON * expected.max(flow.mesh().volumes()[i])
+                {
+                    return Err(DissipationError::Invalid(
+                        "constant-area volume differs from area times cell width",
+                    ));
+                }
             }
         }
         let (maxwell_stefan, mass_ratio) = face::prepare_diffusion(flow.gas())?;
@@ -297,7 +328,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
             mesh: flow.mesh().clone(),
             motion_mesh: None,
             boundaries: flow.boundaries,
-            law,
+            law: law::GeometryTransport::new(law, diffusion_only),
             maxwell_stefan,
             widths,
             mass_ratio,
@@ -310,7 +341,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
     }
     /// Original transport-law owner, including its authored data and validity.
     pub const fn law(&self) -> &L {
-        &self.law
+        self.law.original()
     }
 
     /// Accepted physical geometry. Trial motion never changes this binding.
@@ -324,6 +355,11 @@ impl<L: TransportLaw> DissipationOperator<L> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DissipationError> {
         poll(cancelled)?;
+        if self.mesh.uniform_cross_section().is_none() {
+            return Err(DissipationError::Invalid(
+                "moving molecular geometry requires constant cross-sectional area",
+            ));
+        }
         if flow.gas != self.gas
             || flow.mesh != self.mesh
             || flow.boundaries != self.boundaries

@@ -5063,3 +5063,29 @@ the accepted A does not retrospectively alter that A's force. This split,
 spatially uniform-wall model adds no temperature-dependent damping law,
 resolved through-wall transport, chemistry, entropy inequality, second-order
 thermomechanical accuracy or general FSI stability claim.
+
+
+### Heat and species diffusion in fixed varying-area channels
+
+`multicomponent::dissipation::DissipationOperator::new_diffusion_only` admits
+stationary quasi-one-dimensional meshes with nonuniform widths, varying face
+areas and their original integrated cell volumes. The shared RK2 and RKL2
+operators use actual area-weighted face divergence, volume-based parabolic
+scales and each end's signed area-integrated boundary transfer. Their existing
+Maxwell--Stefan mass frame, pressure diffusion, species partial enthalpies,
+Fourier heat and authored reciprocal Soret/Dufour coupling remain authoritative.
+Uniform-area calls retain their existing arithmetic ordering.
+
+This explicit mode requires zero shear and bulk viscosity at every actual
+source evaluation, including later stages; a state-dependent nonzero stress
+refuses transactionally. The original full-stress constructor still requires
+constant area. This adds no variable-area viscous-stress closure, lateral wall
+transport, abrupt-junction mixing model or moving-area geometry. Mesh producers
+retain responsibility for physical cell-volume integration. The prepared
+workspace is reused without new per-step buffers or successful-path allocation.
+
+Five authored regression groups exercise both integrators against independent
+two-volume heat/species relaxation and unequal-end-area thermal-resistance
+balances, plus uniform Soret/Dufour parity, late constitutive refusal,
+cancellation and workspace reuse. Source tests and isolated arithmetic are not
+experimental qualification or a claim that the full workspace suite passed.
