@@ -5119,6 +5119,35 @@ exact ideal isothermality, conservation, entropy-loss refusal with successful
 refinement, atomic boundaries and first-order composition/temperature convergence
 against an independent energy-conserving scalar RK4 reference.
 
+### Source-qualified adiabatic fields
+
+`miscibility::material::thermal` binds an already resolved spatial field to its
+original `BinaryLiquidCaloricLaw` through `field.bind_caloric`. The exact
+liquid-law reference must match, so a numerically identical replacement cannot
+substitute another material card, claim selection or pressure context. The
+source law retains the originally qualified ordered pure-liquid Cp curves,
+molar-mass conversion, common caloric datum and typed static-pressure binding.
+Its read-only model and liquid accessors expose those existing owners.
+
+The resolved thermal field stores one numerical state, the exact borrowed
+caloric law, the active gradient-source wrapper and shared immutable material
+receipts. Binding shares the existing receipt array through Arc. Accepted
+adiabatic diffusion first completes the numerical energy/entropy gates, then
+resolves actual final inventories at the accepted temperature through the same
+original liquid sources. Unchanged temperatures reuse the active wrapper.
+Final density/domain failure or cancellation discards the complete candidate.
+
+Mixture transport Cp remains an independently sourced property and is not
+substituted into the pure-liquid caloric energy balance. This adapter does not
+certify consistency between independently authored transport Cp and the caloric
+pair. All fixed-volume, uniform-temperature and first-order thermal assumptions
+of the numerical owner remain in force.
+
+Three source integration regressions cover original piecewise-linear Cp with
+analytic sensible heat, source identities and shared receipts, continued
+evolution, rejection of an equivalent but different liquid-law instance, and
+late density/domain/cancellation failures after a valid numerical thermal step.
+
 ## Same-energy binary interface tension in capillary flow
 
 `capillary::material::miscibility::step_binary_liquid_planar_horizontal`

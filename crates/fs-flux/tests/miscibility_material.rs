@@ -1,6 +1,9 @@
 //! G0/G1/G3/G4: conserved fields retain original homogeneous liquid sources.
 //! All material curves below are synthetic numerical fixtures, not measurements.
 
+#[path = "miscibility_material/thermal.rs"]
+mod thermal;
+
 use fs_evidence::ValidityDomain;
 use fs_flux::miscibility::advection::{
     BinaryMiscibilityAdvectionControls, BinaryMiscibilityAdvectionFace,
@@ -76,7 +79,12 @@ fn card(upper_x: f64, middle_density: f64) -> MaterialCard {
                         290.0,
                         600.0,
                     )
-                    .with("pressure", 100_000.0, 100_000.0),
+                    .with_quantity(
+                        "pressure",
+                        quantity(QuantityKind::Pressure),
+                        100_000.0,
+                        100_000.0,
+                    ),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: vec![],
@@ -161,7 +169,12 @@ fn temperature_card(hot_density_scale: f64, maximum_temperature: f64) -> Materia
                         300.0,
                         maximum_temperature,
                     )
-                    .with("pressure", 100_000.0, 100_000.0),
+                    .with_quantity(
+                        "pressure",
+                        quantity(QuantityKind::Pressure),
+                        100_000.0,
+                        100_000.0,
+                    ),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: vec![],
@@ -202,7 +215,7 @@ fn liquid(card: &MaterialCard) -> BinaryLiquidSolutionLaw<'_> {
         .unwrap()
         .with_quantity("x_a", composition(), 0.4)
         .unwrap()
-        .with("pressure", 100_000.0)
+        .with_quantity("pressure", quantity(QuantityKind::Pressure), 100_000.0)
         .unwrap();
     let reference = resolve_liquid_state_from_kinematic(
         card,

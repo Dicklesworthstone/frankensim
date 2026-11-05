@@ -9,7 +9,8 @@
 //! Source receipt allocations are separate from the numerical graph workspace;
 //! an explicit cell-count budget bounds queries and retained material results.
 //! Density, viscosity and thermal properties are exposed through the existing
-//! liquid consumers. This adapter does not advance momentum or heat feedback.
+//! liquid consumers. The `thermal` adapter adds a closed, uniform-temperature
+//! energy balance with original pure-liquid calorics; momentum remains external.
 
 use super::advection::{BinaryMiscibilityAdvection, BinaryMiscibilityAdvectionControls};
 use super::temperature::BinaryMiscibilityTemperatureChange;
@@ -24,6 +25,9 @@ use fs_material::liquid::solution::gradient::{
 };
 use fs_qty::Temperature;
 use std::sync::Arc;
+
+/// Original pure-liquid calorics for uniform-temperature adiabatic diffusion.
+pub mod thermal;
 
 /// Field/source incompatibility, work budget, or an atomic solver/source refusal.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,7 +80,7 @@ impl<'liquid, 'card> SourceBinding<'_, 'liquid, 'card> {
 pub struct ResolvedBinaryMiscibilityField<'source, 'liquid, 'card> {
     source: SourceBinding<'source, 'liquid, 'card>,
     state: BinaryMiscibilityState,
-    cells: Vec<ResolvedBinaryLiquidCell>,
+    cells: Arc<[ResolvedBinaryLiquidCell]>,
     maximum_resolved_cells: usize,
 }
 
@@ -213,19 +217,9 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
         state: BinaryMiscibilityState,
         source: SourceBinding<'source, 'liquid, 'card>,
         maximum_resolved_cells: usize,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
-        let mut cells = Vec::with_capacity(state.component_moles().len());
-        for (cell, &amounts) in state.component_moles().iter().enumerate() {
-            poll(&mut cancelled)?;
-            cells.push(
-                source
-                    .law()
-                    .resolve_cell(amounts, &mut cancelled)
-                    .map_err(|error| BinaryMiscibilityMaterialError::Source { cell, error })?,
-            );
-        }
-        poll(&mut cancelled)?;
+        let cells = resolve_cells(&state, source.law(), cancelled)?;
         Ok(Self {
             source,
             state,
@@ -233,6 +227,27 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
             maximum_resolved_cells,
         })
     }
+}
+
+// Every caller has admitted its exact owner and resolved-cell budget. Share
+// immutable receipts when binding another numerical consumer of the same field.
+fn resolve_cells(
+    state: &BinaryMiscibilityState,
+    source: &BinaryLiquidSquareGradientLaw<'_, '_>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Arc<[ResolvedBinaryLiquidCell]>> {
+    let mut cells = Vec::with_capacity(state.component_moles().len());
+    for (cell, &amounts) in state.component_moles().iter().enumerate() {
+        poll(&mut cancelled)?;
+        cells.push(
+            source
+                .resolve_cell(amounts, &mut cancelled)
+                .map_err(|error| BinaryMiscibilityMaterialError::Source { cell, error })?,
+        );
+    }
+    let cells = cells.into();
+    poll(&mut cancelled)?;
+    Ok(cells)
 }
 
 /// Prescribed uniform temperature and refreshed original material evaluations.

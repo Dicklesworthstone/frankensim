@@ -7,10 +7,10 @@
 //! Completed mixing, heating and homogeneous relaxation balances retain the
 //! system entropy change from these original calorics and accepted phases.
 
-/// Fixed-composition enthalpy storage on the existing conservative heat timeline.
-pub mod storage;
 /// Explicit homogeneous feeds and their energy-conserving relaxation to equilibrium.
 pub mod homogeneous;
+/// Fixed-composition enthalpy storage on the existing conservative heat timeline.
+pub mod storage;
 
 use super::{
     BinaryLiquidError, BinaryLiquidOwner, BinaryLiquidSolutionLaw, ResolvedBinaryLiquidEquilibrium,
@@ -139,6 +139,15 @@ impl<'a, 'card> BinaryLiquidCaloricLaw<'a, 'card> {
     /// Exact original Cp laws, including their source answers and identities.
     pub fn sources(&self) -> &[IsobaricHeatCapacityLaw; 2] {
         &self.owner.sources
+    }
+    /// Original numeric caloric owner, retaining every qualified source knot.
+    /// Cloning this model shares its immutable owner; transport Cp is separate.
+    pub fn model(&self) -> &BinaryLiquidCaloricModelV1 {
+        &self.owner.model
+    }
+    /// Exact original mixture source binding, including its pressure context.
+    pub const fn liquid_law(&self) -> &BinaryLiquidSolutionLaw<'card> {
+        self.liquid
     }
     /// Common numeric temperature domain; final mixture claims must also admit T.
     pub fn temperature_domain(&self) -> [Temperature; 2] {
