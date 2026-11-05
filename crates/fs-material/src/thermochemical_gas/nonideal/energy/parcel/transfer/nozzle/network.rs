@@ -11,6 +11,9 @@
 //! can immediately fund another outflow. The receiving volume thermalizes the
 //! original stagnation enthalpy; jet kinetic energy is not deposited again.
 
+/// Conservative physical-time evolution with local step-doubling estimates.
+pub mod adaptive;
+
 use super::super::species::network::{
     self as species, RealGasSpeciesNetworkStep, SpeciesNetworkError, SpeciesNetworkExternalHeat,
     SpeciesNetworkHeatTransfer, SpeciesNetworkSolve, SpeciesNetworkTransfer,

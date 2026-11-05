@@ -14832,3 +14832,46 @@ cancellation/work limits. The `transient_grinding_circuit` example carries a
 copper feed change across three intervals and prints retained/exported Cu and
 both balance residuals. These are constructed model checks; no rate-power,
 liberation, classifier delay or laboratory-to-plant calibration is supplied.
+
+### Adaptive physical-time evolution of real-gas nozzle networks
+
+`nonideal::energy::parcel::transfer::nozzle::network::adaptive::advance_adaptive`
+advances a closed, unforced network using the original pressure/nozzle and
+partial-enthalpy snapshot owners. Each comparison uses one full interval and
+two half intervals, resampling original pressure, composition, nozzle throat
+and donor enthalpy at every interval. Only the conservative fine pair is
+accepted. No Richardson-extrapolated material, clipped mass or comparison
+stream enters the physical account.
+
+Local error controls act on total and individual species inventories,
+temperature, and the extensive coordinate
+`U - sum_i m_i*u_i_ideal(T_start)`. The latter is evaluated from original finite
+NASA internal-energy increments and the accepted PR departure; arbitrary
+species formation datums cancel before arithmetic even as mixtures change.
+Relative scales use changes from the accepted state, not absolute caloric
+references or initial stock. The first-order step-doubling correction accounts
+for unequal representable half spans. This is a local temporal estimate, not
+a global enclosure, phase-stability proof or experimental accuracy claim.
+
+Original gross-inventory and pressure-crossing refusals cause bounded interval
+reduction. Malformed inputs, unsupported sources, root/caloric failures and
+cancellation propagate. A final interval below the floor may be attempted
+once and must still meet accuracy. Unresolved pressure equalization or reversal
+at the floor returns the original named refusal; it is not passed by clipping.
+A failed window publishes no partial trajectory and leaves all original
+parcels unchanged.
+
+Explicit trial and accepted-step ceilings bound work. The implementation keeps
+three candidate maps and fixed per-path compensated accounts, without storing
+an unbounded step history. Canonical path reports retain separate gross mass
+and stagnation-enthalpy integrals for both directions, including zero paths;
+rejected trials contribute only work counters. A final total/species inventory
+audit and a whole-window sum of absolute accepted local caloric residuals have
+independent caller budgets. The next suggested interval is explicit.
+
+Focused G1/G3 cases compare the exact original half-step trajectory, audit
+absolute storage independently, check the adiabatic donor entropy identity and
+temporal refinement, exercise changing mixtures with independent huge formation
+shifts, and verify gross-limit subdivision, canonical paths, short final spans,
+bounded work, source refusal and late cancellation. This owner supplies no
+external heat/species schedule, phase flash, pipe momentum or wave evolution.
