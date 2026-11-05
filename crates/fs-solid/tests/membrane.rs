@@ -26,7 +26,7 @@ fn sheet(warp: f64, weft: f64, shear: f64, mass: f64) -> ResolvedSheet {
         }).unwrap();
     }
     let card = MaterialCard::assemble(MaterialStateId {chemistry:"synthetic sheet".into(),
-        phase:"solid".into(),process:"test".into(),revision:1},claims,vec![]).unwrap();
+        phase:"solid".into(),process:"test".into(),revision:0},claims,vec![]).unwrap();
     resolve_sheet(&card,&QueryPoint::new().with("T",300.0).unwrap(),
         SheetCapabilities {membrane:true,bending:false},MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
