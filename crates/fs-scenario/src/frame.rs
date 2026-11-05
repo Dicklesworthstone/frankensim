@@ -467,7 +467,7 @@ impl FrameTree {
                 }
                 Motor::from_parts(
                     Quat::identity(),
-                    Vec3::new(direction[0], direction[1], direction[2]) * distance.value,
+                    Vec3::new(direction[0], direction[1], direction[2]).scale(distance.value),
                 )
             }
             FrameMotion::Rotating { axis, center, rate } => {
