@@ -21,12 +21,19 @@
 //! retains the original Newtonian pressure solve and tangent arithmetic.
 //!
 //! Geometry/laws are fixed during a call. This is an incompressible,
-//! stationary-wall, full-film thin-gap reduction with zero-gauge reservoirs.
+//! stationary-wall, full-film thin-gap reduction. The original owner uses
+//! zero-gauge reservoirs; [`pressure::PressureDrivenPowerLawFilm`] adds explicit
+//! pressure supplies and their work without changing the constitutive solver.
 //! Pressure-dependent viscosity, cavitation, sliding entrainment, fluid
 //! inertia, layer/thermal evolution and shear-history models are not inferred.
 
 use fs_math::det;
 
+/// Prescribed pressure supplies on the same non-Newtonian pressure operator.
+pub mod pressure;
+pub use pressure::{PressureDrivenPowerLawFilm, PressureDrivenPowerLawReport};
+
+use super::pressure::ReservoirPressures;
 use super::{
     FilmChannelReport, FilmError, FilmReport, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm,
     Solution, dot, fail, solve_factored,
@@ -60,10 +67,12 @@ pub struct PowerLawControls {
     /// Nonnegative absolute cell-volume-flow defect [m^3/s].
     pub absolute_flow_tolerance_m3_s: f64,
     /// Relative cell defect against the largest original swept-volume rate.
+    /// A pressure-fed film also includes its largest actual passage flow.
     pub relative_flow_tolerance: f64,
     /// Nonnegative absolute force/flow work defect [W].
     pub absolute_power_tolerance_w: f64,
-    /// Relative work defect against max(port work, channel work).
+    /// Relative work defect against max(port work, channel work). A supplied
+    /// film includes the magnitudes of mechanical and reservoir input powers.
     pub relative_power_tolerance: f64,
 }
 
@@ -97,6 +106,22 @@ impl PowerLawControls {
             && power >= 0.0
             && (work - power).abs() <= allowance
     }
+
+    fn admits_supplied_work(self, work: f64, state: &State, supplied: bool) -> bool {
+        if !supplied {
+            return self.admits_work(work, state.power);
+        }
+        let magnitude = (work.abs() + state.supply_magnitude).max(state.power);
+        let residual = work + state.reservoir_power - state.power;
+        let allowance = self.absolute_power_tolerance_w + self.relative_power_tolerance * magnitude;
+        work.is_finite()
+            && magnitude.is_finite()
+            && residual.is_finite()
+            && allowance.is_finite()
+            && state.power.is_finite()
+            && state.power >= 0.0
+            && residual.abs() <= allowance
+    }
 }
 
 /// Original film diagnostics plus the actual nonlinear acceptance residuals.
@@ -110,7 +135,8 @@ pub struct PowerLawFilmReport {
     pub backtracks: usize,
     /// Largest absolute div(Q)-swept-volume defect over the original cells.
     pub maximum_flow_defect_m3_s: f64,
-    /// Signed generalized-force work minus channel dissipation [W].
+    /// Signed mechanical plus supplied reservoir work minus dissipation [W].
+    /// Reservoir work is zero for the original passive owner.
     pub work_defect_w: f64,
 }
 
@@ -303,19 +329,39 @@ impl PowerLawFilm {
         channels: &mut [FilmChannelReport],
         check: &mut impl FnMut() -> Result<(), FilmError>,
     ) -> Result<PowerLawFilmReport, FilmError> {
+        self.evaluate_with_reservoirs::<REPORT_CHANNELS>(
+            q, velocity, force, pressure, channels, None, check,
+        )
+        .map(|report| report.power_law)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_with_reservoirs<const REPORT_CHANNELS: bool>(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [FilmChannelReport],
+        reservoirs: Option<&ReservoirPressures>,
+        check: &mut impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<PressureDrivenPowerLawReport, FilmError> {
         if force.len() != self.film.ports
             || pressure.len() != self.film.cell_count()
             || (REPORT_CHANNELS && channels.len() != self.film.channel_count())
         {
             return fail("invalid power-law film output shape");
         }
-        let state = self.solve(q, velocity, check)?;
+        let state = self.solve_with_reservoirs(q, velocity, reservoirs, check)?;
         let mut channel_candidate = [FilmChannelReport::default(); MAX_CHANNELS];
         let work = state.port_work;
         if REPORT_CHANNELS {
             for (k, edge) in self.film.channels.iter().enumerate() {
-                let dp = state.system.pressure[edge.from]
-                    - edge.to.map_or(0.0, |j| state.system.pressure[j]);
+                let dp = state.system.potential[edge.from]
+                    - edge.to.map_or_else(
+                        || reservoirs.map_or(0.0, |r| r.potential[k]),
+                        |j| state.system.potential[j],
+                    );
                 channel_candidate[k] = FilmChannelReport {
                     volume_flow_m3_s: state.channels[k].flow,
                     dissipated_power_w: state.channels[k].flow * dp,
@@ -333,7 +379,7 @@ impl PowerLawFilm {
             iterations: state.iterations,
             backtracks: state.backtracks,
             maximum_flow_defect_m3_s: state.maximum_residual,
-            work_defect_w: work - state.power,
+            work_defect_w: work + state.reservoir_power - state.power,
         };
         check()?;
         force.copy_from_slice(&state.force[..self.film.ports]);
@@ -341,7 +387,11 @@ impl PowerLawFilm {
         if REPORT_CHANNELS {
             channels.copy_from_slice(&channel_candidate[..self.film.channel_count()]);
         }
-        Ok(report)
+        Ok(PressureDrivenPowerLawReport {
+            power_law: report,
+            mechanical_power_w: work,
+            reservoir_power_w: state.reservoir_power,
+        })
     }
 
     /// Analytic directional action for independently supplied q and v directions.
@@ -371,6 +421,21 @@ impl PowerLawFilm {
         out: &mut [f64],
         mut check: impl FnMut() -> Result<(), FilmError>,
     ) -> Result<(), FilmError> {
+        self.tangent_with_reservoirs(q, velocity, dq, dv, out, None, &[], &mut check)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tangent_with_reservoirs(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        dq: &[f64],
+        dv: &[f64],
+        out: &mut [f64],
+        reservoirs: Option<&ReservoirPressures>,
+        reservoir_directions_pa: &[f64],
+        check: &mut impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<(), FilmError> {
         if dq.len() != self.film.ports
             || dv.len() != self.film.ports
             || out.len() != self.film.ports
@@ -378,10 +443,22 @@ impl PowerLawFilm {
         {
             return fail("invalid power-law film tangent shape or direction");
         }
+        if reservoirs.is_some()
+            && (reservoir_directions_pa.len() != self.film.channel_count()
+                || reservoir_directions_pa.iter().any(|x| !x.is_finite())
+                || self
+                    .film
+                    .channels
+                    .iter()
+                    .zip(reservoir_directions_pa)
+                    .any(|(edge, &dp)| edge.to.is_some() && dp != 0.0))
+        {
+            return fail("invalid power-law film reservoir pressure direction");
+        }
         check()?;
-        let state = self.solve(q, velocity, &mut check)?;
+        let state = self.solve_with_reservoirs(q, velocity, reservoirs, check)?;
         let mut candidate = [0.0; MAX_PORTS];
-        if self.all_newtonian {
+        if self.all_newtonian && reservoirs.is_none() {
             self.film.tangent_from_solution(
                 q,
                 &state.system,
@@ -403,6 +480,8 @@ impl PowerLawFilm {
                 rhs[edge.from] -= change;
                 if let Some(j) = edge.to {
                     rhs[j] += change;
+                } else if reservoirs.is_some() {
+                    rhs[edge.from] += state.channels[k].differential * reservoir_directions_pa[k];
                 }
             }
             solve_factored(
@@ -545,15 +624,10 @@ impl PowerLawFilm {
         &self,
         geometry: &Geometry,
         pressure: &[f64; MAX_CELLS],
+        reservoirs: Option<&ReservoirPressures>,
         check: &mut impl FnMut() -> Result<(), FilmError>,
     ) -> Result<State, FilmError> {
         let n = self.film.cell_count();
-        if pressure[..n]
-            .iter()
-            .any(|p| !p.is_finite() || p.abs() > self.film.limits.maximum_pressure_pa)
-        {
-            return fail("power-law pressure exceeds the declared incompressible domain");
-        }
         let mut state = State {
             system: Solution::new(n, geometry.minimum_gap),
             channels: [Channel::default(); MAX_CHANNELS],
@@ -561,17 +635,36 @@ impl PowerLawFilm {
             maximum_residual: 0.0,
             power: 0.0,
             source_work: 0.0,
+            reservoir_power: 0.0,
+            supply_magnitude: 0.0,
+            flow_scale: geometry.source_scale,
             force: [0.0; MAX_PORTS],
             port_work: 0.0,
             iterations: 0,
             backtracks: 0,
         };
         state.system.pressure = *pressure;
+        state.system.potential = *pressure;
+        if let Some(boundary) = reservoirs {
+            for p in &mut state.system.pressure[..n] {
+                *p += boundary.datum.pressure_pa;
+            }
+        }
+        if state.system.pressure[..n]
+            .iter()
+            .any(|p| !p.is_finite() || p.abs() > self.film.limits.maximum_pressure_pa)
+        {
+            return fail("power-law pressure exceeds the declared incompressible domain");
+        }
         for (k, edge) in self.film.channels.iter().enumerate() {
             if k.is_multiple_of(32) {
                 check()?;
             }
-            let dp = pressure[edge.from] - edge.to.map_or(0.0, |j| pressure[j]);
+            let dp = pressure[edge.from]
+                - edge.to.map_or_else(
+                    || reservoirs.map_or(0.0, |r| r.potential[k]),
+                    |j| pressure[j],
+                );
             if !dp.is_finite() {
                 return fail("power-law pressure drop is unrepresentable");
             }
@@ -590,15 +683,25 @@ impl PowerLawFilm {
                 state.system.lower[j * n + j] += g;
                 state.system.lower[i * n + j] -= g;
                 state.system.lower[j * n + i] -= g;
+            } else if let Some(boundary) = reservoirs {
+                let supplied =
+                    -boundary.reservoirs_pa[k].expect("admitted boundary") * channel.flow;
+                state.reservoir_power += supplied;
+                state.supply_magnitude += supplied.abs();
+            }
+            if reservoirs.is_some() {
+                state.flow_scale = state.flow_scale.max(channel.flow.abs());
             }
             state.channels[k] = channel;
         }
-        for (i, &p) in pressure[..n].iter().enumerate() {
+        for (i, &p) in state.system.pressure[..n].iter().enumerate() {
             state.source_work += p * geometry.source[i];
             state.maximum_residual = state.maximum_residual.max(state.residual[i].abs());
         }
         if !state.power.is_finite()
             || !state.source_work.is_finite()
+            || !state.reservoir_power.is_finite()
+            || !state.supply_magnitude.is_finite()
             || state.residual[..n].iter().any(|r| !r.is_finite())
         {
             return fail("power-law film volume or work sum is unrepresentable");
@@ -609,45 +712,71 @@ impl PowerLawFilm {
     // Force and tangent accept the same solved state, including the rounding
     // in the actual work-conjugate port projection. Cache that projection so
     // an ordinary force evaluation does not repeat it.
-    fn admit_port_work(&self, state: &mut State, velocity: &[f64]) -> Result<(), FilmError> {
+    fn admit_port_work(
+        &self,
+        state: &mut State,
+        velocity: &[f64],
+        supplied: bool,
+    ) -> Result<(), FilmError> {
         self.film.project(&state.system.pressure, &mut state.force);
         state.port_work = dot(velocity, &state.force[..self.film.ports]);
         if state.force[..self.film.ports]
             .iter()
             .any(|x| !x.is_finite())
-            || !self.controls.admits_work(state.port_work, state.power)
+            || !self
+                .controls
+                .admits_supplied_work(state.port_work, state, supplied)
         {
             return fail("power-law film failed force and flow work balance");
         }
         Ok(())
     }
 
-    fn solve(
+    fn flow_tolerance(&self, state: &State) -> Result<f64, FilmError> {
+        let tolerance = self.controls.absolute_flow_tolerance_m3_s
+            + self.controls.relative_flow_tolerance * state.flow_scale;
+        if !tolerance.is_finite() {
+            return fail("power-law flow tolerance is unrepresentable");
+        }
+        Ok(tolerance)
+    }
+
+    fn solve_with_reservoirs(
         &self,
         q: &[f64],
         velocity: &[f64],
+        reservoirs: Option<&ReservoirPressures>,
         check: &mut impl FnMut() -> Result<(), FilmError>,
     ) -> Result<State, FilmError> {
         let geometry = self.geometry(q, velocity, check)?;
-        let flow_tolerance = self.controls.absolute_flow_tolerance_m3_s
-            + self.controls.relative_flow_tolerance * geometry.source_scale;
-        if !flow_tolerance.is_finite() {
-            return fail("power-law flow tolerance is unrepresentable");
-        }
         if self.all_newtonian {
-            let native = self.film.solve(q, velocity)?;
+            let native = if let Some(boundary) = reservoirs {
+                self.film.solve_with_boundaries::<false, true>(
+                    q,
+                    velocity,
+                    &[],
+                    &boundary.potential,
+                    boundary.datum,
+                )?
+            } else {
+                self.film.solve(q, velocity)?
+            };
             check()?;
-            let mut state = self.at_pressure(&geometry, &native.pressure, check)?;
+            let mut state = self.at_pressure(&geometry, &native.potential, reservoirs, check)?;
             state.system = native;
-            if state.maximum_residual > flow_tolerance
-                || !self.controls.admits_work(state.source_work, state.power)
+            if state.maximum_residual > self.flow_tolerance(&state)?
+                || !self.controls.admits_supplied_work(
+                    state.source_work,
+                    &state,
+                    reservoirs.is_some(),
+                )
             {
                 return fail("native Newtonian limit exceeds power-law residual budgets");
             }
-            self.admit_port_work(&mut state, velocity)?;
+            self.admit_port_work(&mut state, velocity, reservoirs.is_some())?;
             return Ok(state);
         }
-        let mut state = self.at_pressure(&geometry, &[0.0; MAX_CELLS], check)?;
+        let mut state = self.at_pressure(&geometry, &[0.0; MAX_CELLS], reservoirs, check)?;
         let mut backtracks = 0;
         for iteration in 0..=self.controls.maximum_iterations {
             check()?;
@@ -656,13 +785,17 @@ impl PowerLawFilm {
             state.system.factor()?;
             // A nonzero load always gets a pressure correction; an absolute
             // tolerance is not used as an artificial zero-force dead band.
-            if (iteration > 0 || geometry.source_scale == 0.0)
-                && state.maximum_residual <= flow_tolerance
-                && self.controls.admits_work(state.source_work, state.power)
+            if (iteration > 0 || state.maximum_residual == 0.0)
+                && state.maximum_residual <= self.flow_tolerance(&state)?
+                && self.controls.admits_supplied_work(
+                    state.source_work,
+                    &state,
+                    reservoirs.is_some(),
+                )
             {
                 state.iterations = iteration;
                 state.backtracks = backtracks;
-                self.admit_port_work(&mut state, velocity)?;
+                self.admit_port_work(&mut state, velocity, reservoirs.is_some())?;
                 return Ok(state);
             }
             if iteration == self.controls.maximum_iterations {
@@ -699,14 +832,14 @@ impl PowerLawFilm {
             let mut accepted = None;
             for _ in 0..self.controls.maximum_line_search_steps {
                 check()?;
-                let mut pressure = state.system.pressure;
+                let mut pressure = state.system.potential;
                 for i in 0..self.film.cell_count() {
                     pressure[i] += fraction * direction[i];
                 }
                 // A nonrepresentable physical trial can shorten the numerical
                 // Newton step. Callback refusals must never be swallowed here.
                 let mut callback_failure = None;
-                let trial = self.at_pressure(&geometry, &pressure, &mut || {
+                let trial = self.at_pressure(&geometry, &pressure, reservoirs, &mut || {
                     let result = check();
                     if let Err(error) = result {
                         callback_failure = Some(error);
@@ -720,8 +853,12 @@ impl PowerLawFilm {
                 if let Ok(trial) = trial {
                     let decreased =
                         trial.maximum_residual <= state.maximum_residual * (1.0 - 1e-4 * fraction);
-                    let converged = trial.maximum_residual <= flow_tolerance
-                        && self.controls.admits_work(trial.source_work, trial.power);
+                    let converged = trial.maximum_residual <= self.flow_tolerance(&trial)?
+                        && self.controls.admits_supplied_work(
+                            trial.source_work,
+                            &trial,
+                            reservoirs.is_some(),
+                        );
                     if decreased || converged {
                         accepted = Some(trial);
                         break;
@@ -757,6 +894,9 @@ struct State {
     residual: [f64; MAX_CELLS],
     maximum_residual: f64,
     source_work: f64,
+    reservoir_power: f64,
+    supply_magnitude: f64,
+    flow_scale: f64,
     power: f64,
     force: [f64; MAX_PORTS],
     port_work: f64,

@@ -1943,8 +1943,44 @@ Seven focused regressions cover the exact Newtonian image, independent
 no-slip profile integration through the core transition, mixed-law network
 continuity, full directional derivatives and reciprocity, SI consistency
 scaling, refusal/cancellation atomicity, and shared force/tangent admission
-at a one-ULP projected-work difference. The exact film sources and all 61
-native film test definitions, together with the real deterministic math
-modules and their seven tests, pass bounded Rust type and borrow checking.
-Runtime tests and a full crate build have not run in the full-storage
-environment; no runtime pass is claimed.
+at a one-ULP projected-work difference. The original film module and all 116
+of its current native tests compile and pass through a narrow Rust test
+facade using the real `fs-math` and `fs-rand` dependencies. This includes all
+13 passive and pressure-fed power-law tests. A full crate/workspace build and
+cross-ISA execution are not claimed by this focused run.
+
+### Pressure-fed non-Newtonian Reynolds films
+
+`resistive_film::power_law::PressureDrivenPowerLawFilm` binds one explicit
+gauge pressure to each original exterior passage and `None` to each internal
+passage. The existing exact regularized-power-law channel flux and bounded
+Newton/Cholesky pressure solve remain the numerical owners. Pressure relative
+to the retained reservoir datum determines hydraulic drops; physical pressure
+determines normal force and the original pressure-domain checks. No supply
+pressure is silently treated as ambient, including on shut channels.
+
+The separate active type reports mechanical input, signed reservoir input
+`-sum(p_boundary * Q_out)`, nonnegative channel heat `sum(Q * delta_p)`, and
+their work residual. A supply can drive the mechanical ports or receive work
+from them. These instantaneous powers do not supply a time integrator, fluid
+inventory or a thermal destination. Every cell must meet the original flow
+budgets; supplied films scale the relative tolerance by the largest actual
+passage flow or swept-volume rate. Work tolerance includes the magnitudes of
+the mechanical and reservoir inputs, retaining accuracy when those ports
+exchange power with opposite signs.
+
+The accepted differential conductances and the same factorization give the
+analytic force tangent with respect to geometry, normal velocity and every
+original reservoir pressure. Evaluation and tangents allocate no heap scratch.
+Zero supplies preserve the original passive path; `n=1` uses the original
+pressure-fed Newtonian solve. Supply or constitutive-law rebinding retains the
+geometry and numerical controls without introducing a thermal clock. All
+refusals, including caller cancellation before publication, preserve outputs.
+Sliding entrainment, pressure-dependent rheology, cavitation and fluid inertia
+remain outside this combination.
+
+Six focused G1/G3/G4 groups recover independent through-gap momentum integrals
+for thinning and thickening supplied flow, reversed throughflow, mixed-law
+cell continuity, both signs of external power, the native Newtonian limit,
+geometry/rate/supply finite-difference tangents and velocity reciprocity,
+zero-supply parity, law refresh, and atomic domain/budget/cancellation refusal.

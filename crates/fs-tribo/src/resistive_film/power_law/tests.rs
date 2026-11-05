@@ -1,6 +1,8 @@
 use super::super::{FilmCell, FilmChannel, FilmLimits, GapPort};
 use super::*;
 
+mod pressure;
+
 const H: f64 = 2e-4;
 const W: f64 = 0.01;
 const L: f64 = 0.02;
