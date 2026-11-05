@@ -3,7 +3,7 @@ use super::*;
 use crate::multicomponent::dissipation::{ConstantTransport, TransportDomain};
 use crate::multicomponent::network::dissipation::tests::law;
 use crate::multicomponent::network::wall_exchange::{
-    CircularLaminarWall, CircularTurbulentWall, CircularWallModel,
+    CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall, CircularWallModel,
 };
 
 fn geometry() -> CircularLaminarWall {
@@ -482,5 +482,253 @@ fn turbulent_wall_g1_refinement_resolves_reynolds_dependent_braking() {
     assert!(errors[2] < 1.3e-5);
     for pair in errors.windows(2) {
         assert!((1.9..2.1).contains(&(pair[0] / pair[1])), "{errors:?}");
+    }
+}
+
+fn gnielinski_geometry() -> CircularGnielinskiWall {
+    CircularGnielinskiWall {
+        diameter: Length::new(0.02),
+        reynolds_number: [1e4, 1e6],
+        prandtl_number: [0.5, 200.0],
+        maximum_mach_number: 0.3,
+    }
+}
+
+fn thermal_pipe(g: &MixtureGas, densities: &[f64], velocities: [f64; 2]) -> MixtureNetwork1d {
+    use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+    let pressure = 2.0
+        * densities
+            .iter()
+            .zip(g.source().models())
+            .map(|(rho, model)| rho * R / model.molar_mass().value())
+            .sum::<f64>();
+    let flow = MixtureEuler1d::new(
+        g.clone(),
+        Length::new(0.2),
+        core::f64::consts::FRAC_PI_4 * 0.02_f64.powi(2),
+        velocities
+            .into_iter()
+            .map(|u| g.conserved(densities, u, pressure).unwrap())
+            .collect(),
+        Boundaries::Periodic,
+        || false,
+    )
+    .unwrap();
+    // The original mesh is twenty diameters long, with two equal wall areas.
+    MixtureNetwork1d::new(vec![flow], Vec::new(), Vec::new(), || false).unwrap()
+}
+
+fn thermal_contact() -> WallContact {
+    WallContact {
+        drag: WallDrag::None,
+        thermal: WallThermal::Lumped {
+            temperature_k: 2.2,
+            heat_capacity_j_per_k: 5e-4,
+            conductance_w_per_k: 999.0,
+        },
+    }
+}
+
+// Independent platform-math correlation; the physical source tests below also
+// solve the frozen Darcy and two finite heat-capacity equations independently.
+fn reference_gnielinski(re: f64, pr: f64) -> (f64, f64) {
+    let f = (0.79 * re.ln() - 1.64).powi(-2);
+    let nu = (f / 8.0) * (re - 1000.0) * pr
+        / (1.0 + 12.7 * (f / 8.0).sqrt() * (pr.cbrt().powi(2) - 1.0));
+    (f, nu)
+}
+
+#[test]
+fn gnielinski_g1_live_slip_drives_heat_and_the_same_darcy_factor_without_double_heating() {
+    let g = gas(1, false, 0.0);
+    let (mu, conductivity, dt, diameter) = (2e-7, 7e-7, 0.2, 0.02);
+    let mut heating = Vec::new();
+    for (wall_speed, slip) in [(0.0, 0.2), (0.0, 0.4), (20.0, 0.2), (20.0, -0.2)] {
+        let mut n = thermal_pipe(&g, &[1.0], [wall_speed + slip; 2]);
+        let before = fields(&n);
+        let volume = n.branches()[0].mesh().volumes()[0];
+        let mut wall = uniform_operator(
+            &n,
+            WallContact {
+                drag: WallDrag::MovingDarcy {
+                    friction_factor: 999.0,
+                    hydraulic_diameter_m: diameter,
+                    wall_velocity_m_s: wall_speed,
+                },
+                ..thermal_contact()
+            },
+        )
+        .with_circular_transport(
+            law(&g, mu, 0.0, conductivity, 0.0),
+            vec![Some(CircularWallModel::Gnielinski(gnielinski_geometry()))],
+            || false,
+        )
+        .unwrap();
+        let report = wall
+            .advance_for(&mut n, Time::new(dt), controls(), || false)
+            .unwrap();
+        // Cp=3.5 enters Pr, whereas Cv=2.5 determines the gas energy storage.
+        let (factor, nu) =
+            reference_gnielinski(slip.abs() * diameter / mu, mu * 3.5 / conductivity);
+        let final_slip = slip / (1.0 + factor * dt * slip.abs() / (2.0 * diameter));
+        let heated_temperature = 2.0 + (slip * slip - final_slip * final_slip) / 5.0;
+        let conductance = nu * conductivity * 4.0 * volume / diameter.powi(2);
+        let q = dt * conductance * (2.2 - heated_temperature)
+            / (1.0 + dt * conductance * (1.0 / (2.5 * volume) + 1.0 / 5e-4));
+        for i in 0..2 {
+            let cell = n.branches()[0].cell(i).unwrap();
+            let actual = g.primitive(cell, || false).unwrap();
+            close(actual.velocity, wall_speed + final_slip, 3e-12);
+            close(
+                actual.temperature,
+                heated_temperature + q / (2.5 * volume),
+                2e-8,
+            );
+            assert_eq!(cell.partial_densities, before.0[0][i].partial_densities);
+            let contact = wall.branch_contacts(0).unwrap()[i];
+            let WallDrag::MovingDarcy {
+                friction_factor,
+                wall_velocity_m_s,
+                ..
+            } = contact.drag
+            else {
+                panic!("coupled heat closure discarded the moving Darcy source");
+            };
+            close(friction_factor, factor, 2e-13);
+            assert_eq!(wall_velocity_m_s, wall_speed);
+            let WallThermal::Lumped {
+                temperature_k,
+                conductance_w_per_k,
+                ..
+            } = contact.thermal
+            else {
+                panic!("coupled heat closure discarded finite wall storage");
+            };
+            close(conductance_w_per_k / conductance, 1.0, 2e-12);
+            close(temperature_k, 2.2 - q / 5e-4, 2e-8);
+            // Total gas energy gains only wall heat and prescribed wall work;
+            // conversion of its existing slip kinetic energy is not a source.
+            close(
+                (cell.energy - before.0[0][i].energy) * volume,
+                q + volume * wall_speed * (final_slip - slip),
+                3e-12,
+            );
+        }
+        close(
+            report.drag_heating_j,
+            volume * (slip * slip - final_slip * final_slip),
+            3e-12,
+        );
+        close(
+            report.mechanical_work_to_gas_j,
+            2.0 * volume * wall_speed * (final_slip - slip),
+            3e-12,
+        );
+        close(report.heat_to_gas_j, 2.0 * q, 3e-12);
+        close(report.wall_energy_change_j, -2.0 * q, 3e-12);
+        close(report.energy_residual_j, 0.0, 3e-12);
+        assert_eq!(report.external_heat_to_gas_j, 0.0);
+        heating.push(report.heat_to_gas_j);
+    }
+    assert!(
+        heating[1] > 1.5 * heating[0],
+        "turbulent heat did not respond to flow speed"
+    );
+    close(heating[2], heating[0], 3e-12);
+    close(heating[3], heating[0], 3e-12);
+}
+
+#[test]
+fn gnielinski_g3_original_mixture_cp_viscosity_and_conductivity_set_heat_transfer() {
+    let g = gas(2, true, 0.0);
+    let mut conductances = Vec::new();
+    for (y, mu, conductivity) in [
+        ([1.0, 0.0], 2e-7, 7e-7),
+        ([0.0, 1.0], 2e-7, 7e-7),
+        ([0.3, 0.7], 2e-7, 7e-7),
+        ([0.3, 0.7], 3e-7, 7e-7),
+        ([0.3, 0.7], 2e-7, 9e-7),
+    ] {
+        let mut n = thermal_pipe(&g, &y, [0.2; 2]);
+        let volume = n.branches()[0].mesh().volumes()[0];
+        let mut wall = uniform_operator(&n, thermal_contact())
+            .with_circular_transport(
+                law(&g, mu, 0.0, conductivity, 0.01),
+                vec![Some(CircularWallModel::Gnielinski(gnielinski_geometry()))],
+                || false,
+            )
+            .unwrap();
+        wall.advance_for(&mut n, Time::new(0.1), controls(), || false)
+            .unwrap();
+        // Original NASA polynomials at T=2: Cp_A=3.5+0.1*T and
+        // Cp_B=(4.3+0.05*T)/2, using the actual species molar masses.
+        let cp = y[0] * 3.7 + y[1] * 2.2;
+        let (_, nu) = reference_gnielinski(0.2 * 0.02 / mu, mu * cp / conductivity);
+        let expected = nu * conductivity * 4.0 * volume / 0.02_f64.powi(2);
+        let WallThermal::Lumped {
+            conductance_w_per_k,
+            ..
+        } = wall.branch_contacts(0).unwrap()[0].thermal
+        else {
+            panic!("missing original thermal wall");
+        };
+        close(conductance_w_per_k / expected, 1.0, 2e-12);
+        conductances.push(conductance_w_per_k);
+    }
+    assert!(conductances[0] > conductances[1]);
+    for i in [3, 4] {
+        assert!((conductances[i] / conductances[2] - 1.0).abs() > 0.01);
+    }
+}
+
+#[test]
+fn gnielinski_g4_reynolds_or_prandtl_endpoint_exit_rolls_back_every_cell_and_report() {
+    for quantity in ["Reynolds number", "Prandtl number"] {
+        let variable = quantity == "Prandtl number";
+        let g = gas(1, variable, 0.0);
+        let velocities = if variable { [0.2; 2] } else { [0.4, 0.2] };
+        let mut n = thermal_pipe(&g, &[1.0], velocities);
+        let mut model = gnielinski_geometry();
+        if variable {
+            model.prandtl_number[1] = 2e-7 * 3.7 / 7e-7 + 0.0001;
+        } else {
+            model.reynolds_number[0] = 19800.0;
+        }
+        // The first cell completes an admitted drag candidate. Only the second
+        // cell's evolved endpoint leaves the declared correlation domain.
+        let mut wall = NetworkWallOperator::new(
+            &n,
+            vec![vec![
+                WallContact {
+                    drag: WallDrag::None,
+                    thermal: WallThermal::Adiabatic,
+                },
+                thermal_contact(),
+            ]],
+            Vec::new(),
+            || false,
+        )
+        .unwrap()
+        .with_circular_transport(
+            law(&g, 2e-7, 0.0, 7e-7, 0.0),
+            vec![Some(CircularWallModel::Gnielinski(model))],
+            || false,
+        )
+        .unwrap();
+        wall.advance_for(&mut n, Time::new(0.0), controls(), || false)
+            .unwrap();
+        let before = fields(&n);
+        let contacts = wall.branch_contacts(0).unwrap().to_vec();
+        let report = wall.last_report();
+        let impulses = wall.accepted_branch_impulses().unwrap().to_vec();
+        assert!(
+            matches!(wall.advance_for(&mut n, Time::new(0.4), controls(), || false),
+            Err(WallExchangeError::TransportDomain { quantity: found, .. }) if found == quantity)
+        );
+        assert_eq!(fields(&n), before);
+        assert_eq!(wall.branch_contacts(0).unwrap(), contacts);
+        assert_eq!(wall.last_report(), report);
+        assert_eq!(wall.accepted_branch_impulses().unwrap(), impulses);
+        assert_eq!(n.time(), Time::new(0.0));
     }
 }

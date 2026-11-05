@@ -2863,6 +2863,38 @@ solution of the continuously refreshed Colebrook law and checks first-order
 constitutive convergence. A G4 endpoint-domain regression checks the actual cells, finite walls
 and previous report after refusal.
 
+### Turbulent gas-wall heat transfer from the current mixture
+
+`CircularWallModel::Gnielinski(CircularGnielinskiWall)` explicitly selects
+coupled smooth-pipe friction and turbulent heat transfer. Each original source
+interval evaluates `Re = rho |u-u_wall| D / mu` and `Pr = mu Cp / k` from its
+current mixture. `Cp` comes from the original NASA calorics and composition;
+it is neither `Cv` nor a constant-gamma substitute. The smooth-pipe Darcy
+factor `(0.79 ln(Re)-1.64)^-2` drives both the momentum loss and Gnielinski's
+Nusselt relation. The existing gas/finite-wall transaction then uses the
+cell's complete wetted area `4 V/D`, including its original solid resistance
+when material wall conduction is bound. No new heat source duplicates the
+existing conversion of relative kinetic energy to sensible energy.
+
+Reference: Gnielinski (1976), *International Chemical Engineering* 16(2),
+359–368; equations (1)–(2) in
+[ORNL/TM-2018/979](https://info.ornl.gov/sites/publications/Files/Pub116516.pdf).
+The implemented range is deliberately narrower: authored Re within 1e4..1e6,
+Pr within 0.5..200, and wall-relative Mach at most 0.3. Original circular
+geometry must agree and branch length/diameter must be at least ten. Fully
+developed smooth flow and modest wall-to-bulk property variation are modeling
+assumptions; the length check does not prove development. This path does not
+extend the heat correlation to rough pipes, transition, swirl, strong property
+variation or oscillatory boundary layers. The existing Colebrook option keeps
+its independently authored Nusselt number.
+
+G1 regressions check the published friction/heat relations and the Pr=1 limit.
+G3/G4 native-network tests check live-property and slip response, finite-wall
+energy exchange, moving-frame consistency and complete rollback on domain
+exit. The constitutive coefficients retain the source owner's first-order
+interval lag. These are numerical checks of an Estimated correlation, not
+experimental gas-pipe validation or a resolved-turbulence claim.
+
 ### Existing source composition
 
 `DissipatingNetwork1d::step_with_wall` performs W/2, D/2, A, D/2, W/2.
