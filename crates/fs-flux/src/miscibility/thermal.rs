@@ -24,6 +24,8 @@ use fs_qty::Temperature;
 use fs_thermochem::solution::caloric::{BinaryCaloricErrorV1, BinaryLiquidCaloricModelV1};
 use std::sync::Arc;
 
+pub mod adaptive;
+
 /// An incompatible caloric owner or incomplete/thermodynamically inadmissible
 /// interval. Every refusal leaves the original field and caloric sources intact.
 #[derive(Clone, Debug, PartialEq)]
