@@ -51,9 +51,6 @@ pub mod materials;
 /// Baked exterior modal loading of drum heads' motion beyond their compact volume model.
 pub mod radiation;
 
-/// Full reciprocal narrowband resistance between work-conjugate body ports.
-pub mod mutual_radiation;
-
 /// What an overhead microphone hears from a drum as one closed body on its floor (pexfp.378): an
 /// fs-bem observation table replayed outside the loop, the baffled path above its band.
 pub mod closed_body;
@@ -2661,6 +2658,8 @@ pub struct Contact {
     /// wires: held under load and warm-started, about one solve in five lands on its own root. Off
     /// elsewhere: it is as exact there, but it would change every other piece's output (by rounding
     /// for most; the open hi-hat's rim chatter decorrelates), and that has not been graded.
+    /// This option applies to independent scalar solves. Interacting contacts
+    /// use `Instrument::contact_solver_controls` and a common final-pose check.
     pub fixed_point_exit: bool,
     /// The crushing of the softer body, with its memory; None for an elastic contact.
     pub crush: Option<Crush>,
@@ -3421,7 +3420,6 @@ pub struct Instrument {
     pub rads: Vec<RadDamp>,
     /// Two heads' compact dipole radiation (opt-in; none by default).
     pub rad_dipole: Option<RadDipole>,
-    mutual_radiation: Vec<mutual_radiation::BoundResistance>,
     pub links: Vec<Link>,
     pub contacts: Vec<Contact>,
     /// Dry friction on the faces some contacts press together, solved after the contacts.
@@ -3469,102 +3467,8 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, mutual_radiation: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), contact_work: contact_response::Workspace::default(), contact_solver_controls: ContactSolveControls::default(), contact_report: ContactSolveReport::default(), contact_failure: None, load_on: None })
+        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), contact_work: contact_response::Workspace::default(), contact_solver_controls: ContactSolveControls::default(), contact_report: ContactSolveReport::default(), contact_failure: None, load_on: None })
     }
-    /// Attach one complete narrowband mutual resistance in its producer's
-    /// generalized basis. Each footprint is the dimensionless projection
-    /// qdot=P v, also used reciprocally to scatter force -P^T Re(Z) qdot.
-    /// For surface shapes Phi with area weights W use (Phi^T W Phi)^-1 Phi^T W,
-    /// not bare mode shapes. See mutual_radiation for units and model limits.
-    ///
-    /// A source owns the self and cross resistance of every body in its
-    /// footprints: existing compact, dipole or modal radiation on those
-    /// bodies must be removed at assembly, not counted a second time.
-    /// The medium must match and the reference must lie below Nyquist.
-    /// Admission includes this explicit load's full mass-normalized trace
-    /// bound; refusal changes no force or trajectory state.
-    pub fn attach_mutual_radiation(
-        &mut self,
-        source: mutual_radiation::ResistanceSample,
-        footprints: Vec<mutual_radiation::RadiationFootprint>,
-    ) -> Result<(), String> {
-        if self.step_index != 0 {
-            return Err("mutual radiation must be attached before the first step".into());
-        }
-        let load = source.bind(&footprints, |body, node| {
-            self.bodies.get(body).and_then(|b| b.mass.get(node)).copied()
-        })?;
-        self.mutual_radiation.push(load);
-        if let Err(error) = self.validate_mutual_radiation() {
-            self.mutual_radiation.pop();
-            return Err(error);
-        }
-        self.prepared = false;
-        Ok(())
-    }
-
-    /// Whether an external stepper must implement the complete mutual load.
-    pub fn has_mutual_radiation(&self) -> bool { !self.mutual_radiation.is_empty() }
-
-    /// Nonnegative centered-velocity dissipation [J] of the declared
-    /// resistance samples. It includes signed inter-body interference.
-    pub fn mutual_radiated_j(&self) -> f64 {
-        self.mutual_radiation.iter().fold(fs_math::dd::Dd::ZERO, |sum, load| {
-            sum + fs_math::dd::Dd::from_f64(load.dissipated_j())
-        }).to_f64()
-    }
-
-    /// The finite-step correction -dt/4 v_half^T C v_half [J] for this
-    /// backward-velocity force. Add it to the mechanical discrete energy
-    /// when balancing mutual_radiated_j; it is not physical air storage.
-    pub fn mutual_radiation_energy_correction(&self) -> f64 {
-        let dt = self.k();
-        self.mutual_radiation.iter().fold(fs_math::dd::Dd::ZERO, |sum, load| {
-            sum + fs_math::dd::Dd::from_f64(load.energy_correction(dt, |body, node| {
-                (self.bodies[body].w[node] - self.bodies[body].wp[node]) / dt
-            }))
-        }).to_f64()
-    }
-
-    /// Recheck after assembly edits to bodies, compact radiation or the clock.
-    /// The existing structural/gas/material timestep estimate is shared
-    /// with stability(); no independent solver or contact compliance is used.
-    pub fn validate_mutual_radiation(&mut self) -> Result<(), String> {
-        if self.mutual_radiation.is_empty() { return Ok(()); }
-        let mut owned = std::collections::BTreeSet::new();
-        for load in &self.mutual_radiation {
-            let source = &load.source;
-            if !self.rate.is_finite() || self.rate <= 0.0
-                || source.reference_hz() >= 0.5 * self.rate
-                || source.density() != self.gas.density
-                || source.sound_speed() != self.gas.sound_speed
-            {
-                return Err("mutual radiation: source medium or reference frequency does not match the instrument clock/gas".into());
-            }
-            let bodies: std::collections::BTreeSet<_> = load.bodies().collect();
-            for body in bodies {
-                let b = self.bodies.get(body).ok_or("mutual radiation: source body was removed")?;
-                if !owned.insert(body) || b.head_radiation.is_some()
-                    || self.rads.iter().any(|r| r.bodies.contains(&body))
-                    || self.rad_dipole.as_ref().is_some_and(|r| r.heads.0 == body || r.heads.1 == body)
-                {
-                    return Err("mutual radiation: overlapping self/cross radiation ownership".into());
-                }
-            }
-            let bound = load.rate_bound(|body, node| {
-                self.bodies.get(body).and_then(|b| b.mass.get(node)).copied().unwrap_or(f64::NAN)
-            });
-            if !bound.is_finite() {
-                return Err("mutual radiation: invalid current nodal mass or source footprint".into());
-            }
-        }
-        let (fraction, who) = self.stability();
-        if !fraction.is_finite() || fraction >= 1.0 {
-            return Err(format!("mutual radiation: explicit coupled stability fraction {fraction} must be below one ({who}); increase the integration rate"));
-        }
-        Ok(())
-    }
-
     /// Bring every body's bias on from zero as a raised cosine over `seconds`, not all at once, so
     /// the piece ends that time at rest under its load. A step rings every mode it reaches. This
     /// leaves a mode of frequency f at most 1 / ((2 f T)^2 - 1) of that, and the load rate has no jump.
@@ -3883,9 +3787,6 @@ impl Instrument {
             gas_rate2 += 2.0 * rate * radiation.resistance
                 * inverse_volume_mass(&radiation.bodies);
         }
-        for load in &self.mutual_radiation {
-            gas_rate2 += 2.0 * rate * load.rate_bound(|body, node| self.bodies[body].mass[node]);
-        }
         // The dipole is rank one on the two heads, with weights +-1/2 on their volumes.
         if let Some(dipole) = &self.rad_dipole {
             gas_rate2 += 2.0 * rate * RadDipole::OWN_HEAD_SHARE * dipole.resistance
@@ -3951,7 +3852,6 @@ impl Instrument {
     }
 
     fn prepare(&mut self) {
-        self.validate_mutual_radiation().expect("invalid mutual radiation assembly");
         let k = self.k();
         for m in self.mics.iter_mut() {
             m.taps.clear();
@@ -4215,14 +4115,6 @@ impl Instrument {
                 }
             }
         }
-        // Full reciprocal resistance uses the same explicit force path as compact
-        // radiation; contacts retain their original body-local implicit responses.
-        for load in &mut self.mutual_radiation {
-            load.sample_backward_velocity(|body, node| {
-                (self.bodies[body].w[node] - self.bodies[body].wp[node]) / k
-            });
-            load.scatter_forces(|body, node, force| self.bodies[body].f[node] += force);
-        }
         for d in &self.drives {
             let v = d.at(t);
             self.bodies[d.body].f[d.node] += v;
@@ -4279,11 +4171,6 @@ impl Instrument {
             let volume = |b: &Body| b.wn.iter().zip(&b.wp).map(|(a, c)| a - c).sum::<f64>() / (2.0 * k) * b.h * b.h;
             let q = 0.5 * (volume(&self.bodies[dipole.heads.0]) - volume(&self.bodies[dipole.heads.1]));
             dipole.radiated_j += k * dipole.resistance * q * q;
-        }
-        for load in &mut self.mutual_radiation {
-            load.record_centered_loss(k, |body, node| {
-                (self.bodies[body].wn[node] - self.bodies[body].wp[node]) / (2.0 * k)
-            });
         }
         // microphones: centred acceleration at this step
         for (mi, m) in self.mics.iter_mut().enumerate() {
@@ -4344,8 +4231,10 @@ impl Instrument {
     /// first step would, so place microphones and bodies before exporting (a later move would no longer
     /// re-prepare them). A microphone's closed-body observer (pexfp.378) is not in it either, so
     /// render-gpu's plan refuses a microphone that has one. Nor is a `RadDipole`: the kit attaches one only to
-    /// heads carrying a radiation load, which that plan refuses. Mutual radiation
-    /// also requires refusal: its presence marker survives export, not its operator.
+    /// heads carrying a radiation load, which that plan refuses.
+    /// Interacting normal contacts are also refused: the exported stepper does
+    /// not implement their simultaneous solve. This check includes contacts a
+    /// scheduled strike may activate later.
     pub fn image(&mut self) -> InstrumentImage {
         assert!(self.contact_failure.is_none(), "cannot export an instrument after a refused contact step");
         assert!(!contact_response::requires_coupled_contacts(&self.bodies, &self.contacts),
@@ -4371,7 +4260,6 @@ impl Instrument {
             bodies,
             cavities: self.cavities.clone(),
             rads: self.rads.clone(),
-            has_mutual_radiation: self.has_mutual_radiation(),
             links: self.links.clone(),
             contacts: self.contacts.clone(),
             frictions: self.frictions.clone(),
@@ -4460,8 +4348,6 @@ pub struct MicImage {
 
 #[derive(Clone)]
 pub struct InstrumentImage {
-    /// The operator is not exported; external steppers must refuse when true.
-    pub has_mutual_radiation: bool,
     pub rate: f64,
     /// Retained coherent medium for external steppers and observation filters.
     pub gas: GasState,

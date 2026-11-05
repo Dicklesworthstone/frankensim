@@ -804,3 +804,246 @@ fn loaded_scalar_path_requires_true_contact_independence() {
     assert_eq!(report.compliance_applications, 2);
     assert!((contacts[0].force - 1e8 * 0.001_f64.powf(1.5)).abs() < 1e-9);
 }
+
+fn mixed_contact_components(k: f64) -> (Vec<Body>, Vec<Contact>) {
+    let mut dry = loaded_body(k);
+    dry.sav = false;
+    dry.air_mass = 0.0;
+    dry.head_radiation = None;
+    dry.wp = vec![0.004, 0.00013, 0.0007, 0.0008];
+    dry.w = dry.wp.clone();
+    dry.wn = dry.wp.clone();
+    dry.tmp = vec![35.0, 91.0, -42.0, 17.0];
+    let mut loaded_a = loaded_body(k);
+    loaded_a.wp = vec![0.0001, 0.0002, 0.0001, 0.0];
+    loaded_a.wn = vec![0.0002, 0.0001, 0.0001, -0.0001];
+    let mut loaded_b = loaded_body(k);
+    loaded_b.wp = vec![0.0002, 0.0001, 0.0001, -0.0001];
+    loaded_b.wn = vec![0.0001, 0.0002, 0.0002, 0.0];
+    let bodies = vec![
+        dry,
+        point_body(0.7, k, 0.0, 0.0),
+        point_body(1.5, k, -0.003, -0.003),
+        loaded_a,
+        loaded_b,
+    ];
+    let mut contacts = chain_contacts();
+    contacts.push(Contact::new(
+        vec![(0, 2, 1.0)],
+        vec![(3, 0, 1.0), (3, 2, 0.2)],
+        0.0,
+        Law::Power {
+            k: 5e7,
+            alpha: 1.5,
+            mu: 0.0,
+        },
+    ));
+    contacts.push(Contact::new(
+        vec![(0, 3, 1.0)],
+        vec![(4, 1, 0.7), (4, 3, -0.1)],
+        0.0,
+        Law::Power {
+            k: 2e7,
+            alpha: 1.5,
+            mu: 0.0,
+        },
+    ));
+    (bodies, contacts)
+}
+
+/// Assemble every mutual response, then solve one global nonlinear system.
+/// This oracle has no contact graph, component detection or scalar shortcut.
+fn global_contact_oracle(
+    bodies: &[Body],
+    contacts: &[Contact],
+    k: f64,
+) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let count = contacts.len();
+    let mut probe = bodies.to_vec();
+    let mut images = Vec::with_capacity(count);
+    let mut compliance = vec![0.0; count * count];
+    for (column, contact) in contacts.iter().enumerate() {
+        for (bi, body) in probe.iter_mut().enumerate() {
+            body.footprint_response(bi, &contact.a, 1.0, &contact.b, -1.0, k);
+        }
+        for (row, receiver) in contacts.iter().enumerate() {
+            compliance[row * count + column] = receiver
+                .a
+                .iter()
+                .map(|&(b, i, w)| w * probe[b].tmp[i])
+                .sum::<f64>()
+                - receiver
+                    .b
+                    .iter()
+                    .map(|&(b, i, w)| w * probe[b].tmp[i])
+                    .sum::<f64>();
+        }
+        images.push(probe.iter().map(|b| b.tmp.clone()).collect::<Vec<_>>());
+    }
+    let predicted: Vec<_> = contacts.iter().map(|c| penetration(bodies, c, 0)).collect();
+    let previous: Vec<_> = contacts.iter().map(|c| penetration(bodies, c, 2)).collect();
+    let warm: Vec<_> = contacts.iter().map(|c| c.force).collect();
+    let diagonal: Vec<_> = (0..count).map(|i| compliance[i * count + i]).collect();
+    let mut global = contact_island::Workspace::default();
+    global
+        .solve(
+            &predicted,
+            &warm,
+            &diagonal,
+            Controls::default(),
+            |x, y| {
+                for (i, value) in y.iter_mut().enumerate() {
+                    *value = dot(&compliance[i * count..(i + 1) * count], x);
+                }
+            },
+            |i, d| {
+                let Law::Power {
+                    k: stiffness,
+                    alpha,
+                    mu,
+                } = contacts[i].law;
+                contact_phi(d, previous[i], stiffness, alpha, mu, k)
+            },
+        )
+        .unwrap();
+    let forces = global.forces().to_vec();
+    let pose = bodies
+        .iter()
+        .enumerate()
+        .map(|(b, body)| {
+            body.wn
+                .iter()
+                .enumerate()
+                .map(|(i, predicted)| {
+                    predicted - (0..count).map(|p| images[p][b][i] * forces[p]).sum::<f64>()
+                })
+                .collect()
+        })
+        .collect();
+    (pose, forces)
+}
+
+#[test]
+fn independent_islands_match_global_core_when_sharing_distinct_dry_body_nodes() {
+    let k = 0.001;
+    let (initial, contacts) = mixed_contact_components(k);
+    let (expected_pose, expected_forces) = global_contact_oracle(&initial, &contacts, k);
+    for reverse in [false, true] {
+        let mut bodies = initial.clone();
+        let mut contacts = contacts.clone();
+        if reverse {
+            contacts.reverse();
+        }
+        let report = solve_contacts_checked(
+            &mut bodies,
+            &mut contacts,
+            &mut ContactQueue::default(),
+            &mut Workspace::default(),
+            k,
+            Controls::default(),
+        )
+        .unwrap();
+        check_final_laws(&bodies, &contacts, k);
+        if reverse {
+            contacts.reverse();
+        }
+        for (body, expected) in bodies.iter().zip(&expected_pose) {
+            for (actual, expected) in body.wn.iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 3e-14,
+                    "component correction contaminated another response: {actual:e} vs {expected:e}"
+                );
+            }
+        }
+        for (contact, expected) in contacts.iter().zip(&expected_forces) {
+            assert!((contact.force - expected).abs() < 2e-8 + 2e-10 * expected.abs());
+        }
+        assert_eq!(
+            bodies[0].wn[1], initial[0].wn[1],
+            "an untouched diagonal node must not receive another island's scratch"
+        );
+        assert!(
+            report.cg_iterations > 0,
+            "the shared-node Hertz pair needs the coupled owner"
+        );
+    }
+}
+
+#[test]
+fn later_island_refusal_publishes_no_earlier_pose_force_or_crush_history() {
+    let k = 0.001;
+    let controls = Controls {
+        max_newton_iterations: 0,
+        ..Controls::default()
+    };
+    let early_body = point_body(1.0, k, 0.004, 0.004);
+    let law = Law::Power {
+        k: 1e6,
+        alpha: 1.5,
+        mu: 0.0,
+    };
+    let crush = Crush::new(0.01, 3e6).unwrap();
+    let frozen = Crush {
+        deepest: 0.004,
+        ..crush
+    };
+    let mut early = Contact::new(vec![(0, 0, 1.0)], vec![], 0.0, law)
+        .crushing(crush)
+        .unwrap();
+    early.force = crush_force(0.004, k * k, 0.0, 0.004, law, &frozen, true, k);
+    early.peak_force = 1.0;
+    early.d_now = -0.001;
+    // Prove this first island can accept the same zero-Newton budget and
+    // would publish nonzero displacement, force diagnostics and crush memory.
+    let mut isolated_body = early_body.clone();
+    let mut isolated_contact = early.clone();
+    solve_contacts_checked(
+        std::slice::from_mut(&mut isolated_body),
+        std::slice::from_mut(&mut isolated_contact),
+        &mut ContactQueue::default(),
+        &mut Workspace::default(),
+        k,
+        controls,
+    )
+    .unwrap();
+    assert!(isolated_body.wn[0] < early_body.wn[0]);
+    assert!(isolated_contact.peak_force > early.peak_force);
+    assert!(isolated_contact.crush.unwrap().deepest > crush.deepest);
+
+    let mut bodies = vec![
+        early_body,
+        point_body(1.0, k, 0.004, 0.004),
+        point_body(0.7, k, 0.0, 0.0),
+        point_body(1.5, k, -0.003, -0.003),
+    ];
+    let mut contacts = vec![early];
+    contacts.extend(chain_contacts().into_iter().map(|mut c| {
+        for (b, _, _) in c.a.iter_mut().chain(&mut c.b) {
+            *b += 1;
+        }
+        c
+    }));
+    let previous_pose: Vec<_> = bodies.iter().map(|b| b.wn.clone()).collect();
+    let previous_contacts = contacts.clone();
+    let result = solve_contacts_checked(
+        &mut bodies,
+        &mut contacts,
+        &mut ContactQueue::default(),
+        &mut Workspace::default(),
+        k,
+        controls,
+    );
+    assert!(matches!(
+        result,
+        Err(contact_island::SolveError::NoConvergence { .. })
+    ));
+    for (body, previous) in bodies.iter().zip(previous_pose) {
+        assert_eq!(body.wn, previous);
+    }
+    for (contact, previous) in contacts.iter().zip(previous_contacts) {
+        assert_eq!(contact.force, previous.force);
+        assert_eq!(contact.peak_force, previous.peak_force);
+        assert_eq!(contact.d_now, previous.d_now);
+        assert_eq!(contact.crush, previous.crush);
+    }
+}

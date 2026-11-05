@@ -20,7 +20,7 @@ pub struct Controls {
     pub displacement_tolerance: f64,
     /// Absolute force tolerance, in newtons.
     pub force_tolerance: f64,
-    /// Coupled Newton steps. Independent scalar laws may instead use the
+    /// Coupled Newton steps per response component. Independent scalar laws may use the
     /// existing fixed 60-iteration safeguarded solve at the default budget.
     /// Reducing this budget disables that scalar fast path.
     pub max_newton_iterations: usize,
@@ -114,7 +114,7 @@ impl std::error::Error for SolveError {}
 /// absolute-plus-relative tolerances. Both must be at most one to succeed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SolveReport {
-    /// Coupled Newton steps; zero when independent scalar laws suffice.
+    /// Coupled Newton steps summed over components; zero when scalar laws suffice.
     pub newton_iterations: usize,
     pub cg_iterations: usize,
     pub compliance_applications: usize,

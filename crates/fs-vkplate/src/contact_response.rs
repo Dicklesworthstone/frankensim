@@ -6,6 +6,9 @@ use super::{
 };
 use crate::contact_island::{Controls, SolveError, SolveReport, Workspace as IslandWorkspace};
 
+#[path = "contact_components.rs"]
+mod components;
+
 #[derive(Clone, Default)]
 pub(crate) struct Workspace {
     core: IslandWorkspace,
@@ -17,7 +20,7 @@ pub(crate) struct Workspace {
     crush: Vec<Option<Crush>>,
     touched: Vec<usize>,
     seen: Vec<bool>,
-    owner: Vec<usize>,
+    components: components::Components,
     diagonal: Vec<f64>,
     scalar_force: Vec<f64>,
     scalar_pose: Vec<f64>,
@@ -206,8 +209,7 @@ pub(crate) fn solve_contacts_checked(
     work.touched.clear();
     work.seen.resize(bodies.len(), false);
     work.seen.fill(false);
-    work.owner.resize(bodies.len(), usize::MAX);
-    work.owner.fill(usize::MAX);
+    work.components.reset(bodies, contacts.len());
     queue.mark.resize_with(bodies.len(), Vec::new);
     for (mark, body) in queue.mark.iter_mut().zip(bodies.iter()) {
         mark.resize(body.n, 0);
@@ -216,6 +218,7 @@ pub(crate) fn solve_contacts_checked(
     let mut independent = true;
     let mut nonlocal = false;
     for (ci, c) in contacts.iter().enumerate().filter(|(_, c)| c.active) {
+        let slot = work.indices.len();
         let Law::Power {
             k: stiffness,
             alpha,
@@ -279,15 +282,9 @@ pub(crate) fn solve_contacts_checked(
                 norm_bound += w.abs() * diagonal.sqrt();
                 exact_diagonal += w * w * diagonal;
                 if w != 0.0 {
-                    if queue.mark[b][i] == queue.batch
-                        || (body.nonlocal_response()
-                            && work.owner[b] != usize::MAX
-                            && work.owner[b] != ci)
-                    {
-                        independent = false;
-                    }
-                    queue.mark[b][i] = queue.batch;
-                    work.owner[b] = ci;
+                    independent &=
+                        work.components
+                            .claim(slot, b, i, body.nonlocal_response(), queue);
                     nonlocal |= body.nonlocal_response();
                 }
                 if !work.seen[b] {
@@ -313,6 +310,7 @@ pub(crate) fn solve_contacts_checked(
         work.crush.push(crush);
     }
     let count = work.indices.len();
+    let partitioned = !independent && work.components.finish(count) > 1;
     work.scalar_force.resize(count, 0.0);
     work.scalar_pose.resize(count, 0.0);
     work.actual_pose.resize(count, 0.0);
@@ -329,6 +327,7 @@ pub(crate) fn solve_contacts_checked(
         scalar_force,
         scalar_pose,
         actual_pose,
+        components,
         ..
     } = work;
     // Reduced work budgets retain the checked coupled driver. The inherited
@@ -369,8 +368,31 @@ pub(crate) fn solve_contacts_checked(
             scalar = false;
         }
     }
+    let frame = components::Frame {
+        indices,
+        predicted,
+        previous,
+        previous_force,
+        diagonal_bound,
+        diagonal,
+        crush,
+    };
+    if partitioned {
+        report = components.solve(
+            bodies,
+            contacts,
+            queue,
+            core,
+            frame,
+            k,
+            controls,
+            scalar_force,
+            scalar_pose,
+        )?;
+    }
+    let mut retried_scalar_components = false;
     loop {
-        if !scalar {
+        if !scalar && !partitioned {
             let spent = report.compliance_applications;
             let result = core.solve(
                 predicted,
@@ -398,12 +420,13 @@ pub(crate) fn solve_contacts_checked(
             })?;
             report.compliance_applications += spent;
         }
-        let (forces, penetrations) = if scalar {
+        let (forces, penetrations) = if scalar || partitioned {
             (&scalar_force[..], &scalar_pose[..])
         } else {
             (core.forces(), core.penetrations())
         };
         let sparse = scalar && !nonlocal;
+        let candidate_report = report;
         let accepted = (|| {
             if !forces.iter().all(|f| f.is_finite() && *f >= 0.0)
                 || !penetrations.iter().all(|d| d.is_finite())
@@ -512,6 +535,31 @@ pub(crate) fn solve_contacts_checked(
                 // original warm forces and retry the simultaneous owner before
                 // refusing a physically valid but more demanding tolerance.
                 scalar = false;
+                continue;
+            }
+            if partitioned
+                && !retried_scalar_components
+                && components.has_scalar_candidates()
+                && controls.max_newton_iterations >= Controls::default().max_newton_iterations
+            {
+                // Discard the failed final-gate residual maxima, retaining
+                // accepted component residuals and every application spent.
+                let spent = report.compliance_applications;
+                report = candidate_report;
+                report.compliance_applications = spent;
+                let retry = components.retry_scalar(
+                    bodies,
+                    contacts,
+                    queue,
+                    core,
+                    frame,
+                    k,
+                    controls,
+                    scalar_force,
+                    scalar_pose,
+                )?;
+                components::add_report(&mut report, retry);
+                retried_scalar_components = true;
                 continue;
             }
             return Err(error);
