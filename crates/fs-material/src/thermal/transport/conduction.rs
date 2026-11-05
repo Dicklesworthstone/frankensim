@@ -10,6 +10,11 @@
 pub mod boundary;
 pub use boundary::IntegratedCaloricBoundary;
 
+/// One source-integrated material surface exchanging convection and radiation.
+#[path = "conduction/gray_boundary.rs"]
+pub mod gray_boundary;
+pub use gray_boundary::IntegratedCaloricGrayBoundary;
+
 use super::{
     isobaric::conduction::IsobaricConductionLaw, isochoric::conduction::IsochoricConductionLaw,
 };

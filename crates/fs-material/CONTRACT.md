@@ -8600,6 +8600,46 @@ bounded/nonrectangular support and disjoint-temperature contact admission.
 All 18 focused native Cp/Cv conduction, integrated-link, boundary and contact
 tests pass with the original full thermal owner and numerical solver kernels.
 
+## Source-integrated Cp/Cv convection and radiation at one surface
+
+`thermal::transport::conduction::IntegratedCaloricGrayBoundary` couples one
+original Cp/Cv material layer to distinct convective and radiative baths. It
+reuses `ReservoirLayerGeometry::evaluate_material_to_two_baths` to solve the
+shared material surface with its exact supported k(T) integral. The native
+`ImplicitBoundaryExchangeLaw` receives the two actual signed powers and bath
+temperatures, including opposing exchanges when the body receives no net heat.
+The existing chain/graph retains all finite-body storage, accepted time, energy
+and bath entropy. No effective bath, second half-cell or additional heat source
+is inferred. The selected channel supplies the actual scheduled gas temperature;
+the radiative surrounding has the explicitly bound fixed temperature.
+
+The full original-energy tangent differentiates both conductivity-integral
+endpoints and chains through the original 1/Cp or 1/Cv. Optional original
+`ImplicitGraySurfaceLaw` emissivity/HTC derivatives also enter that same tangent,
+including signed responses and zero-coefficient onset. This source explicitly
+uses the original BULK energy, is queried once per energy trial, and holds its
+coefficients fixed during the surface root. Its bounds must lie inside the
+original caloric/conductivity support and it must retain the same caloric object.
+No bulk dk/de term is added to the already differentiated integral.
+
+Only the actual material path requires its conductivity source support; a bath
+may lie outside it if the solved material face remains supported. Geometry is
+the original positive planar area and half-distance, with zero coating/contact
+resistance. Nonzero authored resistance refuses because this closure does not
+represent a separate coating jump. This remains a source-free quasi-steady
+single-phase half-cell, a prescribed gas bath and a large black gray-radiation
+surrounding, without finite enclosure storage or inferred view factors. Bulk
+surface coefficients are not laws of a separate evolving surface temperature
+or phase. The adapter allocates no trial tables and adds no source authority;
+an optional source retains its own evaluation costs. Native physical-history
+publication remains transactional on source failure or cancellation.
+
+Four new native regressions pass: independent conductivity-integral/radiation
+balances and Cp/Cv tangents; original coefficient feedback including zero onset;
+actual backward-Euler evolution and neutral-body SDIRK2 bath entropy; and
+source/geometry refusal with cancellation/replay from accepted positive time.
+All 22 focused native original Cp/Cv and integrated exchange tests pass.
+
 ## Source-integrated Cp/Cv exchange with reservoirs and ambient baths
 
 `IntegratedCaloricBoundary` reuses the prepared original Cp/Cv layer and the

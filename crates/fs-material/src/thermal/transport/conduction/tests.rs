@@ -5,6 +5,8 @@
 mod boundary;
 #[path = "tests/contact.rs"]
 mod contact;
+#[path = "tests/gray_boundary.rs"]
+mod gray_boundary;
 
 use super::*;
 use crate::thermal::transport::{
