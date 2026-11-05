@@ -47,8 +47,9 @@ mod phase_volume;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use phase_volume::{
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
-    ImplicitConductiveThermalVolumeStep, ImplicitThermalVolumeLinearControls,
-    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace,
+    ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
+    ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,
+    ImplicitThermalVolumeWorkspace,
 };
 pub use phase_volume::{
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,

@@ -104,8 +104,9 @@ mod flow;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use flow::{
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
-    ImplicitConductiveThermalVolumeStep, ImplicitThermalVolumeLinearControls,
-    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace,
+    ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
+    ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,
+    ImplicitThermalVolumeWorkspace,
 };
 pub(crate) use flow::scale_rows;
 pub(crate) mod krylov;

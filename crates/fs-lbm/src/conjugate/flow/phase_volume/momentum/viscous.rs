@@ -168,6 +168,46 @@ impl FlowField {
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
     ) -> Result<ViscousThermalVolumeMomentumStep, ChtError> {
+        let (viscous, heat_budget) = self.prepare_thermal_volume_viscosity(
+            domain,
+            faces,
+            pressure_mouth_axis,
+            curve,
+            input,
+            viscosity,
+            controls,
+            viscosity_controls,
+            gate,
+        )?;
+        self.finish_viscous_thermal_volume(
+            domain,
+            faces,
+            profile,
+            curve,
+            input,
+            controls,
+            viscosity_controls,
+            viscous,
+            heat_budget,
+            gate,
+        )
+    }
+
+    /// Share the original frozen source sampling and molecular kick with
+    /// caloric owners that must solve its physical heat before volume transport.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::conjugate::flow) fn prepare_thermal_volume_viscosity(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: ThermalVolumeMomentumInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        controls: ThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<(PreparedMaterialViscosity, f64), ChtError> {
         let heat_budget = admit_viscous_thermal_input(domain, input, controls, gate)?;
         let transport = controls.volume.thermal.volume.transport;
         let viscous = self.prepare_material_viscosity(
@@ -186,18 +226,47 @@ impl FlowField {
                 Ok(())
             },
         )?;
-        self.finish_viscous_thermal_volume(
-            domain,
-            faces,
-            profile,
-            curve,
-            input,
-            controls,
-            viscosity_controls,
-            viscous,
-            heat_budget,
-            gate,
-        )
+        Ok((viscous, heat_budget))
+    }
+
+    /// Add physical molecular heat once, retaining the exact original local
+    /// addition residual and joint molecular-work/thermal acceptance gates.
+    pub(in crate::conjugate::flow) fn assemble_thermal_volume_viscous_heat(
+        domain: &VoxelDomain,
+        authored_heat_j: &[f64],
+        viscosity: &MaterialViscosityReport,
+        viscosity_controls: MaterialViscosityControls,
+        heat_budget: f64,
+        gate: &CancelGate,
+    ) -> Result<(Vec<f64>, Dd), ChtError> {
+        let n = domain.cell_count();
+        let mut combined = Vec::with_capacity(n);
+        let mut assembly = Dd::ZERO;
+        for cell in 0..n {
+            super::super::poll_every(gate, cell)?;
+            let authored = authored_heat_j[cell];
+            finite("flow.viscous_thermal_authored_heat", authored)?;
+            let heat = viscosity.cell_molecular_heat_j[cell];
+            let sum = authored + heat;
+            finite("flow.viscous_thermal_combined_heat", sum)?;
+            let residual = (Dd::from_f64(authored) + Dd::from_f64(heat) - Dd::from_f64(sum))
+                .to_f64()
+                .abs();
+            finite("flow.viscous_thermal_heat_addition_residual", residual)?;
+            assembly = assembly + Dd::from_f64(residual);
+            combined.push(sum);
+        }
+        let assembly_defect = assembly.to_f64();
+        finite("flow.viscous_thermal_heat_assembly_defect", assembly_defect)?;
+        if assembly_defect > heat_budget
+            || (assembly + Dd::from_f64(viscosity.absolute_energy_defect_j)).to_f64()
+                > viscosity_controls.maximum_energy_defect_j
+        {
+            return Err(refuse(
+                "molecular heat assembly exceeds the shared thermal or viscosity work budget",
+            ));
+        }
+        Ok((combined, assembly))
     }
 
     /// Consume the prepared impulse and physical heat without reconstructing
@@ -216,33 +285,15 @@ impl FlowField {
         heat_budget: f64,
         gate: &CancelGate,
     ) -> Result<ViscousThermalVolumeMomentumStep, ChtError> {
-        let n = domain.cell_count();
-        let mut combined = Vec::with_capacity(n);
-        let mut assembly = Dd::ZERO;
-        for cell in 0..n {
-            super::super::poll_every(gate, cell)?;
-            let authored = input.volume.net_enthalpy_increment_j[cell];
-            finite("flow.viscous_thermal_authored_heat", authored)?;
-            let heat = viscous.report.cell_molecular_heat_j[cell];
-            let sum = authored + heat;
-            finite("flow.viscous_thermal_combined_heat", sum)?;
-            let residual = (Dd::from_f64(authored) + Dd::from_f64(heat) - Dd::from_f64(sum))
-                .to_f64()
-                .abs();
-            finite("flow.viscous_thermal_heat_addition_residual", residual)?;
-            assembly = assembly + Dd::from_f64(residual);
-            combined.push(sum);
-        }
+        let (combined, assembly) = Self::assemble_thermal_volume_viscous_heat(
+            domain,
+            input.volume.net_enthalpy_increment_j,
+            &viscous.report,
+            viscosity_controls,
+            heat_budget,
+            gate,
+        )?;
         let assembly_defect = assembly.to_f64();
-        finite("flow.viscous_thermal_heat_assembly_defect", assembly_defect)?;
-        if assembly_defect > heat_budget
-            || (assembly + Dd::from_f64(viscous.report.absolute_energy_defect_j)).to_f64()
-                > viscosity_controls.maximum_energy_defect_j
-        {
-            return Err(refuse(
-                "molecular heat assembly exceeds the shared thermal or viscosity work budget",
-            ));
-        }
         let heated = ThermalVolumeMomentumInput {
             volume: CoexistenceVolumeInput {
                 net_enthalpy_increment_j: &combined,

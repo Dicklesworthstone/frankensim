@@ -23,6 +23,8 @@ pub use fs_conduction::enthalpy::conduction::implicit::{
 
 mod momentum;
 pub use momentum::ImplicitConductiveThermalVolumeMomentumStep;
+mod viscous;
+pub use viscous::ImplicitConductiveViscousThermalVolumeMomentumStep;
 
 /// Bounded native analytic Newton/Krylov work for ONE backward-Euler interval.
 /// The existing flow duration and shared enthalpy-defect budget own the clock

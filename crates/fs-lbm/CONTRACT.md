@@ -11328,6 +11328,22 @@ graded face coverage, nonlinear k(T) and k(f) latent storage, opposed baths on
 an embedded wall, independent caloric/momentum transfer and transactional
 source/work/cancellation refusal. Explicit APIs retain their original behavior.
 
+### Molecular heat in the same implicit thermal-volume endpoint
+
+`advance_isotropic_implicit_conductive_thermal_volume_momentum_with_viscosity_and_baths`
+prepares the existing molecular impulse and physical cell heat once. Its
+original addition/work gates combine authored heat with that molecular heat
+before the shared implicit conduction/bath solve. The accepted caloric endpoint
+therefore includes molecular heating when evaluating k(T,f) and every bath
+flux. Native volume/momentum then uses the already updated cell momentum;
+neither viscosity nor its heat is applied again. Original viscosity and phase
+sources remain frozen at the original state, without a simultaneous
+thermal-viscosity constitutive iteration. Molecular numerical losses and wall
+work retain their existing separate accounts. The original viscosity report,
+heat-addition residual and total thermal budget remain available. The focused
+one-sided-bath regression checks an independent two-cell backward-Euler balance
+and the original momentum evolution, including one sample per molecular source.
+
 ## Prescribed thermal baths driving phase-volume heat and momentum
 
 `advance_isotropic_conductive_thermal_volume_with_baths` and
