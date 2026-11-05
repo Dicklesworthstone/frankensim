@@ -11,7 +11,7 @@
 
 use fs_lbm::core2::frame::{FrameForcingError2, RigidFrame2};
 use fs_lbm::freesurface::{ContactModel, FreeSurface};
-use fs_lbm::rheology::{Rheology, update_tau};
+use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR, update_tau};
 use fs_lbm::{Cell, Grid};
 use fs_render::volumes::{AbsorptionImageSettings, VolumeGrid, render_absorption_transmittance};
 
@@ -113,12 +113,104 @@ pub struct PourOutcome {
     pub mass_field: Vec<f64>,
 }
 
+/// A pour that cannot report a trajectory for the supplied fluid and motion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PourError {
+    /// A zero-step run supplies no evolved pour to validate.
+    EmptySchedule,
+    /// The original frame owner refused before advancing this step.
+    FrameForcing {
+        /// Zero-based step whose forcing could not be prepared.
+        step: u32,
+        /// Original native refusal, without a substitute motion.
+        source: FrameForcingError2,
+    },
+    /// The native rheology update would substitute a clipped viscosity.
+    RheologyClipped {
+        /// Zero-based step refused before collision, streaming or VOF transport.
+        step: u32,
+        /// Fluid/interface cells below the representable relaxation floor.
+        floored_cells: u32,
+        /// Fluid/interface cells above the representable relaxation ceiling.
+        capped_cells: u32,
+    },
+}
+
+impl core::fmt::Display for PourError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EmptySchedule => f.write_str("a pour requires at least one time step"),
+            Self::FrameForcing { step, source } => {
+                write!(f, "pour step {step}: {source}")
+            }
+            Self::RheologyClipped {
+                step,
+                floored_cells,
+                capped_cells,
+            } => write!(
+                f,
+                "pour step {step}: {floored_cells} cells below tau={TAU_FLOOR} and \
+                 {capped_cells} cells above tau={TAU_CAP}; rescale the lattice to \
+                 represent the supplied fluid instead of clipping its viscosity"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PourError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FrameForcing { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Advance the original liquid owner only if its local law is representable.
+///
+/// Native and browser pours share this check at every step, because a
+/// shear-dependent law can leave the lattice range after starting inside it.
+/// Refusal leaves physical populations and VOF transport unadvanced. The
+/// relaxation buffer holds the rejected proposal; callers must discard that
+/// trial rather than continuing with its clipped viscosity. There is no added
+/// population pass, scratch allocation or change to admitted-step arithmetic.
+///
+/// # Errors
+/// Returns the step and native floor/cap counts whenever any live cell would
+/// use a viscosity different from the supplied constitutive law.
+///
+/// # Panics
+/// Invalid constitutive parameters or the original native flow contracts.
+pub fn advance_pour_liquid(
+    sim: &mut FreeSurface,
+    law: Rheology,
+    step: u32,
+) -> Result<(), PourError> {
+    let stats = update_tau(&mut sim.grid, law);
+    if stats.floored != 0 || stats.capped != 0 {
+        return Err(PourError::RheologyClipped {
+            step,
+            floored_cells: stats.floored,
+            capped_cells: stats.capped,
+        });
+    }
+    sim.step();
+    Ok(())
+}
+
 /// Run one pour under a contact model and a Carreau fluid.
+///
+/// # Errors
+/// Refuses empty motion, invalid frame forcing or any clipped local viscosity.
+/// A refused run returns no mass field or successful validation outcome.
 ///
 /// # Panics
 /// Only on fs-lbm programmer contracts (fixture-scale).
-#[must_use]
-pub fn run_pour(rig: &PourRig, contact: ContactModel, law: Rheology) -> PourOutcome {
+pub fn run_pour(
+    rig: &PourRig,
+    contact: ContactModel,
+    law: Rheology,
+) -> Result<PourOutcome, PourError> {
     run_pour_in_frame(rig, contact, law, [0.5 * (rig.nx as f64 - 1.0), 0.5])
 }
 
@@ -134,19 +226,18 @@ pub fn run_pour(rig: &PourRig, contact: ContactModel, law: Rheology) -> PourOutc
 /// The prescribed support supplies the vessel motion; no coupled finite-inertia
 /// vessel, gas motion, 3-D pour or quantitative jet-breakup model is claimed.
 ///
+/// # Errors
+/// Empty motion, nonfinite pivot/motion, or clipped local viscosity. No
+/// successful pour outcome is returned for a numerically substituted fluid.
+///
 /// # Panics
-/// Nonfinite pivot/motion or the original native flow admission contracts.
-#[must_use]
+/// The original native flow admission contracts.
 pub fn run_pour_in_frame(
     rig: &PourRig,
     contact: ContactModel,
     law: Rheology,
     pivot: [f64; 2],
-) -> PourOutcome {
-    assert!(
-        pivot.into_iter().all(f64::is_finite),
-        "finite pour pivot required"
-    );
+) -> Result<PourOutcome, PourError> {
     run_pour_motion(rig, contact, law, Some(pivot))
 }
 
@@ -156,14 +247,19 @@ pub fn run_pour_in_frame(
 /// equation of a physically rotating vessel. Existing cross-ISA smoke goldens
 /// can select this model explicitly; physical pours use [`run_pour`].
 ///
+/// This comparison still refuses clipped rheology: retaining its historical
+/// motion does not permit silently substituting a different fluid.
+///
+/// # Errors
+/// An empty schedule or any locally clipped viscosity.
+///
 /// # Panics
 /// The original native flow admission contracts.
-#[must_use]
 pub fn run_pour_rotating_gravity(
     rig: &PourRig,
     contact: ContactModel,
     law: Rheology,
-) -> PourOutcome {
+) -> Result<PourOutcome, PourError> {
     run_pour_motion(rig, contact, law, None)
 }
 
@@ -185,7 +281,10 @@ fn run_pour_motion(
     contact: ContactModel,
     law: Rheology,
     pivot: Option<[f64; 2]>,
-) -> PourOutcome {
+) -> Result<PourOutcome, PourError> {
+    if rig.steps == 0 {
+        return Err(PourError::EmptySchedule);
+    }
     let (nx, ny) = (rig.nx, rig.ny);
     let mut grid = Grid::uniform(nx, ny, 0.55);
     grid.periodic_x = false;
@@ -229,7 +328,7 @@ fn run_pour_motion(
     for step in 0..rig.steps {
         if let Some(origin) = pivot {
             rig.prepare_step(&mut sim.grid, step, origin)
-                .expect("pour rigid-frame forcing");
+                .map_err(|source| PourError::FrameForcing { step, source })?;
         } else {
             // Preserve the explicit historical model's deterministic arithmetic.
             let theta = rig.tilt_final * f64::from(step) / f64::from(rig.steps);
@@ -238,9 +337,7 @@ fn run_pour_motion(
                 -rig.g0 * fs_math::det::cos(theta),
             ];
         }
-        // Carreau/power-law local viscosity adaptation (stage-3 band).
-        let _ = update_tau(&mut sim.grid, law);
-        sim.step();
+        advance_pour_liquid(&mut sim, law, step)?;
         mass_drift = mass_drift.max(((sim.ledger_mass() - m0) / m0).abs());
     }
     // Poured mass: fluid/interface mass right of the weir.
@@ -269,18 +366,148 @@ fn run_pour_motion(
             dribble += 1;
         }
     }
-    PourOutcome {
+    Ok(PourOutcome {
         mass_drift,
         fragments: sim.fragment_count(),
         poured_mass: poured,
         dribble_cells: dribble,
         mass_field,
-    }
+    })
 }
 
 #[cfg(test)]
 mod capillary_tests {
     use super::*;
+
+    /// G0: the complete validator rejects both directions of constitutive
+    /// substitution, including the explicit historical motion comparison.
+    #[test]
+    fn pours_refuse_viscosities_outside_the_native_lattice_range() {
+        let rig = PourRig {
+            nx: 12,
+            ny: 8,
+            lip_x: 6,
+            lip_h: 4,
+            g0: 0.0,
+            surface_tension: 0.0,
+            tilt_final: 0.0,
+            steps: 4,
+        };
+        // Exactly 5 columns by 3 rows are wet initially. Interface insertion
+        // changes their flags but not the count requiring a constitutive law.
+        for (nu, floored_cells, capped_cells) in [(1e-5, 15, 0), (2.0, 0, 15)] {
+            let law = Rheology::Newtonian { nu };
+            let expected = PourError::RheologyClipped {
+                step: 0,
+                floored_cells,
+                capped_cells,
+            };
+            assert_eq!(
+                run_pour(&rig, ContactModel::Neutral, law).unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                run_pour_in_frame(&rig, ContactModel::Wetting, law, [0.5, 0.5]).unwrap_err(),
+                expected,
+            );
+            assert_eq!(
+                run_pour_rotating_gravity(&rig, ContactModel::Neutral, law).unwrap_err(),
+                expected,
+            );
+            assert!(expected.to_string().contains("rescale the lattice"));
+        }
+    }
+
+    /// G0/G3: zero-shear admission cannot authorize a later clipped response.
+    #[test]
+    fn transient_shear_thinning_refuses_when_the_actual_flow_reaches_the_floor() {
+        let rig = PourRig {
+            steps: 300,
+            surface_tension: 0.0,
+            ..PourRig::default()
+        };
+        let law = Rheology::Carreau {
+            nu0: 0.0167,
+            nu_inf: 1e-6,
+            lambda: 10_000.0,
+            n: 0.1,
+        };
+        assert!(0.5 + 3.0 * law.viscosity(0.0) > TAU_FLOOR);
+        let error = run_pour(&rig, ContactModel::Neutral, law).unwrap_err();
+        let PourError::RheologyClipped {
+            step,
+            floored_cells,
+            capped_cells,
+        } = error
+        else {
+            panic!("expected constitutive refusal, got {error:?}");
+        };
+        assert!(step > 0 && step < rig.steps, "step {step}");
+        assert!(floored_cells > 0);
+        assert_eq!(capped_cells, 0);
+    }
+
+    /// G0: a rejected viscosity proposal never drives collision or mass flux.
+    #[test]
+    fn rheology_refusal_precedes_population_and_free_surface_transport() {
+        let mut grid = Grid::uniform(6, 5, 0.8);
+        for y in 3..5 {
+            for x in 0..6 {
+                let cell = grid.idx(x, y);
+                grid.flags[cell] = Cell::Gas;
+            }
+        }
+        let mut sim = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+        let before = sim.clone();
+        assert_eq!(
+            advance_pour_liquid(&mut sim, Rheology::Newtonian { nu: 2.0 }, 7),
+            Err(PourError::RheologyClipped {
+                step: 7,
+                floored_cells: 0,
+                capped_cells: 18,
+            }),
+        );
+        assert_eq!(sim.grid.f, before.grid.f);
+        assert_eq!(sim.grid.flags, before.grid.flags);
+        assert_eq!(sim.mass, before.mass);
+        assert_eq!(sim.ledger_mass(), before.ledger_mass());
+        assert_eq!(sim.conversions.to_fluid, before.conversions.to_fluid);
+        assert_eq!(sim.conversions.to_gas, before.conversions.to_gas);
+        assert_eq!(
+            sim.conversions.gas_to_interface,
+            before.conversions.gas_to_interface
+        );
+        assert_eq!(
+            sim.conversions.fluid_to_interface,
+            before.conversions.fluid_to_interface
+        );
+    }
+
+    #[test]
+    fn empty_or_invalid_motion_does_not_return_a_successful_pour() {
+        let empty = PourRig {
+            steps: 0,
+            ..PourRig::default()
+        };
+        let law = Rheology::Newtonian { nu: 0.0167 };
+        assert_eq!(
+            run_pour(&empty, ContactModel::Neutral, law).unwrap_err(),
+            PourError::EmptySchedule,
+        );
+        assert_eq!(
+            run_pour_in_frame(
+                &PourRig::default(),
+                ContactModel::Neutral,
+                law,
+                [f64::NAN, 0.0]
+            )
+            .unwrap_err(),
+            PourError::FrameForcing {
+                step: 0,
+                source: FrameForcingError2::InvalidMotion
+            },
+        );
+    }
 
     #[test]
     fn pour_image_retains_thin_absorption_without_collision_noise() {
@@ -373,9 +600,9 @@ mod capillary_tests {
             ..PourRig::default()
         };
         let law = Rheology::Newtonian { nu: 0.0167 };
-        let left = run_pour_in_frame(&rig, ContactModel::Neutral, law, [0.5, 0.5]);
-        let right = run_pour_in_frame(&rig, ContactModel::Neutral, law, [46.5, 0.5]);
-        let gravity_only = run_pour_rotating_gravity(&rig, ContactModel::Neutral, law);
+        let left = run_pour_in_frame(&rig, ContactModel::Neutral, law, [0.5, 0.5]).unwrap();
+        let right = run_pour_in_frame(&rig, ContactModel::Neutral, law, [46.5, 0.5]).unwrap();
+        let gravity_only = run_pour_rotating_gravity(&rig, ContactModel::Neutral, law).unwrap();
         for result in [&left, &right, &gravity_only] {
             assert!(result.mass_drift < 1e-10, "{}", result.mass_drift);
             assert!(result.mass_field.iter().all(|v| v.is_finite()));
@@ -398,8 +625,8 @@ mod capillary_tests {
         let rig = PourRig::default();
         assert!(rig.surface_tension > 0.0);
         let liquid = Rheology::Newtonian { nu: 0.0167 };
-        let neutral = run_pour(&rig, ContactModel::Neutral, liquid);
-        let wetting = run_pour(&rig, ContactModel::Wetting, liquid);
+        let neutral = run_pour(&rig, ContactModel::Neutral, liquid).unwrap();
+        let wetting = run_pour(&rig, ContactModel::Wetting, liquid).unwrap();
         let no_tension = run_pour(
             &PourRig {
                 surface_tension: 0.0,
@@ -407,7 +634,8 @@ mod capillary_tests {
             },
             ContactModel::Neutral,
             liquid,
-        );
+        )
+        .unwrap();
         for result in [&neutral, &wetting, &no_tension] {
             assert!(
                 result.mass_drift < 1e-10,

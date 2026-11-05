@@ -83,11 +83,21 @@ COMPOSITION with certificates at every joint.
   900 steps. Set sigma explicitly to zero for a no-capillarity comparison.
   SI conversion is sigma_lu = sigma_SI dt² / (rho_SI dx³); the fixture
   default does not imply a sourced water or other fluid calibration.
-- `pour::run_pour(rig, contact, law) -> PourOutcome` — one physical rigid-frame pour;
+- `pour::run_pour(rig, contact, law) -> Result<PourOutcome, PourError>` — one physical rigid-frame pour;
   outcome carries `mass_drift` (worst relative ledger drift),
   `fragments` (2-D connected-component count), `poured_mass` (mass right of
   the weir), `dribble_cells` (wet outer-lip cells), and `mass_field`
   (the same bytes the render binds).
+- `pour::advance_pour_liquid` owns the checked constitutive advance shared by
+  native and browser pours. Every step uses the original `update_tau` and
+  refuses before collision/streaming/VOF if any liquid or interface cell
+  would need a viscosity below its numerical floor or above its ceiling.
+  The native counts do not include gas or walls. The error reports the
+  zero-based step and both counts;
+  the caller must rescale the lattice instead of accepting a different fluid.
+  This adds no population pass or per-step allocation. A refused trial retains
+  its prepared tau buffer but has not advanced populations, topology or mass;
+  both consumers discard it and publish no successful pour or captured frames.
 - `pour::run_pour_in_frame(rig, contact, law, pivot)` selects an explicit
   lattice pivot; the default is the centre of the halfway-bounce-back floor.
   A quintic clockwise tilt starts and ends with zero angular velocity and
@@ -100,7 +110,8 @@ COMPOSITION with certificates at every joint.
 - `pour::run_pour_rotating_gravity` explicitly retains the historical linear
   gravity-only smoke model. It omits frame inertia and is not a physically
   rotating vessel. The existing cross-ISA smoke golden selects this legacy
-  model explicitly; default and MID pours select the rigid-frame model.
+  model explicitly; default and MID pours select the rigid-frame model. It
+  returns the same `Result` and also refuses clipped rheology.
 - `pour::render_pour(outcome, nx, ny, res)` — fs-render exact Beer--Lambert
   slab transmittance bound ZERO-COPY to `outcome.mass_field`, with explicit
   image/field/work admission. Lattice mass is displayed as absorption per
@@ -178,6 +189,14 @@ the eigensolver failing to converge, `Cheb1::build` failing on the smooth
 carafe, or render dimensions disagreeing with the outcome buffer. The
 flagship has no recovery story for those internally generated smoke-tier
 invariants and converts their failure to a loud stop.
+
+All three public pour runners now return `PourError` for a zero-step schedule,
+unrepresentable local viscosity, or the physical frame owner's refusal. A
+`RheologyClipped` result does not mean the fluid itself is invalid: its requested
+viscosity is outside the native numerical range at the selected scale. A
+shear-dependent law is checked at every evolving state, not only at rest.
+Malformed constitutive parameters and the existing native geometry/capillarity
+programmer contracts still panic; no broad input-recovery API is claimed.
 
 ## Determinism class
 
@@ -283,6 +302,13 @@ inertia, not a rotated body-force proxy. A native comparison also verifies the
 explicit historical smoke path is bitwise identical to its prior implementation.
 The core's independent momentum/stress and pure-Coriolis tests cover the force
 operator; this consumer does not claim global energy exactness for LBM/VOF.
+
+The G0/G3 pour regressions additionally reject both too-small and too-large
+Newtonian viscosities on every public motion path, reject a Carreau law only
+when the evolving flow reaches the numerical floor, and prove that refusal
+precedes changes to populations, interface mass and conversion state. The
+existing Newtonian/contact/Carreau pour tests require successful admission.
+The browser uses the same checked advance and drops a refused trial's frames.
 
 ## Continuous-band physical optimization
 

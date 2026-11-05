@@ -54,7 +54,7 @@ fn vsl_001_stability_objective() {
 #[test]
 fn vsl_002_tilt_pour_mass() {
     let rig = PourRig::default();
-    let out = run_pour(&rig, ContactModel::Neutral, newtonian());
+    let out = run_pour(&rig, ContactModel::Neutral, newtonian()).expect("representable fluid");
     verdict(
         "vsl-002-tilt-pour-mass",
         out.mass_drift < 1e-10 && out.poured_mass > 1.0,
@@ -73,8 +73,8 @@ fn vsl_002_tilt_pour_mass() {
 #[test]
 fn vsl_003_contact_bracket() {
     let rig = PourRig::default();
-    let a = run_pour(&rig, ContactModel::Neutral, newtonian());
-    let b = run_pour(&rig, ContactModel::Wetting, newtonian());
+    let a = run_pour(&rig, ContactModel::Neutral, newtonian()).expect("representable fluid");
+    let b = run_pour(&rig, ContactModel::Wetting, newtonian()).expect("representable fluid");
     let pour_band = (a.poured_mass - b.poured_mass).abs();
     let dribble_band = a.dribble_cells.abs_diff(b.dribble_cells);
     let field_difference: f64 = a
@@ -121,7 +121,7 @@ fn vsl_004_carreau_band() {
     let mut poured = Vec::new();
     let mut all_strict = true;
     for law in fluids {
-        let out = run_pour(&rig, ContactModel::Neutral, law);
+        let out = run_pour(&rig, ContactModel::Neutral, law).expect("representable fluid band");
         if out.mass_drift >= 1e-10 {
             all_strict = false;
         }
@@ -288,7 +288,7 @@ fn vsl_005_cvar_rejects_invalid_risk_inputs() {
 #[test]
 fn vsl_006_render_same_bytes() {
     let rig = PourRig::default();
-    let out = run_pour(&rig, ContactModel::Neutral, newtonian());
+    let out = run_pour(&rig, ContactModel::Neutral, newtonian()).expect("representable fluid");
     let img1 = render_pour(&out, rig.nx, rig.ny, 24);
     let img2 = render_pour(&out, rig.nx, rig.ny, 24);
     let bitwise = img1

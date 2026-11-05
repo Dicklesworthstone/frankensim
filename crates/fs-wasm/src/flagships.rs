@@ -32,7 +32,7 @@ use fs_bem::wake2d::WakeSim;
 use fs_dfo::moo::{Individual, NsgaParams, hypervolume, knee_point, nsga2};
 use fs_eproc::GaussianMixtureCs;
 use fs_exec::KillRegistry;
-use fs_lbm::rheology::{Rheology, update_tau};
+use fs_lbm::rheology::Rheology;
 use fs_lbm::{Cell, ContactModel, FreeSurface, Grid, equilibrium};
 use fs_ornith::certify::LdSurrogate;
 use fs_ornith::param::OrnithCandidate;
@@ -709,10 +709,11 @@ pub fn run_vessel(lip_x1000: u32) -> Vec<f64> {
         .fold(f64::NEG_INFINITY, f64::max);
 
     // ---- STAGE 3: free-surface pour (Neutral, capture frames) -----------
-    let Some(neutral) = pour_inline(nx, ny, frames, ContactModel::Neutral) else {
+    let liquid = Rheology::Newtonian { nu: 0.016_667 };
+    let Some(neutral) = pour_inline(nx, ny, frames, ContactModel::Neutral, liquid) else {
         return Vec::new();
     };
-    let Some(wetting) = pour_inline(nx, ny, 0, ContactModel::Wetting) else {
+    let Some(wetting) = pour_inline(nx, ny, 0, ContactModel::Wetting, liquid) else {
         return Vec::new();
     };
     let contact_poured_band = (neutral.poured - wetting.poured).abs();
@@ -826,8 +827,15 @@ struct PourOut {
 
 /// Reduced free-surface geometry with the native vessel's prescribed-frame
 /// forcing, capturing `capture` evenly-spaced mass frames. The browser retains
-/// its fuller initial chamber and explicitly omits capillarity here.
-fn pour_inline(nx: usize, ny: usize, capture: usize, contact: ContactModel) -> Option<PourOut> {
+/// its fuller initial chamber and explicitly omits capillarity here. A native
+/// rheology refusal discards the whole trial, including its captured frames.
+fn pour_inline(
+    nx: usize,
+    ny: usize,
+    capture: usize,
+    contact: ContactModel,
+    law: Rheology,
+) -> Option<PourOut> {
     let g0 = 6.0e-4;
     let tilt_final = 0.7;
     let steps = 300u32;
@@ -901,11 +909,9 @@ fn pour_inline(nx: usize, ny: usize, capture: usize, contact: ContactModel) -> O
     };
     let mut frames: Vec<f64> = Vec::new();
     let mut drift = 0.0f64;
-    let law = Rheology::Newtonian { nu: 0.016_667 };
     for step in 0..steps {
         rig.prepare_step(&mut sim.grid, step, pivot).ok()?;
-        let _ = update_tau(&mut sim.grid, law);
-        sim.step();
+        fs_vessel::pour::advance_pour_liquid(&mut sim, law, step).ok()?;
         let dr = (sim.ledger_mass() - m0).abs() / m0;
         drift = drift.max(dr);
         if capture_at.contains(&step) {
@@ -1884,9 +1890,10 @@ mod tests {
     #[test]
     fn browser_pour_frames_come_from_the_physical_native_trajectory() {
         let (nx, ny, captures) = (32, 20, 5);
-        let recorded = pour_inline(nx, ny, captures, ContactModel::Neutral)
+        let liquid = Rheology::Newtonian { nu: 0.016_667 };
+        let recorded = pour_inline(nx, ny, captures, ContactModel::Neutral, liquid)
             .expect("bounded physical pour must remain representable");
-        let unrecorded = pour_inline(nx, ny, 0, ContactModel::Neutral)
+        let unrecorded = pour_inline(nx, ny, 0, ContactModel::Neutral, liquid)
             .expect("capture policy cannot change the physical trajectory");
         assert_eq!(recorded.frames.len(), captures * nx * ny);
         assert_eq!(
@@ -1897,6 +1904,15 @@ mod tests {
         assert!(recorded.mass_field.iter().all(|mass| mass.is_finite()));
         assert!(recorded.drift < 1e-10, "mass drift {}", recorded.drift);
         assert!(recorded.poured > 0.0);
+    }
+
+    #[test]
+    fn browser_pour_refuses_clipped_fluids_without_publishing_frames() {
+        for nu in [1e-5, 2.0] {
+            assert!(
+                pour_inline(12, 8, 2, ContactModel::Neutral, Rheology::Newtonian { nu }).is_none()
+            );
+        }
     }
 
     #[test]

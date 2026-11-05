@@ -177,7 +177,8 @@ fn vessel_smoke() -> (StageArtifact, f64) {
         &rig,
         fs_lbm::ContactModel::Neutral,
         fs_lbm::Rheology::Newtonian { nu: 0.0167 },
-    );
+    )
+    .expect("smoke fluid remains representable");
     let rep = robustify(0.7);
     // poured_mass is BACK in the hashed stream (xo2k closed): the
     // divergence was platform trig in the pour tilt schedule — release
@@ -1642,7 +1643,8 @@ fn fe2e_mid_stages() {
         &rig,
         fs_lbm::ContactModel::Neutral,
         fs_lbm::Rheology::Newtonian { nu: 0.0167 },
-    );
+    )
+    .expect("MID fluid remains representable");
     assert!(out.mass_drift < 1e-10 && out.poured_mass > 1.0);
     let c = OrnithCandidate::from_genes(&[0.4, 0.6, 0.5, 0.2, 0.5]);
     let rep = fs_ornith::refine(&c);
