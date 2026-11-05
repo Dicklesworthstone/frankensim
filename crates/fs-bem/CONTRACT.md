@@ -904,6 +904,31 @@ solve. Analytic 1 kHz two-source steering/null and translated-clock regressions
 check complex phase; hemisphere pressure integration is compared with the
 existing coherent-power image at 100 Hz, 1 kHz and 3 kHz.
 
+`PreparedCoherentRadiation::prepare_triangle_receivers` adds finite-cell near
+pressure, Cartesian gradient and particle velocity over the SAME coherent cell
+volume flows. Explicit planar triangles must match each retained area and
+centroid to roundoff; no cell shape is inferred. A caller supplies the physical
+tessellation (overlapping velocity patches superpose). The original
+`near_field` adaptive P0 Green owner supplies all integrations and analytic
+derivatives, including componentwise discrepancy and phase/separation gates.
+Rows normalize the half-space kernel by each triangle's actual area, preserving
+the original cell volume flow. DD source contractions precede field rounding;
+velocity is evaluated directly as minus the potential gradient, retaining its
+regular low-frequency limit and reactive proximity term.
+
+The reusable rows bind the source surface and wavenumber, admit exact
+point-to-triangle clearance, retain the original 64-receiver cap, and check
+complete row-payload and shared quadrature budgets before allocation. Their
+output discrepancies estimate integration error; they do not bound structural,
+material, geometry or arbitrary cancellation-conditioned error. The prescribed
+piecewise-constant triangle field is distinct from the area-point loading/far
+field by finite-cell discretization error; this observer does not change the
+loading solve or certify finite-baffle scattering. A 16/32/64-triangle circular
+piston ladder observes at 5 mm above a 40 mm aperture and checks analytic
+pressure, gradient and reactive velocity. Additional tests retain a pressure
+null with nonzero gradient, a weak modal residual, far-distance convergence,
+row reuse, identity, geometry, clearance, payload/work refusal and cancellation.
+
 Rows use `exp(-i omega t)`: resistance is `Re Z`, added mass is `-Im Z/omega`.
 The unchanged matrix must have relative reciprocity defect at most
 `DENSE_RECIPROCITY_BOUND` = 1e-12 (an iterative row's bound is below) and

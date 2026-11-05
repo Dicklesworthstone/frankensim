@@ -400,6 +400,45 @@ fn integrate_fields_cancellable<K:ReceiverWave>(k:K,x:Point,t:Triangle,normal:Po
     Ok(sum)
 }
 
+// Finite planar velocity cells reuse this owner's P0 Green integration and
+// analytic derivative gates. Geometry/identity/payload admission belongs to
+// the Rayleigh caller. Values are normalized to one cell volume flow.
+pub(crate) struct RayleighSingleLayer {
+    pub value:C64, pub gradient:[C64;3],
+    pub error_value:f64, pub error_gradient:[f64;3],
+}
+pub(crate) fn rayleigh_single_layer_rows(
+    k:f64, triangles:&[Triangle], points:&[Point], options:Options,
+    cancelled:&mut impl FnMut()->bool,
+) -> Result<(Vec<RayleighSingleLayer>,usize),HelmholtzError> {
+    options.validate()?;
+    let count=triangles.len().checked_mul(points.len())
+        .filter(|count|count.checked_mul(80).is_some_and(|work|work<=options.maximum_kernel_evaluations))
+        .ok_or_else(||bad("Rayleigh receiver quadrature budget exhausted"))?;
+    let mut rows=Vec::new();
+    rows.try_reserve_exact(count).map_err(|_|HelmholtzError::AllocationFailed {
+        what:"finite-cell Rayleigh receiver rows",
+    })?;
+    let mut work=Work {options,evaluations:0};
+    for &point in points { for &triangle in triangles {
+        let integral=integrate_fields_cancellable(k,point,triangle,[0.,0.,1.],0,&mut work,true,cancelled)?;
+        // The half-space kernel is 2G. Normalize with the supplied triangle's
+        // actual area so the retained coherent cell volume flow is unchanged.
+        let scale=4./norm(cross(sub(triangle[1],triangle[0]),sub(triangle[2],triangle[0])));
+        let row=RayleighSingleLayer {
+            value:integral.s.scale(scale), gradient:integral.gradient.s.map(|v|v.scale(scale)),
+            error_value:integral.error_s*scale, error_gradient:integral.gradient.error_s.map(|e|e*scale),
+        };
+        if [row.value].into_iter().chain(row.gradient).any(|v|!v.re.is_finite()||!v.im.is_finite())
+            || [row.error_value].into_iter().chain(row.error_gradient).any(|e|!e.is_finite()) {
+            return Err(bad("nonfinite normalized Rayleigh receiver row"));
+        }
+        rows.push(row);
+    }}
+    if cancelled() {return Err(HelmholtzError::Cancelled);}
+    Ok((rows,work.evaluations))
+}
+
 /// Frequency-specific Green representation rows. No new solve is performed.
 pub struct Prepared<'a> {
     surface:&'a SpherePanels,k:f64,medium:Medium,rows:Vec<Vec<Integral>>,

@@ -20,6 +20,10 @@ use std::sync::OnceLock;
 #[path = "rayleigh_modal_resistance.rs"]
 mod resistance;
 
+#[path = "rayleigh_modal_receivers.rs"]
+mod receivers;
+pub use receivers::{PreparedTriangleReceivers, TriangleReceiverField, TriangleReceiverOptions};
+
 /// Complete structural velocity fields retained by the loading integral.
 /// Downstream passive realizations may project these fields into fewer acoustic
 /// ports; that reduction must not remove coordinates from this physical matrix.
