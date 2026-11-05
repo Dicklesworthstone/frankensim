@@ -1,6 +1,6 @@
 //! Strict source cards for the native hyperelastic energy models.
 //! Neo-Hookean retains its coupled logarithmic volume convention;
-//! Mooney–Rivlin retains its decoupled quadratic bulk energy. Only Ogden
+//! Mooney–Rivlin retains its decoupled quadratic bulk energy. Gent, Ogden
 //! and HGO select `volumetric_kind` (0 = quadratic, 1 = log squared).
 //! HGO also selects `fibre_invariants` (0 = isochoric, 1 = full).
 //! FSMODPK v1 is unchanged; no material properties or defaults are inferred.
@@ -233,6 +233,8 @@ impl Hyperelastic {
     /// `mu` and Lamé `lambda` in Pa; `mooney-rivlin-decoupled` requires
     /// `c10`, `c01` and `kappa` in Pa and uses quadratic bulk energy.
     /// Neither model accepts an unused `volumetric_kind` selector.
+    /// `gent-decoupled` requires `mu`, `kappa` in Pa, dimensionless positive
+    /// `locking_invariant` (Jm), and an explicit `volumetric_kind` selector.
     /// Ogden/HGO retain explicit bulk selectors, dimensionless counts,
     /// exponents and directions, and Pa moduli. Ogden uses `mu_0, alpha_0,
     /// ...`; HGO uses `fibre_0_x/y/z, ...`.
@@ -261,6 +263,11 @@ impl Hyperelastic {
                 c10: p.get("c10", PA)?,
                 c01: p.get("c01", PA)?,
                 kappa: p.get("kappa", PA)?,
+            },
+            "gent-decoupled" => HyperelasticModel::Gent {
+                mu: p.get("mu", PA)?,
+                locking_invariant: p.get("locking_invariant", ONE)?,
+                volumetric: p.volumetric()?,
             },
             "ogden-decoupled" => {
                 let volumetric = p.volumetric()?;
@@ -379,7 +386,7 @@ impl HyperelasticNode {
             .check_state(&f)
             .map_err(|_| GraphError::CardMismatch {
                 law: self.declaration.law.0.clone(),
-                obligation: "F=I+H outside positive-determinant/principal-stretch domain",
+                obligation: "F=I+H outside positive-determinant/principal-stretch/constitutive domain",
             })?;
         Ok(f)
     }
@@ -425,11 +432,12 @@ impl LawNode for HyperelasticNode {
     }
 }
 
-/// Add the four native (law,version) factories to an existing registry.
+/// Add the native (law,version) factories to an existing registry.
 pub fn register_hyperelastic_laws(registry: &mut LawRegistry) {
     for name in [
         "neo-hookean-log",
         "mooney-rivlin-decoupled",
+        "gent-decoupled",
         "ogden-decoupled",
         "hgo-dispersed",
     ] {

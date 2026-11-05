@@ -109,7 +109,8 @@ pub(crate) fn original_volume(law: &Hyperelastic) -> Result<Volumetric, Material
             });
         }
         HyperelasticModel::MooneyRivlin { kappa, .. } => Volumetric::Quadratic { kappa: *kappa },
-        HyperelasticModel::Ogden { volumetric, .. }
+        HyperelasticModel::Gent { volumetric, .. }
+        | HyperelasticModel::Ogden { volumetric, .. }
         | HyperelasticModel::HolzapfelGasserOgden { volumetric, .. } => *volumetric,
     };
     if !(volume.kappa().is_finite() && volume.kappa() > 0.0) {

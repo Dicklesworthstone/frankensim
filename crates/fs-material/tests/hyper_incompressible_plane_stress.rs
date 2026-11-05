@@ -223,7 +223,8 @@ fn g0_bulk_parameters_do_not_enter_exact_incompressibility_even_at_extreme_scale
             match &mut model {
                 HyperelasticModel::NeoHookean { lambda, .. } => *lambda = value,
                 HyperelasticModel::MooneyRivlin { kappa, .. } => *kappa = value,
-                HyperelasticModel::Ogden { volumetric, .. }
+                HyperelasticModel::Gent { volumetric, .. }
+                | HyperelasticModel::Ogden { volumetric, .. }
                 | HyperelasticModel::HolzapfelGasserOgden { volumetric, .. } => {
                     *volumetric = Volumetric::LogSquared { kappa: value };
                 }

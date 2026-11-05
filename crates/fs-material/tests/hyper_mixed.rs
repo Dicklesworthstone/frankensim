@@ -89,7 +89,8 @@ fn visco() -> ViscoHyperelastic {
 fn pressure(law: &Hyperelastic, j: f64) -> f64 {
     match &law.model {
         HyperelasticModel::MooneyRivlin { kappa, .. } => kappa * (j - 1.0),
-        HyperelasticModel::Ogden { volumetric, .. }
+        HyperelasticModel::Gent { volumetric, .. }
+        | HyperelasticModel::Ogden { volumetric, .. }
         | HyperelasticModel::HolzapfelGasserOgden { volumetric, .. } => match volumetric {
             Volumetric::Quadratic { kappa } => kappa * (j - 1.0),
             Volumetric::LogSquared { kappa } => kappa * j.ln() / j,

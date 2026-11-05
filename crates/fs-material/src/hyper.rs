@@ -4,7 +4,8 @@
 //! is the exact Hessian (nested duals) — derivative consistency is by
 //! construction, then independently FD-gated in conformance. Ogden uses
 //! coalescence-safe spectral derivatives; HGO uses tension-only structural
-//! strains. Every law enforces its declared principal-stretch domain.
+//! strains. Gent retains finite chain extensibility. Every law enforces its
+//! declared principal-stretch domain and its own constitutive limits.
 
 use crate::{MaterialAdmissibility, MaterialError};
 use fs_ad::{Dual, Dual64, Real};
@@ -98,6 +99,23 @@ pub enum HyperelasticModel {
         c01: f64,
         /// Volumetric stiffness κ.
         kappa: f64,
+    },
+    /// Gent finite-chain elasticity with an explicitly selected bulk energy:
+    /// `W = -mu*Jm/2 * ln(1 - (I1bar-3)/Jm) + U(J)`.
+    ///
+    /// `Jm` bounds the isochoric first-invariant increment, not a principal
+    /// stretch or a rupture strain. The strict domain is `I1bar-3 < Jm`.
+    /// Gent (1996), doi:10.5254/1.3538357; the incompressible convention is
+    /// reproduced in Horgan & Murphy (2022), doi:10.1007/s10659-022-09908-1,
+    /// Eq. (6.11). Replacing I1 by I1bar and adding U is the declared
+    /// compressible extension, not a bulk law inferred from that paper.
+    Gent {
+        /// Infinitesimal shear modulus [Pa].
+        mu: f64,
+        /// Positive dimensionless limiting invariant increment `Jm`.
+        locking_invariant: f64,
+        /// Original decoupled volumetric storage.
+        volumetric: Volumetric,
     },
     /// `sum mu_p/alpha_p (sum lambda_bar_i^alpha_p - 3) + U(J)`.
     Ogden {
@@ -277,6 +295,43 @@ fn small_isochoric_strain<T: Real>(a: &[T; 9]) -> IsochoricStrain<T> {
     }
 }
 
+// Gent's domain and energy must use the same invariant, including the
+// cancellation-resistant expression near any rigid rotation.
+fn gent_trace_shift<T: Real>(f: &[T; 9]) -> T {
+    let j = det3(f);
+    if let Some(a) = small_objective_strain(f, j) {
+        small_isochoric_strain(&a).i1_minus_three
+    } else {
+        let i1 = f
+            .iter()
+            .fold(T::zero(), |sum, value| value.mul_add(*value, sum));
+        (T::from_f64(-2.0 / 3.0) * j.ln()).exp() * i1 - T::from_f64(3.0)
+    }
+}
+
+fn gent_energy<T: Real>(shift: T, mu: f64, locking_invariant: f64) -> T {
+    let x = shift / T::from_f64(locking_invariant);
+    // Factor out the invariant increment. This avoids both subtracting a
+    // sub-ULP x from one and forming mu*Jm, which can overflow even when
+    // energy, stress and tangent are representable in the neo-Hookean limit.
+    let logarithm_ratio = if x.value().abs() <= 0.125 {
+        // -ln(1-x)/x = 2/(2-x) * sum (x/(2-x))^(2k)/(2k+1).
+        // At |x|<=1/8, the omitted tail and its first two derivatives are
+        // below 1e-32. The expression also differentiates correctly at x=0.
+        let denominator = T::from_f64(2.0) - x;
+        let s = x / denominator;
+        let square = s * s;
+        let mut series = T::from_f64(1.0 / 31.0);
+        for k in (0..15).rev() {
+            series = series.mul_add(square, T::from_f64(1.0 / f64::from(2 * k + 1)));
+        }
+        T::from_f64(2.0) * series / denominator
+    } else {
+        -(T::one() - x).ln() / x
+    };
+    T::from_f64(0.5 * mu) * shift * logarithm_ratio
+}
+
 // Rationalize I4/det(C)^(1/3)-1 using I4^3-det(C). Group equal orders
 // in C-I so axial fibres under pure dilation or unchanged by J=1 simple
 // shear retain zero strain and the declared inactive-side Hessian at zero.
@@ -371,6 +426,16 @@ impl Hyperelastic {
                     && shear > 0.0
                     && (*kappa + (4.0 / 3.0) * shear).is_finite()
             }
+            HyperelasticModel::Gent {
+                mu,
+                locking_invariant,
+                volumetric,
+            } => {
+                [*mu, *locking_invariant, volumetric.kappa()]
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0)
+                    && (volumetric.kappa() + (4.0 / 3.0) * *mu).is_finite()
+            }
             HyperelasticModel::Ogden { terms, volumetric } => {
                 !terms.is_empty()
                     && terms.len() <= MAX_OGDEN_TERMS
@@ -429,13 +494,14 @@ impl Hyperelastic {
     ///
     /// Requires an admissible F. Ogden's spectral lift carries the exact
     /// value, gradient and Hessian at the primal point, including repeated
-    /// stretches; derivatives above second order are not claimed. All four
+    /// stretches; derivatives above second order are not claimed. All native
     /// laws use equivalent objective strain expressions near rigid rotations
     /// so small stored energies survive unit-invariant subtraction.
     pub fn energy<T: Real>(&self, f: &[T; 9]) -> T {
         match &self.model {
             HyperelasticModel::NeoHookean { mu, lambda } => neo_hookean_energy(f, *mu, *lambda),
             HyperelasticModel::MooneyRivlin { .. }
+            | HyperelasticModel::Gent { .. }
             | HyperelasticModel::Ogden { .. }
             | HyperelasticModel::HolzapfelGasserOgden { .. } => {
                 self.isochoric_energy(f) + self.volumetric_energy(det3(f))
@@ -463,6 +529,11 @@ impl Hyperelastic {
                 T::from_f64(*c10) * (jm23 * i1 - T::from_f64(3.0))
                     + T::from_f64(0.5 * c01) * (jm43 * (i1 * i1 - tr_c2) - T::from_f64(6.0))
             }
+            HyperelasticModel::Gent {
+                mu,
+                locking_invariant,
+                ..
+            } => gent_energy(gent_trace_shift(f), *mu, *locking_invariant),
             HyperelasticModel::Ogden { terms, .. } => {
                 let j = det3(f);
                 if let Some(a) = small_objective_strain(f, j)
@@ -547,7 +618,8 @@ impl Hyperelastic {
             HyperelasticModel::MooneyRivlin { kappa, .. } => {
                 Volumetric::Quadratic { kappa: *kappa }.energy(j)
             }
-            HyperelasticModel::Ogden { volumetric, .. }
+            HyperelasticModel::Gent { volumetric, .. }
+            | HyperelasticModel::Ogden { volumetric, .. }
             | HyperelasticModel::HolzapfelGasserOgden { volumetric, .. } => volumetric.energy(j),
         }
     }
@@ -559,7 +631,7 @@ impl Hyperelastic {
         spectral::principal_stretches(f)
     }
 
-    /// Admit orientation and the declared principal-stretch domain.
+    /// Admit orientation, the principal-stretch domain and constitutive limits.
     ///
     /// This performs the same deformation checks as stress and tangent
     /// evaluation without computing their derivatives. Energy-only consumers
@@ -591,6 +663,26 @@ impl Hyperelastic {
                     self.stretch_limit
                 ),
             });
+        }
+        if let HyperelasticModel::Gent {
+            locking_invariant, ..
+        } = &self.model
+        {
+            // Public model fields can be changed after construction. An
+            // invalid chain limit must never disable its strict domain gate.
+            if !(locking_invariant.is_finite() && *locking_invariant > 0.0) {
+                return Err(MaterialError::Parameters {
+                    what: "Gent locking invariant must be finite and positive".into(),
+                });
+            }
+            let shift = gent_trace_shift(f);
+            if !(shift.is_finite() && shift < *locking_invariant) {
+                return Err(MaterialError::State {
+                    what: format!(
+                        "Gent chain limit: isochoric I1-3 = {shift} must be below {locking_invariant}"
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -683,6 +775,12 @@ impl Hyperelastic {
                     // absence of this certificate is not non-polyconvexity.
                     (*c01 == 0.0).then_some(true)
                 }
+                HyperelasticModel::Gent { volumetric, .. } => {
+                    // -ln(1-q/Jm) is convex and increasing on q<Jm.
+                    // Compose it with the convex power perspective
+                    // q=|F|²/J^(2/3)-3; the chain domain is its strict sublevel.
+                    self.convex_bulk(*volumetric).then_some(true)
+                }
                 HyperelasticModel::Ogden { terms, volumetric } => {
                     // Schatten powers times J^-b are convex for p>=1,
                     // 0<=b<=p-1 (power perspective); positive exponents use
@@ -705,7 +803,11 @@ impl Hyperelastic {
                 }
             },
             tangent_symmetric: true,
-            failure_envelope: "none declared (validity ends at stretch_limit)",
+            failure_envelope: if matches!(self.model, HyperelasticModel::Gent { .. }) {
+                "no damage law; strict Gent chain limit and principal-stretch domain"
+            } else {
+                "none declared (validity ends at stretch_limit)"
+            },
         }
     }
 
@@ -724,6 +826,8 @@ impl Hyperelastic {
         let (name, disc) = match &self.model {
             HyperelasticModel::NeoHookean { .. } => ("material.neo-hookean", 0.03),
             HyperelasticModel::MooneyRivlin { .. } => ("material.mooney-rivlin", 0.03),
+            // No empirical discrepancy band is inferred from a model family.
+            HyperelasticModel::Gent { .. } => ("material.gent-decoupled", f64::INFINITY),
             HyperelasticModel::Ogden { .. } => ("material.ogden-decoupled", 0.03),
             HyperelasticModel::HolzapfelGasserOgden { .. } => ("material.hgo-dispersed", 0.03),
         };
@@ -733,21 +837,30 @@ impl Hyperelastic {
             ),
             _ => "isotropic".to_string(),
         };
+        let mut assumptions = vec![
+            "isothermal".to_string(),
+            symmetry,
+            "rate independence".to_string(),
+        ];
+        let mut failures = vec!["no damage/Mullins effect".to_string()];
+        if let HyperelasticModel::Gent {
+            locking_invariant, ..
+        } = &self.model
+        {
+            assumptions.push(format!("strict isochoric I1-3 < {locking_invariant}"));
+            failures.push("no empirical model-discrepancy bound supplied".to_string());
+        }
         ModelCard::new(
             name,
             "0.1.0",
             Ambition::Solid,
-            vec![
-                "isothermal".to_string(),
-                symmetry,
-                "rate independence".to_string(),
-            ],
+            assumptions,
             ValidityDomain::unconstrained().with(
                 "stretch",
                 1.0 / self.stretch_limit,
                 self.stretch_limit,
             ),
-            vec!["no damage/Mullins effect".to_string()],
+            failures,
             disc,
         )
     }

@@ -1,5 +1,38 @@
 # fs-material — CONTRACT
 
+## Gent finite-chain elasticity through native material consumers
+
+`hyper::HyperelasticModel::Gent` retains the explicitly supplied shear
+modulus, dimensionless limiting invariant increment `Jm`, and original
+quadratic or log-squared bulk potential. Its decoupled energy is
+`-mu*Jm/2*ln(1-(I1bar-3)/Jm) + U(J)`. This is the declared compressible
+extension of Gent's incompressible law (1996, doi:10.5254/1.3538357), not
+an inferred bulk response or a fitted default. The existing exact-volume
+membrane and mixed owners select incompressibility explicitly.
+
+The original objective small-strain invariant and a bounded logarithm-ratio
+series retain small recoverable energies and the large-`Jm` limit without
+forming `mu*Jm`. Stress and tangent differentiate this same potential. Every
+checked evaluation rejects `I1bar-3 >= Jm` before differentiation; the
+existing principal-stretch restriction also remains active. No stiffness
+cap, damage, rupture, hysteresis or material-specific calibration is inferred.
+The native local plane-stress solver retains its stable-seed and iteration
+limits; this law does not establish global branch uniqueness.
+
+The `gent-decoupled` v1 source card requires dimensioned `mu` and `kappa`,
+dimensionless `locking_invariant` and `stretch_limit`, and an explicit
+`volumetric_kind`. `ResolvedHyperelastic` retains the original card and fixed
+source context for native solid, mixed and sheet use; graph registration
+retains the original law, version and validity declaration.
+`tests/hyperelastic_gent.rs` checks independent shear
+and uniaxial formulas, chain refusal, frame objectivity, tangent differences,
+the Neo-Hookean limit, native mixed condensation, compressible plane stress
+and a source-bound exactly incompressible sheet. These are G0/G1/G3 model
+checks with synthetic coefficients, not experimental validation.
+The generic native model card therefore carries an unbounded empirical
+discrepancy band until a caller supplies separate calibration evidence.
+
+
 ## Tensile crack-plane initiation and elastic handoff
 
 `brittle::initiation::TensileInitiator` detects a maximum-principal-stress
