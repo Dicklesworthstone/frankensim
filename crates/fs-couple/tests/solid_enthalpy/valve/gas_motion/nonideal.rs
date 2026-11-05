@@ -1,5 +1,8 @@
 //! G1/G3/G4: the original elastic pressure port consumes complete real-gas state.
 //! Synthetic PR/NASA sources exercise the coupling, not empirical fluid accuracy.
+#[path = "nonideal/thermal.rs"]
+mod thermal;
+
 use super::*;
 use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_material::thermochemical_gas::nonideal::energy::parcel::IsochoricRealGasParcel;

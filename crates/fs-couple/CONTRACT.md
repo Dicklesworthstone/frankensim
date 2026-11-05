@@ -33601,3 +33601,47 @@ time-domain shooting at different phases, the analytic discrete scalar Floquet
 multiplier, nonlinear storage and signed power splits, and strict bandwidth,
 source, tangent, resource and cancellation refusals.
 
+## Finite wall heat on ideal and nonideal elastic gas cavities
+
+`cavity_phs::modal::GasValveMotion::{thermal_candidate,thermal_layers_candidate}`
+joins the original nonlinear gas/elastic pressure-work step to one finite
+material enthalpy body. The existing bounded scalar feedback owner solves one
+signed transfer Q into the gas and out of the body. Every trial restarts the
+accepted gas and original modal motion, with gas heat `Q_gas+Q` and body heat
+`Q_body-Q`. Its interface sees the actual gas energy/volume midpoint and body
+enthalpy midpoint, including any latent fraction. No independent piston, EOS,
+heat-capacity approximation, modal reduction or thermal root finder is added.
+
+Both native ideal and Peng--Robinson gas parcels retain their original
+composition, mass, source conditions, branch admission, pressure, density,
+calorics, compressibility and transport. The series-layer entry point uses the
+same gas transport state and the body's original material card, condition axes,
+conductivity query and receipts. An ideal reference state cannot substitute
+for the actual dense-gas midpoint.
+
+A `ModalGasThermalCandidate` returns the complete original motion/gas owner,
+`UniformEnthalpyStep`, and `ModalGasThermalStep`. Acceptance independently
+checks the native gas/solid pressure work, the body storage residual, the heat
+law, and the enclosing balance
+`dU_gas+dE_modal+D_modal+dH_body+W_exterior-Q_gas-Q_body`.
+Internal Q cancels once. Native modal dissipation remains external to both
+thermal stores. All heat trials use the same physical sample period; source,
+clock, bracket, work-budget or cancellation failures return no partial state.
+The caller publishes both candidate endpoints together.
+
+The thermal participant follows the original uniform-temperature,
+fixed-geometry, negligible-pV-work enthalpy convention. It does not silently
+rebuild the source-fixed elastic basis, change stiffness, add thermal expansion
+or transfer mechanical state across a phase transition. The existing gas-loaded
+sample-rate and midpoint-resolution guards remain active. Temporal refinement
+is still required; no unconditional convergence, monotone relaxation, entropy
+theorem, measured-fluid calibration or automatic exterior-radiation refresh is
+claimed.
+
+Six G1/G3/G4 regression definitions reuse the original six-tetrahedron modal
+and Peng--Robinson fixtures: independent constant-Cv two-storage heat and
+compression elimination; continuing dense-gas/material-layer exchange and
+whole-system energy; latent-enthalpy midpoints; exact insulation reduction;
+late source/domain/clock/budget refusal with deterministic retry; and
+cancellation after actual interface evaluation. Focused native command:
+`cargo test -p fs-couple --test solid_enthalpy valve::gas_motion::nonideal::thermal`.

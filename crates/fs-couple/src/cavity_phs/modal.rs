@@ -8,6 +8,8 @@
 /// Shared-snapshot species flow feeding the original elastic-cavity owners.
 pub mod exchange;
 pub mod reactive;
+/// Reciprocal finite-wall heat on the original ideal or nonideal gas/motion solve.
+pub mod thermal;
 
 use std::cell::{Cell, RefCell};
 
