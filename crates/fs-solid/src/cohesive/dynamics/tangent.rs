@@ -3,7 +3,7 @@ use super::*;
 use fs_solver::NonlinearProblem;
 
 /// Fallible native Jacobian with the existing source-domain-aware numerical
-/// adapter retained for material switches and unregularized Coulomb constraints.
+/// adapter retained for material switches and friction projection boundaries.
 pub(super) struct StepJacobian<'s, 'p, 'm, 'a, F> {
     problem: &'s StepProblem<'p, 'm, 'a>,
     numerical: FallibleFiniteDifference<F, Error>,
@@ -15,10 +15,15 @@ pub(super) struct StepJacobian<'s, 'p, 'm, 'a, F> {
 struct Cache {
     point: Vec<f64>,
     blocks: Vec<[[f64; 3]; 3]>,
+    coulomb_blocks: Vec<Option<CoulombBlock>>,
     elastic: Vec<f64>,
     valid: bool,
     supported: bool,
 }
+
+// Derivatives of the original traction-valued natural map with respect to
+// endpoint jump and the two metre-valued reaction coordinates, respectively.
+type CoulombBlock = ([[f64; 3]; 2], [[f64; 2]; 2]);
 
 impl<'s, 'p, 'm, 'a, F> StepJacobian<'s, 'p, 'm, 'a, F>
 where
@@ -31,6 +36,10 @@ where
         evaluate: F,
     ) -> Result<Self, Error> {
         let n = problem.motion.state.system.n;
+        let extra = dimension
+            .checked_sub(n)
+            .filter(|extra| extra % 2 == 0)
+            .ok_or(Error::Invalid("complete Coulomb Jacobian dimension"))?;
         Ok(Self {
             problem,
             numerical: FallibleFiniteDifference::new(dimension, difference_step, evaluate)
@@ -38,8 +47,9 @@ where
             failure: RefCell::new(None),
             failed: Cell::new(false),
             cache: RefCell::new(Cache {
-                point: vec![0.0; n],
+                point: vec![0.0; dimension],
                 blocks: vec![[[0.0; 3]; 3]; problem.motion.state.points.len()],
+                coulomb_blocks: vec![None; extra / 2],
                 elastic: vec![0.0; n],
                 valid: false,
                 supported: false,
@@ -72,12 +82,8 @@ where
     ) -> Result<bool, Error> {
         let problem = self.problem;
         problem.poll()?;
-        // Ideal static/kinetic Coulomb adds independent constraint coordinates.
-        // Its natural-map blocks still use the existing fallible adapter.
-        if problem.motion.coulomb.is_some() {
-            return Ok(false);
-        }
         let state = &problem.motion.state;
+        let n = state.system.n;
         let mut cache = self.cache.borrow_mut();
         if cache.valid && cache.point.as_slice() == x && !cache.supported {
             return Ok(false);
@@ -106,7 +112,7 @@ where
             }
             for (index, patch) in state.system.patches.iter().enumerate() {
                 problem.poll()?;
-                let jump = patch.jump(x, problem.offsets[index])?;
+                let jump = patch.jump(&x[..n], problem.offsets[index])?;
                 let old = state.points[index];
                 let friction = problem
                     .motion
@@ -114,8 +120,15 @@ where
                     .as_ref()
                     .and_then(|models| models[index])
                     .filter(|model| model.active());
+                let coulomb = problem
+                    .motion
+                    .coulomb
+                    .as_ref()
+                    .filter(|binding| binding.needs_pressure(index));
                 let tolerance = problem.motion.config.solve.local_energy_tolerance_j_m2;
-                let (tangent, pressure, pressure_gradient) = if friction.is_some() {
+                let (tangent, pressure, pressure_gradient) = if friction.is_some()
+                    || coulomb.is_some()
+                {
                     old.trial_over_time_with_damage_weighted_compression_tangent(
                         jump,
                         problem.dt_s,
@@ -159,6 +172,36 @@ where
                         }
                     }
                 }
+                if let Some(binding) = coulomb {
+                    let Some(pressure_gradient) = pressure_gradient else {
+                        cache.point.copy_from_slice(x);
+                        cache.valid = true;
+                        return Ok(false);
+                    };
+                    let previous = old.jump_m();
+                    let slip = [
+                        finite(jump[1] - previous[1])?,
+                        finite(jump[2] - previous[2])?,
+                    ];
+                    let force = binding.traction(index, &x[n..])?;
+                    let Some(block) = binding.natural_map_tangent(
+                        patch.id,
+                        force,
+                        slip,
+                        pressure,
+                        pressure_gradient,
+                        problem.coulomb_mu.borrow()[index],
+                    )?
+                    else {
+                        cache.point.copy_from_slice(x);
+                        cache.valid = true;
+                        return Ok(false);
+                    };
+                    let coordinate = binding
+                        .coordinate(index)
+                        .ok_or(Error::Invalid("missing Coulomb Jacobian coordinates"))?;
+                    cache.coulomb_blocks[coordinate / 2] = Some(block);
+                }
                 cache.blocks[index] = tangent;
             }
             cache.point.copy_from_slice(x);
@@ -166,16 +209,22 @@ where
             cache.supported = true;
         }
 
-        // J v = (2 M / dt^2 + K / 2) v + sum A B^T D(t_mean) B v.
-        // Reuse each 3x3 material block throughout FGMRES at this exact iterate.
+        // Mechanical rows: (2 M / dt^2 + K / 2) du + A B^T(D du + d_lambda).
+        // Coulomb rows: A D(lambda - projection(lambda + k slip, mu P)).
+        // Reuse the full coupled blocks throughout FGMRES at this exact iterate.
         // Native operators and sparse jump maps retain all cross-coordinate
         // terms; neither a dense global tangent nor SPD assumption is needed.
+        let (native_output, constraint_output) = output.split_at_mut(n);
+        constraint_output.fill(0.0);
         cache.elastic.fill(f64::NAN);
-        state.system.elastic.apply(direction, &mut cache.elastic);
+        state
+            .system
+            .elastic
+            .apply(&direction[..n], &mut cache.elastic);
         problem.poll()?;
-        problem.motion.mass.apply(direction, output);
+        problem.motion.mass.apply(&direction[..n], native_output);
         problem.poll()?;
-        for (i, (value, &elastic)) in output.iter_mut().zip(&cache.elastic).enumerate() {
+        for (i, (value, &elastic)) in native_output.iter_mut().zip(&cache.elastic).enumerate() {
             if i % 256 == 0 {
                 problem.poll()?;
             }
@@ -185,14 +234,34 @@ where
         }
         for (index, patch) in state.system.patches.iter().enumerate() {
             problem.poll()?;
-            let jump_direction = patch.jump(direction, [0.0; 3])?;
+            let jump_direction = patch.jump(&direction[..n], [0.0; 3])?;
             let mut traction = [0.0; 3];
             for (i, value) in traction.iter_mut().enumerate() {
                 for (j, &increment) in jump_direction.iter().enumerate() {
                     *value = finite(*value + cache.blocks[index][i][j] * increment)?;
                 }
             }
-            patch.scatter(traction, output)?;
+            if let Some(binding) = &problem.motion.coulomb
+                && let Some(coordinate) = binding.coordinate(index)
+            {
+                let reaction_direction = binding.traction(index, &direction[n..])?;
+                let (jump_block, reaction_block) = cache.coulomb_blocks[coordinate / 2]
+                    .ok_or(Error::Invalid("missing Coulomb Jacobian block"))?;
+                for i in 0..2 {
+                    traction[i + 1] = finite(traction[i + 1] + reaction_direction[i])?;
+                    let mut constraint = 0.0;
+                    for (j, &increment) in jump_direction.iter().enumerate() {
+                        constraint = finite(constraint + jump_block[i][j] * increment)?;
+                    }
+                    for j in 0..2 {
+                        constraint = finite(
+                            constraint + reaction_block[i][j] * direction[n + coordinate + j],
+                        )?;
+                    }
+                    constraint_output[coordinate + i] = finite(patch.area_m2 * constraint)?;
+                }
+            }
+            patch.scatter(traction, native_output)?;
         }
         problem.poll()?;
         Ok(true)

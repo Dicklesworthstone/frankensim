@@ -478,12 +478,19 @@ fn off_axis_full_inertia_restores_all_native_travel_and_is_world_frame_covariant
             .orientation()
             .right_exp(pose.orientation().rotate_world_to_body(world_rotation))
             .unwrap();
+        // The contact marker is the rotation origin. Reconstruct its COM arm
+        // with the same rotated quaternion so both fixtures retain EXACTLY
+        // zero approach. Independently rounded COM/attitude rotations leave a
+        // gap of order epsilon*ARM; the real JKR tangent then correctly changes
+        // the impulse, obscuring covariance at the much smaller contact scale.
+        let position = orientation.rotate_body_to_world(arms[i]).scale(-1.0);
+        close_vec(
+            position,
+            rotation.rotate_body_to_world(pose.position_world()),
+            32.0 * f64::EPSILON * ARM,
+        );
         rotated.bodies[i] = RigidBodyState::new(
-            Pose::new(
-                rotation.rotate_body_to_world(pose.position_world()),
-                orientation,
-            )
-            .unwrap(),
+            Pose::new(position, orientation).unwrap(),
             Vec3::ZERO,
             Vec3::ZERO,
         )
@@ -497,6 +504,7 @@ fn off_axis_full_inertia_restores_all_native_travel_and_is_world_frame_covariant
     )
     .unwrap();
     let rp = rotated.prepared(&normal);
+    assert_eq!(rp.approach_m(), pair.approach_m());
     let rc = rp
         .advance(
             normal.evaluate_attached(rp.approach_m()).unwrap().state(),

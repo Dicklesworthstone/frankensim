@@ -363,6 +363,82 @@ impl CoulombBinding {
             finite(force[1] - projected[1])?,
         ])
     }
+
+    /// Exact local derivative of the original natural map, before patch area.
+    /// The first block differentiates the full endpoint jump; the second uses
+    /// the additional metre-valued coordinates z, with traction = k z. Pressure
+    /// and its gradient belong to the same original damaged-compression path.
+    /// Neither the conditioning scale k nor this derivative adds a spring.
+    ///
+    /// The disk interior has zero traction-coordinate derivative and -k times
+    /// the tangential jump derivative. Outside, differentiate both the disk
+    /// direction and its pressure-dependent radius. The actual disk boundary
+    /// has no classical derivative and requests the existing numerical fallback.
+    pub(super) fn natural_map_tangent(
+        &self,
+        patch: u64,
+        force: [f64; 2],
+        slip: [f64; 2],
+        pressure: f64,
+        pressure_gradient: [f64; 3],
+        mu: f64,
+    ) -> Result<Option<([[f64; 3]; 2], [[f64; 2]; 2])>, Error> {
+        let capacity = finite(mu * pressure)?;
+        let k = self.config.traction_scale_pa_per_m;
+        let q = [
+            finite(force[0] + k * slip[0])?,
+            finite(force[1] + k * slip[1])?,
+        ];
+        let length = q[0].hypot(q[1]);
+        if !length.is_finite() {
+            return Ok(None);
+        }
+        // Retain the scalar owner's domain admission. A derivative refusal
+        // must not introduce a different physical projection or repair inputs.
+        project_tangent_disk(q, capacity).map_err(|error| Error::Material { patch, error })?;
+        if pressure_gradient.iter().any(|v| !v.is_finite()) {
+            return Ok(None);
+        }
+        if capacity == 0.0 {
+            // For smooth nonnegative P at P=0, dP is zero and the projected
+            // force is o(|dg|), even at q=0. A nonzero dP there is a one-sided
+            // contact derivative; an underflowed positive radius is unresolved.
+            if mu == 0.0 || (pressure == 0.0 && pressure_gradient.iter().all(|&v| v == 0.0)) {
+                return Ok(Some(([[0.0; 3]; 2], [[k, 0.0], [0.0, k]])));
+            }
+            return Ok(None);
+        }
+        if length == capacity {
+            return Ok(None);
+        }
+        if length < capacity {
+            return Ok(Some(([[0.0, -k, 0.0], [0.0, 0.0, -k]], [[0.0; 2]; 2])));
+        }
+        let normal = q.map(|v| v / length);
+        let transverse = [-normal[1], normal[0]];
+        let ratio = capacity / length;
+        let mut jump = [[0.0; 3]; 2];
+        let mut coordinates = [[0.0; 2]; 2];
+        for i in 0..2 {
+            for (j, &gradient) in pressure_gradient.iter().enumerate() {
+                jump[i][j] = -normal[i] * (mu * gradient);
+            }
+            for j in 0..2 {
+                // In two dimensions, t t^T = I - n n^T. This form preserves
+                // a small transverse derivative near an axis without 1-n_i².
+                let projection = ratio * transverse[i] * transverse[j];
+                jump[i][j + 1] -= k * projection;
+                coordinates[i][j] = k * (if i == j { 1.0 } else { 0.0 } - projection);
+            }
+        }
+        Ok(jump
+            .iter()
+            .flatten()
+            .chain(coordinates.iter().flatten())
+            .all(|v| v.is_finite())
+            .then_some((jump, coordinates)))
+    }
+
     pub(super) fn audit(
         &self,
         motion: &CohesiveMotion<'_, '_>,
@@ -554,5 +630,256 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
         Err(Error::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tangent_tests {
+    use super::*;
+
+    fn binding(k: f64) -> CoulombBinding {
+        CoulombBinding {
+            models: Vec::new().into(),
+            states: Vec::new().into(),
+            impulse_recheck: None,
+            config: CoulombConfig {
+                traction_scale_pa_per_m: k,
+                slip_tolerance_m: 1e-10,
+                velocity_tolerance_m_s: 1e-8,
+            },
+            extra: 0,
+        }
+    }
+    fn close(a: f64, b: f64, tolerance: f64) {
+        assert!(
+            (a - b).abs() <= tolerance * (1.0 + a.abs().max(b.abs())),
+            "{a:e} != {b:e}"
+        );
+    }
+    fn action(
+        blocks: &([[f64; 3]; 2], [[f64; 2]; 2]),
+        jump: [f64; 3],
+        coordinates: [f64; 2],
+    ) -> [f64; 2] {
+        core::array::from_fn(|i| {
+            (0..3).map(|j| blocks.0[i][j] * jump[j]).sum::<f64>()
+                + (0..2).map(|j| blocks.1[i][j] * coordinates[j]).sum::<f64>()
+        })
+    }
+
+    #[test]
+    fn natural_map_blocks_match_independent_residual_differences() {
+        for (k, force, slip, pressure, gradient, mu) in [
+            (7.0, [0.1, -0.2], [0.01, 0.02], 3.0, [-2.5, 0.9, -0.4], 0.7),
+            (7.0, [4.3, -1.7], [0.03, -0.07], 3.0, [-2.5, 0.9, -0.4], 0.4),
+            (37.0, [-4.0, 2.0], [-0.2, 0.05], 2.0, [1.7, -0.5, 0.8], 0.5),
+            (0.2, [1.001, 0.0], [0.0; 2], 2.0, [0.3, 0.2, -0.1], 0.5),
+        ] {
+            let model = binding(k);
+            let original = model.residual(9, force, slip, pressure, mu).unwrap();
+            let blocks = model
+                .natural_map_tangent(9, force, slip, pressure, gradient, mu)
+                .unwrap()
+                .unwrap();
+            let residual = |x: [f64; 5]| {
+                let p =
+                    pressure + (0..3).map(|j| gradient[j] * x[j]).sum::<f64>() + 0.3 * x[0] * x[1];
+                model
+                    .residual(
+                        9,
+                        [force[0] + k * x[3], force[1] + k * x[4]],
+                        [slip[0] + x[1], slip[1] + x[2]],
+                        p,
+                        mu,
+                    )
+                    .unwrap()
+            };
+            for j in 0..5 {
+                let h = 1e-6;
+                let mut plus = [0.0; 5];
+                let mut minus = [0.0; 5];
+                plus[j] = h;
+                minus[j] = -h;
+                let a = residual(plus);
+                let b = residual(minus);
+                for i in 0..2 {
+                    let expected = if j < 3 {
+                        blocks.0[i][j]
+                    } else {
+                        blocks.1[i][j - 3]
+                    };
+                    close((a[i] - b[i]) / (2.0 * h), expected, 2e-8);
+                }
+            }
+            let direction = [-0.6, 0.2, -0.4, 0.1, 0.3];
+            let h = 1e-6;
+            let a = residual(direction.map(|v| h * v));
+            let b = residual(direction.map(|v| -h * v));
+            let expected = action(&blocks, [-0.6, 0.2, -0.4], [0.1, 0.3]);
+            for i in 0..2 {
+                close((a[i] - b[i]) / (2.0 * h), expected[i], 2e-8);
+            }
+            assert_eq!(
+                model.residual(9, force, slip, pressure, mu).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn disk_interior_is_exact_constraint_without_a_friction_spring() {
+        let model = binding(13.0);
+        let tangent = model
+            .natural_map_tangent(1, [0.2, -0.1], [0.01, -0.02], 4.0, [3.0, -2.0, 1.0], 0.7)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tangent.0, [[0.0, -13.0, 0.0], [0.0, 0.0, -13.0]]);
+        assert_eq!(tangent.1, [[0.0; 2]; 2]);
+    }
+
+    #[test]
+    fn pressure_and_traction_blocks_rotate_with_the_same_tangent_frame() {
+        let model = binding(7.0);
+        let angle: f64 = 0.37;
+        let (s, c) = angle.sin_cos();
+        let rotate = |v: [f64; 2]| [c * v[0] - s * v[1], s * v[0] + c * v[1]];
+        let rotate_jump = |v: [f64; 3]| {
+            let t = rotate([v[1], v[2]]);
+            [v[0], t[0], t[1]]
+        };
+        let force = [3.0, -4.0];
+        let slip = [0.4, 0.2];
+        let gradient = [-2.5, 0.9, -0.4];
+        let old = model
+            .natural_map_tangent(1, force, slip, 2.0, gradient, 0.4)
+            .unwrap()
+            .unwrap();
+        let new = model
+            .natural_map_tangent(
+                1,
+                rotate(force),
+                rotate(slip),
+                2.0,
+                rotate_jump(gradient),
+                0.4,
+            )
+            .unwrap()
+            .unwrap();
+        for j in 0..5 {
+            let mut jump = [0.0; 3];
+            let mut coordinates = [0.0; 2];
+            if j < 3 {
+                jump[j] = 1.0;
+            } else {
+                coordinates[j - 3] = 1.0;
+            }
+            let expected = rotate(action(&old, jump, coordinates));
+            let actual = action(&new, rotate_jump(jump), rotate(coordinates));
+            for i in 0..2 {
+                close(actual[i], expected[i], 2e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn smooth_zero_radius_includes_zero_force_and_zero_slip() {
+        let model = binding(7.0);
+        for force in [[0.0; 2], [2.0, -3.0]] {
+            for (pressure, gradient, mu) in [(3.0, [-2.0, 0.5, 0.3], 0.0), (0.0, [0.0; 3], 0.4)] {
+                let blocks = model
+                    .natural_map_tangent(1, force, [0.0; 2], pressure, gradient, mu)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(blocks, ([[0.0; 3]; 2], [[7.0, 0.0], [0.0, 7.0]]));
+            }
+            // A smooth nonnegative pressure can leave zero quadratically. Its
+            // projected effort is second order even when its direction flips.
+            for j in 0..5 {
+                let h = 1e-7;
+                let evaluate = |sign: f64| {
+                    let mut x = [0.0; 5];
+                    x[j] = sign * h;
+                    let p = x[0] * x[0] + 2.0 * x[1] * x[1] + 3.0 * x[2] * x[2];
+                    model
+                        .residual(
+                            1,
+                            [force[0] + 7.0 * x[3], force[1] + 7.0 * x[4]],
+                            [x[1], x[2]],
+                            p,
+                            0.4,
+                        )
+                        .unwrap()
+                };
+                let a = evaluate(1.0);
+                let b = evaluate(-1.0);
+                for i in 0..2 {
+                    let expected = if j == i + 3 { 7.0 } else { 0.0 };
+                    close((a[i] - b[i]) / (2.0 * h), expected, 2e-7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disk_corners_and_unrepresentable_derivatives_leave_original_residual_unchanged() {
+        let model = binding(7.0);
+        let huge = [0.9 * f64::MAX; 2];
+        assert!(huge.iter().all(|v| v.is_finite()));
+        assert!(!huge[0].hypot(huge[1]).is_finite());
+        assert!(
+            model
+                .natural_map_tangent(1, huge, [0.0; 2], 1.0, [0.0; 3], 0.5)
+                .unwrap()
+                .is_none()
+        );
+        let before = model.residual(1, [3.0, 4.0], [0.0; 2], 10.0, 0.5).unwrap();
+        assert!(
+            model
+                .natural_map_tangent(1, [3.0, 4.0], [0.0; 2], 10.0, [1.0; 3], 0.5)
+                .unwrap()
+                .is_none()
+        );
+        for force in [[0.0; 2], [2.0, -3.0]] {
+            assert!(
+                model
+                    .natural_map_tangent(1, force, [0.0; 2], 0.0, [1.0, 0.0, 0.0], 0.4)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for gradient in [[f64::NAN, 0.0, 0.0], [0.0, f64::INFINITY, 0.0]] {
+            assert!(
+                model
+                    .natural_map_tangent(1, [2.0, 0.0], [0.0; 2], 1.0, gradient, 0.5)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            model
+                .natural_map_tangent(1, [2.0, 0.0], [0.0; 2], 1e-200, [1e200, 0.0, 0.0], 1e200)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            model
+                .natural_map_tangent(1, [2.0, 0.0], [0.0; 2], 1e-300, [0.0; 3], 1e-300)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            model.residual(1, [3.0, 4.0], [0.0; 2], 10.0, 0.5).unwrap(),
+            before
+        );
+        assert!(
+            model
+                .residual(1, [f64::NAN, 0.0], [0.0; 2], 1.0, 0.5)
+                .is_err()
+        );
+        assert!(
+            model
+                .natural_map_tangent(1, [f64::NAN, 0.0], [0.0; 2], 1.0, [0.0; 3], 0.5)
+                .is_err()
+        );
     }
 }

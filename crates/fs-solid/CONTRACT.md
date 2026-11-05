@@ -5714,8 +5714,17 @@ Its local block retains normal/shear coupling, changing damaged area and the
 transverse derivative of the saturated slip direction; zero slip in the linear
 regularization branch has its finite shear slope. These contributions share
 the same cached material block and leave the physical force and work unchanged.
-Explicitly unsupported material switches, the Huber speed corner and ideal
-Coulomb constraints retain the existing fallible numerical-difference adapter.
+Ideal Coulomb retains its independent reaction coordinates `lambda = k z`.
+The augmented action differentiates the original natural map
+`lambda - projection(lambda + k delta_g_t, mu P)` through both disk-interior
+sticking and disk-exterior sliding, including the original pressure gradient.
+Mechanical rows retain `A B_t^T d_lambda`; constraint rows retain both the
+jump and reaction-coordinate blocks. The cache keys the complete augmented
+iterate, and a changed static/kinetic coefficient starts a new solve/cache.
+Zero-coefficient bindings add no coordinates and use the exact original native
+mechanical action. No friction spring, regularization, or extra storage is added.
+Explicitly unsupported material switches, the Huber speed corner and Coulomb
+disk boundary retain the existing fallible numerical-difference adapter.
 Residuals and analytic actions/preparation attempts share the original
 operator-evaluation allowance; numerical fallback counts its actual residual
 calls. The complete physical endpoint is independently replayed before
@@ -5730,6 +5739,13 @@ inactive numerical-difference scales. Retained partial damage and physical
 viscosity retain their separate original loss accounts. This establishes the
 solver path and derivative behavior, not a wall-clock speedup or specimen
 calibration.
+
+The ideal-Coulomb regressions also require exact zero-capacity equivalence and
+static recapture after a stopping impulse, including finite-difference scales
+which would be inadmissible as physical constitutive probes. The reaction stays
+within the original static capacity with unchanged accepted damage/history and
+zero frictional heat during the held interval. Independent natural-map derivative
+checks cover pressure coupling, tangent rotation, and projection boundaries.
 
 The step reports original kinetic, bulk and cohesive endpoint energies,
 intrinsic fracture loss, physical bond-viscosity loss, optional damaged-area

@@ -6,9 +6,10 @@
 //! offsets. The material's path-mean tangent supplies native Newton/FGMRES
 //! actions, retaining damage and surviving-bond viscosity. Its local blocks are
 //! reused at each fixed iterate. Regularized damaged-area friction includes the
-//! same path's pressure/damage gradient and the vector slip derivative. Material
-//! switches and ideal Coulomb constraints retain the existing fallible
-//! directional-difference adapter.
+//! same path's pressure/damage gradient and the vector slip derivative. Ideal
+//! Coulomb includes the coupled reaction-coordinate and tangent-disk derivative.
+//! Material switches and friction projection boundaries retain the existing
+//! fallible directional-difference adapter.
 //!
 //! The original reduced mass must be symmetric positive definite and the
 //! elastic operator symmetric positive semidefinite. Both must remain pure and
