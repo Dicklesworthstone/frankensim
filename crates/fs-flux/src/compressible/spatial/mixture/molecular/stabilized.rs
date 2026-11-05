@@ -101,7 +101,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 
     /// The composing owner retains this work counter through discarded probes.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn advance_stabilized_unpublished(
+    pub(in crate::compressible::spatial::mixture) fn advance_stabilized_unpublished(
         &mut self,
         flow: &mut MixtureEuler3d,
         duration: Time,
@@ -112,11 +112,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     ) -> Result<StabilizedMolecularReport, DissipationError> {
         poll(cancelled)?;
         controls.validate()?;
-        if self.inertia.is_some() {
-            return Err(DissipationError::Invalid(
-                "stabilized molecular transport requires prescribed walls without finite inertia",
-            ));
-        }
+        self.admit_stabilized()?;
         let before = self.prepare_interval(flow, duration, maximum_workspace_bytes, cancelled)?;
         self.prepare_stabilized(flow, duration.value() > 0.0, maximum_workspace_bytes)?;
         let accepted = controller::advance(
@@ -190,7 +186,20 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         })
     }
 
-    pub(super) fn additional_stabilized_workspace_bytes(&self) -> Result<usize, DissipationError> {
+    pub(in crate::compressible::spatial::mixture) fn admit_stabilized(
+        &self,
+    ) -> Result<(), DissipationError> {
+        if self.inertia.is_some() {
+            return Err(DissipationError::Invalid(
+                "stabilized molecular transport requires prescribed walls without finite inertia",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(in crate::compressible::spatial::mixture) fn additional_stabilized_workspace_bytes(
+        &self,
+    ) -> Result<usize, DissipationError> {
         if self.stabilized.is_none() {
             Workspace::required_bytes(&self.grid, self.gas().species_count() + 4)
         } else {
@@ -198,7 +207,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         }
     }
 
-    pub(super) fn prepare_stabilized(
+    pub(in crate::compressible::spatial::mixture) fn prepare_stabilized(
         &mut self,
         flow: &MixtureEuler3d,
         needed: bool,

@@ -11,14 +11,15 @@
 use super::super::{BoundarySide, StepControl};
 use super::forcing::{self, ForcingWorkspace3d};
 use super::molecular::{
-    DissipationControl, MolecularReport, MolecularTransport3d, TransportLaw, WallAcceleration3d,
-    WallWork,
+    DissipationControl, MolecularReport, MolecularTransport3d, StabilizedDissipationControl,
+    TransportLaw, WallAcceleration3d, WallDrive3d, WallInertiaReport3d, WallWork,
 };
 use super::{BodyForce3d, ForceChange3d, ForceControl3d};
 use super::{
     BoundaryImpulse, MixtureEuler3d, StepReport, Totals, allocated, boundary_view, cell,
     checked_totals, sum_rows,
 };
+use crate::compressible::mixture::molecular::stabilized::{IntervalFailure, StepWork};
 pub use fs_gas::chemistry::IsochoricKineticsSolve;
 use fs_gas::multicomponent::MAX_SPECIES;
 use fs_gas::multicomponent::dissipation::ConstantTransport;
@@ -82,6 +83,19 @@ pub struct SplitDissipationReport3d {
     pub first: MolecularReport,
     /// Complete molecular half interval after chemistry and shock transport.
     pub second: MolecularReport,
+}
+
+/// Original complete reacting spatial interval with actual RKL2 operator work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedReactiveStepReport3d {
+    /// Accepted molecular/chemistry/advection/chemistry/molecular balances.
+    pub coupled: ReactiveStepReport3d,
+    /// Both molecular halves and every discarded complete-interval probe.
+    pub operator_evaluations: usize,
+    /// Largest stage count in the final accepted pair of molecular halves.
+    pub maximum_stages_used: usize,
+    /// Largest scaled parabolic number in the final accepted molecular halves.
+    pub maximum_scaled_parabolic_number: f64,
 }
 
 /// Atomic conservative three-dimensional reacting compressible gas.
@@ -283,6 +297,22 @@ impl ReactingEuler3d {
         self.field_workspace_bytes() + self.reactor.workspace_bytes()
     }
 
+    /// Complete current reactor, molecular buffers and unallocated RKL2 scratch.
+    /// Add supplied forcing workspace before passing the step's total byte limit.
+    /// Immutable source/provider storage retains its original exclusions.
+    pub fn required_stabilized_workspace_bytes<L: TransportLaw>(
+        &self,
+        operator: &MolecularTransport3d<L>,
+    ) -> Result<usize, ReactiveError> {
+        let extra = operator.additional_stabilized_workspace_bytes()?;
+        self.workspace_bytes()
+            .checked_add(operator.workspace_bytes())
+            .and_then(|bytes| bytes.checked_add(extra))
+            .ok_or(ReactiveError::Invalid(
+                "reacting stabilized spatial molecular workspace size overflow",
+            ))
+    }
+
     /// Last completely published reacting interval.
     pub const fn last_step(&self) -> Option<&ReactiveStepReport3d> {
         self.last_step.as_ref()
@@ -322,6 +352,7 @@ impl ReactingEuler3d {
             DissipationControl::default(),
             super::MAX_MIXTURE_WORKSPACE_BYTES,
             None,
+            None,
             &[],
             cancelled,
         )
@@ -352,6 +383,7 @@ impl ReactingEuler3d {
             dissipation_controls,
             maximum_workspace_bytes,
             None,
+            None,
             &[],
             cancelled,
         )
@@ -376,6 +408,7 @@ impl ReactingEuler3d {
             DissipationControl::default(),
             super::MAX_MIXTURE_WORKSPACE_BYTES,
             Some((force, force_controls, workspace)),
+            None,
             &[],
             cancelled,
         )
@@ -404,6 +437,7 @@ impl ReactingEuler3d {
             dissipation_controls,
             maximum_workspace_bytes,
             Some((force, force_controls, workspace)),
+            None,
             &[],
             cancelled,
         )
@@ -434,6 +468,7 @@ impl ReactingEuler3d {
             dissipation_controls,
             maximum_workspace_bytes,
             None,
+            None,
             accelerations,
             cancelled,
         )
@@ -463,9 +498,87 @@ impl ReactingEuler3d {
             dissipation_controls,
             maximum_workspace_bytes,
             Some((force, force_controls, workspace)),
+            None,
             accelerations,
             cancelled,
         )
+    }
+
+    /// Use the original RKL2 molecular halves in one complete D-C-A-C-D step.
+    /// Evolving species, source-defined Soret/Dufour coupling, heat, full stress
+    /// and optional SGS retain their original face operators. Chemistry keeps
+    /// its source model, fixed-volume integration and final temperature guard.
+    ///
+    /// The actual-evaluation budget spans both halves and all discarded
+    /// chemistry/acoustic retries. Finite wall inertia is refused before source
+    /// work; accelerating walls retain their original SSP entry points. The
+    /// physical macrostep cap remains an accuracy choice: the linear stability
+    /// extension is not a nonlinear positivity or entropy guarantee.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_stabilized_dissipation<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport3d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: StabilizedDissipationControl,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveStepReport3d, ReactiveError> {
+        let mut work = StepWork::new(dissipation_controls);
+        let coupled = self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls.transport,
+            maximum_workspace_bytes,
+            None,
+            Some(&mut work),
+            &[],
+            cancelled,
+        )?;
+        Ok(StabilizedReactiveStepReport3d {
+            coupled,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    /// Compose original body forcing with both stabilized diffusion and both
+    /// chemistry halves. Complete-owner storage includes all supplied force
+    /// scratch even for zero force. Original source, chemical and boundary work
+    /// retain separate ledgers, final Mach/acoustic admission and atomic publication.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_stabilized_dissipation_and_forcing<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport3d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: StabilizedDissipationControl,
+        maximum_workspace_bytes: usize,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveStepReport3d, ReactiveError> {
+        let mut work = StepWork::new(dissipation_controls);
+        let coupled = self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls.transport,
+            maximum_workspace_bytes,
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            &[],
+            cancelled,
+        )?;
+        Ok(StabilizedReactiveStepReport3d {
+            coupled,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -477,10 +590,21 @@ impl ReactingEuler3d {
         dissipation_controls: DissipationControl,
         maximum_workspace_bytes: usize,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        mut stabilization: Option<&mut StepWork>,
         accelerations: &[WallAcceleration3d],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport3d, ReactiveError> {
         poll(&mut cancelled)?;
+        if stabilization.is_some() {
+            if !accelerations.is_empty() {
+                return Err(ReactiveError::Invalid(
+                    "stabilized reacting transport requires constant prescribed wall velocities",
+                ));
+            }
+            if let Some(operator) = operator.as_deref() {
+                operator.admit_stabilized()?;
+            }
+        }
         let forcing_bytes = forcing
             .as_ref()
             .map_or(0, |(_, _, work)| work.workspace_bytes());
@@ -522,6 +646,24 @@ impl ReactingEuler3d {
                 "reacting duration, CFL or retry controls",
             ));
         }
+        if let (Some(operator), Some(work)) = (operator.as_deref_mut(), stabilization.as_ref()) {
+            work.controls.validate()?;
+            // Retain both fields, chemistry, complete loads and force scratch in
+            // the same byte budget while the operator reserves its RKL2 buffers.
+            let outside = bytes
+                .checked_sub(self.trial.workspace_bytes())
+                .and_then(|value| value.checked_sub(operator.workspace_bytes()))
+                .ok_or(ReactiveError::Invalid(
+                    "reacting stabilized spatial molecular workspace size overflow",
+                ))?;
+            let allowance = maximum_workspace_bytes
+                .min(super::MAX_MIXTURE_WORKSPACE_BYTES)
+                .checked_sub(outside)
+                .ok_or(ReactiveError::Invalid(
+                    "reacting stabilized spatial molecular total workspace budget",
+                ))?;
+            operator.prepare_stabilized(&self.trial, true, allowance)?;
+        }
         let n = self.accepted.gas.species_count();
         let width = n + 4;
         let before = checked_totals(
@@ -552,6 +694,9 @@ impl ReactingEuler3d {
         let wall_work = WallWork::default();
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
+            if let Some(work) = stabilization.as_deref_mut() {
+                work.reset_extrema();
+            }
             if !positive(0.5 * dt)
                 || !(self.accepted.time + dt).is_finite()
                 || !positive(self.accepted.time + dt - self.accepted.time)
@@ -568,11 +713,13 @@ impl ReactingEuler3d {
                 endpoint_walls = drive.as_ref().map(|d| d.at(dt)).transpose()?;
                 let first = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_driven_unpublished(
+                        let report = molecular_half(
+                            operator,
                             &mut self.trial,
                             Time::new(0.5 * dt),
                             dissipation_controls,
                             maximum_workspace_bytes,
+                            stabilization.as_deref_mut(),
                             drive.as_ref().map(|d| (d, 0.0)),
                             None,
                             &wall_work,
@@ -636,11 +783,13 @@ impl ReactingEuler3d {
                 let mut endpoint_rate: f64 = 0.0;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_driven_unpublished(
+                        let report = molecular_half(
+                            operator,
                             &mut self.trial,
                             Time::new(0.5 * dt),
                             dissipation_controls,
                             maximum_workspace_bytes,
+                            stabilization.as_deref_mut(),
                             // The molecular clock covers [0,h/2] then [h/2,h].
                             // Chemistry retains its original two half durations.
                             drive.as_ref().map(|d| (d, 0.5 * dt)),
@@ -761,6 +910,11 @@ impl ReactingEuler3d {
                     return Ok(report);
                 }
                 Err(ReactiveError::Cancelled) => return Err(ReactiveError::Cancelled),
+                Err(ReactiveError::Dissipation(error))
+                    if stabilization.is_some() && error.is_terminal() =>
+                {
+                    return Err(ReactiveError::Dissipation(error.step_failure(0.0, dt)));
+                }
                 Err(last) => {
                     if retry == controls.maximum_coupling_retries {
                         return Err(ReactiveError::RetryLimit {
@@ -773,6 +927,48 @@ impl ReactingEuler3d {
             }
         }
         unreachable!("bounded retries return on their last attempt")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn molecular_half<L: TransportLaw>(
+    operator: &mut MolecularTransport3d<L>,
+    flow: &mut MixtureEuler3d,
+    duration: Time,
+    controls: DissipationControl,
+    maximum_workspace_bytes: usize,
+    stabilization: Option<&mut StepWork>,
+    drive: Option<(&WallDrive3d, f64)>,
+    previous: Option<&WallInertiaReport3d>,
+    wall_work: &WallWork,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<MolecularReport, ReactiveError> {
+    match stabilization {
+        None => Ok(operator.advance_driven_unpublished(
+            flow,
+            duration,
+            controls,
+            maximum_workspace_bytes,
+            drive,
+            previous,
+            wall_work,
+            cancelled,
+        )?),
+        Some(work) => {
+            let report = operator.advance_stabilized_unpublished(
+                flow,
+                duration,
+                work.controls,
+                maximum_workspace_bytes,
+                &mut work.evaluations,
+                cancelled,
+            )?;
+            work.record(
+                report.maximum_stages_used,
+                report.maximum_scaled_parabolic_number,
+            );
+            Ok(report.transport)
+        }
     }
 }
 
