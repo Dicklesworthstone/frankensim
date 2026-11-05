@@ -9,7 +9,7 @@
     "A circular-arc undercut solved in the engine for each note, so the first partial sits at equal temperament and f2 = 3 f1. The 1:3 target is xylophone tuning practice in print, not taken from the recording",
     "A Hertz mallet from the same paper's Table I: hard rubber at 1.0 m/s on Ab4 and Eb5, boxwood at 0.474 m/s on Db5",
     "The wood's loss: the card keeps Table I's gamma_B and takes eta 3.86e-7 s (read error +-0.03e-7), which we read from their Fig. 4, alpha = 6.11 + 7.62e-6 f^2. No constant was fitted to the recording",
-    "Burton-Miller boundary-element radiation to 10 kHz on a 56 x 6 x 3 bar mesh"
+    "Burton-Miller boundary-element radiation to 7.5 kHz on a 56 x 6 x 3 bar mesh, and Db5 on 56 x 8 x 4"
   ],
   "physics_missing": [
     "A resonator: no box is in any render. In our model a box takes Ab4's first partial from -56.7 dB/s to about -142 at half the patch and -460 to -516 at the card's own rule, where Part II of the same paper says a tube has no appreciable effect on a wooden bar. So it's left out, which costs the 22 to 28 dB of early first partial a resonator gives, measured on Ab4 with an earlier mallet. We think the reason is that in this model the bar is a wall of the cavity and feels its full pressure; that hasn't been tested on its own",
