@@ -7983,3 +7983,33 @@ deformation, Piola/Cauchy stress, current/plastic volume, storage and physical
 heat. This uses the original geometry, constitutive adapter and nonlinear
 solver. It does not provide automatic retained-body stepping, contact,
 remeshing, finite-porosity densification or a locking-free mixed element.
+
+## Elastic prehistory and source-bound brittle initialization
+
+`brittle::solid::initiation::TensileElasticTetSolid` retains original per-element
+source bundles and advances their borrowed elastic backbones through the native
+P1 solver. Its accepted elastic history keeps a fixed prescribed DOF set. Every
+proposed affine endpoint is checked with the source-bound native tensile
+detector; a crossing returns a disposable elastic predictor instead of accepting
+an over-strength elastic state. Repeated principal tension requires an explicit
+physical hint. Per-element events, numerical first-crossing brackets and the
+original predictor remain inspectable, with bounded native onset work and Cx
+polling.
+
+`resolve_bands` derives each actual V/A width on the retained geometry. Predicted
+crossings select their principal planes; elements without crossings retain the
+explicit original source plane. `handoff` requires original sources, coefficients,
+strain/work bounds and matching geometry, then seeds every receiving native law
+at the OLD accepted elastic strain. Local stress/storage continuity and an
+explicit whole-solid energy gate prevent a constitutive change from creating
+work, loss or healing. Only the complete result is published; it can replay the
+requested load with the existing single-endpoint or adaptive brittle solver.
+
+This is an elastic-predictor, fixed-plane approximation. Later predicted planes
+and crossings do not incorporate stress redistribution caused by earlier
+fracture; those brackets are not accepted event times or a mesh-objective crack
+path. Resolved mixed-mode damage at the seed refuses rather than being erased.
+The new regression definitions cover physical Y-plane selection after elastic
+preload, native softening after handoff, repeated-stress hints, heterogeneous
+sources and transactional refusal/retry. New code parsed/formatted and passed
+bounded API/analytical review; compilation and runtime execution remain pending.

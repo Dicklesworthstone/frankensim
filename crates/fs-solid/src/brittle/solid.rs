@@ -8,8 +8,9 @@
 //!
 //! Ordinary mechanical endpoints keep material conditions fixed. The explicit
 //! [`temperature`] path transfers sourced coefficients and history before
-//! re-equilibrating. This owner adds no crack nucleation, rotating planes,
-//! finite kinematics, contact, inertia or limit-load tracking.
+//! re-equilibrating. The [`initiation`] path preserves elastic preload while
+//! selecting fixed planes from a sourced tensile predictor. Fixed planes do not
+//! rotate; finite kinematics, contact, inertia and limit-load tracking are absent.
 //! The caller resolves loading reversals and softening with physical endpoints.
 
 /// Checked temperature/source transfer followed by native mechanical equilibration.
@@ -17,6 +18,9 @@ pub mod temperature;
 
 /// Adaptive physical load intervals with bounded damage and endpoint-work error.
 pub mod path;
+
+/// Retained elastic prehistory and source-bound fixed-plane brittle handoff.
+pub mod initiation;
 
 use std::sync::Arc;
 
