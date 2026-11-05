@@ -1,5 +1,38 @@
 # CONTRACT: fs-couple
 
+## Oscillating axial wall ports on the original channel field
+
+`ChannelContinuousOperator::solve_harmonic_with_walls` solves the original
+tridiagonal continuous momentum equations for pressure and independent
+axial wall peak phasors under `exp(-i*omega*t)`. It retains every velocity
+cell in the planar, circular or annular gas/material channel. The solve is
+linear in cell count, uses two bounded work vectors and introduces no
+dense matrix, time step, fitted impedance or numerical heat.
+
+The response retains pressure work and both mechanical wall powers
+separately. Wall forces act on the fluid; their physical opposite acts on
+the mechanical wall. Complex wall power is `F_on_fluid*conj(U)/2`.
+Independently accumulated relative-shear heat and kinetic inventory obey
+`P_pressure + sum(P_wall) = heat - i*2*omega*mean(E)`.
+A source may recover real work. Raw real/reactive closure residuals remain
+visible, with roundoff scaled by the actual uncancelled cell and wall work.
+`observe_harmonic_with_walls` checks a coupled solver's supplied full field
+against those same original equations and accounts.
+
+A declared work bound is checked before allocation, and cancellation is
+polled throughout elimination and observation. No accepted time-domain
+field or source changes. The circular axis cannot supply a nonzero wall
+velocity. Frequency must be positive for peak-phasor cycle means, and the
+original nonlinear kinetic-head terminal refuses this linear operator.
+
+G1/G3 `channel_wall_harmonic` checks oscillatory planar Couette refinement,
+pressure-only agreement with the original observer, wall-force/work
+balance, phase and work recovery, geometry-independent ownership and
+invalid/work-budget/cancellation refusal. These are fixed-geometry,
+incompressible Newtonian laminar equations; mesh refinement remains the
+caller's accuracy control. Normal wall motion, rotation, thermal evolution
+and transition prediction are not inferred.
+
 ## Material-source resolved laminar channels
 
 `slit_channel::material::MaterialChannel<M: FluidTransport>` admits original

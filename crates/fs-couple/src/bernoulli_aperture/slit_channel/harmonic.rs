@@ -9,6 +9,9 @@
 use super::{AcousticRealizeError, invalid};
 use fs_math::c64::C64;
 
+/// Direct harmonic solves and physical ports for prescribed axial wall motion.
+pub mod walls;
+
 /// Borrowed continuous physical coefficients of the unchanged channel owner.
 /// Valid for fixed geometry, the retained coherent Newtonian fluid, and the
 /// original incompressible, fully developed, laminar reduction about rest.
