@@ -10,6 +10,8 @@
 
 /// Finite material walls sharing the original fixed-volume caloric owner.
 pub mod thermal;
+/// True-vacuum outlets with returned molecules and explicit escaped energy.
+pub mod vacuum;
 
 use super::{EffusionNetworkLink, check, face_error};
 use crate::thermochemical_gas::energy::parcel::transfer::{
