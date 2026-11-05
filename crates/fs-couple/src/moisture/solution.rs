@@ -23,6 +23,17 @@
 //! it does not supply an exactly normalized pure-water or concentrated-ion
 //! solvent chemical potential.
 //!
+//! A selected kinetic solubility owner instead evolves its actual dissolved and
+//! crystal stocks for the proposed interval, at each candidate endpoint volume.
+//! Every scalar trial restarts the original phases. Its actual endpoint activity
+//! drives the same native sorption and water-balance solve. Freezing volume at
+//! the endpoint is a first-order approximation to simultaneous water/phase
+//! evolution; scalar water-balance convergence does not control its temporal
+//! error. Existing adaptive wrappers compare moisture, solvent mass and activity,
+//! without separate per-component phase tolerances. Refine the physical interval
+//! when phase composition needs tighter resolution. Sealed fields
+//! still permit phase evolution inside the reservoir, with no solvent exchange.
+//!
 //! This is the equal-pressure, negligible-vapor-storage sorption limit. It does
 //! not turn a vapor surface coefficient into a liquid-immersion permeability,
 //! resolve an intervening vapor space, admit volatile solutes, transport ions
@@ -57,8 +68,10 @@ use fs_material::osmosis::{
     solubility::{
         FiniteSolubilityError, FiniteSolubilitySolution,
         electrolyte::{ElectrolyteSolubilityError, ElectrolyteSolubilitySolution},
+        kinetics::{KineticSolubilityError, KineticSolubilitySolution},
     },
 };
+use fs_qty::Time;
 
 /// Original thermodynamic/source/diffusion refusal; no endpoint is published.
 #[derive(Debug)]
@@ -106,6 +119,14 @@ impl From<ElectrolyteSolubilityError> for SolutionMoistureError {
         Self::Electrolyte(value)
     }
 }
+impl From<KineticSolubilityError> for SolutionMoistureError {
+    fn from(value: KineticSolubilityError) -> Self {
+        match value {
+            KineticSolubilityError::Material(error) => Self::Solubility(error),
+            KineticSolubilityError::Cancelled => Self::Moisture(MoistureError::Cancelled),
+        }
+    }
+}
 
 /// Explicit scalar work, source-domain and finite-inventory tolerances.
 #[derive(Clone, Copy, Debug)]
@@ -134,6 +155,7 @@ enum SolutionInventory {
     Dissolved(AqueousSolution),
     Solubility(FiniteSolubilitySolution),
     Electrolyte(ElectrolyteSolubilitySolution),
+    Kinetic(KineticSolubilitySolution),
 }
 
 /// Accepted native diffusion and finite-reservoir exchange over one interval.
@@ -236,6 +258,35 @@ impl FiniteMoistureSolution {
         })
     }
 
+    /// Retain the original finite-rate neutral solute owner and actual crystals.
+    /// Every water-balance trial advances these ORIGINAL phases for the full
+    /// proposed interval at that trial's endpoint solvent volume. The same
+    /// conductances and declared growth surfaces apply; supersaturation alone
+    /// creates no nuclei. Only actual dissolved particles affect water activity.
+    ///
+    /// This frozen endpoint-volume approximation is first order in time. The
+    /// existing adaptive wrappers control moisture, solvent mass and activity,
+    /// not each component's phase error independently. Temperature stays prescribed;
+    /// no phase heat, solute transport into specimens or crystal water is added.
+    pub fn with_kinetic_solubility(
+        solution: KineticSolubilitySolution,
+        solvent_molar_mass_kg_mol: f64,
+    ) -> Result<Self, SolutionMoistureError> {
+        let density = solvent_molar_mass_kg_mol / solution.solution().solvent_molar_volume_m3_mol();
+        let mass = solution.solution().solvent_volume_m3() * density;
+        if !positive(solvent_molar_mass_kg_mol) || !positive(density) || !positive(mass) {
+            return Err(SolutionMoistureError::Invalid(
+                "finite positive solvent molar mass, density and water inventory required",
+            ));
+        }
+        solution.solution().water_activity()?;
+        Ok(Self {
+            inventory: SolutionInventory::Kinetic(solution),
+            solvent_molar_mass_kg_mol,
+            solvent_density_kg_m3: density,
+        })
+    }
+
     /// Retain source-backed pH, acid/base families, common ions and a finite
     /// anhydrous salt while the existing specimens exchange only solvent.
     /// Every candidate volume reuses the same chemical sources, analytical
@@ -278,19 +329,22 @@ impl FiniteMoistureSolution {
     }
 
     /// Shared thermodynamics of the DISSOLVED amounts. With finite phases,
-    /// use [`Self::solubility`] or [`Self::electrolyte_solubility`] for conserved
-    /// analytical totals and original solid stocks.
+    /// use [`Self::solubility`], [`Self::kinetic_solubility`] or
+    /// [`Self::electrolyte_solubility`] for conserved totals and original solids.
     pub const fn solution(&self) -> &AqueousSolution {
         match &self.inventory {
             SolutionInventory::Dissolved(solution) => solution,
             SolutionInventory::Solubility(solution) => solution.solution(),
             SolutionInventory::Electrolyte(solution) => solution.solution(),
+            SolutionInventory::Kinetic(solution) => solution.solution(),
         }
     }
     /// Original finite solubility owner, if explicitly selected by the caller.
     pub const fn solubility(&self) -> Option<&FiniteSolubilitySolution> {
         match &self.inventory {
-            SolutionInventory::Dissolved(_) | SolutionInventory::Electrolyte(_) => None,
+            SolutionInventory::Dissolved(_)
+            | SolutionInventory::Electrolyte(_)
+            | SolutionInventory::Kinetic(_) => None,
             SolutionInventory::Solubility(solution) => Some(solution),
         }
     }
@@ -298,7 +352,19 @@ impl FiniteMoistureSolution {
     pub const fn electrolyte_solubility(&self) -> Option<&ElectrolyteSolubilitySolution> {
         match &self.inventory {
             SolutionInventory::Electrolyte(solution) => Some(solution),
-            SolutionInventory::Dissolved(_) | SolutionInventory::Solubility(_) => None,
+            SolutionInventory::Dissolved(_)
+            | SolutionInventory::Solubility(_)
+            | SolutionInventory::Kinetic(_) => None,
+        }
+    }
+    /// Actual dissolved/crystal stocks, original rates and final phase receipts.
+    /// The separate equilibrium targets in those receipts are diagnostic only.
+    pub const fn kinetic_solubility(&self) -> Option<&KineticSolubilitySolution> {
+        match &self.inventory {
+            SolutionInventory::Kinetic(solution) => Some(solution),
+            SolutionInventory::Dissolved(_)
+            | SolutionInventory::Solubility(_)
+            | SolutionInventory::Electrolyte(_) => None,
         }
     }
     /// Explicit solvent molar mass [kg/mol].
@@ -310,9 +376,10 @@ impl FiniteMoistureSolution {
         self.solution().solvent_volume_m3() * self.solvent_density_kg_m3
     }
 
-    fn with_solvent_volume_m3(
+    fn at_endpoint_volume(
         &self,
         volume: f64,
+        dt_s: f64,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, SolutionMoistureError> {
         let inventory = match &self.inventory {
@@ -325,6 +392,13 @@ impl FiniteMoistureSolution {
             SolutionInventory::Electrolyte(solution) => SolutionInventory::Electrolyte(
                 solution.with_solvent_volume_m3_cancelled(volume, cancelled)?,
             ),
+            SolutionInventory::Kinetic(solution) => {
+                // Changing volume preserves both actual phases. Always start
+                // from `self`, never from a previously rejected scalar trial.
+                let mut candidate = solution.with_solvent_volume_m3(volume)?;
+                candidate.advance(Time::new(dt_s), cancelled)?;
+                SolutionInventory::Kinetic(candidate)
+            }
         };
         let mass = volume * self.solvent_density_kg_m3;
         if !positive(mass) {

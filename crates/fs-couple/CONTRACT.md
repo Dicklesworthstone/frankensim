@@ -25426,6 +25426,41 @@ failed-solve immutability. This opt-in route has the original material law's
 independent neutral-solute, instantaneous-equilibrium scope; it does not claim
 electrolyte solubility, crystal-water transport or dissolution heat feedback.
 
+### Finite-rate crystal stocks in the native solution/moisture bridge
+
+`FiniteMoistureSolution::with_kinetic_solubility` retains the original
+`KineticSolubilitySolution`, its conductances and growth-surface policies.
+At each candidate endpoint solvent volume, the material first preserves both
+actual phases and then advances them for the proposed physical interval.
+The resulting dissolved-particle activity drives the existing source queries,
+native diffusion fields and shared scalar water balance. Every rejected root
+trial restarts the original phases; no trial can cumulatively dissolve the bath.
+
+The existing pure-solvent shortcut is disabled for kinetic inventories:
+zero initially dissolved material with a positive crystal stock can acquire
+solute and change activity during the interval. Sealed specimens still permit
+internal solution phase evolution at fixed solvent volume. Nonvolatile solute
+and crystals remain in the reservoir; no crystal-bound water or chemical
+solvent production is introduced. Accepted endpoints retain identical original
+kinetic sources and component totals, with an explicit dissolved-plus-solid
+balance before publication. Cancellation maps to the native moisture refusal
+and leaves both the reservoir and every specimen unchanged.
+
+Single slabs, Cartesian fields and shared collections reuse the same original
+endpoint controller. Freezing reservoir volume at the endpoint is a first-order
+approximation to the continuously coupled phase/water trajectory. Root
+convergence enforces water conservation, not temporal accuracy. Existing
+adaptive wrappers compare moisture, solvent mass and activity, without separate
+per-component phase tolerances; phase composition may require a finer physical
+interval. Temperature remains prescribed, with no phase heat feedback or solute
+transport into specimens. This does not add a second diffusion integrator.
+
+Five focused regressions exercise a manufactured initially-undissolved
+dissolution/uptake endpoint, a closed transfer surface, exact sealed-volume
+kinetics and continuation, seeded/unseeded growth, original Cartesian/shared
+field updates with opposing water transfers and stable reordering, and rejected
+roots/work/cancellation preserving original inventories.
+
 ### Simultaneous specimens sharing one finite solution
 
 `FiniteMoistureSolution::advance_shared` and `advance_shared_cartesian` couple

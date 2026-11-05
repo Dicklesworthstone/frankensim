@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 #[path = "solution/electrolyte.rs"]
 mod electrolyte;
+#[path = "solution/kinetics.rs"]
+mod kinetics;
 #[path = "solution/shared.rs"]
 mod shared;
 

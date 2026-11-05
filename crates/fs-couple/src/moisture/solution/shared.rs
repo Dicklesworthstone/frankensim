@@ -188,7 +188,7 @@ impl FiniteMoistureSolution {
         }
         let evaluate = |volume: f64| -> Result<Trial<F, F::Report>, SolutionMoistureError> {
             poll(cx)?;
-            let reservoir = self.with_solvent_volume_m3(volume, || cx.checkpoint().is_err())?;
+            let reservoir = self.at_endpoint_volume(volume, dt_s, || cx.checkpoint().is_err())?;
             let activity = reservoir.solution().water_activity()?;
             let mut solids = Vec::with_capacity(ordered.len());
             for body in &ordered {
@@ -242,13 +242,16 @@ impl FiniteMoistureSolution {
                 residual_kg: start.residual_kg,
                 tolerance_kg: controls.mass_tolerance_kg,
             });
-        } else if self
-            .solution()
-            .solute_moles()
-            .iter()
-            .all(|&amount| amount == 0.0)
+        } else if self.kinetic_solubility().is_none()
+            && self
+                .solution()
+                .solute_moles()
+                .iter()
+                .all(|&amount| amount == 0.0)
         {
             // Pure-solvent activity is exactly one at every positive volume.
+            // Initially undissolved kinetic stocks do not satisfy this premise:
+            // their phase evolution changes activity during the interval.
             // Every native field is already correct; only one finite external
             // inventory moves by the sum of actual local exchanges.
             let volume = initial_volume - start.water_to_solids_kg / self.solvent_density_kg_m3;
@@ -263,7 +266,7 @@ impl FiniteMoistureSolution {
                 });
             }
             Trial {
-                reservoir: self.with_solvent_volume_m3(volume, || cx.checkpoint().is_err())?,
+                reservoir: self.at_endpoint_volume(volume, dt_s, || cx.checkpoint().is_err())?,
                 residual_kg: (volume - initial_volume) * self.solvent_density_kg_m3
                     + start.water_to_solids_kg,
                 ..start
@@ -350,6 +353,35 @@ impl FiniteMoistureSolution {
                 {
                     return Err(SolutionMoistureError::Invalid(
                         "dissolved plus solid solute failed its original component balance",
+                    ));
+                }
+            }
+        }
+        if let Some(initial) = self.kinetic_solubility() {
+            let endpoint = reservoir
+                .kinetic_solubility()
+                .ok_or(SolutionMoistureError::Invalid(
+                    "kinetic phase inventories were not retained by the moisture candidate",
+                ))?;
+            if initial.models() != endpoint.models()
+                || initial.last_steps().len() != endpoint.last_steps().len()
+            {
+                return Err(SolutionMoistureError::Invalid(
+                    "kinetic source laws or component layout changed during moisture exchange",
+                ));
+            }
+            for (before, after) in initial.last_steps().iter().zip(endpoint.last_steps()) {
+                poll(cx)?;
+                let total = before.state().total_solute().value();
+                let phase = after.state();
+                let residual =
+                    water_sum([phase.dissolved().value(), phase.solid().value(), -total]);
+                if phase.total_solute() != before.state().total_solute()
+                    || !residual.is_finite()
+                    || residual.abs() > 8.0 * f64::EPSILON * total
+                {
+                    return Err(SolutionMoistureError::Invalid(
+                        "kinetic dissolved plus solid solute failed its original component balance",
                     ));
                 }
             }
