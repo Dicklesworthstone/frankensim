@@ -162,9 +162,18 @@ impl Reservoirs {
     }
 
     pub(super) fn primitive_face(&self, side: BoundarySide, face: usize) -> Option<Primitive> {
+        self.primitive_face_at(side, face, false)
+    }
+
+    pub(super) fn primitive_face_at(
+        &self,
+        side: BoundarySide,
+        face: usize,
+        trial_profiles: bool,
+    ) -> Option<Primitive> {
         self.profiles
             .as_ref()
-            .and_then(|profile| profile.primitive(side, face))
+            .and_then(|profile| profile.primitive_at(side, face, trial_profiles))
             .or_else(|| {
                 self.slots[side_index(side.axis(), side.sign())].map(|index| self.primitive[index])
             })

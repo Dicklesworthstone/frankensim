@@ -5958,3 +5958,64 @@ nonreflecting boundaries, wall laws or experimental material data. These APIs
 do not implicitly retime reacting chemistry, body-force compositions or an
 evolving stochastic-source owner; a separately admitted replayable source
 adapter must supply those observations.
+
+
+
+## Stage-time molecular reservoirs for native volumetric mixtures
+
+The explicit `spatial::mixture::molecular::MolecularTransport3d` methods
+`advance_with_reservoir_profiles` and
+`advance_stabilized_with_reservoir_profiles` sample complete prescribed
+reservoir histories inside the original molecular stages. `physical_start`
+supplies absolute seconds because this standalone operator leaves the Euler
+clock unchanged. SSP uses each actual substep start and endpoint, including
+shortened retries. RKL2 uses the original Legendre recurrence abscissae and
+qualifies the accepted endpoint with an additional source evaluation.
+
+The original Maxwell--Stefan face owner, source calorics, every partial
+enthalpy, Fourier heat, full Newtonian stress and prescribed-bath work remain
+authoritative. One bank selection reaches both mirrored velocity ghosts and
+tangential reservoir derivatives, so any admitted SGS model sees consistent
+stage gradients. The existing externally maintained reservoir SGS flux remains
+zero. Native conservative divergence and signed boundary quadrature are
+unchanged; there is no additional viscous-heating source or species clipping.
+
+The composing `MolecularEuler3d` methods `step_with_reservoir_profiles` and
+`step_stabilized_with_reservoir_profiles` use physical intervals
+`[t,t+h/2]`, `[t,t+h]`, and `[t+h/2,t+h]` for first molecular half, Euler, and
+second molecular half respectively. Phase clocks retain the original origin
+and offsets, with explicit canonical phase endpoints. Consequently the final
+profile timestamp is the accepted `t+h` bit pattern even when separately
+adding two rounded half-step origins would exceed that endpoint. No provider
+query is clipped or widened to conceal an out-of-range stochastic sample.
+
+One existing reservoir-stage context counts every supplied face across initial
+interval selection, all molecular substeps and recurrence stages, both split
+halves, Euler stages, and rejected complete intervals. Sampling budget, provider
+and exterior-profile source-admission failures terminate immediately. Original
+numerical trial failures retain their native retry policy. RKL2's independent
+operator-evaluation budget continues to cover both halves and discarded probes.
+Providers must be pure and replayable at absolute time; mutable closure access
+is for observation scratch, not advancing external inventory or randomness.
+
+Prepared active/trial profile banks are reused without new numerical arrays.
+The ordinary opt-in RKL buffers retain their existing preparation budget.
+Standalone success publishes endpoint profiles with cells, molecular report
+and molecular loads; complete split success also publishes the clock, Euler
+report and all composed loads. Refusal or final cancellation preserves these
+accepted values. Each complete retry restores the trial active profiles from
+the accepted bank, including a subsequent ordinary held step after a failed
+time-dependent call. Prepare reservoir topology before constructing the
+composed owner. Ordinary held methods retain their existing semantics.
+
+Eight focused native tests cover held-operator parity with variable calorics;
+second-order sinusoidal species and heat reservoirs against exact one-cell
+solutions in SSP and RKL2; original diffusive enthalpy transfer and energy
+conservation; multistage Legendre sample times; physical Strang timing and
+canonical endpoint bits; cumulative work through outer retries; terminal late
+provider, source and budget failures; and final cancellation with complete
+rollback and replay. Finite wall inertia is refused before provider work.
+These new APIs do not add time-dependent reactive, adaptive, finite-inertia,
+body-forcing or wall-acceleration compositions. Smooth prescribed-data order
+and native conservation do not establish nonlinear RKL stability, a turbulent
+spectrum, nonreflecting inflow or experimental validation.

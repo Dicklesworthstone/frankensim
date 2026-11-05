@@ -1,5 +1,6 @@
 use super::super::{
-    BodyForce3d, Error, ForceChange3d, ForceControl3d, ForcingWorkspace3d, StepReport, forcing,
+    BodyForce3d, Error, ForceChange3d, ForceControl3d, ForcingWorkspace3d, ReservoirFaceState,
+    StepReport, forcing, reservoir_stages::Context,
 };
 use super::*;
 use crate::compressible::mixture::molecular::stabilized::{IntervalFailure, StepWork};
@@ -237,7 +238,86 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         controls: MolecularStepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
-        self.step_impl(maximum_duration, controls, None, None, &[], cancelled)
+        self.step_impl(maximum_duration, controls, None, None, &[], None, cancelled)
+    }
+
+    /// Advance the complete split with prescribed reservoir histories.
+    ///
+    /// Molecular halves sample physical intervals `[t,t+dt/2]` and
+    /// `[t+dt/2,t+dt]`; the central Euler stages sample `[t,t+dt]`. Every
+    /// numerical retry replays the same immutable provider at its actual stage
+    /// times. One face-evaluation budget covers initial admission, both halves,
+    /// advection and all discarded outer attempts. Provider/source refusals and
+    /// budget exhaustion are terminal. The callback must fill every canonical
+    /// species and be pure and replayable; mutable access is observation scratch.
+    ///
+    /// Existing prepared profile banks and original molecular physics are
+    /// reused. Cells, clock, endpoint profiles, reports and all boundary loads
+    /// publish only with a completely accepted split. Smooth prescribed data
+    /// retain the constituent second-order timing; discontinuities require
+    /// caller-chosen physical steps. Finite wall inertia is explicitly refused.
+    pub fn step_with_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(
+            f64,
+            BoundarySide,
+            usize,
+            [f64; 3],
+            &mut [f64],
+        ) -> Result<ReservoirFaceState, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, DissipationError> {
+        let mut context = Context::new(&mut sample, maximum_face_evaluations);
+        self.step_impl(
+            maximum_duration,
+            controls,
+            None,
+            None,
+            &[],
+            Some(&mut context),
+            cancelled,
+        )
+    }
+
+    /// The same physical split with native RKL2 molecular stage abscissae.
+    ///
+    /// The provider budget spans both molecular halves and the full Euler
+    /// stage sequence; the RKL operator budget independently counts every
+    /// molecular residual, including endpoint admission and discarded probes.
+    pub fn step_stabilized_with_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: StabilizedMolecularStepControl,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(
+            f64,
+            BoundarySide,
+            usize,
+            [f64; 3],
+            &mut [f64],
+        ) -> Result<ReservoirFaceState, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, DissipationError> {
+        let mut context = Context::new(&mut sample, maximum_face_evaluations);
+        let mut work = StepWork::new(controls.molecular);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls.split(),
+            None,
+            Some(&mut work),
+            &[],
+            Some(&mut context),
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
     }
 
     /// Drive the same original three-dimensional split with held acceleration or
@@ -258,6 +338,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             Some((force, force_controls, workspace)),
             None,
             &[],
+            None,
             cancelled,
         )
     }
@@ -278,6 +359,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             None,
             None,
             accelerations,
+            None,
             cancelled,
         )
     }
@@ -301,6 +383,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             Some((force, force_controls, workspace)),
             None,
             accelerations,
+            None,
             cancelled,
         )
     }
@@ -328,6 +411,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             None,
             Some(&mut work),
             &[],
+            None,
             cancelled,
         )?;
         Ok(StabilizedMolecularStepReport3d {
@@ -358,6 +442,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             Some((force, force_controls, workspace)),
             Some(&mut work),
             &[],
+            None,
             cancelled,
         )?;
         Ok(StabilizedMolecularStepReport3d {
@@ -377,10 +462,11 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         drive: Option<(&WallDrive3d, f64)>,
         previous: Option<&WallInertiaReport3d>,
         wall_work: &WallWork,
+        profiles: Option<(&mut Context<'_>, timed::Clock)>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularReport, DissipationError> {
         match stabilization {
-            None => self.molecular.advance_driven_unpublished(
+            None => self.molecular.advance_driven_with_profiles_unpublished(
                 &mut self.trial,
                 duration,
                 controls,
@@ -388,17 +474,21 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 drive,
                 previous,
                 wall_work,
+                profiles,
                 cancelled,
             ),
             Some(work) => {
-                let report = self.molecular.advance_stabilized_unpublished(
-                    &mut self.trial,
-                    duration,
-                    work.controls,
-                    self.maximum_workspace_bytes,
-                    &mut work.evaluations,
-                    cancelled,
-                )?;
+                let report = self
+                    .molecular
+                    .advance_stabilized_with_profiles_unpublished(
+                        &mut self.trial,
+                        duration,
+                        work.controls,
+                        self.maximum_workspace_bytes,
+                        &mut work.evaluations,
+                        profiles,
+                        cancelled,
+                    )?;
                 work.record(
                     report.maximum_stages_used,
                     report.maximum_scaled_parabolic_number,
@@ -416,9 +506,23 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         mut forcing: Option<forcing::Context<'_, '_>>,
         mut stabilization: Option<&mut StepWork>,
         accelerations: &[WallAcceleration3d],
+        mut profiles: Option<&mut Context<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
         poll(&mut cancelled)?;
+        if profiles.is_some() {
+            timed::admit(
+                &self.accepted,
+                timed::Clock::direct(self.accepted.time, maximum_duration.value()),
+                maximum_duration.value(),
+                self.molecular.inertia.is_some(),
+            )?;
+            if forcing.is_some() || !accelerations.is_empty() {
+                return Err(DissipationError::Invalid(
+                    "time-resolved molecular reservoirs do not compose forcing or wall acceleration",
+                ));
+            }
+        }
         if stabilization.is_some()
             && (self.molecular.inertia.is_some() || !accelerations.is_empty())
         {
@@ -497,6 +601,20 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             }
             rate = rate.max(forcing::acoustic_rate(p, &self.accepted.grid)?);
         }
+        if let Some(context) = profiles.as_deref_mut() {
+            context.sample_at(
+                self.accepted.time,
+                &self.accepted.gas,
+                &self.accepted.grid,
+                &mut self.trial.reservoirs,
+                &mut cancelled,
+            )?;
+            rate = rate.max(
+                self.trial
+                    .reservoirs
+                    .maximum_rate_at(&self.accepted.grid, true),
+            );
+        }
         // Evolved source stages and faces remain authoritative; this initial
         // headroom avoids a predictably excessive first molecular interval.
         let mut dt = maximum_duration
@@ -530,6 +648,16 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     drive.as_ref().map(|d| (d, 0.0)),
                     None,
                     &wall_work,
+                    profiles.as_deref_mut().map(|context| {
+                        (
+                            context,
+                            timed::Clock {
+                                origin_s: self.accepted.time,
+                                phase_start_s: 0.0,
+                                phase_end_s: 0.5 * dt,
+                            },
+                        )
+                    }),
                     &mut cancelled,
                 )?;
                 copy_values(
@@ -539,7 +667,16 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 )?;
                 // Admit the immutable source/context once at the outer owner,
                 // preserving native stage checks inside the original Euler step.
-                let advection = if let Some((force, control, workspace)) = forcing.as_mut() {
+                let advection = if let Some(context) = profiles.as_deref_mut() {
+                    self.trial.step_impl_with_contact(
+                        Time::new(dt),
+                        controls.advection,
+                        None,
+                        None,
+                        Some(context),
+                        &mut cancelled,
+                    )?
+                } else if let Some((force, control, workspace)) = forcing.as_mut() {
                     self.trial.step_impl(
                         Time::new(dt),
                         controls.advection,
@@ -570,6 +707,16 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     drive.as_ref().map(|d| (d, 0.5 * dt)),
                     first.wall_inertia.as_ref(),
                     &wall_work,
+                    profiles.as_deref_mut().map(|context| {
+                        (
+                            context,
+                            timed::Clock {
+                                origin_s: self.accepted.time,
+                                phase_start_s: 0.5 * dt,
+                                phase_end_s: dt,
+                            },
+                        )
+                    }),
                     &mut cancelled,
                 )?;
                 add_impulses(
@@ -633,6 +780,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     return Ok(report);
                 }
                 Err(DissipationError::Cancelled) => return Err(DissipationError::Cancelled),
+                Err(error) if profiles.as_ref().is_some_and(|context| context.failed()) => {
+                    return Err(error);
+                }
                 Err(error) if stabilization.is_some() && error.is_terminal() => {
                     return Err(error.step_failure(0.0, dt));
                 }
@@ -662,6 +812,15 @@ fn copy_physical(
         &mut target.boundary_impulses,
         cancelled,
     )?;
+    match (&source.reservoirs.profiles, &mut target.reservoirs.profiles) {
+        (Some(source), Some(target)) => target.copy_active_from(source, cancelled)?,
+        (None, None) => {}
+        _ => {
+            return Err(DissipationError::Invalid(
+                "coupled mixture reservoir profile layout differs",
+            ));
+        }
+    }
     target.time = source.time;
     target.last_step = source.last_step;
     Ok(())

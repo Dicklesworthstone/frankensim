@@ -3,6 +3,7 @@ use super::*;
 mod adaptive;
 mod coupled;
 mod reservoir;
+mod reservoir_stages;
 mod stabilized;
 use crate::compressible::mixture::molecular::{MolecularTransport2d, PlanarTransport};
 use crate::compressible::spatial::mixture::molecular::{

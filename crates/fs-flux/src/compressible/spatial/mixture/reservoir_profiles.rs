@@ -263,7 +263,21 @@ impl Profiles {
     }
 
     pub(super) fn primitive(&self, side: BoundarySide, face: usize) -> Option<Primitive> {
-        self.index(side, face).map(|index| self.primitive[index])
+        self.primitive_at(side, face, false)
+    }
+
+    pub(super) fn primitive_at(
+        &self,
+        side: BoundarySide,
+        face: usize,
+        trial: bool,
+    ) -> Option<Primitive> {
+        let values = if trial {
+            &self.trial_primitive
+        } else {
+            &self.primitive
+        };
+        self.index(side, face).map(|index| values[index])
     }
 
     pub(super) fn maximum_rate(&self, trial: bool) -> f64 {
@@ -379,6 +393,27 @@ impl Profiles {
             cancelled,
         )?;
         self.trial_rate = source.trial_rate;
+        Ok(())
+    }
+
+    /// Restore a composing owner's private active bank before a new attempt.
+    /// The accepted owner and its candidate bank are never touched.
+    pub(super) fn copy_active_from(
+        &mut self,
+        source: &Self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        if self.slots != source.slots
+            || self.rows.len() != source.rows.len()
+            || self.primitive.len() != source.primitive.len()
+        {
+            return Err(Error::Invalid(
+                "coupled mixture reservoir profile layout differs",
+            ));
+        }
+        copy_values(&source.rows, &mut self.rows, cancelled)?;
+        copy_primitives(&source.primitive, &mut self.primitive, cancelled)?;
+        self.rate = source.rate;
         Ok(())
     }
 }

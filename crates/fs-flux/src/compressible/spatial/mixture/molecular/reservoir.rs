@@ -2,6 +2,39 @@
 
 use super::*;
 
+/// One explicit bank selection shared by velocity gradients and face physics.
+#[derive(Clone, Copy)]
+pub(super) struct View<'a> {
+    pub(super) reservoirs: &'a Reservoirs,
+    pub(super) trial: bool,
+}
+
+impl<'a> From<&'a Reservoirs> for View<'a> {
+    fn from(reservoirs: &'a Reservoirs) -> Self {
+        Self {
+            reservoirs,
+            trial: false,
+        }
+    }
+}
+
+impl<'a> View<'a> {
+    fn primitive_face(&self, side: BoundarySide, face: usize) -> Option<Primitive> {
+        self.reservoirs.primitive_face_at(side, face, self.trial)
+    }
+
+    pub(super) fn normal_face(
+        self,
+        axis: usize,
+        sign: f64,
+        face: usize,
+        species: usize,
+    ) -> Option<SpatialPrimitive<'a>> {
+        self.reservoirs
+            .normal_face_at(axis, sign, face, species, self.trial)
+    }
+}
+
 pub(super) fn admit(
     boundaries: Boundaries3d,
     reservoirs: &Reservoirs,
@@ -32,7 +65,7 @@ pub(super) fn face_index(grid: &CartesianGrid, cell: usize, axis: usize) -> usiz
 pub(super) fn velocity_neighbour(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &Reservoirs,
+    reservoirs: View<'_>,
     primitive: &[Primitive],
     cell: usize,
     axis: usize,
@@ -78,7 +111,7 @@ pub(super) fn velocity_neighbour(
 pub(super) fn tangential_gradient(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &Reservoirs,
+    reservoirs: View<'_>,
     side: BoundarySide,
     cell: usize,
     interior_gradient: &[[f64; 3]; 3],

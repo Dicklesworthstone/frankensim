@@ -5,6 +5,7 @@
 //! attempt bounds and accepted-stage extrema. A refused call never publishes an
 //! owner; successful trials may replace only the caller's private scratch.
 
+use super::stabilized::IntervalFailure;
 use fs_gas::multicomponent::dissipation::{
     DissipationControl, DissipationError, TransportFaceReport,
 };
@@ -55,19 +56,19 @@ pub(in crate::compressible) struct Interval {
     pub maximum_mass_frame_residual_kg_m2_s: f64,
 }
 
-pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
+pub(in crate::compressible) fn advance<C: FnMut() -> bool, E: IntervalFailure>(
     duration: f64,
     controls: DissipationControl,
     cancelled: &mut C,
     // The callback receives the exact accepted substep start, unchanged on retries.
-    mut evaluate: impl FnMut(Action, f64, &mut C) -> Result<Stage, DissipationError>,
-) -> Result<Interval, DissipationError> {
+    mut evaluate: impl FnMut(Action, f64, &mut C) -> Result<Stage, E>,
+) -> Result<Interval, E> {
     poll(cancelled)?;
     controls.validate()?;
     if !duration.is_finite() || duration < 0.0 {
-        return Err(DissipationError::Invalid(
-            "nonnegative finite molecular duration required",
-        ));
+        return Err(
+            DissipationError::Invalid("nonnegative finite molecular duration required").into(),
+        );
     }
     let mut result = Interval::default();
     while result.elapsed < duration {
@@ -75,9 +76,7 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
         work_limit(result, controls.maximum_steps)?;
         let first = evaluate(Action::First, result.elapsed, cancelled)?;
         if !first.rate.is_finite() || first.rate < 0.0 {
-            return Err(DissipationError::Invalid(
-                "molecular parabolic scale overflow",
-            ));
+            return Err(DissipationError::Invalid("molecular parabolic scale overflow").into());
         }
         let remaining = duration - result.elapsed;
         let mut dt = remaining.min(controls.maximum_step_s);
@@ -92,9 +91,7 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
                 || result.elapsed + dt <= result.elapsed
                 || (dt < controls.minimum_step_s && dt != remaining)
             {
-                return Err(DissipationError::Invalid(
-                    "unrepresentable molecular substep",
-                ));
+                return Err(DissipationError::Invalid("unrepresentable molecular substep").into());
             }
             match evaluate(
                 Action::Trial {
@@ -122,15 +119,11 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
                     result.accepted_steps += 1;
                     break;
                 }
-                Err(DissipationError::Cancelled) => return Err(DissipationError::Cancelled),
+                Err(error) if error.is_terminal() => return Err(error),
                 Err(error) => {
                     result.rejected_steps += 1;
                     if halving == controls.maximum_halvings || dt * 0.5 < controls.minimum_step_s {
-                        return Err(DissipationError::StepFailure {
-                            elapsed_time_s: result.elapsed,
-                            step_s: dt,
-                            last: Box::new(error),
-                        });
+                        return Err(error.step_failure(result.elapsed, dt));
                     }
                     dt *= 0.5;
                 }

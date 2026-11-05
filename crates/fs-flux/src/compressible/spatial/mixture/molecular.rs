@@ -28,6 +28,7 @@ mod driving;
 mod inertia;
 mod reservoir;
 mod stabilized;
+mod timed;
 pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
 pub use coupled::{
     MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, StabilizedMolecularStepControl,
@@ -455,9 +456,48 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         wall_work: &WallWork,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularReport, DissipationError> {
+        self.advance_driven_with_profiles_unpublished(
+            flow,
+            duration,
+            controls,
+            maximum_workspace_bytes,
+            drive,
+            previous,
+            wall_work,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_driven_with_profiles_unpublished(
+        &mut self,
+        flow: &mut MixtureEuler3d,
+        duration: Time,
+        controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        drive: Option<(&WallDrive3d, f64)>,
+        previous: Option<&WallInertiaReport3d>,
+        wall_work: &WallWork,
+        profiles: Option<(&mut super::reservoir_stages::Context<'_>, timed::Clock)>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularReport, DissipationError> {
         poll(cancelled)?;
         controls.validate()?;
+        if let Some((_, clock)) = profiles.as_ref() {
+            timed::admit(flow, *clock, duration.value(), self.inertia.is_some())?;
+        }
+        let timed = profiles.is_some();
         let before = self.prepare_interval(flow, duration, maximum_workspace_bytes, cancelled)?;
+        let mut reservoirs = match profiles {
+            Some((context, clock)) => timed::Sampling::Timed {
+                reservoirs: &mut flow.reservoirs,
+                context,
+                clock,
+                duration: duration.value(),
+            },
+            None => timed::Sampling::Held(&flow.reservoirs),
+        };
         let mut current_walls = self.walls;
         if let Some(previous) = previous {
             previous.apply(&mut current_walls);
@@ -470,85 +510,100 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             controls,
             cancelled,
             |action, elapsed, cancelled| {
-                let (stage, endpoint, exchange) = match action {
-                    Action::First => {
-                        let walls = self.stage_walls(drive, elapsed, Some(&current_walls))?;
-                        wall_work.field(self.inertia)?;
-                        return spatial(
-                            &mut self.source,
-                            &self.grid,
-                            self.boundaries,
-                            &flow.reservoirs,
-                            &walls,
-                            &self.work.current,
-                            &mut self.work.primitive,
-                            &mut self.work.gradient,
-                            &mut self.work.flux,
-                            #[cfg(feature = "experimental-sgs")]
-                            self.sgs.as_mut(),
-                            controls,
-                            cancelled,
-                        );
-                    }
-                    Action::Trial { dt, first, cached } => {
-                        wall_work.trial(self.inertia)?;
-                        if self.inertia.is_some() {
-                            self.solve_wall_trial(
-                                &flow.reservoirs,
-                                dt,
+                let result = (|| -> Result<Stage, DissipationError> {
+                    let (stage, endpoint, exchange) = match action {
+                        Action::First => {
+                            let walls = self.stage_walls(drive, elapsed, Some(&current_walls))?;
+                            wall_work.field(self.inertia)?;
+                            let trace =
+                                reservoirs.at(self.source.gas(), &self.grid, elapsed, cancelled)?;
+                            return spatial(
+                                &mut self.source,
+                                &self.grid,
+                                self.boundaries,
+                                trace,
+                                &walls,
+                                &self.work.current,
+                                &mut self.work.primitive,
+                                &mut self.work.gradient,
+                                &mut self.work.flux,
+                                #[cfg(feature = "experimental-sgs")]
+                                self.sgs.as_mut(),
                                 controls,
-                                drive,
-                                elapsed,
-                                &current_walls,
-                                wall_work,
                                 cancelled,
-                            )?
-                        } else {
-                            let stage = self.ssp_trial(
-                                &flow.reservoirs,
-                                dt,
-                                controls,
-                                drive,
-                                elapsed,
-                                None,
-                                cached.then_some(first),
-                                wall_work,
-                                cancelled,
-                            )?;
-                            (stage, current_walls, [0.0; 6])
+                            );
                         }
+                        Action::Trial { dt, first, cached } => {
+                            wall_work.trial(self.inertia)?;
+                            if self.inertia.is_some() {
+                                self.solve_wall_trial(
+                                    reservoirs.active(),
+                                    dt,
+                                    controls,
+                                    drive,
+                                    elapsed,
+                                    &current_walls,
+                                    wall_work,
+                                    cancelled,
+                                )?
+                            } else {
+                                let stage = self.ssp_trial_sampled(
+                                    &mut reservoirs,
+                                    dt,
+                                    controls,
+                                    drive,
+                                    elapsed,
+                                    None,
+                                    cached.then_some(first),
+                                    wall_work,
+                                    cancelled,
+                                )?;
+                                (stage, current_walls, [0.0; 6])
+                            }
+                        }
+                    };
+                    for (index, ((total, correction), change)) in self
+                        .work
+                        .boundary_trial
+                        .iter_mut()
+                        .zip(&mut self.work.boundary_correction)
+                        .zip(&self.work.boundary_step)
+                        .enumerate()
+                    {
+                        if index % 4096 == 0 {
+                            poll(cancelled)?;
+                        }
+                        let adjusted = change - *correction;
+                        let next = *total + adjusted;
+                        *correction = (next - *total) - adjusted;
+                        *total = next;
                     }
-                };
-                for (index, ((total, correction), change)) in self
-                    .work
-                    .boundary_trial
-                    .iter_mut()
-                    .zip(&mut self.work.boundary_correction)
-                    .zip(&self.work.boundary_step)
-                    .enumerate()
-                {
-                    if index % 4096 == 0 {
-                        poll(cancelled)?;
+                    for index in 0..6 {
+                        let adjusted = exchange[index] - work_correction[index];
+                        let next = mechanical_work[index] + adjusted;
+                        work_correction[index] = (next - mechanical_work[index]) - adjusted;
+                        mechanical_work[index] = next;
                     }
-                    let adjusted = change - *correction;
-                    let next = *total + adjusted;
-                    *correction = (next - *total) - adjusted;
-                    *total = next;
-                }
-                for index in 0..6 {
-                    let adjusted = exchange[index] - work_correction[index];
-                    let next = mechanical_work[index] + adjusted;
-                    work_correction[index] = (next - mechanical_work[index]) - adjusted;
-                    mechanical_work[index] = next;
-                }
-                current_walls = endpoint;
-                std::mem::swap(&mut self.work.current, &mut self.work.candidate);
-                Ok(stage)
+                    current_walls = endpoint;
+                    std::mem::swap(&mut self.work.current, &mut self.work.candidate);
+                    Ok(stage)
+                })();
+                result.map_err(|error| reservoirs.failure(error))
             },
-        )?;
+        )
+        .map_err(|failure| failure.error)?;
         let inertia =
             self.inertia_report(&initial_walls, &current_walls, mechanical_work, wall_work)?;
-        self.complete_interval(flow, duration, before, interval, inertia, cancelled)
+        let report =
+            self.complete_interval(flow, duration, before, interval, inertia, cancelled)?;
+        if timed && duration.value() > 0.0 {
+            flow.reservoirs
+                .profiles
+                .as_mut()
+                .expect("prepared stage profiles")
+                .commit();
+        }
+        Ok(report)
     }
 
     /// Original shared admission and private state/load initialization.
@@ -680,17 +735,44 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         wall_work: &WallWork,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Stage, DissipationError> {
+        self.ssp_trial_sampled(
+            &mut timed::Sampling::Held(reservoirs),
+            dt,
+            controls,
+            drive,
+            elapsed,
+            midpoint,
+            cached,
+            wall_work,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ssp_trial_sampled(
+        &mut self,
+        reservoirs: &mut timed::Sampling<'_, '_>,
+        dt: f64,
+        controls: DissipationControl,
+        drive: Option<(&WallDrive3d, f64)>,
+        elapsed: f64,
+        midpoint: Option<&[MolecularWall3d; 6]>,
+        cached: Option<Stage>,
+        wall_work: &WallWork,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Stage, DissipationError> {
         let width = self.gas().species_count() + 4;
         let walls = self.stage_walls(drive, elapsed, midpoint)?;
         let first = if let Some(first) = cached {
             first
         } else {
             wall_work.field(self.inertia)?;
+            let trace = reservoirs.at(self.source.gas(), &self.grid, elapsed, cancelled)?;
             spatial(
                 &mut self.source,
                 &self.grid,
                 self.boundaries,
-                reservoirs,
+                trace,
                 &walls,
                 &self.work.current,
                 &mut self.work.primitive,
@@ -728,11 +810,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         )?;
         let walls = self.stage_walls(drive, elapsed + dt, midpoint)?;
         wall_work.field(self.inertia)?;
+        let trace = reservoirs.at_stage(self.source.gas(), &self.grid, elapsed, dt, cancelled)?;
         let second = spatial(
             &mut self.source,
             &self.grid,
             self.boundaries,
-            reservoirs,
+            trace,
             &walls,
             &self.work.stage,
             &mut self.work.primitive,
@@ -770,11 +853,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spatial<L: TransportLaw>(
+fn spatial<'a, L: TransportLaw>(
     source: &mut SpatialTransport<L>,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &Reservoirs,
+    reservoirs: impl Into<reservoir::View<'a>>,
     walls: &[MolecularWall3d; 6],
     states: &[f64],
     primitive: &mut [Primitive],
@@ -784,6 +867,7 @@ fn spatial<L: TransportLaw>(
     controls: DissipationControl,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, DissipationError> {
+    let reservoirs = reservoirs.into();
     let species = source.gas().species_count();
     let width = species + 4;
     for (row, value) in states.chunks_exact(width).zip(primitive.iter_mut()) {

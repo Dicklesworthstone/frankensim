@@ -554,7 +554,7 @@ impl MixtureEuler3d {
         controls: StepControl,
         mut forcing: Option<forcing::Context<'_, '_>>,
         mut contact: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
-        mut profiles: Option<reservoir_stages::Context<'_>>,
+        mut profiles: Option<&mut reservoir_stages::Context<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         stepping::poll::<Error>(&mut cancelled)?;

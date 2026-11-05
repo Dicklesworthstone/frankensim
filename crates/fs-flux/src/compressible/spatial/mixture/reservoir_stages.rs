@@ -44,17 +44,13 @@ impl MixtureEuler3d {
         ) -> Result<ReservoirFaceState, Error>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
+        let mut context = Context::new(&mut sample, maximum_face_evaluations);
         self.step_impl_with_contact(
             maximum_duration,
             controls,
             None,
             None,
-            Some(Context {
-                sample: &mut sample,
-                maximum_face_evaluations,
-                evaluations: 0,
-                start_ready: false,
-            }),
+            Some(&mut context),
             cancelled,
         )
     }
@@ -68,10 +64,25 @@ pub(super) struct Context<'a> {
     maximum_face_evaluations: usize,
     evaluations: usize,
     start_ready: bool,
+    failed: bool,
 }
 
-impl Context<'_> {
-    fn sample_at(
+impl<'a> Context<'a> {
+    pub(super) fn new(sample: &'a mut Sample<'a>, maximum_face_evaluations: usize) -> Self {
+        Self {
+            sample,
+            maximum_face_evaluations,
+            evaluations: 0,
+            start_ready: false,
+            failed: false,
+        }
+    }
+
+    pub(super) fn failed(&self) -> bool {
+        self.failed
+    }
+
+    pub(super) fn sample_at(
         &mut self,
         time_s: f64,
         gas: &MixtureGas,
@@ -79,23 +90,33 @@ impl Context<'_> {
         reservoirs: &mut reservoir::Reservoirs,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        let profiles = reservoirs.profiles.as_mut().ok_or(Error::Invalid(
-            "mixture reservoir profiles are not prepared",
-        ))?;
-        profiles.stage(
-            gas,
-            grid,
-            &mut |side, face, position, densities| {
-                if self.evaluations == self.maximum_face_evaluations {
-                    return Err(Error::Invalid(
-                        "mixture reservoir profile face evaluation budget",
-                    ));
-                }
-                self.evaluations += 1;
-                (self.sample)(time_s, side, face, position, densities)
-            },
-            cancelled,
-        )
+        self.start_ready = false;
+        let result = (|| {
+            if !time_s.is_finite() {
+                return Err(Error::Invalid(
+                    "finite mixture reservoir sample time required",
+                ));
+            }
+            let profiles = reservoirs.profiles.as_mut().ok_or(Error::Invalid(
+                "mixture reservoir profiles are not prepared",
+            ))?;
+            profiles.stage(
+                gas,
+                grid,
+                &mut |side, face, position, densities| {
+                    if self.evaluations >= self.maximum_face_evaluations {
+                        return Err(Error::Invalid(
+                            "mixture reservoir profile face evaluation budget",
+                        ));
+                    }
+                    self.evaluations += 1;
+                    (self.sample)(time_s, side, face, position, densities)
+                },
+                cancelled,
+            )
+        })();
+        self.failed |= result.is_err();
+        result
     }
 
     pub(super) fn prepare_start(

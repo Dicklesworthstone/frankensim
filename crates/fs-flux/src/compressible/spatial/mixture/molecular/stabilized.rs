@@ -110,74 +110,125 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         evaluations: &mut usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<StabilizedMolecularReport, DissipationError> {
+        self.advance_stabilized_with_profiles_unpublished(
+            flow,
+            duration,
+            controls,
+            maximum_workspace_bytes,
+            evaluations,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_stabilized_with_profiles_unpublished(
+        &mut self,
+        flow: &mut MixtureEuler3d,
+        duration: Time,
+        controls: StabilizedDissipationControl,
+        maximum_workspace_bytes: usize,
+        evaluations: &mut usize,
+        profiles: Option<(
+            &mut super::super::reservoir_stages::Context<'_>,
+            timed::Clock,
+        )>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularReport, DissipationError> {
         poll(cancelled)?;
         controls.validate()?;
         self.admit_stabilized()?;
+        if let Some((_, clock)) = profiles.as_ref() {
+            timed::admit(flow, *clock, duration.value(), self.inertia.is_some())?;
+        }
+        let timed = profiles.is_some();
         let before = self.prepare_interval(flow, duration, maximum_workspace_bytes, cancelled)?;
         self.prepare_stabilized(flow, duration.value() > 0.0, maximum_workspace_bytes)?;
+        let mut reservoirs = match profiles {
+            Some((context, clock)) => timed::Sampling::Timed {
+                reservoirs: &mut flow.reservoirs,
+                context,
+                clock,
+                duration: duration.value(),
+            },
+            None => timed::Sampling::Held(&flow.reservoirs),
+        };
         let accepted = controller::advance(
             duration.value(),
             controls,
             evaluations,
             cancelled,
             |action, elapsed, evaluations, cancelled| {
-                let stage = match action {
-                    Action::First => {
-                        return spatial(
-                            &mut self.source,
-                            &self.grid,
-                            self.boundaries,
-                            &flow.reservoirs,
-                            &self.walls,
-                            &self.work.current,
-                            &mut self.work.primitive,
-                            &mut self.work.gradient,
-                            &mut self.work.flux,
-                            #[cfg(feature = "experimental-sgs")]
-                            self.sgs.as_mut(),
-                            controls.transport,
+                let result = (|| -> Result<Stage, DissipationError> {
+                    let stage = match action {
+                        Action::First => {
+                            let trace =
+                                reservoirs.at(self.source.gas(), &self.grid, elapsed, cancelled)?;
+                            return spatial(
+                                &mut self.source,
+                                &self.grid,
+                                self.boundaries,
+                                trace,
+                                &self.walls,
+                                &self.work.current,
+                                &mut self.work.primitive,
+                                &mut self.work.gradient,
+                                &mut self.work.flux,
+                                #[cfg(feature = "experimental-sgs")]
+                                self.sgs.as_mut(),
+                                controls.transport,
+                                cancelled,
+                            );
+                        }
+                        Action::Trial {
+                            dt,
+                            scheme,
+                            first,
+                            cached,
+                        } => self.rkl_trial_sampled(
+                            &mut reservoirs,
+                            dt,
+                            scheme,
+                            first,
+                            cached,
+                            controls,
+                            elapsed,
+                            evaluations,
                             cancelled,
-                        );
+                        )?,
+                    };
+                    for (index, ((total, correction), change)) in self
+                        .work
+                        .boundary_trial
+                        .iter_mut()
+                        .zip(&mut self.work.boundary_correction)
+                        .zip(&self.work.boundary_step)
+                        .enumerate()
+                    {
+                        if index % 4096 == 0 {
+                            poll(cancelled)?;
+                        }
+                        let adjusted = change - *correction;
+                        let next = *total + adjusted;
+                        *correction = (next - *total) - adjusted;
+                        *total = next;
                     }
-                    Action::Trial {
-                        dt,
-                        scheme,
-                        first,
-                        cached,
-                    } => self.rkl_trial(
-                        &flow.reservoirs,
-                        dt,
-                        scheme,
-                        first,
-                        cached,
-                        controls,
-                        elapsed,
-                        evaluations,
-                        cancelled,
-                    )?,
-                };
-                for (index, ((total, correction), change)) in self
-                    .work
-                    .boundary_trial
-                    .iter_mut()
-                    .zip(&mut self.work.boundary_correction)
-                    .zip(&self.work.boundary_step)
-                    .enumerate()
-                {
-                    if index % 4096 == 0 {
-                        poll(cancelled)?;
-                    }
-                    let adjusted = change - *correction;
-                    let next = *total + adjusted;
-                    *correction = (next - *total) - adjusted;
-                    *total = next;
-                }
-                std::mem::swap(&mut self.work.current, &mut self.work.stage);
-                Ok(stage)
+                    std::mem::swap(&mut self.work.current, &mut self.work.stage);
+                    Ok(stage)
+                })();
+                result.map_err(|error| reservoirs.failure(error))
             },
-        )?;
+        )
+        .map_err(|failure| failure.error)?;
         let transport =
             self.complete_interval(flow, duration, before, accepted.interval, None, cancelled)?;
+        if timed && duration.value() > 0.0 {
+            flow.reservoirs
+                .profiles
+                .as_mut()
+                .expect("prepared stage profiles")
+                .commit();
+        }
         Ok(StabilizedMolecularReport {
             transport,
             operator_evaluations: accepted.operator_evaluations,
@@ -266,15 +317,42 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         evaluations: &mut usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Stage, DissipationError> {
+        self.rkl_trial_sampled(
+            &mut timed::Sampling::Held(reservoirs),
+            dt,
+            scheme,
+            first,
+            cached,
+            controls,
+            elapsed,
+            evaluations,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rkl_trial_sampled(
+        &mut self,
+        reservoirs: &mut timed::Sampling<'_, '_>,
+        dt: f64,
+        scheme: Rkl2Scheme,
+        first: Stage,
+        cached: bool,
+        controls: StabilizedDissipationControl,
+        elapsed: f64,
+        evaluations: &mut usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Stage, DissipationError> {
         let first = if cached {
             first
         } else {
             reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
+            let trace = reservoirs.at(self.source.gas(), &self.grid, elapsed, cancelled)?;
             spatial(
                 &mut self.source,
                 &self.grid,
                 self.boundaries,
-                reservoirs,
+                trace,
                 &self.walls,
                 &self.work.current,
                 &mut self.work.primitive,
@@ -323,11 +401,18 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         let mut stats = first;
         for j in 2..=scheme.stage_count() {
             reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
+            let trace = reservoirs.at_stage(
+                self.source.gas(),
+                &self.grid,
+                elapsed,
+                scheme.abscissa(j - 1)? * dt,
+                cancelled,
+            )?;
             let stage = spatial(
                 &mut self.source,
                 &self.grid,
                 self.boundaries,
-                reservoirs,
+                trace,
                 &self.walls,
                 &self.work.stage,
                 &mut self.work.primitive,
@@ -395,11 +480,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         // The final recurrence state must itself qualify actual transport data
         // and its enlarged parabolic bound before private acceptance.
         reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
+        let trace = reservoirs.at_stage(self.source.gas(), &self.grid, elapsed, dt, cancelled)?;
         let endpoint = spatial(
             &mut self.source,
             &self.grid,
             self.boundaries,
-            reservoirs,
+            trace,
             &self.walls,
             &self.work.stage,
             &mut self.work.primitive,
