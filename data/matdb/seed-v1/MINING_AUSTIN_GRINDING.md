@@ -72,6 +72,49 @@ mass fractions after 30, 60, 120 and 240 seconds for each original ball filling.
 It reports mass closure and the existing solver's nominal Poisson-tail bound.
 That numerical bound does not include experimental uncertainty or model error.
 
+## Grind to a specified source-bin fraction
+
+`SelectionBreakageModel::time_to_target` now solves the contact time needed to
+reach a cumulative product mass fraction from an actual `ParticleStream` feed.
+The target names the coarsest included source class; every class with an equal
+or smaller declared diameter is included. This avoids inventing an interpolated
+sieve cut or an internal distribution for the unresolved-fines sink. The input
+flow scale supplies the PSD weights, not a claim about batch mass or throughput.
+
+The original daughter matrix admits only transfers toward finer classes, and
+the inverse checks that no active target class can lose mass outside the target
+set. Under the existing constant-rate population balance, cumulative target mass
+is therefore nondecreasing. Every trial calls the original `prepare` and
+`transform`; the returned product preserves their solids, element and water
+accounts, source conditions and evidence.
+
+The search starts at zero and is bounded by `maximum_contact_time`, a total
+`maximum_forward_evaluations` budget and the original per-trial uniformization
+budget. A nonzero result retains actual below-target and meeting-target points
+whose time separation is at most `time_tolerance`. Each comparison includes twice
+the original Poisson-tail bound plus an explicit `fraction_roundoff_allowance`.
+The latter is a caller assumption about source/arithmetic rounding, not a
+computed interval certificate. These allowances do not cover the source's
+experimental uncertainty or its reported model mismatch. An ambiguous threshold,
+unreachable target, source refusal, exhausted budget or cancellation returns no
+accepted time. The result does not claim an exact earliest crossing.
+
+The example also solves for 50% of the initial top-class mass to enter
+`size-001` and finer source bins, using a one-microsecond time-bracket tolerance.
+This is the original model's calculated threshold, not a measured grinding time.
+The integration test independently checks it against top-class survival
+`exp(-S_0*t)`, whose 50% crossing occurs at `ln(2)/S_0`.
+
+Optionally append `--net-power-w DECLARED_WATTS` to the example command to quote
+batch energy. `GrindTargetSolution::energy_at_constant_net_power` computes
+`E = P_net*t` at both retained time endpoints and `E/m_dry` at the meeting time.
+The power is an explicit external input: this source pack does not provide a
+power-draw measurement or law. The example uses the admitted 0.345 kg dry charge,
+and the API refuses a supplied mass that conflicts with an admitted
+`dry-charge-mass`. It does not infer batch mass from PSD flow units. The quote
+excludes idle time, auxiliaries and drive losses and does not recalibrate the
+grinding rates when a different external power is supplied.
+
 The resolver admits the entire time interval and every exact class through the
 ordinary typed material queries. All eight claims must retain one observation
 and identical support. Other filling values, mill dimensions, ball sizes, speed,
@@ -81,9 +124,12 @@ claims, caveats, pack hash and receipts survive in
 
 `xtask/tests/mining_austin_sources.rs` checks the printed Table 2 selection rates,
 unit conversion, independent analytical first and second population solutions,
-all-column mass closure, growing sink inventory and condition refusals. Unit
-tests additionally check an exact three-class solution, element transport,
-source mixing, incomplete time support and invalid grid/coefficient refusal.
+all-column mass closure, growing sink inventory, all three target-crossing
+brackets and condition refusals. Unit tests additionally check an exact
+three-class solution, mixed-feed target inversion, secondary daughter breakage,
+element transport, declared-power energy, unresolved threshold and work-budget
+refusals, source mixing, incomplete time support and invalid grid/coefficient
+refusal.
 
 This supplies a bounded laboratory PSD model. It does not establish plant
 throughput, power demand, scale-up, grinding-media consumption, liberation or

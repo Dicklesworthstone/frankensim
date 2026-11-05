@@ -31,6 +31,9 @@ use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError, QueryPoint
 use fs_math::det;
 use fs_qty::{Dimensionless, Frequency, QuantitySpec, Time};
 
+#[path = "kinetics/target.rs"]
+pub mod target;
+
 /// Version-1 stateless selection-rate model in an ordinary constitutive card.
 pub const SELECTION_BREAKAGE_LAW: &str = "constant-selection-breakage";
 /// Owned coordinate for the complete grinding contact interval, in seconds.

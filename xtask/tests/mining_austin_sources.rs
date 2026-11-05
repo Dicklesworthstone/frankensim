@@ -3,10 +3,14 @@
 use fs_matdb::{NormalizedPack, QueryPoint, SelectionPolicy, UncertaintyModel};
 use fs_material::comminution::{
     austin::resolve_austin_grinding,
-    kinetics::{RATE_PREFIX, UniformizationBudget},
+    kinetics::{
+        RATE_PREFIX, UniformizationBudget,
+        target::{GrindTarget, GrindTargetError, GrindTargetSettings},
+    },
 };
-use fs_qty::{Dimensionless, Frequency, Length, Mass, QuantitySpec, Time};
-use std::{path::Path, process::Command};
+use fs_material::separation::{ParticleClass, ParticleStream};
+use fs_qty::{Dimensionless, Frequency, Length, Mass, MassFlowRate, Power, QuantitySpec, Time};
+use std::{collections::BTreeMap, path::Path, process::Command};
 
 fn conditions(filling: f64) -> QueryPoint {
     [
@@ -172,6 +176,77 @@ fn experimental_fits_produce_source_bound_rates_and_conservative_psd_evolution()
             last_sink = sink;
             assert_eq!(pass.model().austin_calibration_source(), Some(source));
         }
+        let feed = ParticleStream::new(
+            model
+                .daughters()
+                .classes()
+                .iter()
+                .map(|class| {
+                    ParticleClass::new(
+                        class.id.clone(),
+                        class.diameter,
+                        MassFlowRate::new(if class.id == "size-000" { 1.0 } else { 0.0 }),
+                        BTreeMap::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            MassFlowRate::new(0.0),
+        )
+        .unwrap();
+        let settings = GrindTargetSettings {
+            maximum_contact_time: Time::new(240.0),
+            time_tolerance: Time::new(1e-6),
+            fraction_roundoff_allowance: Dimensionless::new(1e-12),
+            maximum_forward_evaluations: 64,
+            forward_budget: budget(),
+        };
+        let target = GrindTarget {
+            coarsest_class: "size-001".into(),
+            minimum_fraction: Dimensionless::new(0.5),
+        };
+        let solved = model
+            .time_to_target(&feed, target.clone(), &query, settings, || false)
+            .unwrap();
+        let bracket = solved.bracket.unwrap();
+        // Independent analytic crossing: top-class survival is exp(-S0*t).
+        let exact_seconds = 60.0 * 2.0_f64.ln() / s0;
+        assert!(bracket.below.contact_time.value() < exact_seconds);
+        assert!(bracket.meeting.contact_time.value() > exact_seconds);
+        assert!(bracket.meeting.contact_time.value() - bracket.below.contact_time.value() <= 1e-6);
+        assert!(bracket.below.upper_fraction() < 0.5);
+        assert!(bracket.meeting.lower_fraction() >= 0.5);
+        assert_eq!(
+            solved.pass.model().austin_calibration_source(),
+            Some(source)
+        );
+        close(solved.product.dry_solids().unwrap().value(), 1.0);
+        // Explicit test power is arithmetic input, not source-calibrated mill power.
+        let energy = solved
+            .energy_at_constant_net_power(Power::new(100.0), Mass::new(0.345))
+            .unwrap();
+        close(
+            energy.meeting_energy.value(),
+            100.0 * solved.pass.elapsed().value(),
+        );
+        assert!(
+            solved
+                .energy_at_constant_net_power(Power::new(100.0), Mass::new(1.0))
+                .is_err()
+        );
+        assert!(matches!(
+            model.time_to_target(
+                &feed,
+                GrindTarget {
+                    minimum_fraction: Dimensionless::new(0.99),
+                    ..target
+                },
+                &query,
+                settings,
+                || false
+            ),
+            Err(GrindTargetError::Unreachable { .. })
+        ));
     }
     for query in [
         conditions(0.15),

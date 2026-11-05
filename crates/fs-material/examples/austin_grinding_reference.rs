@@ -1,8 +1,16 @@
 //! cargo run -p fs-material --example austin_grinding_reference -- --material PACK.fsmatpk
 //! Uses original experimental Table 2 fits, not fitted plant performance.
 use fs_matdb::{NormalizedPack, QueryPoint, SelectionPolicy};
-use fs_material::comminution::{austin::resolve_austin_grinding, kinetics::UniformizationBudget};
-use fs_qty::{Dimensionless, Frequency, Length, Mass, QuantitySpec, Time};
+use fs_material::comminution::{
+    austin::resolve_austin_grinding,
+    kinetics::{
+        UniformizationBudget,
+        target::{GrindTarget, GrindTargetSettings},
+    },
+};
+use fs_material::separation::{ParticleClass, ParticleStream};
+use fs_qty::{Dimensionless, Frequency, Length, Mass, MassFlowRate, Power, QuantitySpec, Time};
+use std::collections::BTreeMap;
 
 fn conditions(filling: f64) -> Result<QueryPoint, fs_matdb::MatDbError> {
     [
@@ -26,9 +34,17 @@ fn conditions(filling: f64) -> Result<QueryPoint, fs_matdb::MatDbError> {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 2 || args[0] != "--material" {
-        return Err("usage: austin_grinding_reference --material PACK.fsmatpk".into());
+    if !matches!(args.len(), 2 | 4)
+        || args[0] != "--material"
+        || (args.len() == 4 && args[2] != "--net-power-w")
+    {
+        return Err("usage: austin_grinding_reference --material PACK.fsmatpk [--net-power-w DECLARED_WATTS]".into());
     }
+    let net_power = if args.len() == 4 {
+        Some(Power::new(args[3].parse()?))
+    } else {
+        None
+    };
     let bytes = std::fs::read(&args[1])?;
     let pack = NormalizedPack::from_bytes(&bytes)?;
     if pack.pack_id() != "quartz-assiros-petrakis-2017-austin" || pack.to_bytes() != bytes {
@@ -80,6 +96,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "    mass_residual={:.3e} nominal_L1_tail_bound={:.3e}",
                 total - 1.0,
                 2.0 * pass.poisson_tail_bound.value()
+            );
+        }
+        let feed = ParticleStream::new(
+            model
+                .daughters()
+                .classes()
+                .iter()
+                .map(|class| {
+                    ParticleClass::new(
+                        class.id.clone(),
+                        class.diameter,
+                        MassFlowRate::new(if class.id == "size-000" { 1.0 } else { 0.0 }),
+                        BTreeMap::new(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            MassFlowRate::new(0.0),
+        )?;
+        let target = model.time_to_target(
+            &feed,
+            GrindTarget {
+                coarsest_class: "size-001".into(),
+                minimum_fraction: Dimensionless::new(0.5),
+            },
+            &query,
+            GrindTargetSettings {
+                maximum_contact_time: Time::new(240.0),
+                time_tolerance: Time::new(1e-6),
+                fraction_roundoff_allowance: Dimensionless::new(1e-12),
+                maximum_forward_evaluations: 64,
+                forward_budget: budget,
+            },
+            || false,
+        )?;
+        let bracket = target
+            .bracket
+            .ok_or("expected a nonzero grind-target bracket")?;
+        println!(
+            "  target=50_percent_in_size-001_and_finer_source_bins included={:?}",
+            target.included_classes
+        );
+        println!(
+            "    contact_time_bracket_s=[{:.9},{:.9}] achieved_fraction={:.12} nominal_fraction_allowance={:.3e} forward_calls={}",
+            bracket.below.contact_time.value(),
+            bracket.meeting.contact_time.value(),
+            target.point.mass_fraction.value(),
+            target.point.nominal_fraction_error.value(),
+            target.evaluations,
+        );
+        if let Some(power) = net_power {
+            let energy = target.energy_at_constant_net_power(power, Mass::new(0.345))?;
+            println!(
+                "    declared_external_net_power_W={} source_dry_batch_kg={} energy_bracket_J=[{:.6},{:.6}] meeting_specific_energy_J_per_kg={:.6}",
+                energy.net_power.value(),
+                energy.dry_batch_mass.value(),
+                energy.below_energy.value(),
+                energy.meeting_energy.value(),
+                energy.specific_energy.value(),
             );
         }
     }

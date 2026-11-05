@@ -6,6 +6,12 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The existing selection-breakage population balance now supports bounded
+**grind-to-spec inversion** from an actual feed PSD. It retains original source-bin
+targets, forward solutions, explicit work budgets and nominal time brackets.
+Optional declared constant net power and batch mass give batch energy without
+inferring a power law. See [the Austin grinding guide](MINING_AUSTIN_GRINDING.md#grind-to-a-specified-source-bin-fraction).
+
 The [ball-mill kinetics guide](MINING_AUSTIN_GRINDING.md) adds three
 experimental Assiros quartz calibrations with 24 claims for selection
 frequencies, daughter distributions and the exact source size grid. They drive

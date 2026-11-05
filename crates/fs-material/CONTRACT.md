@@ -14313,3 +14313,27 @@ model does not infer plant scale-up, liberation, power or media wear. The
 source-to-population-balance use; analytical and compiler-backed regressions
 check source selection rates, first/second populations, daughter mass closure,
 element transport, retained source identity and domain refusal.
+
+## Bounded grind-to-spec inversion and declared-power batch energy
+
+`comminution::kinetics::target` adds `SelectionBreakageModel::time_to_target`
+from an actual feed PSD to a cumulative fraction in a named original source
+class and every no-larger class. It verifies that active target classes cannot
+transfer mass outside the target set and calls the original `prepare` and
+`transform` owners for every trial. Successful nonzero results retain actual
+below-target and meeting-target points within the declared time tolerance,
+the original product and source evidence, and the full forward-call count.
+Comparisons include twice the original Poisson-tail bound and an explicit
+caller rounding allowance; ambiguous crossings, unreachable targets, exhausted
+budgets, cancellation and original source refusals return no accepted time.
+These nominal binary64 allowances do not cover experimental or model uncertainty.
+
+`GrindTargetSolution::energy_at_constant_net_power` accounts for `E = P_net*t`
+at both time endpoints and `E/m_dry` at the meeting endpoint. Net power and
+batch mass are explicit inputs; an admitted `dry-charge-mass` must match.
+The PSD flow scale supplies weights only. No power law, idle loss, arbitrary
+sieve interpolation or plant scale-up is inferred. Analytical mixed-feed and
+secondary-breakage tests check crossing brackets and conservation; the genuine
+source compiler integration independently checks all three original Austin
+calibrations against `ln(2)/S_0`. The reference example accepts optional
+`--net-power-w DECLARED_WATTS`; see `MINING_AUSTIN_GRINDING.md` for scope.
