@@ -198,7 +198,9 @@ impl<'m> DepositionSimulation<'m> {
     /// the next event changes topology or exposure; only the two fine intervals
     /// contribute physical heat, vapor, storage and payload. The final payload
     /// precedes endpoint events. No extrapolated mass or enthalpy is installed.
-    /// All selected interfaces must be active before a positive-duration solve.
+    /// A selected future birth activates only after its original event. Before
+    /// then, existing cells retain ordinary heat transport and only active
+    /// selected interfaces exchange vapor. Unscheduled cell identities refuse.
     ///
     /// Every comparison, including accuracy rejection, spends the same Newton
     /// and residual-evaluation budgets. A fine pair needs two native substep
@@ -231,12 +233,15 @@ impl<'m> DepositionSimulation<'m> {
                 "invalid adaptive target or interface count",
             ));
         }
-        let mut ids = BTreeSet::new();
+        let mut selected = BTreeMap::new();
+        let mut active_bindings = Vec::with_capacity(bindings.len());
+        let mut active_ids = BTreeSet::new();
+        let mut unscheduled = BTreeSet::new();
         for (i, binding) in bindings.iter().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            if !ids.insert(binding.id) {
+            if selected.insert(binding.id, *binding).is_some() {
                 return Err(AdaptiveEvaporationError::Invalid(
                     "duplicate liquid interface inventory",
                 ));
@@ -246,6 +251,30 @@ impl<'m> DepositionSimulation<'m> {
                 .validate()
                 .map_err(ThermalEvaporationError::from)?;
             LiquidBranch::new(binding.id, binding.pure_liquid_enthalpy_range_j_kg)?.check(self)?;
+            if self.cells.contains_key(&binding.id) {
+                active_bindings.push(*binding);
+                active_ids.insert(binding.id);
+            } else {
+                unscheduled.insert(binding.id);
+            }
+        }
+        // Resolve future identities once, before any source callback. Actual
+        // birth admission remains with the original event owner at its time;
+        // a selected birth beyond the requested target stays pending.
+        if !unscheduled.is_empty() {
+            for (index, event) in self.schedule[self.cursor..].iter().enumerate() {
+                if index % 256 == 0 {
+                    checkpoint()?;
+                }
+                if let Event::Birth(cell) = &event.event {
+                    unscheduled.remove(&cell.id);
+                }
+            }
+            if !unscheduled.is_empty() {
+                return Err(AdaptiveEvaporationError::Invalid(
+                    "selected liquid interface is neither active nor a scheduled birth",
+                ));
+            }
         }
         finite(self.mass_kg())?;
         finite(self.energy_j())?;
@@ -291,8 +320,12 @@ impl<'m> DepositionSimulation<'m> {
                 native.events = add_count(native.events, 1)?;
                 if let Some((id, mass, h)) = birth {
                     account.birth(id, mass, h)?;
+                    if let Some(binding) = selected.get(&id) {
+                        active_bindings.push(*binding);
+                        active_ids.insert(id);
+                    }
                 }
-                for binding in bindings {
+                for binding in &active_bindings {
                     LiquidBranch::new(binding.id, binding.pure_liquid_enthalpy_range_j_kg)?
                         .check(&next)?;
                 }
@@ -333,7 +366,7 @@ impl<'m> DepositionSimulation<'m> {
             comparisons = add_count(comparisons, 1)?;
             let (coarse, _, _) = solve_interval(
                 &next,
-                bindings,
+                &active_bindings,
                 end,
                 controls.solve,
                 &mut work,
@@ -342,7 +375,7 @@ impl<'m> DepositionSimulation<'m> {
             )?;
             let (half, _, first) = solve_interval(
                 &next,
-                bindings,
+                &active_bindings,
                 middle,
                 controls.solve,
                 &mut work,
@@ -351,7 +384,7 @@ impl<'m> DepositionSimulation<'m> {
             )?;
             let (fine, payload, second) = solve_interval(
                 &half,
-                bindings,
+                &active_bindings,
                 end,
                 controls.solve,
                 &mut work,
@@ -365,7 +398,7 @@ impl<'m> DepositionSimulation<'m> {
                 &next,
                 &coarse,
                 &fine,
-                &ids,
+                &active_ids,
                 controls,
                 correction,
                 &mut checkpoint,

@@ -1776,6 +1776,17 @@ suggested comparison span. Backward Euler remains first order; the local
 estimator is not a certified accumulated-error bound, and source corners require
 independent refinement. Reference geometry and gas films remain prescribed.
 
+Adaptive liquid bindings may select cells that are active now or have an original
+scheduled birth. Selection is resolved once before source callbacks; unknown
+unscheduled identities refuse. Heat transport continues through existing cells
+before a selected liquid is born. Each selected surface activates only after its
+native birth has been admitted, with its original mass, enthalpy and current
+contact exposure. It receives no earlier phase transfer, mass-error entry or
+surface total. A birth exactly at the requested endpoint remains absent from the
+preceding interval's coefficient payload and phase receipts, while a later birth
+stays pending. Actual birth-time material/branch failures and late cancellation
+still discard the whole proposed trajectory.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry

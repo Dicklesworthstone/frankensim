@@ -11,6 +11,9 @@ mod network;
 #[path = "tests/adaptive.rs"]
 mod adaptive;
 
+#[path = "tests/activation.rs"]
+mod activation;
+
 use super::*;
 use crate::enthalpy::backward_euler::{
     BoundaryExchanges, BoundaryStepCoefficients, PrescribedBathHeat, StepCoefficients,
