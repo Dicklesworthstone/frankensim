@@ -2,6 +2,9 @@
 //! The oracles use the original rigid-body mass/inertia and the declared
 //! first-order kick/contact/drift scheme, including its normal splitting loss.
 
+#[path = "sphere_scene/connected.rs"]
+mod connected;
+
 use fs_contact::broad_phase::SweepConfig;
 use fs_contact::frictional_multicontact::FrictionalContactConfig;
 use fs_exec::CancelGate;

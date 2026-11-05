@@ -103,8 +103,11 @@ pub type EllipticIslandImpactError =
 /// Apply independent native normal/Coulomb events as one atomic scene update.
 ///
 /// `controls.maximum_contacts` bounds the whole scene, while
-/// `controls.contact.maximum_contacts` bounds each connected island (at most
-/// 21 contacts for the existing dense constitutive owner). The latter is not
+/// `controls.contact.maximum_contacts` bounds each connected island (21 by
+/// default). Explicitly larger limits also require the constitutive owner's
+/// scalar matrix budget. More than 63 active scalar rows require its
+/// positive-definite determinacy admission; they do not broaden its bounded
+/// redundant-contact path. The latter cap is not
 /// a total scene limit. Other constitutive work limits also apply per island;
 /// the scene contact cap bounds their total number. Assembly needs O(B+C)
 /// graph storage plus the sum of the original island receipts, and builds

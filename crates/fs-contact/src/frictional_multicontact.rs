@@ -7,6 +7,10 @@
 //! All rows participate in one semismooth Newton--Krylov natural-map solve,
 //! using exact branch Jacobian actions and cached local linearizations. Existing
 //! numerical owners provide matrix admission and nonlinear globalization.
+//! Larger connected groups use cancellable SPD admission and the same global
+//! contraction certificate; dense PSD/range spectral work remains bounded to
+//! 63 active scalar rows. Increasing the input limit never admits a singular
+//! large system or upgrades an uncertified candidate to a unique response.
 //!
 //! Independent contact rows use a weighted contraction witness or a positive
 //! candidate energy form for impulse determinacy. A separate PSD range witness
@@ -23,7 +27,9 @@
 
 use crate::multicontact::add_product;
 use fs_math::dd::Dd;
-use fs_solver::orthant::active_set::{SpdOrthantConfig, SpdOrthantError, solve_spd_orthant};
+use fs_solver::orthant::active_set::{
+    MAX_SPD_VARIABLES, SpdOrthantConfig, SpdOrthantError, admit_spd_matrix, solve_spd_orthant,
+};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
@@ -36,6 +42,15 @@ pub(crate) mod range;
 
 /// Directional impulse ellipses through the original simultaneous Coulomb owner.
 pub mod elliptic;
+
+/// Maximum supplied contact count for the bounded dense SPD lane. The default
+/// remains 21; larger active groups also require sufficient matrix capacity and
+/// a checked global contraction witness. This is not a PSD/range-analysis cap.
+pub const MAX_FRICTIONAL_CONTACTS: usize = MAX_SPD_VARIABLES / 3;
+
+// Spectral admission and the dense numerical range inverse retain their
+// original bounded size, independently of the larger SPD input capacity.
+const MAX_RANGE_VARIABLES: usize = 63;
 
 /// What the numerical witness establishes about this accepted response.
 #[derive(Clone, Debug, PartialEq)]
@@ -217,7 +232,10 @@ pub struct FrictionalContact {
 /// Bounded work and separate numerical/physical acceptance controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionalContactConfig {
-    /// At most 21 contacts (63 scalar rows), bounding both numerical owners.
+    /// In `1..=MAX_FRICTIONAL_CONTACTS`, default 21. More than 21 ACTIVE contacts
+    /// require positive-definite mobility and the global contraction witness;
+    /// large PSD or uncertified responses refuse without spectral fallback.
+    /// `matrix.max_variables` must also cover all active normal/tangent rows.
     pub maximum_contacts: usize,
     /// Maximum residual, analytic Jacobian and right-preconditioner calls,
     /// shared across all branch probes. Actions use quadratic work; the PSD
@@ -236,6 +254,9 @@ pub struct FrictionalContactConfig {
     /// Normal complementarity and tangential duality-gap tolerance [J].
     pub complementarity_tolerance: f64,
     pub energy_tolerance: f64,
+    /// Numerical admission limits. The default admits 64 scalar rows; opt in to
+    /// a larger connected group by increasing this capacity as well as
+    /// `maximum_contacts`. The physical matrix is never shifted or softened.
     pub matrix: SpdOrthantConfig,
     pub newton: NewtonKrylovConfig,
 }
@@ -435,6 +456,7 @@ pub fn solve_frictional_contacts(
     let mut free = Vec::with_capacity(d);
     let mut mu = Vec::with_capacity(active.len());
     for &i in &active {
+        poll(&mut cancelled)?;
         free.extend_from_slice(&contacts[i].relative_velocity);
         mu.push(contacts[i].friction_coefficient);
         for a in 0..3 {
@@ -447,14 +469,16 @@ pub fn solve_frictional_contacts(
     }
     let has_locked_tangent_pairs = locked_tangents::has_locked_pair(&matrix, d);
     let (minimum_pivot, range_admission) =
-        match solve_spd_orthant(&matrix, &vec![0.0; d], config.matrix, &mut cancelled) {
-            Ok(admission) => (admission.min_normalized_pivot, None),
+        match admit_spd_mobility(&matrix, d, config.matrix, &mut cancelled) {
+            Ok(minimum_pivot) => (minimum_pivot, None),
             Err(SpdOrthantError::Cancelled) => return Err(E::Cancelled),
             Err(
                 error @ (SpdOrthantError::NotPositiveDefinite { .. }
                 | SpdOrthantError::Degenerate { .. }),
             ) => {
-                if (0..active.len()).any(|k| matrix[(3 * k) * d + 3 * k] <= 0.0) {
+                if d > MAX_RANGE_VARIABLES
+                    || (0..active.len()).any(|k| matrix[(3 * k) * d + 3 * k] <= 0.0)
+                {
                     return Err(E::MobilityNotAdmitted(error));
                 }
                 let admission = range::admit(&matrix, d, config.matrix, &mut cancelled)?;
@@ -634,7 +658,7 @@ pub fn solve_frictional_contacts(
     // E + delta_p_n dot C delta_v_t <= 0 holds against every other Coulomb
     // root; positive energy coercivity forces delta_p=0 for an SPD mobility.
     // The spectral work is skipped on the existing contraction fast path.
-    if range_admission.is_none() && witness.is_none() && d > 0 {
+    if range_admission.is_none() && witness.is_none() && (1..=MAX_RANGE_VARIABLES).contains(&d) {
         let admission =
             range::admit_positive_definite(&matrix, d, config.matrix, &mut **cancel.borrow_mut())?;
         if let Some(admission) = admission {
@@ -735,6 +759,24 @@ pub fn solve_frictional_contacts(
     Ok(result)
 }
 
+// The original small-system owner retains its numerical behavior. Large
+// systems use the generic cancellable matrix admission directly: a zero-source
+// orthant solve would add no physical information and no impulse iteration.
+fn admit_spd_mobility(
+    matrix: &[f64],
+    dimension: usize,
+    config: SpdOrthantConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, SpdOrthantError> {
+    if dimension > MAX_RANGE_VARIABLES {
+        admit_spd_matrix(matrix, dimension, config, cancelled)
+            .map(|admission| admission.min_normalized_pivot)
+    } else {
+        solve_spd_orthant(matrix, &vec![0.0; dimension], config, cancelled)
+            .map(|admission| admission.min_normalized_pivot)
+    }
+}
+
 /// Bound the natural map in contact normal/tangential block norms. Disk
 /// projection is nonexpansive in its argument and 1-Lipschitz in its radius.
 /// Hence `delta T <= L delta p`; a positive w with Lw < w proves contraction
@@ -782,10 +824,11 @@ fn contraction_witness(
     let mut weights = vec![1.0; blocks];
     for _ in 0..128 {
         poll(cancelled)?;
-        let image: Vec<_> = l
-            .chunks_exact(blocks)
-            .map(|row| fs_solver::dot(row, &weights))
-            .collect();
+        let mut image = Vec::with_capacity(blocks);
+        for row in l.chunks_exact(blocks) {
+            poll(cancelled)?;
+            image.push(fs_solver::dot(row, &weights));
+        }
         if image.iter().any(|v| !v.is_finite()) {
             return Ok(None);
         }
@@ -940,7 +983,7 @@ fn audit(
 }
 
 fn validate_config(c: FrictionalContactConfig) -> Result<(), FrictionalContactError> {
-    if !(1..=21).contains(&c.maximum_contacts)
+    if !(1..=MAX_FRICTIONAL_CONTACTS).contains(&c.maximum_contacts)
         || !(1..=1_000_000).contains(&c.maximum_evaluations)
         || !(1..=256).contains(&c.maximum_newton_iterations)
         || [

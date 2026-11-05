@@ -490,20 +490,22 @@ fn admit_original_mobility(
             }
         }
     }
-    match solve_spd_orthant(&matrix, &vec![0.0; d], config.matrix, &mut *cancelled) {
+    match admit_spd_mobility(&matrix, d, config.matrix, &mut *cancelled) {
         Ok(_) => Ok(()),
         Err(SpdOrthantError::Cancelled) => Err(E::Cancelled),
         Err(
             error @ (SpdOrthantError::NotPositiveDefinite { .. }
             | SpdOrthantError::Degenerate { .. }),
-        ) => match super::range::admit(&matrix, d, config.matrix, cancelled) {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => Err(E::OriginalMobility(
-                FrictionalContactError::MobilityNotAdmitted(error),
-            )),
-            Err(FrictionalContactError::Cancelled) => Err(E::Cancelled),
-            Err(error) => Err(E::OriginalMobility(error)),
-        },
+        ) if d <= MAX_RANGE_VARIABLES => {
+            match super::range::admit(&matrix, d, config.matrix, cancelled) {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(E::OriginalMobility(
+                    FrictionalContactError::MobilityNotAdmitted(error),
+                )),
+                Err(FrictionalContactError::Cancelled) => Err(E::Cancelled),
+                Err(error) => Err(E::OriginalMobility(error)),
+            }
+        }
         Err(error) => Err(E::OriginalMobility(
             FrictionalContactError::MobilityNotAdmitted(error),
         )),

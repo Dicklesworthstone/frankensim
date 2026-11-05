@@ -1,4 +1,7 @@
 //! G0/G1/G3: native impulses and trajectories across independent contact islands.
+#[path = "frictional_islands/connected.rs"]
+mod connected;
+
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
 use fs_exec::CancelGate;
 use fs_mbd::frictional_impact::islands::{IslandContactError, apply_rigid_contact_islands};

@@ -75,6 +75,9 @@ pub struct RigidImpactControls {
     pub angular_momentum_tolerance_nms: f64,
     pub energy_tolerance_j: f64,
     /// Numerical controls and the dense limit for one coupled contact solve.
+    /// The default is 21 contacts. Larger connected events require an explicit
+    /// contact cap and scalar matrix budget. More than 63 active scalar rows
+    /// require the contact owner's positive-definite determinacy path.
     pub contact: FrictionalContactConfig,
 }
 

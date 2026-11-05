@@ -2969,8 +2969,13 @@ inactive witnesses. An oversized connected component refuses before solving;
 it is never split into sequential pair collisions.
 
 The scene body/contact caps bound graph storage and the number of solves;
-`contact.maximum_contacts` remains the dense owner's per-island limit of at
-most 21 contacts. Graph storage is linear in scene bodies and contacts. Dense
+`contact.maximum_contacts` is the dense owner's per-island limit, defaulting
+to 21. An explicitly larger contact cap, matching scalar matrix budget and
+Krylov work budget can admit up to 256 contacts through the original coupled
+Newton/Coulomb law. More than 63 active scalar rows require positive-definite
+mobility and the original weighted contraction witness; bounded small singular
+mobility and velocity-only paths are not silently enlarged. Graph storage is
+linear in scene bodies and contacts. Dense
 mobility storage belongs only to individual islands, not a square matrix for
 the whole scene. Stable contact IDs determine island and global output order,
 with original body/contact index mappings and every native determinacy receipt
@@ -3253,8 +3258,10 @@ estimate. This numerical lane supports straight drift of spheres and fixed
 normal translating planes; it does not claim interval-certified CCD, arbitrary
 shapes, rotating supports, deformability, adhesion, rolling/torsional resistance
 or thermal allocation. The original simultaneous solver's coupled-contact cap
-applies to each connected island; the separately declared scene contact cap can
-admit more than 21 independent contacts. Accepted native step reports retain
+applies to each connected island. Explicit contact, scalar matrix and Krylov
+budgets enable larger positive-definite connected groups; the default remains
+21. The separately declared scene contact cap also bounds independent contacts.
+Accepted native step reports retain
 the complete per-island solver and body receipts. The broader contact and
 multibody beads remain open.
 

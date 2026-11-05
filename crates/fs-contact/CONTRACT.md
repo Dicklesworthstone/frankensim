@@ -1259,10 +1259,20 @@ work then gates global passivity; a locally valid restitution candidate that
 creates assembled energy is refused. All impact loss remains unallocated
 mechanical loss, not an automatic thermal or friction-heat source.
 
-This bounded owner retains a cap of 21 active contacts. Numerically SPD rows
-use a positive weighted contraction witness or the full-rank candidate energy
-criterion below for unique impulses; admitted
-semidefinite rows use the separate velocity-image witness described below.
+The default input cap remains 21 contacts. Explicit `maximum_contacts` and
+`matrix.max_variables` budgets can admit up to 256 supplied contacts and 768
+scalar rows. More than 63 ACTIVE scalar rows require normalized SPD admission
+and the original global weighted contraction witness. They use the same fully
+coupled semismooth Newton/Krylov law, original-matrix residuals and work gates;
+no sequential pairwise approximation, compliance or tolerance change is used.
+The input capacity is not an acceptance guarantee: larger singular mobility
+or unresolved determinacy refuses. Dense PSD/range, SVD and candidate-energy
+spectral work remain bounded to 63 active scalar rows. Larger graphs may need
+explicit Krylov restart/cycle budgets within the existing evaluation cap.
+
+For small numerically SPD groups, a positive weighted contraction witness or
+the full-rank candidate energy criterion below establishes unique impulses;
+admitted semidefinite rows use the separate velocity-image witness below.
 Distinct independently checked passive roots return `Nonunique`; a checked
 root without a sufficient witness returns `UnresolvedDeterminacy`. General
 unresolved rank-deficient manifolds and a complete Painleve existence
