@@ -627,7 +627,7 @@ fn main() -> Result<()> {
         let [part, mass_kg, nodes] = flag.split(':').collect::<Vec<_>>()[..] else {
             return Err("--point-mass needs PART:MASS_KG:NODE,NODE,...".into());
         };
-        let nodes = nodes.split(',').map(str::parse).collect::<Result<Vec<usize>, _>>()?;
+        let nodes = nodes.split(',').map(|node| Ok(node.parse::<usize>()?)).collect::<Result<_>>()?;
         point_masses.push(ShellPointMass { component: position(part)?, nodes, mass_kg: mass_kg.parse()? });
     }
     let assembly = MaterialShellAssembly {
