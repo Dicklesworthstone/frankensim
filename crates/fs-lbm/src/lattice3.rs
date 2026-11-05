@@ -12,6 +12,7 @@ use std::sync::Mutex;
 pub mod finite_wall;
 /// Instantaneous momentum input on the original D3Q19/D3Q27 populations.
 pub mod impulse;
+mod initial;
 /// Prescribed tangential surface motion on the same fixed halfway walls.
 pub mod moving_walls;
 /// Source-preserving generalized-Newtonian viscosity on the existing 3-D step.
@@ -21,6 +22,8 @@ mod sgs;
 pub mod sources;
 /// Momentum-exchange drag and torque on selected stationary halfway walls.
 pub mod wall_loads;
+
+pub use initial::EquilibriumLattice3;
 
 /// A fixed population lattice and its caller-selected collision law.
 pub trait Lattice3<const Q: usize>: Send + Sync + 'static {
@@ -179,6 +182,9 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
     /// Every physical choice is explicit. Nonperiodic external links and
     /// supplied solid cells use stationary halfway bounce-back. No open,
     /// moving, interpolated or guessed wall is introduced by this constructor.
+    /// `initial` supplies stored populations, including the half-force shift.
+    /// Native lattices can use [`Self::try_new_equilibrium`] to specify physical
+    /// density and velocity directly instead.
     pub fn try_new(
         dims: [usize; 3],
         collision: L::Collision,
@@ -187,6 +193,26 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         budget: GridBudget3,
         solid: impl Fn([usize; 3]) -> bool,
         initial: impl Fn([usize; 3]) -> [f64; Q],
+    ) -> Result<Self, GridError3<L::Error>> {
+        Self::try_new_with_initial_cells(
+            dims,
+            collision,
+            force,
+            periodic,
+            budget,
+            solid,
+            |_, p| Ok(initial(p)),
+        )
+    }
+
+    fn try_new_with_initial_cells(
+        dims: [usize; 3],
+        collision: L::Collision,
+        force: [f64; 3],
+        periodic: [bool; 3],
+        budget: GridBudget3,
+        solid: impl Fn([usize; 3]) -> bool,
+        initial: impl Fn(usize, [usize; 3]) -> Result<[f64; Q], GridError3<L::Error>>,
     ) -> Result<Self, GridError3<L::Error>> {
         L::validate(collision).map_err(|source| GridError3::Collision { cell: 0, source })?;
         if Q == 0
@@ -237,7 +263,7 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
             .map_err(|_| GridError3::Allocation)?;
         for cell in 0..count {
             let p = coordinates(cell, dims);
-            let populations = initial(p);
+            let populations = initial(cell, p)?;
             macro_cell::<L, Q>(&populations, force, cell, budget.maximum_mach)?;
             f.push(populations);
             mask.push(solid(p));

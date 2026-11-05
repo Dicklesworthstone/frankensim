@@ -430,7 +430,7 @@ fn relax(mut v: [f64; Q27], eq: [f64; Q27], u: [f64; 3], rates: Rates27) -> [f64
 /// The quadratic Guo polynomial drops those product terms at nonzero u.
 /// Cache nine marginal values/derivatives once; no divisions by probabilities
 /// or per-cell allocation are needed.
-fn factorized_source27(u: [f64; 3], force: [f64; 3]) -> [f64; Q27] {
+pub(crate) fn factorized_source27(u: [f64; 3], force: [f64; 3]) -> [f64; Q27] {
     let marginals: [[(f64, f64); 3]; 3] = core::array::from_fn(|axis| {
         let second = CS2_27 + u[axis] * u[axis];
         [

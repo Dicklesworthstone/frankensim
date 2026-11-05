@@ -1,5 +1,29 @@
 # CONTRACT: fs-lbm
 
+## Physical velocity initialization on shared D3Q19/D3Q27 grids
+
+`Grid3::try_new_equilibrium` accepts physical lattice density and velocity.
+It stores equilibrium minus the full half source, retaining the requested
+velocity and `rho (cs² I + u u)` physical stress. D3Q19 and quadratic D3Q27
+use Guo's source; factorized D3Q27 BGK/TRT reuse their complete product
+derivative. D3Q27 moment families start from the product equilibrium with
+the same hydrodynamic initial moments; their finite-force accuracy scope
+is unchanged. Both grid and collision Mach limits apply to requested and
+represented physical velocities. Initial populations are never clipped.
+
+`ForcedGrid3::try_new_preserving_velocity` attaches a spatial initial force
+field to an unstepped zero-force grid while preserving density, physical
+velocity and existing nonequilibrium stress. This changes source coordinates
+without an impulse, elapsed time or heat. Force shape, finiteness, solid
+ownership and collision capability are checked before publication. Candidates
+reuse existing population scratch and poll cancellation at fixed tile bounds.
+Zero-force populations retain their bits. The existing raw constructors keep
+their explicit population-frame behavior.
+
+Native regressions cover every collision family, full physical stress and
+nonequilibrium preservation, all 27 product-source moments, first-step momentum,
+zero-force identity, the physical Mach convention and invalid/cancelled inputs.
+
 ## Spatial reservoir pressures on native SIMPLE faces
 
 `SimpleConfig::pressure_profiles_pa` optionally replaces each Pressure/Outlet

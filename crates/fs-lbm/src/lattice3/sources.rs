@@ -54,6 +54,8 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
     /// initial populations satisfying rho*u = sum(f*e) + F/2. Solid forces must
     /// be zero. Both the original grid admission and this corrected-velocity
     /// admission must pass. No field is attached to a previously evolved state.
+    /// To retain the input grid's physical velocity and stress instead, use
+    /// [`Self::try_new_preserving_velocity`] on a native lattice.
     pub fn try_new(
         grid: Grid3<L, Q>,
         cx: &Cx<'_>,
@@ -194,6 +196,73 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             pool,
             gate,
         )
+    }
+}
+
+impl<L: super::EquilibriumLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
+    /// Attach initial spatial forces without an artificial half-force kick.
+    ///
+    /// The unstepped input grid must have zero uniform force. Its density,
+    /// physical velocity and full nonequilibrium stress are preserved by
+    /// subtracting `S(u,F)/2` from the existing populations, not by replacing
+    /// them with equilibrium. D3Q27 product-source terms follow its selected
+    /// equilibrium. Zero-force cells and solid populations retain their bits.
+    ///
+    /// Force shape, finiteness, solid ownership, collision capability and both
+    /// physical Mach limits are checked. Existing scratch holds candidates;
+    /// cancellation or refusal returns no partly initialized owner. This is
+    /// an initial source-coordinate change, not an impulse or an elapsed step.
+    pub fn try_new_preserving_velocity(
+        mut grid: Grid3<L, Q>,
+        cx: &Cx<'_>,
+        forces: Vec<[f64; 3]>,
+    ) -> Result<Self, GridError3<L::Error>> {
+        let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
+        poll()?;
+        if grid.completed_steps != 0 || grid.force != [0.0; 3] {
+            return Err(GridError3::Input(
+                "spatial forces require an unstepped zero-force grid",
+            ));
+        }
+        admit_forces(&grid, &forces, None, &mut poll)?;
+        let mut changed = false;
+        for (cell, (&populations, &force)) in grid.f.iter().zip(&forces).enumerate() {
+            if cell % 64 == 0 {
+                poll()?;
+            }
+            let mut candidate = populations;
+            if !grid.solid[cell] {
+                let (_, velocity) =
+                    macro_cell::<L, Q>(&populations, [0.0; 3], cell, grid.budget.maximum_mach)?;
+                super::initial::admit_velocity::<L, Q>(
+                    grid.collision,
+                    velocity,
+                    cell,
+                    grid.budget.maximum_mach,
+                )?;
+                super::initial::attach_force::<L, Q>(
+                    &mut candidate,
+                    grid.collision,
+                    velocity,
+                    force,
+                );
+                let (_, actual) =
+                    macro_cell::<L, Q>(&candidate, force, cell, grid.budget.maximum_mach)?;
+                super::initial::admit_velocity::<L, Q>(
+                    grid.collision,
+                    actual,
+                    cell,
+                    grid.budget.maximum_mach,
+                )?;
+                changed |= force != [0.0; 3];
+            }
+            grid.next[cell] = candidate;
+        }
+        poll()?;
+        if changed {
+            core::mem::swap(&mut grid.f, &mut grid.next);
+        }
+        Ok(Self { grid, forces })
     }
 }
 
