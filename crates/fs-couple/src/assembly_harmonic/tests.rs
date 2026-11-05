@@ -186,7 +186,7 @@ fn conjugate_source_frequency_slope_matches_original_negative_axis_without_advan
             let (slope, _) =
                 source_frequency_derivative(&source, omega, frequency_controls(), cx).unwrap();
             let h = 1e-4 * omega;
-            let at = |delta| model.eval(C64::new(0.0, -(omega + delta)))[0];
+            let at = |delta: f64| model.eval(C64::new(0.0, -(omega + delta)))[0];
             let expected = (at(-2.0 * h) - at(-h).scale(8.0) + at(h).scale(8.0) - at(2.0 * h))
                 .scale(1.0 / (12.0 * h));
             assert!((slope[0] - expected).abs() <= 3e-7 * expected.abs());

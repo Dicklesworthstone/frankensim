@@ -150,7 +150,8 @@ pub fn identify_ringdown(
         }
         let mut shape = Vec::with_capacity(channels.len());
         for channel in &fit.fits {
-            shape.push(channel.phasors[source].conj().scale(0.5));
+            let phasor = channel.phasors[source].conj();
+            shape.push(C64::new(0.5 * phasor.re, 0.5 * phasor.im));
         }
         ordered.push((
             Mode {
