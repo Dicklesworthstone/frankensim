@@ -1,4 +1,4 @@
-//! Finite-rate dissolution, concentration-induced crystallization, and heat.
+//! Finite-rate dissolution, concentration-induced crystallization, and coupled heat.
 //!
 //! Run: cargo run -p fs-material --example solubility_dissolution
 //! All coefficients below are authored demonstration values for one neutral
@@ -16,6 +16,7 @@ use fs_thermochem::{
             IdealSolubilityV1,
             caloric::{
                 SolubilityCaloricComponentV1, SolubilityCaloricModelV1, SolubilityCaloricSolveV1,
+                kinetics::{SolubilityThermalKineticControlsV1, SolubilityThermalKineticsV1},
             },
             kinetics::{PrecipitationPolicyV1, SolubilityKineticStateV1, SolubilityKineticsV1},
         },
@@ -89,9 +90,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     concentrated.advance(Time::new(60.0), || false)?;
     print_state("After 60 s of crystal growth", &concentrated)?;
 
-    // Separate equilibrium bath: a closed heat input uses the SAME distinct
-    // phase Cp curves for its saturation and dissolution enthalpy. This is not
-    // a claim of simultaneous finite-rate thermal coupling.
+    // The SAME distinct phase Cp curves control saturation and the dissolution
+    // enthalpy. Finite-rate adiabatic dissolution now cools the actual bath;
+    // the temperature feedback and evolving phases share one energy account.
     let thermal = SolubilityCaloricModelV1::new(
         molar_volume,
         PureLiquidHeatCapacityV1::new(solvent, temperature, knots(75.0))?,
@@ -99,6 +100,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             law.clone(),
         )?],
     )?;
+    let coupled = SolubilityThermalKineticsV1::new(thermal.clone(), kinetic.models().to_vec())?;
+    let adiabatic = kinetic.advance_with_heat(
+        &coupled,
+        Time::new(60.0),
+        0.0,
+        SolubilityThermalKineticControlsV1 {
+            root: SolubilityCaloricSolveV1 {
+                temperature_bracket: [Temperature::new(290.0), Temperature::new(310.0)],
+                temperature_tolerance_k: 1e-9,
+                energy_tolerance_j: 1e-5,
+                maximum_iterations: 128,
+            },
+            initial_step: Time::new(10.0),
+            minimum_step: Time::new(1e-4),
+            maximum_step: Time::new(10.0),
+            relative_tolerance: 1e-4,
+            amount_absolute_tolerance_mol: 1e-10,
+            temperature_absolute_tolerance_k: 1e-7,
+            maximum_attempts: 4096,
+        },
+        || false,
+    )?;
+    print_state(
+        "After 60 s of adiabatic finite-rate dissolution",
+        adiabatic.solution(),
+    )?;
+    println!(
+        "Coupled bath: T={:.9} K, energy residual={:.3e} J, accepted steps={}",
+        adiabatic.solution().solution().temperature_k(),
+        adiabatic.balance().energy_residual_j(),
+        adiabatic.balance().accepted_steps(),
+    );
+
+    // An independent equilibrium bath demonstrates the infinite-rate limit
+    // under a closed heat input, using the same constitutive sources.
     let equilibrium = FiniteSolubilitySolution::new(
         temperature,
         molar_volume,

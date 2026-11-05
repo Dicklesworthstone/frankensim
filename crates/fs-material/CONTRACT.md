@@ -10301,15 +10301,43 @@ are admitted before any publication; early, intermediate and final cancellation
 leave all accepted inventories unchanged. Clones share immutable laws and own
 independent writable state.
 
-The model is isothermal during each step and does not infer thermostat heat,
-simultaneous membrane/moisture transport, changing crystal area, nonideal
-chemistry or spontaneous nucleation. `cargo run -p fs-material --example
-solubility_dissolution` exercises dissolution, prescribed solvent removal,
-delayed crystal growth, and a separate equilibrium heat calculation using the
-same phase-qualified law. Demonstration coefficients are explicitly authored.
-Focused cases verify opposed phase transfers and actual osmotic response,
-finite-rate dilution/heating lag, original source sharing, buffer reuse,
-layout refusal and transactional cancellation.
+`replace_dissolved_inventories` admits transported solvent/dissolved amounts
+while retaining every original crystal stock. `copy_state_from` transfers
+complete compatible receipts into prepared buffers without allocation or
+repartitioning. Explicit two-phase construction retains donor tails below one
+ulp of the dominant phase; immutable source payloads and Arc control storage
+remain in the preparation memory estimate. Native membrane transport uses this
+boundary and evolves the original kinetic owner on its adaptive timeline.
+
+The basic `advance` operation is isothermal and infers no thermostat heat,
+changing crystal area, nonideal chemistry or spontaneous nucleation. The
+coupled thermal operation below explicitly accounts for heat and temperature.
+Focused cases verify opposed phase transfers, actual osmotic response,
+finite-rate dilution/heating lag, retained crystals through transport,
+original source sharing, buffer reuse, layout refusal and cancellation.
+
+### Finite-rate thermal material evolution
+
+`KineticSolubilitySolution::advance_with_heat` binds the exact original kinetic
+models and solvent convention to `SolubilityThermalKineticsV1`. It prepares the
+current transported stocks, advances the shared thermal/phase equations and
+rebuilds the aqueous view from the accepted actual dissolved amounts at the
+solved temperature. No equilibrium projection or second caloric equation is
+introduced. The returned material and original energy/temporal report can be
+moved together for subsequent evolution. Refusal or cancellation leaves the
+input material untouched.
+
+Zero-time phase receipts refresh the accepted endpoint targets; whole-window
+heat, residual and adaptive statistics remain on the thermal report. The
+underlying method is first order, keeps volume and declared conductances fixed
+over the heat window, and does not simultaneously transport solvent or solute.
+Three adapter regressions cover live transported inventories with an independent
+heat/pressure/activity calculation, rate/policy/solvent-source mismatch,
+final-publication cancellation/retry and sensible-only heating with trace
+crystals. `cargo run -p fs-material --example solubility_dissolution` demonstrates
+isothermal dissolution, concentration-induced crystallization, coupled
+adiabatic finite-rate cooling and a separate equilibrium heat calculation.
+All demonstration coefficients are explicitly authored.
 
 ## Shared cavitation coefficients and frozen mixture acoustics
 

@@ -122,6 +122,40 @@ source/domain refusal. This model has no shrinking-particle geometry, evolving
 interfacial area, crystal population, reaction/speciation, or thermal evolution.
 Its conductance and experimental applicability remain explicit caller inputs.
 
+## Coupled finite-rate dissolution and thermal evolution
+
+`solution::solubility::caloric::kinetics::SolubilityThermalKineticsV1` binds
+the original caloric model and the exact ordered kinetic laws. Actual dissolved
+and solid stocks, the original solvent volume, temperature and source owner
+travel together. Different conductances, growth policies or phase heat-capacity
+sources cannot silently replace the declared physical model.
+
+Each stage evaluates the original analytical fixed-temperature kinetic law at
+the unknown endpoint temperature. One bounded scalar heat balance solves that
+temperature using the shared sensible-plus-dissolution enthalpy equation.
+On an active branch the temperature derivative is positive phase-weighted Cp
+plus `f*n_sat*delta_H(T)^2/(R*T^2)`, with `f=1-exp(-G*h/V)`; finite-stock and
+growth-surface branches preserve the same monotone energy closure.
+
+A full-stage/two-half-stage comparison controls changing-temperature evolution
+and accepts the two-half-stage state. This is a first-order approximation to
+continuous thermal kinetics, not an exact continuous-event solution or a
+certified global error bound. Dissolved and solid errors are scaled separately.
+The original window heat is delivered uniformly in time; each stage is anchored
+to its cumulative heat target and the final energy residual is independently
+recomputed from original/final actual phases. Stage-root tolerance does not
+silently accumulate into an enlarged heat allowance.
+
+Trial storage is bounded by the existing 64-component limit and allocates no
+heap memory. Only returned public states allocate. Input states remain immutable
+on cancellation, domain refusal, unbracketed heat, temporal tolerance failure or
+work exhaustion. Independent cases cover closed-surface sensible heating,
+zero-enthalpy kinetics, both heat signs, finite-rate/equilibrium limits,
+first-order convergence against an independent ODE, unequal phase Cp, shared
+bath balances and transactional refusals. The model retains fixed solvent
+volume and declared conductance over each window; simultaneous spatial
+transport, evolving surface geometry and nucleation physics remain separate.
+
 ## Binary liquid miscibility and source-owned thermodynamic forces
 
 `solution::BinaryRegularSolutionV1` retains two explicit ordered species and a

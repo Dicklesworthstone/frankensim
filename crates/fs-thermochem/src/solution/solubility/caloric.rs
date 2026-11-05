@@ -24,6 +24,8 @@ use crate::solution::caloric::{
 use fs_qty::{Amount, Temperature, Volume};
 use std::sync::Arc;
 
+pub mod kinetics;
+
 /// Hard bound on independently soluble finite components in one thermal bath.
 pub const MAX_SOLUBILITY_CALORIC_COMPONENTS_V1: usize = 64;
 
@@ -39,6 +41,18 @@ pub enum SolubilityCaloricErrorV1 {
         residuals_j: [f64; 2],
     },
     IterationLimit,
+    /// The bounded adaptive integration exhausted its attempted-step budget.
+    IntegrationLimit,
+    /// Full-step/two-half-step disagreement still exceeds the requested
+    /// temporal tolerance at the minimum allowed comparison interval.
+    TemporalTolerance {
+        step_seconds: f64,
+        estimated_error_norm: f64,
+    },
+    /// Independent original-to-final energy accounting refused the window.
+    EnergyResidual {
+        residual_j: f64,
+    },
     Cancelled,
 }
 impl core::fmt::Display for SolubilityCaloricErrorV1 {
@@ -590,24 +604,56 @@ impl SolubilityCaloricModelV1 {
         mut dissolved_at: impl FnMut(usize) -> Result<Amount, SolubilityCaloricErrorV1>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, SolubilityCaloricErrorV1> {
+        self.phase_enthalpy_increment(
+            initial.temperature,
+            initial.solvent_moles,
+            temperature,
+            |index| {
+                let total = initial.total_solute[index].value();
+                let dissolved = initial.dissolved_solute[index].value();
+                Ok(PhaseIncrement {
+                    total,
+                    solid: total - dissolved,
+                    dissolved,
+                    transferred: if total == 0.0 {
+                        0.0
+                    } else {
+                        dissolved_at(index)?.value() - dissolved
+                    },
+                })
+            },
+            cancelled,
+        )
+    }
+
+    // Shared constitutive accounting for equilibrium and finite-rate states.
+    // Explicit original phase stocks retain a small donor that cannot be
+    // reconstructed by subtracting a dominant receiver from the rounded total.
+    fn phase_enthalpy_increment(
+        &self,
+        initial_temperature: Temperature,
+        solvent_moles: Amount,
+        temperature: Temperature,
+        mut phase_at: impl FnMut(usize) -> Result<PhaseIncrement, SolubilityCaloricErrorV1>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, SolubilityCaloricErrorV1> {
         poll(cancelled)?;
         let mut sum = Sum::default();
         sum.add(scaled(
-            initial.solvent_moles.value(),
+            solvent_moles.value(),
             self.owner
                 .solvent_cp
-                .enthalpy_change_j_per_mol(initial.temperature, temperature)?,
+                .enthalpy_change_j_per_mol(initial_temperature, temperature)?,
         )?)?;
         for (index, component) in self.owner.components.iter().enumerate() {
             poll(cancelled)?;
-            let total = initial.total_solute[index].value();
-            if total != 0.0 {
-                let initial_dissolved = initial.dissolved_solute[index].value();
+            let phase = phase_at(index)?;
+            if phase.total != 0.0 {
                 if let Some(cp) = component.common_phase_heat_capacity() {
                     // Preserve the original equal-Cp arithmetic exactly.
                     sum.add(scaled(
-                        total,
-                        cp.enthalpy_change_j_per_mol(initial.temperature, temperature)?,
+                        phase.total,
+                        cp.enthalpy_change_j_per_mol(initial_temperature, temperature)?,
                     )?)?;
                 } else {
                     // First heat each ORIGINAL phase stock to the trial T,
@@ -615,19 +661,19 @@ impl SolubilityCaloricModelV1 {
                     // sensible increments avoid subtracting large enthalpies
                     // or nearly equal phase Cp integrals.
                     for (moles, cp) in [
-                        (total - initial_dissolved, component.solid_heat_capacity()),
-                        (initial_dissolved, component.dissolved_heat_capacity()),
+                        (phase.solid, component.solid_heat_capacity()),
+                        (phase.dissolved, component.dissolved_heat_capacity()),
                     ] {
                         if moles != 0.0 {
                             sum.add(scaled(
                                 moles,
-                                cp.enthalpy_change_j_per_mol(initial.temperature, temperature)?,
+                                cp.enthalpy_change_j_per_mol(initial_temperature, temperature)?,
                             )?)?;
                         }
                     }
                 }
                 sum.add(scaled(
-                    dissolved_at(index)?.value() - initial_dissolved,
+                    phase.transferred,
                     component.law.dissolution_enthalpy_at(temperature)?,
                 )?)?;
             }
@@ -635,6 +681,14 @@ impl SolubilityCaloricModelV1 {
         poll(cancelled)?;
         sum.value()
     }
+}
+
+/// Private molar inputs to the single shared sensible-plus-transfer equation.
+struct PhaseIncrement {
+    total: f64,
+    solid: f64,
+    dissolved: f64,
+    transferred: f64,
 }
 
 /// Explicit work and acceptance bounds; unsupported heat never clamps to a limit.

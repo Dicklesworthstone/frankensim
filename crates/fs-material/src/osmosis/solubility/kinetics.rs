@@ -6,9 +6,13 @@
 //! kinetic step is taken. It does not silently impose instantaneous saturation.
 //!
 //! Coefficients and fixed surface applicability remain explicit caller inputs.
-//! This owner is isothermal during each step, supplies no simultaneous membrane
-//! or moisture transport, and infers no thermostat heat, nonideal chemistry,
-//! shrinking particle geometry, or nucleation law.
+//! `advance` is isothermal during each step. [`caloric`] instead couples these
+//! actual phases to the original finite thermal bath and prescribed heat input.
+//! Neither operation supplies simultaneous spatial transport, nonideal chemistry,
+//! shrinking particle geometry, or a nucleation law.
+
+/// Coupled finite-rate phase exchange and the original shared-bath heat balance.
+pub mod caloric;
 
 use super::{FiniteSolubilityError, FiniteSolubilitySolution};
 use crate::osmosis::{
