@@ -14,6 +14,7 @@ use fs_thermal::enthalpy::conduction::ConductivityLaw;
 use fs_thermal::enthalpy::conduction::implicit::ImplicitConductionLaw;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
+#[path = "phase_conductivity/mushy.rs"]
 mod mushy;
 
 fn claim(value: PropertyValue, fraction_bounds: [f64; 2]) -> PropertyClaim {
