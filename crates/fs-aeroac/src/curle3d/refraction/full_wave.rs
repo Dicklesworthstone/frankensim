@@ -34,6 +34,11 @@ use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use fs_math::{c64::C64, dd::Dd, det};
 use std::collections::BinaryHeap;
 
+mod force;
+pub use force::{
+    FULL_WAVE_FORCE_SCOPE, FullWaveForceDiagnostics, FullWaveForceLimits, PreparedFullWaveForce,
+};
+
 /// Hard bound on integrand evaluations, including discarded parent panels.
 pub const MAX_FULL_WAVE_EVALUATIONS: usize = 1_048_576;
 
@@ -301,18 +306,7 @@ impl PreparedFullWaveMonopole {
 }
 
 fn admit(limits: FullWaveMonopoleLimits) -> Result<(), AeroacError> {
-    if !positive(limits.absolute_pressure_tolerance_pa_per_m3_s)
-        || !positive(limits.absolute_velocity_tolerance_per_m2)
-        || !limits.relative_tolerance.is_finite()
-        || !(0.0..1.0).contains(&limits.relative_tolerance)
-        || !(1..=MAX_FULL_WAVE_EVALUATIONS).contains(&limits.maximum_evaluations)
-        || !(1..=48).contains(&limits.maximum_depth)
-    {
-        return Err(invalid(
-            "full-wave tolerances or explicit evaluation/depth budgets",
-        ));
-    }
-    Ok(())
+    QuadratureLimits::from(limits).admit()
 }
 
 fn minus_i(z: C64) -> C64 {
@@ -546,8 +540,92 @@ fn log_weighted(unit: C64, log_scale: f64, real_weight: f64) -> C64 {
     C64::new(component(unit.re), component(unit.im))
 }
 
+/// Units belong to the public source-specific limits. The shared integration
+/// engine only sees the pressure/velocity transfer norms and work budgets.
+#[derive(Clone, Copy)]
+struct QuadratureLimits {
+    absolute_pressure: f64,
+    absolute_velocity: f64,
+    relative: f64,
+    maximum_evaluations: usize,
+    maximum_depth: usize,
+}
+
+impl From<FullWaveMonopoleLimits> for QuadratureLimits {
+    fn from(limits: FullWaveMonopoleLimits) -> Self {
+        Self {
+            absolute_pressure: limits.absolute_pressure_tolerance_pa_per_m3_s,
+            absolute_velocity: limits.absolute_velocity_tolerance_per_m2,
+            relative: limits.relative_tolerance,
+            maximum_evaluations: limits.maximum_evaluations,
+            maximum_depth: limits.maximum_depth,
+        }
+    }
+}
+
+impl QuadratureLimits {
+    fn admit(self) -> Result<(), AeroacError> {
+        if !positive(self.absolute_pressure)
+            || !positive(self.absolute_velocity)
+            || !self.relative.is_finite()
+            || !(0.0..1.0).contains(&self.relative)
+            || !(1..=MAX_FULL_WAVE_EVALUATIONS).contains(&self.maximum_evaluations)
+            || !(1..=48).contains(&self.maximum_depth)
+        {
+            return Err(invalid(
+                "full-wave tolerances or explicit evaluation/depth budgets",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Statically sized samples keep the original monopole's three-channel work
+/// unchanged; force derivatives share the same nodes with seven channels.
+trait Spectrum<const N: usize> {
+    fn geometry(&self) -> &Kernel;
+    fn sample(&self, region: usize, x: f64) -> Result<[C64; N], AeroacError>;
+}
+
+impl Spectrum<3> for Kernel {
+    fn geometry(&self) -> &Kernel {
+        self
+    }
+    fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
+        Kernel::sample(self, region, x)
+    }
+}
+
+struct IntegratedSpectrum<const N: usize> {
+    value: [C64; N],
+    error: [f64; N],
+    evaluations: usize,
+    maximum_depth_reached: usize,
+    retained_panels: usize,
+    cutoff: f64,
+    maximum_argument: f64,
+}
+
+fn real_norm(values: &[f64]) -> f64 {
+    let Some((&first, remaining)) = values.split_first() else {
+        return 0.0;
+    };
+    remaining
+        .iter()
+        .fold(first.abs(), |sum, v| det::hypot(sum, *v))
+}
+
+fn complex_norm(values: &[C64]) -> f64 {
+    let Some((&first, remaining)) = values.split_first() else {
+        return 0.0;
+    };
+    remaining
+        .iter()
+        .fold(first.abs(), |sum, v| det::hypot(sum, v.abs()))
+}
+
 // Embedded 7-point Gauss / 15-point Kronrod rule on [-1,1]. Shared nodes
-// integrate all three complex transfers together, with DD signed reductions.
+// integrate every complex transfer together, with DD signed reductions.
 const NODES: [f64; 8] = [
     0.991_455_371_120_812_6,
     0.949_107_912_342_758_5,
@@ -575,29 +653,29 @@ const GAUSS: [f64; 4] = [
     0.417_959_183_673_469_4,
 ];
 
-struct Panel {
+struct Panel<const N: usize> {
     region: usize,
     lower: f64,
     upper: f64,
     depth: usize,
-    value: [C64; 3],
-    error: [f64; 3],
+    value: [C64; N],
+    error: [f64; N],
     unresolved: bool,
     priority: f64,
     serial: usize,
 }
-impl PartialEq for Panel {
+impl<const N: usize> PartialEq for Panel<N> {
     fn eq(&self, rhs: &Self) -> bool {
         self.serial == rhs.serial
     }
 }
-impl Eq for Panel {}
-impl PartialOrd for Panel {
+impl<const N: usize> Eq for Panel<N> {}
+impl<const N: usize> PartialOrd for Panel<N> {
     fn partial_cmp(&self, rhs: &Self) -> Option<Ordering> {
         Some(self.cmp(rhs))
     }
 }
-impl Ord for Panel {
+impl<const N: usize> Ord for Panel<N> {
     fn cmp(&self, rhs: &Self) -> Ordering {
         self.unresolved
             .cmp(&rhs.unresolved)
@@ -614,26 +692,26 @@ struct Work {
 
 impl Work {
     #[allow(clippy::too_many_arguments)]
-    fn panel(
+    fn panel<const N: usize, const PRESSURE: usize>(
         &mut self,
-        kernel: &Kernel,
+        kernel: &impl Spectrum<N>,
         region: usize,
         lower: f64,
         upper: f64,
         depth: usize,
-        limits: FullWaveMonopoleLimits,
+        limits: QuadratureLimits,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Panel, AeroacError> {
+    ) -> Result<Panel<N>, AeroacError> {
         if self.evaluations + 15 > limits.maximum_evaluations {
             return Err(invalid("full-wave quadrature evaluation budget exhausted"));
         }
         self.maximum_depth_reached = self.maximum_depth_reached.max(depth);
         let midpoint = lower + (upper - lower) * 0.5;
         let half_width = (upper - lower) * 0.5;
-        let mut samples = [[C64::ZERO; 3]; 15];
-        let mut kronrod = [ComplexSum::default(); 3];
-        let mut gauss = [ComplexSum::default(); 3];
-        let mut absolute = [Dd::ZERO; 3];
+        let mut samples = [[C64::ZERO; N]; 15];
+        let mut kronrod = [ComplexSum::default(); N];
+        let mut gauss = [ComplexSum::default(); N];
+        let mut absolute = [Dd::ZERO; N];
         for node in 0..15 {
             poll(cancelled)?;
             let index = node / 2;
@@ -650,7 +728,7 @@ impl Work {
             let values = kernel.sample(region, x)?;
             self.evaluations += 1;
             samples[node] = values;
-            for component in 0..3 {
+            for component in 0..N {
                 kronrod[component].add(values[component].scale(KRONROD[index]))?;
                 absolute[component] =
                     absolute[component] + Dd::from_f64(values[component].abs() * KRONROD[index]);
@@ -661,8 +739,8 @@ impl Work {
         }
         let result = kronrod.map(ComplexSum::value);
         let gauss = gauss.map(ComplexSum::value);
-        let mut error = [0.0; 3];
-        for component in 0..3 {
+        let mut error = [0.0; N];
+        for component in 0..N {
             let mean = result[component].scale(0.5);
             let mut deviation = Dd::ZERO;
             for (node, values) in samples.iter().enumerate() {
@@ -684,8 +762,8 @@ impl Work {
         if value.iter().any(|v| !finite(*v)) || error.iter().any(|v| !v.is_finite() || *v < 0.0) {
             return Err(nonfinite("full-wave quadrature panel"));
         }
-        let priority = (error[0] / limits.absolute_pressure_tolerance_pa_per_m3_s)
-            .max(det::hypot(error[1], error[2]) / limits.absolute_velocity_tolerance_per_m2);
+        let priority = (real_norm(&error[..PRESSURE]) / limits.absolute_pressure)
+            .max(real_norm(&error[PRESSURE..]) / limits.absolute_velocity);
         let panel = Panel {
             region,
             lower,
@@ -693,7 +771,7 @@ impl Work {
             depth,
             value,
             error,
-            unresolved: !kernel.resolved(region, lower, upper),
+            unresolved: !kernel.geometry().resolved(region, lower, upper),
             priority,
             serial: self.serial,
         };
@@ -708,8 +786,33 @@ fn integrate(
     limits: FullWaveMonopoleLimits,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<([C64; 3], FullWaveMonopoleDiagnostics), AeroacError> {
-    let cutoff = det::hypot(kernel.kmax, kernel.tail_extent);
-    let maximum_argument = cutoff * kernel.range;
+    let result = integrate_spectrum::<3, 1>(kernel, tail, limits.into(), cancelled)?;
+    Ok((
+        result.value,
+        FullWaveMonopoleDiagnostics {
+            evaluations: result.evaluations,
+            maximum_depth_reached: result.maximum_depth_reached,
+            retained_panels: result.retained_panels,
+            transverse_wavenumber_cutoff_rad_m: result.cutoff,
+            maximum_bessel_argument: result.maximum_argument,
+            pressure_quadrature_error_pa_per_m3_s: result.error[0],
+            velocity_quadrature_error_per_m2: [result.error[1], result.error[2]],
+            pressure_tail_bound_pa_per_m3_s: tail[0],
+            velocity_tail_bound_per_m2: [tail[1], tail[2]],
+            exact_equal_speed: false,
+        },
+    ))
+}
+
+fn integrate_spectrum<const N: usize, const PRESSURE: usize>(
+    kernel: &impl Spectrum<N>,
+    tail: [f64; N],
+    limits: QuadratureLimits,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<IntegratedSpectrum<N>, AeroacError> {
+    let geometry = kernel.geometry();
+    let cutoff = det::hypot(geometry.kmax, geometry.tail_extent);
+    let maximum_argument = cutoff * geometry.range;
     if !cutoff.is_finite() || !maximum_argument.is_finite() {
         return Err(nonfinite("full-wave retained spectral extent"));
     }
@@ -719,8 +822,8 @@ fn integrate(
     panels
         .try_reserve_exact(limits.maximum_evaluations / 30 + 3)
         .map_err(|_| invalid("full-wave quadrature allocation exceeds available memory"))?;
-    let mut sums = [ComplexSum::default(); 3];
-    let mut errors = [Dd::ZERO; 3];
+    let mut sums = [ComplexSum::default(); N];
+    let mut errors = [Dd::ZERO; N];
     let mut unresolved = 0_usize;
     let mut work = Work {
         evaluations: 0,
@@ -728,8 +831,8 @@ fn integrate(
         serial: 0,
     };
     for region in 0..3 {
-        let panel = work.panel(kernel, region, 0.0, 1.0, 0, limits, cancelled)?;
-        for component in 0..3 {
+        let panel = work.panel::<N, PRESSURE>(kernel, region, 0.0, 1.0, 0, limits, cancelled)?;
+        for component in 0..N {
             sums[component].add(panel.value[component])?;
             errors[component] = errors[component] + Dd::from_f64(panel.error[component]);
         }
@@ -744,30 +847,25 @@ fn integrate(
             return Err(nonfinite("full-wave accumulated field or error estimates"));
         }
         let pressure_target = limits
-            .absolute_pressure_tolerance_pa_per_m3_s
-            .max(limits.relative_tolerance * value[0].abs());
+            .absolute_pressure
+            .max(limits.relative * complex_norm(&value[..PRESSURE]));
         let velocity_target = limits
-            .absolute_velocity_tolerance_per_m2
-            .max(limits.relative_tolerance * det::hypot(value[1].abs(), value[2].abs()));
-        if unresolved == 0
-            && error[0] + tail[0] <= pressure_target
-            && det::hypot(error[1] + tail[1], error[2] + tail[2]) <= velocity_target
+            .absolute_velocity
+            .max(limits.relative * complex_norm(&value[PRESSURE..]));
+        let total_error = core::array::from_fn::<_, N, _>(|i| error[i] + tail[i]);
+        let pressure_error = real_norm(&total_error[..PRESSURE]);
+        let velocity_error = real_norm(&total_error[PRESSURE..]);
+        if unresolved == 0 && pressure_error <= pressure_target && velocity_error <= velocity_target
         {
-            return Ok((
+            return Ok(IntegratedSpectrum {
                 value,
-                FullWaveMonopoleDiagnostics {
-                    evaluations: work.evaluations,
-                    maximum_depth_reached: work.maximum_depth_reached,
-                    retained_panels: panels.len(),
-                    transverse_wavenumber_cutoff_rad_m: cutoff,
-                    maximum_bessel_argument: maximum_argument,
-                    pressure_quadrature_error_pa_per_m3_s: error[0],
-                    velocity_quadrature_error_per_m2: [error[1], error[2]],
-                    pressure_tail_bound_pa_per_m3_s: tail[0],
-                    velocity_tail_bound_per_m2: [tail[1], tail[2]],
-                    exact_equal_speed: false,
-                },
-            ));
+                error,
+                evaluations: work.evaluations,
+                maximum_depth_reached: work.maximum_depth_reached,
+                retained_panels: panels.len(),
+                cutoff,
+                maximum_argument,
+            });
         }
         let panel = panels
             .pop()
@@ -775,8 +873,7 @@ fn integrate(
         if panel.depth >= limits.maximum_depth {
             return Err(AeroacError::NotConverged {
                 what: "full-wave quadrature depth or phase resolution",
-                residual: ((error[0] + tail[0]) / pressure_target)
-                    .max(det::hypot(error[1] + tail[1], error[2] + tail[2]) / velocity_target),
+                residual: (pressure_error / pressure_target).max(velocity_error / velocity_target),
             });
         }
         let midpoint = panel.lower + (panel.upper - panel.lower) * 0.5;
@@ -786,7 +883,7 @@ fn integrate(
             ));
         }
         // Construct both children before replacing a published parent sum.
-        let left = work.panel(
+        let left = work.panel::<N, PRESSURE>(
             kernel,
             panel.region,
             panel.lower,
@@ -795,7 +892,7 @@ fn integrate(
             limits,
             cancelled,
         )?;
-        let right = work.panel(
+        let right = work.panel::<N, PRESSURE>(
             kernel,
             panel.region,
             midpoint,
@@ -804,7 +901,7 @@ fn integrate(
             limits,
             cancelled,
         )?;
-        for component in 0..3 {
+        for component in 0..N {
             sums[component].add(-panel.value[component])?;
             sums[component].add(left.value[component])?;
             sums[component].add(right.value[component])?;

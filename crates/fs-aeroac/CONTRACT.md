@@ -1599,11 +1599,60 @@ The cached four-coefficient transfer applies original source-clock amplitudes
 without allocation or transcendental work and feeds existing coherent-field and
 harmonic-window observers. The model covers strictly positive source/receiver
 clearances on opposite sides of one infinite lossless plane. It does not model
-flow, absorption, finite surfaces, layers, force dipoles or source feedback.
+flow, absorption, finite surfaces, layers or source feedback. Force sources
+have their own complete tensor transfer described below.
 `tests/full_wave_refraction.rs` covers independent high-precision direct-spectrum
 references, important evanescent contributions, exact reactive equal-speed
 fields, reciprocity, pressure-gradient velocity, ray-tube asymptotics, geometry,
 refinement, original observation clocks and explicit work/cancellation refusals.
+
+## Full-wave refraction of physical force dipoles
+
+`curle3d::refraction::full_wave::PreparedFullWaveForce` transports an actual
+three-dimensional force **on the incident fluid** [N] across the same original
+fluid plane. This supplies the transmitted field of Curle/structural compact
+forces without treating them as volume sources or multiplying by density a
+second time. All force components retain their complex source-clock phase.
+
+Pressure uses the analytic source derivative of the transmitted Green
+function; velocity uses its complete mixed source/receiver derivative.
+Source-normal factors use the incident vertical wavenumber, receiver-normal
+factors the receiving wavenumber. The two mixed tensor entries remain distinct
+when speeds differ. Tangential velocity remains present at dipole pressure
+nulls, including both transverse channels on the normal axis. Equal original
+speeds use exact derivatives of the scaled spherical Green function, including
+the receiving-density velocity correction; nearly equal speeds still use
+their distinct spectra.
+
+Seven complex cylindrical coefficients share the original outgoing branch
+transformations, bounded adaptive Gauss--Kronrod nodes, DD reductions and
+phase/attenuation resolution controls. The original monopole remains a
+three-channel specialization. `FullWaveForceLimits` controls the pressure
+vector's Euclidean norm [Pa/N] and velocity tensor's Frobenius norm [m/s/N],
+so multiplying their estimated errors by the force norm covers any prescribed
+orientation. Relative transfer tolerances do not promise relative field error
+at a directional null. Diagnostics report each radial/normal pressure and each
+tt/ss/tn/nt/nn velocity error separately. Analytic degree-one/degree-two spectral
+tail envelopes retain near-interface gradients; their logarithmic evaluation
+prevents premature underflow. Strongly attenuated physical integrands also use
+logarithmic scaling when ordinary intermediates cannot represent the field.
+Quadrature remains estimated, not certified; Bessel, geometry, coordinate
+rotation and floating-point errors remain outside both reported quantities.
+
+Preparation stores twelve Cartesian complex coefficients. Applying a force or
+feeding `HarmonicFieldLine<3>` is allocation-free with fixed-order DD sums and
+no trigonometry, quadrature or numerical differentiation. Explicit budgets and
+cancellation return no partial owner. The source remains prescribed, compact,
+stationary and three-dimensional; finite source size, moving/absorbing fluids,
+finite or layered interfaces, mutual fluid loading and measured-SPL authority
+remain outside this model.
+
+`tests/full_wave_force_refraction.rs` pins all seven channels against independent
+35/50-digit direct-spectrum references, the homogeneous density-jump limit,
+source-derivative signs, receiving-fluid momentum, pressure-null transverse
+motion, rotation covariance, tensor-norm refinement, physical observation clocks
+and work/cancellation refusals. A balanced-half-decay unit regression covers
+representable force gradients after raw evanescent exponential underflow.
 
 ## Resolved volume-stress quadrupoles
 
