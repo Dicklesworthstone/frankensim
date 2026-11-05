@@ -1744,6 +1744,29 @@ phasors and all p/u moments, Hann bin power, instantaneous velocity-to-stress
 frequency doubling, cross-cell interference, pressure-null transverse motion,
 and shape/frequency/work/cancellation refusals.
 
+`quadrupole::recorded::QuadrupoleWelchStream` binds the fixed cell positions and
+six physical stress channels to an explicit epoch, dt and timestamp-error
+budget. It consumes instantaneous accepted stress arrays through the original
+`WelchStream::push_with`; no velocity-spectrum multiplication, new estimator,
+source independence, resampling or implicit decimation is introduced. Source
+geometry/order, timestamp and record-length checks precede the atomic Welch
+push. Timestamps derive from the epoch and integer index using DD arithmetic;
+the admitted range must resolve adjacent samples even at a large epoch. The
+caller still establishes that the supplied moments belong to that time and
+that the source sampling resolves its bandwidth.
+
+Preparation charges retained positions plus the original transform's entire
+workspace/factor bank to the stated memory budget. Accepted samples allocate
+nothing and retain only the native segment buffers, not full flow histories.
+`RecordedQuadrupoleSpectrum` moves the completed factors without a copy and
+binds observer preparation/evaluation to the same source positions and actual
+interior bin. The original unused-tail, leakage, detrending, statistical and
+point-quadrature limits remain; there is no deterministic waveform or
+cross-frequency phase reconstruction. Four G0/G1/G4/G5 fixtures cover exact
+streaming/batch factor agreement with overlap/tails, changed-source and clock
+refusals, cancelled-transform retry, bound observer use, memory/shape admission
+and timestamp-resolution refusal.
+
 Kernel regressions cover units, the isotropic Helmholtz identity, independent
 Green-function Hessian refinement, all-component linear momentum, rotation
 covariance, far-field directivity/impedance, pressure-null transverse velocity,

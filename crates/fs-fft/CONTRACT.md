@@ -917,8 +917,11 @@ are not the translated product or an additional phase-average assumption.
 ### Streaming synchronized interference measurements
 
 `welch::WelchStream` acquires a declared record through synchronized channel
-slices or interleaved chunks. Construction admits total channel/sample/FFT
-counts, the final factor bank, original FFT/window workspace and two
+slices, interleaved chunks or borrowed dynamic layouts through `push_with`.
+Its `(channel, sample)` accessor must present the same original value on every
+read, retaining channel identity and the declared clock without a transpose.
+Construction admits total channel/sample/FFT counts, the final factor bank,
+original FFT/window workspace and two
 segment-sized input buffers. Batch and streaming share one segment algorithm
 and the final segment count: chunk boundaries preserve factor bits, overlap,
 complex cross-channel phase, detrending and one-sided PSD normalization.

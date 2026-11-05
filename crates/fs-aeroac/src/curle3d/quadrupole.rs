@@ -25,6 +25,8 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det};
 
 mod kernel;
+/// Physical-clock acquisition and propagation of resolved volume histories.
+pub mod recorded;
 mod welch;
 
 /// Physical scope retained by every quadrupole observation.

@@ -117,7 +117,12 @@ impl WelchStream {
         self.push_with(D, samples.len(), |c, j| samples[j][c], cancelled)
     }
 
-    fn push_with(
+    /// Push a dynamically shaped borrowed record without transposing or
+    /// copying its channels. `sample(channel, index)` must return the same
+    /// physical value on every call; it is read during admission and again
+    /// during transforms. Channel identities and the original clock remain
+    /// fixed. The same atomic chunk and work/memory limits apply.
+    pub fn push_with(
         &mut self,
         channels: usize,
         samples: usize,
