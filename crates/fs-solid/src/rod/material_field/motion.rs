@@ -546,7 +546,7 @@ fn g4_centered_refusal_support_admission_and_cancellation_remain_explicit() {
 
 #[test]
 fn g1_transverse_pullback_matches_finite_pose_derivatives_and_rigid_spin() {
-    use fs_ga::{So3Tangent, Vec3};
+    use fs_ga::{So3, So3Tangent, Vec3};
     let gate = CancelGate::new();
     let model = SpatialMaterialRod::try_straight(0.8, vec![section()]).unwrap()
         .into_motion_model(RodRootBoundary::Free, &gate).unwrap();

@@ -11,7 +11,9 @@
 //! assembled elementwise using the canonical SO(3) differentials. Arbitrary
 //! energy callbacks retain the element-local finite-difference fallback.
 //! Dense-LU Newton with load stepping remains fixture-scale by design
-//! (≤ a few hundred DOFs). SE(3) dynamics remain successor scope.
+//! (≤ a few hundred DOFs). Backtracking reuses the current LU to measure
+//! Newton corrections; the physical force/couple residual still decides
+//! convergence. SE(3) dynamics remain successor scope.
 //! [`MaterialRod`] retains its source-resolved section.
 
 use crate::SolidError;
@@ -307,8 +309,10 @@ impl Rod {
         Ok(r)
     }
 
-    /// Newton statics under load stepping; returns residual norms per
-    /// step (evidence).
+    /// Newton statics under load stepping; returns the final physical residual
+    /// norm for each converged load step. Iteration histories in
+    /// [`SolidError::NewtonStalled`] may rise while the Newton correction shrinks;
+    /// the supplied tolerance still applies to the physical force/couple residual.
     ///
     /// # Errors
     /// [`SolidError::NewtonStalled`] with the history on failure.
@@ -397,6 +401,16 @@ impl Rod {
             return Ok(vec![0.0; steps]);
         }
         let residual_norm = |r: &[f64]| free.iter().map(|&k| r[k] * r[k]).sum::<f64>().sqrt();
+        // Compare displacement corrections, not raw forces from widely
+        // different axial/shear and bending stiffnesses. Translations use the
+        // same retained length scale as the solver's independent probes;
+        // rotations are dimensionless body/right increments.
+        let correction_norm = |correction: &[f64]| {
+            free.iter().zip(correction).fold(0.0, |norm, (&coordinate, &value)| {
+                let scaled = if coordinate % 6 < 3 { value / translation_scale_m } else { value };
+                fs_math::det::hypot(norm, scaled)
+            })
+        };
         let mut finals = Vec::new();
         for step in 1..=steps {
             #[allow(clippy::cast_precision_loss)]
@@ -468,11 +482,22 @@ impl Rod {
                 })?;
                 let mut reduced: Vec<f64> = free.iter().map(|&k| -r[k]).collect();
                 f.solve(&mut reduced);
+                let newton_norm = correction_norm(&reduced);
+                if !newton_norm.is_finite() {
+                    return Err(SolidError::SolveFailed {
+                        iters: 0,
+                        rel_residual: f64::INFINITY,
+                    }.into());
+                }
                 let mut d = vec![0.0; full_n];
                 for (&k, &value) in free.iter().zip(&reduced) { d[k] = value; }
                 checkpoint()?;
-                // Backtracking on the residual norm (applied couples make
-                // Π alone an incomplete merit function).
+                // Frozen-Jacobian correction merit: a large force in a stiff
+                // direction need not imply a large remaining displacement.
+                // Reuse THIS factorization for every trial; do not reassemble
+                // the nonlinear tangent or infer a potential for applied couples.
+                // The original physical residual remains the convergence gate.
+                let mut trial_correction = vec![0.0; n];
                 let mut alpha = 1.0f64;
                 let mut accepted = false;
                 for _ in 0..20 {
@@ -486,7 +511,19 @@ impl Rod {
                     let rt = trial.residual_on(load, factor, energy, checkpoint,
                         translation_scale_m, &free, None)?;
                     let rtn = residual_norm(&rt);
-                    if rtn < rn {
+                    let improves = if rtn < tol {
+                        true
+                    } else {
+                        for (value, &coordinate) in trial_correction.iter_mut().zip(&free) {
+                            *value = rt[coordinate];
+                        }
+                        checkpoint()?;
+                        f.solve(&mut trial_correction);
+                        let trial_norm = correction_norm(&trial_correction);
+                        trial_norm.is_finite() && trial_norm < newton_norm
+                    };
+                    checkpoint()?;
+                    if improves {
                         *self = trial;
                         accepted = true;
                         break;

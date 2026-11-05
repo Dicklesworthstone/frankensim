@@ -3468,10 +3468,12 @@ cancellation, budget and late-jump rollback.
   MULTIPLICATIVELY through body/right group operations; strains Γ = Rᵀr′ − e₁ and
   κ = Log(Rᵢ⁻¹Rᵢ₊₁)/L₀ from RELATIVE quantities (rigid motions give
   exactly zero strain — energy-invariance battery). Statics: analytical native
-  residual/tangent Newton with residual backtracking and load
-  stepping, fixture-gated; fixture slenderness matters — a
-  penalty-stiff EA puts a quadratic spurious-stretch wall around
-  every Newton iterate (measured, documented in the battery).
+  residual/tangent Newton with load stepping and frozen-Jacobian
+  correction backtracking. The current LU is reused for trial solves;
+  scaled displacement/rotation corrections choose accepted steps, while
+  the original physical force/couple residual decides convergence.
+  Constitutive and discretization validity retain their original
+  admission and refinement requirements.
   Arbitrary energy callbacks retain an element-local finite-difference fallback;
   SE(3) dynamics under fs-time integrators remain successor scope.
 - `fiber` (bead tfz.14): fiber sections over fs-material `Uniaxial`
@@ -4017,11 +4019,28 @@ It also verifies that the untimed and inertial entry points cannot age fibers.
 `rod::WorldTipLoad` declares a world-held tip force in newtons and a free couple
 about that moving tip in newton metres. `Rod`, `MaterialRod` and
 `SpatialMaterialRod::solve_static_world` use the original energy, Lie-group
-Newton, load stepping and residual backtracking. Each trial evaluates
+Newton and load stepping with frozen-Jacobian correction backtracking.
+Each trial evaluates
 `M_body = R_tip^T M_world`; the exact external contribution to the body/right
 residual tangent is `-hat(M_body)`. It is included alongside both native
 analytical internal tangents and the arbitrary-energy finite-difference fallback.
 The constant couple is not replaced by the gradient of `-M dot Log(R)`.
+
+At each Newton iterate, rod statics factors the current free-coordinate
+Jacobian once. Backtracking reuses that LU and compares each trial's correction
+norm with the current iterate's correction norm. Translations use the existing
+translation scale; body/right rotation increments are dimensionless. A trial is
+accepted when it satisfies the original physical residual tolerance or strictly
+reduces the correction norm under that same frozen Jacobian. The raw force/couple
+residual may rise during accepted iterations; its original tolerance remains
+the sole equilibrium convergence gate. The Jacobian is refreshed at the next
+Newton iterate. The returned residual vector contains final physical residuals
+for completed load steps; a `NewtonStalled` history need not be monotone.
+
+The unchanged finite-bending world-couple regression and the complete rod
+material/source integration targets pass with the original loads, tolerances,
+Newton limits and backtrack limits. This step-acceptance change preserves the
+original constitutive model, reference inventory and material publication rules.
 
 `TipLoad` continues to express a world-held force plus a body-held follower
 couple. These are distinct physical load laws when a tip turns. World loading
