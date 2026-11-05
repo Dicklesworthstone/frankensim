@@ -139,6 +139,17 @@ preconditioning; boundary/gauge restrictions remain the caller's responsibility.
 Focused regressions compare assembled action and diagonal, exact graded mass
 and centroid without triplet storage, repeated use, and atomic refusal.
 
+`prepare_action_with_scalar_field` freezes a positive scalar multiplier at
+caller-selected Duffy quadrature points. It supports general spatial density,
+inverse density and density/heat-capacity products without resampling a source
+during warm action. Original source errors propagate unchanged, coefficient
+dimensions compose explicitly, and sampled storage is admitted before queries.
+Independent coefficient scales remain factored through integration so their
+separate maxima cannot spuriously overflow a finite combined operator. Tests
+use exact quadratic-density moments and the logarithmic inverse-density energy.
+The declared quadrature order is a caller-controlled approximation for a general
+field; sampled positivity is not an unsampled material-domain certificate.
+
 This includes the constant/affine scalar bulk-operator slice of
 `frankensim-ext-feec-weighted-operators-vxth`. It does not close that bead's
 high-order, nonlinear/quadrature-point, constitutive-history, or full

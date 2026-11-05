@@ -204,6 +204,271 @@ fn material_action_refusal_is_atomic_and_storage_is_bounded() {
 }
 
 #[test]
+fn sampled_density_retains_quadratic_inventory_moments_and_heat_capacity_units() {
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let weights = [CellWeight::Scalar(5.0)]; // Specific heat [J/(kg K)].
+    for r in [1, 3, 6] {
+        let space = SimplexSpace::new(&complex, r);
+        let op = MaterialOperator::new(
+            &space,
+            &geo,
+            H1Pairing::Mass,
+            &weights,
+            Dims([2, 0, -2, -1, 0, 0]),
+            LIMITS,
+            &mut || false,
+        )
+        .unwrap();
+        let order = r + 3; // Exact through quadratic density times degree-2r mass.
+        let mut calls = 0;
+        let action = op
+            .prepare_action_with_scalar_field(
+                Dims([-3, 1, 0, 0, 0, 0]),
+                order,
+                1_000_000,
+                &mut |cell, lambda| {
+                    calls += 1;
+                    let x: f64 = complex.tets[cell]
+                        .iter()
+                        .zip(lambda)
+                        .map(|(&v, l)| l * positions[v as usize][0])
+                        .sum();
+                    Ok::<_, WeightedError>(3.0 + 12.0 * x * x)
+                },
+                &mut || false,
+            )
+            .unwrap();
+        assert_eq!(calls, order.pow(3));
+        assert_eq!(action.entry_dims(), Dims([2, 1, -2, -1, 0, 0]));
+        let mut constant = vec![0.0; space.ndof];
+        constant[..positions.len()].fill(1.0);
+        let mut output = vec![0.0; space.ndof];
+        let mut scratch = vec![0.0; space.ndof];
+        action
+            .apply_into(&constant, &mut output, &mut scratch, &mut || false)
+            .unwrap();
+        // Independent Cartesian monomial integrals on the unit tetrahedron:
+        // integral rho=7/10; integral rho*x=9/40; integral rho*y=rho*z=19/120.
+        near(output[..positions.len()].iter().sum(), 7.0 / 2.0);
+        for c in 0..3 {
+            let moment: f64 = positions
+                .iter()
+                .enumerate()
+                .map(|(i, p)| p[c] * output[i])
+                .sum();
+            near(moment, [9.0 / 8.0, 19.0 / 24.0, 19.0 / 24.0][c]);
+        }
+        let mut linear = vec![0.0; space.ndof];
+        for (i, p) in positions.iter().enumerate() {
+            linear[i] = p[0];
+        }
+        action
+            .apply_into(&linear, &mut output, &mut scratch, &mut || false)
+            .unwrap();
+        near(
+            linear.iter().zip(output).map(|(u, f)| u * f).sum(),
+            15.0 / 28.0,
+        );
+        assert_eq!(
+            calls,
+            order.pow(3),
+            "warm actions must not query material again"
+        );
+    }
+}
+
+#[test]
+fn sampled_inverse_density_is_integrated_before_diffusion_projection() {
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let space = SimplexSpace::new(&complex, 2);
+    let weights = [CellWeight::Scalar(1.0)];
+    let op = MaterialOperator::new(
+        &space,
+        &geo,
+        H1Pairing::Diffusion,
+        &weights,
+        Dims::NONE,
+        LIMITS,
+        &mut || false,
+    )
+    .unwrap();
+    let mut trial = vec![0.0; space.ndof];
+    for (i, p) in positions.iter().enumerate() {
+        trial[i] = p[0];
+    }
+    let exact = (9.0 * (1.5_f64).ln() - 3.5) / 2.0;
+    let mut errors = Vec::new();
+    for order in [4, 8] {
+        let action = op
+            .prepare_action_with_scalar_field(
+                Dims([3, -1, 0, 0, 0, 0]),
+                order,
+                1_000_000,
+                &mut |cell, lambda| {
+                    let x: f64 = complex.tets[cell]
+                        .iter()
+                        .zip(lambda)
+                        .map(|(&v, l)| l * positions[v as usize][0])
+                        .sum();
+                    Ok::<_, WeightedError>(1.0 / (2.0 + x))
+                },
+                &mut || false,
+            )
+            .unwrap();
+        let mut output = vec![0.0; space.ndof];
+        let mut scratch = vec![0.0; space.ndof];
+        action
+            .apply_into(&trial, &mut output, &mut scratch, &mut || false)
+            .unwrap();
+        let value: f64 = trial.iter().zip(output).map(|(u, f)| u * f).sum();
+        errors.push((value - exact).abs());
+    }
+    // Integral_0^1 (1-x)^2/[2(2+x)] dx. Interpolating reciprocal corner
+    // samples instead gives 11/144, which is a different physical operator.
+    assert!((11.0 / 144.0 - exact).abs() > 1e-3);
+    assert!(
+        errors[1] < 1e-12 && errors[1] < errors[0] * 1e-3,
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn sampled_material_preserves_source_errors_and_admits_before_sampling() {
+    #[derive(Debug, PartialEq)]
+    enum SourceError {
+        Weighted(WeightedError),
+        OutsideDomain,
+    }
+    impl From<WeightedError> for SourceError {
+        fn from(e: WeightedError) -> Self {
+            Self::Weighted(e)
+        }
+    }
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let space = SimplexSpace::new(&complex, 2);
+    let weights = [CellWeight::Scalar(3.0)];
+    let op = MaterialOperator::new(
+        &space,
+        &geo,
+        H1Pairing::Mass,
+        &weights,
+        Dims::NONE,
+        LIMITS,
+        &mut || false,
+    )
+    .unwrap();
+    let mut calls = 0;
+    assert!(matches!(
+        op.prepare_action_with_scalar_field(
+            Dims::NONE,
+            4,
+            0,
+            &mut |_, _| {
+                calls += 1;
+                Ok::<_, WeightedError>(1.0)
+            },
+            &mut || false
+        ),
+        Err(WeightedError::LimitExceeded { .. })
+    ));
+    assert_eq!(calls, 0);
+    assert!(matches!(
+        op.prepare_action_with_scalar_field(
+            Dims::NONE,
+            4,
+            1_000_000,
+            &mut |_, _| Err::<f64, _>(SourceError::OutsideDomain),
+            &mut || false
+        ),
+        Err(SourceError::OutsideDomain)
+    ));
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            op.prepare_action_with_scalar_field(
+                Dims::NONE,
+                4,
+                1_000_000,
+                &mut |_, _| Ok::<_, WeightedError>(bad),
+                &mut || false
+            ),
+            Err(WeightedError::InvalidCoefficient { cell: 0, .. })
+        ));
+    }
+    let original = op.prepare_action(1_000_000, &mut || false).unwrap();
+    let sampled = op
+        .prepare_action_with_scalar_field(
+            Dims::NONE,
+            4,
+            1_000_000,
+            &mut |_, _| Ok::<_, WeightedError>(1.0),
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(original.diagonal(), sampled.diagonal());
+    let trial: Vec<_> = (0..space.ndof).map(|i| i as f64 / 10.0).collect();
+    let mut left = vec![0.0; space.ndof];
+    let mut right = left.clone();
+    let mut scratch = left.clone();
+    original
+        .apply_into(&trial, &mut left, &mut scratch, &mut || false)
+        .unwrap();
+    sampled
+        .apply_into(&trial, &mut right, &mut scratch, &mut || false)
+        .unwrap();
+    assert_eq!(left, right);
+}
+
+#[test]
+fn anticorrelated_density_scales_do_not_refuse_a_finite_material_operator() {
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let space = SimplexSpace::new(&complex, 1);
+    let weights = [CellWeight::AffineScalar([1e308, 1e307, 1e307, 1e307])];
+    let op = MaterialOperator::new(
+        &space,
+        &geo,
+        H1Pairing::Mass,
+        &weights,
+        Dims::NONE,
+        LIMITS,
+        &mut || false,
+    )
+    .unwrap();
+    let action = op
+        .prepare_action_with_scalar_field(
+            Dims::NONE,
+            3,
+            1_000_000,
+            &mut |_, lambda| {
+                Ok::<_, WeightedError>(
+                    1e308 / (1e308 * lambda[0] + 1e307 * (lambda[1] + lambda[2] + lambda[3])),
+                )
+            },
+            &mut || false,
+        )
+        .unwrap();
+    // The combined coefficient is constant 1e308, although multiplying the
+    // separately attained maxima would overflow. Every P1 mass entry is finite.
+    for &diagonal in action.diagonal() {
+        near(diagonal, 1e308 / 60.0);
+    }
+    let trial = [1.0, 2.0, -0.5, 0.3];
+    let mut output = [0.0; 4];
+    action
+        .apply_into(&trial, &mut output, &mut [0.0; 4], &mut || false)
+        .unwrap();
+    for i in 0..4 {
+        near(
+            output[i],
+            (trial.iter().sum::<f64>() + trial[i]) * (1e308 / 120.0),
+        );
+    }
+}
+
+#[test]
 fn affine_density_highorder_mass_and_diffusion_match_exact_whitney_restriction() {
     use fs_feec::{incidence_to_csr, stiffness, weighted_mass_matrix};
     let (complex, positions) = two_tets();
