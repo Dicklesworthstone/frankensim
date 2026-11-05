@@ -535,6 +535,26 @@ active gap. There is no
 anonymous `h_min`, pressure clamp, liquid cavitation substitution, or
 Elrod--Adams semantics.
 
+The declared molecular mean free path belongs to the declared temperature and
+initial absolute pressure. At fixed temperature the solver uses
+`lambda(p) = lambda_ref * p_ref / p`, checking the actual starting/checkpoint
+state, the accepted cells, and each imposed reservoir/vent at its local gap.
+Reservoir pressure is checked directly, without averaging it with a denser
+interior cell. The reported maximum Knudsen number covers the accepted cells
+and boundary states. The reference pressure is fixed across restarts. In a
+uniform sealed isothermal squeeze/expansion, `p*h` and therefore `lambda/h`
+remain constant; a smaller gap alone does not imply greater rarefaction.
+
+The Mach envelope includes pressure-driven gas speed, not only wall motion.
+Each accepted face gradient and gap reconstruct the same no-slip
+Couette--Poiseuille velocity profile used for traction and dissipation. Its
+two wall values and interior stationary point, if present, give the exact
+maximum absolute tangential speed; an off-centre peak cannot be hidden by a
+mean-flow or mid-gap check. The receipt reports `maximum_gas_mach_number`.
+Exceeding either pressure-dependent applicability envelope refuses the step
+before a checkpoint or receipt is published; no slip or compressible-inertia
+correction is silently substituted.
+
 The implementation is bit-deterministic on one ISA by fixed cell/face order and
 bounded Jacobi/Picard sweeps. It has no RNG, no `Cx` cancellation hook, no
 entropy model, and no thermochemical or material-data admission; the
@@ -549,6 +569,8 @@ pressure flow doing work on translating walls, opposing-gradient heat,
 vent closure, spatial/time refinement of analytic limits, reversal and
 pressure-density scaling, static contact exclusion,
 rarefaction/negative/slip/roughness refusal,
+pressure-scaled cell/reservoir/vent rarefaction, sealed compression/expansion
+Knudsen invariance, and pressure-driven/off-centre-profile Mach limits,
 iteration-budget refusal, and deterministic checkpoint replay.  These are
 software/numerical checks of declared equations only.
 

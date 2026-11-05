@@ -377,6 +377,175 @@ fn hostile_rarefaction_negative_state_slip_and_roughness_refuse() {
 }
 
 #[test]
+fn pressure_scaled_knudsen_checks_reservoirs_and_vent() {
+    for boundary in [
+        GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: 50_000.0,
+            right_absolute_pressure_pa: 101_325.0,
+        },
+        GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: 101_325.0,
+            right_absolute_pressure_pa: 50_000.0,
+        },
+        GasFilmBoundaryTopology::Vented {
+            cell_index: 2,
+            absolute_pressure_pa: 50_000.0,
+        },
+    ] {
+        let mut input = fixture(4);
+        input.boundary = boundary;
+        assert_eq!(
+            solve_isothermal_gas_film_1d(&input, None),
+            Err(GasFilmError::Unavailable {
+                reason: "rarefied-knudsen-outside-continuum-envelope"
+            })
+        );
+    }
+
+    let mut input = fixture(4);
+    input.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: 110_000.0,
+        right_absolute_pressure_pa: 80_000.0,
+    };
+    let step = solve_isothermal_gas_film_1d(&input, None).expect("continuum reservoir");
+    let expected = input.applicability.mean_free_path_m / input.grid.gap_m[3]
+        * input.initial_absolute_pressure_pa
+        / 80_000.0;
+    assert!((step.receipt.maximum_knudsen_number / expected - 1.0).abs() < 1.0e-12);
+}
+
+#[test]
+fn sealed_gap_changes_scale_mean_free_path_with_pressure() {
+    for new_gap in [5.0e-6, 20.0e-6] {
+        let mut input = fixture(4);
+        let old_gap = input.grid.gap_m[0];
+        input.grid.gap_m.fill(new_gap);
+        input.wall_motion.gap_rate_m_per_s = (new_gap - old_gap) / input.timestep_s;
+        let step = solve_isothermal_gas_film_1d(&input, None)
+            .expect("isothermal compression/expansion preserves the continuum regime");
+        // In a sealed uniform film, p*h is conserved. Both lambda and h scale
+        // together, so Kn stays fixed even when a pressure-blind check would
+        // reject the compressed gap or understate the expanded gap's Kn.
+        let expected_knudsen = input.applicability.mean_free_path_m / old_gap;
+        let expected_pressure = input.initial_absolute_pressure_pa * old_gap / new_gap;
+        assert!((step.receipt.maximum_knudsen_number / expected_knudsen - 1.0).abs() < 1.0e-8);
+        for pressure in active_pressure(&step) {
+            assert!((pressure / expected_pressure - 1.0).abs() < 1.0e-8);
+        }
+    }
+
+    let input = fixture(4);
+    let mut checkpoint = solve_isothermal_gas_film_1d(&input, None)
+        .expect("continuum checkpoint")
+        .checkpoint;
+    checkpoint.active_absolute_pressure_pa[1] = 50_000.0;
+    let before = checkpoint.clone();
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&input, Some(&checkpoint)),
+        Err(GasFilmError::Unavailable {
+            reason: "rarefied-knudsen-outside-continuum-envelope"
+        })
+    );
+    assert_eq!(checkpoint, before);
+}
+
+#[test]
+fn converged_pressure_must_remain_inside_the_continuum_envelope() {
+    let mut input = fixture(2);
+    input.timestep_s = 4.0e-5;
+    input.wall_motion.lower_tangential_velocity_m_per_s = 100.0;
+    input.wall_motion.upper_tangential_velocity_m_per_s = 100.0;
+    // The initial state and wall speeds are admitted. Couette transport moves
+    // mass toward the sealed right end, rarefying the left cell during the step.
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&input, None),
+        Err(GasFilmError::Unavailable {
+            reason: "rarefied-knudsen-outside-continuum-envelope"
+        })
+    );
+}
+
+#[test]
+fn stationary_walls_do_not_bypass_pressure_driven_mach_limit() {
+    let mut input = fixture(2);
+    input.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: 101_325.0,
+        right_absolute_pressure_pa: 101_325.0,
+    };
+    let mut checkpoint = solve_isothermal_gas_film_1d(&input, None)
+        .expect("quiescent checkpoint")
+        .checkpoint;
+    let left: f64 = 2.0e6;
+    let right: f64 = 101_325.0;
+    input.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: left,
+        right_absolute_pressure_pa: right,
+    };
+    // The exact steady isothermal profile has p^2 linear in x. It satisfies
+    // the mass balance but its Poiseuille speed exceeds the declared Mach cap.
+    checkpoint.active_absolute_pressure_pa = [0.25, 0.75]
+        .map(|x| (left * left + (right * right - left * left) * x).sqrt())
+        .to_vec();
+    let before = checkpoint.clone();
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&input, Some(&checkpoint)),
+        Err(GasFilmError::Unavailable {
+            reason: "gas-mach-outside-declared-envelope"
+        })
+    );
+    assert_eq!(checkpoint, before);
+}
+
+#[test]
+fn couette_poiseuille_mach_uses_off_center_peak_in_both_flow_directions() {
+    for direction in [1.0, -1.0] {
+        let mut input = fixture(2);
+        input.boundary = GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: if direction > 0.0 {
+                120_000.0
+            } else {
+                100_000.0
+            },
+            right_absolute_pressure_pa: if direction > 0.0 {
+                100_000.0
+            } else {
+                120_000.0
+            },
+        };
+        input.wall_motion.lower_tangential_velocity_m_per_s = direction;
+        input.wall_motion.upper_tangential_velocity_m_per_s = 3.0 * direction;
+        let step = solve_isothermal_gas_film_1d(&input, None).expect("subsonic pressure flow");
+        let inlet = if direction > 0.0 { 0 } else { 1 };
+        let pressure = step.absolute_pressure_pa[inlet].expect("active inlet cell");
+        let gradient_magnitude = (120_000.0 - pressure) / (0.25 * input.grid.length_m);
+        let curvature = input.grid.gap_m[inlet].powi(2) * gradient_magnitude
+            / (2.0 * input.gas.dynamic_viscosity_pa_s);
+        // Completing the square in the quadratic velocity profile gives the
+        // interior peak: |U_mean| + |A|/4 + (U_upper-U_lower)^2/(4|A|).
+        let midpoint_speed = 2.0 + curvature / 4.0;
+        let expected_peak_speed = midpoint_speed + 1.0 / curvature;
+        let actual_peak_speed =
+            step.receipt.maximum_gas_mach_number * input.applicability.speed_of_sound_m_per_s;
+        assert!(
+            curvature > 2.0,
+            "the profile extremum must be inside the gap"
+        );
+        assert!((actual_peak_speed / expected_peak_speed - 1.0).abs() < 1.0e-12);
+
+        // A cap between the midpoint and the true peak must refuse even though
+        // both wall velocities and the entire mean-flow estimate pass.
+        input.applicability.maximum_mach_number = 0.5 * (midpoint_speed + expected_peak_speed)
+            / input.applicability.speed_of_sound_m_per_s;
+        assert_eq!(
+            solve_isothermal_gas_film_1d(&input, None),
+            Err(GasFilmError::Unavailable {
+                reason: "gas-mach-outside-declared-envelope"
+            })
+        );
+    }
+}
+
+#[test]
 fn checkpoint_replay_and_budget_refusal_are_deterministic() {
     let input = fixture(8);
     let first = solve_isothermal_gas_film_1d(&input, None).expect("first step");
