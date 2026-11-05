@@ -10,6 +10,41 @@ use super::{
     ThermalSourceLimits, invalid, source_step_transport_mapped,
 };
 
+// A constitutive force may depend on heat already transported in this same
+// step. Its scalar predictor includes the known final source half-kick, but
+// does not execute that kick early or change its physical velocity/history.
+// The final accepted population sum can differ by rounding; source owners
+// must retain this force-query epoch separately from actual endpoint queries.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_step_resolved_mapped<
+    S: super::Slab<D, Q>, const D: usize, const Q: usize, R, E,
+>(
+    state: &mut S, heat: &[f64], forces: &[[f64; D]], limits: ThermalSourceLimits,
+    transport: RelaxationField<'_>,
+    resolve: impl FnOnce(&S, Vec<f64>) -> Result<Vec<[f64; D]>, E>,
+    finish: impl FnOnce(&S, ThermalSourceBalance) -> Result<R, E>,
+) -> Result<R, E>
+where E: From<ThermalSourceError> + From<super::ThermalForcingError>,
+{
+    super::source_step_with_advance(
+        state, heat, forces, limits, Some(transport), None,
+        |candidate| candidate.advance_local_resolved(forces, transport.thermal, |transported| {
+            let (cells, plane) = transported.layout()?;
+            super::check_temperatures(transported.populations(), plane, limits.temperature_range)?;
+            let mut predicted = vec![0.0; cells];
+            for cell in plane..cells - plane {
+                let value = transported.populations()[cell].iter().sum::<f64>() + 0.5 * heat[cell];
+                if !value.is_finite() || value < limits.temperature_range[0] || value > limits.temperature_range[1] {
+                    return Err(ThermalSourceError::Temperature { cell, value }.into());
+                }
+                predicted[cell] = value;
+            }
+            resolve(transported, predicted)
+        }),
+        finish,
+    )
+}
+
 /// Complete, step-local momentum and thermal relaxation fields.
 ///
 /// Supply one value per cell, including both wall planes. Values must be finite
@@ -73,3 +108,6 @@ impl ThermalLbm3 {
         )
     }
 }
+
+#[cfg(test)]
+mod force_resolution_tests;

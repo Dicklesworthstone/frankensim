@@ -1019,14 +1019,41 @@ additional per-step allocation or a second heat/flow solve.
 
 Checked source, local-transport and tensor candidates retain the selection and
 refuse a nonfinite transported total force before publication. Low-level direct
-steps remain nontransactional after scalar transport. Only native linear beta
-buoyancy is centered: external loads, including density-resolved material
-buoyancy whose adapter disables native `gbeta`, retain their existing held
-sampling. This does not establish the time order of the complete partitioned
+steps remain nontransactional after scalar transport. This native quadrature setting alone does not center caller-supplied external
+loads. The ordinary density-resolved material adapter retains its held-force
+sampling; the separate explicit material endpoint method below resolves that
+force from its own original source epochs. This does not establish the time order of the complete partitioned
 solver or a total mechanical/thermal energy closure. `buoyancy_quadrature`
 tests use actual wall/source thermal ramps, independent fluid plus reflected-wall
 momentum, time refinement, rotating loads, retained thermal history and
 late-refusal rollback.
+
+The opt-in 2-D/3-D
+`step_with_boussinesq_material_transport_endpoint_averaged` methods return
+`BoussinesqEndpointStep`. Initial material mu/k continue to set local relaxation
+with fixed rho0/cp0. After one actual scalar transport, the original bounded
+source is queried at the admitted scalar prediction
+`T_transport + heat_per_step/2`; initial and predicted density departures are
+averaged, prescribed external force is added once, and the original Guo
+frame/collision advances flow once. The trailing heat half-kick retains the new
+physical velocity and history. `force_endpoint` retains the distinct force-query
+epoch; `transport.endpoint` is independently re-queried from actual final
+populations, preserving exact source identity despite possible ulp differences.
+All three query epochs, source/force conversion, heat/wall balance and
+cancellation gates precede publication. No replay, inferred expansion law,
+density/storage rebind or global coupled time-order claim is introduced.
+
+The private source-owner regressions execute the actual one-pass 2-D/3-D
+kernels: an independent quadratic-density thermal-ramp impulse has the analytic
+trapezoidal defect and fourfold error reduction under timestep halving. Typed
+force-query and final-endpoint refusals, nonfinite replacement loads and
+continued accepted thermal history are checked. These two new checks and
+eighteen prior selected native checks passed in isolated native-source execution.
+`material_buoyancy_endpoint` additionally specifies nonlinear original-gas
+density, one-read source tickets, all three exact query epochs, initial
+molecular-rate ownership and material-source/cancellation rollback. Those two
+full material integration tests remain unexecuted; selected kernel execution
+does not establish full-crate integration or experimental accuracy.
 
 `BoundaryGrid3::rebind_shear_relaxation` extends uniform transport refresh to
 the original tiled boundary/moving-body solver. It delegates to the existing

@@ -1001,15 +1001,41 @@ impl ThermalLbm3 {
         self.step_with_forces_inner(Some(forces), None, Some(diffusion))
     }
 
+    // Match the 2-D post-thermal force seam without another heat/flow pass.
+    // Restore the original scratch before querying so refusal remains a valid
+    // tentative state; the outer source owner decides whether to publish it.
+    pub(crate) fn step_with_resolved_external_forces<E: From<ThermalForcingError>>(
+        &mut self, forces: &[[f64; 3]], thermal_tau: &[f64],
+        resolve: impl FnOnce(&Self) -> Result<Vec<[f64; 3]>, E>,
+    ) -> Result<(), E> {
+        let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
+        validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref, self.buoyancy_direction)?;
+        self.step_with_force_resolution(Some(forces), Some(thermal_tau), None, Some(resolve))
+    }
+
     fn step_with_forces_inner(
         &mut self,
         external: Option<&[[f64; 3]]>,
         thermal_tau: Option<&[f64]>,
         diffusion: Option<crate::thermal::tensor::DiffusivityField<'_, 3>>,
     ) -> Result<(), ThermalForcingError> {
+        self.step_with_force_resolution(
+            external, thermal_tau, diffusion,
+            None::<fn(&Self) -> Result<Vec<[f64; 3]>, ThermalForcingError>>,
+        )
+    }
+
+    fn step_with_force_resolution<E: From<ThermalForcingError>>(
+        &mut self,
+        external: Option<&[[f64; 3]]>,
+        thermal_tau: Option<&[f64]>,
+        diffusion: Option<crate::thermal::tensor::DiffusivityField<'_, 3>>,
+        resolve: Option<impl FnOnce(&Self) -> Result<Vec<[f64; 3]>, E>>,
+    ) -> Result<(), E> {
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
         let average = self.buoyancy_quadrature == BuoyancyQuadrature::EndpointAverage;
-        if !average {
+        let rebind_after_transport = average || resolve.is_some();
+        if !rebind_after_transport {
             for z in 1..nz - 1 {
                 for y in 0..ny {
                     for x in 0..nx {
@@ -1046,7 +1072,7 @@ impl ThermalLbm3 {
         // Preserve old T in the next cells entries of the original 19*cells
         // flow scratch until force binding, before flow overwrites them.
         let old_temperature_start = 7 * cells;
-        if average {
+        if rebind_after_transport {
             let old = &mut post.as_flattened_mut()
                 [old_temperature_start..old_temperature_start + cells];
             for cell in plane..cells - plane {
@@ -1079,11 +1105,19 @@ impl ThermalLbm3 {
             Some(walls),
         ));
         self.grid.post = post;
-        if average {
+        let resolved = resolve.map(|resolve| resolve(self)).transpose()?;
+        if let Some(forces) = resolved.as_deref() {
+            validate_external_forces(
+                forces, &self.gpop, plane, 0.0, self.t_ref, self.buoyancy_direction,
+            )?;
+        }
+        let external = resolved.as_deref().or(external);
+        if rebind_after_transport {
             for cell in plane..cells - plane {
                 let before = self.grid.post.as_flattened()[old_temperature_start + cell];
+                let after = if average { self.gpop[cell].iter().sum() } else { before };
                 let total = crate::thermal::forcing::endpoint_average_force(
-                    before, self.gpop[cell].iter().sum(), self.gbeta, self.t_ref,
+                    before, after, self.gbeta, self.t_ref,
                     self.buoyancy_direction, external.map(|field| field[cell]), cell,
                 )?;
                 let previous = self.grid.fext[cell];
@@ -1096,7 +1130,7 @@ impl ThermalLbm3 {
                 }
             }
         }
-        self.grid.try_step().map_err(ThermalForcingError::Flow3)
+        self.grid.try_step().map_err(ThermalForcingError::Flow3).map_err(E::from)
     }
 
     /// Total kinetic energy of the fluid.

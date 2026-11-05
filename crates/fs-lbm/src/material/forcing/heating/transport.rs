@@ -99,6 +99,11 @@ impl std::error::Error for MaterialTransportError {}
 impl From<ThermalSourceError> for MaterialTransportError {
     fn from(e: ThermalSourceError) -> Self { Self::Thermal(e) }
 }
+impl From<crate::thermal::ThermalForcingError> for MaterialTransportError {
+    fn from(error: crate::thermal::ThermalForcingError) -> Self {
+        Self::Thermal(ThermalSourceError::Force(error))
+    }
+}
 impl From<crate::thermal::sources::sgs3::ThermalSgsError> for MaterialTransportError {
     fn from(error: crate::thermal::sources::sgs3::ThermalSgsError) -> Self {
         match error {

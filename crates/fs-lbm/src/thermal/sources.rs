@@ -151,6 +151,10 @@ pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn momentum_relaxation_mut(&mut self) -> &mut [f64];
     fn momentum_relaxation_valid(&self, tau: &[f64]) -> bool;
     fn advance_local(&mut self, forces: &[[f64; D]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError>;
+    fn advance_local_resolved<E: From<ThermalForcingError>>(
+        &mut self, forces: &[[f64; D]], thermal_tau: &[f64],
+        resolve: impl FnOnce(&Self) -> Result<Vec<[f64; D]>, E>,
+    ) -> Result<(), E>;
     fn advance_tensor(&mut self, forces: &[[f64; D]], diffusion: super::tensor::DiffusivityField<'_, D>) -> Result<(), ThermalForcingError>;
 }
 
@@ -201,36 +205,66 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
     diffusion: Option<super::tensor::DiffusivityField<'_, D>>,
     finish: impl FnOnce(&S, ThermalSourceBalance) -> Result<R, ThermalSourceError>,
 ) -> Result<R, ThermalSourceError> {
+    source_step_with_advance::<S, D, Q, R, ThermalSourceError>(
+        state, heat, forces, limits, transport, diffusion,
+        |candidate| {
+            if let Some(field) = diffusion {
+                candidate.advance_tensor(forces, field)?;
+            } else {
+                match transport {
+                    Some(field) => candidate.advance_local(forces, field.thermal)?,
+                    None => candidate.advance(forces)?,
+                }
+            }
+            Ok(())
+        },
+        finish,
+    )
+}
+
+// The numerical owner may resolve a force after its one thermal transport.
+// Keep all source, wall, storage, endpoint and publication gates here, and
+// propagate constitutive errors without erasing their original source type.
+#[allow(clippy::too_many_arguments)]
+fn source_step_with_advance<
+    S: Slab<D, Q>, const D: usize, const Q: usize, R, E: From<ThermalSourceError>,
+>(
+    state: &mut S, heat: &[f64], forces: &[[f64; D]], limits: ThermalSourceLimits,
+    transport: Option<transport::RelaxationField<'_>>,
+    diffusion: Option<super::tensor::DiffusivityField<'_, D>>,
+    advance: impl FnOnce(&mut S) -> Result<(), E>,
+    finish: impl FnOnce(&S, ThermalSourceBalance) -> Result<R, E>,
+) -> Result<R, E> {
     let (cells, plane) = state.layout()?;
     if cells > limits.max_cells || !limits.balance_tolerance.is_finite() || limits.balance_tolerance < 0.0
         || !limits.temperature_range.iter().all(|x| x.is_finite())
         || limits.temperature_range[0] > limits.temperature_range[1]
     {
-        return Err(invalid("invalid temperature/balance limits or cell budget exceeded"));
+        return Err(invalid("invalid temperature/balance limits or cell budget exceeded").into());
     }
-    if heat.len() != cells || forces.len() != cells { return Err(invalid("one source and force vector per cell, including walls, is required")); }
+    if heat.len() != cells || forces.len() != cells { return Err(invalid("one source and force vector per cell, including walls, is required").into()); }
     if !heat.iter().all(|x| x.is_finite()) || !forces.iter().flatten().all(|x| x.is_finite()) {
-        return Err(invalid("source and force fields must be finite"));
+        return Err(invalid("source and force fields must be finite").into());
     }
     if heat[..plane].iter().chain(&heat[cells-plane..]).any(|x| *x != 0.0) {
-        return Err(invalid("ghost wall source entries must be zero; use the thermal wall law for surface heat"));
+        return Err(invalid("ghost wall source entries must be zero; use the thermal wall law for surface heat").into());
     }
-    if !state.flow_valid() { return Err(invalid("invalid thermal/flow state or unsupported slab topology")); }
+    if !state.flow_valid() { return Err(invalid("invalid thermal/flow state or unsupported slab topology").into()); }
     check_temperatures(state.populations(), plane, limits.temperature_range)?;
     for wall in state.thermal_walls() {
         wall.validate().map_err(ThermalSourceError::Wall)?;
         if let ThermalWall::Temperature(temperature) = wall
             && (temperature < limits.temperature_range[0] || temperature > limits.temperature_range[1])
         {
-            return Err(invalid("prescribed wall temperature is outside the admitted interval"));
+            return Err(invalid("prescribed wall temperature is outside the admitted interval").into());
         }
     }
     let source: f64 = heat[plane..cells-plane].iter().sum();
-    if !source.is_finite() { return Err(invalid("summed source is not representable")); }
+    if !source.is_finite() { return Err(invalid("summed source is not representable").into()); }
     if let Some(field) = transport {
         field.admit(cells)?;
         if !state.momentum_relaxation_valid(field.momentum) {
-            return Err(invalid("local transport is incompatible with the selected collision rates"));
+            return Err(invalid("local transport is incompatible with the selected collision rates").into());
         }
     }
     if let Some(field) = diffusion { field.admit(cells)?; }
@@ -240,15 +274,8 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
     }
     candidate.source_half_kick(heat, plane);
     check_temperatures(candidate.populations(), plane, limits.temperature_range)?;
-    if let Some(field) = diffusion {
-        candidate.advance_tensor(forces, field)?;
-    } else {
-        match transport {
-            Some(field) => candidate.advance_local(forces, field.thermal)?,
-            None => candidate.advance(forces)?,
-        }
-    }
-    if !candidate.flow_valid() { return Err(invalid("transport produced an inadmissible flow state")); }
+    advance(&mut candidate)?;
+    if !candidate.flow_valid() { return Err(invalid("transport produced an inadmissible flow state").into()); }
     check_temperatures(candidate.populations(), plane, limits.temperature_range)?;
     // The streaming owner measures incoming minus outgoing on each actual
     // reflected pair. This remains valid for flux/film/insulated walls and
@@ -263,7 +290,7 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
         {
             return Err(ThermalSourceError::WallTemperature {
                 wall, minimum: exchange.min_temperature, maximum: exchange.max_temperature,
-            });
+            }.into());
         }
     }
     let [bottom_wall, top_wall] = wall_exchange.map(|exchange| exchange.heat_in);
@@ -274,7 +301,7 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
         .map(|(after, before)| after.iter().zip(before).map(|(a,b)| a-b).sum::<f64>()).sum();
     let defect = stored_change - source - bottom_wall - top_wall;
     if !defect.is_finite() || defect.abs() > limits.balance_tolerance {
-        return Err(ThermalSourceError::Balance { defect });
+        return Err(ThermalSourceError::Balance { defect }.into());
     }
     // Coefficients are borrowed for ONE step, like sources. Preserve background
     // rates so a later legacy step cannot combine stale local viscosity with
@@ -355,6 +382,12 @@ impl Slab<2, 5> for ThermalLbm {
     fn advance_local(&mut self, forces: &[[f64; 2]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
         self.step_with_local_thermal_relaxation(forces, thermal_tau)
     }
+    fn advance_local_resolved<E: From<ThermalForcingError>>(
+        &mut self, forces: &[[f64; 2]], thermal_tau: &[f64],
+        resolve: impl FnOnce(&Self) -> Result<Vec<[f64; 2]>, E>,
+    ) -> Result<(), E> {
+        self.step_with_resolved_external_forces(forces, thermal_tau, resolve)
+    }
     fn advance_tensor(&mut self, forces: &[[f64; 2]], diffusion: super::tensor::DiffusivityField<'_, 2>) -> Result<(), ThermalForcingError> {
         self.step_with_tensor_diffusion(forces, diffusion)
     }
@@ -413,6 +446,12 @@ impl Slab<3, 7> for ThermalLbm3 {
     }
     fn advance_local(&mut self, forces: &[[f64; 3]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {
         self.step_with_local_thermal_relaxation(forces, thermal_tau)
+    }
+    fn advance_local_resolved<E: From<ThermalForcingError>>(
+        &mut self, forces: &[[f64; 3]], thermal_tau: &[f64],
+        resolve: impl FnOnce(&Self) -> Result<Vec<[f64; 3]>, E>,
+    ) -> Result<(), E> {
+        self.step_with_resolved_external_forces(forces, thermal_tau, resolve)
     }
     fn advance_tensor(&mut self, forces: &[[f64; 3]], diffusion: super::tensor::DiffusivityField<'_, 3>) -> Result<(), ThermalForcingError> {
         self.step_with_tensor_diffusion(forces, diffusion)

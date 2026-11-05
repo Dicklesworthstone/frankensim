@@ -13,13 +13,16 @@ use super::{
 };
 use fs_exec::CancelGate;
 
+mod endpoint;
+pub use endpoint::BoussinesqEndpointStep;
+
 /// Explicit Boussinesq approximation and physical gravity for one step.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoussinesqConfig<const D: usize> {
     /// Signed gravitational acceleration [m/s²], in the solver's axes.
     /// For ordinary downward gravity the final component is negative.
     pub gravity_m_s2: [f64; D],
-    /// Maximum `abs(rho(T) - rho0) / rho0`, checked at both query epochs.
+    /// Maximum `abs(rho(T) - rho0) / rho0`, checked at every query epoch.
     /// Must be in `[0,1)`; the caller must choose a physically small allowance.
     pub max_relative_density_departure: f64,
     /// Maximum `abs(cp(T) - cp0) / cp0` neglected by fixed sensible storage.
@@ -174,9 +177,10 @@ fn advance<
     depth_m: f64,
     limits: HeatSourceLimits,
     config: BoussinesqConfig<D>,
+    endpoint_average: bool,
     gate: &CancelGate,
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
-) -> Result<MaterialTransportStep<BoussinesqMaterial<F>>, MaterialTransportError> {
+) -> Result<BoussinesqEndpointStep<F>, MaterialTransportError> {
     poll(gate)?;
     config.validate()?;
     let (cells, plane) = slab.lattice.layout()?;
@@ -205,10 +209,18 @@ fn advance<
         gate,
         &mut bounded,
     )?;
-    let (trial, heat) = candidate_with_buoyancy::<S, BoussinesqMaterial<F>, D, Q>(
-        slab, input, forces, &applied, config, gate,
-        |material| material.resolved.density_kg_m3(),
-    )?;
+    let (trial, heat, force_endpoint) = if endpoint_average {
+        endpoint::candidate::<S, F, D, Q>(
+            slab, input, forces, &applied, limits.temperature_range_k,
+            config, gate, &mut bounded,
+        )?
+    } else {
+        let (trial, heat) = candidate_with_buoyancy::<S, BoussinesqMaterial<F>, D, Q>(
+            slab, input, forces, &applied, config, gate,
+            |material| material.resolved.density_kg_m3(),
+        )?;
+        (trial, heat, Vec::new())
+    };
     let endpoint = sample::<S, BoussinesqMaterial<F>, D, Q>(
         slab,
         &trial,
@@ -220,10 +232,9 @@ fn advance<
     )?;
     poll(gate)?;
     slab.lattice = trial;
-    Ok(MaterialTransportStep {
-        heat,
-        applied,
-        endpoint,
+    Ok(BoussinesqEndpointStep {
+        transport: MaterialTransportStep { heat, applied, endpoint },
+        force_endpoint,
     })
 }
 
@@ -313,9 +324,10 @@ impl MaterialSlab<ThermalLbm> {
             depth_m,
             limits,
             config,
+            false,
             gate,
             resolve,
-        )
+        ).map(|step| step.transport)
     }
 }
 
@@ -341,8 +353,9 @@ impl MaterialSlab<ThermalLbm3> {
             depth_m,
             limits,
             config,
+            false,
             gate,
             resolve,
-        )
+        ).map(|step| step.transport)
     }
 }

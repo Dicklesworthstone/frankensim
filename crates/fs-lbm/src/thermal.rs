@@ -285,16 +285,41 @@ impl ThermalLbm {
         self.step_with_forces_inner(Some(forces), None, Some(diffusion))
     }
 
+    // One constitutive query may replace the external field after the actual
+    // heat transport and before the only flow collision. The source owner
+    // supplies rollback and retains its original typed constitutive errors.
+    pub(crate) fn step_with_resolved_external_forces<E: From<ThermalForcingError>>(
+        &mut self, forces: &[[f64; 2]], thermal_tau: &[f64],
+        resolve: impl FnOnce(&Self) -> Result<Vec<[f64; 2]>, E>,
+    ) -> Result<(), E> {
+        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
+        self.step_with_force_resolution(Some(forces), Some(thermal_tau), None, Some(resolve))
+    }
+
     fn step_with_forces_inner(
         &mut self,
         external: Option<&[[f64; 2]]>,
         thermal_tau: Option<&[f64]>,
         diffusion: Option<tensor::DiffusivityField<'_, 2>>,
     ) -> Result<(), ThermalForcingError> {
+        self.step_with_force_resolution(
+            external, thermal_tau, diffusion,
+            None::<fn(&Self) -> Result<Vec<[f64; 2]>, ThermalForcingError>>,
+        )
+    }
+
+    fn step_with_force_resolution<E: From<ThermalForcingError>>(
+        &mut self,
+        external: Option<&[[f64; 2]]>,
+        thermal_tau: Option<&[f64]>,
+        diffusion: Option<tensor::DiffusivityField<'_, 2>>,
+        resolve: Option<impl FnOnce(&Self) -> Result<Vec<[f64; 2]>, E>>,
+    ) -> Result<(), E> {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         let average = self.buoyancy_quadrature == BuoyancyQuadrature::EndpointAverage;
+        let rebind_after_transport = average || resolve.is_some();
         // Boussinesq: per-cell force via the external-force field.
-        if !average {
+        if !rebind_after_transport {
             for y in 1..ny - 1 {
                 for x in 0..nx {
                     let i = self.grid.idx(x, y);
@@ -323,7 +348,7 @@ impl ThermalLbm {
         // The next cells entries fit inside the original 9*cells flow scratch
         // and retain old T until force binding, before flow overwrites them.
         let old_temperature_start = W5.len() * cells;
-        if average {
+        if rebind_after_transport {
             let old = &mut self.scratch.as_flattened_mut()
                 [old_temperature_start..old_temperature_start + cells];
             for cell in nx..cells - nx {
@@ -355,11 +380,21 @@ impl ThermalLbm {
             [nx, ny],
             Some(walls),
         ));
-        if average {
+        let resolved = resolve.map(|resolve| resolve(self)).transpose()?;
+        if let Some(forces) = resolved.as_deref() {
+            // Admit the replacement field itself here. Its sum with the
+            // selected native beta quadrature is admitted cellwise below.
+            forcing::validate_external_forces(
+                forces, &self.gpop, nx, 0.0, self.t_ref, self.buoyancy_direction,
+            )?;
+        }
+        let external = resolved.as_deref().or(external);
+        if rebind_after_transport {
             for cell in nx..cells - nx {
                 let before = self.scratch.as_flattened()[old_temperature_start + cell];
+                let after = if average { self.gpop[cell].iter().sum() } else { before };
                 let total = forcing::endpoint_average_force(
-                    before, self.gpop[cell].iter().sum(), self.gbeta, self.t_ref,
+                    before, after, self.gbeta, self.t_ref,
                     self.buoyancy_direction, external.map(|field| field[cell]), cell,
                 )?;
                 let previous = self.grid.fext[cell];
