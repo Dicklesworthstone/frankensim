@@ -203,3 +203,211 @@ fn original_source_layout_budget_and_cancellation_cannot_publish_partial_heat() 
         0.0
     );
 }
+
+#[test]
+fn source_resistor_heat_uses_the_voltage_difference_including_near_equilibrium() {
+    let (rate, conductance, dt) = (0.1_f64, 0.09_f64, 0.7_f64);
+    let source = PreparedSourceLoss::new_with_feedthrough_controlled(
+        1,
+        1,
+        &[-rate],
+        &[rate],
+        &[conductance.sqrt()],
+        &[-conductance.sqrt()],
+        dt,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    for (initial, voltage) in [(0.0, 4.0), (-3.0, -1.0), (1e16 + 2.0, 1e16)] {
+        // C*dV/dt=G*(Vs-V). This physical resistor heat is independent of
+        // the capacitor's energy datum and is not the Norton shunt G*V².
+        let difference = initial - voltage;
+        let expected =
+            conductance * difference * difference * (-(-2.0 * rate * dt).exp_m1()) / (2.0 * rate);
+        let mut scratch = [f64::NAN; 2];
+        let actual = source
+            .evaluate_into_controlled(&[initial], &[voltage], &mut scratch, || false)
+            .unwrap();
+        close(actual, expected, expected);
+        assert_eq!(
+            actual,
+            source
+                .evaluate_controlled(&[initial], &[voltage], || false)
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        source
+            .evaluate_controlled(&[1e16], &[1e16], || false)
+            .unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn multiple_physical_source_rows_include_all_state_input_cross_terms() {
+    let dt = 0.4;
+    let source = PreparedSourceLoss::new_with_feedthrough_controlled(
+        2,
+        2,
+        &[0.0; 4],
+        &[1.0, -2.0, 0.5, 1.0],
+        &[1.0, 2.0, -3.0, 0.5],
+        &[-2.0, 1.0, 0.25, -4.0],
+        dt,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let (initial, inputs) = ([2.0, -4.0], [3.0, -1.0]);
+    // x(t)=[2+5t, -4+0.5t]. The original two physical loss rows are
+    // [-13+6t, -3.25-14.75t]; integrate their squares independently.
+    let expected: f64 = [(-13.0, 6.0), (-3.25, -14.75)]
+        .into_iter()
+        .map(|(a, b)| dt * (a * a + a * b * dt + b * b * dt * dt / 3.0))
+        .sum();
+    close(
+        source
+            .evaluate_controlled(&initial, &inputs, || false)
+            .unwrap(),
+        expected,
+        expected,
+    );
+
+    let pure_source = PreparedSourceLoss::new_with_feedthrough_controlled(
+        1,
+        2,
+        &[-2.0],
+        &[0.0, 0.0],
+        &[0.0],
+        &[2.0, -3.0],
+        dt,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    close(
+        pure_source
+            .evaluate_controlled(&[100.0], &[4.0, 5.0], || false)
+            .unwrap(),
+        49.0 * dt,
+        49.0 * dt,
+    );
+    assert_eq!(
+        pure_source
+            .evaluate_controlled(&[100.0], &[0.0, 0.0], || false)
+            .unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn source_feedthrough_preserves_zero_mapping_and_refuses_incomplete_or_cancelled_work() {
+    let original =
+        PreparedSourceLoss::new_controlled(1, 1, &[-3.0], &[1.0], &[0.7], 0.4, budget(), || false)
+            .unwrap();
+    let zero = PreparedSourceLoss::new_with_feedthrough_controlled(
+        1,
+        1,
+        &[-3.0],
+        &[1.0],
+        &[0.7],
+        &[0.0],
+        0.4,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(
+        original
+            .evaluate_controlled(&[3.5], &[0.9], || false)
+            .unwrap()
+            .to_bits(),
+        zero.evaluate_controlled(&[3.5], &[0.9], || false)
+            .unwrap()
+            .to_bits()
+    );
+    for invalid in [&[][..], &[1.0, 2.0][..], &[f64::NAN][..]] {
+        assert!(
+            PreparedSourceLoss::new_with_feedthrough_controlled(
+                1,
+                1,
+                &[-3.0],
+                &[1.0],
+                &[0.7],
+                invalid,
+                0.4,
+                budget(),
+                || false,
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        PreparedSourceLoss::new_with_feedthrough_controlled(
+            1,
+            1,
+            &[-3.0],
+            &[1.0],
+            &[0.7],
+            &[0.2],
+            0.4,
+            DenseExponentialBudget {
+                max_dense_bytes: 0,
+                ..budget()
+            },
+            || false,
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        PreparedSourceLoss::new_with_feedthrough_controlled(
+            1,
+            1,
+            &[-3.0],
+            &[1.0],
+            &[0.7],
+            &[0.2],
+            0.4,
+            budget(),
+            || true,
+        ),
+        Err(PreparedStepError::Cancelled)
+    ));
+    let source = PreparedSourceLoss::new_with_feedthrough_controlled(
+        1,
+        1,
+        &[-3.0],
+        &[1.0],
+        &[0.7],
+        &[0.2],
+        0.4,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let expected = source
+        .evaluate_controlled(&[3.5], &[0.9], || false)
+        .unwrap();
+    let mut scratch = [0.0; 2];
+    let mut polls = 0;
+    assert!(matches!(
+        source.evaluate_into_controlled(&[3.5], &[0.9], &mut scratch, || {
+            polls += 1;
+            polls == 3
+        }),
+        Err(PreparedStepError::Cancelled)
+    ));
+    assert_eq!(
+        source
+            .evaluate_into_controlled(&[3.5], &[0.9], &mut scratch, || false)
+            .unwrap(),
+        expected
+    );
+    assert!(
+        source
+            .evaluate_into_controlled(&[3.5], &[0.9], &mut [], || false)
+            .is_err()
+    );
+}

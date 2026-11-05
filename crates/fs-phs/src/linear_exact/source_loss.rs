@@ -3,9 +3,12 @@ use super::{
     DenseExponentialBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, finite, positive_heat, refuse,
 };
 use crate::{PhsError, PreparedStepError};
-use fs_math::det;
+use fs_math::{
+    det,
+    eft::{two_prod, two_sum},
+};
 
-/// Cached integral of `||S*x(t)||²` for the unchanged `x'=A*x+B*u`.
+/// Cached integral of `||S*x(t)+D*u||²` for the unchanged `x'=A*x+B*u`.
 ///
 /// This is a read-only channel observation. It owns no physical state, advances
 /// no clock, and makes no passivity claim for A. Its caller retains the physical
@@ -20,6 +23,7 @@ pub struct PreparedSourceLoss {
     flow: Vec<f64>,
     input: Vec<f64>,
     source: Vec<f64>,
+    feedthrough: Vec<f64>,
     root: Vec<f64>,
     rate: f64,
     duration: f64,
@@ -49,6 +53,71 @@ impl PreparedSourceLoss {
         source_rows: &[f64],
         duration: f64,
         budget: DenseExponentialBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            n,
+            m,
+            flow,
+            input,
+            source_rows,
+            None,
+            duration,
+            budget,
+            cancelled,
+        )
+    }
+
+    /// Integrate physical source squares with direct held-input feedthrough.
+    ///
+    /// Each row is `S*x+D*u`, in units of sqrt(W). For `r` source rows,
+    /// `source_rows` is row-major r×n and `feedthrough_rows` is r×m, with
+    /// `r <= n`. This includes a real source resistor's
+    /// `sqrt(G)*(V_bus-V_source)` and driven acoustic boundary losses.
+    /// Squaring the state contribution alone would omit physical source work.
+    ///
+    /// No extra state or clock is introduced. With held u, the existing
+    /// observation coordinates obey `y'=S*v`, `v'=A*v`; only their initial
+    /// values change to `y(0)=S*x(0)+D*u`, `v(0)=A*x(0)+B*u`.
+    /// Preparation therefore retains the original 2n dimension and positive
+    /// Gauss/QR factor. Inputs must remain constant over this entire interval.
+    /// Warm evaluation uses compensated products/sums to retain small physical
+    /// differences between large source and state values, without allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_feedthrough_controlled(
+        n: usize,
+        m: usize,
+        flow: &[f64],
+        input: &[f64],
+        source_rows: &[f64],
+        feedthrough_rows: &[f64],
+        duration: f64,
+        budget: DenseExponentialBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            n,
+            m,
+            flow,
+            input,
+            source_rows,
+            Some(feedthrough_rows),
+            duration,
+            budget,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        n: usize,
+        m: usize,
+        flow: &[f64],
+        input: &[f64],
+        source_rows: &[f64],
+        feedthrough_rows: Option<&[f64]>,
+        duration: f64,
+        budget: DenseExponentialBudget,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
         poll(&mut cancelled)?;
@@ -66,6 +135,13 @@ impl PreparedSourceLoss {
             .and_then(|v| v.checked_mul(32))
             .and_then(|v| v.checked_add(square.checked_mul(3)?))
             .and_then(|v| v.checked_add(inputs))
+            .and_then(|v| {
+                v.checked_add(if feedthrough_rows.is_some() {
+                    inputs
+                } else {
+                    0
+                })
+            })
             .and_then(|v| v.checked_add(source_rows.len()))
             .and_then(|v| v.checked_mul(8));
         let work = (d as u64)
@@ -97,9 +173,24 @@ impl PreparedSourceLoss {
             )
             .into());
         }
+        if feedthrough_rows
+            .is_some_and(|rows| rows.len() != (source_rows.len() / n) * m || !finite(rows))
+        {
+            return Err(
+                refuse("source loss needs one finite feedthrough row per source row").into(),
+            );
+        }
         let mut source = source_rows.to_vec();
         source.resize(square, 0.0);
-        let (rate, root) = if source.iter().all(|&value| value == 0.0) {
+        let feedthrough = match feedthrough_rows {
+            Some(rows) if rows.iter().any(|&value| value != 0.0) => {
+                let mut values = rows.to_vec();
+                values.resize(inputs, 0.0);
+                values
+            }
+            _ => Vec::new(),
+        };
+        let (rate, root) = if source.iter().all(|&value| value == 0.0) && feedthrough.is_empty() {
             (1.0, Vec::new())
         } else {
             positive_heat::source_integral(flow, &source, n, duration)?
@@ -111,6 +202,7 @@ impl PreparedSourceLoss {
             flow: flow.to_vec(),
             input: input.to_vec(),
             source,
+            feedthrough,
             root,
             rate,
             duration,
@@ -130,8 +222,11 @@ impl PreparedSourceLoss {
         held_inputs: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<f64, PreparedStepError> {
-        let mut coordinates = if self.root.is_empty() { Vec::new() }
-            else { vec![0.0; 2 * self.n] };
+        let mut coordinates = if self.root.is_empty() {
+            Vec::new()
+        } else {
+            vec![0.0; 2 * self.n]
+        };
         self.evaluate_into_controlled(initial, held_inputs, &mut coordinates, cancelled)
     }
 
@@ -165,6 +260,21 @@ impl PreparedSourceLoss {
         let root_rate = det::sqrt(self.rate);
         for i in 0..n {
             poll(&mut cancelled)?;
+            if !self.feedthrough.is_empty() {
+                coordinates[i] = compensated_dot(
+                    &self.source[i * n..(i + 1) * n],
+                    initial,
+                    &self.feedthrough[i * self.m..(i + 1) * self.m],
+                    held_inputs,
+                ) / root_rate;
+                coordinates[n + i] = compensated_dot(
+                    &self.flow[i * n..(i + 1) * n],
+                    initial,
+                    &self.input[i * self.m..(i + 1) * self.m],
+                    held_inputs,
+                ) / self.rate;
+                continue;
+            }
             coordinates[i] = self.source[i * n..(i + 1) * n]
                 .iter()
                 .zip(initial)
@@ -206,4 +316,18 @@ impl PreparedSourceLoss {
         }
         Ok(loss)
     }
+}
+
+// The same linear form spans state and source coordinates. Separate rounded
+// dot products can erase a weak loss or acceleration about a driven equilibrium.
+fn compensated_dot(a: &[f64], x: &[f64], b: &[f64], u: &[f64]) -> f64 {
+    let mut high = 0.0;
+    let mut low = 0.0;
+    for (&coefficient, &value) in a.iter().zip(x).chain(b.iter().zip(u)) {
+        let (product, product_error) = two_prod(coefficient, value);
+        let (next, sum_error) = two_sum(high, product);
+        high = next;
+        low += product_error + sum_error;
+    }
+    high + low
 }
