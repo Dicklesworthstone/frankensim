@@ -1,4 +1,7 @@
 //! Laminate transport through the original material, heat and motion owners.
+#[path = "coupled_gas_law.rs"]
+mod gas_law;
+
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::ConductanceSample;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::transport::coupled::*;

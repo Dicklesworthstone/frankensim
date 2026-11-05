@@ -3,6 +3,11 @@
 //! Every path retains its source, force convention and common finite-inventory
 //! owner. Only the ingress differs from molecular diffusion; the complete
 //! assembly's adaptive loop, physical error coordinates and accounts are shared.
+/// Complete-path adaptive evolution with caller-selected gas-surface heat laws.
+#[path = "coupled_gas_law.rs"]
+pub mod gas_law;
+pub use gas_law::{CoupledTransportGasLawError, CoupledTransportGasLawReport};
+
 use super::super::diffusion::coupled::{CoupledDiffusionReport, TransportLedger};
 use super::*;
 use fs_material::thermochemical_gas::energy::GasEnergyError;
