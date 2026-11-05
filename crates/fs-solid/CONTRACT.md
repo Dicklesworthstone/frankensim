@@ -1,5 +1,23 @@
 # fs-solid CONTRACT
 
+## Temperature-dependent brittle midpoint continuation
+
+`BrittleTetMotion::advance_midpoint_at_temperature` reuses the original private
+source/history temperature transfer, then completes the native mean-stress
+midpoint mechanical interval before publishing any successor. It retains the
+original consistent mass and density snapshot through that parameter stage,
+along with velocity, kinetic storage, clock and remaining physical-step budget.
+A changed queried density cannot silently create matter or momentum.
+
+The combined first-law gate accounts for signed parameter work, external
+mean-force work, actual storage change, thermal plus mechanical fracture loss,
+and the native stable kinetic increment. It adds no backward-Euler loss or
+endpoint-work correction. Source, domain, nonlinear, cancellation and late work
+refusals retain the pre-transfer motion for retry. Temperature is a coefficient
+change at fixed accepted strain followed by motion at those new coefficients;
+this ordered split does not infer thermal expansion, caloric heat or global
+second-order accuracy through an unresolved temperature history.
+
 ## Work-conjugate brittle midpoint motion
 
 `BrittleTetMotion::advance_midpoint` uses the original analytic crack-band

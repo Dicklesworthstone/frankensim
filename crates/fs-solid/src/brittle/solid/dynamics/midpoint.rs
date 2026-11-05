@@ -20,6 +20,9 @@
 //! establish a temporal error bound. Fixed planes, small rotations/strains,
 //! source conditions and reference inventory remain unchanged during a step.
 
+/// Original thermal source/history transfer followed by work-conjugate motion.
+pub mod temperature;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;
