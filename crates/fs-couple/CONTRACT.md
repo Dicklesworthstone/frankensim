@@ -32896,3 +32896,19 @@ and kind errors, cancellation and unchanged accepted state.
 Serial and pooled adapters then call the original shared D3Q19/D3Q27 moving-wall operator. That owner remains authoritative for probe topology, wall tangency, discrete impermeability, collision Mach limits, actual momentum/work receipts and atomic population/step-count publication. Returned `MovingWallMomentum3` retains native lattice units. The time sample is explicit, allowing midpoint sampling without assuming a solver clock. This is prescribed surface motion on fixed geometry; it does not implement normal wall displacement, swept cells or remeshing.
 
 The integration target `scenario_wall_velocity` checks translating drives against the original moving-wall populations, impulse and mechanical work on both native lattices, independently checks rotation at fixed WORLD wall-link locations, and checks overspeed, forbidden normal motion, cancellation and scratch-length refusal. Source review and parsing passed. These integration tests are not claimed as executed while the unchanged `asupersync` dependency blocks the full native crate build.
+
+
+## Distributed dielectric loss on the original finite thermal timeline
+
+The default-off `resolved-dielectric-thermal` feature couples native planar,
+axisymmetric and tetrahedral dielectric candidates to the original finite
+enthalpy and complete heat-network owners. Polarization and Ohmic losses enter
+thermal cells once; electric/polarization storage remains separate. Source
+claims are refreshed at actual trial temperatures under fixed, validity-wide
+constant electrical coefficients. Physical cell volumes, source ownership,
+clocks and joint electrical/thermal energy must agree before either endpoint
+is returned. Fourier transport, thermal contacts, layers and closed-enclosure
+radiation retain their existing owners. See
+[the dielectric thermal contract](docs/resolved-dielectric-thermal.md) for the
+API, first-order coupled thermal accuracy and bounded physical assumptions.
+Seven focused regressions are in `tests/dielectric_field_thermal.rs`.

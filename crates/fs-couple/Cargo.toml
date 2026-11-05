@@ -90,6 +90,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Distributed Debye loss coupled to actual finite caloric receivers.
+resolved-dielectric-thermal = ["fs-em/resolved-leaky-dielectric"]
 # Frontier resolved electrostatic field/circuit/body feedback on one time step.
 resolved-electrostatic-circuit-motion = []
 # Source-owned Maxwell-Stefan, Soret and Dufour transport in the live gas assembly.
