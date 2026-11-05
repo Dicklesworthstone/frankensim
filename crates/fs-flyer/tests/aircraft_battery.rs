@@ -365,6 +365,7 @@ fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_wor
     let mut kj_force = [0.0; 2];
     let mut expected_moment = 0.0;
     let mut separation_moment_change = 0.0;
+    let mut plane_force = [[0.0; 2]; 4];
     let mut separated_count = 0;
     for (s, strip) in strips.iter().enumerate() {
         let a = loads.coupled.strip_alpha_eff_rad[s];
@@ -410,19 +411,35 @@ fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_wor
             expected_moment -= scale * (rz * w + rx * u);
             kj_force[0] -= scale * w;
             kj_force[1] += scale * u;
+            let plane = match panel.surface {
+                fs_wing::SurfaceId::WingLower => 0,
+                fs_wing::SurfaceId::WingUpper => 1,
+                fs_wing::SurfaceId::CanardLower => 2,
+                fs_wing::SurfaceId::CanardUpper => 3,
+                fs_wing::SurfaceId::Vertical => unreachable!(),
+            };
+            plane_force[plane][0] -= scale * w;
+            plane_force[plane][1] += scale * u;
             kj_power += scale * (-w * cg_velocity[0] + u * cg_velocity[1]);
         }
     }
     // Reconstruct the signed transverse force from accepted local flow and
     // circulation, then project using reference velocity components. This
     // does not call the production projection helper or infer lift from -Fz.
-    let transverse_lift = (kj_force[0] * cg_velocity[1] - kj_force[1] * cg_velocity[0]) / speed;
     let q_reference = 0.5 * RHO * speed * speed;
-    // Existing biplane convention: S=2bc and AR=b/c, so S*AR=2b^2.
-    let drag_denominator =
-        2.0 * q_reference * core::f64::consts::PI * design.wing_span_m.powi(2) * design.oswald_e;
-    let expected_induced = transverse_lift.powi(2) / drag_denominator;
-    let body_normal_induced = kj_force[1].powi(2) / drag_denominator;
+    let mut expected_induced = 0.0;
+    let mut body_normal_induced = 0.0;
+    for (plane, [fx, fz]) in plane_force.into_iter().enumerate() {
+        let span = if plane < 2 {
+            design.wing_span_m
+        } else {
+            design.canard_span_m
+        };
+        let transverse_lift = (fx * cg_velocity[1] - fz * cg_velocity[0]) / speed;
+        let drag_denominator = q_reference * core::f64::consts::PI * span.powi(2) * design.oswald_e;
+        expected_induced += transverse_lift.powi(2) / drag_denominator;
+        body_normal_induced += fz.powi(2) / drag_denominator;
+    }
     assert!((loads.induced_drag_n - expected_induced).abs() < 1e-9);
     assert!((loads.lift_n + kj_force[1]).abs() < 1e-9);
     assert!(

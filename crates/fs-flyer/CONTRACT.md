@@ -1035,31 +1035,41 @@ are unchanged. Full coupled accuracy remains bounded by the declared wing,
 BEMT and coupling tolerances; refinement evidence does not certify physical
 validity or arbitrary operating branches.
 
-### Wind-axis lift in aircraft loads and native propulsion
+### Plane-resolved induced drag in aircraft loads and native propulsion
 
-The longitudinal aircraft and native steady, dynamic and harmonic propulsion
-consumers share one projection helper to compute the
-circulatory lift component along `(sin(alpha), 0, -cos(alpha))` before applying
-the existing classical induced-drag screen. Body-normal force `-Fz` is only its
-projection; squaring that component would spuriously reduce induced drag by
-`cos(alpha)^2` in uniform flow. The correction changes neither the section
-solve nor any profile-drag, parasite, propeller or moment-arm owner.
+The built-in longitudinal aircraft and native steady, dynamic and harmonic
+propulsion consumers share one fixed-size accumulator for accepted circulatory
+forces on the lower wing, upper wing, lower canard and upper canard. Each plane
+first projects its own load along `(sin(alpha), 0, -cos(alpha))`, then contributes
+`L_perp² / (q pi e b²)` with its physical span. This is the classical
+`Cdi=Cl²/(pi AR e)` law with `AR=b²/S`; reference area cancels. The existing
+Estimated `oswald_e` applies separately to every plane. Summing before squaring
+would let a down-loaded canard erase wing drag and incorrectly use the larger
+wing span for the canard. Unequal loading between the two wing planes is also
+retained. Equal wing loads with no canard load recover the previous biplane
+formula exactly in real arithmetic.
 
-The local analytic regression specifies signed-lift recovery under pitch,
-streamwise-force and side-force changes. The real geared-aircraft tests
-independently integrate the accepted flat-panel circulation and use a velocity
-projection to compare the corrected native force at attached and separated
-states, retaining the existing force/moment tolerances and shaft-power checks.
-This remains an Estimated global induced-drag model, not a resolved-wake drag
-calculation. `ForceBuildup::lift_n` retains its documented circulatory body-up
-load; the transverse force is used for induced drag before profile/parasite
-forces are added. The separated aircraft regression independently reconstructs
-lift from accepted local flow, circulation and span, verifies induced drag and
-actual drag work, and exposes the body-axis error at 0.5 rad incidence. In
-uniform flow that deficit is 23%. The longitudinal SimLoop
-and trim now receive this same corrected force; their trajectories and physical
-trim fingerprints intentionally change, without changing the section/coupling
-solve or the model's longitudinal applicability.
+Body-normal force `-Fz` remains only a projection of lift; using its square
+would spuriously reduce induced drag by `cos(alpha)^2` in uniform flow. The
+summed induced resistance acts opposite the reference flow at the CG, as before.
+It adds no separate moment or heat deposit. The section/circulation solve,
+profile-drag, parasite, propeller and their moment-arm owners are unchanged.
+Explicit native `LiftingSurfaces` continue to use their caller-declared groups.
+
+This is an Estimated independent-plane loss closure. Circulation includes
+the original mutual induction, but the loss estimate does not resolve the
+cross-plane wake-energy terms, infer biplane efficiency, or establish historical
+trim validity. `ForceBuildup::lift_n` retains its documented circulatory body-up
+load. The longitudinal SimLoop and trim consume the same corrected drag, so
+their trajectories and physical trim fingerprints intentionally change.
+
+G0/G3 regressions cover exact opposite loads with zero net lift and positive
+loss, unequal wing loading at fixed total lift, the equal-load limit, signed
+lift under pitch, and a real opposing wing/canard force solve shared by native
+and longitudinal consumers. Independent panel integration reconstructs the
+per-plane drag and actual aerodynamic work at separated incidence, with the
+existing force/moment and shaft-power tolerances unchanged. Formula reference:
+[NASA Glenn, Induced Drag Coefficient](https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/induced-drag-coefficient/).
 
 ### Instantaneous rotor and geared momentum transfer
 

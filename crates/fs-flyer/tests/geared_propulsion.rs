@@ -627,20 +627,99 @@ fn transverse_induced_drag(
 ) -> f64 {
     let (panels, strips) = design.layout(canard).unwrap();
     let local = loads.coupled.strip_velocity_mps.as_ref().unwrap();
-    let (mut fx, mut fz) = (0.0, 0.0);
+    let mut forces = [[0.0; 2]; 4];
     for (strip, flow) in strips.iter().zip(local) {
         for &j in &strip.panel_indices {
             let span = panels[j].b[1] - panels[j].a[1];
             let circulation = rho * loads.coupled.gamma[j] * span;
-            fx -= circulation * flow[2];
-            fz += circulation * flow[0];
+            let plane = match panels[j].surface {
+                fs_wing::SurfaceId::WingLower => 0,
+                fs_wing::SurfaceId::WingUpper => 1,
+                fs_wing::SurfaceId::CanardLower => 2,
+                fs_wing::SurfaceId::CanardUpper => 3,
+                fs_wing::SurfaceId::Vertical => unreachable!(),
+            };
+            forces[plane][0] -= circulation * flow[2];
+            forces[plane][1] += circulation * flow[0];
         }
     }
     let chord_speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
-    let lift = (fx * velocity[2] - fz * velocity[0]) / chord_speed;
     let q = 0.5 * rho * v(velocity).dot(v(velocity));
-    // S=2bc and AR=b/c in this declared biplane screen.
-    lift * lift / (2.0 * q * core::f64::consts::PI * design.wing_span_m.powi(2) * design.oswald_e)
+    forces
+        .into_iter()
+        .enumerate()
+        .map(|(plane, [fx, fz])| {
+            let lift = (fx * velocity[2] - fz * velocity[0]) / chord_speed;
+            let span = if plane < 2 {
+                design.wing_span_m
+            } else {
+                design.canard_span_m
+            };
+            lift * lift / (q * core::f64::consts::PI * span.powi(2) * design.oswald_e)
+        })
+        .sum()
+}
+
+#[test]
+fn g3_opposed_wing_and_canard_loads_retain_induced_drag_in_both_force_owners() {
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    design.camber_ratio = 0.0;
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let model = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let state = flight_state(&assembly);
+    let canard = -0.30;
+    let native = model
+        .evaluate(
+            &state,
+            PropulsionInputs {
+                canard_rad: canard,
+                ..inputs()
+            },
+            &|_| Ok(ZERO),
+            None,
+        )
+        .unwrap();
+    let loads = design
+        .force_buildup_with_incident(12.0, 0.08, canard, 35.0, 0.0, 1.225, None, &|_| {
+            Ok(state.rigid.vel_mps)
+        })
+        .unwrap();
+    let (panels, strips) = design.layout(canard).unwrap();
+    let local = loads.coupled.strip_velocity_mps.as_ref().unwrap();
+    let mut lift = [0.0; 2];
+    for (strip, flow) in strips.iter().zip(local) {
+        for &j in &strip.panel_indices {
+            let panel = panels[j];
+            let group = usize::from(matches!(
+                panel.surface,
+                fs_wing::SurfaceId::CanardLower | fs_wing::SurfaceId::CanardUpper
+            ));
+            let scale = 1.225 * loads.coupled.gamma[j] * (panel.b[1] - panel.a[1]);
+            lift[group] -= scale * (flow[2] * f64::sin(0.08) + flow[0] * f64::cos(0.08));
+        }
+    }
+    assert!(
+        lift[0] > 100.0 && lift[1] < -100.0,
+        "opposing loads: {lift:?}"
+    );
+    let q = 0.5 * 1.225 * 12.0_f64.powi(2);
+    let cancelled = (lift[0] + lift[1]).powi(2)
+        / (2.0 * q * core::f64::consts::PI * design.oswald_e * design.wing_span_m.powi(2));
+    let expected = transverse_induced_drag(&design, &loads, state.rigid.vel_mps, canard, 1.225);
+    assert!(
+        expected > 2.0 * cancelled,
+        "per-plane {expected}, cancelled {cancelled}"
+    );
+    assert!((loads.induced_drag_n - expected).abs() < 1e-9);
+    let weight = design.gross_mass_kg * 9.80665;
+    let force = [
+        loads.force_n[0] + weight * f64::sin(0.08),
+        loads.force_n[1],
+        loads.force_n[2] - weight * f64::cos(0.08),
+    ];
+    assert!((v(force) - v(native.aerodynamic_force_body_n)).norm() < 1e-9);
+    assert!((loads.moment_y_nm - native.loads.carrier.moment_nm[1]).abs() < 1e-9);
 }
 
 #[test]

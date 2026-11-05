@@ -9,8 +9,8 @@
 //!     ONE influence system — canard–wing interference is solved, never
 //!     superposed) under the converged prop slipstream (E4.5),
 //!   - per-panel Kutta–Joukowsky forces F = ρΓ(V×seg), using local rigid-point
-//!     relative velocity plus prop wash; wing-induced drag is carried as the
-//!     declared classical term CL²/(π·AR·e) — documented, Estimated,
+//!     relative velocity plus prop wash; induced drag is the sum of the
+//!     classical CL²/(π·AR·e) terms for each physical plane — Estimated,
 //!   - per-strip section quarter-chord moments (thin-airfoil cm₀ blended
 //!     to the separated plate's center-of-pressure moment),
 //!   - wing profile drag (declared attached cd₀, the same flat-plate
@@ -69,7 +69,8 @@ pub struct OpenLoopDesign {
     /// Attached wing/canard profile drag coefficient (declared Estimated).
     /// The separated branch uses the same flat-plate law as section lift.
     pub cd0_wing: f64,
-    /// Oswald-class span-efficiency for the induced term (Estimated).
+    /// Oswald-class span-efficiency used separately for each wing/canard
+    /// plane's induced drag (Estimated; no cross-plane interference term).
     pub oswald_e: f64,
     /// CG reference (FRD, from the wing LE origin). Estimated ~30% chord
     /// aft, between the planes (Culick/Jex discussion class).
@@ -251,6 +252,79 @@ pub(crate) fn wind_axis_lift(force: fs_ga::Vec3, alpha: f64) -> f64 {
     let lift_x = force.x * det::sin(alpha);
     let lift_z = force.z * det::cos(alpha);
     lift_x - lift_z
+}
+
+/// Accepted circulatory loads for the four planes in the built-in layout.
+/// Keep opposite surface loads separate until AFTER their induced losses are
+/// squared: a lifting wing and a down-loaded canard do not erase each other's
+/// wake energy. The explicit native surface layout owns its own drag groups.
+#[derive(Default)]
+pub(crate) struct PlaneCirculatoryLoads {
+    force_n: [fs_ga::Vec3; 4],
+}
+
+impl PlaneCirculatoryLoads {
+    pub(crate) fn add(&mut self, surface: SurfaceId, force: fs_ga::Vec3) -> Result<(), Refusal> {
+        let index = match surface {
+            SurfaceId::WingLower => 0,
+            SurfaceId::WingUpper => 1,
+            SurfaceId::CanardLower => 2,
+            SurfaceId::CanardUpper => 3,
+            SurfaceId::Vertical => return Err(Self::invalid()),
+        };
+        self.force_n[index] = self.force_n[index] + force;
+        Ok(())
+    }
+
+    /// Cdi=Cl²/(pi AR e), AR=b²/S gives D=L_perp²/(q pi e b²)
+    /// for each plane, independent of the bookkeeping reference area.
+    /// <https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/induced-drag-coefficient/>
+    /// This is a classical independent-plane estimate: the circulation solve
+    /// still includes mutual induction, but this loss closure does not resolve
+    /// cross-plane wake interference or infer a new biplane efficiency.
+    pub(crate) fn induced_drag(
+        &self,
+        design: &OpenLoopDesign,
+        speed_mps: f64,
+        alpha_rad: f64,
+        rho_kg_m3: f64,
+    ) -> Result<f64, Refusal> {
+        let q = 0.5 * rho_kg_m3 * speed_mps * speed_mps;
+        if !q.is_finite()
+            || q <= 0.0
+            || !alpha_rad.is_finite()
+            || !design.oswald_e.is_finite()
+            || design.oswald_e <= 0.0
+        {
+            return Err(Self::invalid());
+        }
+        let mut drag_n = 0.0;
+        for (force, span) in self.force_n.iter().zip([
+            design.wing_span_m,
+            design.wing_span_m,
+            design.canard_span_m,
+            design.canard_span_m,
+        ]) {
+            let lift = wind_axis_lift(*force, alpha_rad);
+            let denominator = q * core::f64::consts::PI * design.oswald_e * span * span;
+            if !span.is_finite() || span <= 0.0 || !denominator.is_finite() || denominator <= 0.0 {
+                return Err(Self::invalid());
+            }
+            drag_n += lift * lift / denominator;
+        }
+        if !drag_n.is_finite() {
+            return Err(Self::invalid());
+        }
+        Ok(drag_n)
+    }
+
+    fn invalid() -> Refusal {
+        Refusal {
+            code: "induced-drag-invalid",
+            message: "induced drag needs finite wing/canard loads and positive pressure, spans and efficiency".into(),
+            ranked_repairs: vec!["use the built-in four-plane layout within its finite classical-drag domain".into()],
+        }
+    }
 }
 
 /// Remove the level-flight weight inserted by the force assembly.
@@ -732,6 +806,7 @@ impl OpenLoopDesign {
         // Per-panel Kutta–Joukowsky forces + moments about the CG ref.
         let mut force = [0.0f64; 3];
         let mut m_y = 0.0f64;
+        let mut plane_loads = PlaneCirculatoryLoads::default();
         for (j, p) in panels.iter().enumerate() {
             let fs_v = panel_velocity.as_ref().map_or(fs_v, |local| local[j]);
             let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
@@ -752,6 +827,7 @@ impl OpenLoopDesign {
             let fz = fz_a - fz_b;
             let s = rho_kg_m3 * coupled.gamma[j];
             let f = [s * fx, s * fy, s * fz];
+            plane_loads.add(p.surface, fs_ga::Vec3::new(f[0], f[1], f[2]))?;
             let mid = [
                 0.5 * (p.a[0] + p.b[0]) - self.cg_m[0],
                 0.5 * (p.a[1] + p.b[1]) - self.cg_m[1],
@@ -766,8 +842,6 @@ impl OpenLoopDesign {
             m_y += m_term;
         }
         let lift = -force[2];
-        let transverse_lift =
-            wind_axis_lift(fs_ga::Vec3::new(force[0], force[1], force[2]), alpha_rad);
         // Per-strip quarter-chord moments and profile drag use the same
         // accepted effective incidence and separation blend as lift.
         let mut d_prof = 0.0;
@@ -809,12 +883,10 @@ impl OpenLoopDesign {
             let m_term = m_a - m_b;
             m_y += m_term;
         }
-        // Induced drag: declared classical term at the CG line (the
-        // incident-flow KJ panel forces exclude it by construction).
-        let s_ref = 2.0 * self.wing_span_m * self.wing_chord_m;
-        let ar = self.wing_span_m * self.wing_span_m / (s_ref / 2.0);
-        let cl = transverse_lift / (q * s_ref);
-        let d_ind = q * s_ref * cl * cl / (core::f64::consts::PI * ar * self.oswald_e);
+        // Every physical plane retains its own signed circulatory load and
+        // span before squaring. Apply the summed classical losses at the CG;
+        // the incident-flow KJ panel forces exclude this drag by construction.
+        let d_ind = plane_loads.induced_drag(self, v_mps, alpha_rad, rho_kg_m3)?;
         let dix = d_ind * vhat[0];
         let diz = d_ind * vhat[2];
         force[0] -= dix;
@@ -1061,4 +1133,55 @@ fn solve4(a: &[[f64; 4]; 4], b: &[f64; 4]) -> Option<[f64; 4]> {
         out[r] = s / m[r][r];
     }
     out.iter().all(|x| x.is_finite()).then_some(out)
+}
+
+#[cfg(test)]
+mod induced_drag_tests {
+    use super::{PlaneCirculatoryLoads, SurfaceId, wright_openloop_v1};
+    use fs_ga::Vec3;
+
+    #[test]
+    fn g0_opposing_surface_loads_cannot_cancel_induced_loss() {
+        let mut design = wright_openloop_v1();
+        design.wing_span_m = 10.0;
+        design.canard_span_m = 2.0;
+        design.oswald_e = 0.8;
+        let mut loads = PlaneCirculatoryLoads::default();
+        loads
+            .add(SurfaceId::WingLower, Vec3::new(0.0, 0.0, -100.0))
+            .unwrap();
+        loads
+            .add(SurfaceId::CanardLower, Vec3::new(0.0, 0.0, 100.0))
+            .unwrap();
+        let drag = loads.induced_drag(&design, 10.0, 0.0, 1.2).unwrap();
+        let expected =
+            100.0_f64.powi(2) * (1.0 / 100.0 + 1.0 / 4.0) / (60.0 * core::f64::consts::PI * 0.8);
+        assert!((drag - expected).abs() < 1e-12);
+        assert!(
+            drag > 0.0,
+            "zero total lift must not erase either plane's wake loss"
+        );
+    }
+
+    #[test]
+    fn g3_unequal_plane_loading_increases_loss_at_the_same_total_lift() {
+        let design = wright_openloop_v1();
+        let mut equal = PlaneCirculatoryLoads::default();
+        let mut unequal = PlaneCirculatoryLoads::default();
+        equal
+            .add(SurfaceId::WingLower, Vec3::new(0.0, 0.0, -100.0))
+            .unwrap();
+        equal
+            .add(SurfaceId::WingUpper, Vec3::new(0.0, 0.0, -100.0))
+            .unwrap();
+        unequal
+            .add(SurfaceId::WingLower, Vec3::new(0.0, 0.0, -200.0))
+            .unwrap();
+        let equal_drag = equal.induced_drag(&design, 10.0, 0.0, 1.2).unwrap();
+        let unequal_drag = unequal.induced_drag(&design, 10.0, 0.0, 1.2).unwrap();
+        let legacy_equal = 200.0_f64.powi(2)
+            / (2.0 * 60.0 * core::f64::consts::PI * design.oswald_e * design.wing_span_m.powi(2));
+        assert!((equal_drag - legacy_equal).abs() < 1e-12);
+        assert!((unequal_drag - 2.0 * equal_drag).abs() < 1e-12);
+    }
 }

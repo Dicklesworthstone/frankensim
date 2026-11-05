@@ -12,7 +12,7 @@ use super::super::{Loads, SixDofState, TICK_HZ};
 use super::geared::{self, GearedAssembly, GearedLoads, GearedState, GearedStep};
 use super::{array, finite, vec};
 use crate::Refusal;
-use crate::aircraft::{OpenLoopDesign, wind_axis_lift};
+use crate::aircraft::{OpenLoopDesign, PlaneCirculatoryLoads};
 use crate::propcoupling::spatial::{self, DiskAxes};
 use crate::propcoupling::{
     CoupledStep, IncidentInflow, PropDisk, coupled_prop_airframe_step_with_incident,
@@ -661,6 +661,7 @@ impl PropulsionGeometry<'_> {
         let mut group_forces = self
             .surfaces
             .map(|model| vec![Vec3::default(); model.groups.len()]);
+        let mut plane_loads = PlaneCirculatoryLoads::default();
         for (s, strip) in strips.iter().enumerate() {
             for &j in &strip.panel_indices {
                 let panel_load = circulatory
@@ -669,6 +670,8 @@ impl PropulsionGeometry<'_> {
                 if let (Some(model), Some(groups)) = (self.surfaces, group_forces.as_mut()) {
                     let group = model.properties[s].induced_drag_group;
                     groups[group] = groups[group] + panel_load.force;
+                } else {
+                    plane_loads.add(panels[j].surface, panel_load.force)?;
                 }
             }
         }
@@ -689,9 +692,6 @@ impl PropulsionGeometry<'_> {
             force = force + additional.force;
             moment = moment + additional.torque;
         } else {
-            // The induced-drag screen uses transverse lift, not its body-z
-            // projection; the latter introduces a spurious cos(alpha)^2 factor.
-            let lift = wind_axis_lift(force, alpha);
             for (s, strip) in strips.iter().enumerate() {
                 let panel = &panels[strip.panel_indices[0]];
                 let v = local[s];
@@ -718,12 +718,7 @@ impl PropulsionGeometry<'_> {
                 force = force + profile_force;
                 moment = moment + arm.cross(profile_force);
             }
-            let area = 2.0 * design.wing_span_m * design.wing_chord_m;
-            let aspect = design.wing_span_m * design.wing_span_m / (0.5 * area);
-            let dynamic_pressure = 0.5 * rho * speed2;
-            let cl = lift / (dynamic_pressure * area);
-            let induced_drag = dynamic_pressure * area * cl * cl
-                / (core::f64::consts::PI * aspect * design.oswald_e);
+            let induced_drag = plane_loads.induced_drag(design, airspeed, alpha, rho)?;
             force = force - air_direction.scale(induced_drag);
         }
         let local_velocity = |point| Ok(air.sample(point)?.relative_velocity_mps);
@@ -843,7 +838,8 @@ impl<const N: usize> GearedPropulsion<'_, N> {
 
 #[cfg(test)]
 mod lift_projection_tests {
-    use super::{Vec3, det, wind_axis_lift};
+    use super::{Vec3, det};
+    use crate::aircraft::wind_axis_lift;
 
     #[test]
     fn signed_lift_projection_is_independent_of_pitch_and_streamwise_force() {
