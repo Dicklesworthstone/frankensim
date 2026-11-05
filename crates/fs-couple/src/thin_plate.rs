@@ -36,14 +36,18 @@ use fs_vfit::FitOptions;
 use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_impedance};
 
 mod thermoelastic_loss;
+pub(crate) mod thermoelastic_memory;
+pub mod thermoelastic_linear;
+pub use thermoelastic_memory::ThermoelasticMemoryOptions;
 use thermoelastic_loss::ThermoelasticBendingProjection;
 
 
 /// Explicit frozen-state thermal data for a homogeneous anisotropic plate.
 /// Elasticity, density, thickness and material orientation come from the SAME
 /// ThinPlate. These caller-supplied constants do not imply material-pack authority.
-/// The model assumes weak coupling, insulated faces and through-thickness
-/// conduction; do not combine it with transport resolving the same thermal loss.
+/// Consumers select weak-loss ratios or coupled linear thermal memory. Both
+/// assume insulated faces, through-thickness conduction and a frozen state;
+/// do not combine either with transport resolving the same thermal loss.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnisotropicPlateThermal {
     /// Absolute specimen temperature [K].
@@ -60,6 +64,20 @@ pub struct AnisotropicPlateThermal {
 
 impl AnisotropicPlateThermal {
     fn resolve(self, plate: ThinPlate, section: &PlateSection)
+        -> Result<SlabThermoelasticBending, AcousticRealizeError>
+    {
+        self.resolve_with_capacity(plate, section, false)
+    }
+
+    /// Complete linear strain-temperature coupling; the material owner admits
+    /// C_epsilon = C_sigma - T alpha^T Q alpha at this same specimen state.
+    pub(crate) fn resolve_coupled(self, plate: ThinPlate, section: &PlateSection)
+        -> Result<SlabThermoelasticBending, AcousticRealizeError>
+    {
+        self.resolve_with_capacity(plate, section, true)
+    }
+
+    fn resolve_with_capacity(self, plate: ThinPlate, section: &PlateSection, coupled: bool)
         -> Result<SlabThermoelasticBending, AcousticRealizeError>
     {
         if plate.thermoelastic.is_some() || plate.damping_ratio != 0.0 {
@@ -82,7 +100,9 @@ impl AnisotropicPlateThermal {
                 2.0*cs*(a-b)+(cc-ss)*shear]
         };
         let q = section.d.map(|d| 12.0*d / plate.thickness_m.powi(3));
-        SlabThermoelasticBending::new(q, alpha, self.temperature_k,
+        let build = if coupled { SlabThermoelasticBending::new_coupled }
+            else { SlabThermoelasticBending::new };
+        build(q, alpha, self.temperature_k,
             plate.density_kg_m3*self.specific_heat_j_kg_k,
             self.thickness_conductivity_w_m_k, plate.thickness_m)
             .map_err(|_| AcousticRealizeError::InvalidDescription {
@@ -726,7 +746,7 @@ impl VkBody {
     ) -> Result<Self, AcousticRealizeError> {
         let section = plane_stress_section(plate)?;
         let slab = thermal.resolve(plate, &section)?;
-        Self::from_sampled_fe_with_slab(plate, false, Some(slab))
+        Self::from_sampled_fe_with_slab(plate, false, Some(slab), None)
     }
 
     fn from_plate_ports(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
@@ -821,13 +841,22 @@ impl VkBody {
     }
 
     fn from_sampled_fe(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
-        Self::from_sampled_fe_with_slab(plate, with_area, None)
+        Self::from_sampled_fe_with_slab(plate, with_area, None, None)
     }
 
     #[allow(clippy::too_many_lines)] // one coherent FE sampling stage
     fn from_sampled_fe_with_slab(
         plate: ThinPlate, with_area: bool, slab: Option<SlabThermoelasticBending>,
+        memory: Option<&thermoelastic_memory::PreparedPlateThermalMemory<'_>>,
     ) -> Result<Self, AcousticRealizeError> {
+        if let Some(memory) = memory {
+            if memory.gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
+            if slab.is_some() {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "thermal memory and diagonal thermoelastic loss cannot be combined",
+                });
+            }
+        }
         admit_vk_render_modes(plate.n_modes, with_area)?;
         let section = plane_stress_section(plate)?;
         let (nx_c, ny_c) = (8, 8);
@@ -869,6 +898,7 @@ impl VkBody {
         let ny = ny_c + 1;
         let mut disp = Vec::with_capacity(n_keep);
         let mut zetas = Vec::with_capacity(n_keep);
+        let mut thermal_fields = Vec::new();
         for pair in report.modes.iter().take(n_keep) {
             let omega = pair.lambda.max(0.0).sqrt();
             if !omega.is_finite() || omega <= 0.0 {
@@ -887,6 +917,7 @@ impl VkBody {
                 }
             }
             disp.push(fs_nlmodal::SampledPlateMode { omega, w, nx, ny });
+            if memory.is_some() { thermal_fields.push(pair.phi.as_slice()); }
             zetas.push(
                 plate.damping_ratio
                     + match &bending_loss {
@@ -927,6 +958,7 @@ impl VkBody {
         let rho_h = plate.density_kg_m3 * plate.thickness_m;
         let mut areas = Vec::with_capacity(disp.len());
         let mut drive = Vec::with_capacity(disp.len());
+        let mut thermal_scales = Vec::new();
         let sx = 0.25 * plate.length_m;
         let sy = 0.5 * plate.width_m;
         for mode in &disp {
@@ -937,12 +969,32 @@ impl VkBody {
                 });
             }
             let scale = 1.0 / energy.sqrt();
+            if memory.is_some() { thermal_scales.push(scale); }
             areas.push(mode.w.iter().map(|v| v * scale * area_el).sum());
             drive.push(
                 bilinear_sample(&mode.w, nx, ny, plate.length_m, plate.width_m, sx, sy) * scale,
             );
         }
-        finish_vk(vk.storage, &zetas, &drive, areas, with_area)
+        let branches = if let Some(memory) = memory {
+            let branches = thermoelastic_memory::project_thermal_relaxation(
+                &mesh, &model.dof_map, &thermal_fields, &thermal_scales,
+                memory.law, memory.spectrum, memory.options.max_memory_states,
+                memory.options.max_projection_terms, memory.gate,
+            )?;
+            thermoelastic_memory::admit_memory_band(
+                &vk.storage.omegas, &branches, memory.spectrum.band_rad_s(),
+            )?;
+            Some(branches)
+        } else { None };
+        let body = finish_vk(vk.storage, &zetas, &drive, areas, with_area)?;
+        match (memory, branches) {
+            (Some(memory), Some(branches)) => {
+                let body = body.with_relaxation_branches(branches, memory.options.max_memory_states)?;
+                if memory.gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
+                Ok(body)
+            }
+            _ => Ok(body),
+        }
     }
 
     fn n_modes(&self) -> usize {

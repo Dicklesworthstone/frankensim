@@ -8232,6 +8232,37 @@ clarinet is one filling of those objects.
   solved. Caller-authored constants do not acquire material-pack authority.
   Duplicate thermoelastic loss and nonzero authored modal damping refuse;
   existing viscosity and material-source restrictions remain in force.
+- Full thermoelastic memory is available through
+  `VkBody::from_plate_with_thermoelastic_memory` and
+  `thin_plate::thermoelastic_linear::ThermoelasticPlateImage`. Both consume the
+  same explicit `AnisotropicPlateThermal` data and
+  `ThermoelasticMemoryOptions`. The coupled material owner converts
+  constant-stress to fixed-strain heat capacity; isothermal elastic stiffness
+  remains the equilibrium stiffness. Original DKT curvature factors are
+  projected through the same retained eigenvectors and coordinate scales as
+  the mechanical body. Power-of-two scaled QR compresses spatial factors
+  without a rank tolerance, retaining signed cross-mode coupling and weak
+  independent channels. Positive diffusion branches carry their own storage,
+  heat and histories through the existing pHS/held-force Maxwell owners.
+  No parallel thermal damping ratio is inserted.
+  The nonlinear sampled route retains the complete original requested basis
+  under its existing pHS admission; `PlateBankImage` carries the complete
+  appended histories. The linear image
+  supports up to 64 requested modes, retains the original mass, force and
+  reciprocal volume maps, fills drive buffers without allocation and prepares
+  the existing `CoupledModalSystem`. Preparation keeps its original resource,
+  energy and instantaneous-stiffness Nyquist admission.
+  Explicit thermal-term, memory-state and projection-work allowances bound
+  setup. Both consumers admit the represented instantaneous linear stiffness
+  against the finite constitutive band; this does not bandlimit forcing or
+  nonlinear response. The reported spectrum error covers only normalized
+  complex constitutive response in that band, excluding spatial/modal
+  truncation and projection/runtime arithmetic. Homogeneous frozen-state,
+  insulated-face and through-thickness conduction assumptions remain;
+  finite-amplitude membrane thermal loss, lateral/boundary heat flow and
+  evolving mean temperature are not modeled. Existing duplicate-loss and
+  source/viscosity refusals remain active; caller data gain no material-pack
+  authority.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
   4ω₀ so higher certified modes sit on the stiffness limb. Both linear and
