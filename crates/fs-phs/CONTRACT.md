@@ -593,6 +593,20 @@ force a residual to zero or turn numerical error into heat. The regression
 source checks a quartic system shifted by an arbitrary 1e30 J datum, composition,
 large quadratic states, represented midpoint rounding and finite extreme Q.
 
+The built-in Duffing storage now owns the symmetric polynomial spring secant
+and the physical mean velocity separately. Its spring effort is
+`k(a+b)/2 + k3(a+b)(a²+b²)/4`; unrelated kinetic storage cannot cancel that
+force or divert its potential work into momentum effort. Original energy
+accounting uses a complete analytic midpoint remainder for both potential and
+kinetic energy, including represented-midpoint rounding. The continuous
+Hessian and the secant's endpoint derivative are separate, allocation-free
+capabilities retained by existing direct-sum composition and prepared stepping.
+Finite parameters, positive mass and nonnegative stiffness/damping remain the
+admitted model; no double-well, material-identification or timestep-fidelity
+claim is added. Focused `duffing_potential` regressions cover a 5e17 J kinetic
+background, independent scalar motion/work/heat references, rounded midpoints
+and analytic tangents. Native execution of this increment remains unverified.
+
 A resistor whose terminals are the same node has zero incidence and contributes
 neither dissipation nor a ground connection. Its conductance is not stamped, and
 it cannot hide a floating node. The circuit regression compares the actual

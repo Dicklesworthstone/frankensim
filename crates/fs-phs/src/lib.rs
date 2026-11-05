@@ -5775,6 +5775,10 @@ struct DuffingStorage {
 }
 
 impl Storage for DuffingStorage {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> { Some(self) }
+
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> { Some(self) }
+
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         Some(linear_exact::QuadraticPart {
             matrix: vec![self.k, 0.0, 0.0, 1.0/self.m],
@@ -5791,16 +5795,75 @@ impl Storage for DuffingStorage {
         out[0] = self.k * q + self.k3 * det::powi(q, 3);
         out[1] = p / self.m;
     }
+
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        let dq = b[0] - a[0];
+        let half_dq = 0.5 * dq;
+        // The represented midpoint may round to an endpoint. Keep its offset
+        // from the exact mean; simply k3 * mid_q * dq^3 / 4 would lose the
+        // quadratic work and the leading quartic work in that case.
+        let q_offset = 0.5 * ((a[0] - mid[0]) + (b[0] - mid[0]));
+        let p_offset = 0.5 * ((a[1] - mid[1]) + (b[1] - mid[1]));
+        let quartic = self.k3 * (mid[0] * half_dq * half_dq
+            + q_offset * (3.0 * mid[0] * mid[0] + 3.0 * mid[0] * q_offset
+                + q_offset * q_offset + half_dq * half_dq));
+        Some(dq * (self.k * q_offset + quartic) + (b[1] - a[1]) * (p_offset / self.m))
+    }
+}
+
+impl ContinuousStorageTangent for DuffingStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        if state.len() != 2 || direction.len() != 2 || out.len() != 2
+            || state.iter().chain(direction).any(|value| !value.is_finite())
+        { return false; }
+        out[0] = (self.k + 3.0 * self.k3 * state[0] * state[0]) * direction[0];
+        out[1] = direction[1] / self.m;
+        out.iter().all(|value| value.is_finite())
+    }
+}
+
+impl ConstitutiveDiscreteGradient for DuffingStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        // Polarize each original energy separately. A Gonzalez correction of
+        // total H can erase the spring force beside large kinetic storage, or
+        // turn its quartic work into an artificial momentum effort.
+        let mean_q_squared = f64::midpoint(a[0] * a[0], b[0] * b[0]);
+        out[0] = if a[0] == b[0] {
+            self.k * a[0] + self.k3 * det::powi(a[0], 3)
+        } else {
+            self.k * mid[0] + self.k3 * mid[0] * mean_q_squared
+        };
+        out[1] = mid[1] / self.m;
+    }
+
+    fn end_jacobian_action(
+        &self, a: &[f64], b: &[f64], direction: &[f64], out: &mut [f64],
+    ) -> bool {
+        if a.len() != 2 || b.len() != 2 || direction.len() != 2 || out.len() != 2
+            || a.iter().chain(b).chain(direction).any(|value| !value.is_finite())
+        { return false; }
+        let mean_q = f64::midpoint(a[0], b[0]);
+        // d/db of (k/2)(a+b) + (k3/4)(a+b)(a^2+b^2).
+        // The positive-square form avoids cancellation in a^2+2ab+3b^2.
+        out[0] = (0.5 * self.k + self.k3 * (mean_q * mean_q + 0.5 * b[0] * b[0]))
+            * direction[0];
+        out[1] = 0.5 * (direction[1] / self.m);
+        out.iter().all(|value| value.is_finite())
+    }
 }
 
 /// Nonlinear (Duffing-type) spring-mass: `H = p^2/(2m) + k q^2/2 +
-/// k3 q^4/4` via a bespoke storage (parameters baked in) — the
-/// non-quadratic exercise for the Gonzalez gradient.
+/// k3 q^4/4`. Its symmetric polynomial discrete gradient retains spring
+/// work independently of kinetic storage, with allocation-free analytic
+/// continuous and endpoint tangents and stable original-energy accounting.
 ///
 /// # Errors
-/// Admission errors on non-physical parameters.
+/// Admission errors on nonfinite parameters, nonpositive mass or negative
+/// stiffness/damping. The admitted potential remains bounded below.
 pub fn duffing_oscillator(m: f64, k: f64, k3: f64, c: f64) -> Result<PortHamiltonian, PhsError> {
-    if m <= 0.0 || k < 0.0 || k3 < 0.0 || c < 0.0 {
+    if [m, k, k3, c].iter().any(|value| !value.is_finite())
+        || m <= 0.0 || k < 0.0 || k3 < 0.0 || c < 0.0
+    {
         return Err(PhsError::Unadmitted {
             what: "duffing parameters",
         });
