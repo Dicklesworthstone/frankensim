@@ -7662,3 +7662,45 @@ measured spectrum or impose a thermal emission law. Regressions retain exact
 interior-wavelength evaluation and compare native camera radiance and original
 area-source irradiance against independent area/distance²/Beer values, including
 exact-black source behavior and explicit source-domain refusals.
+
+## Original scene cameras and emitters through native refraction
+
+`NativeOpticalScene::with_curved_camera` connects an admitted original tracer
+scene to the existing reciprocal camera and its raster/area-light consumers.
+The caller supplies independent surface and environment conversions from
+authored radiance units to W/(m² sr nm) using `NativeRadianceCalibration`.
+Geometry already uses metres. Each original emissive primitive registers once,
+with its exact lifted spectrum, authored strength and original two-sided law.
+Material reflectance does not multiply local emission: native camera transport
+adds emission on arrival before sampling the original scattering material.
+The original environment is borrowed with its existing RGB spectral
+reconstruction and declared visible support; calibration does not recover a
+measured spectrum. Zero calibration is exact black in the declared band.
+
+The original camera eye, orthonormal forward/up basis and half-tangent projection
+are retained by the existing exact legacy-compatible pinhole branch. Callers
+select the launch medium with the optical owner's original-primitive references;
+camera containment is not inferred. Actual refracted paths, reciprocal
+`n_camera²/n_source²`, Beer attenuation, native proposal probabilities and
+unresolved-continuation errors remain owned by the same curved transport.
+`CurvedCameraRaster` traces each of its four wavelengths independently, with the
+existing deterministic sample identities and normalized XYZ integration.
+Detector-role surfaces remain unsupported by the reciprocal camera owner.
+
+Legacy rectangles remain NEE metadata naming original physical sources. They
+undergo existing rectangle/duplicate admission and the same primitive emission
+and geometry predicate as ordinary render admission. They add no second source
+or geometry. `CurvedAreaEmitter::from_camera` can prepare each shared original
+surface and exact spectrum for native area-light MIS under explicit face,
+geometry and image budgets. Legacy proposals do not infer refracted image seeds,
+an automatic NEE strategy or image completeness.
+
+Camera/source preparation checkpoints cancellation and bounds source storage by
+the admitted object count; native acceleration uses the caller's build-work
+budget. Invalid camera bases, source coefficients/strengths, unrepresentable
+calibration products, mismatched light ownership and exhausted budgets refuse
+before an observation callback. Observation errors remain distinct from
+admission errors. Regressions cover original emission through a glass sphere,
+immersed-camera index scaling and actual Beer lengths, two-sided emission before
+diffuse/environment continuation, raster spectral/XYZ replay, exact source and
+geometry identity for area proposals, and absence of duplicate rectangle power.

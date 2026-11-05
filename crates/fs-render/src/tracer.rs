@@ -16734,9 +16734,7 @@ fn validate_scene_with_medium_emission<'scene>(
         if matches!(&light_primitive.shape, Shape::AnimatedInstance(_)) {
             return Err(TracerError::AnimatedLightUnsupported);
         }
-        if !emissions_match(light_primitive.emission, Some(light.emission))
-            || !light_geometry_matches(light, &light_primitive.shape)
-        {
+        if !rectangle_light_matches_primitive(light, light_primitive) {
             return Err(TracerError::LightPrimitiveMismatch {
                 light_primitive: light.prim,
             });
@@ -17163,6 +17161,13 @@ fn checked_pixel_len(width: u32, height: u32) -> Result<usize, TracerError> {
         return Err(TracerError::InvalidInput);
     }
     usize::try_from(pixel_count).map_err(|_| TracerError::InvalidInput)
+}
+
+/// Shared original-geometry/emission predicate for scalar and native optical
+/// camera admission. A rectangle is proposal metadata, not another emitter.
+pub(crate) fn rectangle_light_matches_primitive(light: &RectLight, primitive: &Primitive) -> bool {
+    emissions_match(primitive.emission, Some(light.emission))
+        && light_geometry_matches(light, &primitive.shape)
 }
 
 fn light_geometry_matches(light: &RectLight, shape: &Shape) -> bool {

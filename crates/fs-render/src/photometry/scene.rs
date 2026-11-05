@@ -17,8 +17,10 @@
 //! sensor observations. Their existing budgets, branch policies, polarization,
 //! Jacobians, visibility and convergence semantics remain in force. A selected
 //! connection is not an all-image measurement. Source observations measure the
-//! explicitly supplied source: scene emission is retained for ordinary rendering
-//! but is not automatically injected into the curved source transport view.
+//! explicitly supplied source. Use [`NativeOpticalScene::with_curved_camera`]
+//! with an explicit [`NativeRadianceCalibration`] to observe the original scene
+//! emitters and environment through its own pinhole camera. The reciprocal
+//! camera and area-light strategies retain the same geometry and source laws.
 
 use core::fmt;
 use std::sync::Arc;
@@ -40,6 +42,9 @@ use crate::polarization::dielectric::scene::{
 };
 use crate::spectral::SpectralReflectance;
 use crate::tracer::{Material, Primitive, Scene, Shape};
+
+mod camera;
+pub use camera::{NativeCameraError, NativeRadianceCalibration};
 
 /// Stable identity for geometry that an ordinary tracer scene has not placed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
