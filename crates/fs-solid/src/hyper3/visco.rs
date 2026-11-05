@@ -30,6 +30,10 @@ use crate::linear3::TetAssemblyBudget;
 /// Native finite-deformation motion with distinct physical and numerical losses.
 pub mod dynamics;
 
+/// Instantaneous changes of the prescribed stress-free material reference.
+pub mod reference_change;
+pub use reference_change::FiniteViscoTetReferenceChange;
+
 type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy, Vec<f64>);
 
 /// Original immutable laws, without averaging regional relaxation spectra.

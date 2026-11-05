@@ -225,6 +225,149 @@ fn prestressed_birth_relaxes_from_its_actual_initial_storage_and_deformation() {
 }
 
 #[test]
+fn changed_reference_preserves_aged_memory_and_continues_native_relaxation() {
+    with_cx(|cx| {
+        let original = law(10_000.0, 30_000.0, 0.15);
+        let f = [1.18, 0.04, 0.0, 0.0, 0.94, 0.0, 0.0, 0.0, 1.02];
+        let displacement = NODES.map(|point| affine(&f, point));
+        let initial = FiniteViscoTetSolid::try_new_from(
+            &NODES,
+            &TET,
+            ViscoelasticLawField::Uniform(&original),
+            &displacement,
+            TetAssemblyBudget::default(),
+            cx,
+        )
+        .unwrap();
+        let aged = initial
+            .advance(
+                0.06,
+                &boundary(&f),
+                &[],
+                [0.0; 3],
+                settings(),
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solid;
+        let before = aged.element_states()[0].clone();
+        assert!(before.dissipated > 0.0);
+        let target = law(10_000.0, 30_000.0, 0.07).with_reference_deformation(
+            ReferenceDeformation::try_new([1.04, 0.02, 0.0, 0.0, 1.01, 0.0, 0.0, 0.0, 0.98])
+                .unwrap(),
+        );
+        let expected = target.change_reference_from(&original, &before).unwrap();
+        let change = aged
+            .change_reference(ViscoelasticLawField::Uniform(&target), cx)
+            .unwrap();
+        assert_eq!(aged.element_states()[0], before);
+        assert_eq!(
+            change.solid.displacement_m().as_ptr(),
+            aged.displacement_m().as_ptr()
+        );
+        assert_eq!(change.solid.time_s(), aged.time_s());
+        assert_eq!(
+            change.solid.reference_nodes_m().as_ptr(),
+            aged.reference_nodes_m().as_ptr()
+        );
+        let state = &change.solid.element_states()[0];
+        assert_eq!(state.deformation_gradient, before.deformation_gradient);
+        assert_eq!(
+            state.inverse_viscous_cauchy_green,
+            before.inverse_viscous_cauchy_green
+        );
+        assert_eq!(state.work, before.work);
+        assert_eq!(state.dissipated, before.dissipated);
+        close(
+            change.reference_work_j,
+            expected.reference_work_pa / 6.0,
+            2e-12,
+        );
+        close(change.stored_before_j, aged.stored_energy_j(), 2e-12);
+        close(
+            change.stored_after_j - change.stored_before_j,
+            change.reference_work_j,
+            2e-12,
+        );
+        close(
+            state.reference_work - before.reference_work,
+            expected.reference_work_pa,
+            2e-12,
+        );
+        // The successor owns its buffers and law binding; a long trajectory
+        // must be able to discard the previous accepted body immediately.
+        drop(aged);
+        let expected_hold = target.step_response(&expected.state, &f, 0.05).unwrap();
+        let held = change
+            .solid
+            .advance(
+                0.05,
+                &boundary(&f),
+                &[],
+                [0.0; 3],
+                settings(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        assert!(held.energy.dissipated_j > 0.0);
+        close(held.energy.native_loading_work_j, 0.0, 2e-8);
+        close(
+            held.energy.stored_after_j,
+            expected_hold.state.stored / 6.0,
+            2e-10,
+        );
+        close(
+            held.energy.dissipated_j,
+            expected_hold.dissipated_pa / 6.0,
+            2e-10,
+        );
+        assert_eq!(
+            held.solid.element_states()[0].reference_work,
+            state.reference_work
+        );
+    });
+}
+
+#[test]
+fn reference_change_refuses_late_material_replacement_without_changing_old_state() {
+    with_cx(|cx| {
+        let original = law(10_000.0, 30_000.0, 0.15);
+        let initial = FiniteViscoTetSolid::try_new(
+            &PATCH,
+            &PATCH_TETS,
+            ViscoelasticLawField::Uniform(&original),
+            TetAssemblyBudget::default(),
+            cx,
+        )
+        .unwrap();
+        let mut targets = vec![original.clone(); PATCH_TETS.len()];
+        targets[0] = original.clone().with_reference_deformation(
+            ReferenceDeformation::try_new([1.03, 0.0, 0.0, 0.0, 1.01, 0.0, 0.0, 0.0, 0.99])
+                .unwrap(),
+        );
+        targets[3] = law(11_000.0, 30_000.0, 0.15);
+        let states = initial.element_states().to_vec();
+        let stresses = initial.element_first_piola_pa().to_vec();
+        assert!(matches!(
+            initial.change_reference(ViscoelasticLawField::PerElement(&targets), cx),
+            Err(FiniteViscoTetError::Material { element: 3, .. })
+        ));
+        assert_eq!(initial.element_states(), states);
+        assert_eq!(initial.element_first_piola_pa(), stresses);
+        assert_eq!(initial.time_s(), 0.0);
+        let faster = law(10_000.0, 30_000.0, 0.02);
+        let kinetic_only = initial
+            .change_reference(ViscoelasticLawField::Uniform(&faster), cx)
+            .unwrap();
+        assert_eq!(kinetic_only.reference_work_j, 0.0);
+        assert_eq!(kinetic_only.solid.element_states(), states);
+        assert_eq!(kinetic_only.stored_after_j, initial.stored_energy_j());
+    });
+}
+
+#[test]
 fn affine_patch_relaxation_matches_material_point_with_free_interior_node() {
     with_cx(|cx| {
         let law = law(10_000.0, 30_000.0, 0.15);
