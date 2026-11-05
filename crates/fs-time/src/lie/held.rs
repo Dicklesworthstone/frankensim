@@ -93,7 +93,7 @@ pub fn rigid_body_spatial_torque_step(
     ))
 }
 
-fn finite_vector(vector: Vec3, context: &'static str) -> Result<[Dd; 3], LieStepError> {
+pub(super) fn finite_vector(vector: Vec3, context: &'static str) -> Result<[Dd; 3], LieStepError> {
     let mut result = [Dd::ZERO; 3];
     for (target, value) in result.iter_mut().zip([vector.x, vector.y, vector.z]) {
         *target = compensated::checked(Dd::from_f64(value), context)?;
@@ -101,7 +101,7 @@ fn finite_vector(vector: Vec3, context: &'static str) -> Result<[Dd; 3], LieStep
     Ok(result)
 }
 
-fn momentum_from_velocity(omega: Vec3, inertia: Vec3) -> Result<[Dd; 3], LieStepError> {
+pub(super) fn momentum_from_velocity(omega: Vec3, inertia: Vec3) -> Result<[Dd; 3], LieStepError> {
     let omega = finite_vector(omega, "rigid-body angular velocity")?;
     let moments = [inertia.x, inertia.y, inertia.z];
     if !moments
@@ -122,7 +122,10 @@ fn momentum_from_velocity(omega: Vec3, inertia: Vec3) -> Result<[Dd; 3], LieStep
     Ok(result)
 }
 
-fn velocity_from_momentum(momentum: [Dd; 3], inertia: Vec3) -> Result<Vec3, LieStepError> {
+pub(super) fn velocity_from_momentum(
+    momentum: [Dd; 3],
+    inertia: Vec3,
+) -> Result<Vec3, LieStepError> {
     let moments = [inertia.x, inertia.y, inertia.z];
     let mut result = [0.0; 3];
     for d in 0..3 {
@@ -131,7 +134,11 @@ fn velocity_from_momentum(momentum: [Dd; 3], inertia: Vec3) -> Result<Vec3, LieS
     Ok(Vec3::new(result[0], result[1], result[2]))
 }
 
-fn half_kick(momentum: [Dd; 3], torque: [Dd; 3], h: f64) -> Result<[Dd; 3], LieStepError> {
+pub(super) fn half_kick(
+    momentum: [Dd; 3],
+    torque: [Dd; 3],
+    h: f64,
+) -> Result<[Dd; 3], LieStepError> {
     let mut result = [Dd::ZERO; 3];
     for d in 0..3 {
         result[d] = compensated::checked(

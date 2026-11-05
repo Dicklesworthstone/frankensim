@@ -25,6 +25,10 @@ pub mod compensated;
 mod held;
 pub use held::{rigid_body_spatial_torque_step, rigid_body_torque_step};
 
+#[path = "lie/configuration_torque.rs"]
+mod configuration_torque;
+pub use configuration_torque::rigid_body_torque_function_step;
+
 #[path = "lie/gyrostat.rs"]
 pub mod gyrostat;
 

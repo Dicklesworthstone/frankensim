@@ -223,6 +223,40 @@ impl InertiaTensor3 {
         )
     }
 
+    /// Rigid rotation under a time- and orientation-dependent torque.
+    ///
+    /// This is the full-inertia counterpart of
+    /// [`crate::lie::rigid_body_torque_function_step`]. The callback receives
+    /// the physical body-to-space attitude at both endpoint times; body torque
+    /// samples and `omega_body` use this tensor's material frame. Cached
+    /// principal axes drive the compensated free flow without an eigensolve
+    /// per step. No internal rotor is included in this rigid-body method.
+    ///
+    /// # Errors
+    /// Inherits the time, force, arithmetic and callback refusals of
+    /// [`crate::lie::rigid_body_torque_function_step`].
+    pub fn torque_function_step<F>(
+        self,
+        rotation: So3,
+        omega_body: Vec3,
+        time: f64,
+        dt: f64,
+        torque_at: F,
+    ) -> Result<(So3, Vec3), LieStepError>
+    where
+        F: FnMut(f64, So3) -> Result<HeldTorque, LieStepError>,
+    {
+        super::super::configuration_torque::step_in_frame(
+            rotation,
+            omega_body,
+            self.principal,
+            self.principal_to_body,
+            time,
+            dt,
+            torque_at,
+        )
+    }
+
     /// Free motion with total body momentum `L = I omega + h_rotor`.
     ///
     /// The body pose, total momentum and internal momentum use the caller's

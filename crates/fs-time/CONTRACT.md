@@ -121,6 +121,22 @@ where claimed below.
   discarded merely because its two separately rounded half-kicks vanish.
   Exactly zero torque (including signed zeros) delegates to the unchanged
   scalar free owner, preserving its established bitwise parity and refusals.
+- `lie::rigid_body_torque_function_step` and
+  `lie::gyrostat::InertiaTensor3::torque_function_step` evaluate a fallible
+  configuration/time torque law at both physical endpoint attitudes and
+  times. Each `HeldTorque` result selects that sample's body or spatial frame;
+  it does not freeze the force law for the step. Two symmetric momentum
+  half-kicks enclose the existing compensated free rotation. Smooth attitude
+  and time loads are second order; deterministic autonomous conservative
+  loads retain symmetric Hamiltonian splitting. Spatial momentum changes
+  by the trapezoidal sum of the two spatial endpoint torques to roundoff;
+  energy is not exact. The dense-tensor owner reuses its cached principal
+  basis without an eigensolve, allocation, or nonlinear force solve per step.
+  Invalid time/duration/inertia/state is refused before force evaluation;
+  callback and arithmetic failures return no partial physical state. The
+  endpoint time must be finite and distinct from the initial time. These
+  APIs do not cover velocity-dependent loads, rotor exchange, contact events,
+  moving mass or callback adjoints; those require their dedicated owners.
 - `lie::gyrostat::{momentum_step, carrier_momentum_step, driven_step,
   HeldTorque}` advances a carrier with internal rotor momentum `h`.
   `momentum_step` retains total body momentum `L = I omega + h`;
