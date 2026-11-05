@@ -5,6 +5,9 @@ use fs_lbm::material::free_surface::wetting::EquilibriumAngleOrigin;
 use fs_material::liquid::surface::EQUILIBRIUM_CONTACT_ANGLE_PROPERTY;
 use fs_material::liquid::surface::adhesion::EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY;
 
+#[path = "equilibrium_height_graph.rs"]
+mod height_graph;
+
 fn equilibrium_interface(
     liquid: &MaterialCard,
     solid: &MaterialCard,

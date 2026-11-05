@@ -73,6 +73,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         dx: f64,
         gate: &CancelGate,
     ) -> Result<(), Error> {
+        if self.wetting.is_some() && self.height_graph_thermocapillary_surface().is_some() {
+            return Err(Error::Invalid(
+                "graph wetting has no separately solved wall/interface temperature closure",
+            ));
+        }
         if self.local_thermocapillary_surface().is_some() {
             return self.admit_local_surface_geometry(surfaces, gate);
         }

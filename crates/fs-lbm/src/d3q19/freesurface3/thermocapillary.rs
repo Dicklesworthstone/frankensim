@@ -283,7 +283,6 @@ pub(crate) struct HeightGraphSurface3 {
 
 #[derive(Clone, Copy)]
 struct SurfaceColumn {
-    height: f64,
     volume: f64,
     sigma: f64,
     force: [f64; 3],
@@ -346,7 +345,6 @@ impl FreeSurface3 {
         let mut columns: Vec<_> = patches
             .iter()
             .map(|patch| SurfaceColumn {
-                height: patch.centroid[graph.axis],
                 volume: patch.volume,
                 sigma: 0.0,
                 force: [0.0; 3],
@@ -384,12 +382,10 @@ impl FreeSurface3 {
             for a in 0..shape[0] {
                 check_cancel(gate)?;
                 let p = [a, b];
-                let h = |q: [usize; 2]| columns[q[0] + shape[0] * q[1]].height;
                 let s = |q: [usize; 2]| columns[q[0] + shape[0] * q[1]].sigma;
-                let slope = [
-                    graph_derivative(p, 0, shape, h),
-                    graph_derivative(p, 1, shape, h),
-                ];
+                // Contact-angle geometry, normal, area and tangential force
+                // consume one slope; do not rebuild a different edge normal.
+                let slope = patches[a + shape[0] * b].slope;
                 let gradient = [
                     graph_derivative(p, 0, shape, s),
                     graph_derivative(p, 1, shape, s),
@@ -950,5 +946,113 @@ mod tests {
                 if reason.contains("capillary-wave") && reason.contains("density")));
         assert_eq!(sigma, before);
         assert_eq!(surface.grid().state_bits(), populations);
+    }
+
+    fn sidewall_angles(
+        surface: &FreeSurface3, wall: PlanarWall3, graph_axis: usize, angle: f64,
+    ) -> BTreeMap<[usize; 3], f64> {
+        let along = (0..3).find(|&d| d != wall.axis() && d != graph_axis).unwrap();
+        let size = surface.domain_cells();
+        let mut angles = BTreeMap::new();
+        for &key in surface.tiles.keys() {
+            for lane in 0..TILE_CELLS {
+                let p = FreeSurface3::transport_coordinates(MassLocation3::Cell(key, lane)).unwrap();
+                if p[wall.axis()] == if wall.upper() { size[wall.axis()] - 1 } else { 0 } {
+                    angles.insert(p, if p[along] == 0 || p[along] + 1 == size[along] {
+                        core::f64::consts::FRAC_PI_2
+                    } else { angle });
+                }
+            }
+        }
+        angles
+    }
+
+    #[test]
+    fn g1_height_graph_sidewall_angle_normal_area_and_traction_share_one_metric() {
+        let gate = CancelGate::new_clock_free();
+        for axis in 0..3 {
+            let tangent = match axis { 0 => [1, 2], 1 => [0, 2], _ => [0, 1] };
+            let (hu, hv): (f64, f64) = (0.2, -0.1);
+            let area = (1.0 + hu*hu + hv*hv).sqrt();
+            for sign in [-1, 1] {
+                let mut normal = [0.0; 3];
+                normal[axis] = f64::from(sign) / area;
+                normal[tangent[0]] = -f64::from(sign) * hu / area;
+                normal[tangent[1]] = -f64::from(sign) * hv / area;
+                for wall in [PlanarWall3::XMin, PlanarWall3::XMax, PlanarWall3::YMin,
+                    PlanarWall3::YMax, PlanarWall3::ZMin, PlanarWall3::ZMax]
+                    .into_iter().filter(|wall| wall.axis() != axis)
+                {
+                    let mut surface = graph_surface(axis, sign,
+                        |u, v| 3.7 + hu*(u-4.0) + hv*(v-4.0));
+                    let inward = if wall.upper() { -1.0 } else { 1.0 };
+                    let angle = (inward * normal[wall.axis()]).acos();
+                    let angles = sidewall_angles(&surface, wall, axis, angle);
+                    surface.set_planar_contact_field(wall, angles, &gate).unwrap();
+                    let graph = HeightGraphSurface3 {
+                        axis, outward_sign: sign, maximum_slope: 0.6, minimum_fill: 0.01,
+                    };
+                    let patches = surface.height_graph_geometry(graph, &gate).unwrap();
+                    let mut sigma = field(&surface, |p| 0.01
+                        + 0.0002*(p[tangent[0]] as f64 + 0.5)
+                        - 0.0001*(p[tangent[1]] as f64 + 0.5));
+                    let forces = surface.height_graph_marangoni_forces(graph, &mut sigma, &gate).unwrap();
+                    let impulses = column_impulses(&surface, axis, &forces);
+                    let mut ambient = [0.0; 3];
+                    ambient[tangent[0]] = 0.0002;
+                    ambient[tangent[1]] = -0.0001;
+                    let dot = (0..3).map(|d| ambient[d]*normal[d]).sum::<f64>();
+                    let along = (0..3).find(|&d| d != axis && d != wall.axis()).unwrap();
+                    for patch in patches.iter().filter(|patch| {
+                        patch.liquid[wall.axis()] == if wall.upper() { 7 } else { 0 }
+                            && (1..7).contains(&patch.liquid[along])
+                    }) {
+                        assert!((patch.area-area).abs() < 2e-14);
+                        for d in 0..3 {
+                            assert!((patch.outward_normal[d]-normal[d]).abs() < 2e-14);
+                            let expected = (ambient[d]-dot*normal[d])*area;
+                            assert!((impulses[&patch.column][d]-expected).abs() < 5e-15);
+                        }
+                        assert!((patch.outward_normal[wall.axis()]*inward-angle.cos()).abs() < 2e-14);
+                        assert!((0..3).map(|d| impulses[&patch.column][d]*patch.outward_normal[d])
+                            .sum::<f64>().abs() < 5e-15);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_height_graph_sidewall_refuses_missing_bands_corners_and_wrong_wall() {
+        let gate = CancelGate::new_clock_free();
+        let original = graph_surface(2, 1, |u, _| 4.0 + 0.3*(u-4.0));
+        let graph = HeightGraphSurface3 {
+            axis: 2, outward_sign: 1, maximum_slope: 0.6, minimum_fill: 0.01,
+        };
+        for (case, reason) in [(0, "complete"), (1, "interface band"),
+            (2, "corner"), (3, "side wall"), (4, "slope envelope")]
+        {
+            let mut surface = original.clone();
+            let mut angles = sidewall_angles(&surface, PlanarWall3::XMin, 2, 1.4);
+            match case {
+                0 => { angles.remove(&[0, 3, 2]); }
+                1 => { angles.insert([0, 3, 2], 1.5); }
+                2 => { for z in 0..8 { angles.insert([0, 0, z], 1.4); } }
+                4 => { angles = sidewall_angles(&surface, PlanarWall3::XMin, 2, 0.1); }
+                _ => {}
+            }
+            if case == 3 {
+                surface.set_planar_contact_angle(PlanarWall3::ZMin, core::f64::consts::FRAC_PI_2).unwrap();
+            } else {
+                surface.set_planar_contact_field(PlanarWall3::XMin, angles, &gate).unwrap();
+            }
+            let before = surface.grid().state_bits();
+            let mut sigma = field(&surface, |_| 0.01);
+            let source = sigma.clone();
+            assert!(matches!(surface.height_graph_marangoni_forces(graph, &mut sigma, &gate),
+                Err(FreeSurfaceError3::Transport(message)) if message.contains(reason)));
+            assert_eq!(sigma, source);
+            assert_eq!(surface.grid().state_bits(), before);
+        }
     }
 }

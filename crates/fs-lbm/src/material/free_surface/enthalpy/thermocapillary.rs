@@ -52,7 +52,11 @@ pub struct PlanarThermocapillarity {
 /// both Laplace pressure and the full two-dimensional surface gradient.
 ///
 /// This is a resolved graph reduction, not an arbitrary-drop or overhang model.
-/// Internal solid walls, imposed contact angles and a nonzero mass carry refuse.
+/// Internal solid walls and a nonzero mass carry refuse. An explicitly attached
+/// equilibrium angle can close one planar side wall: its complete interface
+/// band must share one angle per column, and its slope obeys the same envelope.
+/// End columns meeting a second side wall must have exactly neutral pi/2
+/// angles; nonneutral two-wall corners need a separate resolved boundary law.
 /// Raw interface fractions must remain in [0,1] and monotone along each column.
 /// Before endpoint reconstruction, native over/underfill is resolved through
 /// local conservative mass routes and the same enthalpy transport solve.
@@ -402,6 +406,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         };
         let scaling = &self.flow.scaling;
         let surface_samples = solved_tensions.is_some();
+        if surface_samples && self.wetting.is_some() {
+            return Err(Error::Invalid(
+                "thermal graph wetting requires work and tension at the same bulk source temperature",
+            ));
+        }
         if self.uniform_thermal_capillarity() && surface_samples {
             return Err(Error::Invalid(
                 "uniform thermal capillarity uses the actual bulk source temperature",

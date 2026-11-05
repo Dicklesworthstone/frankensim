@@ -1,7 +1,7 @@
 //! Local thermal equilibrium uses the original wall and source transaction.
 //!
 //! The native thermal owner retains and checks the actual liquid/gas tension.
-//! It is constant or admitted by the exactly uniform thermal-capillarity mode.
+//! It is constant or admitted by a compatible thermal-capillarity owner.
 //! The same local source temperature supplies work and tension; reversible
 //! work is not reinterpreted as a measured angle,
 //! contact-line friction, hysteresis or heat.
@@ -65,15 +65,15 @@ impl<'m> WettingBinding<'m> {
                         "equilibrium adhesion requires original liquid/gas tension",
                     ))?;
             // The thermal owner has already pinned and admitted the SAME
-            // source's temperature axis. Only its uniform mode can evolve it
-            // without a separate, incompatible contact-line reconstruction.
+            // source's temperature axis. Only its uniform or sidewall graph
+            // mode can evolve it with the admitted contact-angle geometry.
             if !evolving_surface_tension
                 && (!tension.source_axes().is_empty()
                     || tension.answer().receipt.decision
                         != fs_matdb::EvaluationDecision::ConstantWithinValidity)
             {
                 return Err(Error::Invalid(
-                    "thermal adhesion needs constant tension or its uniform thermal owner",
+                    "thermal adhesion needs constant tension or its compatible thermal owner",
                 ));
             }
         }

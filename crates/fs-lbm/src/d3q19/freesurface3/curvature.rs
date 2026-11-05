@@ -7,6 +7,29 @@
 //! Reference: Popinet, JCP 228 (2009), 5838–5866,
 //! <https://doi.org/10.1016/j.jcp.2009.04.042> (fixed complete-height rung only).
 
+/// Height slope normal to one planar side wall, using the original angle ghost.
+/// With n = s_q(-h_u,-h_v,1)/sqrt(1+|grad h|²) and inward wall normal s_w e_u,
+/// n.n_wall=cos(theta) gives h_u=-s_q*s_w*cot(theta)*sqrt(1+h_v²).
+/// This is the same continuum condition as the smoothed-VOF pressure ghost;
+/// it does not identify their distinct discrete curvature reconstructions.
+pub(super) fn contact_angle_graph_slope(
+    cotangent: f64,
+    inward_wall_sign: i8,
+    outward_graph_sign: i8,
+    along_wall_slope: f64,
+) -> Option<f64> {
+    if !cotangent.is_finite()
+        || !along_wall_slope.is_finite()
+        || ![-1, 1].contains(&inward_wall_sign)
+        || ![-1, 1].contains(&outward_graph_sign)
+    {
+        return None;
+    }
+    let slope = -f64::from(inward_wall_sign * outward_graph_sign)
+        * cotangent * (1.0 + along_wall_slope * along_wall_slope).sqrt();
+    slope.is_finite().then_some(slope)
+}
+
 /// Sum of principal curvatures in inverse cell widths, positive for a drop.
 /// `normal` points out of the liquid. No allocation or field mutation occurs.
 pub(super) fn height_function(
@@ -104,6 +127,52 @@ pub(super) fn height_geometry_with_depth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g1_contact_graph_slope_has_the_original_angle_in_every_wall_orientation() {
+        for graph_axis in 0..3 {
+            for wall_axis in (0..3).filter(|&axis| axis != graph_axis) {
+                let along_axis = (0..3).find(|&axis| axis != graph_axis && axis != wall_axis).unwrap();
+                for outward in [-1, 1] {
+                    for inward in [-1, 1] {
+                        for angle in [core::f64::consts::PI / 3.0, core::f64::consts::FRAC_PI_2,
+                            2.0 * core::f64::consts::PI / 3.0]
+                        {
+                            let cot = if angle == core::f64::consts::FRAC_PI_2 { 0.0 }
+                                else { angle.cos() / angle.sin() };
+                            for parallel in [-0.4, 0.0, 0.3] {
+                                let slope = contact_angle_graph_slope(cot, inward, outward, parallel).unwrap();
+                                let area = (1.0 + slope * slope + parallel * parallel).sqrt();
+                                let mut normal = [0.0; 3];
+                                normal[graph_axis] = f64::from(outward) / area;
+                                normal[wall_axis] = -f64::from(outward) * slope / area;
+                                normal[along_axis] = -f64::from(outward) * parallel / area;
+                                assert!((normal[wall_axis] * f64::from(inward) - angle.cos()).abs() < 4e-16);
+                                assert!((normal.iter().map(|n| n*n).sum::<f64>() - 1.0).abs() < 5e-16);
+                                // Independent pressure-ghost relation on a local
+                                // affine volume-fraction field phi: d_n phi=-|grad_t phi|cot(theta).
+                                let gradient = normal.map(|n| -0.03 * n);
+                                let tangent = (gradient[graph_axis].powi(2) + gradient[along_axis].powi(2)).sqrt();
+                                assert!((gradient[wall_axis] * f64::from(inward) + tangent * cot).abs() < 2e-17);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_contact_graph_slope_refuses_unrepresentable_geometry() {
+        for (cot, inward, outward, along) in [
+            (f64::NAN, 1, 1, 0.0), (f64::INFINITY, 1, 1, 0.0),
+            (1.0, 0, 1, 0.0), (1.0, 1, 0, 0.0),
+            (1.0, 1, 1, f64::NAN), (1.0, 1, 1, f64::MAX),
+        ] {
+            assert!(contact_angle_graph_slope(cot, inward, outward, along).is_none());
+        }
+        assert_eq!(contact_angle_graph_slope(0.0, 1, 1, 0.0), Some(0.0));
+    }
 
     // Tensor Gauss quadrature independently integrates cell volumes below the
     // prescribed graph. Summing a complete height column telescopes to the

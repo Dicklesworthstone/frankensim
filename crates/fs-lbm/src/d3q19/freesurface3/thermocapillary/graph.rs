@@ -6,6 +6,8 @@ use super::*;
 pub(crate) struct HeightGraphPatch3 {
     pub column: [usize; 2],
     pub centroid: [f64; 3],
+    /// Same physical height derivatives used by area, normal and surface stress.
+    pub slope: [f64; 2],
     pub outward_normal: [f64; 3],
     pub area: f64,
     pub volume: f64,
@@ -30,14 +32,16 @@ impl FreeSurface3 {
             || graph.minimum_fill <= 0.0
             || graph.minimum_fill > 1.0
             || !self.solid.is_empty()
-            || self.planar_contact.is_some()
-            || self.planar_contact_field.is_some()
             || self.contact != ContactModel3::Neutral
             || self.carry != 0.0
         {
             return Err(invalid(
-                "height graph needs resolved Cartesian columns, neutral walls and bounded slopes",
+                "height graph needs resolved Cartesian columns and bounded slopes",
             ));
+        }
+        let wall = self.planar_contact_wall();
+        if wall.is_some_and(|wall| wall.axis() == graph.axis) {
+            return Err(invalid("height-graph wetting requires a planar side wall"));
         }
         let (nx, ny, nz) = self.grid.tile_dims();
         let size = [nx * TILE, ny * TILE, nz * TILE];
@@ -55,6 +59,13 @@ impl FreeSurface3 {
         }
         const TOLERANCE: f64 = 64.0 * f64::EPSILON;
         let mut patches = Vec::with_capacity(count);
+        let wall_column = wall.map(|wall| {
+            (wall, if tangent[0] == wall.axis() { 0 } else { 1 })
+        });
+        // Only the one-dimensional wall trace owns angle data. A graph
+        // without wetting allocates no additional boundary storage.
+        let mut wall_angles = wall_column.map_or_else(Vec::new,
+            |(_, normal)| vec![None; shape[1 - normal]]);
         for b in 0..shape[1] {
             for a in 0..shape[0] {
                 check_cancel(gate)?;
@@ -63,6 +74,7 @@ impl FreeSurface3 {
                 let mut volume = 0.0;
                 let mut liquid = None;
                 let mut gas = None;
+                let mut angle: Option<PlanarContactAngle3> = None;
                 for depth in 0..size[graph.axis] {
                     if depth % TILE == 0 {
                         check_cancel(gate)?;
@@ -115,6 +127,21 @@ impl FreeSurface3 {
                         volume += fill;
                         liquid = Some(p);
                         gas = None;
+                        if let Some(wall) = wall
+                            && p[wall.axis()] == if wall.upper() { size[wall.axis()] - 1 } else { 0 }
+                        {
+                            let mut ghost = p.map(|v| v as i64);
+                            ghost[wall.axis()] += if wall.upper() { 1 } else { -1 };
+                            let current = self.planar_contact_at(ghost).ok_or(invalid(
+                                "height-graph contact line needs a complete original angle field",
+                            ))?;
+                            if angle.is_some_and(|old| old.angle_radians != current.angle_radians) {
+                                return Err(invalid(
+                                    "height-graph contact angle differs through its occupied interface band",
+                                ));
+                            }
+                            angle = Some(current);
+                        }
                     } else if fill == 0.0 && liquid.is_some() && gas.is_none() {
                         gas = Some(p);
                     }
@@ -140,20 +167,50 @@ impl FreeSurface3 {
                 patches.push(HeightGraphPatch3 {
                     column: [a, b],
                     centroid,
+                    slope: [0.0; 2],
                     outward_normal: [0.0; 3],
                     area: 0.0,
                     volume,
                     liquid,
                     gas,
                 });
+                if let Some(angle) = angle {
+                    let (_, normal) = wall_column.expect("a wall supplied this angle");
+                    wall_angles[[a, b][1 - normal]] = Some(angle);
+                }
             }
         }
         for b in 0..shape[1] {
             for a in 0..shape[0] {
                 check_cancel(gate)?;
                 let height = |p: [usize; 2]| patches[p[0] + shape[0] * p[1]].centroid[graph.axis];
-                let hu = graph_derivative([a, b], 0, shape, height);
-                let hv = graph_derivative([a, b], 1, shape, height);
+                let mut slope = [
+                    graph_derivative([a, b], 0, shape, height),
+                    graph_derivative([a, b], 1, shape, height),
+                ];
+                let contact = wall_column.and_then(|(wall, normal)| {
+                    if [a, b][normal] == if wall.upper() { shape[normal] - 1 } else { 0 } {
+                        wall_angles[[a, b][1 - normal]]
+                    } else { None }
+                });
+                if let Some(contact) = contact {
+                    let normal = if tangent[0] == contact.wall.axis() { 0 } else { 1 };
+                    let along = 1 - normal;
+                    if ([a, b][along] == 0 || [a, b][along] + 1 == shape[along])
+                        && contact.angle_radians != core::f64::consts::FRAC_PI_2
+                    {
+                        return Err(invalid(
+                            "nonneutral height-graph contact angles need a resolved two-wall corner law",
+                        ));
+                    }
+                    slope[normal] = curvature::contact_angle_graph_slope(
+                        contact.cotangent,
+                        if contact.wall.upper() { -1 } else { 1 },
+                        graph.outward_sign,
+                        slope[along],
+                    ).ok_or(invalid("height-graph contact slope is unrepresentable"))?;
+                }
+                let [hu, hv] = slope;
                 let square = hu * hu + hv * hv;
                 if !square.is_finite() || square.sqrt() > graph.maximum_slope + TOLERANCE {
                     return Err(invalid(
@@ -161,6 +218,7 @@ impl FreeSurface3 {
                     ));
                 }
                 let patch = &mut patches[a + shape[0] * b];
+                patch.slope = slope;
                 patch.area = (1.0 + square).sqrt();
                 let scale = f64::from(graph.outward_sign) / patch.area;
                 patch.outward_normal[tangent[0]] = -hu * scale;

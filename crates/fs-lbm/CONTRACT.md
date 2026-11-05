@@ -7601,7 +7601,8 @@ on that same thermal/native transaction. It selects either an original
 equilibrium-angle claim or the existing Young--Dupre law from reversible
 `equilibrium-work-of-adhesion` W(T) and the SAME liquid/gas tension retained
 by the thermal material bundle. Ordinary attachment requires constant sigma;
-the explicit uniform thermal-capillarity entry below can evolve it. The actual local
+the explicit uniform thermal-capillarity entry below or the bounded sidewall
+height graph can evolve it. The actual local
 liquid caloric temperature refreshes the selected interface claim before
 collision, at conductive substeps, and after advection. Source substitution,
 loss of partial wetting (`0 < W < 2 sigma`), and the original tension source's
@@ -7615,9 +7616,9 @@ receipt, without fabricated hysteresis claims or a contact-speed query.
 This boundary does not need a resolved contact-line velocity, and therefore
 does not reject locally flat filling stencils merely for a zero tangential
 gradient. Adding Cox dynamics refuses rather than turning equilibrium work
-into a measured advancing/receding bracket. The separate planar, height-graph
-and local thermocapillary geometries remain incompatible with imposed wall
-angles. The local-cell
+into a measured advancing/receding bracket. The separate planar and local
+thermocapillary geometries remain incompatible with imposed wall angles;
+the height-graph sidewall domain is specified below. The local-cell
 interface-temperature approximation, stationary homogeneous-wall assumption
 and absence of closed surface-energy/heat accounting remain explicit.
 
@@ -8874,6 +8875,31 @@ pressure cells, including empty ghosts; bulk caloric temperatures remain
 unchanged. A dense column buffer and two bounded cell passes avoid a global
 surface solve or per-cell allocation.
 
+`with_equilibrium_planar_wetting` also admits one planar SIDE wall on this
+graph. The original interface W(T) or equilibrium-angle claim and original
+liquid sigma(T) use the same actual local caloric temperature. Every positive
+occupied interface cell in a wall column must give exactly one angle; separate
+columns may differ. Missing angle samples, through-band angle differences and
+a graph-normal wall refuse. The two end columns touching another side wall
+must remain exactly neutral (pi/2); nonneutral two-wall corners are unresolved.
+At an XMin wall with liquid below a z graph, the imposed slope is
+`h_x = -cot(theta)*sqrt(1+h_y^2)`, with the corresponding signs for the opposite
+wall, liquid side and axis rotations. This slope supplies the SAME graph
+normal, actual area and tangential gradient projection. Its total slope still
+obeys the declared finite-slope envelope. Native normal pressure keeps its
+existing smoothed-VOF angle-ghost curvature and original column sigma; this is
+the same continuum angle, not a shared discrete variational surface-energy law.
+
+Initial attachment, each heated flow preparation and the advected endpoint
+install the current angle BEFORE reconstructing graph traction. The original
+single candidate lattice and native force rebind retain physical momentum;
+the next collision supplies the actual impulse. Storage-free wet ghosts use
+the same enthalpy extension at attachment and heated endpoints. A separately
+solved interface-temperature stress boundary is refused with graph wetting,
+because it has no matching solid/liquid temperature closure for W(T). Source,
+geometry or endpoint refusal rolls back populations, heat, force, pressure
+coefficients and the original wetting receipts together.
+
 Source/geometry/slope/carry/cancellation refusal discards the entire candidate.
 Raw interface fractions must remain monotone and in [0,1]. Before endpoint
 geometry, the material candidate resolves native conversion hysteresis through
@@ -8889,6 +8915,13 @@ and volume scaling, quadratic mixed slopes, constant sigma, all orientations,
 pressure/traction consistency and geometry refusal. Material regressions check
 SI traction, conservative mass/enthalpy evolution, exact uniform-sigma baseline
 population bits, source-validity refusal and cancellation rollback.
+The sidewall extension adds analytical normal/area/traction checks across all
+axis and wall orientations, an independent affine VOF-pressure check, and
+thermal source, same-interval impulse and atomic corner/band/slope regressions.
+The six direct native curvature-source tests pass; the broader native graph
+and thermal integration regressions are authored but unexecuted under the
+dependency-build resource limit. These checks are numerical, not experimental
+wetting validation.
 
 ### Local thermocapillary traction on detached interfaces
 

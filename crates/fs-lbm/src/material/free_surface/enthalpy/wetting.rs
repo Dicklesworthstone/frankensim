@@ -8,10 +8,11 @@
 //! The thermal stage holds the last accepted contact speed while re-evaluating
 //! both pinned angle claims. Its angles drive the same interval's native flow.
 //! The accepted advected temperature and original backward geometric speed then
-//! admit the endpoint history. Equilibrium adhesion also composes with the
-//! exactly uniform sigma(T) owner and uses its same local source coefficient.
-//! This is a first-order local-cell wetting closure, not resolved interface
-//! temperature, Marangoni physics, calibrated pinning or surface-energy closure.
+//! admit the endpoint history. Equilibrium adhesion also composes with uniform
+//! sigma(T) or the finite-slope height graph's existing Marangoni owner. The
+//! graph boundary angle is installed before its normal, area and stress are
+//! reconstructed. This local-cell closure does not resolve interface
+//! temperature, calibrated pinning or a surface-energy balance.
 
 use super::*;
 use crate::d3q19::freesurface3::PlanarWall3;
@@ -35,9 +36,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     ///
     /// This smooth, homogeneous stationary-wall closure supplies no pinning,
     /// contact-line friction or dynamic-angle law. It cannot be combined with
-    /// the separate Cox/hysteresis or nonuniform thermocapillary geometry owners.
+    /// the separate Cox/hysteresis, planar or local thermocapillary owners.
     /// The uniform thermal-capillarity owner can evolve sigma(T), provided all
-    /// actual wet cells agree exactly at every admitted stage. Changing
+    /// actual wet cells agree exactly at every admitted stage. A height graph
+    /// instead admits one planar SIDE wall: every occupied interface cell in
+    /// a wall column must give the same angle. Other columns may differ; the
+    /// two end columns meeting another side wall must remain exactly neutral
+    /// because a nonneutral two-wall corner law is not resolved. Its
+    /// angle supplies the shared graph normal/area and tangential-stress metric;
+    /// native pressure retains its original same-angle VOF ghost curvature.
+    /// This first-cell boundary approximation needs spatial refinement. Changing
     /// adhesion alters native capillary momentum, but does not invent surface
     /// heat or establish a closed total surface/mechanical energy balance.
     /// The local liquid-cell temperature approximates the interface temperature;
@@ -53,21 +61,49 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     ) -> Result<Self, Error> {
         poll(gate)?;
         let uniform_tension = self.uniform_thermal_capillarity();
-        if self.thermocapillary.is_some() && !uniform_tension || self.wetting.is_some() {
+        let graph_tension = self.height_graph_thermocapillary_surface().is_some();
+        if self.thermocapillary.is_some() && !(uniform_tension || graph_tension)
+            || self.wetting.is_some() || graph_tension && self.surface_temperature_forces
+        {
             return Err(Error::Invalid(
-                "thermal equilibrium wetting requires constant or spatially uniform tension",
+                "equilibrium wetting needs constant, uniform or bulk-temperature height-graph tension",
             ));
         }
+        let mut graph_materials = if graph_tension {
+            let masses = self.flow.lattice.mass_snapshot();
+            let old_h = self.h.clone();
+            // Storage-free ghosts use the SAME thermal extension at initial
+            // attachment and later heated endpoints; they are not extra input
+            // temperatures that may independently select a wall angle.
+            extend_empty_ghosts(&masses, &mut self.h, &old_h, true)?;
+            Some(self.resolve_liquid_states(&self.flow.lattice, &self.h, &masses, gate)?)
+        } else {
+            None
+        };
         let binding = WettingBinding::try_equilibrium(
             &mut self.flow, wall, card, origin, selection, self.law.temperature_axis(),
-            uniform_tension,
+            uniform_tension || graph_tension,
             maximum_wall_cells, gate,
         )?;
-        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let states = graph_materials.as_ref().map_or(&self.states, |resolved| &resolved.states);
+        let temperatures = temperatures(states, self.law.temperature_axis(), gate)?;
         let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
         binding.install(&mut self.flow.lattice, gate)?;
         poll(gate)?;
         self.wetting = Some(binding);
+        if let Some(mut resolved) = graph_materials.take() {
+            // Attaching an angle changes the boundary patch normal and area.
+            // Reconstruct its stress now, without advancing heat or momentum.
+            self.resolve_surface_fields(&self.flow.lattice, &mut resolved, &mut None, gate)?;
+            if let Some(tensions) = resolved.surface_tensions {
+                self.flow.lattice.rebind_surface_tensions(tensions, gate)?;
+            }
+            if let Some(forces) = resolved.forces {
+                self.flow.lattice.rebind_force_field(forces, gate)?;
+            }
+            self.states = resolved.states;
+            self.rheology_samples = resolved.rheology;
+        }
         Ok(self)
     }
 
@@ -216,6 +252,21 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let candidate = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
         candidate.install(lattice, gate)?;
         Ok(Some(candidate))
+    }
+
+    pub(super) fn endpoint_wetting(
+        &self,
+        binding: Option<&WettingBinding<'m>>,
+        lattice: &mut FreeSurface3,
+        states: &BTreeMap<MassLocation3, ResolvedLiquidState>,
+        gate: &CancelGate,
+    ) -> Result<Option<WettingBinding<'m>>, Error> {
+        let Some(binding) = binding else { return Ok(None); };
+        let temperatures = temperatures(states, self.law.temperature_axis(), gate)?;
+        Ok(Some(binding.at_endpoint(
+            lattice, &self.flow.scaling,
+            Some((self.law.temperature_axis(), &temperatures)), gate,
+        )?))
     }
 }
 
