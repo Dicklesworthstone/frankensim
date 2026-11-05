@@ -13,6 +13,9 @@
 //! supplies its quasi-steady pressure-loss coefficient (no value is inferred).
 //! `--port-radiation` replaces its frozen radiation resistance with the causal
 //! uniform-piston response in an infinite rigid baffle, including exterior memory.
+//! `--mic-first-order ALPHA FX FY FZ` declares an ideal pressure/velocity pattern
+//! and its unit front axis (toward the source). ALPHA=0.5 is cardioid, 0 figure eight.
+//! This is not measured capsule data; pressure-only closed-body tables refuse it.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -37,10 +40,26 @@ const HEAD_DIPOLE_FLAG: &str = "--head-dipole";
 const PORT_FLAG: &str = "--port";
 const PORT_FLOW_LOSS_FLAG: &str = "--port-flow-loss";
 const PORT_RADIATION_FLAG: &str = "--port-radiation";
+const MIC_FIRST_ORDER_FLAG: &str = "--mic-first-order";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
     let all: Vec<String> = std::env::args().collect();
+    let mic_index = all.iter().position(|a| a == MIC_FIRST_ORDER_FLAG);
+    let mic_pattern = mic_index.map(|i| {
+        let values: [f64; 4] = std::array::from_fn(|j| {
+            all.get(i + 1 + j).and_then(|s| s.parse().ok()).filter(|x: &f64| x.is_finite()).unwrap_or_else(|| {
+                eprintln!("usage: {MIC_FIRST_ORDER_FLAG} ALPHA FX FY FZ (finite values, explicit unit front axis)");
+                std::process::exit(2)
+            })
+        });
+        let axis = [values[1], values[2], values[3]];
+        fs_vkplate::Mic::first_order([0.0; 3], values[0], axis).unwrap_or_else(|e| {
+            eprintln!("refused: {e}");
+            std::process::exit(1)
+        });
+        (values[0], axis)
+    });
     let port_value = |flag: &str| all.iter().position(|a| a == flag).map(|i| {
         all.get(i + 1).and_then(|s| s.parse::<f64>().ok()).filter(|x| x.is_finite()).unwrap_or_else(|| {
             eprintln!("usage: {flag} FINITE_VALUE");
@@ -92,17 +111,18 @@ fn main() {
                 std::process::exit(1)
             })
     });
-    let valued = |i: usize| i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG);
+    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG))
+        || mic_index.is_some_and(|j| i > j && i <= j + 4);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ]");
         std::process::exit(2);
     }
     if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
@@ -153,6 +173,15 @@ fn main() {
         eprintln!("refused: {e}");
         std::process::exit(1)
     });
+    if let Some((alpha, axis)) = mic_pattern {
+        for mic in 0..p.instrument.mics.len() {
+            p.instrument.set_microphone_pattern(mic, alpha, axis).unwrap_or_else(|e| {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            });
+        }
+        p.notes.push(format!("ideal pressure/particle-velocity microphone: alpha={alpha}, front={axis:?}; finite-aperture and near-field response, no measured capsule/electronics model"));
+    }
     if let Some(path) = &observer {
         let spec = match a[1].as_str() {
             "kick" => kit::kick(),

@@ -157,6 +157,32 @@ Node count alone does not establish audio-band fidelity.
   includes every coefficient, including rigid-floor image paths. This observation
   does not add a force, radiation loss, jet noise or an acoustic source to the
   dynamics. It retains the isolated uniform aperture and infinite-baffle assumptions.
+  `Mic::first_order(position, alpha, front_axis)` also observes particle velocity:
+  the Pa-equivalent output is `alpha*p - (1-alpha)*rho*c*(front_axis . velocity)`.
+  The explicit unit axis points from the microphone toward its front source;
+  `alpha=1` is omni, `0.5` cardioid, and `0` figure eight. This is the existing
+  BEM `FirstOrder` calibration; its `pressure_fraction()` and `front_axis()` can
+  supply these controls. No additional capsule type or measured response is implied.
+  Each Rayleigh element contributes both its retarded acceleration/r term and
+  its velocity/r² term, as required by Euler's equation. The reactive term creates
+  proximity response naturally. The circular aperture integrates the direction
+  over its complete arc, including the lateral first moment; it never assigns the
+  whole aperture the direction of its center. Reflected paths reflect the front
+  axis along with the receiver position, so the rigid floor has the correct
+  particle-velocity boundary condition as well as positive pressure reflection.
+  Surface velocity is centered on the acceleration clock. Port flow uses the
+  mean of its accepted half-step velocities on that same clock. Both weight banks
+  are prepared once, with separate quadrature tolerances because their units
+  differ; the additional scatter into the pressure ring allocates nothing.
+  `Instrument::set_microphone_pattern` can configure an existing microphone
+  before stepping. The kit CLI exposes the same authored controls as
+  `--mic-first-order ALPHA FX FY FZ`, for example `--mic-first-order 0.5 0 0 -1`
+  for a cardioid pointing down the z axis. Position and direction must be declared
+  for the actual setup. These ideal patterns do not model diaphragm response,
+  capsule/electronics transfer, low-frequency rolloff, noise or saturation and
+  do not qualify a measured microphone or complete M2.6-W1. Pressure-only
+  closed-body tables and external/GPU steppers refuse a directional pattern.
+  The original omni path remains the default.
   A cymbal is not in a baffle: its microphones hear both faces with opposite pressure polarity,
   including the delayed back-face sound reflected by a floor. They apply the unbaffled-disc
   axial amplitude limit (`(4/3pi) ka` times the baffled field for `ka << 1`), joined to the

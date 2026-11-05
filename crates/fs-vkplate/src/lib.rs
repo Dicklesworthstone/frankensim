@@ -106,6 +106,9 @@ mod material_gas_tests;
 mod microphone_delay_tests;
 
 #[cfg(test)]
+mod microphone_directional_tests;
+
+#[cfg(test)]
 mod material_tests;
 
 #[cfg(test)]
@@ -2769,6 +2772,10 @@ pub struct Mic {
     pub pos: [f64; 3],
     taps: Vec<(usize, usize, usize, f64, f64)>, // body, node, delay, weight lo, weight hi
     ptaps: Vec<(usize, usize, f64, f64)>,      // cavity port, delay, weight lo, weight hi
+    vtaps: Vec<(usize, usize, usize, f64, f64)>, // centered surface velocity, same paths
+    pvtaps: Vec<(usize, usize, f64, f64)>,    // centered port flow, same paths
+    pressure_fraction: f64,
+    front_axis: [f64; 3],
     ring: Vec<f64>,
     /// Unbaffled thin source of radius a: the far field tends to the baffled (Rayleigh) one for
     /// ka >> 1 and to the axial dipole amplitude (4/3pi) ka times it for ka << 1 (rigid disc).
@@ -2815,11 +2822,47 @@ impl Floor {
         let qn = self.point[0] * n[0] + self.point[1] * n[1] + self.point[2] * n[2];
         std::array::from_fn(|i| p[i] - 2.0 * pn * n[i] + 2.0 * qn * n[i])
     }
+
+    /// The gradient at the real receiver is the reflected image gradient.
+    /// Equivalently reflect its front axis before projecting the image field.
+    fn image_axis(&self, axis: [f64; 3]) -> [f64; 3] {
+        let dot: f64 = (0..3).map(|i| axis[i] * self.normal[i]).sum();
+        std::array::from_fn(|i| axis[i] - 2.0 * dot * self.normal[i])
+    }
 }
 
 impl Mic {
     pub fn new(pos: [f64; 3]) -> Mic {
-        Mic { pos, taps: vec![], ptaps: vec![], ring: vec![], unbaffled: None, floor: None, hp: (0.0, 0.0), closed: None, closed_more: vec![], closed_alignment: None }
+        Mic { pos, taps: vec![], ptaps: vec![], vtaps: vec![], pvtaps: vec![], pressure_fraction: 1.0, front_axis: [0.0, 0.0, 1.0], ring: vec![], unbaffled: None, floor: None, hp: (0.0, 0.0), closed: None, closed_more: vec![], closed_alignment: None }
+    }
+
+    /// Ideal coincident pressure/particle-velocity observation, in Pa equivalent:
+    /// `alpha*p - (1-alpha)*rho*c*(front_axis . velocity)`.
+    /// The explicit unit axis points FROM microphone TO its front source.
+    /// `alpha=1` is omni, `0.5` cardioid, and `0` figure eight, with unit front
+    /// plane-wave sensitivity. These are the same controls and convention as
+    /// `fs_bem::near_field::FirstOrder`; its accessors can supply them directly.
+    ///
+    /// Reactive near-field velocity follows the retarded Rayleigh kernel;
+    /// no bass boost or source distance is fitted. This selects an ideal pattern,
+    /// not a measured capsule: no diaphragm, electronics, noise, or saturation.
+    /// Closed-body pressure-only tables and external steppers cannot represent it.
+    pub fn first_order(pos: [f64; 3], pressure_fraction: f64, front_axis: [f64; 3]) -> Result<Mic, String> {
+        let norm = front_axis[0].hypot(front_axis[1]).hypot(front_axis[2]);
+        if !pressure_fraction.is_finite() || !(0.0..=1.0).contains(&pressure_fraction)
+            || !pos.iter().chain(&front_axis).all(|x| x.is_finite())
+            || (norm - 1.0).abs() > 1e-12 {
+            return Err("first-order microphone needs a finite position, alpha in [0,1] and an explicit unit front axis".into());
+        }
+        let mut mic = Self::new(pos);
+        mic.pressure_fraction = pressure_fraction;
+        mic.front_axis = front_axis;
+        Ok(mic)
+    }
+
+    /// The declared ideal pressure fraction and front axis; `new` is omni.
+    pub fn first_order_pattern(&self) -> (f64, [f64; 3]) {
+        (self.pressure_fraction, self.front_axis)
     }
     /// The primary closed-body observer, if one is attached. Use `closed_bodies`
     /// to enumerate every source when this microphone hears several bodies.
@@ -3616,6 +3659,24 @@ impl Instrument {
     pub const fn gas(&self) -> &GasState {
         &self.gas
     }
+    /// Select an ideal pattern on an existing microphone before the trajectory
+    /// starts, retaining its position, floor and unbaffled-source setting.
+    /// See `Mic::first_order` for calibration and scope. Failed admission leaves
+    /// the microphone and its prepared paths unchanged.
+    pub fn set_microphone_pattern(&mut self, mic: usize, pressure_fraction: f64, front_axis: [f64; 3]) -> Result<(), String> {
+        if self.step_index != 0 {
+            return Err("microphone pattern must be declared before the instrument steps".into());
+        }
+        let m = self.mics.get_mut(mic).ok_or_else(|| format!("no microphone {mic}"))?;
+        let pattern = Mic::first_order(m.pos, pressure_fraction, front_axis)?;
+        if pressure_fraction != 1.0 && m.closed.is_some() {
+            return Err("closed-body tables contain pressure only; a first-order microphone also needs particle velocity".into());
+        }
+        m.pressure_fraction = pattern.pressure_fraction;
+        m.front_axis = pattern.front_axis;
+        self.prepared = false;
+        Ok(())
+    }
     /// Hear microphone `mic` as fs-bem's closed body (pexfp.378): the drum whose batter and
     /// resonant heads are bodies `batter` and `resonant`, its shell rigid, on the table's floor.
     /// The table geometry may be translated rigidly by the batter's origin; its
@@ -3683,6 +3744,9 @@ impl Instrument {
         let Some(m) = self.mics.get(mic) else {
             return refuse(format!("no microphone {mic}"));
         };
+        if m.pressure_fraction != 1.0 {
+            return refuse("the table contains pressure only; a first-order microphone also needs particle velocity".into());
+        }
         if table.rate.to_bits() != self.rate.to_bits() {
             return refuse(format!("baked at {} Hz, the instrument steps at {} Hz", table.rate, self.rate));
         }
@@ -3980,17 +4044,21 @@ impl Instrument {
         let k = self.k();
         for m in self.mics.iter_mut() {
             m.taps.clear();
+            m.vtaps.clear();
+            let alpha = m.pressure_fraction;
+            let beta = 1.0 - alpha;
             let mut dmax = 0;
             // One geometric image for every radiator, including cavity ports.
             // Rigid pressure reflection has gain +1; distance and delay still
             // belong to each source. Preparing these paths allocates no ray list.
-            let targets = [Some(m.pos), m.floor.map(|floor| floor.image(m.pos))];
+            let targets = [Some((m.pos, m.front_axis)), m.floor.map(|floor|
+                (floor.image(m.pos), floor.image_axis(m.front_axis)))];
             for (bi, b) in self.bodies.iter().enumerate() {
                 if !b.radiates {
                     continue;
                 }
                 let h2 = b.h * b.h;
-                for tp in targets.into_iter().flatten() {
+                for (tp, axis) in targets.into_iter().flatten() {
                     for i in 0..b.n {
                         let p = [b.origin[0] + b.xy[i][0], b.origin[1] + b.xy[i][1], b.origin[2] + b.facing * b.rest_z[i]];
                         let d = [tp[0] - p[0], tp[1] - p[1], tp[2] - p[2]];
@@ -4006,31 +4074,56 @@ impl Instrument {
                         // the front compresses. Use the path's side, including floor images;
                         // a rigid reflection itself still has positive pressure gain.
                         let polarity = if side < 0.0 { -1.0 } else { 1.0 };
-                        let wgt = polarity * self.gas.density * h2 / (2.0 * PI * r) / (k * k);
+                        let gain = polarity * self.gas.density * h2 / (2.0 * PI * r);
+                        let projection = (0..3).map(|j| axis[j] * d[j] / r).sum::<f64>();
+                        let wgt = gain / (k * k) * (alpha - beta * projection);
                         m.taps.push((bi, i, di, wgt * weights[0], wgt * weights[1]));
                         dmax = dmax.max(di + 2);
                         if weights[2] != 0.0 || weights[3] != 0.0 {
                             m.taps.push((bi, i, di + 2, wgt * weights[2], wgt * weights[3]));
                             dmax = dmax.max(di + 4);
                         }
+                        if beta != 0.0 && projection != 0.0 {
+                            // Euler's equation gives n*[a/(c*r)+v/r^2].
+                            // Use the body's actual centered velocity, not an
+                            // integral of sampled pressure with drifting DC.
+                            let vwgt = -gain * beta * self.gas.sound_speed * projection / r / (2.0 * k);
+                            m.vtaps.push((bi, i, di, vwgt * weights[0], vwgt * weights[1]));
+                            if weights[2] != 0.0 || weights[3] != 0.0 {
+                                m.vtaps.push((bi, i, di + 2, vwgt * weights[2], vwgt * weights[3]));
+                            }
+                        }
                     }
                 }
             }
             m.ptaps.clear();
+            m.pvtaps.clear();
             for (ci, c) in self.cavities.iter().enumerate() {
                 if let Some(q) = &c.port {
-                    for tp in targets.into_iter().flatten() {
+                    for (tp, axis) in targets.into_iter().flatten() {
                         let d = [tp[0] - q.pos[0], tp[1] - q.pos[1], tp[2] - q.pos[2]];
                         if d[2] * q.facing <= 0.0 {
                             continue;
                         }
-                        let (first, weights) = port_receiver::circular_taps(
-                            q.area, d, self.gas.density, self.gas.sound_speed, self.rate,
-                        ).expect("admitted circular vent microphone geometry and clock");
+                        let (first, weights, velocity_weights) = if alpha == 1.0 {
+                            port_receiver::circular_taps(q.area, d, self.gas.density, self.gas.sound_speed, self.rate)
+                                .map(|(first, weights)| (first, weights, Vec::new()))
+                        } else {
+                            port_receiver::directional_taps(
+                                q.area, d, self.gas.density, self.gas.sound_speed, self.rate, alpha, axis,
+                            )
+                        }.expect("admitted circular vent microphone geometry and clock");
                         for (pair, values) in weights.chunks(2).enumerate() {
                             let di = first + 2 * pair;
                             m.ptaps.push((ci, di, values[0], values.get(1).copied().unwrap_or(0.0)));
                             dmax = dmax.max(di + 2);
+                        }
+                        for (pair, values) in velocity_weights.chunks(2).enumerate() {
+                            let di = first + 2 * pair;
+                            let (lo, hi) = (values[0], values.get(1).copied().unwrap_or(0.0));
+                            if lo != 0.0 || hi != 0.0 {
+                                m.pvtaps.push((ci, di, lo, hi));
+                            }
                         }
                     }
                 }
@@ -4338,6 +4431,17 @@ impl Instrument {
                 m.ring[(base + di) & mask] += lo * a;
                 m.ring[(base + di + 1) & mask] += hi * a;
             }
+            for &(bi, i, di, lo, hi) in &m.vtaps {
+                let b = &self.bodies[bi];
+                let v = b.wn[i] - b.wp[i]; // 1/(2*k) is in the prepared weights
+                m.ring[(base + di) & mask] += lo * v;
+                m.ring[(base + di + 1) & mask] += hi * v;
+            }
+            for &(ci, di, lo, hi) in &m.pvtaps {
+                let flow = self.cavities[ci].port.as_ref().map_or(0.0, |q| q.u - 0.5 * k * q.du);
+                m.ring[(base + di) & mask] += lo * flow;
+                m.ring[(base + di + 1) & mask] += hi * flow;
+            }
             let slot = base & mask;
             let mut y = m.ring[slot];
             if let Some(a) = m.unbaffled {
@@ -4389,6 +4493,8 @@ impl Instrument {
     /// checks include contacts a scheduled strike may activate later.
     pub fn image(&mut self) -> InstrumentImage {
         assert!(self.contact_failure.is_none(), "cannot export an instrument after a refused contact step");
+        assert!(self.mics.iter().all(|m| m.pressure_fraction == 1.0),
+            "the exported stepper does not implement particle-velocity microphone paths; use Instrument::step");
         assert!(!contact_response::requires_coupled_contacts(&self.bodies, &self.contacts),
             "the exported stepper does not implement simultaneous interacting normal contacts; use Instrument::try_step");
         assert!(self.frictions.iter().all(|f| f.mu == 0.0),

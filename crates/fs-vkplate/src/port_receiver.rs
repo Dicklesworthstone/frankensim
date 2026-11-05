@@ -26,17 +26,54 @@ pub(crate) fn circular_taps(
     sound_speed: f64,
     rate: f64,
 ) -> Result<(usize, Vec<f64>), String> {
+    let (first, acceleration, _) = directional_taps(
+        area,
+        offset,
+        density,
+        sound_speed,
+        rate,
+        1.0,
+        [0.0, 0.0, 1.0],
+    )?;
+    Ok((first, acceleration))
+}
+
+/// The same aperture integral projected onto an ideal pressure/velocity
+/// microphone. The two weight banks multiply integer-time dQ/dt and Q.
+/// From Euler's equation each Rayleigh element contributes
+/// `rho/(2*pi*R) * [(alpha-beta*front.n)*dQ/dt-beta*c/R*(front.n)*Q]`.
+/// Integrating the direction over each circular arc keeps its exact lateral
+/// first moment, rather than treating the entire aperture as one direction.
+pub(crate) fn directional_taps(
+    area: f64,
+    offset: [f64; 3],
+    density: f64,
+    sound_speed: f64,
+    rate: f64,
+    alpha: f64,
+    front: [f64; 3],
+) -> Result<(usize, Vec<f64>, Vec<f64>), String> {
     if ![area, density, sound_speed, rate]
         .iter()
         .all(|x| x.is_finite() && *x > 0.0)
         || !offset.iter().all(|x| x.is_finite())
         || offset[2] == 0.0
+        || !alpha.is_finite()
+        || !(0.0..=1.0).contains(&alpha)
+        || !front.iter().all(|x| x.is_finite())
+        || (front[0].hypot(front[1]).hypot(front[2]) - 1.0).abs() > 1e-12
     {
         return Err("circular vent receiver needs finite positive area, medium, clock and distance from the baffle".into());
     }
     let a = (area / PI).sqrt();
     let b = offset[0].hypot(offset[1]);
     let z = offset[2].abs();
+    let beta = 1.0 - alpha;
+    let lateral_axis = if b == 0.0 {
+        0.0
+    } else {
+        front[0] * (offset[0] / b) + front[1] * (offset[1] / b)
+    };
     let s_min = (b - a).max(0.0);
     let s_max = b + a;
     let r_min = z.hypot(s_min);
@@ -60,6 +97,7 @@ pub(crate) fn circular_taps(
     let last_cell = (delay + width).floor() as usize;
     let first = first_cell.saturating_sub(1);
     let mut taps = vec![0.0; last_cell.saturating_sub(1) + 4 - first];
+    let mut velocity_taps = vec![0.0; taps.len()];
     // Below a point inside the disk, the full-circle interval ends at its near
     // edge. Split there so each integration segment has smooth interior data.
     let full_until = if b < a {
@@ -87,8 +125,8 @@ pub(crate) fn circular_taps(
                 let dr = t / rate * sound_speed;
                 let square_increment = dr * (2.0 * r_min + dr);
                 let s = (s_min * s_min + square_increment).sqrt();
-                let fraction = if b == 0.0 || (b < a && s <= a - b) {
-                    1.0
+                let (fraction, sine_arc) = if b == 0.0 || (b < a && s <= a - b) {
+                    (1.0, 0.0)
                 } else {
                     // acos(1-epsilon) loses the far-field aperture angle. The
                     // half-angle identity retains it; outside the disk, use the
@@ -99,27 +137,40 @@ pub(crate) fn circular_taps(
                     } else {
                         (a - b + s) * (a + b - s)
                     };
-                    2.0 / PI * (inside / (4.0 * b * s)).clamp(0.0, 1.0).sqrt().asin()
+                    let half_sine = (inside / (4.0 * b * s)).clamp(0.0, 1.0).sqrt();
+                    (
+                        2.0 / PI * half_sine.asin(),
+                        2.0 * half_sine * (1.0 - half_sine * half_sine).max(0.0).sqrt(),
+                    )
                 };
+                let radius = r_min + dr;
+                let projection =
+                    (front[2] * offset[2] * fraction + lateral_axis * s * sine_arc / PI) / radius;
+                let acceleration = gain * (alpha * fraction - beta * projection);
+                let velocity = -gain * beta * sound_speed / radius * projection;
                 let (index, weights) = super::microphone_delay_taps(delay + t);
-                let mut value = [0.0; 4];
+                let mut value = [[0.0; 4]; 2];
                 for (i, weight) in weights.into_iter().enumerate() {
                     if weight != 0.0 {
-                        value[index + i - start] += gain * fraction * jacobian * weight;
+                        value[0][index + i - start] += acceleration * jacobian * weight;
+                        value[1][index + i - start] += velocity * jacobian * weight;
                     }
                 }
                 value
             };
             let integral = adaptive(&integrand, 0.0, 1.0, 12, None)?;
-            for (i, value) in integral.into_iter().enumerate() {
-                taps[start + i - first] += value;
+            for i in 0..4 {
+                taps[start + i - first] += integral[0][i];
+                velocity_taps[start + i - first] += integral[1][i];
             }
         }
     }
-    if !taps.iter().all(|x| x.is_finite()) || taps.iter().sum::<f64>() <= 0.0 {
+    if !taps.iter().chain(&velocity_taps).all(|x| x.is_finite())
+        || (alpha == 1.0 && taps.iter().sum::<f64>() <= 0.0)
+    {
         return Err("circular vent pressure coefficients are not representable".into());
     }
-    Ok((first, taps))
+    Ok((first, taps, velocity_taps))
 }
 
 const GAUSS_4: [(f64, f64); 2] = [
@@ -133,35 +184,49 @@ const GAUSS_8: [(f64, f64); 4] = [
     (0.9602898564975363, 0.1012285362903763),
 ];
 
-fn integrate(f: &impl Fn(f64) -> [f64; 4], lo: f64, hi: f64, rule: &[(f64, f64)]) -> [f64; 4] {
+fn integrate(
+    f: &impl Fn(f64) -> [[f64; 4]; 2],
+    lo: f64,
+    hi: f64,
+    rule: &[(f64, f64)],
+) -> [[f64; 4]; 2] {
     let mid = 0.5 * (lo + hi);
     let half = 0.5 * (hi - lo);
-    let mut sum = [0.0; 4];
+    let mut sum = [[0.0; 4]; 2];
     for &(x, weight) in rule {
         let left = f(mid - half * x);
         let right = f(mid + half * x);
-        for i in 0..4 {
-            sum[i] += half * weight * (left[i] + right[i]);
+        for bank in 0..2 {
+            for i in 0..4 {
+                sum[bank][i] += half * weight * (left[bank][i] + right[bank][i]);
+            }
         }
     }
     sum
 }
 
 fn adaptive(
-    f: &impl Fn(f64) -> [f64; 4],
+    f: &impl Fn(f64) -> [[f64; 4]; 2],
     lo: f64,
     hi: f64,
     depth: u32,
-    budget: Option<f64>,
-) -> Result<[f64; 4], String> {
+    budget: Option<[f64; 2]>,
+) -> Result<[[f64; 4]; 2], String> {
     let coarse = integrate(f, lo, hi, &GAUSS_4);
     let fine = integrate(f, lo, hi, &GAUSS_8);
-    let error: f64 = fine.iter().zip(coarse).map(|(a, b)| (a - b).abs()).sum();
-    let scale: f64 = fine.iter().map(|x| x.abs()).sum();
+    let error: [f64; 2] = std::array::from_fn(|bank| {
+        fine[bank]
+            .iter()
+            .zip(coarse[bank])
+            .map(|(a, b)| (a - b).abs())
+            .sum()
+    });
+    let scale: [f64; 2] = std::array::from_fn(|bank| fine[bank].iter().map(|x| x.abs()).sum());
     // Split the parent coefficient-error allowance. Requiring relative
     // accuracy again on a vanishing edge sliver instead chases roundoff.
-    let allowance = budget.unwrap_or(QUADRATURE_TOLERANCE * scale);
-    if error <= allowance {
+    // The two banks have different units: neither may hide the other's error.
+    let allowance = budget.unwrap_or(scale.map(|s| QUADRATURE_TOLERANCE * s));
+    if (0..2).all(|bank| error[bank] <= allowance[bank]) {
         return Ok(fine);
     }
     if depth == 0 {
@@ -170,9 +235,11 @@ fn adaptive(
         );
     }
     let mid = 0.5 * (lo + hi);
-    let a = adaptive(f, lo, mid, depth - 1, Some(0.5 * allowance))?;
-    let b = adaptive(f, mid, hi, depth - 1, Some(0.5 * allowance))?;
-    Ok(std::array::from_fn(|i| a[i] + b[i]))
+    let a = adaptive(f, lo, mid, depth - 1, Some(allowance.map(|s| 0.5 * s)))?;
+    let b = adaptive(f, mid, hi, depth - 1, Some(allowance.map(|s| 0.5 * s)))?;
+    Ok(std::array::from_fn(|bank| {
+        std::array::from_fn(|i| a[bank][i] + b[bank][i])
+    }))
 }
 
 #[cfg(test)]
@@ -304,6 +371,115 @@ mod tests {
             assert!(error(response(first, &taps, frequency, rate), expected) / gain < 8e-4);
         }
         assert!((taps.iter().sum::<f64>() / gain - 1.0).abs() < 2e-6);
+    }
+
+    fn flow_response(
+        first: usize,
+        acceleration: &[f64],
+        velocity: &[f64],
+        frequency: f64,
+        rate: f64,
+    ) -> [f64; 2] {
+        let a = response(first, acceleration, frequency, rate);
+        let v = response(first, velocity, frequency, rate);
+        let omega = 2.0 * PI * frequency;
+        [v[0] - omega * a[1], v[1] + omega * a[0]]
+    }
+
+    #[test]
+    fn g2_axial_particle_velocity_matches_exact_disk_and_transverse_null() {
+        let (a, z, frequency) = (0.05_f64, 0.08_f64, 4000.0);
+        let area = PI * a * a;
+        let edge = a.hypot(z);
+        // Differentiate the analytic disk potential in z: rho*c*u_z/Q =
+        // rho*c/A * [exp(-ik*z) - z/edge * exp(-ik*edge)]. Combine with p
+        // for a forward cardioid. This is not the center-point projection.
+        let k = 2.0 * PI * frequency / C;
+        let gain = RHO * C / area;
+        let edge_weight = 0.5 * (1.0 + z / edge);
+        let exact = [
+            gain * ((k * z).cos() - edge_weight * (k * edge).cos()),
+            gain * (-(k * z).sin() + edge_weight * (k * edge).sin()),
+        ];
+        let mut previous = f64::INFINITY;
+        for rate in [48_000.0, 96_000.0, 192_000.0] {
+            let (first, acceleration, velocity) =
+                directional_taps(area, [0.0, 0.0, z], RHO, C, rate, 0.5, [0.0, 0.0, -1.0]).unwrap();
+            let relative = error(
+                flow_response(first, &acceleration, &velocity, frequency, rate),
+                exact,
+            ) / exact[0].hypot(exact[1]);
+            assert!(
+                relative < previous / 8.0,
+                "rate={rate}, error={relative}, previous={previous}"
+            );
+            previous = relative;
+        }
+        assert!(previous < 2e-5);
+        let (_, acceleration, velocity) =
+            directional_taps(area, [0.0, 0.0, z], RHO, C, 48_000.0, 0.0, [1.0, 0.0, 0.0]).unwrap();
+        assert!(acceleration.iter().chain(&velocity).all(|x| *x == 0.0));
+    }
+
+    fn directional_surface_response(
+        a: f64,
+        offset: [f64; 3],
+        alpha: f64,
+        axis: [f64; 3],
+        frequency: f64,
+        rings: usize,
+    ) -> [f64; 2] {
+        // Independent two-dimensional equal-area surface integration, using
+        // Euler's equation on each source-to-receiver vector directly.
+        let omega = 2.0 * PI * frequency;
+        let angles = 4 * rings;
+        let directions: Vec<_> = (0..angles)
+            .map(|j| {
+                let theta = 2.0 * PI * (j as f64 + 0.5) / angles as f64;
+                (theta.cos(), theta.sin())
+            })
+            .collect();
+        let mut value = [0.0; 2];
+        for i in 0..rings {
+            let radius = a * ((i as f64 + 0.5) / rings as f64).sqrt();
+            for &(x, y) in &directions {
+                let delta = [offset[0] - radius * x, offset[1] - radius * y, offset[2]];
+                let r = delta[0].hypot(delta[1]).hypot(delta[2]);
+                let dot = (0..3).map(|j| axis[j] * delta[j] / r).sum::<f64>();
+                let phase = omega * r / C;
+                let real = -(1.0 - alpha) * C * dot / (r * r);
+                let imaginary = omega * (alpha - (1.0 - alpha) * dot) / r;
+                value[0] += real * phase.cos() + imaginary * phase.sin();
+                value[1] += imaginary * phase.cos() - real * phase.sin();
+            }
+        }
+        value.map(|x| x * RHO / (2.0 * PI * (rings * angles) as f64))
+    }
+
+    #[test]
+    fn g2_off_axis_velocity_and_pressure_follow_the_full_aperture_field() {
+        let a = 0.05;
+        let (alpha, axis, rate) = (0.3, [0.3, -0.4, -(0.75_f64).sqrt()], 192_000.0);
+        for offset in [[0.02, 0.01, 0.08], [0.09, 0.12, -0.08]] {
+            let (first, acceleration, velocity) =
+                directional_taps(PI * a * a, offset, RHO, C, rate, alpha, axis).unwrap();
+            for frequency in [100.0, 6000.0] {
+                let coarse = directional_surface_response(a, offset, alpha, axis, frequency, 384);
+                let fine = directional_surface_response(a, offset, alpha, axis, frequency, 768);
+                let scale = fine[0].hypot(fine[1]);
+                assert!(
+                    error(coarse, fine) < 2e-5 * scale,
+                    "independent surface quadrature must resolve: offset={offset:?}, frequency={frequency}, relative={}",
+                    error(coarse, fine) / scale
+                );
+                let actual = flow_response(first, &acceleration, &velocity, frequency, rate);
+                assert!(
+                    error(actual, fine) < 4e-5 * scale,
+                    "offset={offset:?}, frequency={frequency}, relative={}",
+                    error(actual, fine) / scale
+                );
+            }
+        }
     }
 
     #[test]
