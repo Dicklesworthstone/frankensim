@@ -7586,3 +7586,44 @@ Focused controls include axial series and retroreception, independently folded
 oblique Snell rays and finite-difference areas, angular source support,
 visibility, tilted/grazing reception, a separate complex-amplitude absorbing-
 film reference, rescaled extreme attenuation and domain/work refusals.
+
+## Original tracer scenes in calibrated curved transport
+
+`photometry::scene::NativeOpticalScene` admits an ordinary static `tracer::Scene`
+to the existing curved polarized transport and its calibrated point connections,
+image discovery and finite-detector measurements. Original mesh/chart objects
+move into shared immutable geometry without tessellation or a replacement lens;
+placed instances retain their object/geometry/frame identities and proper-rigid
+transforms. `render_scene()` and `into_scene()` retain the original materials,
+emission, lights, environment and camera with the same shared geometry. Raw
+meshes/charts require caller-supplied object IDs and immutable geometry hashes.
+Animated shapes require an explicit static snapshot.
+
+Every primitive has an explicit material or detector role. Material exteriors
+and source initial media use `Ambient` or `InteriorOf(original_primitive_index)`.
+Every material dielectric retains a distinct medium slot, including equal-index
+bodies with different absorption. Invalid references and self/cyclic containment
+refuse; parent validation is linear in the object count. The caller remains
+responsible for geometrically correct nesting and outward boundary normals.
+Original native medium-transition checks still refuse inconsistent paths.
+
+Dielectric surfaces retain the original dispersion, bulk absorption, roughness,
+anisotropy and compact coherent coating. Smooth/rough/brushed conductors retain
+their optical tables/coatings and body-local detail. Native spectral diffuse and
+coated diffuse laws are unchanged; exactly constant lifted Lambertian reflectance
+is admitted without fitting. Nonconstant lifted Lambertian, legacy Schlick GGX
+and thermal materials currently refuse rather than becoming surrogate absorbers.
+Detectors explicitly intercept the chosen original geometry. All other original
+geometry remains present, including physical occluders.
+
+Object allocations are bounded and checked; `with_curved_scene` builds the native
+boundary accelerator once per observation batch under its existing work budget.
+Per-path and per-solve limits, cancellation, actual spectral Snell/Jacobian
+transport, Stokes transfer, and native visibility remain unchanged. Selected
+connections retain selected-branch semantics; image seed discovery does not
+prove completeness. Curved source observations measure the explicitly supplied
+source contribution, not all emitters retained in the ordinary rendering view.
+Regressions connect the original dispersive ball chart to independent axial
+ray-transfer/Fresnel/Beer/CIE values, preserve embedded nested absorption even
+at equal phase indices, retain black blockers and shared instance identity, and
+refuse malformed topology, unsupported laws and exhausted build budgets.

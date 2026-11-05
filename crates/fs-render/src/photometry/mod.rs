@@ -33,6 +33,7 @@ pub mod image;
 pub mod medium;
 pub mod observer;
 pub mod path;
+pub mod scene;
 pub mod source;
 pub mod transport;
 
