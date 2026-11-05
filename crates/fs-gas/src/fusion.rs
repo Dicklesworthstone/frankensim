@@ -45,6 +45,7 @@ mod thermal;
 
 /// Competing D–T, D–D and D–He3 reactions on the same material state.
 pub mod network;
+pub mod volume;
 
 const AVOGADRO: f64 = 6.022_140_76e23;
 const CV_MOLAR: f64 = 1.5 * R;
