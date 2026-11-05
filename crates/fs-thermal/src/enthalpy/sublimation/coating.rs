@@ -8,9 +8,11 @@
 //!
 //! This is a thin, isothermal coating with negligible internal/contact thermal
 //! resistance. Conductance and exposed area retain their authored reference
-//! geometry. Porosity, melting, moving geometry, resolved gas temperature and
-//! observer-driven sources need their own coupled owners. Surfaces may have
-//! independent reservoirs or explicitly share one finite thermostatted chamber.
+//! geometry. Porosity, melting, moving geometry and observer-driven sources
+//! need their own coupled owners. An external gas owner can use the coating-aware
+//! heat path and atomically admit its joint endpoints through [`external`].
+//! Surfaces may have independent reservoirs or explicitly share one finite
+//! thermostatted chamber.
 //! A shared chamber solves all active surfaces at one endpoint pressure; copying
 //! finite reservoirs into the independent constructor does not connect them.
 //!
@@ -37,6 +39,16 @@ use std::collections::{BTreeMap, BTreeSet};
 mod chamber;
 pub use chamber::ChamberCoatingSurface;
 
+/// Coating-aware heat transport and admission for an externally solved gas.
+#[path = "coating/external.rs"]
+pub mod external;
+
+#[derive(Clone, Copy)]
+enum AdvanceMode {
+    Reservoirs(Option<crate::sublimation::chamber::ChamberSolverConfig>),
+    External { maximum_substeps: usize },
+}
+
 /// Explicit heterogeneous-deposition admission for one persistent substrate.
 /// `deposit_enthalpy` is the original continuous nondecreasing PURE-SOLID h(T),
 /// with the datum used by `law`'s latent enthalpy. The substrate datum is
@@ -56,6 +68,8 @@ pub struct CoatingSurface<'a> {
 
 /// Actual deposited storage and its vapor-reservoir observation. In a shared
 /// chamber every active coating repeats the SAME inventory, not separate stocks.
+/// External coupling retains only prescribed observations here; the original
+/// gas owner keeps the gas inventory and energy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoatingState {
     pub mass_kg: f64,
@@ -96,8 +110,9 @@ pub struct CoatingAudit {
     pub last_steps: BTreeMap<CellId, SupportedSurfaceStep>,
 }
 
-/// One candidate owns substrate, coating, vapor and event time. The bare thermal
-/// owner stays private, so unrelated mutations cannot bypass coating storage.
+/// One candidate owns substrate, coating, event time and any thermostatted
+/// reservoirs. The bare thermal owner stays private, so unrelated mutations
+/// cannot bypass coating storage.
 #[derive(Clone)]
 pub struct CoatingSimulation<'a> {
     thermal: DepositionSimulation<'a>,
@@ -291,6 +306,25 @@ impl<'a> CoatingSimulation<'a> {
         thermal_config: StepConfig,
         phase_config: SolverConfig,
         chamber_config: Option<crate::sublimation::chamber::ChamberSolverConfig>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, CoatingAudit), ThermalSublimationError> {
+        self.advance_mode(
+            target_s,
+            thermal_config,
+            phase_config,
+            AdvanceMode::Reservoirs(chamber_config),
+            checkpoint,
+        )
+    }
+
+    // All coating owners share this heat/event loop. External coupling disables
+    // only phase exchange; heat still resolves BOTH original stored materials.
+    fn advance_mode(
+        &self,
+        target_s: f64,
+        thermal_config: StepConfig,
+        phase_config: SolverConfig,
+        mode: AdvanceMode,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, CoatingAudit), ThermalSublimationError> {
         checkpoint()?;
@@ -305,6 +339,12 @@ impl<'a> CoatingSimulation<'a> {
             .into());
         }
         validate_solver(phase_config)?;
+        let maximum_substeps = match mode {
+            AdvanceMode::Reservoirs(_) => self.thermal.budget.max_substeps,
+            AdvanceMode::External { maximum_substeps } => {
+                maximum_substeps.min(self.thermal.budget.max_substeps)
+            }
+        };
         let mut next = self.clone();
         let mut audit = CoatingAudit {
             thermal: empty_audit(),
@@ -377,7 +417,7 @@ impl<'a> CoatingSimulation<'a> {
                 next.thermal.time_s = stop;
                 continue;
             }
-            if audit.thermal.substeps >= self.thermal.budget.max_substeps {
+            if audit.thermal.substeps >= maximum_substeps {
                 return Err(DepositionError::Budget("coating thermal substeps").into());
             }
             let remaining = stop - next.time_s();
@@ -457,9 +497,9 @@ impl<'a> CoatingSimulation<'a> {
             sums.heat_residual.add(internal_defect)?;
             sums.defects.add(internal_defect.abs())?;
             // START exposure: endpoint coverage/source events are still pending.
-            if let Some(config) = chamber_config {
+            if let AdvanceMode::Reservoirs(Some(config)) = mode {
                 next.exchange_chamber(&areas, dt, config, &mut sums, &mut audit, &mut checkpoint)?;
-            } else {
+            } else if let AdvanceMode::Reservoirs(None) = mode {
                 for (&id, coating) in &mut next.coatings {
                     checkpoint()?;
                     let model = &next.surfaces[&id];
