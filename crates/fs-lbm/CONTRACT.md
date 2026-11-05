@@ -583,7 +583,9 @@ remain active when existing callers add pressure. One private candidate serves
 pressure, conversion and SI admission before publication. Original authored
 pressure errors and cancellation retain `MaterialLbmError::FreeSurfacePressure2`;
 local conversion refusals retain their native reason. Source and scaling errors
-are unchanged. Native pressure-only APIs retain their documented legacy scope.
+are unchanged. Native pressure convenience APIs use the same conservative
+candidate and retain their existing error type, including the original
+conversion refusal reason without a pressure-cell coordinate.
 
 ## Prescribed gas traction with conservative D2Q9 conversion
 
@@ -654,7 +656,7 @@ explicit local angular step. The native and material
 `ConversionRedistribution2::ConservativeLocalAngular` through the common
 momentum candidate, including prescribed cell/link gas pressure and subsequent
 source-owned wetting composition. `ConservativeLocal` remains the default.
-Legacy native mass-only stepping retains its historical behavior.
+Native ordinary and pressure convenience steps also honor this selection.
 
 The original signed, capacity-bounded adjacent transport still owns mass and
 linear momentum. Sparse components contain only actual nonzero transfer routes;
@@ -8566,17 +8568,21 @@ order, use fixed-size neighbor storage and take the final rounding remainder
 locally. The redistribution cost depends on converted cells and their stencil,
 without another whole-domain interface scan.
 
-New D3Q19 constructors select `ConversionRedistribution3::Local`.
+New D3Q19 constructors select `ConversionRedistribution3::ConservativeLocal`.
+The named `Local` policy explicitly retains its former mass-only arithmetic.
 `with_conversion_redistribution(LegacyGlobal)` explicitly reproduces historical
 version-1 trajectories, including their nonlocal pooling. The frozen pour
 sentinel selects this replay mode and retains its original four-quadrant hash;
 new locality and thermal regressions exercise the corrected default. The
-independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 5 for the current default;
+independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 6 for the current default;
 version 2 introduced local redistribution, and version 3 corrects the density
 and force handling of fresh-cell initialization described below. Version 4
 uses the physical Guo frame in gas-pressure reconstruction as described above.
 Version 5 retains actual positive density in fill fractions and actual total
 mass in relative conservation diagnostics, without an absolute numerical floor.
+Version 6 selects bounded physical momentum conversion for both binary-occupancy
+and transferred-cell constructors. Ordinary and cell/link-pressure steps thereby
+reuse the existing atomic conservative candidate without requiring an opt-in.
 Explicit `LegacyGlobal` replay retains its historical conversion and
 gas-pressure arithmetic, leaving the unchanged D3Q19 core, boundary and sparse
 goldens untouched.
@@ -8640,12 +8646,13 @@ whitespace checks passed; native compilation and execution remain outstanding.
 
 D3Q19 records direct donor/recipient mass routes, including reversed routes for
 conversion debt. The original extensive enthalpy transport consumes these same
-routes, avoiding temperature mixing through a shared zero-storage pool. Excess
-or debt with no adjacent recipient remains explicit unregioned carry; without
-spatial provenance it is not injected into another component on a later step.
-This preserves the total numerical mass ledger but does not claim resolved
-geometry for orphan carry, momentum conservation during cell conversion or a
-conservative capillary surface-energy discretization.
+routes, avoiding temperature mixing through a shared zero-storage pool. The
+explicit historical `Local` policy retains excess or debt without an adjacent
+recipient as unregioned carry; without spatial provenance it is not injected
+into another component on a later step. That mass-only policy does not preserve
+conversion momentum or resolve orphan geometry. The default conservative policy
+refuses unlocated carry or unavailable adjacent capacity before publication.
+Neither policy supplies a conservative capillary surface-energy discretization.
 
 Focused G0 tests cover both conversion signs, disconnected-drop locality,
 per-node mass-route balances, orphan carry retention and scalar D3Q19 tension
@@ -8654,10 +8661,11 @@ components and reverse-debt cycles against analytic local energy balances.
 
 ### Bounded local conversion carries physical liquid momentum
 
-`ConversionRedistribution3::ConservativeLocal` is an explicit native timestep
-option, also selectable on `MaterialFreeSurface3` or the already bound
-`MaterialFreeSurfaceEnthalpy3`. Existing Local and LegacyGlobal trajectories retain their arithmetic.
-The new mode completes signed over/undershoots at zero conversion tolerance and
+`ConversionRedistribution3::ConservativeLocal` is the native constructor and
+timestep default, also selectable on `MaterialFreeSurface3` or the already bound
+`MaterialFreeSurfaceEnthalpy3`. Explicit Local and LegacyGlobal conversion
+rules retain their arithmetic. The conservative mode completes signed
+over/undershoots at zero conversion tolerance and
 routes each excess/debt only to adjacent interfaces with actual available
 capacity/mass. Dry ghosts cannot pay debt, full cells cannot overfill, and no
 unlocated carry or distant component supplies a missing recipient.
@@ -8682,7 +8690,10 @@ integrator's momentum/energy balance, angular momentum, capillary surface energy
 or phase-density volume sources. Native regressions cover unequal densities, Guo
 forces, advancing/receding and disconnected fronts, actual before/routes/after
 mass continuity, a real collision/stream/conversion step, zero-pressure replay,
-co-moving identity and late public-step rollback.
+co-moving identity and late public-step rollback. These regressions use the
+actual constructor defaults; binary ingress separately checks advancing and
+receding momentum under force, and both pressure entries retain conservative
+conversion and late-refusal atomicity without a policy override.
 
 `ConversionRedistribution3::ConservativeLocalAngular` extends that native
 conversion with angular closure. It preserves signed tracked mass, Guo physical
@@ -8764,28 +8775,34 @@ mass/linear-momentum defects. Numerical conversion loss is not physical heat.
 The receipt excludes collision/streaming, pressure traction and imposed forces.
 The linear-only policy does not preserve first mass moments or angular momentum;
 the opt-in angular policy adds local angular closure without preserving first
-mass moments. The historical `step` retains its existing conversion behavior.
+mass moments. Native `step` and the cell/link gas-pressure convenience entries
+use this same conservative conversion owner.
 
 Seven focused G0/G1/G3 regressions cover unequal-density advancing and receding
 fronts, signed debt, physical boosts and forcing, independent droplets, periodic
 capacity aliases, retained physical stress, native zero-conversion replay,
 cancellation and newly wet-cell refusal.
 
-### Material D2Q9 defaults carry conversion momentum
+### Native and material D2Q9 defaults carry conversion momentum
 
-`MaterialFreeSurface2::step` and `MaterialFreeSurfaceWetting2::step_with_gate`
-delegate to their existing `step_with_momentum` owners. Ordinary material
+`FreeSurface::step`, `MaterialFreeSurface2::step` and
+`MaterialFreeSurfaceWetting2::step_with_gate` delegate to their existing
+`step_with_momentum` owners. Ordinary native and material
 stepping therefore carries signed donor momentum through actual adjacent
-conversion capacity, admits the existing SI conversion account, and publishes
-one complete candidate. Dynamic wetting publishes the same candidate together
-with its accepted source queries, contact geometry and angle history.
+conversion capacity and publishes one complete candidate. Material stepping
+also admits the existing SI conversion account. Dynamic wetting publishes the
+same candidate together with its accepted source queries, contact geometry and
+angle history.
 
-The native `FreeSurface::step` remains the historical replay entry. Material
-`step` preserves its convenience signature and panics on a conservative refusal
-without publishing the proposal; the existing explicit momentum entry provides
-typed cancellation and refinement refusals. The wetting convenience entry
-retains its original error type and canonical cancellation classification.
-No additional lattice clone or duplicate conversion-report owner is introduced.
+Native `step` replaces its former mass-only conversion and reuses one staged
+surface. Its convenience signature and the material `step` signatures remain;
+conservative refusal panics without publishing the proposal. Explicit momentum
+entries provide typed cancellation and refinement refusals. Native cell/link
+pressure convenience entries similarly discard only the conversion receipt,
+retaining physical gas traction, the selected angular policy, and their existing
+error type. No extra clone is added to the already staged pressure path.
+The wetting convenience entry retains its original error type and canonical
+cancellation classification.
 
 `resolved_linear_momentum_kg_per_s` sums actual liquid mass times Guo-corrected
 velocity and converts to SI momentum per unit out-of-plane depth (kg/s). Gas,
@@ -8793,14 +8810,25 @@ walls and unlocated carry have no represented liquid momentum. External forces
 and wall/pressure traction can change the observation; it does not certify
 whole-step or angular-momentum conservation.
 
-The material regressions compare default and explicit conservative evolution
-through actual nonzero conversion routes, check SI momentum against physical
+Native regressions independently measure signed liquid momentum before and
+after advancing/receding conversions, including body forcing and real pressure
+force/torque. They exercise ordinary and both pressure defaults, selected angular
+closure and complete rollback when local capacity is unavailable. Material
+regressions compare default and explicit conservative evolution through actual
+nonzero conversion routes, check SI momentum against physical
 cell observations, and preserve wetting-source refusal and cancellation
 atomicity. Native capillary fixtures cover all four wall orientations and the
 existing material parameters; the gravity fixture starts at physical rest in
 the held-force frame before evolving real drop conversions.
 
 ### Density-consistent physical state at free-surface ingress and conversion
+
+`FreeSurface3::from_cells` closes the canonical population sum to each supplied
+density before applying the Guo force frame. Tracked mass remains the authored
+`fill*density`; a full interface therefore has no rounding-only excess to
+convert. The existing bounded density-closure owner is shared with strain
+initialization. Forced/unforced ingress regressions check exact density and
+mass, physical momentum, and absence of spurious conversion across density scales.
 
 Newly wet D2Q9 cells and default D3Q19 cells average their neighbors' physical
 velocities, including each neighbor's own `F/(2 rho)` correction. They then

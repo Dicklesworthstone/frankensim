@@ -28,7 +28,7 @@ pub struct GasPressureLink2 {
 /// An inadmissible pressure/geometry input or cancelled unpublished step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FreeSurfacePressureError2 {
-    /// The declared pressure, numerical domain or existing wall geometry refused.
+    /// Pressure, numerical domain, wall geometry or local conversion refused.
     Invalid {
         /// Rejected liquid cell, when the error concerns one local load.
         coordinates: Option<[usize; 2]>,
@@ -185,13 +185,18 @@ impl FreeSurface {
     /// The combined gas and capillary pressure must satisfy
     /// `|rho_boundary-1| <= maximum_density_excursion` in (0,1). This is an
     /// explicit numerical domain, not a physical compressibility-error bound.
-    /// The original collision, mass exchange and local conversion remain the
-    /// owners; gas dynamics and pressure-work storage are not introduced.
+    /// Signed conversion mass carries its donor's physical momentum through
+    /// the same capacity-bounded owner as [`Self::step_with_momentum`], including
+    /// the selected angular policy. The collision and mass exchange are
+    /// unchanged; gas dynamics and pressure-work storage are not introduced.
     ///
-    /// All pressure, geometry and cancellation refusals preserve populations,
-    /// mass, flags and conversion counters. Cancellation is checked before and
-    /// after the candidate, and at each streaming row. No pressure map is kept
-    /// between steps, so advancing interfaces cannot inherit stale loads.
+    /// All pressure, geometry, momentum-conversion and cancellation refusals
+    /// preserve populations, mass, flags and conversion counters. Conversion
+    /// refusals retain their reason with no pressure-cell coordinate.
+    /// Cancellation is checked before and after the candidate, and at each
+    /// streaming row. No pressure map is kept between steps, so advancing
+    /// interfaces cannot inherit stale loads. The `_and_momentum` entry returns
+    /// the conversion balance and distinguishes pressure and momentum errors.
     pub fn step_with_gas_pressure(
         &mut self,
         gate: &CancelGate,
@@ -309,11 +314,20 @@ impl FreeSurface {
         maximum_density_excursion: f64,
         field: Field<'_>,
     ) -> Result<(), FreeSurfacePressureError2> {
-        check_cancel(Some(gate))?;
-        let boundary = GasPressure2::new(field, maximum_density_excursion)?;
-        let mut candidate = self.clone();
-        candidate.stream_step_with_pressure(Some(gate), Some(&boundary))?;
-        candidate.apply_conversions();
+        let (candidate, _) = self
+            .pressure_momentum_candidate(gate, maximum_density_excursion, field)
+            .map_err(|error| match error {
+                FreeSurfacePressureMomentumError2::Pressure(error) => error,
+                FreeSurfacePressureMomentumError2::Momentum(error) => match error {
+                    FreeSurfaceMomentumError2::Cancelled => FreeSurfacePressureError2::Cancelled,
+                    FreeSurfaceMomentumError2::Invalid(reason) => {
+                        FreeSurfacePressureError2::Invalid {
+                            coordinates: None,
+                            reason,
+                        }
+                    }
+                },
+            })?;
         check_cancel(Some(gate))?;
         *self = candidate;
         Ok(())

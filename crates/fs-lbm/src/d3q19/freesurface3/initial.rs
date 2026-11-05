@@ -117,7 +117,10 @@ impl FreeSurface3 {
     /// half-filled shell or resets transferred velocity to rest. A full cell
     /// bordering gas is an interface cell with fill ONE; interior partial cells
     /// also remain interface cells. Initial mass is rho*fill (to floating-point
-    /// precision), with zero redistribution carry. Populations are physical
+    /// precision), with zero redistribution carry. The canonical population
+    /// sum is closed to the supplied density before applying the force frame,
+    /// so a full interface cannot start with roundoff-only excess mass.
+    /// Populations are physical
     /// equilibrium minus the Guo half source `S(velocity, force)/2`, so native
     /// sampling returns the supplied velocity without an artificial force-squared
     /// pressure/stress. This projects physical stress to equilibrium; it does not
@@ -127,6 +130,8 @@ impl FreeSurface3 {
     /// Only supplied occupied tiles and their one-tile gas margin are activated.
     /// The caller owns a domain/allocation budget, as for the original native
     /// constructor; the material adapter enforces its explicit cell budget.
+    /// Subsequent steps default to capacity-bounded physical momentum conversion,
+    /// using the same policy as the binary occupancy constructor.
     ///
     /// # Errors
     /// Refuses invalid dimensions/solid tiles, duplicate or out-of-domain
@@ -233,12 +238,14 @@ impl FreeSurface3 {
                     "initial velocity exceeds the lattice Mach domain",
                 ));
             }
-            let populations = forcing::reframe(
-                equilibrium3(state.density, state.velocity),
-                state.velocity,
-                [0.0; 3],
-                gravity,
-            )?;
+            let mut populations = equilibrium3(state.density, state.velocity);
+            // Mass below uses the authored rho, while conversion and geometry
+            // use this exact ordered population sum. Close them before the Guo
+            // transform, which preserves the incoming canonical density. Even
+            // a two-ulp discrepancy can spuriously convert a full interface.
+            forcing::preserve_density(&mut populations, state.density)?;
+            let populations =
+                forcing::reframe(populations, state.velocity, [0.0; 3], gravity)?;
             if populations.iter().any(|f| !f.is_finite() || *f <= 0.0)
                 || !populations.iter().sum::<f64>().is_finite()
             {
@@ -296,7 +303,7 @@ impl FreeSurface3 {
             solid,
             sigma,
             local_sigma: None,
-            redistribution: ConversionRedistribution3::Local,
+            redistribution: ConversionRedistribution3::default(),
             contact,
             planar_contact: None,
             planar_contact_field: None,

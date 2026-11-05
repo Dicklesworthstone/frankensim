@@ -6,9 +6,8 @@ use std::collections::BTreeMap;
 
 mod angular;
 
-/// Local numerical conversion policy for conservative momentum stepping.
-/// Legacy native step and pressure-only stepping retain their original
-/// conversion behavior; this selects the explicitly conservative owner.
+/// Local numerical conversion policy for every native free-surface step,
+/// including ordinary stepping and prescribed gas pressure.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConversionRedistribution2 {
     /// Preserve signed mass and physical linear momentum on adjacent routes.
@@ -103,7 +102,7 @@ pub(super) fn admit_initialized_cell(
 }
 
 impl FreeSurface {
-    /// Policy used by momentum stepping, including its gas-pressure variants.
+    /// Policy used by every step, including its gas-pressure variants.
     #[must_use]
     pub const fn conversion_redistribution(&self) -> ConversionRedistribution2 {
         self.redistribution
@@ -112,8 +111,7 @@ impl FreeSurface {
     /// Select local conversion closure without changing accepted populations.
     /// The angular policy requires nonperiodic coordinates: no moment about a
     /// torus is inferred. The same condition is checked again at every step.
-    /// Native legacy step and pressure-only methods are unaffected; select
-    /// conservative momentum stepping to use this policy.
+    /// Ordinary and pressure-driven stepping use the same selected policy.
     pub fn set_conversion_redistribution(
         &mut self,
         policy: ConversionRedistribution2,
@@ -133,7 +131,7 @@ impl FreeSurface {
     /// droplets cannot exchange mass or momentum through a global pool.
     ///
     /// One staged surface makes cancellation, missing capacity and population
-    /// refusal atomic. The legacy `step` retains its historical replay behavior.
+    /// refusal atomic. [`Self::step`] uses this owner and discards the receipt.
     /// The receipt covers conversion alone: it is not a whole-step conservation
     /// certificate or physical dissipation. The selected angular policy closes
     /// both momenta locally, but cell-centre relocation does not preserve first

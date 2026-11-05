@@ -5,6 +5,94 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
 #[test]
+fn g1_initial_density_closes_authored_mass_without_a_force_impulse_or_conversion() {
+    let gate = CancelGate::new_clock_free();
+    ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 28,
+                kernel_id: 69,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        for scale in [2.0_f64.powi(-40), 1.0, 2.0_f64.powi(40)] {
+            for velocity in [[0.0; 3], [0.025, -0.012, 0.018]] {
+                for force in [[0.0; 3], [0.0002, -0.0001, 0.0003].map(|f| f * scale)] {
+                    let initial = [
+                        FreeSurfaceInitialCell3 {
+                            coordinates: [1, 1, 1],
+                            fill_fraction: 1.0,
+                            // Hydrostatic density whose raw equilibrium sum
+                            // falls below its authored value by two ulps.
+                            density: 1.0015000000000001 * scale,
+                            velocity,
+                        },
+                        FreeSurfaceInitialCell3 {
+                            coordinates: [2, 1, 1],
+                            fill_fraction: 0.35,
+                            density: 0.99775 * scale,
+                            velocity,
+                        },
+                    ];
+                    let mut flow = FreeSurface3::from_cells(
+                        [4; 3],
+                        0.8,
+                        force,
+                        0.0,
+                        ContactModel3::Neutral,
+                        &[],
+                        &initial,
+                        &cx,
+                    )
+                    .unwrap();
+                    for state in initial {
+                        let [x, y, z] = state.coordinates;
+                        let (slot, lane) = flow
+                            .grid
+                            .resolve_source(x as i64, y as i64, z as i64)
+                            .unwrap();
+                        let key = flow.grid.active_keys()[slot];
+                        let populations = flow.grid.populations(slot, lane);
+                        let rho: f64 = populations.iter().sum();
+                        let mass = flow.tiles[&key].mass[lane];
+                        assert_eq!(rho.to_bits(), state.density.to_bits());
+                        assert_eq!(
+                            mass.to_bits(),
+                            (state.fill_fraction * state.density).to_bits()
+                        );
+                        assert!(mass <= rho);
+                        for axis in 0..3 {
+                            let raw: f64 = populations
+                                .iter()
+                                .zip(E3)
+                                .map(|(f, e)| f * f64::from([e.0, e.1, e.2][axis]))
+                                .sum();
+                            let physical = raw + 0.5 * force[axis];
+                            assert!(
+                                (physical - state.density * velocity[axis]).abs()
+                                    < 64.0 * f64::EPSILON * state.density
+                            );
+                        }
+                    }
+                    let bits = flow.grid.state_bits();
+                    let mass = flow.mass_snapshot();
+                    flow.apply_conversions(None).unwrap();
+                    assert_eq!(flow.grid.state_bits(), bits);
+                    assert_eq!(flow.mass_snapshot(), mass);
+                    assert_eq!(flow.conversions, ConversionStats3::default());
+                    assert_eq!(flow.conversion_momentum_report().unwrap().routes, 0);
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn g1_initial_strain_preserves_forced_momentum_and_recovers_molecular_stress() {
     let gate = CancelGate::new_clock_free();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
