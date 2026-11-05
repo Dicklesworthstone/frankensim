@@ -1,4 +1,6 @@
 //! Native P1 entropy against independent caloric and face-matrix identities.
+#[path = "entropy/robin.rs"]
+mod robin;
 use super::*;
 use fs_conduction::transient::backward_euler::{ArealHeatCapacity, SurfaceHeatCapacity};
 use fs_conduction::transient::enthalpy::entropy::{EnthalpyEntropyBalance, EnthalpyEntropyError};
@@ -343,15 +345,15 @@ fn consistent_robin_negative_production_is_retained_without_lumping_the_face() {
 }
 
 #[test]
-fn varying_robin_baths_nonfinite_accounts_and_cancellation_refuse() {
+fn nonpositive_robin_baths_nonfinite_accounts_and_cancellation_refuse() {
     let mesh = tetrahedron();
     let boundary = ThermalBoundaryBuilder::new(&mesh)
         .region(
-            "spatial bath needs its own entropy integration",
+            "nonpositive bath has no thermal entropy",
             |_| true,
             ThermalBc::Robin {
                 htc: ScalarField::Uniform(1.0),
-                t_ref: ScalarField::Nodal(vec![300.0, 310.0, 320.0, 330.0]),
+                t_ref: ScalarField::Nodal(vec![0.0, 310.0, 320.0, 330.0]),
             },
         )
         .unwrap()
@@ -375,7 +377,7 @@ fn varying_robin_baths_nonfinite_accounts_and_cancellation_refuse() {
                 config(),
             ),
             Err(EnthalpyError::InvalidInput(
-                "entropy requires one positive actual Robin bath temperature per active face"
+                "entropy requires positive actual Robin bath temperatures"
             ))
         ));
         assert!(matches!(

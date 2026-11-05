@@ -11,12 +11,14 @@
 //! clips coefficients, changes the mesh or labels numerical defects as heating.
 //! See Limache and Idelsohn (2016), doi:10.1186/s40323-016-0066-8.
 //!
-//! Each active Robin triangle must have one actual positive bath temperature.
-//! Different triangles may use different baths. Spatially varying bath entropy
-//! and photon entropy require their own integration; no patch mean substitutes.
+//! Each active Robin triangle retains its actual positive affine bath field.
+//! The original h(x), T(x) and B(x) determine its exact rational bath entropy;
+//! no patch mean substitutes. Photon entropy requires its own integration.
 //! Prescribed heat flux and volumetric watts remain unclassified inputs.
 
 use std::fmt;
+
+mod robin;
 
 use fs_exec::Cx;
 
@@ -35,10 +37,10 @@ use crate::{
 pub struct EnthalpyEntropyBalance {
     /// Actual original-chart entropy, plus the sensible films' entropy.
     pub thermal_storage_change_j_k: f64,
-    /// Prescribed-temperature reactions at their actual endpoint temperatures.
+    /// Prescribed-temperature reactions at their actual time-quadrature temperatures.
     /// Includes fixed-node storage when a boundary temperature changes.
     pub dirichlet_entropy_input_j_k: f64,
-    /// Inward Robin heat divided by each triangle's actual bath temperature.
+    /// Integral of inward Robin heat divided by the actual affine bath B(x).
     pub robin_entropy_input_j_k: f64,
     /// Signed discrete bulk, surface and contact generation on this state.
     /// General P1 meshes can make this negative even with positive conductivity.
@@ -54,10 +56,11 @@ pub struct EnthalpyEntropyBalance {
     pub neumann_at_node_j_k: f64,
     /// True if any volumetric source or prescribed flux is nonzero.
     pub has_unclassified_inputs: bool,
-    /// Sum of exact state entropy minus each actual energy increment/T_new.
+    /// Exact state entropy minus native time-weighted energy increments
+    /// divided by their actual stage temperatures.
     /// This is time discretization, not physical conductive generation.
     pub temporal_defect_j_k: f64,
-    /// Sum of the actual free-row energy residual divided by nodal T_new.
+    /// Time-weighted free-row stage residuals divided by actual stage temperature.
     pub algebraic_residual_j_k: f64,
     /// Remaining operator/reduction roundoff after ALL accounts above.
     /// No physical source or balancing correction is created from this value.
@@ -268,13 +271,9 @@ pub(super) fn admit_boundary(
                 continue;
             }
             let temperatures = vertices.map(|v| t_ref.at(v));
-            if !temperatures[0].is_finite()
-                || temperatures[0] <= 0.0
-                || temperatures[1] != temperatures[0]
-                || temperatures[2] != temperatures[0]
-            {
+            if temperatures.iter().any(|t| !t.is_finite() || *t <= 0.0) {
                 return Err(EnthalpyError::InvalidInput(
-                    "entropy requires one positive actual Robin bath temperature per active face",
+                    "entropy requires positive actual Robin bath temperatures",
                 ));
             }
         }
@@ -409,17 +408,25 @@ pub(super) fn evaluate(
                 if vertices.iter().all(|&v| htc.at(v) == 0.0) {
                     continue;
                 }
-                let bath_t = t_ref.at(vertices[0]);
-                let block = robin_face_matrix(face.area, vertices.map(|v| htc.at(v)));
-                let delta = vertices.map(|v| temperature[v] - bath_t);
+                let baths = vertices.map(|v| t_ref.at(v));
+                let bath_reference = baths.into_iter().fold(0.0_f64, f64::max);
+                let transfer = vertices.map(|v| htc.at(v));
+                let temperatures = vertices.map(|v| temperature[v]);
+                let block = robin_face_matrix(face.area, transfer);
+                let delta = std::array::from_fn::<_, 3, _>(|a| temperatures[a] - baths[a]);
+                let correction = robin::correction(
+                    context.cx, face.area, transfer, temperatures, baths,
+                )?;
                 for (a, &va) in vertices.iter().enumerate() {
                     let mut out = 0.0_f64;
                     for b in 0..3 {
                         out = block[a][b].mul_add(delta[b], out);
                     }
-                    bath.add(finite(-out / bath_t)?)?;
-                    // Retain the native consistent face flux and nodal 1/T.
-                    robin.add(finite((out / temperature[va]) * (delta[a] / bath_t))?)?;
+                    bath.add(finite(-out / bath_reference)?)?;
+                    // The reference cancels algebraically with the exact
+                    // rational correction below; the original B(x) is retained.
+                    robin.add(finite((out / temperature[va])
+                        * ((temperature[va] - bath_reference) / bath_reference))?)?;
                     for b in (a + 1)..3 {
                         // Remove the Robin off-diagonal from the full sparse
                         // operator pair sum, leaving original bulk/contact K.
@@ -430,6 +437,8 @@ pub(super) fn evaluate(
                         )?)?;
                     }
                 }
+                bath.add(-correction)?;
+                robin.add(correction)?;
             }
             Some(ThermalBc::Dirichlet { .. }) | None => {}
         }

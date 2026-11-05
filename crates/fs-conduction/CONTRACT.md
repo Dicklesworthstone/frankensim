@@ -4532,11 +4532,14 @@ The account integrates each original caloric chart's dh/T against frozen
 reference nodal mass. Sensible films contribute their original caloric entropy
 at the same host temperature; latent heat is already contained in the host
 chart and is never deposited again. Dirichlet reactions include fixed-node
-storage at the actual endpoint bath temperature. Each active Robin triangle
-must name one positive actual bath temperature, with independent temperatures
-allowed on different triangles. Heat-flux and volumetric inputs remain explicitly
-unclassified; dividing their watts by receiving nodal temperature does not
-invent a reservoir or convert work into heat.
+storage at the actual time-quadrature bath temperatures. Each active Robin
+triangle retains its positive P1 bath field B(x), transfer coefficient h(x)
+and body trace T(x). Bath entropy is the actual integral
+-integ[h(x)*(T(x)-B(x))/B(x) dA]. The same native consistent face heat rows
+q_i give signed production integ[h*(T-B)/B dA]-sum_i(q_i/T_i).
+Heat-flux and volumetric inputs remain explicitly unclassified; dividing their
+watts by receiving nodal temperature does not invent a reservoir or convert
+work into heat.
 
 Bulk, sheet and contact production use the same sparse transport entries as
 energy. The original consistent Robin matrix contributes its actual heat and
@@ -4550,10 +4553,25 @@ Exact state entropy, physical transport, time-discretization defect, free-row
 algebraic residual and remaining reduction closure are separate quantities.
 The account adds one linear pass over vertices, sparse entries and boundary
 faces, plus the original caloric queries; Newton iterations perform no entropy
-work. Spatially varying Robin-bath entropy and photon entropy require their
-own integration and are not inferred by this interface. Acceptance is a check
-of this admitted discrete state, not a whole-system second-law certificate or
-a continuum, mesh-monotonicity or time-accuracy theorem.
+work. Spatial bath integration uses at most two median-isotherm subtriangles,
+exact polynomial transverse moments and closed logarithmic reciprocal moments.
+Near equal baths use a positive series with a bounded omitted analytic tail;
+all loops are bounded and cancellation-aware. No mean temperature, face
+refinement, altered heat matrix or extra quadrature state is introduced.
+An algebraic reciprocal-reference correction retains the near-constant limit
+without subtracting two first-order entropy totals. These are f64 evaluations
+of the analytic integrals, not certified floating-point enclosures.
+Photon entropy requires its own owner. Acceptance is a check of this admitted
+discrete state, not a whole-system second-law certificate or a continuum,
+mesh-monotonicity or time-accuracy theorem.
+
+G1/G3 regressions compare spatial baths and nonuniform transfer coefficients
+against independent positive Duffy/Gauss integration, all face-vertex
+permutations, repeated bath values, small near-equilibrium production and an
+independent logarithmic reference over a 1e12 bath contrast. Accepted native
+BE and SDIRK2 steps retain their original energy trajectories and actual
+stage-weighted bath entropy; nonpositive bath temperatures,
+original material limits and cancellation retain transactional refusal.
 
 
 ## Entropy admission on actual second-order spatial stages
