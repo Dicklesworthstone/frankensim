@@ -31,6 +31,23 @@ pub(super) fn gravity(core: &BoundGraphCore<'_>) -> Result<f64, SourceGraphError
     Ok(gravity)
 }
 
+fn plate_speed(
+    flow: f64,
+    area: f64,
+    direction: PlateFlowDirection,
+) -> Result<f64, FlowConvectionError> {
+    let speed = match direction {
+        PlateFlowDirection::AlongBranch => flow / area,
+        PlateFlowDirection::AgainstBranch => -flow / area,
+    };
+    if !nonnegative(speed) {
+        return Err(FlowConvectionError::Source(SourceGraphError::Invalid(
+            "plate-section velocity must follow its authored leading edge; rebind after reversal",
+        )));
+    }
+    Ok(speed)
+}
+
 // Use this native cell's tangent, including each local section of a curved
 // path. A whole-branch endpoint displacement cannot stand in for wall flow.
 fn mixed_geometry(
@@ -111,6 +128,33 @@ pub(super) fn resolve(
                 correlation,
                 speed_m_s: speed,
                 settings,
+            }
+        }
+        GraphConvectionLaw::ForcedPlateSection {
+            branch,
+            correlation,
+            start,
+            direction,
+        } => {
+            let &(actual_branch, section) = location.as_ref().ok_or_else(|| {
+                source_error(SourceGraphError::Invalid(
+                    "plate-section convection requires a pipe cell with native flow area",
+                ))
+            })?;
+            if actual_branch != branch {
+                return Err(source_error(SourceGraphError::Invalid(
+                    "plate-section branch does not own the fluid cell",
+                )));
+            }
+            let area = core.section_areas[branch][section];
+            // A supported average cannot hide motion toward the authored
+            // leading edge at either endpoint. Do this before source queries.
+            plate_speed(flow.initial(branch), area, direction)?;
+            plate_speed(flow.final_flow(branch), area, direction)?;
+            SourceCellConvectionLaw::ForcedPlateSection {
+                correlation,
+                speed_m_s: plate_speed(flow.average(branch), area, direction)?,
+                start,
             }
         }
         GraphConvectionLaw::Natural { geometry } => {
@@ -213,6 +257,40 @@ pub(super) fn admit_envelope<M: ThermalFluidTransport>(
             admit(final_flow)?;
             if (initial < 0.0 && final_flow > 0.0) || (initial > 0.0 && final_flow < 0.0) {
                 admit(0.0)?;
+            }
+        }
+        GraphConvectionLaw::ForcedPlateSection {
+            branch,
+            correlation,
+            start,
+            direction,
+        } => {
+            let Some(Some((_, section))) = core.locations.get(&point.fluid_cell) else {
+                return Err(source_error(SourceGraphError::Invalid(
+                    "missing admitted plate-section flow geometry",
+                )));
+            };
+            let area = core.section_areas[branch][*section];
+            let average = flow.average(branch);
+            let endpoints = [flow.initial(branch), flow.final_flow(branch)];
+            for (index, volume_flow) in endpoints.into_iter().enumerate() {
+                // The common quasi-steady case needs no repeated correlation
+                // or evidence construction at an already admitted speed.
+                if volume_flow == average || (index == 1 && volume_flow == endpoints[0]) {
+                    continue;
+                }
+                // The average has already passed the original section owner.
+                // Reuse its film snapshot for both endpoint regimes, including
+                // the positive upstream distance. Direction admission excludes
+                // any internal zero crossing; a zero endpoint still sees the
+                // original forced card's lower Reynolds limit.
+                evaluate_flat_plate_section_from_material(
+                    correlation,
+                    &point.thermal.transport(),
+                    plate_speed(volume_flow, area, direction)?,
+                    start,
+                    point.characteristic_length,
+                ).map_err(|error| FlowConvectionError::Envelope(error.into()))?;
             }
         }
         GraphConvectionLaw::AidingVerticalPlate {

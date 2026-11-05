@@ -3556,6 +3556,35 @@ subdivision, source/dimensional consistency, Robin lowering, local heat
 variation, rotation, geometry changes and flow reversal; they do not confer
 experimental validation.
 
+### Plate sections on native hydraulic and thermal graph endpoints
+
+`GraphConvectionLaw::ForcedPlateSection` connects the original external-plate
+strip coefficient to source-bound liquid and gas graphs. Native solved `Q/A`
+supplies the free-stream speed; `start` and `characteristic_length` retain the
+two distances from the physical leading edge. `PlateFlowDirection` explicitly
+declares whether downstream follows or opposes the branch path. Initial,
+average and final flow must agree with that direction. An interval reversal
+refuses before material queries; subsequent reverse flow requires rebinding
+both direction and distances from the opposite edge.
+
+Finite wall links and prescribed wall reservoirs use the same original
+mean-film source and section evaluation. Both positive spatial endpoints must
+pass the selected laminar or turbulent card at both temporal endpoint speeds;
+a supported average cannot hide an unsupported upstream Reynolds number.
+The native implicit graph refreshes these coefficients with its actual trial
+temperatures and solved flow. Finite wall exchange cancels internally through
+the original reciprocal link; only prescribed wall heat is external. No new
+correlation, thermal storage, mass flow or source-power deposit is introduced.
+
+Focused liquid/gas `source_graph::plate_sections` regressions cover held-state
+strip additivity, explicit reverse-flow rebinding, original gas film/EOS and
+caloric identity, interval/domain refusal, and a joint liquid momentum/enthalpy
+step with viscosity and film-coefficient feedback and native energy closure.
+The external plate's attached, unconfined, zero-pressure-gradient assumptions
+remain caller obligations. Local temperature updates remain the existing
+held-property approximation; they do not resolve boundary-layer history or
+establish experimental accuracy. Native test execution is reported separately.
+
 ## Reversible total-pressure hydraulic nodes and physical static tractions
 
 `graph::inertial::total_pressure::TotalPressureGraph` is an explicitly selected,

@@ -28,11 +28,20 @@ use crate::graph::thermal::medium::convection::{
             },
         },
     },
-    evaluate_forced_from_material,
+    evaluate_flat_plate_section_from_material, evaluate_forced_from_material,
 };
 use fs_convection::{CorrelationId, ThermalDirection};
 use fs_material::fluid_transport::ThermalFluidTransport;
 use fs_qty::Length;
+
+/// Direction away from an external plate's physical leading edge, relative to
+/// the native branch's `from` -> `to` path. Reversing flow requires rebinding
+/// both this direction and the section distances from the opposite edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlateFlowDirection {
+    AlongBranch,
+    AgainstBranch,
+}
 
 /// Authored wall geometry. A forced link's fluid cell must be a native pipe
 /// section of this branch; a natural link may use a bound junction or pipe cell.
@@ -45,6 +54,21 @@ pub enum GraphConvectionLaw {
         branch: usize,
         correlation: CorrelationId,
         settings: ForcedConvectionSettings,
+    },
+    /// An external isothermal plate strip using the original laminar or
+    /// leading-edge-corrected turbulent mean. `start` and the binding's
+    /// `characteristic_length` are upstream/downstream distances from ONE
+    /// physical leading edge, not cell widths or hydraulic diameters.
+    /// Mean-film properties are required. The initial, final and average native
+    /// flow must follow `direction`; an interval reversal refuses atomically.
+    /// Each positive endpoint retains the same card's regime admission.
+    /// The caller admits attached, unconfined, zero-pressure-gradient flow;
+    /// locally updated properties do not resolve a variable-property boundary layer.
+    ForcedPlateSection {
+        branch: usize,
+        correlation: CorrelationId,
+        start: Length,
+        direction: PlateFlowDirection,
     },
     Natural {
         geometry: NaturalConvectionGeometry,

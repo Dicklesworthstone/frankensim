@@ -1209,3 +1209,6 @@ mod reservoir;
 
 #[path = "source_graph/developing.rs"]
 mod developing;
+
+#[path = "source_graph/plate_sections.rs"]
+mod plate_sections;

@@ -162,6 +162,7 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
             core, thermal, flow, binding.fluid_cell, binding.law, gravity,
         ).map_err(|error| law_error(binding.fluid_cell, error))?;
         law.admit_property_temperature(binding.property_temperature).map_err(native_error)?;
+        law.admit_geometry(binding.characteristic_length).map_err(native_error)?;
         ordered.push((binding, law));
     }
     ordered.sort_by_key(|(binding, _)| binding.fluid_cell);
