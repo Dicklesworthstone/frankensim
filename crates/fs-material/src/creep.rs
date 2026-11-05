@@ -26,7 +26,7 @@ pub mod thermal;
 pub mod uniaxial;
 
 use crate::elastic::IsotropicElastic;
-use crate::tensor::{contract, trace};
+use crate::tensor::{contract, frobenius_norm as norm, trace};
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 use core::fmt;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
@@ -190,15 +190,6 @@ fn difference(a: &Voigt, b: &Voigt) -> Voigt {
     core::array::from_fn(|i| a[i] - b[i])
 }
 
-// Scale first: squaring representable large stresses must not overflow early.
-fn norm(v: &Voigt) -> f64 {
-    let scale = v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-    if scale == 0.0 {
-        return 0.0;
-    }
-    let unit = core::array::from_fn(|i| v[i] / scale);
-    scale * det::sqrt(contract(&unit, &unit))
-}
 fn logistic_inverse(log_x: f64) -> f64 {
     if log_x >= 0.0 {
         let e = det::exp(-log_x);

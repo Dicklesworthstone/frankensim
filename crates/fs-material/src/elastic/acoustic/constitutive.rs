@@ -123,13 +123,12 @@ impl SmallStrainLaw for ElasticAcousticState {
                 "frozen symmetric positive-definite elastic tensor; infinitesimal strain".into(),
                 format!("original material state {:?}", self.material_state_identity),
             ],
-            // The generic evidence helper uses max absolute tensor-Voigt
-            // strain. This conservative scalar ceiling also bounds Mandel
-            // shear; checked kernels apply the exact componentwise domain.
+            // A Frobenius-norm ball of this radius lies inside the original
+            // Mandel-component box. Checked kernels retain that exact box.
             ValidityDomain::unconstrained().with(
                 "strain-magnitude",
                 0.0,
-                core::f64::consts::FRAC_1_SQRT_2 * self.maximum_absolute_mandel_strain,
+                self.maximum_absolute_mandel_strain,
             ),
             vec!["no finite strain, material evolution, yield or measured wave authority".into()],
             0.01,

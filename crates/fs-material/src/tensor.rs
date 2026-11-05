@@ -10,7 +10,11 @@ use crate::{Tangent6, Voigt};
 #[must_use]
 pub fn to_mandel(value: &Voigt) -> Voigt {
     std::array::from_fn(|i| {
-        if i < 3 { value[i] } else { core::f64::consts::SQRT_2 * value[i] }
+        if i < 3 {
+            value[i]
+        } else {
+            core::f64::consts::SQRT_2 * value[i]
+        }
     })
 }
 
@@ -18,7 +22,11 @@ pub fn to_mandel(value: &Voigt) -> Voigt {
 #[must_use]
 pub fn from_mandel(value: &Voigt) -> Voigt {
     std::array::from_fn(|i| {
-        if i < 3 { value[i] } else { core::f64::consts::FRAC_1_SQRT_2 * value[i] }
+        if i < 3 {
+            value[i]
+        } else {
+            core::f64::consts::FRAC_1_SQRT_2 * value[i]
+        }
     })
 }
 
@@ -61,6 +69,27 @@ pub fn deviator(v: &Voigt) -> Voigt {
 #[must_use]
 pub fn contract(a: &Voigt, b: &Voigt) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + 2.0 * (a[3] * b[3] + a[4] * b[4] + a[5] * b[5])
+}
+
+/// Rotation-invariant Frobenius norm `sqrt(value:value)` of a symmetric tensor.
+///
+/// Tensor shear contributes twice. This is also the Euclidean norm of the
+/// corresponding Mandel vector, not the maximum component or the J2 equivalent
+/// strain. Scale before squaring so finite large/small strains or stresses do
+/// not overflow/underflow before their norm does. A NaN component remains NaN.
+#[must_use]
+pub fn frobenius_norm(value: &Voigt) -> f64 {
+    if value.iter().any(|x| x.is_nan()) {
+        return f64::NAN;
+    }
+    let scale = value
+        .iter()
+        .fold(0.0_f64, |largest, x| largest.max(x.abs()));
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
+    }
+    let unit = value.map(|x| x / scale);
+    scale * fs_math::det::sqrt(contract(&unit, &unit))
 }
 
 /// Von Mises equivalent stress `√(3/2 s:s)` of the deviator.
@@ -206,4 +235,50 @@ pub fn mandel_basis() -> [[[f64; 3]; 3]; 6] {
     basis[5][2][0] = shear;
     basis[5][0][2] = shear;
     basis
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g0_tensor_norm_uses_physical_shear_and_preserves_numeric_scale() {
+        let value = [1.0, -2.0, 3.0, 4.0, -5.0, 6.0];
+        let expected = 168.0_f64.sqrt();
+        for scale in [1e-300, 1.0, 1e300] {
+            let actual = frobenius_norm(&value.map(|v| scale * v));
+            assert!((actual / scale / expected - 1.0).abs() < 3e-15);
+        }
+        assert_eq!(frobenius_norm(&[0.0; 6]), 0.0);
+        assert_eq!(
+            frobenius_norm(&[f64::from_bits(1), 0.0, 0.0, 0.0, 0.0, 0.0]),
+            f64::from_bits(1)
+        );
+        assert_eq!(
+            frobenius_norm(&[f64::MAX, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            f64::MAX
+        );
+        assert!(frobenius_norm(&[f64::MAX; 6]).is_infinite());
+        for component in 0..6 {
+            let mut invalid = [0.0; 6];
+            invalid[component] = f64::NAN;
+            assert!(frobenius_norm(&invalid).is_nan());
+            invalid[component] = f64::INFINITY;
+            assert_eq!(frobenius_norm(&invalid), f64::INFINITY);
+        }
+    }
+
+    #[test]
+    fn g3_tensor_norm_is_unchanged_by_rotation() {
+        for value in [
+            [0.06, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.01, -0.02, 0.03, 0.04, -0.05, 0.06],
+            [0.02, 0.02, 0.02, 0.0, 0.0, 0.0],
+        ] {
+            for angle in [0.0, 0.3, core::f64::consts::FRAC_PI_4, 2.1] {
+                let rotated = rotate(&value, &rotation([0.0, 0.0, 1.0], angle));
+                assert!((frobenius_norm(&rotated) / frobenius_norm(&value) - 1.0).abs() < 3e-15);
+            }
+        }
+    }
 }

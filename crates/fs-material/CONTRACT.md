@@ -1,5 +1,23 @@
 # fs-material — CONTRACT
 
+## Objective small-strain magnitude
+
+`tensor::frobenius_norm` evaluates the physical symmetric-tensor norm in the
+native `[xx, yy, zz, xy, yz, zx]` tensor-shear convention. It counts shear twice,
+scales before squaring, preserves NaN and distinguishes total strain from a
+deviatoric J2 measure. `evidence_stress` uses this rotation-invariant magnitude
+for the generic `strain-magnitude` coordinate; a rotation cannot move the same
+strain into a scalar calibration domain by spreading it across components.
+Nonfinite strain or stress always gives out-of-domain model evidence.
+
+Native Norton creep uses the same norm for its existing physical strain and
+stress bounds. Full-tensor, frozen thermoelastic and crystallization adapters
+retain their original componentwise Mandel admission in checked kernels. Their
+generic evidence card uses the inscribed Frobenius ball, so it is conservative
+and does not replace the source's anisotropic domain or validate a material.
+G0/G3 checks in `tensor` and `tests/conformance.rs` exercise physical shear,
+hydrostatic strain, rotations, extreme representable scales and nonfinite input.
+
 ## Integrated bulk conduction with an evolving source contact
 
 `ImplicitLayerLink::with_contact` composes the original

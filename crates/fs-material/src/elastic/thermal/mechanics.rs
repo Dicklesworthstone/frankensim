@@ -134,7 +134,7 @@ impl SmallStrainLaw for FrozenThermoelasticLaw<'_> {
             ValidityDomain::unconstrained().with(
                 "strain-magnitude",
                 0.0,
-                core::f64::consts::FRAC_1_SQRT_2 * self.source.maximum_absolute_mandel_strain,
+                self.source.maximum_absolute_mandel_strain,
             ),
             vec![
                 "temperature evolution and reversible thermal work belong to the original thermal owner".into(),

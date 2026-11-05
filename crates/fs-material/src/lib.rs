@@ -224,6 +224,9 @@ impl<L: SmallStrainLaw + ?Sized> SmallStrainLaw for &L {
 /// update is deterministic arithmetic), the law's model card attached,
 /// and `in_domain` reflecting whether the strain sits inside the card's
 /// CALIBRATION DOMAIN — outside-domain use is flagged, not refused.
+/// The `strain-magnitude` coordinate is the rotation-invariant tensor
+/// Frobenius norm (Euclidean Mandel norm), including both shear entries.
+/// Nonfinite input or stress can never receive in-domain model evidence.
 #[must_use]
 pub fn evidence_stress<L: SmallStrainLaw>(
     law: &L,
@@ -234,9 +237,11 @@ pub fn evidence_stress<L: SmallStrainLaw>(
     let stress = law.stress(strain, state);
     let qoi = tensor::von_mises(&stress);
     let card = law.card();
-    let magnitude = strain.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+    let magnitude = tensor::frobenius_norm(strain);
     let mut point = BTreeMap::new();
     point.insert("strain-magnitude".to_string(), magnitude);
+    let mut model = fs_evidence::ModelEvidence::from_card(&card, &point);
+    model.in_domain &= magnitude.is_finite() && stress.iter().all(|value| value.is_finite());
     let mut canon = format!("stress:{}", card.name);
     for v in strain {
         let _ = core::fmt::Write::write_fmt(&mut canon, format_args!(";{v}"));
@@ -246,7 +251,7 @@ pub fn evidence_stress<L: SmallStrainLaw>(
         qoi,
         numerical: fs_evidence::NumericalCertificate::exact(qoi),
         statistical: fs_evidence::StatisticalCertificate::None,
-        model: fs_evidence::ModelEvidence::from_card(&card, &point),
+        model,
         sensitivity: fs_evidence::SensitivitySummary::default(),
         provenance: fs_evidence::ProvenanceHash::of_bytes(canon.as_bytes()),
         adjoint_ref: None,

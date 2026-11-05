@@ -48,6 +48,60 @@ fn steel() -> IsotropicElastic {
     IsotropicElastic::new(200e9, 0.3, 0.05).expect("steel")
 }
 
+#[test]
+fn g3_strain_evidence_is_rotation_invariant_and_nonfinite_states_are_outside() {
+    let law = steel();
+    // All stored components of the rotated tensor are <= 0.03, but the
+    // physical strain is still the same 0.06 principal extension.
+    let strain = [0.06, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let q = rotation([0.0, 0.0, 1.0], core::f64::consts::FRAC_PI_4);
+    for value in [strain, rotate(&strain, &q)] {
+        assert!(
+            !fs_material::evidence_stress(&law, &value, &())
+                .model
+                .in_domain
+        );
+        let inside = value.map(|x| 0.5 * x);
+        assert!(
+            fs_material::evidence_stress(&law, &inside, &())
+                .model
+                .in_domain
+        );
+    }
+    // Hydrostatic strain contributes to the total-strain norm, unlike J2.
+    assert!(
+        !fs_material::evidence_stress(&law, &[0.03, 0.03, 0.03, 0.0, 0.0, 0.0], &())
+            .model
+            .in_domain
+    );
+    // Tensor shear occupies two positions of the full physical tensor.
+    assert!(
+        !fs_material::evidence_stress(&law, &[0.0, 0.0, 0.0, 0.04, 0.0, 0.0], &())
+            .model
+            .in_domain
+    );
+    for component in 0..6 {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut value = [0.0; 6];
+            value[component] = bad;
+            assert!(
+                !fs_material::evidence_stress(&law, &value, &())
+                    .model
+                    .in_domain
+            );
+        }
+    }
+    let invalid_response = IsotropicElastic {
+        youngs: f64::NAN,
+        ..law
+    };
+    assert!(
+        !fs_material::evidence_stress(&invalid_response, &[0.0; 6], &())
+            .model
+            .in_domain
+    );
+}
+
 fn j2() -> J2Plasticity {
     J2Plasticity::new(steel(), 400e6, 2e9).expect("j2")
 }

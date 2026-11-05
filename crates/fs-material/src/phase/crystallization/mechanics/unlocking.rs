@@ -259,7 +259,7 @@ impl SmallStrainLaw for UnlockedCrystallization {
             ValidityDomain::unconstrained().with(
                 "strain-magnitude",
                 0.0,
-                core::f64::consts::FRAC_1_SQRT_2 * self.limits.maximum_absolute_total_mandel_strain,
+                self.limits.maximum_absolute_total_mandel_strain,
             ),
             vec![
                 "no universal melting criterion, liquid pressure/viscosity, momentum or contact solve".into(),
