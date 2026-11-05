@@ -1,4 +1,4 @@
-//! Material-driven thermal refraction in the original scene's medium topology.
+//! Source-backed material refraction in the original scene's medium topology.
 //!
 //! Each binding borrows a complete accepted thermo-optic field. Its original
 //! reference glass must equal the selected original scene medium in every
@@ -7,15 +7,24 @@
 //! a second time. Geometry, original surface laws and medium indices remain
 //! unchanged, including equal-index bodies with distinct physical ownership.
 
-use super::{NativeOpticalMedium, NativeOpticalScene, NativeOpticalSceneError};
+use super::{
+    NativeOpticalBinding, NativeOpticalMedium, NativeOpticalScene, NativeOpticalSceneError,
+    NativeReferenceMedium, reserved,
+};
 use crate::dielectric::{DielectricGlass, DielectricSurface};
 use crate::gradient_index::GradientIndexField;
 use crate::gradient_index::bundle::SecondOrderIndexField;
+use crate::instances::InstanceScene;
+use crate::material_state::gas_scattering::{
+    GasCompositionGradientField, GasCompositionSecondOrderField, GasDensityGradientField,
+    GasDensitySecondOrderField, MaterialGasCompositionRefractiveField, MaterialGasRefractiveField,
+    PreparedMaterialGasCompositionRefractiveField,
+};
 use crate::material_state::thermo_optic::{
     MaterialThermoOpticField, TemperatureGradientField, TemperatureSecondOrderField,
 };
 use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, SceneMedium};
-use crate::tracer::Material;
+use crate::tracer::{Material, Scene};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 
@@ -23,6 +32,15 @@ use fs_exec::Cx;
 enum Field<'a> {
     Gradient(&'a (dyn GradientIndexField + Sync)),
     Differentiable(&'a (dyn SecondOrderIndexField + Sync)),
+}
+
+impl<'a> Field<'a> {
+    fn native_medium(self, identity: ContentHash) -> SceneMedium<'a> {
+        match self {
+            Self::Gradient(field) => SceneMedium::GradientIndex { field, identity },
+            Self::Differentiable(field) => SceneMedium::Differentiable { field, identity },
+        }
+    }
 }
 
 /// An explicitly selected original medium and one immutable thermal/material
@@ -90,16 +108,7 @@ impl<'a> NativeThermoOpticBinding<'a> {
     }
 
     fn native_medium(self) -> SceneMedium<'a> {
-        match self.field {
-            Field::Gradient(field) => SceneMedium::GradientIndex {
-                field,
-                identity: self.field_identity,
-            },
-            Field::Differentiable(field) => SceneMedium::Differentiable {
-                field,
-                identity: self.field_identity,
-            },
-        }
+        self.field.native_medium(self.field_identity)
     }
 }
 
@@ -144,6 +153,17 @@ impl NativeOpticalScene {
         bindings: &[NativeThermoOpticBinding<'_>],
         observe: impl FnOnce(&CurvedPolarizedScene<'_>) -> R,
     ) -> Result<R, NativeOpticalSceneError> {
+        let mut media = self.native_media(cx)?;
+        self.bind_thermal_media(cx, &mut media, bindings)?;
+        self.with_native_media(cx, max_build_work, &media, observe)
+    }
+
+    fn bind_thermal_media<'a>(
+        &self,
+        cx: &Cx<'_>,
+        media: &mut [SceneMedium<'a>],
+        bindings: &[NativeThermoOpticBinding<'a>],
+    ) -> Result<(), NativeOpticalSceneError> {
         cx.checkpoint()?;
         if bindings.len() > self.media.len() {
             return Err(NativeOpticalSceneError::TooManyFieldBindings {
@@ -151,7 +171,6 @@ impl NativeOpticalScene {
                 media: self.media.len(),
             });
         }
-        let mut media = self.native_media(cx)?;
         for binding in bindings {
             cx.checkpoint()?;
             let index = self.medium_index(binding.medium)?;
@@ -160,16 +179,234 @@ impl NativeOpticalScene {
                     medium: binding.medium,
                 });
             }
-            if self.media[index] != *binding.reference {
+            if self.media[index].glass() != Some(binding.reference) {
                 return Err(NativeOpticalSceneError::ReferenceGlassMismatch {
                     medium: binding.medium,
                 });
             }
             media[index] = binding.native_medium();
         }
-        self.with_native_media(cx, max_build_work, &media, observe)
+        Ok(())
     }
 }
 
+/// One accepted molecular material and frozen density/composition snapshot.
+/// Only the original material gas owners can construct this ambient; there is
+/// no arbitrary GRIN injection, nominal glass fit or inferred species/EOS.
+/// The source model, density basis and supported vacuum-wavelength band remain
+/// authoritative. Gas true absorption is exactly zero under these owners;
+/// molecular scattering has its separate source-coupled native attachment.
+#[derive(Clone, Copy)]
+pub struct NativeGasAmbient<'a> {
+    material_identity: ContentHash,
+    field_identity: ContentHash,
+    wavelength_range_nm: [f64; 2],
+    field: Field<'a>,
+}
+
+impl<'a> NativeGasAmbient<'a> {
+    /// Original fixed-composition density field, including
+    /// `IsobaricGasField::bind_refraction`. Its declared constant-polarizability
+    /// visible model has equal phase/group indices; no dispersion is invented.
+    pub fn from_density_field<F: GasDensityGradientField + Sync + ?Sized>(
+        field: &'a MaterialGasRefractiveField<'_, F>,
+    ) -> Self {
+        Self {
+            material_identity: field.state().model_identity(),
+            field_identity: field.content_identity(),
+            // This is the original RayleighGasState refraction domain.
+            wavelength_range_nm: [380.0, 780.0],
+            field: Field::Gradient(field),
+        }
+    }
+
+    /// Retain both nonlinear Lorentz--Lorenz density-jet terms for native
+    /// bundle focusing; a locally zero gradient never substitutes for a Hessian.
+    pub fn from_differentiable_density_field<F: GasDensitySecondOrderField + Sync + ?Sized>(
+        field: &'a MaterialGasRefractiveField<'_, F>,
+    ) -> Self {
+        Self {
+            field: Field::Differentiable(field),
+            ..Self::from_density_field(field)
+        }
+    }
+
+    /// Original partial-density field with its exact component order, units,
+    /// optical sources and, where supplied, molecular spectral dispersion.
+    pub fn from_composition_field<F: GasCompositionGradientField + Sync + ?Sized>(
+        field: &'a MaterialGasCompositionRefractiveField<'_, F>,
+    ) -> Self {
+        Self {
+            material_identity: field.model().content_identity(),
+            field_identity: field.content_identity(),
+            wavelength_range_nm: field.model().wavelength_range_nm(),
+            field: Field::Gradient(field),
+        }
+    }
+
+    /// Original component Hessians and full molecular chain rule, including
+    /// focusing when total mass density is constant but composition varies.
+    pub fn from_differentiable_composition_field<
+        F: GasCompositionSecondOrderField + Sync + ?Sized,
+    >(
+        field: &'a MaterialGasCompositionRefractiveField<'_, F>,
+    ) -> Self {
+        Self {
+            field: Field::Differentiable(field),
+            ..Self::from_composition_field(field)
+        }
+    }
+
+    /// Reuse the original stack-owned wavelength preparation across every ray
+    /// stage and connection trial. Its exact physical snapshot must match the
+    /// supplied source field; another queried wavelength remains an error.
+    /// Source-band metadata is retained, not narrowed to a fictitious material.
+    pub fn from_prepared_composition_field<F: GasCompositionGradientField + Sync + ?Sized>(
+        source: &MaterialGasCompositionRefractiveField<'_, F>,
+        prepared: &'a PreparedMaterialGasCompositionRefractiveField<'_, '_, F>,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        if source.content_identity() != prepared.content_identity() {
+            return Err(NativeOpticalSceneError::GasSnapshotMismatch);
+        }
+        Ok(Self {
+            material_identity: source.model().content_identity(),
+            field_identity: source.content_identity(),
+            wavelength_range_nm: source.model().wavelength_range_nm(),
+            field: Field::Gradient(prepared),
+        })
+    }
+
+    /// Keep that same spectral preparation and the source's analytic Hessian.
+    pub fn from_prepared_differentiable_composition_field<
+        F: GasCompositionSecondOrderField + Sync + ?Sized,
+    >(
+        source: &MaterialGasCompositionRefractiveField<'_, F>,
+        prepared: &'a PreparedMaterialGasCompositionRefractiveField<'_, '_, F>,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        Ok(Self {
+            field: Field::Differentiable(prepared),
+            ..Self::from_prepared_composition_field(source, prepared)?
+        })
+    }
+
+    pub const fn material_identity(&self) -> ContentHash {
+        self.material_identity
+    }
+
+    /// Exactly the original field identity, also used by the corresponding
+    /// `MaterialGasCompositionScatteringField` attachment. No rehash disconnects
+    /// molecular collisions from their actual refractive snapshot.
+    pub const fn field_identity(&self) -> ContentHash {
+        self.field_identity
+    }
+
+    /// Original material source band. A prepared binding admits only its one
+    /// selected wavelength even though it retains this complete source band.
+    pub const fn wavelength_range_nm(&self) -> [f64; 2] {
+        self.wavelength_range_nm
+    }
+}
+
+/// Original static geometry/materials with a source-backed molecular ambient.
+///
+/// This type deliberately has no ordinary `render_scene` or `into_scene` view:
+/// that renderer cannot carry the gas field, and substituting vacuum or fitted
+/// nominal glass would change the physics. Every native observation explicitly
+/// supplies an accepted snapshot of the material admitted at construction.
+/// Geometry is shared exactly as in `NativeOpticalScene`; no gas surface or
+/// replacement volume geometry is created. Positions and density derivatives
+/// retain their original SI units and the snapshot stays fixed for the batch.
+pub struct NativeGasOpticalScene {
+    pub(super) scene: NativeOpticalScene,
+}
+
+impl NativeGasOpticalScene {
+    pub fn try_from_scene(
+        cx: &Cx<'_>,
+        scene: Scene,
+        ambient: NativeGasAmbient<'_>,
+        bindings: &[NativeOpticalBinding],
+        max_objects: usize,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        Ok(Self {
+            scene: NativeOpticalScene::try_from_scene_with_ambient(
+                cx,
+                scene,
+                NativeReferenceMedium::Molecular {
+                    material_identity: ambient.material_identity,
+                    wavelength_range_nm: ambient.wavelength_range_nm,
+                },
+                bindings,
+                max_objects,
+            )?,
+        })
+    }
+
+    /// The unchanged original geometry, including original physical blockers.
+    pub const fn geometry(&self) -> &InstanceScene {
+        self.scene.geometry()
+    }
+
+    pub fn medium_index(
+        &self,
+        medium: NativeOpticalMedium,
+    ) -> Result<usize, NativeOpticalSceneError> {
+        self.scene.medium_index(medium)
+    }
+
+    /// Original interior reference glass; the gas ambient returns `None` and
+    /// never fabricates a homogeneous optical law. Indices use `medium_index`.
+    pub fn medium(&self, index: usize) -> Option<&DielectricGlass> {
+        self.scene.medium(index)
+    }
+
+    /// Observe gas refraction and optional original interior thermo-optic
+    /// fields through the same native geometry and local boundary optics.
+    /// The ambient argument is mandatory; an ambient thermal binding would
+    /// duplicate its ownership and refuses. Original molecular material/band
+    /// mismatches refuse even at equal index or zero density. A newly accepted
+    /// frozen snapshot of the same material may be supplied for another batch.
+    ///
+    /// Source spatial support, dilute limits, wavelength domains and contact
+    /// collars remain authoritative. The gas field is not extrapolated into
+    /// vacuum, and internal discontinuities need their original event treatment.
+    /// With a composition field, its existing source-bound scattering adapter
+    /// can attach to `CurvedRayleighScene` using the unchanged field identity;
+    /// this coherent refraction view alone does not add scattered radiance.
+    pub fn with_curved_scene<R>(
+        &self,
+        cx: &Cx<'_>,
+        max_build_work: u64,
+        ambient: NativeGasAmbient<'_>,
+        thermal: &[NativeThermoOpticBinding<'_>],
+        observe: impl FnOnce(&CurvedPolarizedScene<'_>) -> R,
+    ) -> Result<R, NativeOpticalSceneError> {
+        cx.checkpoint()?;
+        match self.scene.media.first() {
+            Some(NativeReferenceMedium::Molecular {
+                material_identity,
+                wavelength_range_nm,
+            }) if *material_identity == ambient.material_identity
+                && *wavelength_range_nm == ambient.wavelength_range_nm => {}
+            _ => return Err(NativeOpticalSceneError::GasMaterialMismatch),
+        }
+        let mut media = reserved(self.scene.media.len())?;
+        media.push(ambient.field.native_medium(ambient.field_identity));
+        for medium in self.scene.media.iter().skip(1) {
+            cx.checkpoint()?;
+            media.push(SceneMedium::Homogeneous(
+                medium
+                    .glass()
+                    .ok_or(NativeOpticalSceneError::MissingGasAmbient)?,
+            ));
+        }
+        self.scene.bind_thermal_media(cx, &mut media, thermal)?;
+        self.scene
+            .with_native_media(cx, max_build_work, &media, observe)
+    }
+}
+
+#[cfg(test)]
+mod gas_tests;
 #[cfg(test)]
 mod tests;

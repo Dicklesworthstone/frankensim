@@ -7900,3 +7900,57 @@ controls retain the homogeneous reference limit, physical snapshot identity,
 explicit Hessian capability and source/domain/work refusals. These native Rust
 regressions are authored; this environment permits scoped parser/format checks
 and source/math review but does not provide native Cargo execution.
+
+## Original scenes with source-backed molecular gas ambient
+
+With `photometry` and `material-state`, `NativeGasOpticalScene` admits original
+scene geometry and materials with an actual molecular ambient. Its
+`NativeGasAmbient` can be constructed only from existing
+`MaterialGasRefractiveField` or `MaterialGasCompositionRefractiveField` owners,
+including an `IsobaricGasField` refraction binding. Material identity and source
+band come from those owners; no nominal glass, vacuum placeholder, fitted index
+or caller-asserted material identity is introduced. The distinct scene type
+does not expose ordinary `render_scene`/`into_scene` views that would lose the
+gas physics. Existing glass-scene APIs retain their behavior.
+
+Every gas scene/camera observation requires an explicit accepted ambient field.
+Its material identity and source band must match scene admission, even for
+numerically equal optics or local vacuum. Different accepted frozen snapshots
+of that same material may serve different batches. The native field identity
+remains the exact original source/snapshot identity. Interior homogeneous glass
+and optional reference-matched thermo-optic fields retain their original slots,
+surfaces and absorption; another ambient binding is duplicate ownership and
+refuses. Gas ambient has no fabricated reference glass.
+
+Fixed-composition density fields retain the original visible, nondispersive
+Lorentz--Lorenz approximation. Composition fields use their explicit source
+bands, including supported infrared dispersion, with the full mixture phase
+and group derivatives. First-order bindings refuse angular-bundle queries;
+differentiable bindings retain the actual density/component Hessians and both
+nonlinear chain-rule terms. A typed prepared-composition binding verifies its
+exact source snapshot and reuses the existing stack-owned molecular wavelength
+coefficients across stages, boundary segments and connection trials. Its one
+selected wavelength remains mandatory; source-band metadata is not a license
+to reuse prepared coefficients at another wavelength. No optical heap workspace,
+cache, finite-difference Hessian or independent gas EOS is added.
+
+Camera/source preparation is shared with the original native camera. Authored
+radiance calibration, exact thermal sources, reflection, source spectral support
+and emitting-host restrictions remain intact. Molecular true absorption is
+zero under these source owners. The same composition scattering field attaches
+directly to the existing `CurvedRayleighScene` and `CurvedRayleighCameraScene`
+using its unchanged refractive identity, so elastic collision and survival
+sampling are not double-counted as Beer absorption. Refraction alone does not
+claim the complete scattered radiance. Fields use world metres and their
+declared SI density bases/derivatives. Snapshot, dilute/EOS, spatial and spectral
+domains, contact collars, cancellation and native work limits remain binding.
+
+Four focused regression groups cover an isobaric thermal gradient bending the
+original camera onto an off-axis original source against an independent exact
+conserved-momentum solution; visible/infrared composition focusing combined with
+thermal glass through the actual original ball interfaces and detector;
+prepared/unprepared agreement and source-coupled elastic molecular camera
+collisions; and material, snapshot, capability, domain, duplicate, work and
+cancellation refusals. Native Rust execution is not available in the current
+implementation environment; parser/format checks and independent source/math
+review are recorded separately from the authored regressions.

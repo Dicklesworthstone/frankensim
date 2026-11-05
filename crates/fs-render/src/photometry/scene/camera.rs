@@ -6,7 +6,7 @@
 //! from the returned camera owner with their existing geometric and image budgets.
 
 #[cfg(feature = "material-state")]
-use super::NativeThermoOpticBinding;
+use super::{NativeGasAmbient, NativeGasOpticalScene, NativeThermoOpticBinding};
 use super::{NativeOpticalScene, NativeOpticalSceneError, reserved};
 use crate::camera::{Aperture, CameraError, PhysicalCamera};
 use crate::lighting::{AdmittedLighting, LightingError};
@@ -105,6 +105,37 @@ struct CameraSources<'a> {
     camera: PhysicalCamera,
     emitters: Vec<SurfaceEmitter>,
     environment: Option<EnvironmentRadiance<'a>>,
+}
+
+#[cfg(feature = "material-state")]
+impl NativeGasOpticalScene {
+    /// Original camera/source radiance through the explicitly selected accepted
+    /// molecular ambient, with optional original interior thermal-index fields.
+    /// Source calibration, geometry and reflection are shared with the ordinary
+    /// native camera; the gas field supplies the actual wavelength-dependent
+    /// phase/group law and spatial derivatives. It never supplies an absorption
+    /// or thermal-emission law that the molecular material does not own.
+    ///
+    /// Every query retains the source spectrum's own support and emitting-host
+    /// restrictions. `CurvedRayleighCameraScene` can compose this exact camera
+    /// with the original composition scattering field inside the callback;
+    /// the ambient's field identity already matches that native attachment.
+    /// Scattering then remains elastic transport, separate from true absorption.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_curved_camera<R>(
+        &self,
+        cx: &Cx<'_>,
+        max_build_work: u64,
+        calibration: NativeRadianceCalibration,
+        ambient: NativeGasAmbient<'_>,
+        thermal: &[NativeThermoOpticBinding<'_>],
+        observe: impl FnOnce(&CurvedCameraScene<'_, '_>, &PhysicalCamera) -> R,
+    ) -> Result<R, NativeCameraError> {
+        let sources = self.scene.camera_sources(cx, calibration)?;
+        self.with_curved_scene(cx, max_build_work, ambient, thermal, |scene| {
+            self.scene.observe_camera(cx, scene, &sources, observe)
+        })?
+    }
 }
 
 impl NativeOpticalScene {

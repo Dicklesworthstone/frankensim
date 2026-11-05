@@ -25,6 +25,9 @@
 //! `with_thermo_optic_camera` bind accepted thermal fields to these same medium
 //! references. Their native rays and bundles then see the actual local index,
 //! its analytic derivatives, group delay and original absorption.
+//! `NativeGasOpticalScene` admits an original molecular ambient separately;
+//! its observations require that source's accepted gas field and never expose
+//! an ordinary rendering view that would silently drop the ambient physics.
 
 use core::fmt;
 use std::sync::Arc;
@@ -53,7 +56,7 @@ pub use camera::{NativeCameraError, NativeRadianceCalibration};
 #[cfg(feature = "material-state")]
 mod fields;
 #[cfg(feature = "material-state")]
-pub use fields::NativeThermoOpticBinding;
+pub use fields::{NativeGasAmbient, NativeGasOpticalScene, NativeThermoOpticBinding};
 
 /// Stable identity for geometry that an ordinary tracer scene has not placed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +147,12 @@ pub enum NativeOpticalSceneError {
     ReferenceGlassMismatch {
         medium: NativeOpticalMedium,
     },
+    /// A source-backed gas ambient requires its original material field.
+    MissingGasAmbient,
+    /// A different molecular material cannot replace the admitted ambient.
+    GasMaterialMismatch,
+    /// Spectral preparation must belong to the same frozen physical field.
+    GasSnapshotMismatch,
     Geometry(InstanceError),
     Curved(CurvedSceneError),
     AllocationRefused,
@@ -175,12 +184,43 @@ impl fmt::Display for NativeOpticalSceneError {
 }
 impl std::error::Error for NativeOpticalSceneError {}
 
+#[derive(Clone, Copy)]
+enum NativeReferenceMedium {
+    Glass(DielectricGlass),
+    #[cfg(feature = "material-state")]
+    Molecular {
+        material_identity: ContentHash,
+        wavelength_range_nm: [f64; 2],
+    },
+}
+
+impl NativeReferenceMedium {
+    fn glass(&self) -> Option<&DielectricGlass> {
+        match self {
+            Self::Glass(glass) => Some(glass),
+            #[cfg(feature = "material-state")]
+            Self::Molecular { .. } => None,
+        }
+    }
+
+    fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        match self {
+            Self::Glass(glass) => glass.ior().wavelength_bounds_nm(),
+            #[cfg(feature = "material-state")]
+            Self::Molecular {
+                wavelength_range_nm: [lo, hi],
+                ..
+            } => (*lo, *hi),
+        }
+    }
+}
+
 /// One immutable scene shared by ordinary rendering and calibrated optics.
 /// Repeated observations borrow this owner; no mesh, chart or placement is rebuilt.
 pub struct NativeOpticalScene {
     render: Scene,
     geometry: InstanceScene,
-    media: Vec<DielectricGlass>,
+    media: Vec<NativeReferenceMedium>,
     interior_media: Vec<Option<usize>>,
     conductors: Vec<ConductorOptics>,
     reflectances: Vec<SpectralReflectance>,
@@ -206,6 +246,22 @@ impl NativeOpticalScene {
         cx: &Cx<'_>,
         scene: Scene,
         ambient: DielectricGlass,
+        bindings: &[NativeOpticalBinding],
+        max_objects: usize,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        Self::try_from_scene_with_ambient(
+            cx,
+            scene,
+            NativeReferenceMedium::Glass(ambient),
+            bindings,
+            max_objects,
+        )
+    }
+
+    fn try_from_scene_with_ambient(
+        cx: &Cx<'_>,
+        scene: Scene,
+        ambient: NativeReferenceMedium,
         bindings: &[NativeOpticalBinding],
         max_objects: usize,
     ) -> Result<Self, NativeOpticalSceneError> {
@@ -269,7 +325,7 @@ impl NativeOpticalScene {
                         return Err(NativeOpticalSceneError::MediumBudgetExceeded);
                     }
                     let index = media.len();
-                    media.push(glass);
+                    media.push(NativeReferenceMedium::Glass(glass));
                     Some(index)
                 } else {
                     None
@@ -424,7 +480,7 @@ impl NativeOpticalScene {
                             let emitter = DiffuseThermalEmitter::try_gray_in_band(
                                 instance.object_id(),
                                 surface,
-                                media[medium].ior().wavelength_bounds_nm(),
+                                media[medium].wavelength_bounds_nm(),
                             )
                             .map_err(|_| {
                                 NativeOpticalSceneError::InvalidMaterial { primitive: index }
@@ -515,7 +571,7 @@ impl NativeOpticalScene {
     /// Original physical medium at a resolved native index, including absorption.
     #[must_use]
     pub fn medium(&self, index: usize) -> Option<&DielectricGlass> {
-        self.media.get(index)
+        self.media.get(index).and_then(NativeReferenceMedium::glass)
     }
 
     /// Prepare the existing curved transport owner once for a batch of native
@@ -541,7 +597,11 @@ impl NativeOpticalScene {
         let mut media = reserved(self.media.len())?;
         for medium in &self.media {
             cx.checkpoint()?;
-            media.push(SceneMedium::Homogeneous(medium));
+            media.push(SceneMedium::Homogeneous(
+                medium
+                    .glass()
+                    .ok_or(NativeOpticalSceneError::MissingGasAmbient)?,
+            ));
         }
         Ok(media)
     }
