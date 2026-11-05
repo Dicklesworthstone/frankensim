@@ -14,6 +14,17 @@ fn owned_mixture_loads<'a>(
         .collect()
 }
 
+fn forced_coupled_mixture(flow: MixtureEuler3d) -> mixing::MolecularEuler3d<ConstantTransport> {
+    let (flow, molecular) = coupled_mixture(flow).into_parts();
+    // The complete coupled cap includes externally supplied forcing storage
+    // as well as the original SSP/RKL field, face and molecular scratch.
+    let bytes = mixing::MolecularEuler3d::required_stabilized_workspace_bytes(&flow, &molecular)
+        .unwrap()
+        .checked_add(flow.required_forcing_workspace_bytes().unwrap())
+        .unwrap();
+    mixing::MolecularEuler3d::new(flow, molecular, bytes, || false).unwrap()
+}
+
 // Independent realization observation in this fixture's authored quarter-turn.
 fn fluctuation(
     bridge: &MannOuBridge,
@@ -308,8 +319,8 @@ fn forced_species_molecular_bridges_keep_species_enthalpy_and_late_draw_transact
     for stabilized in [false, true] {
         let mut frame = bridge.frame(10_000, || false).unwrap();
         let mut direct = bridge.frame(10_000, || false).unwrap();
-        let mut flow = coupled_mixture(prepared_mixture(&inlet, &frame));
-        let mut native = coupled_mixture(prepared_mixture(&inlet, &frame));
+        let mut flow = forced_coupled_mixture(prepared_mixture(&inlet, &frame));
+        let mut native = forced_coupled_mixture(prepared_mixture(&inlet, &frame));
         let mut work = flow.flow().forcing_workspace(100_000).unwrap();
         let mut native_work = native.flow().forcing_workspace(100_000).unwrap();
         let step = |flow: &mut mixing::MolecularEuler3d<_>,
@@ -401,7 +412,7 @@ fn forced_species_molecular_bridges_keep_species_enthalpy_and_late_draw_transact
         close(report.conservation_residual.energy, 0.0, 3e-12);
         close(report.absolute_energy_residual_j, 0.0, 3e-10);
         let mut refused_frame = bridge.frame(10_000, || false).unwrap();
-        let mut refused = coupled_mixture(prepared_mixture(&inlet, &refused_frame));
+        let mut refused = forced_coupled_mixture(prepared_mixture(&inlet, &refused_frame));
         let mut refused_work = refused.flow().forcing_workspace(100_000).unwrap();
         let original = refused.flow().states().to_vec();
         let profile = refused
