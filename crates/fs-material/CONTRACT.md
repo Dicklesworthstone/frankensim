@@ -1,5 +1,34 @@
 # fs-material — CONTRACT
 
+## Tensile crack-plane initiation and elastic handoff
+
+`brittle::initiation::TensileInitiator` detects a maximum-principal-stress
+tensile crossing on an explicitly affine, previously elastic strain increment.
+It borrows the original isotropic elastic owner and uses the explicit tensile
+strength. Fixed-size Gershgorin/positive-definiteness screens keep ordinary
+elastic queries allocation-free; threshold uncertainty and the event plane use
+the existing checked native Jacobi eigensolver. Strain domain, stress/fraction
+resolution, bisection count and cancellation are explicit.
+
+Repeated principal tension has no unique plane. An explicit material-direction
+hint is projected into its principal eigenspace; missing or perpendicular hints
+refuse. The event reports its numerical fraction bracket and spectral residual.
+These are numerical resolution observations, not interval certificates.
+
+`TensileOnset::seed` hands off at the original increment start, retaining its
+elastic storage, then callers replay the actual increment through the original
+fixed-plane crack band. Exact material/strength agreement, matching plane,
+both endpoint strain domains, zero damage/dissipation, no prior frozen mixed
+mode, and stress/storage continuity are required. Virtual preload work is not
+charged again. No existing damaged history can be supplied to this initializer.
+
+G0/G1/G3/G4 coverage in `tests/brittle_initiation.rs` includes analytic and
+nonproportional onset, native fracture after conservative handoff, compression,
+rotation/scaling, repeated principal stresses and bounded refusal/cancellation.
+This tensile criterion does not select all-plane mixed-mode or crushing
+failure, evolve crack paths, integrate FE fracture events or change topology.
+It adds no experimental strength calibration.
+
 ## Brittle thermal weakening with retained fracture history
 
 `brittle::temperature` adds an explicit fixed-strain coefficient/history

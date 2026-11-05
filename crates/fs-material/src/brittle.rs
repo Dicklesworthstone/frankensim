@@ -53,6 +53,9 @@ pub mod source;
 /// History-preserving changes of source-defined thermal coefficients.
 pub mod temperature;
 
+/// Bounded tensile onset discovery and elastic-to-crack-band handoff.
+pub mod initiation;
+
 /// Explicit pure-mode strengths and fracture work. No values are inferred from
 /// a material name, hardness, flexural modulus of rupture or yield stress.
 #[derive(Clone, Copy, Debug, PartialEq)]
