@@ -1075,7 +1075,8 @@ reactions and work. Read-only response recovery adds no observation; there is no
 mutable mechanical escape or external stress injection into either history.
 
 Each gauge declares an uncracked nominal-stress location, fixed crack-plane
-normal, constant geometry factor and admitted crack-length interval. Physical
+normal and either constant geometry or a bounded log-log geometry-factor table
+with its admitted crack-length interval. Physical
 tensor shear is converted by the existing tensor-basis owner. Normal traction
 must be tensile; the norm of tangential plane traction must stay within the
 explicit Mode-I numerical allowance at every sample. The current crack's Kmax
@@ -1090,6 +1091,15 @@ every fixed typed query coordinate. Only calibration R and squared Delta-K
 coordinates are excluded; the runtime law enforces their source domains.
 Custom source temperature axes remain intact. These checks retain original
 calibration evidence without establishing validated component life.
+
+The original immutable geometry and its context remain inspectable through
+`geometry(gauge)`. The shared material owner evaluates the changing factor
+during advancement and forecasting; Y is not frozen at the initial crack.
+Constant geometry retains constant work, while tabulated evolution visits only
+crossed intervals and checks all intermediate intensity extrema. Native
+forecast cancellation propagates through these intervals. Table refinement
+and geometric applicability remain caller obligations, and the original
+mechanical stiffness, native stress and physical motion remain unchanged.
 
 A cycle starts at a resolved physical extremum and contains one monotone
 outward segment and one monotone return segment, with plateaus admitted.
@@ -1117,6 +1127,8 @@ block preserves every crack and the representative window for a bounded retry.
 The inertial wrapper intentionally has no repeated-cycle operation. The runnable
 `fatigue_crack_growth --demo CYCLES` example uses three native solves and clearly
 synthetic coefficients, and prints an independent analytical m=2 comparison.
+Its optional `--varying-geometry` mode exercises a declared Y proportional to
+the square root of crack length and compares the independent rational solution.
 
 Both native owners expose a read-only `cycles_to_length` forecast for a gauge
 whose representative cycle is fully sampled but not yet explicitly consumed.
@@ -1137,7 +1149,7 @@ excursions and then prevents further samples. Static holds produce no crack
 extension; positive ranges below the calibrated Paris regime refuse rather
 than becoming an invented fatigue-arrest threshold.
 
-This is fixed-temperature, small-strain, tensile Mode-I, constant-Y LEFM
+This is fixed-temperature, small-strain, tensile Mode-I nominal-stress LEFM
 postprocessing. Small-scale yielding, geometric applicability and adequate
 spatial/time resolution of stress extrema remain explicit caller obligations.
 The mesh has no advancing crack surface, and growth does not change stiffness,

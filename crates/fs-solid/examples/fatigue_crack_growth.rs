@@ -1,10 +1,12 @@
 //! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000
+//! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000 --varying-geometry
 //!
 //! SYNTHETIC Paris-law demonstration; coefficients are not measured material data.
 //! Three native solves resolve one tensile 2 -> 8 -> 2 MPa cycle. The caller then
 //! explicitly declares identical quasistatic cycles with fixed material, thermal
-//! state, supports and uncracked mechanics. Constant Y=1 is a declared geometry
-//! approximation: a denotes crack half-length; growth does not change stiffness.
+//! state, supports and uncracked mechanics. Geometry is either constant Y=1 or
+//! an explicitly synthetic Y(a)=sqrt(a/a0) table. Both have independent analytic
+//! reference solutions. Here a is crack half-length; growth leaves stiffness fixed.
 
 use std::sync::Arc;
 
@@ -13,7 +15,8 @@ use fs_blake3::ContentHash;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::fatigue::FatigueScope;
 use fs_material::fatigue::crack_growth::{
-    ConstantGeometryCrack, CrackGrowthLimits, ParisDomain, ParisLaw, ParisParameters,
+    ConstantGeometryCrack, CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext,
+    CrackGrowthLimits, ParisDomain, ParisLaw, ParisParameters, TabulatedCrackGeometry,
 };
 use fs_solid::fatigue::crack_growth::{
     CrackStressTolerance, TetCrackGrowthConfig, TetCrackGrowthGauge, TetCrackGrowthPath,
@@ -32,11 +35,15 @@ const MAXIMUM_STRESS_PA: f64 = 8e6;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 2 || args[0] != "--demo" {
+    if !(2..=3).contains(&args.len())
+        || args[0] != "--demo"
+        || args.get(2).is_some_and(|flag| flag != "--varying-geometry")
+    {
         return Err(
-            "usage: fatigue_crack_growth --demo CYCLES (1..=1000000); synthetic data only".into(),
+            "usage: fatigue_crack_growth --demo CYCLES [--varying-geometry] (1..=1000000); synthetic data only".into(),
         );
     }
+    let varying_geometry = args.len() == 3;
     let cycles: u64 = args[1].parse()?;
     if !(1..=1_000_000).contains(&cycles) {
         return Err("CYCLES must lie in 1..=1000000".into());
@@ -66,7 +73,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source_reference: "SYNTHETIC m=2 arithmetic fixture; not measured".into(),
             material: "synthetic elastic demonstration".into(),
             process: "synthetic".into(),
-            surface_and_geometry: "declared constant Y=1; a is crack half-length".into(),
+            surface_and_geometry: if varying_geometry {
+                "synthetic Y(a)=sqrt(a/a0) table; a is crack half-length".into()
+            } else {
+                "declared constant Y=1; a is crack half-length".into()
+            },
             environment: "synthetic fixed conditions".into(),
             load_basis: "tensile Mode-I full stress-intensity range".into(),
             temperature_k: 300.0,
@@ -88,17 +99,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         absolute_stress_pa: 1e-5,
         relative: 1e-9,
     };
+    let crack_geometry = if varying_geometry {
+        CrackGeometry::Tabulated(Arc::new(TabulatedCrackGeometry::new(
+            CrackGeometryTableContext {
+                source_reference: "SYNTHETIC power profile; not a calibrated component geometry"
+                    .into(),
+                crack_length_convention: "a is crack half-length in metres; a0=0.001 m".into(),
+                nominal_stress_basis:
+                    "uncracked uniform tensile stress on the fixed x-normal plane".into(),
+            },
+            [0.5_f64, 1.0, 1.005, 2.0, 10.0]
+                .into_iter()
+                .map(|ratio| CrackGeometryPoint {
+                    crack_length_m: ratio * INITIAL_LENGTH_M,
+                    geometry_factor: ratio.sqrt(),
+                })
+                .collect(),
+            5,
+        )?))
+    } else {
+        ConstantGeometryCrack {
+            geometry_factor: 1.0,
+            minimum_length_m: 1e-5,
+            maximum_length_m: 0.01,
+        }
+        .into()
+    };
     let gauge = TetCrackGrowthGauge {
         element: 0,
         normal_in_mesh_frame: [1.0, 0.0, 0.0],
         material_state_identity: [104; 32],
         material_source: None,
         law,
-        geometry: ConstantGeometryCrack {
-            geometry_factor: 1.0,
-            minimum_length_m: 1e-5,
-            maximum_length_m: 0.01,
-        },
+        geometry: crack_geometry,
         initial_length_m: INITIAL_LENGTH_M,
         limits: CrackGrowthLimits {
             maximum_blocks: 1,
@@ -134,12 +167,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let steps = path.close_repeated_cycle(cycles, &cx)?;
         let step = &steps[0];
         path.finish(&cx)?;
-        // Independent m=2 solution: da/dN = rate * (Y*DeltaStress/Kref)^2 * pi*a.
+        // Independent m=2 integrals: constant Y gives da/dN=k*a, while
+        // Y(a)=sqrt(a/a0) gives da/dN=k*a^2/a0.
         let normalized_range = (MAXIMUM_STRESS_PA - MINIMUM_STRESS_PA) / REFERENCE_DELTA_K;
-        let expected = INITIAL_LENGTH_M
-            * (REFERENCE_RATE * normalized_range.powi(2) * std::f64::consts::PI * cycles as f64).exp();
+        let exposure = REFERENCE_RATE * normalized_range.powi(2) * std::f64::consts::PI * cycles as f64;
+        let expected = if varying_geometry {
+            INITIAL_LENGTH_M / (1.0 - exposure)
+        } else {
+            INITIAL_LENGTH_M * exposure.exp()
+        };
         println!("SYNTHETIC demonstration, not validated component life");
-        println!("Declared identical quasistatic cycles; uncracked mechanics and Y=1 stay fixed.");
+        println!("Declared identical quasistatic cycles; uncracked mechanics stay fixed.");
+        println!("geometry={}", if varying_geometry {
+            "declared log-log table Y(a)=sqrt(a/a0), evaluated as the crack grows"
+        } else {
+            "declared constant Y=1"
+        });
         println!("native_samples={} repeated_full_cycles={cycles}", path.observed_samples());
         println!("normal_stress_min_pa={MINIMUM_STRESS_PA:.6e} normal_stress_max_pa={MAXIMUM_STRESS_PA:.6e}");
         println!("initial_crack_length_m={:.12e} final_crack_length_m={:.12e}",

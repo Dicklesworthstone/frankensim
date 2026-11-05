@@ -360,7 +360,10 @@ fn g0_calibration_scope_and_evolution_budgets_are_explicit() {
     assert_eq!(model.domain().maximum_load_ratio, 0.8);
     let evolution = ParisCrackGrowth::new(model, geometry(), INITIAL_LENGTH_M, limits()).unwrap();
     assert_eq!(evolution.law().scope(), &scope());
-    assert_eq!(evolution.geometry().geometry_factor, GEOMETRY_FACTOR);
+    assert_eq!(
+        evolution.geometry().factor_at(INITIAL_LENGTH_M).unwrap(),
+        GEOMETRY_FACTOR
+    );
 
     let mut missing_source = scope();
     missing_source.source_reference.clear();

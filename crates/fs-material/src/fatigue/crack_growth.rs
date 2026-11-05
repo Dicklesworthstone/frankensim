@@ -7,10 +7,11 @@
 //! for the conventional Paris coefficient C. Parameters are caller-supplied
 //! empirical calibration, with the existing material/process/environment scope.
 //!
-//! For a declared constant geometry factor, `K = Y sigma sqrt(pi a)`. Each
-//! constant-amplitude block integrates the evolving crack length analytically,
-//! including the exponential exponent-two case. Work is constant per block,
-//! independent of its cycle count. No frozen-K/Euler approximation is used.
+//! Stress intensity is `K = Y(a) sigma sqrt(pi a)`. Constant geometry retains
+//! an analytical O(1) fast path. Declared tabulated geometry uses log-log Y(a)
+//! interpolation and analytically integrates each crossed power-law interval.
+//! Work depends on crossed geometry intervals, not the cycle count. No
+//! frozen-K/Euler approximation or cycle-by-cycle loop is used.
 //! Blocks stay in physical order; completed rainflow cycles must NOT be used
 //! as a reordered crack-growth spectrum.
 //! A read-only inverse forecasts additional exposure to a declared larger crack
@@ -21,7 +22,7 @@
 //! Only nonnegative tensile stress ratios within declared support are admitted.
 //! The lower fit bound is NOT a threshold: below-fit cycles refuse. No crack
 //! closure, overload retardation, short-crack initiation, mixed-mode growth,
-//! temperature transfer, evolving Y, mesh crack, or stiffness/heat law is
+//! temperature transfer, resolved mesh crack, or stiffness/heat law is
 //! inferred. The upper K bound is a declared validity cutoff, not a fracture
 //! toughness measurement or a failure certificate.
 //!
@@ -37,6 +38,11 @@ use super::FatigueScope;
 
 /// Original material-card Paris calibration and retained query evidence.
 pub mod source;
+
+mod geometry;
+pub use geometry::{
+    CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext, TabulatedCrackGeometry,
+};
 
 /// A normalized Paris fit; lengths are metres and N counts full cycles.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -162,6 +168,12 @@ pub enum CrackGrowthError {
         length_m: f64,
         minimum: f64,
         maximum: f64,
+    },
+    /// The complete requested block would continue beyond the last declared
+    /// geometry point. No crack length is extrapolated or partially published.
+    GeometrySupportExhausted {
+        length_m: f64,
+        remaining_cycles: f64,
     },
     /// The requested block reaches the mathematical finite-cycle singularity.
     /// This is outside the finite geometry/fit domain, not a rupture prediction.
@@ -360,7 +372,7 @@ impl ConstantGeometryCrack {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParisCrackGrowth {
     law: Arc<ParisLaw>,
-    geometry: ConstantGeometryCrack,
+    geometry: CrackGeometry,
     limits: CrackGrowthLimits,
     state: CrackGrowthState,
 }
@@ -368,10 +380,11 @@ pub struct ParisCrackGrowth {
 impl ParisCrackGrowth {
     pub fn new(
         law: Arc<ParisLaw>,
-        geometry: ConstantGeometryCrack,
+        geometry: impl Into<CrackGeometry>,
         initial_length_m: f64,
         limits: CrackGrowthLimits,
     ) -> Result<Self, CrackGrowthError> {
+        let geometry = geometry.into();
         geometry.validate()?;
         geometry.check_length(initial_length_m)?;
         if limits.maximum_blocks == 0 || !positive(limits.maximum_cycles) {
@@ -394,8 +407,8 @@ impl ParisCrackGrowth {
     pub fn law(&self) -> &ParisLaw {
         &self.law
     }
-    pub fn geometry(&self) -> ConstantGeometryCrack {
-        self.geometry
+    pub fn geometry(&self) -> &CrackGeometry {
+        &self.geometry
     }
     pub fn limits(&self) -> CrackGrowthLimits {
         self.limits
@@ -422,10 +435,10 @@ impl ParisCrackGrowth {
     }
 
     /// Additional full-cycle equivalents to a strictly larger declared length,
-    /// assuming these fixed tensile extrema and constant Y throughout.
+    /// assuming these fixed tensile extrema and the declared geometry law.
     ///
-    /// This read-only O(1) inverse checks both endpoints of the monotone interval
-    /// against the same R, Delta-K, maximum-K and geometry limits as advancement.
+    /// This read-only inverse checks every crossed geometry interval against
+    /// the same R, Delta-K, maximum-K and geometry limits as advancement.
     /// It requires one remaining block and representable cumulative exposure
     /// within the cycle budget, without consuming either. A zero range refuses
     /// rather than implying infinite life. Nonrepresentable inverse arithmetic,
@@ -436,6 +449,21 @@ impl ParisCrackGrowth {
         maximum_pa: f64,
         target_length_m: f64,
     ) -> Result<CrackGrowthForecast, CrackGrowthError> {
+        self.cycles_to_length_with_cancel(minimum_pa, maximum_pa, target_length_m, &mut || false)
+    }
+
+    /// Cancellation-aware forecast, polling before/after the query and at each
+    /// crossed table interval. Constant geometry retains constant work.
+    pub fn cycles_to_length_with_cancel(
+        &self,
+        minimum_pa: f64,
+        maximum_pa: f64,
+        target_length_m: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<CrackGrowthForecast, CrackGrowthError> {
+        if cancelled() {
+            return Err(CrackGrowthError::Cancelled);
+        }
         self.geometry.check_length(target_length_m)?;
         let a = self.state.crack_length_m;
         if target_length_m <= a {
@@ -459,34 +487,23 @@ impl ParisCrackGrowth {
         self.law.check_delta_k(target_delta_k_pa_sqrt_m)?;
         self.law.check_maximum_k(target_maximum_k_pa_sqrt_m)?;
 
-        // q=1-m/2 and L=ln(target/a): N=(a/rate)*expm1(q*L)/q.
-        // Corrected log1p retains even a one-ULP extension; expm1 supplies the
-        // continuous m=2 limit without subtracting two nearly equal powers.
-        let extension = (target_length_m - a) / a;
-        let log_growth = if extension.is_finite() {
-            extension * log1p_over_x(extension)
-        } else {
-            det::ln(target_length_m) - det::ln(a)
+        let additional_cycles = match &self.geometry {
+            CrackGeometry::Constant(_) => {
+                power_cycles(a, target_length_m, rate, 0.5 * self.law.parameters.exponent)?
+            }
+            CrackGeometry::Tabulated(table) => self.tabulated_cycles(
+                table,
+                minimum_pa,
+                maximum_pa,
+                target_length_m,
+                rate,
+                cancelled,
+            )?,
         };
-        let q = 1.0 - 0.5 * self.law.parameters.exponent;
-        let normalized_cycles = if q == 0.0 {
-            log_growth
-        } else {
-            det::expm1(q * log_growth) / q
-        };
-        let relative_rate = rate / a;
-        let additional_cycles = normalized_cycles / relative_rate;
-        let forward_time = relative_rate * additional_cycles;
-        let forward_argument = q * forward_time;
-        if !positive(relative_rate)
-            || !positive(additional_cycles)
-            || !positive(forward_time)
-            || !forward_argument.is_finite()
-            || forward_argument <= -1.0
-        {
-            return Err(CrackGrowthError::Arithmetic);
-        }
         self.checked_exposure(additional_cycles)?;
+        if cancelled() {
+            return Err(CrackGrowthError::Cancelled);
+        }
         Ok(CrackGrowthForecast {
             before: self.state,
             target_length_m,
@@ -512,7 +529,7 @@ impl ParisCrackGrowth {
         if cancelled() {
             return Err(CrackGrowthError::Cancelled);
         }
-        let step = self.preview(cycle)?;
+        let step = self.preview(cycle, cancelled)?;
         if cancelled() {
             return Err(CrackGrowthError::Cancelled);
         }
@@ -568,7 +585,11 @@ impl ParisCrackGrowth {
         Ok((blocks, cycles))
     }
 
-    fn preview(&self, cycle: StressCycle) -> Result<CrackGrowthStep, CrackGrowthError> {
+    fn preview(
+        &self,
+        cycle: StressCycle,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<CrackGrowthStep, CrackGrowthError> {
         let range_pa = stress_range(cycle.minimum_pa, cycle.maximum_pa)?;
         let (blocks, cycles) = self.checked_exposure(cycle.cycles)?;
         let a = self.state.crack_length_m;
@@ -581,26 +602,13 @@ impl ParisCrackGrowth {
         } else {
             let ratio = cycle.minimum_pa / cycle.maximum_pa;
             let rate = self.law.growth_rate(initial_delta_k_pa_sqrt_m, ratio)?;
-            let t = (rate / a) * cycle.cycles;
-            if !positive(t) {
-                return Err(CrackGrowthError::Arithmetic);
-            }
-            let q = 1.0 - 0.5 * self.law.parameters.exponent;
-            let x = q * t;
-            if x <= -1.0 {
-                return Err(CrackGrowthError::GrowthSingularity);
-            }
-            if !x.is_finite() {
-                return Err(CrackGrowthError::Arithmetic);
-            }
-            // Integrating da/dN = rate*(a/a_initial)^(m/2) gives
-            // ln(a_next/a_initial) = ln(1+q*t)/q. The continuous q=0 limit
-            // is t; this form also stays accurate for exponents near two.
-            let log_growth = t * log1p_over_x(x);
-            let next = if log_growth < 0.5 {
-                a + a * det::expm1(log_growth)
-            } else {
-                det::exp(det::ln(a) + log_growth)
+            let next = match &self.geometry {
+                CrackGeometry::Constant(_) => {
+                    power_length(a, rate, 0.5 * self.law.parameters.exponent, cycle.cycles)?
+                }
+                CrackGeometry::Tabulated(table) => {
+                    self.tabulated_length(table, cycle, rate, cancelled)?
+                }
             };
             self.geometry.check_length(next)?;
             if !next.is_finite() || next <= a {
@@ -612,8 +620,9 @@ impl ParisCrackGrowth {
         let final_maximum_k_pa_sqrt_m = self.geometry.intensity(next_length, cycle.maximum_pa)?;
         self.law.check_maximum_k(final_maximum_k_pa_sqrt_m)?;
         if range_pa > 0.0 {
-            // a and both intensities increase monotonically throughout this
-            // block, so endpoint checks admit the complete growth interval.
+            // Constant-Y intensities increase with length; table evolution has
+            // additionally checked all crossed interval extrema, including any
+            // interior intensity peak or valley.
             self.law.check_delta_k(final_delta_k_pa_sqrt_m)?;
         }
         Ok(CrackGrowthStep {
@@ -628,6 +637,79 @@ impl ParisCrackGrowth {
             initial_maximum_k_pa_sqrt_m,
             final_maximum_k_pa_sqrt_m,
         })
+    }
+}
+
+/// Exact evolution for da/dN = rate_at_a * (length/a)^power. Table geometry
+/// changes `power` to m*(1/2 + d ln(Y)/d ln(a)); the constant-Y path is m/2.
+fn power_length(a: f64, rate: f64, power: f64, cycles: f64) -> Result<f64, CrackGrowthError> {
+    let t = (rate / a) * cycles;
+    let q = 1.0 - power;
+    if !positive(t) || !q.is_finite() {
+        return Err(CrackGrowthError::Arithmetic);
+    }
+    let x = q * t;
+    if x <= -1.0 {
+        return Err(CrackGrowthError::GrowthSingularity);
+    }
+    if !x.is_finite() {
+        return Err(CrackGrowthError::Arithmetic);
+    }
+    let log_growth = t * log1p_over_x(x);
+    Ok(if log_growth < 0.5 {
+        a + a * det::expm1(log_growth)
+    } else {
+        det::exp(det::ln(a) + log_growth)
+    })
+}
+
+/// Integral to an interval boundary. Positive infinity means a finite block
+/// cannot reach that boundary; the caller can still evolve within the interval.
+fn power_cycles_to_boundary(
+    a: f64,
+    target: f64,
+    rate: f64,
+    power: f64,
+) -> Result<f64, CrackGrowthError> {
+    let q = 1.0 - power;
+    let log_growth = positive_log_ratio(a, target);
+    let relative_rate = rate / a;
+    if !q.is_finite() || !positive(log_growth) || !positive(relative_rate) {
+        return Err(CrackGrowthError::Arithmetic);
+    }
+    let normalized = if q == 0.0 {
+        log_growth
+    } else {
+        det::expm1(q * log_growth) / q
+    };
+    let cycles = normalized / relative_rate;
+    if cycles.is_nan() || cycles <= 0.0 {
+        return Err(CrackGrowthError::Arithmetic);
+    }
+    Ok(cycles)
+}
+
+fn power_cycles(a: f64, target: f64, rate: f64, power: f64) -> Result<f64, CrackGrowthError> {
+    let cycles = power_cycles_to_boundary(a, target, rate, power)?;
+    let forward_time = (rate / a) * cycles;
+    let forward_argument = (1.0 - power) * forward_time;
+    if !positive(cycles)
+        || !positive(forward_time)
+        || !forward_argument.is_finite()
+        || forward_argument <= -1.0
+    {
+        return Err(CrackGrowthError::Arithmetic);
+    }
+    Ok(cycles)
+}
+
+/// ln(to/from), keeping adjacent representable values and wide ratios.
+fn positive_log_ratio(from: f64, to: f64) -> f64 {
+    let relative = (to - from) / from;
+    if relative.is_finite() && relative > -1.0 {
+        relative * log1p_over_x(relative)
+    } else {
+        det::ln(to) - det::ln(from)
     }
 }
 

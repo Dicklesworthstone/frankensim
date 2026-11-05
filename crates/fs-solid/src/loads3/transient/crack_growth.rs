@@ -4,7 +4,7 @@
 //! receives initial and accepted native stresses, including free vibration.
 //! No zero-load static replacement, skipped native step, mutable-run escape or
 //! external stress trace can alter its history. All fixed-temperature,
-//! nominal-stress, constant-Y and simple-cycle restrictions remain in force.
+//! nominal-stress, bounded-geometry and simple-cycle restrictions remain in force.
 
 use super::response::TransientResponse3;
 use super::{TetTransientRun3, TransientStep3};
@@ -15,7 +15,7 @@ use crate::loads3::TetLoadCase3;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::crack_growth::{
-    CrackGrowthForecast, CrackGrowthState, CrackGrowthStep, ParisLaw,
+    CrackGeometry, CrackGrowthForecast, CrackGrowthState, CrackGrowthStep, ParisLaw,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
 
@@ -89,6 +89,9 @@ impl<'g, 'm, 'p, 's> TetTransientCrackGrowthRun3<'g, 'm, 'p, 's> {
     }
     pub fn law(&self, gauge: usize) -> Option<&ParisLaw> {
         self.observation.law(gauge)
+    }
+    pub fn geometry(&self, gauge: usize) -> Option<&CrackGeometry> {
+        self.observation.geometry(gauge)
     }
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         self.observation.material_source(gauge)

@@ -244,18 +244,32 @@ coordinate; only calibration R and squared Delta-K are excluded from operating
 context matching. No missing growth data, toughness, threshold or measured
 authority is inferred from unrelated material properties.
 
-For a caller-declared constant geometry factor, `K=Y*sigma*sqrt(pi*a)`.
-Constant-amplitude blocks integrate evolving crack length analytically for
-all positive exponents, including the exponential m=2 limit. Work and storage
-are constant per block, independent of cycle count. Ordered spectra preserve
-their input order, and clones retain the complete accepted state. This
-memoryless Paris law supplies no overload/retardation sequence interaction.
+`CrackGeometry` retains either constant Y or an immutable, bounded original
+table of Y versus crack length. Both use `K=Y(a)*sigma*sqrt(pi*a)`. The constant
+case retains its analytical O(1) path, including the exponential m=2 limit.
+`TabulatedCrackGeometry` retains the original source reference, crack-length
+convention, nominal-stress basis and all points without sorting or repairing
+them. Within each log-log interval, `Y=Y0*(a/a0)^s`, so the Paris growth rate is
+proportional to `a^[m*(s+1/2)]` and integrates analytically. Increasing,
+constant and decreasing intensities are supported. Work is bounded by crossed
+intervals, independent of cycle count; point caps bound allocation and interval
+work, and cancellation is polled at construction and interval boundaries.
+There is no extrapolation. Geometry-table interpolation and adequacy of its
+resolution remain declared model approximations, not certified error bounds.
+Ordered spectra preserve their input order, and clones retain the complete
+accepted state with shared immutable geometry. This memoryless Paris law
+supplies no overload/retardation sequence interaction.
 It must not consume rainflow completion order as a chronological spectrum.
 
 Positive-range cycles require the supplied tensile R interval and Paris-region
 range bounds. Every sample can be checked against the current K limit before
-cycle closure. Growth rechecks the complete monotone interval through its
-endpoints, including the declared crack-length and exclusive upper-K limits.
+cycle closure. Growth checks every crossed interval's endpoints, including
+interior intensity peaks or valleys of the complete geometry table, against
+the declared fitted range and exclusive upper-K limits. Advancing beyond the
+last geometry point reports the supported length and unconsumed exposure;
+it publishes no partial extension. Forecasting and advancement use the same
+compensated cumulative interval counts, so forecasts reach original knots
+without tolerance-based clipping. Nonrepresentable interval counts refuse.
 Zero-range exposure adds no fatigue growth but still checks static K.
 The lower fit bound is not a threshold: unsupported low loads refuse. Blocks,
 spectra, cancellation and failed endpoint admission publish no partial growth.
@@ -263,7 +277,9 @@ spectra, cancellation and failed endpoint admission publish no partial growth.
 `ParisCrackGrowth::cycles_to_length` provides a read-only analytical forecast
 to a caller-declared length strictly above the accepted crack length, under
 fixed tensile stress extrema. It returns fractional additional full cycles and
-both endpoint stress intensities, with constant work and storage. The inverse
+both endpoint stress intensities, with constant work for constant Y and bounded
+interval traversal for tabulated Y. `cycles_to_length_with_cancel` exposes the
+same cancellation-aware calculation to native observers. The inverse
 retains the m=2 limit and tiny relative extensions without subtracting nearly
 equal powers. Geometry, R, Delta-K and exclusive maximum-K support must hold
 over the complete interval. One block and the predicted cycles must fit the
@@ -279,7 +295,7 @@ retention, static and evolving-domain refusals, budgets and rollback. The
 formula follows NASA-HDBK-5010 Volume 2 Revision A §7.3 and AFGROW DTD Handbook
 §5.1.2. These synthetic checks verify implementation, not component life.
 This lane supplies no inferred crack initiation, closure/compression correction,
-mixed-mode growth, thermal transfer, evolving geometry factor, resolved mesh
+mixed-mode growth, thermal transfer, resolved mesh
 crack, stiffness degradation, heat, toughness measurement or rupture guarantee.
 
 ## Objective small-strain magnitude

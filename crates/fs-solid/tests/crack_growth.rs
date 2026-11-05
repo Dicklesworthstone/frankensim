@@ -16,8 +16,9 @@ use fs_material::fatigue::crack_growth::source::{
     ParisProperty, ParisSourceRequest, STRESS_INTENSITY_SQUARED_DIMS, resolve_paris,
 };
 use fs_material::fatigue::crack_growth::{
-    ConstantGeometryCrack, CrackGrowthError, CrackGrowthLimits, ParisDomain, ParisLaw,
-    ParisParameters,
+    ConstantGeometryCrack, CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext,
+    CrackGrowthError, CrackGrowthLimits, ParisDomain, ParisLaw, ParisParameters,
+    TabulatedCrackGeometry,
 };
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -143,7 +144,8 @@ fn gauge() -> TetCrackGrowthGauge {
             geometry_factor: 1.0,
             minimum_length_m: 1e-5,
             maximum_length_m: 0.01,
-        },
+        }
+        .into(),
         initial_length_m: INITIAL_A,
         limits: CrackGrowthLimits {
             maximum_blocks: 100,
@@ -1142,5 +1144,158 @@ fn g0_sourced_native_paris_retains_original_card_and_refuses_foreign_operating_c
                 ))
             ));
         }
+    });
+}
+
+fn square_root_crack_geometry() -> CrackGeometry {
+    // Log-log interpolation reproduces this declared power profile exactly.
+    // The narrow first interval forces even one native cycle to cross a knot.
+    let points = [0.5_f64, 1.0, 1.005, 2.0, 4.0]
+        .into_iter()
+        .map(|ratio| CrackGeometryPoint {
+            crack_length_m: ratio * INITIAL_A,
+            geometry_factor: ratio.sqrt(),
+        })
+        .collect();
+    CrackGeometry::Tabulated(Arc::new(
+        TabulatedCrackGeometry::new(
+            CrackGeometryTableContext {
+                source_reference: "synthetic Y(a)=sqrt(a/a0) profile; not measured".into(),
+                crack_length_convention: "a is crack half-length in metres; a0=0.001 m".into(),
+                nominal_stress_basis: "uncracked tensile stress on the declared fixed plane".into(),
+            },
+            points,
+            5,
+        )
+        .unwrap(),
+    ))
+}
+
+fn analytical_square_root_geometry_length(cycles: f64) -> f64 {
+    // Independent m=2 integral: Y^2=a/a0 gives da/dN=(k/a0)*a^2,
+    // where k=(1e-4/1e12)*pi*(6 MPa)^2. Hence 1/a=1/a0-k*N/a0.
+    let k = 1e-16 * std::f64::consts::PI * 6e6 * 6e6;
+    INITIAL_A / (1.0 - k * cycles)
+}
+
+#[test]
+fn g1_native_tabulated_geometry_crosses_knots_with_analytical_growth_and_forecast() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed = fixed();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let profile = square_root_crack_geometry();
+        let mut selected = gauge();
+        selected.geometry = profile.clone();
+        let mut path = path(&problem, &thermal, vec![selected], cx);
+        assert_eq!(path.geometry(0), Some(&profile));
+        for (index, stress) in [2e6, 8e6, 2e6].into_iter().enumerate() {
+            let sample = path
+                .advance(index as f64, &load(&geometry, stress, cx), cx)
+                .unwrap();
+            close(sample.normal_stress_pa[0], stress, 1e-6);
+            assert_eq!(sample.cracks[0].crack_length_m, INITIAL_A);
+        }
+        let before = path.states();
+        let expected = analytical_square_root_geometry_length(60.0);
+        assert!(expected > 2.0 * INITIAL_A);
+        let forecast = path.cycles_to_length(0, expected, cx).unwrap();
+        close(forecast.additional_cycles, 60.0, 1e-9);
+        assert_eq!(forecast.before, before[0]);
+        assert_eq!(path.states(), before);
+        let completed = path.close_repeated_cycle(60, cx).unwrap();
+        close(completed[0].after.crack_length_m, expected, 2e-16);
+        let initial_delta_k = 6e6 * (std::f64::consts::PI * INITIAL_A).sqrt();
+        close(
+            completed[0].initial_delta_k_pa_sqrt_m,
+            initial_delta_k,
+            1e-8,
+        );
+        close(
+            completed[0].final_delta_k_pa_sqrt_m,
+            initial_delta_k * expected / INITIAL_A,
+            1e-7,
+        );
+        assert_eq!(completed[0].after.cycles, 60.0);
+        assert_eq!(completed[0].after.blocks, 1);
+        assert_eq!(path.observed_samples(), 3);
+        assert_eq!(path.last_time_s(), Some(2.0));
+        assert_eq!(path.geometry(0), Some(&profile));
+        assert_eq!(path.finish(cx).unwrap(), path.states());
+    });
+}
+
+#[test]
+fn g1_inertial_cycles_keep_original_motion_while_crack_geometry_evolves() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed = fixed();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let forcing = load(&geometry, 5e6, cx);
+        let mut initial = ZERO;
+        initial[1][0] = 2e6 / 200e9;
+        let mut original = forcing
+            .begin_transient(
+                &problem,
+                Some(TetThermalStrainField::Uniform(&thermal)),
+                0.0,
+                &initial,
+                &ZERO,
+                TransientConfig3::default(),
+                cx,
+            )
+            .unwrap();
+        let profile = square_root_crack_geometry();
+        let mut selected = gauge();
+        selected.geometry = profile.clone();
+        let mut observed = original
+            .clone()
+            .with_crack_growth(FRAME, vec![selected], config(), cx)
+            .unwrap();
+        let mut checkpoint = observed.clone();
+        assert_eq!(observed.geometry(0), Some(&profile));
+        let h = 2.0 * (std::f64::consts::PI / 32.0).tan() / (10.0_f64 * 200e9 / 7800.0).sqrt();
+        let mut minimum: f64 = 2e6;
+        let mut maximum: f64 = 2e6;
+        for step in 1..=32 {
+            let expected_mechanics = original.advance(&forcing, h, cx).unwrap();
+            let actual = if step == 32 {
+                observed.advance_and_close_cycle(&forcing, h, cx).unwrap()
+            } else {
+                observed.advance(&forcing, h, cx).unwrap()
+            };
+            assert_eq!(actual.mechanics, expected_mechanics);
+            assert_eq!(
+                actual.response,
+                original.recover_response(FRAME, 0.01, cx).unwrap()
+            );
+            minimum = minimum.min(actual.normal_stress_pa[0]);
+            maximum = maximum.max(actual.normal_stress_pa[0]);
+        }
+        close(minimum, 2e6, 0.01);
+        close(maximum, 8e6, 0.01);
+        close(
+            observed.states()[0].crack_length_m,
+            analytical_square_root_geometry_length(1.0),
+            2e-16,
+        );
+        assert_eq!(observed.states()[0].cycles, 1.0);
+        assert_eq!(observed.states()[0].blocks, 1);
+        assert_eq!(observed.observed_samples(), 33);
+        assert_eq!(observed.geometry(0), Some(&profile));
+        assert_eq!(observed.mechanics().state(), original.state());
+        for step in 1..=32 {
+            if step == 32 {
+                checkpoint.advance_and_close_cycle(&forcing, h, cx).unwrap();
+            } else {
+                checkpoint.advance(&forcing, h, cx).unwrap();
+            }
+        }
+        assert_eq!(checkpoint.states(), observed.states());
+        assert_eq!(checkpoint.mechanics().state(), observed.mechanics().state());
     });
 }

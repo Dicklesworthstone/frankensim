@@ -1,7 +1,8 @@
 //! Chronological Mode-I Paris growth from the original elastic solid response.
 //!
 //! Each gauge declares an UNCRACKED nominal-stress location, a fixed crack-plane
-//! normal and a constant geometry factor over a bounded crack-length interval.
+//! normal and a constant or tabulated geometry factor over a bounded crack-length
+//! interval. The shared material owner evaluates Y at the evolving crack length.
 //! The recovered native stress supplies the tensile normal traction; appreciable
 //! in-plane shear traction refuses instead of silently entering a Mode-I law.
 //! The mesh does not contain the crack, and growth changes neither stiffness,
@@ -29,8 +30,8 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::NormalStressDirection;
 use fs_material::fatigue::crack_growth::{
-    ConstantGeometryCrack, CrackGrowthError, CrackGrowthForecast, CrackGrowthLimits,
-    CrackGrowthState, CrackGrowthStep, ParisCrackGrowth, ParisLaw, StressCycle,
+    CrackGeometry, CrackGrowthError, CrackGrowthForecast, CrackGrowthLimits, CrackGrowthState,
+    CrackGrowthStep, ParisCrackGrowth, ParisLaw, StressCycle,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_math::det;
@@ -86,7 +87,8 @@ pub struct TetCrackGrowthGauge {
     /// chemistry/process/`T` binding remains required.
     pub material_source: Option<Arc<ResolvedMaterialStatePoint>>,
     pub law: Arc<ParisLaw>,
-    pub geometry: ConstantGeometryCrack,
+    /// Constant Y or a declared bounded table evaluated at the growing crack.
+    pub geometry: CrackGeometry,
     pub initial_length_m: f64,
     pub limits: CrackGrowthLimits,
     /// Closure compares first/last normal stresses using the window peak scale.
@@ -96,8 +98,9 @@ pub struct TetCrackGrowthGauge {
     pub mode_i: CrackStressTolerance,
 }
 
-/// Shared bounds for quasistatic and inertial observations. Retained storage
-/// is constant per gauge; no sampled trajectory or rainflow residue is kept.
+/// Shared bounds for quasistatic and inertial observations. Mutable cycle state
+/// is constant per gauge; immutable calibration and bounded geometry are shared.
+/// No sampled trajectory or rainflow residue is kept.
 #[derive(Debug, Clone, Copy)]
 pub struct TetCrackGrowthConfig {
     pub maximum_absolute_mandel_strain: f64,
@@ -214,6 +217,9 @@ impl<'p, 'm> TetCrackGrowthPath<'p, 'm> {
     pub fn law(&self, gauge: usize) -> Option<&ParisLaw> {
         self.observation.law(gauge)
     }
+    pub fn geometry(&self, gauge: usize) -> Option<&CrackGeometry> {
+        self.observation.geometry(gauge)
+    }
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         self.observation.material_source(gauge)
     }
@@ -287,9 +293,10 @@ impl<'p, 'm> TetCrackGrowthPath<'p, 'm> {
     /// thermal and support fields. The caller must establish that every repeated
     /// cycle has the observed nominal stress extrema. The crack remains absent
     /// from the stiffness, so its growth cannot change these nominal stresses.
-    /// Work is constant per gauge, independent of the repeat count; every fitted
-    /// stress-intensity, crack-length and exposure limit still applies to the
-    /// entire block. Failure preserves every crack and the reusable open window.
+    /// Work is constant for constant Y and bounded by crossed table segments
+    /// otherwise, independent of the repeat count. Fitted stress-intensity,
+    /// crack-length and exposure limits apply throughout the block. Failure
+    /// preserves every crack and the reusable open window.
     ///
     /// `full_cycles` must be in `1..=2^53`, so its conversion to the material
     /// owner's cycle coordinate is exact. This changes cycle exposure only:
@@ -484,6 +491,9 @@ impl TetCrackGrowthObserver {
     pub(crate) fn law(&self, gauge: usize) -> Option<&ParisLaw> {
         self.gauges.get(gauge).map(|g| g.growth.law())
     }
+    pub(crate) fn geometry(&self, gauge: usize) -> Option<&CrackGeometry> {
+        self.gauges.get(gauge).map(|g| g.growth.geometry())
+    }
     pub(crate) fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         self.gauges
             .get(gauge)
@@ -511,7 +521,12 @@ impl TetCrackGrowthObserver {
         let cycle = window.cycle(observed.closure, gauge)?;
         let forecast = observed
             .growth
-            .cycles_to_length(cycle.minimum_pa, cycle.maximum_pa, target_length_m)
+            .cycles_to_length_with_cancel(
+                cycle.minimum_pa,
+                cycle.maximum_pa,
+                target_length_m,
+                &mut || cx.checkpoint().is_err(),
+            )
             .map_err(|error| TetCrackGrowthError::Gauge { gauge, error })?;
         poll(cx)?;
         Ok(forecast)
