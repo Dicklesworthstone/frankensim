@@ -2,7 +2,8 @@
 //!
 //! The sphere's reference material inventory, source strain and native momentum
 //! remap determine its current radius and inertia. The original creeping-flow
-//! owner supplies all drag, rotary resistance, buoyancy, regime admission and
+//! owner supplies all drag, selected rotational lift, rotary resistance,
+//! buoyancy, regime admission and
 //! midpoint dynamics. There is no parallel heat or motion integrator here.
 
 /// Source-bound heat exchange with the same surrounding fluid.
@@ -71,6 +72,11 @@ impl<'a> HeatedRigidBody<'a> {
     /// Endpoint Reynolds and fluid-diffusion checks use the UPDATED radius.
     /// Body mass is unchanged, so heating changes drag, torque, displacement,
     /// angular speed and subsequent acceleration without replacing matter.
+    /// A sphere selected with `with_rotational_lift` retains that model through
+    /// every radius rebuild. The force uses the current radius cubed and the
+    /// actual native world spin; its work belongs to the maintained-flow account,
+    /// and it adds no viscous heat. This also applies to composed heat observers
+    /// and the surrounding-fluid conduction adapter.
     ///
     /// The reservoir's gravity must match the original mechanical integrator.
     /// Continue with the same reservoir: replacing it is an external model

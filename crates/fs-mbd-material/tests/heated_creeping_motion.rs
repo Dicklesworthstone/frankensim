@@ -345,6 +345,109 @@ struct PrescribedHeat {
     supplied_j: f64,
     refuse_after_s: Option<f64>,
 }
+
+#[test]
+fn selected_lift_curves_heated_motion_and_uses_current_radius_and_native_spin() {
+    use fs_mbd::{Vec3 as NativeVec3, Wrench};
+
+    let rho = 0.002;
+    let reservoir = fluid(rho, 0.001);
+    let sphere = CreepingSphere::new(
+        &reservoir,
+        RADIUS,
+        Gravity::ZERO,
+        NativeVec3::ZERO,
+        limits(),
+    )
+    .unwrap()
+    .with_rotational_lift();
+    for alpha in [0.0, 0.02] {
+        let material = card(CP, alpha, 500.0);
+        let source = reference_body(&material, VolumeMoments::sphere(RADIUS).unwrap());
+        let chart = caloric(&material, 1e5, SolidLiquidPhase::Solid);
+        let original = body(
+            &source,
+            &material,
+            &chart,
+            RATE,
+            controls(),
+            Gravity::ZERO,
+            Twist::new(Vec3::new(0.0, 0.0, 0.2), Vec3::new(0.01, 0.0, 0.0)),
+        );
+        let (next, audit) = original
+            .advance_creeping_sphere(&sphere, flow_controls(), 4.0 * DT, config(), || Ok(()))
+            .unwrap();
+        let properties = next.principal_frame().properties();
+        let velocity = next
+            .state()
+            .center_of_mass_velocity_world(properties)
+            .unwrap();
+        let omega = properties
+            .angular_velocity_body_checked(next.state().angular_momentum_body())
+            .unwrap();
+        let omega_world = next
+            .state()
+            .pose()
+            .orientation()
+            .rotate_body_to_world(omega);
+        let expected = omega_world
+            .cross(velocity)
+            .scale(core::f64::consts::PI * rho * audit.radius_after_m.powi(3));
+        for (actual, wanted) in [
+            (audit.load_after.lift_force_world_n.x, expected.x),
+            (audit.load_after.lift_force_world_n.y, expected.y),
+            (audit.load_after.lift_force_world_n.z, expected.z),
+        ] {
+            close(actual, wanted);
+        }
+        assert!(audit.load_before.lift_force_world_n.y > 0.0);
+        assert!(velocity.y > 1e-8, "the native trajectory must curve");
+        close(
+            audit.radius_after_m,
+            RADIUS * (1.0 + alpha * RATE * 4.0 * DT),
+        );
+        close(audit.combined_residual_j, 0.0);
+        assert_eq!(audit.background_work_j, 0.0);
+        assert!(audit.viscous_heat_j > 0.0);
+        assert_eq!(
+            next.configuration().inertia().mass(),
+            source.inertia().mass()
+        );
+        let (half, _) = original
+            .advance_creeping_sphere(&sphere, flow_controls(), 2.0 * DT, config(), || Ok(()))
+            .unwrap();
+        let (restarted, _) = half
+            .advance_creeping_sphere(&sphere, flow_controls(), 4.0 * DT, config(), || Ok(()))
+            .unwrap();
+        assert_eq!(next.state(), restarted.state());
+        assert_eq!(next.configuration(), restarted.configuration());
+        if alpha == 0.0 {
+            let principal = source.principal_body(1e-12, || false).unwrap();
+            let mut state = original.state();
+            let mut heat = 0.0;
+            for _ in 0..4 {
+                let step = sphere
+                    .step_with_rotational_lift(
+                        &principal,
+                        state,
+                        Wrench::ZERO,
+                        CreepingStepControls {
+                            duration_s: DT,
+                            maximum_relaxation_fraction: flow_controls()
+                                .maximum_relaxation_fraction,
+                            maximum_energy_defect_j: flow_controls().maximum_step_energy_defect_j,
+                        },
+                        || false,
+                    )
+                    .unwrap();
+                state = step.dynamics.state_after;
+                heat += step.viscous_heat_j;
+            }
+            assert_eq!(next.state(), state);
+            close(audit.viscous_heat_j, heat);
+        }
+    }
+}
 impl DepositionObserver for PrescribedHeat {
     type Error = DepositionError;
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {

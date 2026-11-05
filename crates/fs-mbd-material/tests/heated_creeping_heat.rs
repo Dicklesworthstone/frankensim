@@ -166,6 +166,69 @@ struct Heater {
     steps: usize,
     refuse_at: usize,
 }
+
+#[test]
+fn thermal_fluid_exchange_keeps_selected_lift_through_expansion() {
+    let material = card(CP, 0.002, 1000.0);
+    let chart = caloric(&material);
+    let solid = transport(&material, 1e5, 360.0);
+    let reference = reference(&material, 300.0, RADIUS);
+    let medium = fluid(320.0, 10.0, None);
+    let ambient = Vec3::new(0.01, 0.0, 0.0);
+    let sphere = CreepingSphere::new(&medium, RADIUS, Gravity::ZERO, ambient, flow_limits())
+        .unwrap()
+        .with_rotational_lift();
+    let original = body(
+        &reference,
+        &material,
+        &chart,
+        CP,
+        300.0,
+        RADIUS,
+        0.01,
+        Gravity::ZERO,
+        0.2,
+    );
+    let (next, report) = original
+        .advance_creeping_sphere_in_thermal_fluid(
+            &sphere,
+            exchange(&solid),
+            flow_controls(),
+            0.1,
+            config(0.01),
+            || Ok(()),
+        )
+        .unwrap();
+    let properties = next.principal_frame().properties();
+    let slip = next
+        .state()
+        .center_of_mass_velocity_world(properties)
+        .unwrap()
+        .sub(ambient);
+    let spin = properties
+        .angular_velocity_body_checked(next.state().angular_momentum_body())
+        .unwrap();
+    let world_spin = next.state().pose().orientation().rotate_body_to_world(spin);
+    let expected = world_spin.cross(slip).scale(
+        core::f64::consts::PI * sphere.transport().density_kg_m3() * report.after.radius_m.powi(3),
+    );
+    assert!(report.after.radius_m > RADIUS);
+    assert!(next.state().linear_momentum_world().y < 0.0);
+    for (actual, wanted) in [
+        (report.coupled.load_after.lift_force_world_n.x, expected.x),
+        (report.coupled.load_after.lift_force_world_n.y, expected.y),
+        (report.coupled.load_after.lift_force_world_n.z, expected.z),
+    ] {
+        close(actual, wanted, 1e-18);
+    }
+    close(report.coupled.combined_residual_j, 0.0, 1e-8);
+    close(
+        report.coupled.thermal.external_heat_j,
+        report.reservoir_heat_into_body_j,
+        1e-10,
+    );
+    assert!(report.coupled.viscous_heat_j > 0.0);
+}
 impl DepositionObserver for Heater {
     type Error = DepositionError;
     fn sources(

@@ -1218,8 +1218,25 @@ explicitly select the leading Rubinow--Keller transverse force
 `Wrench::ZERO` or the same held external COM force/body couple as the original
 driven step. The source's fluid density, declared spherical radius, actual
 native spin and relative translation determine the force. Body density still
-determines inertia, not the lift coefficient. The original `load`, `step`,
-thermal, ellipsoid and unsteady-flow paths retain their existing models.
+determines inertia, not the lift coefficient. Construction remains Stokes-only.
+`with_rotational_lift()` explicitly selects the same law for ordinary `load`,
+`step`, driven steps and the existing heated-sphere adapters;
+`rotational_lift_enabled()` exposes that selection. The one-step explicit
+methods remain equivalent to the selected reservoir.
+
+Thermal radius rebuilds preserve both this selection and the original frozen
+transport snapshot. Every fixed-configuration mechanical interval uses its
+current radius and native angular momentum/inertia, and the updated endpoint
+is admitted again. This reaches prescribed heating, composed heat observers
+and source-bound surrounding-fluid conduction without another motion or heat
+integrator. Lift contributes to maintained-flow work but never to viscous heat
+or solid caloric storage. The thermal owner's existing expansion-flow omissions
+and refinement requirements still apply.
+
+Unsteady-history construction explicitly refuses a reservoir with selected
+quasi-steady lift, including the rotating-history entry point, before creating
+history. The two physical approximations are not silently combined or dropped.
+Ellipsoid and finite-Reynolds owners retain their own force laws.
 
 The shared midpoint implementation solves drag and the transverse skew term
 simultaneously through a closed-form 3-by-3 inverse, without iterative solves
@@ -1243,7 +1260,10 @@ scaling, frame/boost covariance, zero-slip/spin limits, native midpoint and
 work agreement under a general drive, second-order convergence to an
 independent curved trajectory with decaying spin, and regime/cancellation
 refusals. Synthetic source cards establish these numerical properties, not
-measured-material or high-Reynolds physical validation.
+measured-material or high-Reynolds physical validation. The heated-motion and
+heated-fluid batteries additionally check signed trajectory deflection,
+current-radius/current-spin force reconstruction, fixed-configuration native
+step equivalence, restart composition and the original heat/work accounts.
 
 ## Source-bound finite-Reynolds sphere drag
 
@@ -1785,3 +1805,4 @@ The main receipt includes total body/fluid storage, heat and external force/coup
 Five regression groups cover independent analytic rotary impedance and spectral tails, zero instantaneous added inertia, convergence to an independently inverted continuum spin-up response, simultaneous changing force/three-axis torque with native replay and work/impulse checks, world-frame covariance of both histories, and refusal/cancellation/retry. The original nonrotating entry point retains its existing path and rejects applied torque.
 
 Scope remains a no-slip uniform sphere, frozen transport in an unbounded Newtonian fluid, low relative translational and rotational Reynolds numbers, initially comoving translation and zero initial spin. The explicit uniform-flow acceleration path above can drive translation on the same clock; it does not rotate the ambient fluid. Cutoff, quadrature and physical-time refinement remain required. No ambient vorticity/strain, wall/gap interaction, fluid prehistory, finite-Re Magnus force or nonspherical history is inferred.
+

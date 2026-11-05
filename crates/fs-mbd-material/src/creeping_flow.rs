@@ -149,6 +149,7 @@ pub struct CreepingSphere<'a, F: FluidTransport + ?Sized> {
     gravity: Gravity,
     ambient_velocity_world: Vec3,
     limits: CreepingFlowLimits,
+    selected_lift: SphereLift,
 }
 
 /// Instantaneous physical load at the actual supplied velocity, with body
@@ -160,7 +161,7 @@ pub struct CreepingLoad {
     pub wrench: Wrench,
     /// Translational resistance in the world frame [N].
     pub drag_force_world_n: Vec3,
-    /// Transverse Rubinow--Keller force [N]; zero in the Stokes-only methods.
+    /// Transverse Rubinow--Keller force [N]; zero unless rotational lift is selected.
     /// It does no work against the relative translational velocity.
     pub lift_force_world_n: Vec3,
     /// Rotary resistance in the principal body frame [N m].
@@ -263,21 +264,44 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             gravity,
             ambient_velocity_world,
             limits,
+            selected_lift: SphereLift::None,
         })
+    }
+
+    /// Select the leading quasi-steady rotational lift for every ordinary
+    /// load/step and the heated-sphere adapters that consume this reservoir.
+    ///
+    /// Construction is Stokes-only by default. This explicit selection uses
+    /// the same law and native midpoint solve as [`Self::step_with_rotational_lift`].
+    /// Thermal radius rebuilds retain it together with the frozen fluid snapshot;
+    /// the current radius and native spin determine the actual lift at each stage.
+    /// This does not model expansion-induced fluid motion or make the law valid
+    /// with unsteady added-mass/history dynamics; those entry points refuse it.
+    #[must_use]
+    pub fn with_rotational_lift(mut self) -> Self {
+        self.selected_lift = SphereLift::RubinowKeller;
+        self
+    }
+
+    /// Whether ordinary loads, steps and thermal adapters include rotational lift.
+    pub const fn rotational_lift_enabled(&self) -> bool {
+        matches!(self.selected_lift, SphereLift::RubinowKeller)
     }
 
     /// Rebuild only the spherical boundary, retaining the SAME frozen fluid
     /// snapshot. Thermal configuration adapters must not re-query a mutable
     /// external source halfway through an accepted reservoir interval.
     pub(crate) fn at_radius(&self, radius_m: f64) -> Result<Self, Error> {
-        Self::with_transport(
+        let mut resized = Self::with_transport(
             self.source,
             self.transport,
             radius_m,
             self.gravity,
             self.ambient_velocity_world,
             self.limits,
-        )
+        )?;
+        resized.selected_lift = self.selected_lift;
+        Ok(resized)
     }
 
     /// Retain the original fluid owner and its provenance or mixture receipts.
@@ -326,7 +350,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         Ok(())
     }
 
-    /// Evaluate Stokes drag, rotary resistance and buoyancy without advancing
+    /// Evaluate drag, selected lift, rotary resistance and buoyancy without advancing
     /// physical state. Original body weight is supplied ONCE by native gravity.
     pub fn load(
         &self,
@@ -368,7 +392,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         state: RigidBodyState,
         cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingLoad, Error> {
-        self.load_frame_with_lift(frame, state, SphereLift::None, cancelled)
+        self.load_frame_with_lift(frame, state, self.selected_lift, cancelled)
     }
 
     /// Shared instantaneous Stokes admission for a time-evolving uniform flow.
@@ -574,7 +598,14 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         controls: CreepingStepControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingStep, Error> {
-        self.step_frame_with_lift(frame, state, applied, controls, SphereLift::None, cancelled)
+        self.step_frame_with_lift(
+            frame,
+            state,
+            applied,
+            controls,
+            self.selected_lift,
+            cancelled,
+        )
     }
 
     fn step_frame_with_lift(
@@ -756,7 +787,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SphereLift {
     None,
     RubinowKeller,

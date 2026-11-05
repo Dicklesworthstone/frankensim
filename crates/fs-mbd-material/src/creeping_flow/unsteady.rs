@@ -139,6 +139,9 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
     /// rounded velocity equality alone does not admit the initial state.
     /// All relative memory starts at zero; arbitrary slip and prior history
     /// are not inferred.
+    /// A reservoir selected with `with_rotational_lift` refuses here: the
+    /// quasi-steady lift law cannot be silently dropped or superposed on this
+    /// history model, including when spin is introduced by a later drive.
     /// No spin, thermal shape/source change, free surface, wall, other particle,
     /// nonlinear convection, compressibility or Basset prehistory is inferred.
     ///
@@ -154,6 +157,11 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<UnsteadySphereMotion<'s, 'f, 'b, F>, Error> {
         poll(&mut cancelled)?;
+        if self.rotational_lift_enabled() {
+            return Err(Error::Invalid(
+                "quasi-steady rotational lift cannot be combined with unsteady sphere history",
+            ));
+        }
         self.admit_body(body)?;
         self.load_frame(body.frame(), state, &mut cancelled)?;
         let lo = resolution.minimum_wavenumber_radius;

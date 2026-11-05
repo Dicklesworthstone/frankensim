@@ -2,6 +2,77 @@
 use super::*;
 use fs_mbd::{Pose, RigidBodyState, UnitQuaternion, Vec3 as NativeVec3, Wrench};
 
+#[test]
+fn selected_lift_reaches_ordinary_loads_and_steps_but_refuses_unsteady_history() {
+    use fs_mbd_material::creeping_flow::unsteady::BassetResolution;
+
+    let source = sphere(20000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(10.0, 1.0);
+    let baseline =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let selected =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits())
+            .unwrap()
+            .with_rotational_lift();
+    assert!(!baseline.rotational_lift_enabled());
+    assert!(selected.rotational_lift_enabled());
+    let initial = state(
+        &body,
+        UnitQuaternion::IDENTITY,
+        NativeVec3::new(0.01, -0.02, 0.03),
+        NativeVec3::new(0.5, -1.0, 0.75),
+    );
+    assert_eq!(
+        selected.load(&body, initial, || false).unwrap(),
+        baseline
+            .load_with_rotational_lift(&body, initial, || false)
+            .unwrap(),
+    );
+    assert_eq!(
+        selected
+            .step(&body, initial, controls(0.005), || false)
+            .unwrap(),
+        baseline
+            .step_with_rotational_lift(&body, initial, Wrench::ZERO, controls(0.005), || false)
+            .unwrap(),
+    );
+    let drive = Wrench {
+        force_world: NativeVec3::new(0.001, -0.002, 0.003),
+        torque_body: NativeVec3::new(1e-6, 2e-6, -1e-6),
+    };
+    assert_eq!(
+        selected
+            .step_with_wrench(&body, initial, drive, controls(0.005), || false)
+            .unwrap(),
+        baseline
+            .step_with_rotational_lift(&body, initial, drive, controls(0.005), || false)
+            .unwrap(),
+    );
+    let resting = state(
+        &body,
+        UnitQuaternion::IDENTITY,
+        NativeVec3::ZERO,
+        NativeVec3::ZERO,
+    );
+    let resolution = BassetResolution {
+        minimum_wavenumber_radius: 0.01,
+        maximum_wavenumber_radius: 10.0,
+        intervals: 8,
+    };
+    assert!(
+        baseline
+            .unsteady_motion(&body, resting, resolution, || false)
+            .is_ok()
+    );
+    assert!(matches!(
+        selected.unsteady_motion(&body, resting, resolution, || false),
+        Err(CreepingFlowError::Invalid(
+            "quasi-steady rotational lift cannot be combined with unsteady sphere history"
+        ))
+    ));
+}
+
 fn state(
     body: &fs_mbd_material::principal::PrincipalBody<'_>,
     attitude: UnitQuaternion,
