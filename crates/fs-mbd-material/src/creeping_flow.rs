@@ -1,7 +1,8 @@
 //! A material-defined rigid sphere in an unbounded Newtonian fluid.
 //!
-//! Stokes translation gives F=-6*pi*mu*a*(v-U); rotation gives
-//! torque=-8*pi*mu*a^3*omega. Fully immersed buoyancy is -rho*V*g.
+//! No-slip Stokes translation gives F=-6*pi*mu*a*(v-U); rotation gives
+//! torque=-8*pi*mu*a^3*omega. An explicit source-bound [`navier_slip`]
+//! interface changes both resistances. Fully immersed buoyancy is -rho*V*g.
 //! The shared fluid snapshot supplies rho and mu; the original material body
 //! supplies mass and inertia. The existing rigid-body integrator owns ALL
 //! momentum, position and attitude updates. Only its linear midpoint load
@@ -13,9 +14,9 @@
 //! D. Tong, *Fluid Dynamics I and II: Questions on Viscous Flows*, rotating
 //! sphere problem, <https://www.damtp.cam.ac.uk/user/tong/books/examples/f2.pdf>.
 //!
-//! This is a no-slip, incompressible, quasi-steady reduction. It refuses large
+//! This is an incompressible, quasi-steady reduction. It refuses large
 //! Reynolds numbers and body relaxation too fast for the caller's declared
-//! fluid-diffusion allowance. No Basset history, added mass, slip/rarefaction,
+//! fluid-diffusion allowance. No Basset history, added mass, rarefaction,
 //! free surface, walls, other particles or nonlinear drag is supplied. The
 //! material's continuum/Newtonian validity remains an external model obligation.
 //! Do not superpose another exterior drag law on this same sphere.
@@ -34,8 +35,11 @@ use fs_mbd::{
 
 /// Nonrotating, quasi-steady sphere motion beyond the Stokes regime.
 pub mod finite_reynolds;
+/// Uniform Navier slip from the original ordered solid/fluid interface source.
+pub mod navier_slip;
 /// Added fluid inertia and causal viscous memory on the same native body.
 pub mod unsteady;
+use navier_slip::{NavierSlipBoundary, ResistanceFactors};
 
 /// Source, geometry, regime, native dynamics or acceptance failure.
 #[derive(Clone, Debug, PartialEq)]
@@ -142,6 +146,7 @@ pub struct CreepingSphere<'a, F: FluidTransport + ?Sized> {
     transport: FluidTransportState,
     sphere: VolumeMoments,
     radius_m: f64,
+    navier_slip: Option<NavierSlipBoundary<'a>>,
     resistance_kg_s: f64,
     rotary_resistance_kg_m2_s: f64,
     fluid_mass_kg: f64,
@@ -153,7 +158,8 @@ pub struct CreepingSphere<'a, F: FluidTransport + ?Sized> {
 }
 
 /// Instantaneous physical load at the actual supplied velocity, with body
-/// gravity excluded. Dissipation goes to the prescribed fluid reservoir;
+/// gravity excluded. Bulk viscous and any Navier interface-friction loss go
+/// to the prescribed external reservoir;
 /// it is not automatically added to any finite material heat store.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CreepingLoad {
@@ -168,7 +174,8 @@ pub struct CreepingLoad {
     pub rotary_torque_body_nm: Vec3,
     /// Fully immersed Archimedes force in the world frame [N].
     pub buoyancy_force_world_n: Vec3,
-    /// Nonnegative viscous loss deposited in the external fluid reservoir [W].
+    /// Nonnegative total bulk-viscous plus interface-friction loss [W].
+    /// The external-reservoir account does not infer a solid/fluid heat partition.
     pub dissipated_power_w: f64,
     /// Work supplied by maintaining the admitted background flow. The uniform
     /// sphere uses (F_drag + F_lift) dot U; an ambient-rotation owner also includes
@@ -191,7 +198,8 @@ pub struct CreepingStep {
     pub load_midpoint: CreepingLoad,
     /// Fluid load evaluated at the actual native candidate endpoint.
     pub load_after: CreepingLoad,
-    /// Viscous energy deposited in the external fluid reservoir [J].
+    /// Total bulk-viscous plus interface-friction energy transferred to the
+    /// external reservoir [J], without a finite-body heat-partition model.
     pub viscous_heat_j: f64,
     /// Energy supplied by maintaining the uniform background flow [J].
     pub background_work_j: f64,
@@ -207,7 +215,7 @@ pub struct CreepingStep {
 }
 
 impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
-    /// Declare a fully immersed sphere in a spatially uniform, frozen fluid.
+    /// Declare a fully immersed no-slip sphere in a spatially uniform, frozen fluid.
     /// Its material body must have one uniform spherical region with these
     /// same volume moments. A geometry declaration is not inferred from a
     /// material name, and matching moments alone do not certify actual shape.
@@ -225,6 +233,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             gravity,
             ambient_velocity_world,
             limits,
+            None,
         )
     }
 
@@ -235,6 +244,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         gravity: Gravity,
         ambient_velocity_world: Vec3,
         limits: CreepingFlowLimits,
+        navier_slip: Option<NavierSlipBoundary<'a>>,
     ) -> Result<Self, Error> {
         let sphere = VolumeMoments::sphere(radius_m)?;
         if !ambient_velocity_world.is_finite()
@@ -249,6 +259,22 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             positive(6.0 * core::f64::consts::PI * transport.dynamic_viscosity_pa_s() * radius_m)?;
         let rotary_resistance_kg_m2_s =
             positive((4.0 / 3.0) * resistance_kg_s * radius_m * radius_m)?;
+        // Derive both coefficients from their ORIGINAL no-slip expressions.
+        // Scaling the already corrected translation coefficient would apply
+        // the wrong Gamma_2,3 factor to rotary resistance. Keep b=0 arithmetic
+        // exactly unchanged, including an explicitly sourced no-slip limit.
+        let (resistance_kg_s, rotary_resistance_kg_m2_s) =
+            if let Some(boundary) = navier_slip.filter(|boundary| boundary.slip_length_m() > 0.0) {
+                let factors = ResistanceFactors::new(radius_m, boundary.slip_length_m()).ok_or(
+                    Error::Invalid("Navier spherical resistance is unrepresentable"),
+                )?;
+                (
+                    positive(resistance_kg_s * factors.translation)?,
+                    positive(rotary_resistance_kg_m2_s * factors.rotation)?,
+                )
+            } else {
+                (resistance_kg_s, rotary_resistance_kg_m2_s)
+            };
         let fluid_mass_kg = positive(transport.density_kg_m3() * sphere.volume_m3())?;
         let diffusion_time_s =
             positive(radius_m * (radius_m / transport.kinematic_viscosity_m2_s()))?;
@@ -257,6 +283,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             transport,
             sphere,
             radius_m,
+            navier_slip,
             resistance_kg_s,
             rotary_resistance_kg_m2_s,
             fluid_mass_kg,
@@ -268,6 +295,33 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         })
     }
 
+    /// Select a homogeneous impermeable Navier boundary from its actual
+    /// solid/fluid interface source. No material or transport snapshot is
+    /// queried again. Physical b stays fixed when thermal expansion changes a;
+    /// translation uses (1+2b/a)/(1+3b/a), rotation uses 1/(1+3b/a).
+    /// The original Reynolds, diffusion, step and work gates still apply.
+    ///
+    /// Positive slip is incompatible with the existing no-slip Basset,
+    /// rotational-memory and Rubinow--Keller extensions. A selected rotational
+    /// lift law is retained for b=0 and causes positive b to refuse here; it
+    /// is never silently reset. This adds no rarefaction, permeability or bubble law.
+    pub fn with_navier_slip(self, boundary: NavierSlipBoundary<'a>) -> Result<Self, Error> {
+        let mut updated = Self::with_transport(
+            self.source,
+            self.transport,
+            self.radius_m,
+            self.gravity,
+            self.ambient_velocity_world,
+            self.limits,
+            Some(boundary),
+        )?;
+        updated.selected_lift = self.selected_lift;
+        if updated.rotational_lift_enabled() {
+            updated.require_no_slip()?;
+        }
+        Ok(updated)
+    }
+
     /// Select the leading quasi-steady rotational lift for every ordinary
     /// load/step and the heated-sphere adapters that consume this reservoir.
     ///
@@ -277,6 +331,8 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     /// the current radius and native spin determine the actual lift at each stage.
     /// This does not model expansion-induced fluid motion or make the law valid
     /// with unsteady added-mass/history dynamics; those entry points refuse it.
+    /// Selecting this on a positive-slip Navier sphere makes ordinary loads,
+    /// steps and thermal adapters refuse the incompatible no-slip lift law.
     #[must_use]
     pub fn with_rotational_lift(mut self) -> Self {
         self.selected_lift = SphereLift::RubinowKeller;
@@ -299,6 +355,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             self.gravity,
             self.ambient_velocity_world,
             self.limits,
+            self.navier_slip,
         )?;
         resized.selected_lift = self.selected_lift;
         Ok(resized)
@@ -312,9 +369,13 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     pub const fn transport(&self) -> FluidTransportState {
         self.transport
     }
-    /// Declared no-slip spherical boundary radius [m].
+    /// Declared spherical boundary radius [m], independent of slip length.
     pub const fn radius_m(&self) -> f64 {
         self.radius_m
+    }
+    /// Original optional interface source. Absence is the explicit no-slip model.
+    pub const fn navier_slip(&self) -> Option<NavierSlipBoundary<'a>> {
+        self.navier_slip
     }
     /// The same gravity used for body weight and displaced-fluid buoyancy.
     pub const fn gravity(&self) -> Gravity {
@@ -328,7 +389,32 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 "creeping sphere requires one uniform spherical material region",
             ));
         }
+        self.admit_surface_material(regions[0].material())?;
         self.admit_geometry(regions[0].geometry())
+    }
+
+    /// Thermal adapters pass the current source-backed solid state, not just
+    /// updated moments, so source identity and surface-temperature support hold.
+    pub(crate) fn admit_surface_material(
+        &self,
+        solid: &fs_material::state_point::ResolvedMaterialStatePoint,
+    ) -> Result<(), Error> {
+        if let Some(boundary) = self.navier_slip {
+            boundary.require_solid(solid)?;
+        }
+        Ok(())
+    }
+
+    fn require_no_slip(&self) -> Result<(), Error> {
+        if self
+            .navier_slip
+            .is_some_and(|boundary| boundary.slip_length_m() > 0.0)
+        {
+            return Err(Error::Invalid(
+                "this sphere extension derives from a no-slip boundary and does not admit Navier slip",
+            ));
+        }
+        Ok(())
     }
 
     /// Configuration adapters establish the single uniform region and its
@@ -372,7 +458,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     ///
     /// This is an explicit quasi-steady, unbounded, uniform-flow asymptote,
     /// not a high-Reynolds spinning-ball law or a shear/Saffman correction.
-    /// Both existing Reynolds ceilings still apply. Viscous dissipation is
+    /// Requires the no-slip boundary. Both existing Reynolds ceilings still apply. Viscous dissipation is
     /// unchanged; lift contributes to maintained-flow work when U is nonzero.
     pub fn load_with_rotational_lift(
         &self,
@@ -439,6 +525,9 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     ) -> Result<CreepingLoad, Error> {
         poll(&mut cancelled)?;
         vector(ambient_velocity_world)?;
+        if lift_model == SphereLift::RubinowKeller {
+            self.require_no_slip()?;
+        }
         let properties = frame.properties();
         let relative = state
             .center_of_mass_velocity_world(properties)?

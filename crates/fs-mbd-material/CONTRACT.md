@@ -1210,6 +1210,51 @@ refinement, separate maintained-flow work from heat, and exercise geometry,
 regime and transactional refusals. This is a bounded MR57 capability; it does
 not close the broader exterior/gap-flow bead or claim empirical validation.
 
+### Source-bound Navier slip on the same native sphere
+
+`CreepingSphere::with_navier_slip` accepts a `navier_slip::NavierSlipBoundary`
+borrowed from the existing `ResolvedInterfaceStatePoint`. The canonical
+`navier_slip_length` is a finite nonnegative length in metres on an ordered
+solid/fluid interface, not a fitted drag multiplier. The complete source and
+query receipts remain reachable. The selected claim must be constant within
+its validity with only fixed external conditions; sampled temperature, rate,
+stress or history dependence is not silently frozen. Surface A must match the
+original solid material, and its `T` support is checked against actual solid
+temperature. Both interface and solid `T` descriptors must denote absolute
+kelvin (legacy untyped, dimensional temperature or static absolute-temperature
+semantics); a pressure or temperature-difference axis named `T` is not kelvin.
+Thermal admission uses the current configured solid, so its older mass-reference
+temperature need not lie inside a newly selected interface's support.
+The generic `FluidTransport` trait does not expose material
+identity: assigning surface B to the actual surrounding fluid and maintaining
+the other interface conditions is an explicit caller obligation, not a
+verified inference from matching viscosity or density.
+
+For radius a and physical slip length b, translation uses
+6*pi*mu*a*(1+2b/a)/(1+3b/a), while rotation uses 8*pi*mu*a^3/(1+3b/a).
+These are the homogeneous impermeable Navier-boundary solutions in Ichiki,
+Kobryn and Kovalenko, <https://arxiv.org/abs/1302.0461>, Eqs. (44), (49), (54).
+The b=0 arithmetic preserves the original no-slip load and native step exactly.
+Large finite b approaches the shear-free translational resistance 4*pi*mu*a
+and vanishing rotary resistance; unrepresentable finite-slip coefficients
+refuse rather than inventing an exactly shear-free surface.
+
+The corrected coefficients enter the SAME midpoint wrench, driven motion,
+relaxation timestep and diffusion admission. Reynolds numbers and displaced
+fluid use actual geometric radius. The heat/work receipt counts total bulk
+viscous plus interfacial-friction dissipation in its external-reservoir account;
+it does not infer a solid/fluid heat partition. A positive-slip sphere refuses
+the existing no-slip Rubinow--Keller and unsteady/Basset/rotational-memory
+entry points. Selecting slip after persistent rotational lift retains that
+selection for b=0 and refuses b>0. Selecting lift after b>0 leaves the selection
+explicit but makes ordinary loads, steps and thermal adapters refuse; neither
+builder order silently drops a law. Thermal radius rebuilds retain both the
+original interface and selected lift. The separate finite-Reynolds owner constructs its own no-slip
+boundary and cannot inherit this interface implicitly. No rarefaction,
+permeability, heterogeneous slip, bubble dynamics or finite-Re slip law is
+claimed. Focused scalar and native-motion tests cover exact limits, source
+substitution, work closure, regime admission and unsupported-law refusal.
+
 ### Rotational lift on the same material-defined sphere
 
 `CreepingSphere::load_with_rotational_lift` and `step_with_rotational_lift`
@@ -1525,8 +1570,14 @@ is never compounded and the original closed-body mass stays bit-identical.
 The original fluid snapshot supplies all density and viscosity values without
 another source query when radius changes; its gravity must match native gravity.
 
-Consequently Stokes translation, rotary resistance and displaced-fluid force
+For no slip, Stokes translation, rotary resistance and displaced-fluid force
 change as r, r^3 and r^3 while the body's moment of inertia changes as r^2.
+A sourced Navier boundary retains the SAME physical slip length in metres
+and original interface receipt; both resistance factors are recomputed using
+b/r at the updated radius. Its constant source's solid-temperature support is
+checked at every endpoint, and an unsupported candidate is discarded. Radius
+change never scales b or freezes the previous b/r. Interfacial friction joins
+the external loss account without being credited again to finite-body heat.
 The original owner retains its force closure, native position/momentum/attitude
 step and all Reynolds, diffusion-time and relaxation-step gates. Admission
 also runs at each UPDATED thermal endpoint, even when there is no subsequent

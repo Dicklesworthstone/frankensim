@@ -2,6 +2,8 @@
 //! Synthetic coefficients exercise the admitted model, not measured materials.
 #[path = "heating/common.rs"]
 mod common;
+#[path = "creeping_flow/navier_slip_source.rs"]
+mod navier_slip_source;
 use common::{budget, caloric, card, config, point, region};
 use fs_ga::{Se3, So3, Twist, Vec3};
 use fs_matdb::MaterialCard;
@@ -135,6 +137,10 @@ struct Reference {
     displacement_work: f64,
 }
 fn reference(alpha: f64, rho: f64, mu: f64, steps: usize) -> Reference {
+    reference_with_slip(alpha, rho, mu, steps, 0.0)
+}
+
+fn reference_with_slip(alpha: f64, rho: f64, mu: f64, steps: usize, slip_length: f64) -> Reference {
     let volume = |r: f64| 4.0 * std::f64::consts::PI * r * r * r / 3.0;
     let mass = DENSITY * volume(RADIUS);
     let inertia = |r: f64| 0.4 * mass * r * r;
@@ -152,6 +158,15 @@ fn reference(alpha: f64, rho: f64, mu: f64, steps: usize) -> Reference {
         let next_radius = RADIUS * (1.0 + alpha * RATE * ((i + 1) as f64 * DT));
         let c = 6.0 * std::f64::consts::PI * mu * radius;
         let rotary = 8.0 * std::f64::consts::PI * mu * radius.powi(3);
+        let (c, rotary) = if slip_length > 0.0 {
+            let relative = slip_length / radius;
+            (
+                c * (1.0 + 2.0 * relative) / (1.0 + 3.0 * relative),
+                rotary / (1.0 + 3.0 * relative),
+            )
+        } else {
+            (c, rotary)
+        };
         let fluid_mass = rho * volume(radius);
         let angular_mid =
             (result.spin / inertia(radius)) / (1.0 + 0.5 * DT * rotary / inertia(radius));
@@ -174,6 +189,190 @@ fn reference(alpha: f64, rho: f64, mu: f64, steps: usize) -> Reference {
             rho * (volume(next_radius) - volume(radius)) * (-0.1 * result.position[2]);
     }
     result
+}
+
+#[test]
+fn thermal_expansion_keeps_sourced_physical_slip_length_and_recompiles_both_native_loads() {
+    use fs_mbd_material::creeping_flow::navier_slip::NavierSlipBoundary;
+    let alpha = 0.02;
+    let rho = 0.002;
+    let mu = 0.001;
+    let material = card(CP, alpha, 500.0);
+    let source = reference_body(&material, VolumeMoments::sphere(RADIUS).unwrap());
+    let chart = caloric(&material, 1e5, SolidLiquidPhase::Solid);
+    let body = body(
+        &source,
+        &material,
+        &chart,
+        RATE,
+        controls(),
+        gravity(),
+        twist(),
+    );
+    let reservoir = fluid(rho, mu);
+    let interface = navier_slip_source::constant(material.id(), RADIUS, 400.0);
+    let sphere = CreepingSphere::new(&reservoir, RADIUS, gravity(), flow(), limits())
+        .unwrap()
+        .with_navier_slip(NavierSlipBoundary::new(&interface).unwrap())
+        .unwrap();
+    let (next, audit) = body
+        .advance_creeping_sphere(&sphere, flow_controls(), 4.0 * DT, config(), || Ok(()))
+        .unwrap();
+    let expected = reference_with_slip(alpha, rho, mu, 4, RADIUS);
+    let velocity = next
+        .state()
+        .center_of_mass_velocity_world(next.principal_frame().properties())
+        .unwrap();
+    let position = next.state().pose().position_world();
+    let spin = next
+        .state()
+        .pose()
+        .orientation()
+        .rotate_body_to_world(next.state().angular_momentum_body());
+    for (actual, value) in [
+        velocity.x, velocity.y, velocity.z, position.x, position.y, position.z, spin.z,
+    ]
+    .into_iter()
+    .zip(
+        expected
+            .velocity
+            .into_iter()
+            .chain(expected.position)
+            .chain([expected.spin]),
+    ) {
+        close(actual, value);
+    }
+    close(audit.viscous_heat_j, expected.heat);
+    close(audit.background_work_j, expected.flow_work);
+    close(
+        audit.parameter_work_j,
+        expected.inertia_work + expected.displacement_work,
+    );
+    close(audit.combined_residual_j, 0.0);
+    assert_eq!(
+        next.configuration().inertia().mass(),
+        source.inertia().mass()
+    );
+    close(next.thermal().energy_j(), audit.thermal.external_heat_j);
+    let radius = RADIUS * (1.0 + alpha * RATE * 4.0 * DT);
+    let ratio = RADIUS / radius;
+    let omega = next
+        .principal_frame()
+        .properties()
+        .angular_velocity_body_checked(next.state().angular_momentum_body())
+        .unwrap();
+    close(
+        audit.load_after.drag_force_world_n.x,
+        -6.0 * std::f64::consts::PI * mu * radius * (1.0 + 2.0 * ratio) / (1.0 + 3.0 * ratio)
+            * (velocity.x - flow().x),
+    );
+    close(
+        audit.load_after.rotary_torque_body_nm.z,
+        -8.0 * std::f64::consts::PI * mu * radius.powi(3) / (1.0 + 3.0 * ratio) * omega.z,
+    );
+    assert_eq!(sphere.navier_slip().unwrap().slip_length_m(), RADIUS);
+    assert!(core::ptr::eq(
+        sphere.navier_slip().unwrap().source(),
+        &interface
+    ));
+    let (middle, _) = body
+        .advance_creeping_sphere(&sphere, flow_controls(), 2.0 * DT, config(), || Ok(()))
+        .unwrap();
+    let (restarted, _) = middle
+        .advance_creeping_sphere(&sphere, flow_controls(), 4.0 * DT, config(), || Ok(()))
+        .unwrap();
+    assert_eq!(restarted.state(), next.state());
+}
+
+#[test]
+fn slip_source_support_uses_current_temperature_instead_of_the_mass_reference() {
+    use fs_mbd_material::creeping_flow::navier_slip::NavierSlipBoundary;
+    let material = card(CP, 0.02, 500.0);
+    let source = reference_body(&material, VolumeMoments::sphere(RADIUS).unwrap());
+    let chart = caloric(&material, 1e5, SolidLiquidPhase::Solid);
+    let body = body(
+        &source,
+        &material,
+        &chart,
+        RATE,
+        controls(),
+        Gravity::ZERO,
+        Twist::zero(),
+    );
+    let (warm, _) = body.advance_to(4.0 * DT, config(), || Ok(())).unwrap();
+    close(warm.thermal().temperature_k(CellId(0)).unwrap(), 302.0);
+    assert_eq!(
+        warm.reference().regions()[0]
+            .material()
+            .state_coordinate("T"),
+        Some(300.0)
+    );
+
+    let interface = navier_slip_source::resolve(
+        material.id(),
+        RADIUS,
+        fs_qty::Length::DIMS,
+        fs_evidence::ValidityDomain::unconstrained().with("T", 301.0, 400.0),
+        &point(302.0, 1e5),
+    );
+    let reservoir = fluid(0.002, 0.001);
+    let sphere = CreepingSphere::new(
+        &reservoir,
+        RADIUS,
+        Gravity::ZERO,
+        fs_mbd::Vec3::ZERO,
+        limits(),
+    )
+    .unwrap()
+    .with_navier_slip(NavierSlipBoundary::new(&interface).unwrap())
+    .unwrap();
+    let (next, audit) = warm
+        .advance_creeping_sphere(&sphere, flow_controls(), 6.0 * DT, config(), || Ok(()))
+        .unwrap();
+    close(next.thermal().temperature_k(CellId(0)).unwrap(), 303.0);
+    assert_eq!(
+        next.configuration().inertia().mass(),
+        source.inertia().mass()
+    );
+    close(audit.combined_residual_j, 0.0);
+    assert_eq!(audit.viscous_heat_j, 0.0);
+}
+
+#[test]
+fn heated_slip_sphere_refuses_the_first_endpoint_outside_interface_temperature_support() {
+    use fs_mbd_material::creeping_flow::navier_slip::NavierSlipBoundary;
+    let material = card(CP, 0.02, 500.0);
+    let source = reference_body(&material, VolumeMoments::sphere(RADIUS).unwrap());
+    let chart = caloric(&material, 1e5, SolidLiquidPhase::Solid);
+    let body = body(
+        &source,
+        &material,
+        &chart,
+        RATE,
+        controls(),
+        gravity(),
+        twist(),
+    );
+    let reservoir = fluid(0.002, 0.001);
+    let interface = navier_slip_source::constant(material.id(), RADIUS, 301.0);
+    let sphere = CreepingSphere::new(&reservoir, RADIUS, gravity(), flow(), limits())
+        .unwrap()
+        .with_navier_slip(NavierSlipBoundary::new(&interface).unwrap())
+        .unwrap();
+    let (at_limit, _) = body
+        .advance_creeping_sphere(&sphere, flow_controls(), 2.0 * DT, config(), || Ok(()))
+        .unwrap();
+    close(at_limit.thermal().temperature_k(CellId(0)).unwrap(), 301.0);
+    let before = at_limit.state();
+    assert!(matches!(
+        at_limit.advance_creeping_sphere(&sphere, flow_controls(), 4.0 * DT, config(), || Ok(())),
+        Err(HeatedMotionError::CreepingFlow(CreepingFlowError::Invalid(
+            _
+        )))
+    ));
+    assert_eq!(at_limit.state(), before);
+    close(at_limit.thermal().temperature_k(CellId(0)).unwrap(), 301.0);
+    close(body.thermal().temperature_k(CellId(0)).unwrap(), 300.0);
 }
 
 #[test]

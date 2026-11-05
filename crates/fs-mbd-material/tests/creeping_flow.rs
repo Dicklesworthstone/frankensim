@@ -5,6 +5,10 @@ mod common;
 mod driven;
 #[path = "creeping_flow/finite_reynolds.rs"]
 mod finite_reynolds;
+#[path = "creeping_flow/navier_slip.rs"]
+mod navier_slip;
+#[path = "creeping_flow/navier_slip_source.rs"]
+mod navier_slip_source;
 #[path = "creeping_flow/rotation.rs"]
 mod rotation;
 #[path = "creeping_flow/rotational_lift.rs"]

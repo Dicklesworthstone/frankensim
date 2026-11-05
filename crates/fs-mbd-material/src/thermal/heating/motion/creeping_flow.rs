@@ -34,7 +34,8 @@ pub struct HeatedCreepingAudit {
     pub radius_after_m: f64,
     pub load_before: CreepingLoad,
     pub load_after: CreepingLoad,
-    /// Native Stokes loss deposited in the external fluid reservoir [J].
+    /// Native bulk-viscous plus any Navier interface-friction loss in the
+    /// external reservoir [J]; no solid/fluid heat partition is inferred.
     /// This is never also credited to the finite solid's caloric storage.
     pub viscous_heat_j: f64,
     /// Signed work supplied by maintaining the original background flow [J].
@@ -69,6 +70,9 @@ impl<'a> HeatedRigidBody<'a> {
     /// momentum-preserving inertia update. Radius is rebuilt from the reference,
     /// not compounded. The same fluid snapshot supplies density and viscosity;
     /// no source is re-queried during this advance or between radius rebuilds.
+    /// A sourced Navier boundary retains physical slip length, recomputes b/a
+    /// at each radius, and checks its constant source's surface-temperature
+    /// support at every updated endpoint. Slip length is not thermally scaled.
     /// Endpoint Reynolds and fluid-diffusion checks use the UPDATED radius.
     /// Body mass is unchanged, so heating changes drag, torque, displacement,
     /// angular speed and subsequent acceleration without replacing matter.
@@ -81,7 +85,7 @@ impl<'a> HeatedRigidBody<'a> {
     /// The reservoir's gravity must match the original mechanical integrator.
     /// Continue with the same reservoir: replacing it is an external model
     /// change whose exchange work is not inferred. This first-order split
-    /// requires time refinement. The original no-slip, unbounded, fully immersed
+    /// requires time refinement. The original unbounded, fully immersed
     /// quasi-steady limits apply; expanding-surface flow, its dissipation and
     /// kinetic energy, added mass/history and reciprocal thermoelastic heat are
     /// not supplied. Thermal geometry remains the original heating owner's
@@ -267,6 +271,7 @@ impl<'f, F: FluidTransport + ?Sized> CreepingExpansion<'_, '_, 'f, F> {
         let radius = self.sphere.radius_m() * (1.0 + region.expansion().free_linear_strain());
         let sphere = self.sphere.at_radius(radius)?;
         sphere.admit_geometry(region.geometry())?;
+        sphere.admit_surface_material(region.expansion().current().resolved())?;
         Ok(sphere)
     }
     fn snapshot(
