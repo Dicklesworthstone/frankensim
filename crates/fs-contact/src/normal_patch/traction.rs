@@ -11,6 +11,9 @@
 //! motion on the supplied concentric rings. It does not solve nonaxisymmetric
 //! deformation, add finite-body compliance, or supply a new contact tangent.
 
+/// Conservative polar-sector wrenches and affine normal-work transfer.
+pub mod sectors;
+
 use super::{
     NormalLawSource,
     adhesive::{JkrError, SourceJkrSphereContact},
