@@ -31,6 +31,13 @@ mod profile;
 pub use profile::{
     BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3,
 };
+#[cfg(feature = "turbulent-inflow")]
+mod mann_inflow;
+#[cfg(feature = "turbulent-inflow")]
+pub use mann_inflow::{
+    BoundaryMannConfig3, BoundaryMannError3, BoundaryMannInflow3, BoundaryMannObservation3,
+    BoundaryMannReport3, BoundaryMannSource3,
+};
 mod forcing;
 pub use forcing::{
     BoundaryForcingError3, DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3,

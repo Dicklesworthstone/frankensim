@@ -3362,6 +3362,39 @@ modes and reports transport, shear dissipation and mass. It demonstrates the
 spatial inlet path; it supplies neither a measured turbulent spectrum nor a
 developed turbulent inflow or a newly qualified transparent outlet.
 
+### Full-tensor Mann inlet observations on D3Q19
+
+With `turbulent-inflow`, `BoundaryMannInflow3` prepares an explicit SI/lattice
+frame and point or exact square-face observation for the original
+`BoundaryGrid3::set_velocity_profile` owner. The same accepted velocity trace
+feeds ordinary, pooled and SGS collision/streaming. Node positions use the
+existing on-site boundary coordinates, not exterior NSF ghost centers. The
+full Mann cross-component spectrum comes from fs-atmo; there is no variance
+restoration, inferred mean or independent random generator. The prepared
+`MannBoxFilter` binds the complete immutable model and uses no gain storage for
+point observations. Face gains are prepared once under an explicit byte bound.
+
+One borrowed source selector consumes a Taylor-frozen snapshot with convection
+in grid Cartesian axes at the authored physical time, a current
+`FixedStepMannField` endpoint, or its accepted stationary
+`MannStepAverage`. Live and averaged sources retain their own advection exactly
+once, must use the declared CFD dt, and are never advanced by the adapter. An
+interval mean must end at that source's accepted endpoint. It averages velocity,
+not nonlinear momentum/energy fluxes; it adds no higher-order boundary claim.
+Spatial and advective phase bounds must not exceed pi, and active-node/mode work
+is bounded before sampling. The temporal bound does not bandlimit OU innovations.
+
+Arbitrary Mann wavevectors do not wrap periodically: transverse periodic faces
+refuse. Native transverse-wall/open-seam rules remain, including `InletFlux3`'s
+mixed-seam refusal for mean-normal control. Unconstrained sampling retains the
+finite aperture's fluctuating mean. Source, profile and population state remain
+unchanged on refusal; successful application only publishes the original profile.
+A later fluid-step refusal retains that accepted control. No viscous inlet wall
+layer, developed turbulent-flow calibration or transparent outlet is claimed.
+The focused `boundary_mann_inflow` tests exercise all six face mappings, exact
+spatial averaging and native serial/pooled SGS, original endpoint/interval-mean
+consumption, and source/clock/resolution/topology/work/cancellation refusals.
+
 ### Transient finite-volume momentum and heat
 
 `conjugate::simple_unsteady_with_sgs` and `march_conjugate_with_sgs` select the

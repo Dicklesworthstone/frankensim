@@ -34,6 +34,11 @@ pub use boundary::{
     BoundaryDynamicSgsConfig3, BoundaryDynamicSgsError3, BoundaryDynamicSgsReport3,
     BoundaryDynamicSgsWorkspace3,
 };
+#[cfg(feature = "turbulent-inflow")]
+pub use boundary::{
+    BoundaryMannConfig3, BoundaryMannError3, BoundaryMannInflow3, BoundaryMannObservation3,
+    BoundaryMannReport3, BoundaryMannSource3,
+};
 
 pub use boundary::{
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
