@@ -12,9 +12,11 @@
 //! interval is not a substitute. Preparation is reusable across inventories
 //! bound to the same immutable model; application is quadratic in node count.
 //!
-//! This closed acyclic model has no irradiation, external feed, fission yields,
-//! rate feedback or radiation transport. One retained daughter per event does
-//! not assert conservation of nuclear mass/charge without emitted-particle data.
+//! The base advance is closed and acyclic; [`production`] adds explicitly
+//! prescribed production throughout an interval. Neither operation infers
+//! irradiation, fission yields, rate feedback or radiation transport. One
+//! retained daughter per event does not assert conservation of nuclear
+//! mass/charge without emitted-particle data.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -26,6 +28,9 @@ use crate::{Accumulator, EnergyChannels, channel_values, nonnegative, sum};
 /// Decay heat on the original material-backed thermal timeline.
 #[cfg(feature = "thermal")]
 pub mod thermal;
+
+/// Prescribed production during decay and source-bound production schedules.
+pub mod production;
 
 /// A dataset-owned nuclide identity and its immutable admitted half-life law.
 #[derive(Clone, Debug, PartialEq)]
@@ -211,6 +216,7 @@ pub struct DecayInventory {
     model: Arc<DecayModel>,
     populations: Vec<f64>,
     decays: Vec<Accumulator>,
+    produced: Vec<Accumulator>,
     released: [Accumulator; 3],
 }
 
@@ -226,10 +232,12 @@ impl DecayInventory {
             ));
         }
         let decays = vec![Accumulator::new(0.0); populations.len()];
+        let produced = vec![Accumulator::new(0.0); populations.len()];
         Ok(Self {
             model,
             populations,
             decays,
+            produced,
             released: [Accumulator::new(0.0); 3],
         })
     }
@@ -245,6 +253,11 @@ impl DecayInventory {
     #[must_use]
     pub fn cumulative_decays(&self) -> Vec<f64> {
         self.decays.iter().map(|count| count.value()).collect()
+    }
+    /// Original-order expected nuclei produced by explicit sources since construction.
+    #[must_use]
+    pub fn cumulative_produced_nuclei(&self) -> Vec<f64> {
+        self.produced.iter().map(|count| count.value()).collect()
     }
     #[must_use]
     pub fn cumulative_released(&self) -> EnergyChannels {
@@ -331,10 +344,32 @@ impl DecayInventory {
             return Err(error);
         }
         let evolved = evolved?;
+        self.account_evolution(
+            evolved,
+            prepared.duration_s(),
+            None,
+            0.0,
+            budget,
+            &mut checkpoint,
+        )
+    }
+
+    // All numerical propagators share the same physical event/energy ledger.
+    // Produced counts are a separately authored influx, not daughter transfers.
+    fn account_evolution(
+        &self,
+        evolved: fs_la::decay::DecayAdvance,
+        duration_s: f64,
+        produced: Option<&[f64]>,
+        production_roundoff_nuclei: f64,
+        budget: DecayBudget,
+        checkpoint: &mut impl FnMut() -> Result<(), DecayError>,
+    ) -> Result<(Self, DecayStep), DecayError> {
         let mut next = self.clone();
         let mut incoming = vec![Accumulator::new(0.0); self.populations.len()];
         let mut released = [Accumulator::new(0.0); 3];
         let mut population_error = Accumulator::new(evolved.population_balance_residual.abs());
+        add(&mut population_error, production_roundoff_nuclei)?;
         let mut energy_error = Accumulator::new(0.0);
         let mut branch_decays = Vec::with_capacity(self.model.branches.len());
         for branch in &self.model.branches {
@@ -364,6 +399,7 @@ impl DecayInventory {
         }
         for (index, &population) in evolved.populations.iter().enumerate() {
             checkpoint()?;
+            let production = produced.map_or(0.0, |counts| counts[index]);
             // Per-node balance catches missed tiny debits even when the total
             // population residual rounds to zero or different nodes cancel.
             let residual = sum(&[
@@ -372,9 +408,12 @@ impl DecayInventory {
                 evolved.decays[index],
                 -incoming[index].hi,
                 -incoming[index].lo,
+                -production,
             ]);
             add(&mut population_error, checked(residual)?.abs())?;
             let error = add(&mut next.decays[index], evolved.decays[index])?.abs();
+            add(&mut population_error, error)?;
+            let error = add(&mut next.produced[index], production)?.abs();
             add(&mut population_error, error)?;
         }
         let released = channel_values(released);
@@ -397,7 +436,7 @@ impl DecayInventory {
         Ok((
             next,
             DecayStep {
-                duration_s: prepared.duration_s(),
+                duration_s,
                 decays: evolved.decays,
                 branch_decays,
                 released,
@@ -442,6 +481,7 @@ pub struct DecayStep {
     /// Counts in the model's original branch order.
     pub branch_decays: Vec<f64>,
     pub released: EnergyChannels,
+    /// Final minus initial minus explicitly produced expected nuclei.
     pub population_balance_residual: f64,
     pub population_roundoff_nuclei: f64,
     pub energy_roundoff_j: f64,

@@ -544,3 +544,56 @@ No physical type, heat law, numerical algorithm or integrator was mocked. Full
 workspace Cargo and `fs-couple` build validation remain separate; the existing
 native reproduction gates above still apply when that dependency environment
 is available.
+
+## Prescribed production during radioactive decay
+
+`decay::production` integrates an explicitly authored vector of nuclide
+production rates while the existing inventory and every newly produced daughter
+continue decaying. `DecayModel::prepare_production` binds the original half-life
+data and topology to `fs_la::decay::source::DecaySourcePlan`; it adds no second
+propagator. The prepared maps are independent of production rates and initial
+populations, so one interval can be reused across both inventory and source changes.
+
+`trial_with_production` and `trial_production_prepared` report a
+`DecayProductionStep` containing original-order produced counts and the original
+`DecayStep` emission ledger. The corresponding advance methods publish atomically.
+A single shared physical accounting path serves closed and produced inventories:
+per-node balance is final minus initial minus production plus transformations
+minus incoming daughters. Source rate-times-duration roundoff and compensated
+lifetime production-counter defects consume the same noncancelling nuclei
+allowance. `cumulative_produced_nuclei` survives shutdown, restart and later
+ordinary closed-decay advances. Initial inventories are distinct from subsequent
+source production.
+
+`DecayProductionSchedule` binds nonnegative rate vectors to the exact model Arc,
+admits a caller-bounded strictly increasing change history, and performs binary
+search for right-continuous rates and the next transition. Invalid rates, times,
+shapes, model bindings, source products, work limits and cancellations refuse
+without changing an accepted inventory. Positive but unrepresentable produced
+counts are not silently credited as zero.
+
+Production is prescribed within the tracked nuclear inventory. It does not
+infer activation cross sections, fission yields, source-parent depletion, or
+the bulk mass and enthalpy of a transported material stream. In particular, an
+irradiated parent's exponentially falling reaction rate cannot be replaced by
+its constant interval average and described as an exact source convolution.
+The existing irradiation owner and any explicit product binding must preserve
+that history and keep prompt capture/fission energy distinct from later
+radioactive emissions.
+
+All 60 default-feature source tests passed in the actual native `fs-nuclear`
+crate root linked to the applicable unchanged production dependencies: 52 prior
+tests plus eight production-owner regressions. The additions check independent
+constant-source and repeated-rate ingrowth integrals, shutdown, stable and zero
+intervals, partition/restart, transition admission, noncancelling per-node birth
+roundoff, source-product defects, cancellation and prepared-map reuse. Full
+workspace Cargo verification still requires the missing constellation checkouts.
+
+`examples/decay_production.rs` demonstrates a source increase followed by
+shutdown, using one prepared quarter-second map across changing source vectors.
+It reports produced populations and separate lifetime emissions; the authored
+schedule aligns with its explicit grid. Integrating consumers must clip
+intervals at arbitrary schedule transitions.
+
+The example also compiled and executed successfully through the same exact-source
+native build, including its production/conservation/shutdown assertions.
