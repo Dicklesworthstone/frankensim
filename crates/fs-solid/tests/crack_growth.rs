@@ -1632,3 +1632,197 @@ fn g1_sourced_walker_resolves_frozen_thermal_prestress_on_original_newmark_suppo
         close(outcomes[1].1, outcomes[0].1 / 1.5, 1e-9);
     });
 }
+
+#[test]
+fn g1_native_events_preserve_an_open_crack_cycle_and_all_failure_boundaries() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed = fixed();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let low = load(&geometry, 2e6, cx);
+        let forcing = load(&geometry, 5e6, cx);
+        let alternate = load(&geometry, 4e6, cx);
+        let mut initial = ZERO;
+        initial[1][0] = 2e6 / 200e9;
+        let mut native = low
+            .begin_transient_with_supports(
+                &problem,
+                Some(TetThermalStrainField::Uniform(&thermal)),
+                0.0,
+                &initial,
+                &ZERO,
+                &ZERO,
+                TransientConfig3 {
+                    maximum_steps: 32,
+                    ..Default::default()
+                },
+                cx,
+            )
+            .unwrap();
+        let mut cfg = config();
+        cfg.maximum_samples = 33;
+        let mut observed = native
+            .clone()
+            .with_crack_growth(FRAME, vec![gauge()], cfg, cx)
+            .unwrap();
+        let initial_cracks = observed.states();
+        let initial_stress = observed.recover_response(cx).unwrap().stress;
+        let jump = observed.apply_load_jump(&forcing, cx).unwrap();
+        assert_eq!(jump, native.apply_load_jump(&forcing, cx).unwrap());
+        assert!(jump.acceleration_change_l2_m_s2 > 0.0);
+        assert_eq!(observed.states(), initial_cracks);
+        assert_eq!(observed.observed_samples(), 1);
+        assert_eq!(
+            observed.recover_response(cx).unwrap().stress,
+            initial_stress
+        );
+        assert_eq!(observed.mechanics().state().time_s, 0.0);
+        assert_eq!(observed.mechanics().state().step, 0);
+        assert_eq!(observed.mechanics().nodal_motion(cx).unwrap()[0], initial);
+        assert_eq!(observed.mechanics().nodal_motion(cx).unwrap()[1], ZERO);
+
+        let h = 2.0 * (std::f64::consts::PI / 32.0).tan() / (10.0_f64 * 200e9 / 7800.0).sqrt();
+        let mut minimum: f64 = 2e6;
+        let mut maximum: f64 = 2e6;
+        for step in 1..=32 {
+            let expected = native.advance_with_supports(&forcing, &[], h, cx).unwrap();
+            let actual = observed
+                .advance_with_supports(&forcing, &[], h, cx)
+                .unwrap();
+            assert_eq!(actual.mechanics, expected);
+            assert_eq!(
+                actual.response,
+                native.recover_response(FRAME, 0.01, cx).unwrap()
+            );
+            assert_eq!(observed.mechanics().state(), native.state());
+            minimum = minimum.min(actual.normal_stress_pa[0]);
+            maximum = maximum.max(actual.normal_stress_pa[0]);
+            if step == 8 {
+                // Mid-excursion, preserve the original first extremum and open
+                // outward branch. These switches have no elapsed time between
+                // them, and the original force/zero support acceleration returns.
+                let before = native.state().clone();
+                let motion = native.nodal_motion(cx).unwrap();
+                let stress = actual.response.stress;
+                assert_eq!(
+                    observed.apply_load_jump(&alternate, cx).unwrap(),
+                    native.apply_load_jump(&alternate, cx).unwrap()
+                );
+                let support = observed
+                    .apply_support_acceleration_jump(&forcing, &[(0, 10.0)], cx)
+                    .unwrap();
+                assert_eq!(
+                    support,
+                    native
+                        .apply_support_acceleration_jump(&forcing, &[(0, 10.0)], cx)
+                        .unwrap()
+                );
+                assert!(support.acceleration_change_l2_m_s2 > 0.0);
+                assert_eq!(
+                    observed.mechanics().nodal_motion(cx).unwrap()[2][0][0],
+                    10.0
+                );
+                assert_eq!(
+                    observed
+                        .apply_support_acceleration_jump(&forcing, &[], cx)
+                        .unwrap(),
+                    native
+                        .apply_support_acceleration_jump(&forcing, &[], cx)
+                        .unwrap()
+                );
+                let after_motion = observed.mechanics().nodal_motion(cx).unwrap();
+                assert_eq!(after_motion[0], motion[0]);
+                assert_eq!(after_motion[1], motion[1]);
+                assert_eq!(observed.mechanics().state().time_s, before.time_s);
+                assert_eq!(observed.mechanics().state().step, before.step);
+                assert_eq!(
+                    observed.mechanics().state().total_energy_j,
+                    before.total_energy_j
+                );
+                assert_eq!(observed.recover_response(cx).unwrap().stress, stress);
+                assert_eq!(observed.states(), initial_cracks);
+                assert_eq!(observed.observed_samples(), 9);
+
+                let mut foreign_nodes = NODES;
+                foreign_nodes[1][0] = 2.0;
+                let foreign_geometry =
+                    TetLoadGeometry3::new(&foreign_nodes, &TETS, Default::default(), 4, cx)
+                        .unwrap();
+                let foreign = foreign_geometry
+                    .assemble(&[], VolumeLoad3::None, &[], cx)
+                    .unwrap();
+                let accepted = observed.recover_response(cx).unwrap();
+                assert!(matches!(
+                    observed.apply_load_jump(&foreign, cx),
+                    Err(TetCrackGrowthError::Transient(_))
+                ));
+                assert!(matches!(
+                    observed.apply_support_acceleration_jump(&alternate, &[(3, 1.0)], cx),
+                    Err(TetCrackGrowthError::Transient(_))
+                ));
+                with_cx(true, |cancelled| {
+                    assert!(matches!(
+                        observed.apply_load_jump(&alternate, cancelled),
+                        Err(TetCrackGrowthError::Cancelled)
+                    ));
+                    assert!(matches!(
+                        observed.apply_support_acceleration_jump(&alternate, &[], cancelled),
+                        Err(TetCrackGrowthError::Cancelled)
+                    ));
+                });
+                assert_eq!(observed.mechanics().state(), native.state());
+                assert_eq!(observed.mechanics().nodal_motion(cx).unwrap(), after_motion);
+                assert_eq!(observed.recover_response(cx).unwrap(), accepted);
+                assert_eq!(observed.states(), initial_cracks);
+                assert_eq!(observed.observed_samples(), 9);
+            }
+        }
+        close(minimum, 2e6, 0.01);
+        close(maximum, 8e6, 0.01);
+        let forecast = observed.cycles_to_length(0, 1.2 * INITIAL_A, cx).unwrap();
+        // Exhausted time-step/sample budgets do not prohibit same-time events;
+        // even the already closed, unconsumed physical cycle remains identical.
+        assert_eq!(observed.observed_samples(), 33);
+        assert_eq!(
+            observed.apply_load_jump(&alternate, cx).unwrap(),
+            native.apply_load_jump(&alternate, cx).unwrap()
+        );
+        assert_eq!(
+            observed
+                .apply_support_acceleration_jump(&alternate, &[(0, 10.0)], cx)
+                .unwrap(),
+            native
+                .apply_support_acceleration_jump(&alternate, &[(0, 10.0)], cx)
+                .unwrap()
+        );
+        assert_eq!(
+            observed.cycles_to_length(0, 1.2 * INITIAL_A, cx).unwrap(),
+            forecast
+        );
+        assert_eq!(observed.states(), initial_cracks);
+        assert_eq!(observed.observed_samples(), 33);
+        observed.close_cycle(cx).unwrap();
+        close(
+            observed.states()[0].crack_length_m,
+            analytical_length(INITIAL_A, maximum - minimum),
+            2e-16,
+        );
+        assert_eq!(observed.states()[0].cycles, 1.0);
+        let completed = observed.finish(cx).unwrap();
+        let accepted = observed.recover_response(cx).unwrap();
+        assert!(matches!(
+            observed.apply_load_jump(&forcing, cx),
+            Err(TetCrackGrowthError::Finished)
+        ));
+        assert!(matches!(
+            observed.apply_support_acceleration_jump(&forcing, &[], cx),
+            Err(TetCrackGrowthError::Finished)
+        ));
+        assert_eq!(observed.mechanics().state(), native.state());
+        assert_eq!(observed.recover_response(cx).unwrap(), accepted);
+        assert_eq!(observed.states(), completed);
+        assert_eq!(observed.observed_samples(), 33);
+    });
+}

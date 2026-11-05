@@ -641,11 +641,17 @@ impl TetFatigueObserver {
         Ok(())
     }
 
-    pub(crate) fn check_next(&self, time_s: f64, cx: &Cx<'_>) -> Result<(), TetFatigueError> {
+    /// Same-time native events do not spend sample budget or alter history.
+    pub(crate) fn check_event(&self, cx: &Cx<'_>) -> Result<(), TetFatigueError> {
         poll(cx)?;
         if self.finished {
             return Err(TetFatigueError::Finished);
         }
+        Ok(())
+    }
+
+    pub(crate) fn check_next(&self, time_s: f64, cx: &Cx<'_>) -> Result<(), TetFatigueError> {
+        self.check_event(cx)?;
         if !time_s.is_finite() || time_s < 0.0 || self.last_time_s.is_some_and(|t| time_s <= t) {
             return Err(TetFatigueError::Invalid(
                 "sample times must be finite, nonnegative and strictly increasing",

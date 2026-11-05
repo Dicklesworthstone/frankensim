@@ -532,11 +532,17 @@ impl TetCrackGrowthObserver {
         Ok(forecast)
     }
 
-    pub(crate) fn check_next(&self, time_s: f64, cx: &Cx<'_>) -> Result<(), TetCrackGrowthError> {
+    /// Same-time native events do not spend sample budget or alter history.
+    pub(crate) fn check_event(&self, cx: &Cx<'_>) -> Result<(), TetCrackGrowthError> {
         poll(cx)?;
         if self.finished {
             return Err(TetCrackGrowthError::Finished);
         }
+        Ok(())
+    }
+
+    pub(crate) fn check_next(&self, time_s: f64, cx: &Cx<'_>) -> Result<(), TetCrackGrowthError> {
+        self.check_event(cx)?;
         if !time_s.is_finite()
             || time_s < 0.0
             || self.last_time_s.is_some_and(|last| time_s <= last)

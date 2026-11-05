@@ -15,6 +15,7 @@
 //! elastic applicability; no plastic response, damage heat or stiffness loss
 //! is inferred from this observation.
 
+use super::events::LoadJump3;
 use super::response::TransientResponse3;
 use super::{TetTransientRun3, TransientStep3};
 use crate::fatigue::{
@@ -166,6 +167,38 @@ impl<'g, 'm, 'p, 's> TetTransientFatigueRun3<'g, 'm, 'p, 's> {
             self.observation.maximum_strain(),
             cx,
         )?)
+    }
+
+    /// Change a finite external load at the accepted time through the native
+    /// acceleration solve. Displacement, velocity, temperature and stress stay
+    /// fixed, so this event adds no fatigue sample or cycle and retains every
+    /// open history. Native force/reaction updates and cancellation are atomic.
+    pub fn apply_load_jump(
+        &mut self,
+        load_after: &TetLoadCase3<'_, '_>,
+        cx: &Cx<'_>,
+    ) -> Result<LoadJump3, TetFatigueError> {
+        self.observation.check_event(cx)?;
+        // The native event is the last fallible operation. It changes no
+        // stress-driving state, so no observer work follows its commit.
+        Ok(self.run.apply_load_jump(load_after, cx)?)
+    }
+
+    /// Switch finite support acceleration and external load at the same time.
+    /// The original mass solve retains full support coupling and reactions;
+    /// q/v, stress and all fatigue histories remain unchanged. Support motion
+    /// must already be initialized; omitted fixed components get zero acceleration.
+    /// No mechanical step or fatigue sample allowance is consumed.
+    pub fn apply_support_acceleration_jump(
+        &mut self,
+        load_after: &TetLoadCase3<'_, '_>,
+        prescribed_dofs_m_s2: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<LoadJump3, TetFatigueError> {
+        self.observation.check_event(cx)?;
+        Ok(self
+            .run
+            .apply_support_acceleration_jump(load_after, prescribed_dofs_m_s2, cx)?)
     }
 
     /// Advance stationary-support mechanics and every gauge as one transaction.

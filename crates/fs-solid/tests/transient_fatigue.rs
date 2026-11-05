@@ -588,3 +588,163 @@ fn g4_stress_recovery_domain_refusal_does_not_commit_native_motion() {
         assert_eq!(run.summaries(), history);
     });
 }
+
+#[test]
+fn g1_native_load_and_support_jumps_preserve_fatigue_history_and_continue_atomically() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let empty = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let loaded = geometry
+            .assemble(&[], VolumeLoad3::None, &[(0, 0.034), (3, 0.012)], cx)
+            .unwrap();
+        let mut native = empty
+            .begin_transient_with_supports(
+                &problem,
+                Some(TetThermalStrainField::Uniform(&thermal)),
+                0.0,
+                &initial(),
+                &ZERO,
+                &ZERO,
+                TransientConfig3 {
+                    maximum_steps: 2,
+                    ..Default::default()
+                },
+                cx,
+            )
+            .unwrap();
+        let mut cfg = config();
+        cfg.history.maximum_samples = 3;
+        let selected = gauge([1.0, 0.0, 0.0], 1.0);
+        let mut independent =
+            RainflowMiner::new(selected.curve.clone(), selected.mean_stress, cfg.history).unwrap();
+        let mut run = native
+            .clone()
+            .with_fatigue(FRAME, vec![selected], cfg, cx)
+            .unwrap();
+        let initial_response = run.recover_response(cx).unwrap();
+        independent
+            .push(initial_response.stress.elements()[0].stress_mandel_pa()[0])
+            .unwrap();
+        let initial_state = native.state().clone();
+        let initial_motion = native.nodal_motion(cx).unwrap();
+        let history = run.summaries();
+        let jump = run.apply_load_jump(&loaded, cx).unwrap();
+        assert_eq!(jump, native.apply_load_jump(&loaded, cx).unwrap());
+        // Original consistent mass M_ff=.1 and M_fc=.05: finite forcing
+        // changes acceleration by .012/.1, then support inertia by -.05*.02/.1.
+        close(jump.acceleration_change_l2_m_s2, 0.12, 1e-14);
+        let support = run
+            .apply_support_acceleration_jump(&loaded, &[(0, 0.02)], cx)
+            .unwrap();
+        assert_eq!(
+            support,
+            native
+                .apply_support_acceleration_jump(&loaded, &[(0, 0.02)], cx)
+                .unwrap()
+        );
+        close(support.acceleration_change_l2_m_s2, 0.01, 1e-14);
+        let motion = run.mechanics().nodal_motion(cx).unwrap();
+        assert_eq!(motion[0], initial_motion[0]);
+        assert_eq!(motion[1], initial_motion[1]);
+        assert_eq!(motion[2][0][0], 0.02);
+        assert_eq!(run.mechanics().state().time_s, initial_state.time_s);
+        assert_eq!(run.mechanics().state().step, initial_state.step);
+        assert_eq!(
+            run.mechanics().state().total_energy_j,
+            initial_state.total_energy_j
+        );
+        assert_eq!(run.summaries(), history);
+        assert_eq!(run.observed_samples(), 1);
+        assert_eq!(
+            run.recover_response(cx).unwrap().stress,
+            initial_response.stress
+        );
+        assert_eq!(run.mechanics().state(), native.state());
+        assert_eq!(
+            run.recover_response(cx).unwrap(),
+            native.recover_response(FRAME, 0.01, cx).unwrap()
+        );
+
+        let mut foreign_nodes = NODES;
+        foreign_nodes[1][0] = 2.0;
+        let foreign_geometry =
+            TetLoadGeometry3::new(&foreign_nodes, &TETS, Default::default(), 4, cx).unwrap();
+        let foreign = foreign_geometry
+            .assemble(&[], VolumeLoad3::None, &[], cx)
+            .unwrap();
+        let accepted = run.recover_response(cx).unwrap();
+        assert!(matches!(
+            run.apply_load_jump(&foreign, cx),
+            Err(TetFatigueError::Transient(TransientError3::Invalid(_)))
+        ));
+        assert!(matches!(
+            run.apply_support_acceleration_jump(&empty, &[(3, 1.0)], cx),
+            Err(TetFatigueError::Transient(TransientError3::Invalid(_)))
+        ));
+        with_cx(true, |cancelled| {
+            assert!(matches!(
+                run.apply_load_jump(&empty, cancelled),
+                Err(TetFatigueError::Cancelled)
+            ));
+            assert!(matches!(
+                run.apply_support_acceleration_jump(&empty, &[], cancelled),
+                Err(TetFatigueError::Cancelled)
+            ));
+        });
+        assert_eq!(run.mechanics().state(), native.state());
+        assert_eq!(run.mechanics().nodal_motion(cx).unwrap(), motion);
+        assert_eq!(run.recover_response(cx).unwrap(), accepted);
+        assert_eq!(run.summaries(), history);
+
+        for _ in 0..2 {
+            let expected = native
+                .advance_with_supports(&loaded, &[], 0.05, cx)
+                .unwrap();
+            let step = run.advance_with_supports(&loaded, &[], 0.05, cx).unwrap();
+            assert_eq!(step.mechanics, expected);
+            assert_eq!(
+                step.response,
+                native.recover_response(FRAME, 0.01, cx).unwrap()
+            );
+            assert_eq!(run.mechanics().state(), native.state());
+            independent.push(step.signed_stress_pa[0]).unwrap();
+            assert_eq!(run.summaries(), vec![independent.summary()]);
+        }
+        // Both advancement and sampling allowances are exhausted, but an
+        // instantaneous event consumes neither. The unresolved S-N residue stays.
+        let history = run.summaries();
+        assert_eq!(run.observed_samples(), 3);
+        assert_eq!(
+            run.apply_load_jump(&empty, cx).unwrap(),
+            native.apply_load_jump(&empty, cx).unwrap()
+        );
+        assert_eq!(
+            run.apply_support_acceleration_jump(&empty, &[], cx)
+                .unwrap(),
+            native
+                .apply_support_acceleration_jump(&empty, &[], cx)
+                .unwrap()
+        );
+        assert_eq!(run.summaries(), history);
+        assert_eq!(run.observed_samples(), 3);
+        let final_summary = run.finish(cx).unwrap();
+        assert_eq!(final_summary, vec![independent.finish().unwrap()]);
+        assert!(final_summary[0].miner_damage > 0.0);
+        let accepted = run.recover_response(cx).unwrap();
+        assert!(matches!(
+            run.apply_load_jump(&loaded, cx),
+            Err(TetFatigueError::Finished)
+        ));
+        assert!(matches!(
+            run.apply_support_acceleration_jump(&loaded, &[(0, 0.02)], cx),
+            Err(TetFatigueError::Finished)
+        ));
+        assert_eq!(run.mechanics().state(), native.state());
+        assert_eq!(run.recover_response(cx).unwrap(), accepted);
+        assert_eq!(run.summaries(), final_summary);
+    });
+}

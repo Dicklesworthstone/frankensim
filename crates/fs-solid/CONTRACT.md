@@ -1149,6 +1149,14 @@ an optional bundle still has to be the actual elastic state. The synthetic
 `tests/fatigue_source.rs` regressions cover static damage, native Newmark motion,
 source refusals and complete checkpoint replay without changing mechanics.
 
+`apply_load_jump` and `apply_support_acceleration_jump` expose the original
+native finite-force and support-acceleration events at the accepted time.
+They retain the native `LoadJump3` diagnostics and full mass/support coupling.
+Displacement, velocity, temperature and stress stay fixed, so no extra stress
+recovery, history copy, sample or cycle is needed. Open rainflow residues and
+sample/step allowances remain unchanged. Native rejection or cancellation
+publishes neither force nor acceleration; finalized observers refuse events.
+
 The wrapper exposes no mutable run, external stress injection or material/thermal
 reconfiguration. A late gauge refusal, stress-domain failure or cancellation
 commits neither native mechanics nor any fatigue counter. Cloning retains both
@@ -1167,7 +1175,9 @@ stiffness degradation, damage-derived heat or service-life validation claim.
 G0/G1/G3/G4 regressions in `tests/transient_fatigue.rs` cover unforced oscillator
 stress and independently accumulated damage, a three-rung physical-period
 reference, exact native mechanics/reactions, moving supports, checkpoint/chunk
-continuation, complete rollback and source/history refusals. All fatigue data
+continuation, finite load/support-acceleration events through unresolved
+histories and exhausted sample allowances, complete rollback and source/history
+refusals. All fatigue data
 in those tests is explicitly synthetic; the regressions are implementation
 checks, not experimental material calibration.
 
@@ -1205,6 +1215,15 @@ elastic stress, displacement, inertia, reactions and work remain unchanged.
 The reference R and gamma remain inspectable in the retained law and, for a
 source-resolved fit, in its original six material claims. This does not change
 the fixed-temperature restriction or establish a changing-temperature transfer.
+
+The inertial wrapper also exposes native `apply_load_jump` and
+`apply_support_acceleration_jump` events. At the accepted time they update
+force, acceleration and reactions through the original consistent-mass owner,
+retaining its `LoadJump3` report. They preserve displacement, velocity,
+temperature, stress, open excursions and closed but unconsumed cycles exactly.
+There is no duplicate observation, observer clone or cycle closure, and no
+step/sample allowance is consumed. Native failure or cancellation leaves both
+owners unchanged; a finalized observer refuses further events.
 
 The original immutable geometry and its context remain inspectable through
 `geometry(gauge)`. The shared material owner evaluates the changing factor
