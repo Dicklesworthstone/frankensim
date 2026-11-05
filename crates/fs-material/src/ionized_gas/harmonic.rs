@@ -121,7 +121,7 @@ impl IonizedGasConductivity {
             }
             for pair in self.coulomb_pairs() {
                 poll(&mut cancelled)?;
-                let index = |original| {
+                let index = |original: usize| {
                     self.state
                         .thermodynamics()
                         .models()

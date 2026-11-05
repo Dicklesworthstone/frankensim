@@ -177,7 +177,7 @@ pub(super) fn add_impulse(momentum: [Dd; 3], force: Vec3, duration: f64) -> [Dd;
 pub(super) fn add_half_impulse(momentum: [Dd; 3], force: Vec3, duration: f64) -> [Dd; 3] {
     let half = 0.5 * duration;
     let result = add_impulse(momentum, force, half);
-    let remainder = (-2.0).mul_add(half, duration);
+    let remainder = (-2.0_f64).mul_add(half, duration);
     if remainder == 0.0 {
         return result;
     }
