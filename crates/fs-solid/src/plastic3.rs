@@ -479,7 +479,8 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         elements: &[Element],
         states: &[L::State],
         u: &[f64],
-        inertia: Option<&dynamics::Inertia<'_>>,
+        inertia: Option<&dyn increment::IncrementInertia>,
+        fallback: Option<&TangentFallback>,
         cx: &Cx<'_>,
     ) -> Result<Csr, SmallStrainTetError> {
         let mut coo = Coo::new(u.len(), u.len());
@@ -487,14 +488,30 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             if index % 4096 == 0 {
                 checkpoint(cx)?;
             }
-            let c: Tangent6 = self
-                .laws
-                .at(index)
-                .tangent(&Self::strain(element, u), &states[index]);
+            let law = self.laws.at(index);
+            let strain = Self::strain(element, u);
+            let mut c: Tangent6 = law.tangent(&strain, &states[index]);
             if c.iter().flatten().any(|v| !v.is_finite()) {
-                return Err(SmallStrainTetError::InvalidInput {
-                    what: format!("element {index} has a non-finite constitutive tangent"),
-                });
+                let Some(fallback) = fallback else {
+                    return Err(SmallStrainTetError::InvalidInput {
+                        what: format!("element {index} has a non-finite constitutive tangent"),
+                    });
+                };
+                c = dynamics::midpoint::numerical_tangent(
+                    law,
+                    &strain,
+                    &states[index],
+                    index,
+                    fallback.difference_step_strain,
+                    cx,
+                )?;
+                fallback
+                    .evaluations
+                    .set(fallback.evaluations.get().checked_add(1).ok_or_else(|| {
+                        SmallStrainTetError::InvalidInput {
+                            what: "numerical constitutive tangent count overflow".into(),
+                        }
+                    })?);
             }
             let cols: [Voigt; 12] =
                 std::array::from_fn(|k| b_column(element.gradients[k / 3], k % 3));
@@ -556,7 +573,7 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
     ) -> Result<Csr, SmallStrainTetError> {
         let elements = self.validate()?;
         self.check(displacement_m, states)?;
-        self.tangent(&elements, states, displacement_m, None, cx)
+        self.tangent(&elements, states, displacement_m, None, None, cx)
     }
 
     /// Reference displacement gradients from the same P1 shape gradients as
@@ -638,7 +655,17 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
     fn solve_candidate(
         &self,
         initial: Option<(&[f64], &[L::State])>,
-        inertia: Option<&dynamics::Inertia<'_>>,
+        inertia: Option<&dyn increment::IncrementInertia>,
+        cx: &Cx<'_>,
+    ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
+        self.solve_candidate_with_tangent(initial, inertia, None, cx)
+    }
+
+    fn solve_candidate_with_tangent(
+        &self,
+        initial: Option<(&[f64], &[L::State])>,
+        inertia: Option<&dyn increment::IncrementInertia>,
+        tangent_fallback: Option<&TangentFallback>,
         cx: &Cx<'_>,
     ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
         checkpoint(cx)?;
@@ -650,8 +677,9 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             problem: self,
             elements: &elements,
             inertia,
+            tangent_fallback,
         };
-        let result = increment::solve(
+        let result = increment::solve_with_inertia(
             &operator,
             increment::IncrementControls {
                 dofs: 3 * self.nodes_m.len(),
@@ -677,10 +705,17 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
     }
 }
 
+/// Explicit solver control, never a replacement constitutive tangent contract.
+struct TangentFallback {
+    difference_step_strain: f64,
+    evaluations: std::cell::Cell<usize>,
+}
+
 struct TetIncrement<'a, 'b, L: SmallStrainLaw> {
     problem: &'a SmallStrainTetProblem<'b, L>,
     elements: &'a [Element],
-    inertia: Option<&'a dynamics::Inertia<'a>>,
+    inertia: Option<&'a dyn increment::IncrementInertia>,
+    tangent_fallback: Option<&'a TangentFallback>,
 }
 
 impl<L: SmallStrainLaw> increment::IncrementOperator for TetIncrement<'_, '_, L> {
@@ -709,11 +744,22 @@ impl<L: SmallStrainLaw> increment::IncrementOperator for TetIncrement<'_, '_, L>
         u: &[f64],
         cx: &Cx<'_>,
     ) -> Result<Csr, SmallStrainTetError> {
-        self.problem
-            .tangent(self.elements, states, u, self.inertia, cx)
+        self.problem.tangent(
+            self.elements,
+            states,
+            u,
+            self.inertia,
+            self.tangent_fallback,
+            cx,
+        )
     }
 
     fn tangent_symmetric(&self) -> bool {
+        if self.tangent_fallback.is_some() {
+            // Numerical columns need not preserve exact symmetry, even when
+            // the underlying smooth material does. Use the native general solve.
+            return false;
+        }
         match self.problem.laws {
             SmallStrainLawField::Uniform(law) => law.admissibility().tangent_symmetric,
             SmallStrainLawField::PerElement(laws) => {

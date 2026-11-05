@@ -1,5 +1,25 @@
 # fs-solid CONTRACT
 
+## Work-conjugate brittle midpoint motion
+
+`BrittleTetMotion::advance_midpoint` uses the original analytic crack-band
+path-mean stress, retained consistent reference mass and native midpoint
+inertia through the existing P1 Newton/FGMRES assembly. Applied loads and support
+reactions are interval means; displacement, velocity, constitutive history and
+published solid stresses remain physical endpoints. Independent replay and
+whole-mesh gates check material work, cumulative fracture loss, mean-force work,
+kinetic continuity, equilibrium work and the complete first law. No endpoint
+quadrature correction or numerical kinetic loss is relabeled as physical loss.
+
+Unavailable classical mean tangents require an explicit solver option. The
+native finite-difference owner then evaluates only the affected element's
+six-component actual mean response at fixed history, with at most seven material
+trials using a cached base. It preserves domain/cancellation refusals and uses
+the general sparse solver; all ordinary endpoint paths remain strict. This is
+centered, fixed-plane small-strain motion. Exact supplied-path work does not
+resolve unseen reversals, certify temporal error, remove frequency warping or
+initialize newly inserted crack surfaces in loaded bodies.
+
 ## Continued brittle seam growth with retained physical histories
 
 `TetFractureTopology::refine` adds explicitly selected original faces to an

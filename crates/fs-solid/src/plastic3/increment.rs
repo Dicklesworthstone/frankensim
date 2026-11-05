@@ -12,6 +12,93 @@ use fs_exec::Cx;
 use fs_material::Voigt;
 use fs_sparse::{Coo, Csr};
 
+/// Borrowed contributions from the original time-integration owner. Material
+/// assembly and the Newton loop stay shared; the inertia owner supplies its
+/// own momentum force, exact derivative and physical free-row force scale.
+pub(crate) trait IncrementInertia {
+    fn add_force(
+        &self,
+        u: &[f64],
+        force: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::inertia::InertiaError>;
+
+    fn add_tangent(
+        &self,
+        matrix: &mut Coo,
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::inertia::InertiaError>;
+
+    fn force_scale(
+        &self,
+        u: &[f64],
+        free: &[usize],
+        elastic_free_norm: f64,
+        external_free_norm: f64,
+        cx: &Cx<'_>,
+    ) -> Result<f64, crate::inertia::InertiaError>;
+}
+
+impl IncrementInertia for crate::inertia::BackwardEulerInertia<'_> {
+    fn add_force(
+        &self,
+        u: &[f64],
+        force: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::inertia::InertiaError> {
+        Self::add_force(self, u, force, cx)
+    }
+
+    fn add_tangent(
+        &self,
+        matrix: &mut Coo,
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::inertia::InertiaError> {
+        Self::add_tangent(self, matrix, cx)
+    }
+
+    fn force_scale(
+        &self,
+        u: &[f64],
+        free: &[usize],
+        elastic_free_norm: f64,
+        external_free_norm: f64,
+        cx: &Cx<'_>,
+    ) -> Result<f64, crate::inertia::InertiaError> {
+        Self::force_scale(self, u, free, elastic_free_norm, external_free_norm, cx)
+    }
+}
+
+impl IncrementInertia for crate::inertia::MidpointInertia<'_> {
+    fn add_force(
+        &self,
+        u: &[f64],
+        force: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::inertia::InertiaError> {
+        Self::add_force(self, u, force, cx)
+    }
+
+    fn add_tangent(
+        &self,
+        matrix: &mut Coo,
+        cx: &Cx<'_>,
+    ) -> Result<(), crate::inertia::InertiaError> {
+        Self::add_tangent(self, matrix, cx)
+    }
+
+    fn force_scale(
+        &self,
+        u: &[f64],
+        free: &[usize],
+        elastic_free_norm: f64,
+        external_free_norm: f64,
+        cx: &Cx<'_>,
+    ) -> Result<f64, crate::inertia::InertiaError> {
+        Self::force_scale(self, u, free, elastic_free_norm, external_free_norm, cx)
+    }
+}
+
 pub(crate) trait IncrementOperator {
     type State: Clone + PartialEq;
 
@@ -81,12 +168,31 @@ pub(crate) struct IncrementSolution<S> {
 
 /// The wrapper validates topology, budgets, controls and initial array shapes
 /// before entry. Candidate state stays private until the entire path succeeds.
-#[allow(clippy::too_many_lines)] // shared increment / Newton / backtracking loop
 pub(crate) fn solve<O: IncrementOperator>(
     operator: &O,
     controls: IncrementControls<'_>,
     initial: Option<(&[f64], &[O::State])>,
     inertia: Option<&dynamics::Inertia<'_>>,
+    cx: &Cx<'_>,
+) -> Result<IncrementSolution<O::State>, SmallStrainTetError> {
+    solve_with_inertia(
+        operator,
+        controls,
+        initial,
+        inertia.map(|inertia| inertia as &dyn IncrementInertia),
+        cx,
+    )
+}
+
+/// Same accepted-state, backtracking and reaction owner with an explicitly
+/// selected inertial rule. The operator's tangent must include this same
+/// inertia. A path-mean material law remains the caller's responsibility.
+#[allow(clippy::too_many_lines)] // shared increment / Newton / backtracking loop
+pub(crate) fn solve_with_inertia<O: IncrementOperator>(
+    operator: &O,
+    controls: IncrementControls<'_>,
+    initial: Option<(&[f64], &[O::State])>,
+    inertia: Option<&dyn IncrementInertia>,
     cx: &Cx<'_>,
 ) -> Result<IncrementSolution<O::State>, SmallStrainTetError> {
     checkpoint(cx)?;

@@ -15,6 +15,10 @@
 
 pub mod fatigue;
 
+/// Centered inertia for native constitutive laws that explicitly supply a
+/// work-conjugate path-mean stress and its derivative.
+pub(crate) mod midpoint;
+
 use super::*;
 
 pub(super) use crate::inertia::BackwardEulerInertia as Inertia;

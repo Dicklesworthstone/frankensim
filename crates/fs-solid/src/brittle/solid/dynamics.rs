@@ -14,6 +14,9 @@
 //! against local state comparisons, damage jumps and numerical-loss budgets.
 //! This adds no crack topology, fragment contact or finite-strain mass mapping.
 
+/// Analytic material path work with centered inertia and no numerical kinetic loss.
+pub mod midpoint;
+
 /// Temperature-dependent strength with unchanged reference mass and retained motion.
 pub mod temperature;
 
