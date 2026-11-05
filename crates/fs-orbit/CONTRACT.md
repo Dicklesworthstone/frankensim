@@ -618,6 +618,37 @@ These measurements detect generated energy outside finite Fourier guard bands,
 but do not certify absence of arbitrary aliases beyond both sample grids or
 replace independent base-waveform refinement.
 
+`sideband::sensitivity` differentiates the retained coupled response with respect
+to the signed carrier, at a FIXED original operating orbit, clock and phase.
+`PreparedSidebandResponse::prepare_carrier_derivative` admits and caches the
+declared complete `dP(i*w)/dw` at every signed shifted frequency. This derivative
+includes the imaginary-axis chain factor; it is not merely `dP(s)/ds`. The exact
+native/authored derivative must cover all original mass, damping, gyroscopic and
+dispersive/memory terms. Unavailable, incomplete or nonfinite callback results
+refuse without finite-difference substitution.
+
+Each sensitivity query supplies both the complete physical forcing and its
+carrier derivative, including any frequency-dependent source law. The existing
+LU and correction owner solve `D X = F` and `D X' = F' - P' X`; no second
+factorization or differentiation of solver iterations is introduced. A separate
+double-double contraction checks the full differentiated original equation
+`D X' + P' X - F'`, independently of the rounded formed RHS. Differentiated
+omitted-band defects have their own allowance, in original-equation scale units
+per angular frequency. The complete primal/derivative pair is published only
+after both pass. Prepared port-derivative blocks serve later right-hand sides
+without source callbacks.
+
+Explicit additional payload/work caps include derivative preparation, the
+retained primal result, differentiated solve and assessments; they add to the
+original factor/solve caps and apply per query, not to an unbounded campaign.
+The returned derivatives concern complex coefficients, not the time waveform or
+a changing nonlinear operating branch. Finite-order backward-error evidence
+does not supply a forward-sensitivity bound near an ill-conditioned resonance.
+`tests/sideband_carrier_derivative.rs` checks full dispersive/gyroscopic ports and
+frequency-dependent forcing against closed two-coordinate inverse derivatives,
+phase-dependent periodic conversion against exact rational derivatives, and
+independent derivative truncation, budget, source and cancellation refusals.
+
 `tests/sideband_response.rs` checks a phase-shifted nonlinear cascade against
 analytic converted sidebands, a parametrically driven oscillator against
 independent real-time integration and order refinement, and full coupled

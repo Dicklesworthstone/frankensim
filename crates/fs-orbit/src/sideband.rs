@@ -25,6 +25,7 @@ use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_blocked_with_ca
 use fs_math::{c64::C64, dd::Dd, det};
 
 pub mod refinement;
+pub mod sensitivity;
 
 /// Independent original state and equation units; numerical conditioning only.
 #[derive(Clone, Debug)]
@@ -73,6 +74,14 @@ pub enum SidebandError {
     Invalid(&'static str),
     /// The original source does not declare an exact complete state tangent.
     TangentUnavailable,
+    /// The declared derivative of the original frequency-dependent port refused
+    /// or left a nonfinite/unwritten matrix entry. No finite difference fallback.
+    CarrierDerivativeRefused {
+        /// Signed retained sideband index.
+        sideband: isize,
+        /// Signed original port frequency in radians per unit time.
+        angular_frequency: f64,
+    },
     /// A declared tangent refused or left a nonfinite/unwritten entry.
     TangentRefused {
         /// Zero-based failed quadrature sample.
@@ -450,6 +459,33 @@ impl PreparedSidebandResponse<'_> {
         }) {
             return Err(invalid("normalized forcing is not representable"));
         }
+        self.solve_normalized(
+            rhs,
+            self.controls.maximum_relative_residual,
+            require_omitted_resolution.then_some(self.controls.maximum_omitted_residual),
+            cancelled,
+        )
+    }
+
+    // One native solve/correction owner for physical forcing and differentiated
+    // equations. The sensitivity path forms its normalized RHS directly, avoiding
+    // a lossy round trip through potentially extreme physical equation units.
+    fn solve_normalized(
+        &self,
+        rhs: Vec<C64>,
+        maximum_relative_residual: f64,
+        maximum_omitted_residual: Option<f64>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SidebandResponse> {
+        poll(&mut cancelled)?;
+        let d = self.dimension;
+        let h = self.controls.harmonics;
+        let n = d * (2 * h + 1);
+        if rhs.len() != n || rhs.iter().any(|&z| !finite(z)) {
+            return Err(invalid(
+                "complete finite normalized sideband forcing required",
+            ));
+        }
         let mut solution = rhs.clone();
         self.factor
             .solve_with_cancel(&mut solution, &mut cancelled)?;
@@ -471,7 +507,7 @@ impl PreparedSidebandResponse<'_> {
             &mut cancelled,
         )?;
         for _ in 0..4 {
-            if relative_residual <= self.controls.maximum_relative_residual {
+            if relative_residual <= maximum_relative_residual {
                 break;
             }
             self.factor
@@ -491,10 +527,10 @@ impl PreparedSidebandResponse<'_> {
                 &mut cancelled,
             )?;
         }
-        if relative_residual > self.controls.maximum_relative_residual {
+        if relative_residual > maximum_relative_residual {
             return Err(SidebandError::Residual {
                 measured: relative_residual,
-                limit: self.controls.maximum_relative_residual,
+                limit: maximum_relative_residual,
             });
         }
         let mut omitted_residual = 0.0;
@@ -517,12 +553,11 @@ impl PreparedSidebandResponse<'_> {
             }
         }
         if !omitted_residual.is_finite()
-            || (require_omitted_resolution
-                && omitted_residual > self.controls.maximum_omitted_residual)
+            || maximum_omitted_residual.is_some_and(|limit| omitted_residual > limit)
         {
             return Err(SidebandError::OmittedSidebands {
                 measured: omitted_residual,
-                limit: self.controls.maximum_omitted_residual,
+                limit: maximum_omitted_residual.unwrap_or(self.controls.maximum_omitted_residual),
             });
         }
         for (i, value) in solution.iter_mut().enumerate() {
