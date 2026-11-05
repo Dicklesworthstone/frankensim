@@ -53,9 +53,6 @@ fn large_controls() -> RigidImpactControls {
     let mut controls = controls();
     controls.contact.maximum_contacts = COUNT;
     controls.contact.matrix.max_variables = 3 * COUNT;
-    // Budget the larger coupled Krylov solve without changing its accuracy.
-    controls.contact.newton.linear_restart = 64;
-    controls.contact.newton.max_linear_cycles = 16;
     controls
 }
 

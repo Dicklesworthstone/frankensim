@@ -6,7 +6,7 @@
 //! converts them into a uniqueness claim. The separate Gram-coordinate solver
 //! remains the PSD baseline. This numerical owner knows nothing about contact.
 
-use fs_la::factor::{FactorError, FactorRunError, cholesky_cancellable};
+use fs_la::factor::{Cholesky, FactorError, FactorRunError, cholesky_cancellable};
 
 /// Hard dimension ceiling for bounded dense SPD admission and active sets.
 /// Larger operators require a separately budgeted sparse or matrix-free owner.
@@ -51,6 +51,80 @@ pub struct SpdMatrixAdmission {
     pub min_normalized_pivot: f64,
 }
 
+/// Reusable normalized factor from the original SPD matrix admission.
+///
+/// The factor represents the same diagonally equilibrated, symmetry-admitted
+/// matrix as the numerical admission. It is useful as a right preconditioner;
+/// consumers still check residuals against their original supplied operator.
+#[derive(Debug)]
+pub struct PreparedSpdMatrix {
+    factor: Cholesky,
+    scales: Vec<f64>,
+    admission: SpdMatrixAdmission,
+}
+
+impl PreparedSpdMatrix {
+    /// Original dimension and normalized positive-pivot admission.
+    pub fn admission(&self) -> SpdMatrixAdmission {
+        self.admission
+    }
+
+    /// Solve with the retained factor in the original coordinate units.
+    ///
+    /// Both diagonal transforms and triangular solves poll cancellation. The
+    /// borrowed right-hand side and reusable factor remain unchanged on every
+    /// outcome; an incomplete or nonfinite solution is never returned.
+    pub fn solve(
+        &self,
+        rhs: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, SpdOrthantError> {
+        poll(&mut cancelled)?;
+        if rhs.len() != self.scales.len() || rhs.iter().any(|value| !value.is_finite()) {
+            return Err(SpdOrthantError::Invalid("prepared SPD right-hand side"));
+        }
+        let mut candidate = Vec::with_capacity(rhs.len());
+        for (&value, &scale) in rhs.iter().zip(&self.scales) {
+            poll(&mut cancelled)?;
+            candidate.push(finite(value / scale)?);
+        }
+        self.factor
+            .solve_cancellable(&mut candidate, &mut cancelled)
+            .map_err(run_error)?;
+        for (value, &scale) in candidate.iter_mut().zip(&self.scales) {
+            poll(&mut cancelled)?;
+            *value = finite(*value / scale)?;
+        }
+        poll(&mut cancelled)?;
+        Ok(candidate)
+    }
+}
+
+/// Retain the factor already computed by the bounded original SPD admission.
+/// No second factorization, inverse matrix or orthant iteration is performed.
+pub fn prepare_spd_matrix(
+    hessian: &[f64],
+    dimension: usize,
+    config: SpdOrthantConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedSpdMatrix, SpdOrthantError> {
+    poll(&mut cancelled)?;
+    if dimension > config.max_variables || dimension > MAX_SPD_VARIABLES {
+        return Err(SpdOrthantError::Invalid("matrix admission dimension"));
+    }
+    let zero = vec![0.0; dimension];
+    let (problem, factor) = Problem::new_with_factor(hessian, &zero, config, &mut cancelled)?;
+    poll(&mut cancelled)?;
+    Ok(PreparedSpdMatrix {
+        factor,
+        admission: SpdMatrixAdmission {
+            dimension,
+            min_normalized_pivot: problem.min_pivot,
+        },
+        scales: problem.scales,
+    })
+}
+
 /// Admit SPD mobility without constructing an artificial optimization result.
 ///
 /// This shares the original diagonal normalization, symmetry and positive-pivot
@@ -62,19 +136,9 @@ pub fn admit_spd_matrix(
     hessian: &[f64],
     dimension: usize,
     config: SpdOrthantConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<SpdMatrixAdmission, SpdOrthantError> {
-    poll(&mut cancelled)?;
-    if dimension > config.max_variables || dimension > MAX_SPD_VARIABLES {
-        return Err(SpdOrthantError::Invalid("matrix admission dimension"));
-    }
-    let zero = vec![0.0; dimension];
-    let problem = Problem::new(hessian, &zero, config, &mut cancelled)?;
-    poll(&mut cancelled)?;
-    Ok(SpdMatrixAdmission {
-        dimension,
-        min_normalized_pivot: problem.min_pivot,
-    })
+    prepare_spd_matrix(hessian, dimension, config, cancelled).map(|prepared| prepared.admission())
 }
 
 /// A nonnegative point with independently reconstructed original-system KKT
@@ -255,6 +319,15 @@ impl<'a> Problem<'a> {
         config: SpdOrthantConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, SpdOrthantError> {
+        Self::new_with_factor(raw, linear, config, cancelled).map(|(problem, _)| problem)
+    }
+
+    fn new_with_factor(
+        raw: &'a [f64],
+        linear: &'a [f64],
+        config: SpdOrthantConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, Cholesky), SpdOrthantError> {
         poll(cancelled)?;
         if !(1..=MAX_SPD_VARIABLES).contains(&config.max_variables)
             || !(1..=4096).contains(&config.max_iterations)
@@ -311,14 +384,17 @@ impl<'a> Problem<'a> {
             }
             min_pivot = min_pivot.min(pivot);
         }
-        Ok(Self {
-            raw,
-            linear,
-            matrix,
-            scaled_linear,
-            scales,
-            min_pivot,
-        })
+        Ok((
+            Self {
+                raw,
+                linear,
+                matrix,
+                scaled_linear,
+                scales,
+                min_pivot,
+            },
+            factor,
+        ))
     }
 
     fn solve_active(

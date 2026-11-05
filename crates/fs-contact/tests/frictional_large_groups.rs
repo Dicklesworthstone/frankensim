@@ -11,8 +11,7 @@ fn controls(contacts: usize) -> FrictionalContactConfig {
     let mut config = FrictionalContactConfig::default();
     config.maximum_contacts = contacts;
     config.matrix.max_variables = 3 * contacts;
-    config.newton.linear_restart = 64;
-    config.newton.max_linear_cycles = 16;
+    // Larger physical groups retain the original default Newton/Krylov budget.
     config
 }
 

@@ -29,9 +29,6 @@ fn thirty_two_connected_spheres_stop_and_transfer_the_entire_stack_weight() {
     scene_controls.step.impact.maximum_contacts = COUNT;
     scene_controls.step.impact.contact.maximum_contacts = COUNT;
     scene_controls.step.impact.contact.matrix.max_variables = 3 * COUNT;
-    // This opt-in larger component also needs a larger linear work budget.
-    scene_controls.step.impact.contact.newton.linear_restart = 64;
-    scene_controls.step.impact.contact.newton.max_linear_cycles = 16;
     let report = advance_sphere_scene(
         &mut bodies,
         &properties,

@@ -28,7 +28,8 @@
 use crate::multicontact::add_product;
 use fs_math::dd::Dd;
 use fs_solver::orthant::active_set::{
-    MAX_SPD_VARIABLES, SpdOrthantConfig, SpdOrthantError, admit_spd_matrix, solve_spd_orthant,
+    MAX_SPD_VARIABLES, PreparedSpdMatrix, SpdOrthantConfig, SpdOrthantError, prepare_spd_matrix,
+    solve_spd_orthant,
 };
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
@@ -468,9 +469,9 @@ pub fn solve_frictional_contacts(
         }
     }
     let has_locked_tangent_pairs = locked_tangents::has_locked_pair(&matrix, d);
-    let (minimum_pivot, range_admission) =
+    let (minimum_pivot, range_admission, spd_factor) =
         match admit_spd_mobility(&matrix, d, config.matrix, &mut cancelled) {
-            Ok(minimum_pivot) => (minimum_pivot, None),
+            Ok((minimum_pivot, factor)) => (minimum_pivot, None, factor),
             Err(SpdOrthantError::Cancelled) => return Err(E::Cancelled),
             Err(
                 error @ (SpdOrthantError::NotPositiveDefinite { .. }
@@ -483,7 +484,7 @@ pub fn solve_frictional_contacts(
                 }
                 let admission = range::admit(&matrix, d, config.matrix, &mut cancelled)?;
                 match admission {
-                    Some(admission) => (0.0, Some(admission)),
+                    Some(admission) => (0.0, Some(admission), None),
                     None => return Err(E::MobilityNotAdmitted(error)),
                 }
             }
@@ -520,7 +521,13 @@ pub fn solve_frictional_contacts(
     let evaluations = Cell::new(0);
     let cancel = RefCell::new(&mut cancelled);
     let active_targets: Vec<_> = active.iter().map(|&i| targets[i]).collect();
-    let range_preconditioner = range_admission.is_some();
+    let preconditioner = if let Some(factor) = &spd_factor {
+        natural::Preconditioner::Mobility(factor)
+    } else if range_admission.is_some() {
+        natural::Preconditioner::Range
+    } else {
+        natural::Preconditioner::Identity
+    };
     let solve = |seed: Vec<f64>| -> Result<(Vec<f64>, NewtonReport), E> {
         let problem = natural::NaturalMap::new(
             &matrix,
@@ -530,7 +537,7 @@ pub fn solve_frictional_contacts(
             &mu,
             &evaluations,
             config.maximum_evaluations,
-            range_preconditioner,
+            preconditioner,
             || (**cancel.borrow_mut())(),
         );
         let construction = NewtonKrylovState::new(&problem, seed, config.newton);
@@ -760,20 +767,20 @@ pub fn solve_frictional_contacts(
 }
 
 // The original small-system owner retains its numerical behavior. Large
-// systems use the generic cancellable matrix admission directly: a zero-source
-// orthant solve would add no physical information and no impulse iteration.
+// systems retain their admitted factor for numerical right preconditioning;
+// no second mobility factorization or change to the physical law is needed.
 fn admit_spd_mobility(
     matrix: &[f64],
     dimension: usize,
     config: SpdOrthantConfig,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<f64, SpdOrthantError> {
+) -> Result<(f64, Option<PreparedSpdMatrix>), SpdOrthantError> {
     if dimension > MAX_RANGE_VARIABLES {
-        admit_spd_matrix(matrix, dimension, config, cancelled)
-            .map(|admission| admission.min_normalized_pivot)
+        prepare_spd_matrix(matrix, dimension, config, cancelled)
+            .map(|factor| (factor.admission().min_normalized_pivot, Some(factor)))
     } else {
         solve_spd_orthant(matrix, &vec![0.0; dimension], config, cancelled)
-            .map(|admission| admission.min_normalized_pivot)
+            .map(|admission| (admission.min_normalized_pivot, None))
     }
 }
 

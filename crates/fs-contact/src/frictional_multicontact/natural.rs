@@ -11,6 +11,10 @@
 //! Local branch blocks are cached at the exact numerical iterate. Each Krylov
 //! action then needs only W*direction and O(N) block work. This is a primal
 //! semismooth linearization, not a classical contact-mode adjoint.
+//! Large SPD groups reuse their admitted mobility factor as the right inverse
+//! W^-1 S^-1, where S contains the natural-map row steps. It is exact on a fully
+//! loaded sticking branch (J=S*W). Separating normal branches retain identity
+//! preconditioning; their direct identity rows do not need a mobility inverse.
 //!
 //! For PSD contact mobility, a cached numerical range inverse of this exact
 //! Jacobian keeps Newton corrections out of its unresolved impulse gauge.
@@ -21,7 +25,15 @@
 
 use super::FrictionalContactError as E;
 use fs_solver::NonlinearProblem;
+use fs_solver::orthant::active_set::{PreparedSpdMatrix, SpdOrthantError};
 use std::cell::{Cell, RefCell};
+
+#[derive(Clone, Copy)]
+pub(super) enum Preconditioner<'a> {
+    Identity,
+    Mobility(&'a PreparedSpdMatrix),
+    Range,
+}
 
 struct Block {
     direct: [[f64; 3]; 3],
@@ -49,7 +61,7 @@ pub(super) struct NaturalMap<'a, C> {
     mu: &'a [f64],
     evaluations: &'a Cell<usize>,
     maximum_evaluations: usize,
-    range_preconditioner: bool,
+    preconditioner: Preconditioner<'a>,
     cancelled: C,
     failed: Cell<bool>,
     failure: RefCell<Option<E>>,
@@ -66,7 +78,7 @@ impl<'a, C: Fn() -> bool> NaturalMap<'a, C> {
         mu: &'a [f64],
         evaluations: &'a Cell<usize>,
         maximum_evaluations: usize,
-        range_preconditioner: bool,
+        preconditioner: Preconditioner<'a>,
         cancelled: C,
     ) -> Self {
         Self {
@@ -77,7 +89,7 @@ impl<'a, C: Fn() -> bool> NaturalMap<'a, C> {
             mu,
             evaluations,
             maximum_evaluations,
-            range_preconditioner,
+            preconditioner,
             cancelled,
             failed: Cell::new(false),
             failure: RefCell::new(None),
@@ -365,9 +377,45 @@ impl<C: Fn() -> bool> NonlinearProblem for NaturalMap<'_, C> {
             ));
             return;
         }
-        if !self.range_preconditioner {
-            output.copy_from_slice(residual);
-            return;
+        match self.preconditioner {
+            Preconditioner::Identity => {
+                output.copy_from_slice(residual);
+                return;
+            }
+            Preconditioner::Mobility(factor) => {
+                if !self.linearize(point) {
+                    return;
+                }
+                if self
+                    .cached
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .blocks
+                    .iter()
+                    .any(|block| block.direct[0][0] != 0.0)
+                {
+                    output.copy_from_slice(residual);
+                    return;
+                }
+                let rhs: Vec<_> = residual
+                    .iter()
+                    .zip(self.steps)
+                    .map(|(r, s)| r / s)
+                    .collect();
+                if rhs.iter().any(|v| !v.is_finite()) {
+                    self.fail(E::NonFinite);
+                    return;
+                }
+                match factor.solve(&rhs, || !self.poll()) {
+                    Ok(solved) => output.copy_from_slice(&solved),
+                    Err(SpdOrthantError::Cancelled) => self.fail(E::Cancelled),
+                    Err(SpdOrthantError::NonFinite) => self.fail(E::NonFinite),
+                    Err(error) => self.fail(E::MobilityNotAdmitted(error)),
+                }
+                return;
+            }
+            Preconditioner::Range => {}
         }
         if !self.linearize(point) || !self.prepare_inverse(point) {
             return;
@@ -426,7 +474,7 @@ mod tests {
                 &[0.7],
                 &count,
                 32,
-                false,
+                Preconditioner::Identity,
                 || false,
             );
             let mut action = [0.0; 3];
@@ -463,7 +511,7 @@ mod tests {
             &[0.5],
             &count,
             32,
-            false,
+            Preconditioner::Identity,
             || false,
         );
         let p = [2.0, 1.0, 0.0];
@@ -498,7 +546,7 @@ mod tests {
             &[0.5],
             &count,
             32,
-            true,
+            Preconditioner::Range,
             || false,
         );
         let point = [1.0, 0.1, 0.0];
@@ -511,5 +559,183 @@ mod tests {
         assert_eq!(actual, [2.0, 3.0, 0.0]);
         assert_eq!(rhs[2] - actual[2], 4.0);
         assert!(!map.has_failed());
+    }
+
+    #[test]
+    fn prepared_mobility_removes_loaded_chain_krylov_conditioning() {
+        use fs_solver::orthant::active_set::{SpdOrthantConfig, prepare_spd_matrix};
+        use fs_solver::{NewtonKrylovConfig, NewtonKrylovState};
+
+        let n = 64;
+        let d = 3 * n;
+        let mut w = vec![0.0; d * d];
+        let mut expected = vec![0.0; d];
+        let mut free = vec![0.0; d];
+        let mut steps = vec![1.0 / 7.0; d];
+        for i in 0..n {
+            // Unit-mass solid spheres: translational normal mobility and both
+            // translation/spin shear mobility, including the shared neighbor.
+            for (axis, diagonal, adjacent) in [(0, 2.0, -1.0), (1, 7.0, 1.5), (2, 7.0, 1.5)] {
+                let row = 3 * i + axis;
+                w[row * d + row] = diagonal;
+                if i + 1 < n {
+                    w[row * d + row + 3] = adjacent;
+                    w[(row + 3) * d + row] = adjacent;
+                }
+            }
+            // The discrete second difference of these loads is 8/n^2. A
+            // uniform approaching rate therefore stops at this exact profile.
+            expected[3 * i] = 4.0 * ((i + 1) * (n - i)) as f64 / (n * n) as f64;
+            free[3 * i] = -8.0 / (n * n) as f64;
+            steps[3 * i] = 0.5;
+        }
+        let factor = prepare_spd_matrix(
+            &w,
+            d,
+            SpdOrthantConfig {
+                max_variables: d,
+                ..Default::default()
+            },
+            || false,
+        )
+        .unwrap();
+        let targets = vec![0.0; n];
+        let mu = vec![0.3; n];
+        let config = NewtonKrylovConfig {
+            relative_tolerance: 0.0,
+            linear_restart: 64,
+            max_linear_cycles: 1,
+            forcing_minimum: 1e-10,
+            forcing_maximum: 1e-10,
+            ..Default::default()
+        };
+        let mut work = Vec::new();
+        for preconditioner in [Preconditioner::Identity, Preconditioner::Mobility(&factor)] {
+            let count = Cell::new(0);
+            let problem = NaturalMap::new(
+                &w,
+                &free,
+                &targets,
+                &steps,
+                &mu,
+                &count,
+                4096,
+                preconditioner,
+                || false,
+            );
+            // Both solves start strictly inside the same loaded/sticking
+            // branch, so this compares preconditioning, not branch selection.
+            let seed = expected.iter().map(|value| 0.5 * value).collect();
+            let mut state = NewtonKrylovState::new(&problem, seed, config).unwrap();
+            let report = state.run(&problem, 4);
+            assert!(report.converged, "{report:?}");
+            assert!(!problem.has_failed());
+            for (actual, expected) in state.x.iter().zip(&expected) {
+                assert!((actual - expected).abs() < 2e-10);
+            }
+            // Independent local momentum and midpoint work, using actual
+            // solved loads rather than the factor or Newton residual.
+            let mut actual_work = 0.0;
+            let mut expected_work = 0.0;
+            for i in 0..n {
+                let pn = state.x[3 * i];
+                let after = free[3 * i] + 2.0 * pn
+                    - if i > 0 { state.x[3 * (i - 1)] } else { 0.0 }
+                    - if i + 1 < n { state.x[3 * (i + 1)] } else { 0.0 };
+                assert!(after.abs() < 2e-12);
+                actual_work += 0.5 * pn * (free[3 * i] + after);
+                expected_work += 0.5 * expected[3 * i] * free[3 * i];
+            }
+            assert!((actual_work - expected_work).abs() < 2e-11);
+            assert!(actual_work < 0.0);
+            work.push((
+                report
+                    .history
+                    .iter()
+                    .map(|step| step.linear_iterations)
+                    .sum::<usize>(),
+                count.get(),
+            ));
+        }
+        assert!(work[0].0 >= 16, "identity work: {work:?}");
+        assert!(work[1].0 <= 2, "prepared work: {work:?}");
+        assert!(4 * work[1].1 < work[0].1, "callback reduction: {work:?}");
+    }
+
+    #[test]
+    fn mobility_preconditioner_retains_separating_rows_and_cancellation() {
+        use fs_solver::orthant::active_set::prepare_spd_matrix;
+
+        let mut w = vec![0.0; 36];
+        for (axis, diagonal, adjacent) in [(0, 2.0, -1.0), (1, 7.0, 1.5), (2, 7.0, 1.5)] {
+            w[axis * 6 + axis] = diagonal;
+            w[(axis + 3) * 6 + axis + 3] = diagonal;
+            w[axis * 6 + axis + 3] = adjacent;
+            w[(axis + 3) * 6 + axis] = adjacent;
+        }
+        let factor = prepare_spd_matrix(&w, 6, Default::default(), || false).unwrap();
+        let point = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let steps = [0.5, 1.0 / 7.0, 1.0 / 7.0, 0.5, 1.0 / 7.0, 1.0 / 7.0];
+        let rhs = [1.0, -2.0, 3.0, 4.0, -5.0, 6.0];
+        let count = Cell::new(0);
+        let separating = NaturalMap::new(
+            &w,
+            &[-1.0, 0.0, 0.0, 3.0, 0.0, 0.0],
+            &[0.0; 2],
+            &steps,
+            &[0.3; 2],
+            &count,
+            32,
+            Preconditioner::Mobility(&factor),
+            || false,
+        );
+        let mut output = [0.0; 6];
+        separating.preconditioner_apply(&point, 0, 0, &rhs, &mut output);
+        assert_eq!(output, rhs);
+        assert!(!separating.has_failed());
+
+        let free = [-1.0, 0.0, 0.0, -1.0, 0.0, 0.0];
+        let polls = Cell::new(0);
+        let loaded = NaturalMap::new(
+            &w,
+            &free,
+            &[0.0; 2],
+            &steps,
+            &[0.3; 2],
+            &count,
+            32,
+            Preconditioner::Mobility(&factor),
+            || {
+                polls.set(polls.get() + 1);
+                false
+            },
+        );
+        loaded.preconditioner_apply(&point, 0, 0, &rhs, &mut output);
+        let total = polls.get();
+        let mut action = [0.0; 6];
+        loaded.jacobian_apply(&point, &output, &mut action);
+        for i in 0..6 {
+            assert!((action[i] - rhs[i]).abs() < 2e-13);
+        }
+        for stop in [1, total / 2, total] {
+            let seen = Cell::new(0);
+            let map = NaturalMap::new(
+                &w,
+                &free,
+                &[0.0; 2],
+                &steps,
+                &[0.3; 2],
+                &count,
+                32,
+                Preconditioner::Mobility(&factor),
+                || {
+                    seen.set(seen.get() + 1);
+                    seen.get() == stop
+                },
+            );
+            map.preconditioner_apply(&point, 0, 0, &rhs, &mut output);
+            assert!(matches!(map.take_failure(), Some(E::Cancelled)));
+            assert!(output.iter().all(|value| value.is_nan()));
+        }
     }
 }

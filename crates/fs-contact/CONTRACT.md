@@ -1270,6 +1270,16 @@ or unresolved determinacy refuses. Dense PSD/range, SVD and candidate-energy
 spectral work remain bounded to 63 active scalar rows. Larger graphs may need
 explicit Krylov restart/cycle budgets within the existing evaluation cap.
 
+The larger SPD path reuses its admitted mobility factor for right
+preconditioning when every normal projection branch is loaded. With the
+natural-map row steps S, it applies W^-1 S^-1; this is the exact inverse of
+J=S*W on a fully loaded sticking branch. If any normal branch separates, the
+solve retains identity preconditioning. The exact Jacobian, true linear
+residual, determinacy certificate and original physical acceptance gates
+remain authoritative. Small SPD and bounded PSD/range paths retain their
+existing preconditioners. The connected 64-contact mixed-friction and native
+32-sphere fixtures pass with the default Newton/Krylov work budgets.
+
 For small numerically SPD groups, a positive weighted contraction witness or
 the full-rank candidate energy criterion below establishes unique impulses;
 admitted semidefinite rows use the separate velocity-image witness below.

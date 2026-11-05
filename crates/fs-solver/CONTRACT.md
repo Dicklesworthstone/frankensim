@@ -475,6 +475,14 @@ optimization result. Its receipt contains the dimension and minimum squared
 normalized pivot. It does not certify a contact law or its determinacy: those
 remain separate obligations of the consuming nonlinear/physical owner.
 
+`prepare_spd_matrix` retains the factor produced by that same admission as a
+`PreparedSpdMatrix`. Repeated `solve` calls transform the right-hand side and
+solution through the original diagonal scales and use cancellable triangular
+solves. They neither refactor the mobility nor construct a matrix inverse.
+The factor and borrowed source remain unchanged on failure; only a complete
+finite private solution is returned. Consumers still check residuals against
+the original supplied operator, including any admitted small asymmetry.
+
 Cancellation polls inside factorization panels and trailing-update row tiles,
 at triangular solve rows, at original-system row operations, and before final
 publication. Private triangular-solve scratch and candidate states ensure
