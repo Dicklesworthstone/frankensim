@@ -15,7 +15,7 @@ use crate::osmosis::{
     AqueousSolution, IdealDiluteSolution, MAX_OSMOTIC_SOLUTES, OsmosisError,
     water_activity_from_osmotic_pressure,
 };
-use fs_qty::{Temperature, Time, Volume, VolumetricFlowRate};
+use fs_qty::{Amount, Temperature, Time, Volume, VolumetricFlowRate};
 use fs_thermochem::solution::solubility::{
     SolubilityErrorV1,
     kinetics::{
@@ -166,6 +166,73 @@ impl KineticSolubilitySolution {
     pub fn models(&self) -> &[SolubilityKineticsV1] {
         &self.models
     }
+    /// Original common solvent identity; the admitted component list is nonempty.
+    pub fn solvent(&self) -> &fs_thermochem::SpeciesId {
+        self.models[0].law().solvent()
+    }
+
+    /// Owned prepared storage, conservatively counting shared source payloads.
+    /// Advancing or copying a compatible prepared state allocates no memory.
+    pub fn heap_bytes(&self) -> usize {
+        self.models.iter().fold(
+            self.solution
+                .heap_bytes()
+                .saturating_add(core::mem::size_of_val(self.models.as_ref()))
+                .saturating_add(core::mem::size_of_val(self.steps.as_ref())),
+            |bytes, model| bytes.saturating_add(model.law().heap_bytes()),
+        )
+    }
+
+    /// Replace transported solvent and dissolved molecules while retaining every
+    /// actual solid stock. A bare membrane cannot transport or equilibrate the
+    /// crystals. New component totals are derived from the two explicit phases;
+    /// a trace solid is retained even when it is below one ulp of the solution.
+    /// All components and the aqueous endpoint are checked before publication.
+    pub fn replace_dissolved_inventories(
+        &mut self,
+        volume_m3: f64,
+        dissolved_moles: &[f64],
+    ) -> Result<()> {
+        if dissolved_moles.len() != self.models.len() {
+            return Err(invalid("transported dissolved inventory layout"));
+        }
+        let mut candidate = [None; MAX_OSMOTIC_SOLUTES];
+        let temperature = Temperature::new(self.solution.temperature_k());
+        for (index, ((model, old), &dissolved)) in self
+            .models
+            .iter()
+            .zip(self.steps.iter())
+            .zip(dissolved_moles)
+            .enumerate()
+        {
+            let phase =
+                SolubilityKineticStateV1::from_phases(Amount::new(dissolved), old.state().solid())?;
+            candidate[index] =
+                Some(model.advance(temperature, Volume::new(volume_m3), &phase, Time::new(0.0))?);
+        }
+        self.validate_aqueous(volume_m3, dissolved_moles)?;
+        self.publish_prepared(volume_m3, dissolved_moles, &candidate)
+    }
+
+    /// Copy an accepted compatible state into prepared native transport buffers.
+    /// The exact phase receipts, including sub-ulp donor tails, are copied without
+    /// repartitioning, re-equilibrating or allocating. Sources, temperature and
+    /// solvent convention must match before any accepted storage can change.
+    pub fn copy_state_from(&mut self, source: &Self) -> Result<()> {
+        if !(Arc::ptr_eq(&self.models, &source.models) || self.models == source.models)
+            || self.solution.temperature_k() != source.solution.temperature_k()
+            || self.solution.solvent_molar_volume_m3_mol()
+                != source.solution.solvent_molar_volume_m3_mol()
+        {
+            return Err(invalid("incompatible kinetic source or thermal state"));
+        }
+        self.solution.replace_inventories(
+            source.solution.solvent_volume_m3(),
+            source.solution.solute_moles(),
+        )?;
+        self.steps.copy_from_slice(&source.steps);
+        Ok(())
+    }
     /// Original species order; each receipt retains current total/dissolved/solid
     /// stocks, signed last transfer, target and any exhaustion event.
     pub fn last_steps(&self) -> &[SolubilityKineticStepV1] {
@@ -193,21 +260,33 @@ impl KineticSolubilitySolution {
             candidate[index] = Some(step);
         }
         let count = self.models.len();
-        let pressure = self
-            .solution
-            .osmotic_pressure_at(volume.value(), &dissolved[..count])?;
+        self.validate_aqueous(volume.value(), &dissolved[..count])?;
+        poll(&mut cancelled)?;
+        self.publish_prepared(volume.value(), &dissolved[..count], &candidate)?;
+        Ok(&self.steps)
+    }
+
+    fn validate_aqueous(&self, volume_m3: f64, dissolved: &[f64]) -> Result<()> {
+        let pressure = self.solution.osmotic_pressure_at(volume_m3, dissolved)?;
         water_activity_from_osmotic_pressure(
-            temperature.value(),
+            self.solution.temperature_k(),
             pressure,
             self.solution.solvent_molar_volume_m3_mol(),
         )?;
-        poll(&mut cancelled)?;
-        self.solution
-            .replace_inventories(volume.value(), &dissolved[..count])?;
+        Ok(())
+    }
+
+    fn publish_prepared(
+        &mut self,
+        volume_m3: f64,
+        dissolved: &[f64],
+        candidate: &[Option<SolubilityKineticStepV1>; MAX_OSMOTIC_SOLUTES],
+    ) -> Result<()> {
+        self.solution.replace_inventories(volume_m3, dissolved)?;
         for (accepted, prepared) in self.steps.iter_mut().zip(candidate) {
             *accepted = prepared.expect("every original kinetic component was prepared");
         }
-        Ok(&self.steps)
+        Ok(())
     }
 
     /// Prescribe pure-solvent dilution/concentration without re-equilibrating.

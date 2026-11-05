@@ -184,3 +184,81 @@ fn layout_and_source_identity_cannot_change_silently() {
     .unwrap();
     assert!(KineticSolubilitySolution::from_equilibrium(&equilibrium, &[]).is_err());
 }
+
+#[test]
+fn dissolved_transport_retains_crystals_and_admits_every_component_before_publication() {
+    let mut owner = reservoir();
+    owner.advance(Time::new(0.5), || false).unwrap();
+    let solid = owner
+        .last_steps()
+        .iter()
+        .map(|step| step.state().solid())
+        .collect::<Vec<_>>();
+    let phase_buffer = owner.last_steps().as_ptr();
+    let aqueous_buffer = owner.solution().solute_moles().as_ptr();
+    owner
+        .replace_dissolved_inventories(0.00075, &[0.07, 0.02])
+        .unwrap();
+    for (index, &amount) in [0.07, 0.02].iter().enumerate() {
+        let state = owner.last_steps()[index].state();
+        assert_eq!(state.solid(), solid[index]);
+        assert_eq!(state.dissolved().value(), amount);
+        near(state.total_solute().value(), amount + solid[index].value());
+        assert_eq!(
+            owner.last_steps()[index].transferred_to_solution().value(),
+            0.0
+        );
+    }
+    near(
+        owner.solution().osmotic_pressure_pa().unwrap(),
+        R * 300.0 * 0.09 / 0.00075,
+    );
+    assert_eq!(owner.last_steps().as_ptr(), phase_buffer);
+    assert_eq!(owner.solution().solute_moles().as_ptr(), aqueous_buffer);
+    let accepted = owner.clone();
+    for amounts in [&[0.03, -0.01][..], &[0.03, f64::NAN], &[0.03]] {
+        assert!(owner.replace_dissolved_inventories(0.001, amounts).is_err());
+        assert_eq!(owner, accepted);
+    }
+    // Every phase can be formed, but the resulting activity is inadmissible.
+    assert!(
+        owner
+            .replace_dissolved_inventories(1e-30, &[0.03, 0.04])
+            .is_err()
+    );
+    assert_eq!(owner, accepted);
+}
+
+#[test]
+fn prepared_transport_copies_preserve_trace_solids_and_reject_different_sources() {
+    let state =
+        SolubilityKineticStateV1::from_phases(Amount::new(1.0), Amount::new(1e-20)).unwrap();
+    let model = SolubilityKineticsV1::new(
+        law("A", 100.0, 0.0),
+        VolumetricFlowRate::new(1e-3),
+        PrecipitationPolicyV1::ExistingSolidOnly,
+    )
+    .unwrap();
+    let mut source = KineticSolubilitySolution::new(
+        Temperature::new(300.0),
+        18e-6,
+        Volume::new(1e-3),
+        vec![(model, state)],
+    )
+    .unwrap();
+    let mut prepared = source.clone();
+    let buffer = prepared.last_steps().as_ptr();
+    source.replace_dissolved_inventories(2e-3, &[0.5]).unwrap();
+    assert_eq!(source.last_steps()[0].state().solid().value(), 1e-20);
+    assert_eq!(source.last_steps()[0].state().total_solute().value(), 0.5);
+    prepared.copy_state_from(&source).unwrap();
+    assert_eq!(prepared, source);
+    assert_eq!(prepared.last_steps().as_ptr(), buffer);
+    assert_ne!(prepared.last_steps().as_ptr(), source.last_steps().as_ptr());
+    let before = prepared.clone();
+    let incompatible = source.with_temperature(Temperature::new(310.0)).unwrap();
+    assert!(prepared.copy_state_from(&incompatible).is_err());
+    assert_eq!(prepared, before);
+    assert!(prepared.heap_bytes() >= core::mem::size_of_val(prepared.last_steps()));
+    assert_eq!(prepared.solvent(), &SpeciesId::new("water").unwrap());
+}

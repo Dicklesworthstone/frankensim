@@ -38,6 +38,19 @@ pub struct SolubilityKineticStateV1 {
     balance_residual: Amount,
 }
 impl SolubilityKineticStateV1 {
+    /// Declare both actual phases, retaining a trace solid or dissolved donor
+    /// even when adding it to the dominant phase rounds the total unchanged.
+    /// The rounded sum is the component total; the compensated residual keeps
+    /// the discrepancy inspectable. This is also the transport boundary: only
+    /// dissolved stock changes when a bare membrane retains the crystals.
+    pub fn from_phases(dissolved: Amount, solid: Amount) -> Result<Self, SolubilityErrorV1> {
+        Self::with_phases(
+            Amount::new(dissolved.value() + solid.value()),
+            dissolved.value(),
+            solid.value(),
+        )
+    }
+
     /// Declare a complete component total and its initially dissolved part.
     pub fn new(total_solute: Amount, dissolved: Amount) -> Result<Self, SolubilityErrorV1> {
         if !nonnegative(total_solute.value())
@@ -325,14 +338,16 @@ fn product_ratio(a: f64, b: f64, c: f64) -> Result<f64, SolubilityErrorV1> {
 }
 
 // A subnormal exp(-x) loses relative accuracy even when its scaled donor is
-// normal. Combine the logarithms before exponentiating in that case as well.
+// normal. Splitting the exponent avoids that loss and the cancellation in
+// ln(amount)-x; each multiplication can only decrease the finite donor.
 fn decayed(amount: f64, exponent: f64) -> f64 {
     let fraction = exp(-exponent);
     let direct = amount * fraction;
     if fraction.is_normal() && direct > 0.0 {
         direct
     } else {
-        exp(ln(amount) - exponent)
+        let half = exp(-0.5 * exponent);
+        (amount * half) * half
     }
 }
 

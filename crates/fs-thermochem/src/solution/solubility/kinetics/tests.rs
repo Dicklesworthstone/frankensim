@@ -220,6 +220,44 @@ fn zero_time_closed_contact_and_equilibrium_are_exact() {
 }
 
 #[test]
+fn explicit_phase_stocks_preserve_trace_donors_and_refuse_invalid_totals() {
+    let trace = 1e-100;
+    for (dissolved, solid) in [(1.0, trace), (trace, 1.0)] {
+        let initial =
+            SolubilityKineticStateV1::from_phases(Amount::new(dissolved), Amount::new(solid))
+                .unwrap();
+        assert_eq!(initial.dissolved().value(), dissolved);
+        assert_eq!(initial.solid().value(), solid);
+        assert_eq!(initial.total_solute().value(), 1.0);
+        assert_eq!(initial.balance_residual().value(), trace);
+    }
+
+    // Replacing the dissolved inventory after transport must not reconstruct
+    // a rounded-away solid stock from total minus dissolved. The retained
+    // trace remains an active donor on the next physical phase step.
+    let initial =
+        SolubilityKineticStateV1::from_phases(Amount::new(1.0), Amount::new(trace)).unwrap();
+    let active = model(1.0, 1.0, PrecipitationPolicyV1::ExistingSolidOnly);
+    let evolved = step(&active, &initial, 5.0);
+    near(evolved.state().solid().value(), trace * (-5.0_f64).exp());
+    assert_eq!(evolved.state().total_solute(), initial.total_solute());
+    assert_eq!(evolved.solid_exhaustion_time(), None);
+
+    for (dissolved, solid) in [
+        (-1.0, 2.0),
+        (1.0, -1.0),
+        (f64::NAN, 1.0),
+        (1.0, f64::INFINITY),
+        (f64::MAX, f64::MAX),
+    ] {
+        assert!(
+            SolubilityKineticStateV1::from_phases(Amount::new(dissolved), Amount::new(solid))
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn invalid_states_and_conditions_refuse() {
     for (total, dissolved) in [
         (-1.0, 0.0),
