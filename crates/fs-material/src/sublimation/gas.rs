@@ -51,7 +51,8 @@ use crate::thermochemical_gas::{
 };
 use fs_thermal::sublimation::{
     SolidSurfaceState, SublimationError, SublimationLaw, SublimationProperties, SurfaceKinetics,
-    VaporReservoir, molecular::molecular_mass_flux_with_kinetics,
+    VaporReservoir,
+    molecular::{molecular_mass_flux, molecular_mass_flux_with_kinetics},
 };
 use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 

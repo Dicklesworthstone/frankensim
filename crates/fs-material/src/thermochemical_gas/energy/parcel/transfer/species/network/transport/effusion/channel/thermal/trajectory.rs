@@ -25,6 +25,7 @@ use crate::thermochemical_gas::energy::{
     },
 };
 use fs_math::dd::Dd;
+use fs_thermal::enthalpy::ThermalLaw;
 use fs_thermochem::SpeciesId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -328,10 +329,13 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
         if !positive(span) || !positive(half) || half + half != span {
             return Err(Error::Invalid("finite-wall adaptive clock is unrepresentable"));
         }
+        // The cancel callback is a parameter, not a capture: the error estimates
+        // below borrow the same callback inside the trial.
         let mut eval = |g: &BTreeMap<u64, ClosedGasParcel>,
                         w: &BTreeMap<u64, FixedVolumeChannelWall<'l, 'p>>,
                         dt: f64,
-                        at: f64|
+                        at: f64,
+                        cancelled: &mut C|
          -> Result<FiniteChannelNetworkCandidate<'l, 'p>, Error> {
             if attempted == controls.maximum_attempts {
                 return Err(Error::WorkBudget {
@@ -341,13 +345,13 @@ pub fn advance_candidate<'l, 'p, C: FnMut() -> bool>(
                 });
             }
             attempted += 1;
-            step_candidate(g, w, paths, links, dt, endpoints, step_controls, &mut cancelled)
+            step_candidate(g, w, paths, links, dt, endpoints, step_controls, &mut *cancelled)
                 .map_err(|e| physical(e, at, dt))
         };
         let trial = (|| {
-            let coarse = eval(&gas, &wall, span, elapsed)?;
-            let first = eval(&gas, &wall, half, elapsed)?;
-            let fine = eval(first.parcels(), first.walls(), half, elapsed + half)?;
+            let coarse = eval(&gas, &wall, span, elapsed, &mut cancelled)?;
+            let first = eval(&gas, &wall, half, elapsed, &mut cancelled)?;
+            let fine = eval(first.parcels(), first.walls(), half, elapsed + half, &mut cancelled)?;
             let e = gas_error(coarse.parcels(), fine.parcels(), controls, &mut cancelled)?
                 .max(wall_error(coarse.walls(), fine.walls(), controls, &mut cancelled)?);
             Ok::<_, Error>((first, fine, e))
