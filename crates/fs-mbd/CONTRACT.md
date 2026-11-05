@@ -4791,6 +4791,35 @@ detachment with all cross responses, static support, tangent gauge/body indices,
 and source/geometry/torsion/sliding/cancellation/budget refusal with retry.
 Native execution remains subject to the existing dependency build limitation.
 
+## Native JKR normal attachment and pull-off
+
+`tangential_friction::adhesive::jkr_normal_motion::PreparedRigidJkrPair`
+condenses actual masses, full inertia tensors and reaction arms into the
+original `fs-contact` JKR normal trajectory. Geometry markers and an immutable
+approach datum authenticate accepted source history. Equal/opposite forces act
+at the common midpoint reaction plane. The original impulse and its first time
+moment restore native momenta and COM, angular and marker travel through smooth
+motion, capture, reversal and pull-off. A whole-interval midpoint impulse does
+not replace that event-resolved travel.
+
+Independent checks close native kinetic work, integrated original contact work,
+normal storage plus explicit snap release, individual impulses and total pair
+linear/angular momentum at the held geometry. Snap release supplies no impulse
+and is not automatically assigned to heat. Successful preparation is stack-only;
+original scalar substep/root/event budgets bound the trajectory. Cancellation or
+late refusal publishes no body or history update; application publishes both
+body momenta and the source branch together.
+
+This remains frictionless JKR with one fixed normal Jacobian. No tangential force
+or free spin couple is supplied. The pose owner must consume travel and refresh
+geometry before continuation; stale geometry refuses. No finite-rotation pose
+integration, contact discovery, hidden support, junction shear or measured
+specimen calibration is claimed. The six G1/G3/G4 groups in
+`tests/adhesive_jkr_normal_motion.rs` exercise exact detached flight, analytic
+initial attraction and snap/rebound energy, full off-axis inertia, first-moment
+travel, world-frame/body-index covariance, geometry-owned continuation and
+source/budget/cancellation refusal with deterministic retry.
+
 ## Prepared thermal trials of adhesive transients
 
 `PreparedRigidAdhesiveTransient` captures the original pair, point kinematics,
