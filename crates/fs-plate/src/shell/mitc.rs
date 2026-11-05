@@ -25,6 +25,8 @@ mod static_solver;
 pub use static_solver::PreparedMitcStatic;
 /// Reusable observation of the original condensed MITC strain field.
 pub mod strain;
+/// Layer-resolved physical shear from the original equilibrated laminate law.
+pub mod shear_recovery;
 /// Integrated thermal membrane strain, thickness gradients and compatible response.
 pub mod thermal;
 /// Full membrane, bending and transverse-shear material dissipation.

@@ -296,6 +296,34 @@ impl MitcShellModel {
 }
 
 impl PreparedThermalShell<'_> {
+    /// Recover physical laminate shear with the SAME thermally induced
+    /// condensed director motion as this prepared solve. The source stack,
+    /// section orientation and inertia must match the retained shell assembly.
+    /// Material profiles are prepared once and may be reused across facets.
+    pub fn laminate_shear_field<'a>(
+        &self,
+        element: usize,
+        source: &'a fs_material::laminate::LaminateShearRecovery,
+        section_angle_rad: f64,
+        displacement_6n: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::shear_recovery::LaminateShearField<'a>, PlateError> {
+        if cancelled() { return Err(PlateError::Cancelled); }
+        if displacement_6n.len() != 6 * self.model.mesh.nodes.len() {
+            return Err(PlateError::BadSection {
+                what: "one physical displacement/rotation per original shell DOF required",
+            });
+        }
+        let section = self.model.sections.get(element).ok_or(PlateError::BadSection {
+            what: "laminate shear facet out of range",
+        })?;
+        let tri = self.model.mesh.tris[element];
+        let nodal = core::array::from_fn(|i| displacement_6n[6 * tri[i / 6] + i % 6]);
+        let native = self.strain_field(element, &nodal, &mut cancelled)?;
+        super::shear_recovery::LaminateShearField::from_thermal(
+            section, source, section_angle_rad, native)
+    }
+
     /// Whole-facet strain polynomial at an actual physical nodal snapshot,
     /// including the thermally driven affine director-bubble displacement.
     /// This shares the original Bernstein observation owner; using a cold

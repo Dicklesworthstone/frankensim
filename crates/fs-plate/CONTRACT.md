@@ -1,5 +1,25 @@
 # CONTRACT: fs-plate
 
+## Physical ply shear on the native MITC field
+
+`MitcShellModel::prepare_laminate_shear` binds an original equilibrated laminate
+recovery to the exact oriented section, inertia and reference surface used in
+one native facet. It caches the existing condensed strain observation once;
+each physical nodal snapshot forms one native polynomial, then arbitrary ply
+and barycentric point queries allocate nothing. Actual ply stresses and strains
+come from the material owner's continuous equilibrium profile, retaining full
+off-axis coupling and physical shear work. Responses expose section, ply and
+facet coordinates explicitly. This observation changes no assembled operator.
+
+`PreparedThermalShell::laminate_shear_field` instead reuses the same thermal
+owner's strain field, including thermally induced interior director motion at
+fixed physical nodes. Local work integrates to the native H contribution, not
+to membrane/bending or numerical drilling energy. Source mismatch, invalid
+positions and cancellation refuse without advancing any owner. The source's
+two-probe cylindrical-bending approximation remains binding; this is not a
+general 3-D/free-edge or failure/delamination model. Focused native tests cover
+mixed shear work, a loaded nonuniform facet, thermal director motion and refusal.
+
 ## Original MITC thermoelastic factors
 
 `shell::mitc::thermoelastic::project_thermoelastic_factors` projects the
