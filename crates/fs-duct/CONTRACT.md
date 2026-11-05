@@ -191,8 +191,17 @@ Lefebvre, Scavone and Kergomard (Acta Acustica 99, 2013, arXiv 1207.5490, "TMMI"
 Eq. 16, `Z_nm = j k rho c exp(-j k d) / (eps pi d)`, conjugated here for
 `e^{-i omega t}`, with `eps = 2` as printed for every pair of openings (4 is a
 full space). Each hole keeps its own chimney, loss, wall, local gas and flanged
-self radiation as the diagonal term; the bore between consecutive openings is
-solved exactly as admittance two-ports on one nodal system, so `eps -> infinity`
+self radiation as the diagonal term. The bore retains its original scattering
+two-ports and uses the small admittance/nodal solve where that elimination is
+regular. At isolated half/full-wave run poles or a singular nodal solve, it
+reuses the graph owner's pressure/flow scattering constraints, applying all
+coupled aperture loads before inversion. The fallback inherits the 800-unknown
+graph cap and uses the caller's bound on the equilibrated complete system;
+regular frequencies retain the original nodal work and arithmetic. It does not
+remove genuine loaded-system poles or extend the radiation law's scope.
+A G2 fixture near 858 Hz checks all four half/full-wave phase combinations
+against an analytic two-aperture radiation matrix, retaining signed mouth
+flows and input/bell pressures for radiating and closed ends. Thus `eps -> infinity`
 reproduces the independent response to rounding (tested to 1e-8 on both fields,
 both terminations, response, reflection and hole flows). Response, reflection
 and the hole mouth flows use the coupled solve (reported as `Scattering`); it

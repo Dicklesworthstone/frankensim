@@ -10,8 +10,10 @@
 //!
 //! written there for `exp(+j w t)`; this crate uses `exp(-i w t)`, so the conjugate is used.
 //! Each hole keeps its own chimney (inner length, loss, wall) and its own self radiation as the
-//! diagonal `Z_nn`; the bore between consecutive openings is solved exactly as admittance
-//! two-ports on a nodal system. With no coupling (`eps` -> infinity) the result is the
+//! diagonal `Z_nn`; the bore between consecutive openings uses the original scattering
+//! two-ports. A small nodal solve is retained away from component poles; singular isolated
+//! admittances retain their pressure/flow equations until the complete load is applied.
+//! With no coupling (`eps` -> infinity) the result is the
 //! independent-hole response to rounding.
 //!
 //! Scope, stated plainly: the distances are the AXIAL distances between hole stations (the
@@ -199,7 +201,9 @@ pub(crate) struct CoupledSolution {
     pub condition: f64,
 }
 
-/// Solve the bore between openings as admittance two-ports and the openings through [`couple`].
+/// Solve the bore between openings and the openings through [`couple`].
+/// A half-wave run has singular I+S, not necessarily a singular loaded instrument.
+/// Such runs use the existing graph owner's retained scattering constraints.
 /// `holes` and `ports` are the open holes in axial order; `bell` is the radiating open end, or
 /// `None` for a closed end.
 #[allow(clippy::too_many_arguments)]
@@ -227,6 +231,9 @@ pub(crate) fn solve(
     let nodes = m + 2;
     let mut ytot = vec![C64::ZERO; nodes * nodes];
     let mut condition = 1.0_f64;
+    let mut propagation_condition = 1.0_f64;
+    let mut wave_edges = Vec::with_capacity(m + 1);
+    let mut keep_waves = false;
     for k in 0..=m {
         let begin = if k == 0 { 0 } else { holes[k - 1].block_index + 1 };
         let end = if k == m { chain.blocks.len() } else { holes[k].block_index };
@@ -239,11 +246,22 @@ pub(crate) fn solve(
             let (next, c) = run.star(block, maximum_condition)?;
             run = next;
             condition = condition.max(c);
+            propagation_condition = propagation_condition.max(c);
         }
-        let (y, c) = run.admittance(maximum_condition)?;
-        condition = condition.max(c);
-        for (row, column, value) in [(k, k, y[0]), (k, k + 1, y[1]), (k + 1, k, y[2]), (k + 1, k + 1, y[3])] {
-            ytot[row * nodes + column] = ytot[row * nodes + column] + value;
+        wave_edges.push(crate::network::WaveEdge {
+            ends: [Some(k), Some(k + 1)],
+            two_port: run,
+            condition: propagation_condition,
+        });
+        match run.admittance(maximum_condition) {
+            Ok((y, c)) => {
+                condition = condition.max(c);
+                for (row, column, value) in [(k, k, y[0]), (k, k + 1, y[1]), (k + 1, k, y[2]), (k + 1, k + 1, y[3])] {
+                    ytot[row * nodes + column] = ytot[row * nodes + column] + value;
+                }
+            }
+            Err(DuctError::Singular) => keep_waves = true,
+            Err(error) => return Err(error),
         }
     }
     let mut all: Vec<CoupledPort> = ports.to_vec();
@@ -256,13 +274,32 @@ pub(crate) fn solve(
             ytot[at] = ytot[at] + coupling.admittance[i * q + j];
         }
     }
-    let lu = lu_complex(&ytot, nodes).map_err(|_| DuctError::Singular)?;
-    let mut p = vec![C64::ZERO; nodes];
-    p[0] = C64::ONE;
-    lu.solve(&mut p);
-    if p.iter().any(|v| !finite(*v)) {
-        return Err(DuctError::Singular);
-    }
+    let nodal = if keep_waves {
+        Err(DuctError::Singular)
+    } else {
+        lu_complex(&ytot, nodes).map_err(|_| DuctError::Singular).and_then(|lu| {
+            let mut p = vec![C64::ZERO; nodes];
+            p[0] = C64::ONE;
+            lu.solve(&mut p);
+            if p.iter().all(|v| finite(*v)) { Ok(p) } else { Err(DuctError::Singular) }
+        })
+    };
+    let p = match nodal {
+        Ok(p) => p,
+        Err(DuctError::Singular) => {
+            // Only the aperture boundary is stamped here. The graph owner
+            // retains every bore current, so no isolated I+S is inverted.
+            let mut boundary_y = vec![C64::ZERO; nodes * nodes];
+            for i in 0..q { for j in 0..q {
+                boundary_y[(i + 1) * nodes + j + 1] = coupling.admittance[i * q + j];
+            } }
+            let (inverse, c) = crate::network::wave_pressure_inverse(
+                &boundary_y, nodes, &wave_edges, maximum_condition)?;
+            condition = propagation_condition.max(c);
+            (0..nodes).map(|i| inverse[i * nodes]).collect()
+        }
+        Err(error) => return Err(error),
+    };
     let junction = &p[1..=q];
     let row = |matrix: &[C64], i: usize| (0..q).fold(C64::ZERO, |sum, j| sum + matrix[i * q + j] * junction[j]);
     let inflow: Vec<C64> = (0..q).map(|i| row(&coupling.admittance, i)).collect();
