@@ -15838,8 +15838,9 @@ native runtime execution remains required for numerical qualification.
 
 ## Finite source gas drives an elastic pressure boundary
 
-`cavity_phs::modal::GasValveMotion` joins the original source-bearing
-`ClosedGasParcel` to `ThermalValveModalMotion`. The source mesh, consistent
+`cavity_phs::modal::GasValveMotion<G = ClosedGasParcel>` joins the original
+source-bearing ideal or nonideal gas parcel to `ThermalValveModalMotion`
+through the existing sealed `PistonGas` interface. The source mesh, consistent
 mass, prestressed tangent modes and pressure footprint remain authoritative.
 The initial physical gas volume anchors an affine volume chart in the actual
 retained modal coordinates; volume is not reconstructed from a separate
@@ -15852,6 +15853,18 @@ from the native held-force map and gas midpoint pressure derivative. Every
 trial starts from the same accepted histories. The original mixture's caloric,
 EOS and transport laws are resolved at the gas stages; no nominal air constants
 or fixed gamma are substituted.
+
+The nonideal `IsochoricRealGasParcel` supplies its actual EOS midpoint
+pressure and exact derivative with respect to final cavity volume. The
+complete real-gas state supplies density and adiabatic sound speed for the
+gas-loaded clock bound; the ideal reference state is never used in its place.
+`ModalGasStep` retains that actual resolved midpoint type. This changes no
+mechanical integration law and introduces no second EOS or runtime dispatch.
+The separate chemical and exchange adapters remain specialized to the ideal
+parcel, with their existing domains. The real-gas regressions use the original
+six-tetrahedron elastic fixture to check dense-versus-ideal motion, pressure
+work and enclosing energy, source identity, equilibrium, clock admission,
+source/iteration refusal and cancellation without either history publishing.
 
 Publication requires independent physical-volume, pressure-transfer and
 enclosing energy bounds. Exterior pressure work uses the actual wall sweep.

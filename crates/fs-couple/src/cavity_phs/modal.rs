@@ -5,12 +5,13 @@
 //! through its exact ZOH map. A scalar volume residual joins their endpoints;
 //! the existing Newton-Krylov owner solves it using the exact discrete tangent.
 
-pub mod reactive;
 /// Shared-snapshot species flow feeding the original elastic-cavity owners.
 pub mod exchange;
+pub mod reactive;
 
 use std::cell::{Cell, RefCell};
 
+use super::piston::{PistonGas, PistonGasState};
 use fs_exec::Cx;
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
@@ -100,9 +101,12 @@ fn poll(cx: &Cx<'_>) -> Result<(), ModalGasError> {
 /// including its equilibrium displacement. Positive pressure opens this volume.
 /// Geometry and the thermal equilibrium/basis stay fixed throughout this run;
 /// no hidden modal rebuild, equilibrium reset or gas-volume reset is performed.
+/// Both the ideal and nonideal source parcels use the same mechanical solve.
+/// The latter retains its actual EOS pressure, calorics and compressibility;
+/// chemistry and exchange adapters remain restricted to the ideal parcel.
 #[derive(Clone, Debug)]
-pub struct GasValveMotion {
-    gas: ClosedGasParcel,
+pub struct GasValveMotion<G: PistonGas = ClosedGasParcel> {
+    gas: G,
     motion: ThermalValveModalMotion,
     reference_volume_m3: f64,
     reference_coordinates: Vec<f64>,
@@ -110,10 +114,10 @@ pub struct GasValveMotion {
 
 /// Original stage accounts and independently checked interconnection balances.
 #[derive(Clone, Debug)]
-pub struct ModalGasStep {
+pub struct ModalGasStep<S: PistonGasState = ResolvedThermochemicalGasState> {
     pub gas: GasHeatVolumeStep,
     /// Shared source-bearing pressure effort, also available to acoustic owners.
-    pub midpoint: ResolvedThermochemicalGasState,
+    pub midpoint: S,
     pub motion: ThermalValveMotionFrame,
     pub modal_energy_change_j: f64,
     /// Work against constant exterior pressure on the actual wall sweep [J].
@@ -147,7 +151,7 @@ fn modal_energy(motion: &ThermalValveModalMotion) -> f64 {
 // nonlinear held-pressure interconnection the full coupled exponential.
 fn admit_clock(
     motion: &ThermalValveModalMotion,
-    gas: &ResolvedThermochemicalGasState,
+    gas: &impl PistonGasState,
     volume: f64,
 ) -> Result<(), ModalGasError> {
     let modes = motion.model().modes();
@@ -155,8 +159,11 @@ fn admit_clock(
         .iter()
         .map(|m| m.angular_frequency_rad_s.powi(2))
         .fold(0.0, f64::max);
-    let damping = motion.model().damping_rates_per_s()
-        .iter().copied()
+    let damping = motion
+        .model()
+        .damping_rates_per_s()
+        .iter()
+        .copied()
         .fold(0.0, f64::max);
     let area2: f64 = motion
         .valve()
@@ -165,8 +172,8 @@ fn admit_clock(
         .iter()
         .map(|a| a * a)
         .sum();
-    let gas = gas.state();
-    let rate = (stiffness + gas.density * gas.sound_speed * gas.sound_speed * area2 / volume)
+    let rate = (stiffness
+        + gas.density_kg_m3() * gas.sound_speed_m_s() * gas.sound_speed_m_s() * area2 / volume)
         .sqrt()
         + damping;
     let dt = motion.model().sample_period_s();
@@ -180,8 +187,8 @@ fn admit_clock(
     fs_phs::linear_exact::admit_midpoint_band(rate, dt).map_err(ModalGasError::TimeResolution)
 }
 
-struct Trial {
-    gas: GasHeatVolumeCandidate,
+struct Trial<G: PistonGas> {
+    gas: GasHeatVolumeCandidate<G, G::State>,
     motion: ThermalValveModalMotion,
     frame: ThermalValveMotionFrame,
     residual_m3: f64,
@@ -196,8 +203,8 @@ struct VolumeProblem<F> {
     failed: Cell<bool>,
     failure: RefCell<Option<ModalGasError>>,
 }
-impl<F: Fn(f64) -> Result<Trial, ModalGasError>> VolumeProblem<F> {
-    fn sample(&self, coordinate: f64) -> Option<Trial> {
+impl<G: PistonGas, F: Fn(f64) -> Result<Trial<G>, ModalGasError>> VolumeProblem<F> {
+    fn sample(&self, coordinate: f64) -> Option<Trial<G>> {
         if self.failed.get() {
             return None;
         }
@@ -211,7 +218,9 @@ impl<F: Fn(f64) -> Result<Trial, ModalGasError>> VolumeProblem<F> {
         }
     }
 }
-impl<F: Fn(f64) -> Result<Trial, ModalGasError>> NonlinearProblem for VolumeProblem<F> {
+impl<G: PistonGas, F: Fn(f64) -> Result<Trial<G>, ModalGasError>> NonlinearProblem
+    for VolumeProblem<F>
+{
     fn dimension(&self) -> usize {
         1
     }
@@ -233,12 +242,12 @@ impl<F: Fn(f64) -> Result<Trial, ModalGasError>> NonlinearProblem for VolumeProb
     }
 }
 
-impl GasValveMotion {
+impl<G: PistonGas> GasValveMotion<G> {
     /// Bind a finite source gas to an accepted native elastic motion.
     /// The gas parcel supplies the physical cavity volume; no area or effective
     /// mass is copied into an independent piston model.
     pub fn new(
-        gas: ClosedGasParcel,
+        gas: G,
         motion: ThermalValveModalMotion,
         cx: &Cx<'_>,
     ) -> Result<Self, ModalGasError> {
@@ -258,7 +267,7 @@ impl GasValveMotion {
             reference_coordinates,
         })
     }
-    pub const fn gas(&self) -> &ClosedGasParcel {
+    pub const fn gas(&self) -> &G {
         &self.gas
     }
     pub const fn motion(&self) -> &ThermalValveModalMotion {
@@ -267,7 +276,7 @@ impl GasValveMotion {
     /// Preserve original histories for a separately admitted source update.
     /// Changed basis/equilibrium needs native state transfer and explicit
     /// parameter/geometry work accounting before binding another volume chart.
-    pub fn into_parts(self) -> (ClosedGasParcel, ThermalValveModalMotion) {
+    pub fn into_parts(self) -> (G, ThermalValveModalMotion) {
         (self.gas, self.motion)
     }
 
@@ -294,7 +303,7 @@ impl GasValveMotion {
         exterior_pressure_pa: f64,
         controls: ModalGasSolve,
         cx: &Cx<'_>,
-    ) -> Result<ModalGasStep, ModalGasError> {
+    ) -> Result<ModalGasStep<G::State>, ModalGasError> {
         poll(cx)?;
         let v0 = self.gas.volume_m3();
         let [lower, upper] = controls.volume_interval_m3;
@@ -345,12 +354,14 @@ impl GasValveMotion {
             }
             let gas = self
                 .gas
-                .midpoint_heat_volume(volume, heat_j, controls.gas, || cx.checkpoint().is_err())?;
+                .midpoint_heat_volume(volume, heat_j, controls.gas, &mut || {
+                    cx.checkpoint().is_err()
+                })?;
             admit_clock(&self.motion, gas.midpoint(), 0.5 * v0 + 0.5 * volume)?;
             admit_clock(&self.motion, gas.endpoint().state(), volume)?;
             let mut motion = self.motion.clone();
             let frame =
-                motion.step_pressure(gas.midpoint().state().pressure - exterior_pressure_pa, cx)?;
+                motion.step_pressure(gas.midpoint().pressure_pa() - exterior_pressure_pa, cx)?;
             let swept: f64 = area
                 .iter()
                 .zip(&self.reference_coordinates)
