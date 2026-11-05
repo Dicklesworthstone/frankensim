@@ -143,6 +143,16 @@ to parallel biquad sections and discrete state-space.
   FIR filling of the same port (scattering vs impedance). A TMM bore,
   a muffler, a pulse tube, and a BEM radiation load are fillings of
   that port. Music is not a special case.
+- `scattering::ImpedanceScatteringPort` closes the original `DigitalFilter`
+  pressure/volume-flow impedance against a positive characteristic impedance:
+  `p=d*U+h`, `p=2*a-Zc*U`, hence `U=(2*a-h)/(Zc+d)` at the current sample.
+  It requires a full-circle certificate of the actual owned coefficients,
+  exposes affine reflected pressure to implicit source/junction solves, and
+  advances only the original filter memories. No reflection refit, extra delay,
+  gain correction or per-sample allocation is introduced. All boundary outputs
+  and candidate filter memories are checked before committing a sample.
+  Reported `p*U*T` is signed supplied work; it does not invent a dissipation or
+  storage decomposition, a physical data-error bound, or a runtime energy proof.
 
 ### Analytic multiport impedance derivatives
 

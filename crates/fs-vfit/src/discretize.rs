@@ -26,11 +26,16 @@ mod scattering;
 mod passivity;
 #[path = "discretize_impedance.rs"]
 mod impedance_realization;
+#[path = "discretize_impedance_port.rs"]
+mod impedance_port;
 
 pub use passivity::check_digital_passivity;
 pub use impedance_realization::{
     ImpedanceRealization, ImpedanceSampleErrors, realize_tabulated_impedance,
     realize_tabulated_impedance_with_report,
+};
+pub use impedance_port::{
+    ImpedanceScatteringError, ImpedanceScatteringFrame, ImpedanceScatteringPort,
 };
 
 /// One second-order (or degenerate first-order) parallel section:

@@ -1,4 +1,8 @@
-//! Same-sample FIR scattering ports for implicit physical junctions.
+//! Same-sample scattering ports for implicit physical junctions.
+//!
+//! [`ImpedanceScatteringPort`] closes a globally certified digital impedance
+//! directly against pressure/volume-flow characteristics, retaining its IIR
+//! history and current feedthrough without fitting a second reflection filter.
 //!
 //! A sampled reflection is `b[n] = r[0] a[n] + sum(k>=1, r[k] a[n-k])`.
 //! Feeding a junction `DelayedFilter::incoming()` after the previous push
@@ -12,6 +16,10 @@
 //! All kernels use one characteristic-wave normalization supplied by the caller.
 
 use crate::discretize::{DelayedFilter, DiscretizeError};
+
+pub use crate::discretize::{
+    ImpedanceScatteringError, ImpedanceScatteringFrame, ImpedanceScatteringPort,
+};
 
 /// Refusal of a same-sample port or its bounded bank.
 #[derive(Debug, Clone, PartialEq)]
