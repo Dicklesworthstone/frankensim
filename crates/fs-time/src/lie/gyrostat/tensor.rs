@@ -7,6 +7,7 @@
 
 use super::{HeldTorque, LieStepError, driven_step, momentum_step};
 use fs_ga::{Mat3, Quat, So3, Vec3};
+use fs_math::dd::Dd;
 
 const SYMMETRY_TOLERANCE: f64 = 64.0 * f64::EPSILON;
 const RECONSTRUCTION_TOLERANCE: f64 = 512.0 * f64::EPSILON;
@@ -195,6 +196,31 @@ impl InertiaTensor3 {
         let body = self.principal_to_body.rotate(omega)?;
         finite_vector(body, "body angular velocity")?;
         Ok(body)
+    }
+
+    /// Free rigid motion retaining impulse tails in the caller's body frame.
+    ///
+    /// The cached principal frame feeds the compensated Hamiltonian split;
+    /// retained momentum drives both the attitude and its matched inverse
+    /// transport. There is no per-step factorization, allocation or projection.
+    /// This rigid-body lane excludes separately carried internal rotor momentum.
+    ///
+    /// # Errors
+    /// The finite-parameter, derived-arithmetic and group refusals of
+    /// [`crate::lie::compensated::rigid_body_momentum_step_in_frame`].
+    pub fn compensated_momentum_step(
+        self,
+        rotation: So3,
+        momentum_body: [Dd; 3],
+        dt: f64,
+    ) -> Result<(So3, [Dd; 3]), LieStepError> {
+        super::super::compensated::rigid_body_momentum_step_in_frame(
+            rotation,
+            momentum_body,
+            self.principal,
+            self.principal_to_body,
+            dt,
+        )
     }
 
     /// Free motion with total body momentum `L = I omega + h_rotor`.

@@ -89,6 +89,21 @@ where claimed below.
   reversible symplectic evolution with a tested bounded energy envelope.
   Both APIs allocate nothing, iterate no nonlinear solve, and do not
   renormalize the stored attitude; invalid/non-finite states refuse.
+- `lie::compensated::{rigid_body_momentum_step,
+  rigid_body_momentum_step_in_frame}` retains `[Dd; 3]` body momentum through
+  the same symmetric split. The latter accepts cached positive principal
+  moments and a fixed principal-to-body `So3`; `InertiaTensor3` exposes it as
+  `compensated_momentum_step`. Residual-flow phases, the spherical rotation
+  vector and quaternion compositions retain impulse tails through the
+  existing deterministic DD trigonometry, so small impulses affect attitude
+  as well as spin. Projective quaternion action pairs each increment with
+  its inverse momentum transport, including the full-tensor frame change;
+  the spherical flow leaves momentum analytically unchanged. The incoming
+  attitude participates in DD composition before the one final native `So3`
+  admission. Fixed-size arithmetic adds no allocations, factorization,
+  nonlinear solve, renormalization or momentum projection. Nonfinite or
+  unrepresentable derived arithmetic refuses; this is neither an interval
+  certificate nor an exact-energy claim for asymmetric finite steps.
 - `lie::rigid_body_torque_step(R, omega_body, I, torque_body, h)` and
   `lie::rigid_body_spatial_torque_step(R, omega_body, I, torque_space, h)`
   apply held center-of-mass torques through symmetric momentum half-kicks
@@ -100,7 +115,12 @@ where claimed below.
   the trapezoidal sum of the two rotated endpoint torques. These helpers do
   not claim an adjoint or second-order coupled accuracy when a changing
   torque is frozen once per step. Such consumers must evaluate their force
-  law at the required stages.
+  law at the required stages. Loaded steps retain `I omega`, both impulse
+  tails and the final inertia division in DD around the compensated free
+  owner. The public state stays f64; a representable full impulse is not
+  discarded merely because its two separately rounded half-kicks vanish.
+  Exactly zero torque (including signed zeros) delegates to the unchanged
+  scalar free owner, preserving its established bitwise parity and refusals.
 - `lie::gyrostat::{momentum_step, carrier_momentum_step, driven_step,
   HeldTorque}` advances a carrier with internal rotor momentum `h`.
   `momentum_step` retains total body momentum `L = I omega + h`;
@@ -818,6 +838,13 @@ Held-torque G0/G1/G3 regressions additionally cover exact constant angular
 acceleration about each principal axis, the accumulated spatial angular
 impulse over 2,000 steps, second-order refinement and time reversal for
 both torque conventions, zero-load parity, and non-finite-load refusals.
+`tests/lie_compensated.rs` additionally checks signed sub-ULP angular kicks
+whose missing midpoint phase changes attitude by a full radian, a full
+off-diagonal tensor, independent Euler/RK4 second-order refinement and
+first-variation responses in both attitude and nonlinear spin, DD momentum
+norm and spatial momentum preservation, time reversal, finite large phases
+and subnormal durations, and the actual held-torque public owners' distinct
+body/spatial endpoint impulse balances.
 `tests/hybrid.rs` (RE.Z1; G0/G3/G4/G5): relay-chatter and positive-dwell
 microcases; mode/event input-order and schema replay; model-version identity
 sensitivity; event-cap and numerical-trace theorem falsifiers; finite
