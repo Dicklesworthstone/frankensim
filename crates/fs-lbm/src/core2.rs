@@ -22,8 +22,7 @@ const MAX_REGULARIZED_BOUNDARY_SPEED_SQ: f64 = 0.03;
 const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
 
 /// Collision operator for the D2Q9 core (naming follows the d3q19
-/// [`crate::d3q19::CollisionModel3`] precedent; tau stays per-cell,
-/// so the variants carry no parameters).
+/// [`crate::d3q19::CollisionModel3`] precedent; shear tau stays per-cell).
 ///
 /// Default is [`CollisionModel2::Bgk`], whose arithmetic path is
 /// byte-for-byte the historical one — every existing pin and golden
@@ -99,6 +98,40 @@ pub enum CollisionModel2 {
     /// feature, but it is NOT a faithful acoustic-propagation
     /// operator.
     CentralMoment,
+    /// Central-moment collision with independently specified bulk viscosity.
+    /// Shear modes retain the per-cell [`Grid::tau`], while the trace of the
+    /// second central moment relaxes at `1 / bulk_tau`. In two dimensions,
+    /// `zeta / rho = CS2 * (bulk_tau - 1/2)` (the general `2 / D`
+    /// factor equals one in 2-D); the kinematic shear viscosity
+    /// remains `nu = CS2 * (tau - 1/2)`. Thus acoustic attenuation can reflect
+    /// a material's bulk viscosity independently of its shear viscosity.
+    /// For planar flow in a three-dimensional material, the matching 2-D
+    /// coefficient is `zeta_2 / rho = zeta_3 / rho + nu / 3`.
+    /// Third- and fourth-order moments are equilibrated as in
+    /// [`CollisionModel2::CentralMoment`]. Setting `bulk_tau = 1` reproduces
+    /// that historical operator bit-for-bit.
+    CentralMomentBulk {
+        /// Bulk relaxation time, finite and strictly greater than `1/2`.
+        bulk_tau: f64,
+    },
+}
+
+impl CollisionModel2 {
+    /// Resolve and validate the bulk relaxation once per collision/rheology
+    /// sweep, keeping material parameters out of the per-cell hot path.
+    pub(crate) fn central_moment_bulk_tau(self) -> Option<f64> {
+        match self {
+            Self::CentralMoment => Some(1.0),
+            Self::CentralMomentBulk { bulk_tau } => {
+                assert!(
+                    bulk_tau.is_finite() && bulk_tau > 0.5,
+                    "central-moment bulk relaxation time must be finite and greater than 0.5"
+                );
+                Some(bulk_tau)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Cell classification.
@@ -1119,6 +1152,7 @@ impl Grid {
     // proposals. Chunk boundaries change no cell arithmetic or reduction order.
     fn collide_cells_into(&self, start: usize, post: &mut [[f64; Q]]) {
         let model = self.collision;
+        let central_bulk_omega = model.central_moment_bulk_tau().map(|tau| 1.0 / tau);
         if let CollisionModel2::Trt { magic } = model {
             assert!(
                 magic.is_finite() && magic > 0.0,
@@ -1144,7 +1178,7 @@ impl Grid {
                 self.g[0].mul_add(rho, self.fext[i][0]),
                 self.g[1].mul_add(rho, self.fext[i][1]),
             );
-            if matches!(model, CollisionModel2::CentralMoment) {
+            if let Some(bulk_omega) = central_bulk_omega {
                 // Collide the physical populations f + S/2, then publish
                 // f_post = C(f + S/2) + S/2. At frozen u this is the MRT
                 // forcing rule (I - Lambda/2)S in EACH central mode,
@@ -1171,11 +1205,18 @@ impl Grid {
                     }
                 }
                 // Relax: conserved k00/k10/k01 untouched; shear pair
-                // at 1/tau toward 0 (k11) and 0 (k20 - k02); bulk,
-                // third, fourth equilibrated to Maxwellian values.
+                // at 1/tau toward 0 (k11) and 0 (k20 - k02); bulk at
+                // its material rate; third and fourth equilibrated.
                 let omega = 1.0 / tau;
                 let shear_diff = (1.0 - omega) * (k[2][0] - k[0][2]);
-                let bulk = 2.0 * rho * CS2; // equilibrium k20 + k02
+                let bulk_eq = 2.0 * rho * CS2;
+                let bulk = if bulk_omega == 1.0 {
+                    // Preserve the historical central-moment arithmetic.
+                    bulk_eq
+                } else {
+                    let bulk_old = k[2][0] + k[0][2];
+                    bulk_old + bulk_omega * (bulk_eq - bulk_old)
+                };
                 k[1][1] *= 1.0 - omega;
                 k[2][0] = 0.5 * (bulk + shear_diff);
                 k[0][2] = 0.5 * (bulk - shear_diff);

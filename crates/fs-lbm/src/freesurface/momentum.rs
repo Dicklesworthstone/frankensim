@@ -264,6 +264,13 @@ impl FreeSurface {
                 return Err(invalid("finite positive TRT magic parameter required"));
             }
         }
+        if let crate::core2::CollisionModel2::CentralMomentBulk { bulk_tau } = self.grid.collision {
+            if !bulk_tau.is_finite() || bulk_tau <= 0.5 {
+                return Err(invalid(
+                    "central-moment bulk relaxation time must be finite and greater than 0.5",
+                ));
+            }
+        }
         let wall = self
             .planar_contact
             .map(|c| c.wall)

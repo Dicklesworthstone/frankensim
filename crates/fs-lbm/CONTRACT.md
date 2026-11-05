@@ -12567,3 +12567,39 @@ and native/late-cancellation refusal followed by exact retry. They use declared
 synthetic material calibrations, not experimental validation. This fixed-geometry,
 low-Mach, generalized-Newtonian path adds no swept-cell transport, finite actuator
 reservoir, elastic memory, numerical-loss heating or transient total-energy proof.
+
+## Independent bulk viscosity in the dense D2Q9 central-moment solver
+
+`CollisionModel2::CentralMomentBulk { bulk_tau }` separates the second-moment
+trace from the deviatoric modes. The shear modes retain each cell's `Grid::tau`;
+the trace uses the finite material relaxation time `bulk_tau > 1/2`. Third and
+fourth central moments keep their original equilibrium treatment. The original
+`CentralMoment` option remains exactly the `bulk_tau = 1` arithmetic, including
+forcing and streaming. The bulk reciprocal is prepared once per collision sweep.
+
+In dimension D, `nu = cs² (tau_s - 1/2)` and
+`zeta/rho = (2/D) cs² (tau_b - 1/2)` in lattice units. Therefore D2Q9 uses
+`zeta/rho = cs² (bulk_tau - 1/2)`, not the D3 factor `2/3`. For planar flow in a
+three-dimensional material, the corresponding two-dimensional coefficient is
+`zeta_2/rho = zeta_3/rho + nu/3`. Scale the appropriate dimensional kinematic
+coefficient by `dt/dx²` before inverting the D2 relaxation law. Linear isothermal
+longitudinal waves decay at `Gamma = (nu + zeta_2/rho) k²/2`; transverse waves
+retain `nu k²` attenuation. The planar 3-D conversion therefore recovers
+`Gamma = (4nu/3 + zeta_3/rho) k²/2` without confusing dimensional conventions.
+
+The same physical-population Guo transform applies each force moment at its own
+relaxation rate. Uniform and spatial rheology remove isotropic stress from the
+shear-tau-dependent deviatoric part, reconstruct dilation using the configured
+bulk tau, and retain the existing full strain invariant `sqrt(2 D:D)` for the
+constitutive solve. Changing bulk tau must not be misinterpreted as material
+shear thinning. The checked endpoint-force step rejects invalid bulk relaxation
+before numerical proposal work; the low-level collide API retains its assert
+contract for invalid relaxation parameters.
+
+Focused regressions cover independently manufactured trace/shear relaxation
+under Guo forcing, compatibility at unity, two-wavelength continuum sound decay,
+shear-wave and force-driven channel viscosity, source ramps/reversals, and
+uniform/spatial mixed-strain rheology. This is a weakly compressible isothermal
+bulk-viscosity capability; it supplies no thermal acoustic attenuation or
+frequency-dependent molecular relaxation. D3Q19 and D3Q27 retain their existing
+collision contracts.

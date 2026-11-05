@@ -14,9 +14,7 @@
 /// Source-retaining SI constitutive parameters on the admitted material scale.
 pub mod physical;
 
-use crate::core2::{
-    Cell, CollisionModel2, Grid, force_corrected_shear_rate, force_corrected_stress,
-};
+use crate::core2::{Cell, Grid, force_corrected_shear_rate, force_corrected_stress};
 use crate::{CS2, Q};
 
 /// The τ stability floor (ν > 0 with margin; BGK folklore-free zone
@@ -720,8 +718,9 @@ pub struct RheologyStats {
 /// this does not make the time integration implicit. The strain
 /// includes the Guo half-source correction for both body acceleration and
 /// local external force; uniform acceleration is not material shear.
-/// Central-moment collision retains its unit bulk relaxation time: its trace
-/// strain and the shear-tau-dependent deviatoric strain are resolved separately.
+/// Central-moment collision retains its configured bulk relaxation time
+/// (unity for the historical variant): its trace strain and the
+/// shear-tau-dependent deviatoric strain are resolved separately.
 #[must_use]
 pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
     let law = law.prepare();
@@ -755,6 +754,7 @@ fn update_tau_prepared<'a>(
     grid: &mut Grid,
     law_at: impl Fn(usize) -> &'a PreparedRheology,
 ) -> RheologyStats {
+    let central_bulk_tau = grid.collision.central_moment_bulk_tau();
     let mut stats = RheologyStats {
         floored: 0,
         capped: 0,
@@ -768,14 +768,14 @@ fn update_tau_prepared<'a>(
         let law = law_at(i);
         let mm = grid.moments(i);
         let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
-        let local = if matches!(grid.collision, CollisionModel2::CentralMoment) {
+        let local = if let Some(bulk_tau) = central_bulk_tau {
             let [sxx, sxy, syy] = force_corrected_stress(&grid.f[i], mm.rho, mm.u, force);
             // Pi_dev = -2 rho cs² tau D_dev and tr(Pi) =
-            // -2 rho cs² tau_bulk tr(D), with tau_bulk=1 in this model.
+            // -2 rho cs² tau_bulk tr(D), independently of the shear tau.
             // In 2-D, 2 D:D = 4(D_dev,xx² + D_xy²) + tr(D)².
             let scale = 3.0 / mm.rho;
             let numerator = scale * combined_strain_rate((0.5 * (sxx - syy)).abs(), sxy.abs());
-            let dilation = 0.5 * scale * (sxx + syy).abs();
+            let dilation = 0.5 * scale * (sxx + syy).abs() / bulk_tau;
             law.solve_with_fixed_strain(numerator, dilation, grid.tau[i])
         } else {
             let numerator = force_corrected_shear_rate(&grid.f[i], mm.rho, mm.u, force, 1.0);
@@ -1038,7 +1038,12 @@ mod tests {
         let mixed = mixed_laws();
         let laws = [mixed[0], mixed[1], mixed[2], mixed[3], mixed[0], mixed[0]];
         let field = RheologyField::new([3, 2], &laws).unwrap();
-        for collision in [CollisionModel2::Bgk, CollisionModel2::CentralMoment] {
+        for collision in [
+            CollisionModel2::Bgk,
+            CollisionModel2::CentralMoment,
+            CollisionModel2::CentralMomentBulk { bulk_tau: 0.7 },
+            CollisionModel2::CentralMomentBulk { bulk_tau: 1.8 },
+        ] {
             let mut grid = Grid::uniform(3, 2, 1.7);
             grid.collision = collision;
             grid.g = [0.001, -0.002];
@@ -1058,11 +1063,7 @@ mod tests {
                 max_rate = max_rate.max(rate);
                 expected[i] = 0.5 + laws[i].viscosity(rate) / CS2;
                 let isotropic = 0.5 * (strain[0][0] + strain[1][1]);
-                let bulk_tau = if collision == CollisionModel2::CentralMoment {
-                    1.0
-                } else {
-                    expected[i]
-                };
+                let bulk_tau = collision.central_moment_bulk_tau().unwrap_or(expected[i]);
                 let stress: [[f64; 2]; 2] = std::array::from_fn(|a| {
                     std::array::from_fn(|b| {
                         let trace = if a == b { isotropic } else { 0.0 };
@@ -1229,12 +1230,13 @@ mod tests {
                 let rate = (2.0_f64 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
                 let expected_tau = 0.5 + law.viscosity(rate) / CS2;
                 assert!(expected_tau > TAU_FLOOR && expected_tau < TAU_CAP);
-                for collision in [CollisionModel2::Bgk, CollisionModel2::CentralMoment] {
-                    let bulk_tau = if collision == CollisionModel2::CentralMoment {
-                        1.0
-                    } else {
-                        expected_tau
-                    };
+                for collision in [
+                    CollisionModel2::Bgk,
+                    CollisionModel2::CentralMoment,
+                    CollisionModel2::CentralMomentBulk { bulk_tau: 0.7 },
+                    CollisionModel2::CentralMomentBulk { bulk_tau: 1.8 },
+                ] {
+                    let bulk_tau = collision.central_moment_bulk_tau().unwrap_or(expected_tau);
                     for rho in [0.4, 2.5] {
                         for force in [[0.0; 2], [0.003, -0.002]] {
                             let u = [0.04, -0.03];

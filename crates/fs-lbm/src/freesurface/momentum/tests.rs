@@ -268,6 +268,92 @@ fn g3_native_step_replays_unchanged_without_conversion_and_refuses_atomically() 
 }
 
 #[test]
+fn g0_bulk_relaxation_refuses_before_native_momentum_and_pressure_steps() {
+    use crate::core2::CollisionModel2;
+
+    let gate = CancelGate::new_clock_free();
+    let mut grid = Grid::uniform(8, 8, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.f.fill(equilibrium(1.2, 0.02, -0.01));
+    let initial = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+    for bulk_tau in [0.0, 0.5, -1.0, f64::INFINITY, f64::NAN] {
+        for entry in 0..4 {
+            let mut sim = initial.clone();
+            sim.grid.collision = CollisionModel2::CentralMomentBulk { bulk_tau };
+            // These are the public transactional entry points, including the
+            // real native collision path; invalid relaxation must not unwind.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match entry {
+                0 => sim.step_with_momentum(&gate),
+                1 => sim.step_with_angular_momentum(&gate),
+                _ => {
+                    let result = if entry == 2 {
+                        sim.step_with_gas_pressure_and_momentum(&gate, 0.1, |_| {
+                            panic!("invalid collision reached pressure sampling")
+                        })
+                    } else {
+                        sim.step_with_gas_link_pressure_and_momentum(&gate, 0.1, |_| {
+                            panic!("invalid collision reached pressure sampling")
+                        })
+                    };
+                    result.map_err(|error| match error {
+                        FreeSurfacePressureMomentumError2::Momentum(error) => error,
+                        other => panic!("unexpected pressure refusal: {other:?}"),
+                    })
+                }
+            }));
+            assert_eq!(
+                result.expect("invalid bulk relaxation must refuse without panicking"),
+                Err(invalid(
+                    "central-moment bulk relaxation time must be finite and greater than 0.5"
+                ))
+            );
+            assert_eq!(sim.grid.f, initial.grid.f);
+            assert_eq!(sim.grid.flags, initial.grid.flags);
+            assert_eq!(sim.grid.tau, initial.grid.tau);
+            assert_eq!(sim.grid.fext, initial.grid.fext);
+            assert_eq!(sim.grid.g, initial.grid.g);
+            assert_eq!(sim.mass, initial.mass);
+            assert_eq!(sim.fill_raw, initial.fill_raw);
+            assert_eq!(sim.fill_smooth, initial.fill_smooth);
+            assert_eq!(sim.scratch, initial.scratch);
+            assert_eq!(sim.carry.to_bits(), initial.carry.to_bits());
+            assert_eq!(sim.redistribution, initial.redistribution);
+            assert_eq!(sim.conversions.to_fluid, initial.conversions.to_fluid);
+            assert_eq!(sim.conversions.to_gas, initial.conversions.to_gas);
+            assert_eq!(
+                sim.conversions.gas_to_interface,
+                initial.conversions.gas_to_interface
+            );
+            assert_eq!(
+                sim.conversions.fluid_to_interface,
+                initial.conversions.fluid_to_interface
+            );
+            let CollisionModel2::CentralMomentBulk { bulk_tau: retained } = sim.grid.collision
+            else {
+                panic!("refusal changed the original collision model");
+            };
+            assert_eq!(retained.to_bits(), bulk_tau.to_bits());
+        }
+    }
+    // Admitted material bulk rates still reach the actual collision/streaming
+    // owner and agree with its existing native step when no cells convert.
+    for bulk_tau in [0.7, 1.8] {
+        let mut sim = initial.clone();
+        sim.grid.collision = CollisionModel2::CentralMomentBulk { bulk_tau };
+        let mut legacy = sim.clone();
+        legacy.step();
+        assert_eq!(
+            sim.step_with_momentum(&gate).unwrap(),
+            ConversionMomentumReport2::default()
+        );
+        assert_eq!(sim.grid.f, legacy.grid.f);
+        assert_eq!(sim.mass, legacy.mass);
+        assert_eq!(sim.grid.flags, legacy.grid.flags);
+    }
+}
+
+#[test]
 fn g0_newly_wet_cells_require_valid_material_state_before_publication() {
     let gate = CancelGate::new_clock_free();
     for bad_force in [true, false] {
