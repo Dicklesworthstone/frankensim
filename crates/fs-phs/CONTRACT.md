@@ -132,9 +132,19 @@ the five internal heat entries, and both terminal-resistor heats. The latter
 independently integrate the positive source squares
 `(Vsource - Vbus(t))^2/R` through `PreparedSourceLoss` with source feedthrough.
 Neither Norton-equivalent `Vbus^2/R`, squared mean current, nor subtraction of
-large source/storage energies supplies physical series-resistor heat. Each
-terminal closes `source work = resistor heat + converter-boundary work`;
-the full storage/heat/work balance must also pass before publication.
+large source/storage energies supplies physical series-resistor heat. Signed
+current is a separate first-moment observation of the same source coordinates,
+so source work does not subtract a rounded mean bus voltage from the source.
+The constitutive identity `Vbus*I = Vsource*I - R*I^2` then supplies bus work;
+this identity is not presented as an independent energy-closure check.
+
+The independent full storage/heat/work check uses this interval's actual
+transfers, excluding its unchanged stored-energy datum. Native endpoint/storage
+roundoff that cannot resolve a small transfer therefore refuses transactionally.
+An exact constant trajectory is preserved only when every product and sum in
+the original held `A*x+B*u` has an exact-zero arithmetic witness; uncertain or
+underflowing products do not trigger the stationary path. No numerical power
+floor or residual-based energy repair is applied.
 
 Warm calls reuse native factors and fixed-size scratch without allocation or
 matrix exponentiation. Cancellation or arithmetic refusal preserves both caller
@@ -143,7 +153,9 @@ limits remain: this path adds no ideal zero-resistance clamp, controller,
 temperature feedback, switching transitions, or new device validity claim.
 Focused analytical coverage includes buck/boost/reverse equilibria, independent
 RC/source work and near-matched positive resistor heat, coupled startup and
-changed-source power ODEs, and cancellation/retry at every exposed checkpoint.
+changed-source power ODEs, tiny regenerative currents about 24 V, refusal of
+unresolved storage changes including a `1e16 V` datum, exact unloaded
+equilibrium, and cancellation/retry at every exposed checkpoint.
 
 ## Physical acoustic terminal flow
 
@@ -2026,6 +2038,18 @@ zero D retains the original arithmetic. The existing caller-owned scratch path
 remains allocation-free. This is a held-input interval model, not quadrature for
 an arbitrary changing source waveform or an additional physical heat debit.
 
+`signed_integral_into_controlled` independently integrates one original
+`S*x+D*u` row, retaining its sign. For the existing derivative coordinates z
+and positive factor R, the first source basis trajectories have constant output
+`sqrt(rate)`; the first n entries of `R^T R z / sqrt(rate)` are therefore the
+signed first moments. Compensated initialization and contractions reuse that
+SAME factor without another matrix, exponential, coordinate, retained cache or
+warm allocation, including when D is empty. An exactly zero selected-column
+coefficient excludes its unrelated factor row before contraction, so an
+overflowing unrelated observation cannot contaminate a finite selected integral.
+This is a linear trajectory observation, never an inferred heat or energy-balance
+remainder.
+
 `PreparedQuadraticFlow::new_extended_input_controlled` retains the original
 physical storage transform and exact generator/Gramian kernels while accepting
 an explicit complete input map for extended coordinates. This permits a force
@@ -2036,12 +2060,12 @@ held-port preparation keeps its existing input assembly and arithmetic. Public
 `evaluate_into` exposes the unchanged candidate-only contractions with supplied
 scratch; callers retain physical admission and transactional publication.
 
-All six `tests/source_loss.rs` cases pass against the complete actual fs-phs
-source in bounded native execution: analytic forced and silent modes,
+The focused `tests/source_loss.rs` suite covers analytic forced and silent modes,
 independent nonnormal-trajectory quadrature, source-resistor voltage differences
 near a large equilibrium, multirow state/input cross terms, pure feedthrough,
-zero-map bit equality, and budget/nonfinite/cancellation refusals. This is
-numerical-owner validation, not a full workspace Cargo execution.
+zero-map bit equality, signed RC currents about large driven equilibria,
+selected-source overflow isolation, and budget/nonfinite/cancellation refusals.
+Numerical-owner validation does not substitute for full workspace execution.
 
 
 ## Shared complete common-flow constraint algebra

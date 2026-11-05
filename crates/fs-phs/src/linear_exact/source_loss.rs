@@ -20,6 +20,7 @@ use fs_math::{
 pub struct PreparedSourceLoss {
     n: usize,
     m: usize,
+    source_count: usize,
     flow: Vec<f64>,
     input: Vec<f64>,
     source: Vec<f64>,
@@ -199,6 +200,7 @@ impl PreparedSourceLoss {
         Ok(Self {
             n,
             m,
+            source_count: source_rows.len() / n,
             flow: flow.to_vec(),
             input: input.to_vec(),
             source,
@@ -241,7 +243,146 @@ impl PreparedSourceLoss {
         coordinates: &mut [f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, PreparedStepError> {
+        self.initialize_coordinates(initial, held_inputs, coordinates, false, &mut cancelled)?;
+        if self.root.is_empty() {
+            return Ok(0.0);
+        }
+        let mut loss = 0.0;
+        for row in self.root.chunks_exact(2 * self.n) {
+            poll(&mut cancelled)?;
+            let output = row
+                .iter()
+                .zip(coordinates.iter())
+                .map(|(a, x)| a * x)
+                .sum::<f64>();
+            loss += output * output;
+        }
+        if !loss.is_finite() {
+            return Err(PhsError::Dimension {
+                what: "source loss integral is unrepresentable",
+            }
+            .into());
+        }
+        Ok(loss)
+    }
+    /// Signed integral of one ORIGINAL source row `S*x(t)+D*u`, without
+    /// squaring it or subtracting large state and source averages.
+    ///
+    /// `source_row` follows the rows supplied at preparation. The unchanged
+    /// derivative coordinates retain a small source difference about a driven
+    /// equilibrium. Their first n basis trajectories have constant physical
+    /// output sqrt(rate), so the existing positive Gramian factor R gives
+    /// `integral source_i dt = (R^T R z)_i / sqrt(rate)` directly. Initialization
+    /// and both factor contractions use compensated products/sums, including
+    /// state-only source differences. This is an independent linear observation,
+    /// never a heat or energy-balance remainder.
+    ///
+    /// No new factor, cache, dimension or allocation is introduced. Caller
+    /// scratch is the same `2*n` coordinates as [`Self::evaluate_into_controlled`].
+    /// Its contents may change on refusal; no physical state is retained.
+    pub fn signed_integral_into_controlled(
+        &self,
+        source_row: usize,
+        initial: &[f64],
+        held_inputs: &[f64],
+        coordinates: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, PreparedStepError> {
         poll(&mut cancelled)?;
+        if source_row >= self.source_count {
+            return Err(refuse("signed source integral requires an original source row").into());
+        }
+        self.initialize_coordinates(initial, held_inputs, coordinates, true, &mut cancelled)?;
+        if self.root.is_empty() {
+            return Ok(0.0);
+        }
+        let root_rate = det::sqrt(self.rate);
+        let (mut high, mut low) = (0.0, 0.0);
+        for row in self.root.chunks_exact(2 * self.n) {
+            poll(&mut cancelled)?;
+            // An unrelated source can overflow even though this selected
+            // linear observation is finite. Its exact zero coefficient must
+            // exclude it before evaluating the unrelated factor row.
+            if row[source_row] == 0.0 {
+                continue;
+            }
+            let output = compensated_dot(row, coordinates, &[], &[]);
+            let (product, product_error) = two_prod(row[source_row] / root_rate, output);
+            let (next, sum_error) = two_sum(high, product);
+            high = next;
+            low += product_error + sum_error;
+        }
+        let integral = high + low;
+        if !integral.is_finite() {
+            return Err(refuse("signed source integral is unrepresentable").into());
+        }
+        Ok(integral)
+    }
+
+    // A conservative exact witness for a constant held-input trajectory.
+    // A rounded compensated zero is insufficient: an underflowing derivative
+    // can accumulate a representable change over a long interval. Only accept
+    // products and additions proved exact in the ORIGINAL A*x+B*u reduction.
+    pub(crate) fn has_exactly_zero_derivative_controlled(
+        &self,
+        initial: &[f64],
+        held_inputs: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<bool, PreparedStepError> {
+        poll(&mut cancelled)?;
+        if initial.len() != self.n
+            || held_inputs.len() != self.m
+            || !finite(initial)
+            || !finite(held_inputs)
+        {
+            return Err(
+                refuse("stationarity requires complete finite state and held inputs").into(),
+            );
+        }
+        // This conservative range keeps all 106 significand bits of an exact
+        // f64 product representable, so a zero TwoProd error cannot hide an
+        // underflowed remainder. It is an arithmetic witness, not a power floor.
+        let exact_product_floor = f64::MIN_POSITIVE / (f64::EPSILON * f64::EPSILON);
+        for i in 0..self.n {
+            poll(&mut cancelled)?;
+            let state_terms = self.flow[i * self.n..(i + 1) * self.n].iter().zip(initial);
+            let input_terms = self.input[i * self.m..(i + 1) * self.m]
+                .iter()
+                .zip(held_inputs);
+            let mut sum = 0.0;
+            for (&coefficient, &value) in state_terms.chain(input_terms) {
+                if coefficient == 0.0 || value == 0.0 {
+                    continue;
+                }
+                let (product, product_error) = two_prod(coefficient, value);
+                if !product.is_finite()
+                    || product.abs() < exact_product_floor
+                    || product_error != 0.0
+                {
+                    return Ok(false);
+                }
+                let (next, sum_error) = two_sum(sum, product);
+                if !next.is_finite() || sum_error != 0.0 {
+                    return Ok(false);
+                }
+                sum = next;
+            }
+            if sum != 0.0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn initialize_coordinates(
+        &self,
+        initial: &[f64],
+        held_inputs: &[f64],
+        coordinates: &mut [f64],
+        compensated: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), PreparedStepError> {
+        poll(cancelled)?;
         let n = self.n;
         if initial.len() != n
             || held_inputs.len() != self.m
@@ -255,16 +396,21 @@ impl PreparedSourceLoss {
             .into());
         }
         if self.root.is_empty() {
-            return Ok(0.0);
+            return Ok(());
         }
         let root_rate = det::sqrt(self.rate);
         for i in 0..n {
-            poll(&mut cancelled)?;
-            if !self.feedthrough.is_empty() {
+            poll(cancelled)?;
+            if compensated || !self.feedthrough.is_empty() {
+                let direct = if self.feedthrough.is_empty() {
+                    &[][..]
+                } else {
+                    &self.feedthrough[i * self.m..(i + 1) * self.m]
+                };
                 coordinates[i] = compensated_dot(
                     &self.source[i * n..(i + 1) * n],
                     initial,
-                    &self.feedthrough[i * self.m..(i + 1) * self.m],
+                    direct,
                     held_inputs,
                 ) / root_rate;
                 coordinates[n + i] = compensated_dot(
@@ -298,23 +444,7 @@ impl PreparedSourceLoss {
                 refuse("source loss initial output or derivative is unrepresentable").into(),
             );
         }
-        let mut loss = 0.0;
-        for row in self.root.chunks_exact(2 * n) {
-            poll(&mut cancelled)?;
-            let output = row
-                .iter()
-                .zip(coordinates.iter())
-                .map(|(a, x)| a * x)
-                .sum::<f64>();
-            loss += output * output;
-        }
-        if !loss.is_finite() {
-            return Err(PhsError::Dimension {
-                what: "source loss integral is unrepresentable",
-            }
-            .into());
-        }
-        Ok(loss)
+        Ok(())
     }
 }
 

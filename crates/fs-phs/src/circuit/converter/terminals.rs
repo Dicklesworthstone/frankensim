@@ -42,6 +42,7 @@ pub struct VoltageDrivenStep {
 pub struct PreparedVoltageDrivenBuckBoost {
     native: PreparedMultiportScatteringZoh,
     resistance_ohm: [f64; 2],
+    source_to_current: [f64; 2],
     fractions: [f64; CONDUCTION_CHANNELS],
     terminal_heat: [PreparedSourceLoss; 2],
 }
@@ -151,6 +152,9 @@ impl AveragedBuckBoost {
         Ok(PreparedVoltageDrivenBuckBoost {
             native,
             resistance_ohm: terminal_resistance_ohm,
+            source_to_current: core::array::from_fn(|p| {
+                (1.0 / terminal_resistance_ohm[p]) / root[p]
+            }),
             fractions,
             terminal_heat,
         })
@@ -171,8 +175,11 @@ impl PreparedVoltageDrivenBuckBoost {
 
     /// Advance the complete original state under the two held source voltages.
     /// Returns actual mean bus voltages and independent physical work/heat.
-    /// Every channel and both external source balances must close before any
-    /// caller output publishes. Refusal/cancellation is safe to retry.
+    /// Signed current and positive resistor heat are integrated independently;
+    /// the terminal power law supplies bus work. Storage balance is checked
+    /// against this interval's transfers, excluding its unchanged energy datum.
+    /// An unresolved small transfer refuses without publishing either output.
+    /// A proved exact zero of the original held generator preserves equilibrium.
     pub fn step_controlled(
         &mut self,
         initial: &[f64; 3],
@@ -191,45 +198,78 @@ impl PreparedVoltageDrivenBuckBoost {
             )
             .into());
         }
-        let (mut candidate, mut voltage) = ([0.0; 3], [0.0; 2]);
-        let mut ports = [ScatteringPortRecord::default(); 2];
-        let account =
-            self.native
-                .step_into(initial, &waves, &mut candidate, &mut voltage, &mut ports)?;
         let mut terminal_resistor_heat_j = [0.0; 2];
-        for (heat, observer) in terminal_resistor_heat_j.iter_mut().zip(&self.terminal_heat) {
-            *heat = observer.evaluate_into_controlled(
+        let mut terminal_charge_c = [0.0; 2];
+        for (p, observer) in self.terminal_heat.iter().enumerate() {
+            let mut coordinates = [0.0; 6];
+            terminal_resistor_heat_j[p] = observer.evaluate_into_controlled(
                 initial,
                 &waves,
-                &mut [0.0; 6],
+                &mut coordinates,
                 &mut cancelled,
             )?;
+            terminal_charge_c[p] = self.source_to_current[p]
+                * observer.signed_integral_into_controlled(
+                    0,
+                    initial,
+                    &waves,
+                    &mut coordinates,
+                    &mut cancelled,
+                )?;
         }
+        let stationary = self.terminal_heat[0].has_exactly_zero_derivative_controlled(
+            initial,
+            &waves,
+            &mut cancelled,
+        )?;
         let duration = self.duration_s();
-        let source_work_j: [f64; 2] = core::array::from_fn(|p| {
-            let mean_current = (source_voltage_v[p] - voltage[p]) / self.resistance_ohm[p];
-            (duration * source_voltage_v[p]) * mean_current
-        });
-        let terminal_work_j = ports.map(|p| p.boundary_work);
-        let joules = self.fractions.map(|f| f * account.physical_heat);
-        let scale = self
-            .system()
-            .hamiltonian(initial)
+        // The independently integrated current, not a difference between a
+        // source and a rounded mean bus voltage, supplies source work. The
+        // terminal law Vbus=Vs-R*I then integrates Vbus*I as Vs*integral(I)
+        // minus the independent positive resistor square. This is constitutive
+        // power integration, not an energy-balance remainder.
+        let source_work_j: [f64; 2] =
+            core::array::from_fn(|p| source_voltage_v[p] * terminal_charge_c[p]);
+        let terminal_work_j: [f64; 2] =
+            core::array::from_fn(|p| source_work_j[p] - terminal_resistor_heat_j[p]);
+        let (mut candidate, mut voltage) = ([0.0; 3], [0.0; 2]);
+        let (delta_h, physical_heat) = if stationary {
+            candidate = *initial;
+            let mut effort = [0.0; 3];
+            self.system().storage().gradient(initial, &mut effort);
+            voltage = [effort[1], effort[2]];
+            let amplitude = det::sqrt(self.system().structure().1[0]) * effort[0];
+            let integrated_amplitude = amplitude * det::sqrt(duration);
+            (0.0, integrated_amplitude * integrated_amplitude)
+        } else {
+            let account = self.native.step_into(
+                initial,
+                &waves,
+                &mut candidate,
+                &mut voltage,
+                &mut [ScatteringPortRecord::default(); 2],
+            )?;
+            (account.delta_h, account.physical_heat)
+        };
+        let joules = self.fractions.map(|f| f * physical_heat);
+        // A large untouched bus-energy datum must not admit an inaccurate
+        // small transfer. Unresolved native endpoint/storage evolution refuses
+        // against the physical work/heat of THIS interval.
+        let scale = delta_h
             .abs()
-            .max(self.system().hamiltonian(&candidate).abs())
-            .max(account.delta_h.abs())
-            .max(account.physical_heat.abs())
+            .max(physical_heat.abs())
             .max(source_work_j.iter().map(|w| w.abs()).sum::<f64>())
             .max(terminal_resistor_heat_j.iter().sum::<f64>())
             .max(terminal_work_j.iter().map(|w| w.abs()).sum::<f64>());
         let residuals = [
-            source_work_j[0] - terminal_resistor_heat_j[0] - terminal_work_j[0],
-            source_work_j[1] - terminal_resistor_heat_j[1] - terminal_work_j[1],
-            joules.iter().sum::<f64>() - account.physical_heat,
-            account.delta_h + account.physical_heat + terminal_resistor_heat_j.iter().sum::<f64>()
+            joules.iter().sum::<f64>() - physical_heat,
+            delta_h + physical_heat + terminal_resistor_heat_j.iter().sum::<f64>()
                 - source_work_j.iter().sum::<f64>(),
         ];
         if !scale.is_finite()
+            || !self.system().hamiltonian(initial).is_finite()
+            || !self.system().hamiltonian(&candidate).is_finite()
+            || voltage.iter().any(|v| !v.is_finite())
             || source_work_j
                 .iter()
                 .chain(&terminal_resistor_heat_j)
@@ -250,9 +290,9 @@ impl PreparedVoltageDrivenBuckBoost {
         Ok(VoltageDrivenStep {
             converter: ConverterStep {
                 native: PreparedStepRecord {
-                    delta_h: account.delta_h,
-                    dissipated: account.physical_heat,
-                    supplied: account.boundary_work,
+                    delta_h,
+                    dissipated: physical_heat,
+                    supplied: terminal_work_j.iter().sum(),
                     newton_iters: 0,
                     solver_residual: 0.0,
                     solver_certificate: None,

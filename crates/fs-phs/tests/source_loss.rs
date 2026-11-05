@@ -275,6 +275,17 @@ fn multiple_physical_source_rows_include_all_state_input_cross_terms() {
         expected,
     );
 
+    for (row, (a, b)) in [(-13.0, 6.0), (-3.25, -14.75)].into_iter().enumerate() {
+        let signed = dt * (a + 0.5 * b * dt);
+        close(
+            source
+                .signed_integral_into_controlled(row, &initial, &inputs, &mut [0.0; 4], || false)
+                .unwrap(),
+            signed,
+            signed.abs(),
+        );
+    }
+
     let pure_source = PreparedSourceLoss::new_with_feedthrough_controlled(
         1,
         2,
@@ -293,6 +304,13 @@ fn multiple_physical_source_rows_include_all_state_input_cross_terms() {
             .unwrap(),
         49.0 * dt,
         49.0 * dt,
+    );
+    close(
+        pure_source
+            .signed_integral_into_controlled(0, &[100.0], &[4.0, 5.0], &mut [0.0; 2], || false)
+            .unwrap(),
+        -7.0 * dt,
+        7.0 * dt,
     );
     assert_eq!(
         pure_source
@@ -409,5 +427,112 @@ fn source_feedthrough_preserves_zero_mapping_and_refuses_incomplete_or_cancelled
         source
             .evaluate_into_controlled(&[3.5], &[0.9], &mut [], || false)
             .is_err()
+    );
+}
+
+#[test]
+fn signed_source_integral_retains_small_regenerative_current_about_large_bus_voltage() {
+    let dt = 0.3_f64;
+    // Unit RC: I(t)=Vs-V(t)=-(V0-Vs)*exp(-t). Both the signed
+    // charge and positive heat have independent, cancellation-safe primitives.
+    let source = PreparedSourceLoss::new_with_feedthrough_controlled(
+        1,
+        1,
+        &[-1.0],
+        &[1.0],
+        &[-1.0],
+        &[1.0],
+        dt,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    for (voltage, offset) in [(24.0, 1e-7), (24.0, 1e-10), (1e16, 2.0)] {
+        let initial = voltage + offset;
+        let difference = initial - voltage;
+        let charge = difference * (-dt).exp_m1();
+        let heat = -0.5 * difference * difference * (-2.0 * dt).exp_m1();
+        let actual = source
+            .signed_integral_into_controlled(0, &[initial], &[voltage], &mut [0.0; 2], || false)
+            .unwrap();
+        assert!(actual < 0.0);
+        close(actual, charge, charge.abs());
+        close(
+            source
+                .evaluate_controlled(&[initial], &[voltage], || false)
+                .unwrap(),
+            heat,
+            heat,
+        );
+        assert_eq!(source.signed_integral_into_controlled(
+            0, &[voltage], &[voltage], &mut [0.0; 2], || false,
+        ).unwrap(), 0.0);
+    }
+}
+
+#[test]
+fn signed_source_selection_excludes_unrelated_overflow_and_preserves_retry() {
+    // Signed state-only differences also need compensated initialization;
+    // rounding these two products independently would return 0.25 instead.
+    let difference = PreparedSourceLoss::new_controlled(
+        2,
+        0,
+        &[0.0; 4],
+        &[],
+        &[0.1, -0.1],
+        1.0,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    close(
+        difference
+            .signed_integral_into_controlled(0, &[1e16 + 2.0, 1e16], &[], &mut [0.0; 4], || false)
+            .unwrap(),
+        0.2,
+        0.2,
+    );
+    let source = PreparedSourceLoss::new_controlled(
+        2,
+        0,
+        &[0.0; 4],
+        &[],
+        &[1.0, 0.0, 0.0, 1.0],
+        100.0,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let initial = [1.0, 1e308];
+    let mut scratch = [0.0; 4];
+    // The other source has an unrepresentable integral; an exact zero
+    // coefficient must prevent its factor row from contaminating row zero.
+    close(
+        source
+            .signed_integral_into_controlled(0, &initial, &[], &mut scratch, || false)
+            .unwrap(),
+        100.0,
+        100.0,
+    );
+    assert!(
+        source
+            .signed_integral_into_controlled(1, &initial, &[], &mut scratch, || false,)
+            .is_err()
+    );
+    assert!(
+        source
+            .signed_integral_into_controlled(2, &initial, &[], &mut scratch, || false,)
+            .is_err()
+    );
+    assert!(matches!(
+        source.signed_integral_into_controlled(0, &initial, &[], &mut scratch, || true,),
+        Err(PreparedStepError::Cancelled)
+    ));
+    close(
+        source
+            .signed_integral_into_controlled(0, &initial, &[], &mut scratch, || false)
+            .unwrap(),
+        100.0,
+        100.0,
     );
 }

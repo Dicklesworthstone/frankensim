@@ -298,3 +298,88 @@ fn voltage_terminal_admission_and_every_cancellation_checkpoint_preserve_outputs
     assert_eq!(next, expected);
     assert_eq!(mean, expected_mean);
 }
+
+fn unit_freewheel() -> AveragedBuckBoost {
+    let mut p = super::ideal();
+    p.inductance_h = 1.0;
+    p.bus_capacitance_f = [1.0; 2];
+    AveragedBuckBoost::new(p, modulation(0.0, 0.0)).unwrap()
+}
+
+#[test]
+fn tiny_source_current_is_integrated_without_subtracting_a_rounded_mean_voltage() {
+    let dt = 0.3_f64;
+    for offset in [1e-7, 1e-10] {
+        let model = unit_freewheel();
+        // The second bus has a resolved passive discharge, while the input
+        // source independently receives a much smaller regenerative current.
+        let initial = model.state(0.0, [24.0 + offset, 10.0]).unwrap();
+        let difference = initial[1] - 24.0;
+        let source_work = 24.0 * difference * (-dt).exp_m1();
+        let heat = -0.5 * difference * difference * (-2.0 * dt).exp_m1();
+        let mut prepared = model
+            .prepare_voltage_driven_controlled([1.0; 2], dt, budget(), heat_budget(), || false)
+            .unwrap();
+        let (mut next, mut mean) = ([0.0; 3], [0.0; 2]);
+        let record = prepared
+            .step_controlled(&initial, &[24.0, 0.0], &mut next, &mut mean, || false)
+            .unwrap();
+        for (actual, expected) in [
+            (record.source_work_j[0], source_work),
+            (record.terminal_resistor_heat_j[0], heat),
+            (record.converter.terminal_work_j[0], source_work - heat),
+        ] {
+            assert!(
+                (actual - expected).abs() <= 3e-12 * expected.abs(),
+                "{actual:e} != {expected:e}",
+            );
+        }
+    }
+}
+
+#[test]
+fn unresolved_small_storage_transfers_refuse_without_using_the_large_energy_datum() {
+    for (voltage, offset) in [(24.0, 1e-7), (24.0, 1e-10), (1e16, 2.0)] {
+        let model = unit_freewheel();
+        let initial = model.state(0.0, [voltage + offset, 0.0]).unwrap();
+        let mut prepared = model
+            .prepare_voltage_driven_controlled([1.0; 2], 0.3, budget(), heat_budget(), || false)
+            .unwrap();
+        let (mut next, mut mean) = ([123.0; 3], [456.0; 2]);
+        assert!(
+            prepared
+                .step_controlled(&initial, &[voltage, 0.0], &mut next, &mut mean, || false,)
+                .is_err()
+        );
+        assert_eq!(next, [123.0; 3]);
+        assert_eq!(mean, [456.0; 2]);
+        // Refusal retains the prepared cache: a representable driven interval
+        // with the same coefficients remains usable.
+        prepared
+            .step_controlled(&[0.0; 3], &[1.0, 0.0], &mut next, &mut mean, || false)
+            .unwrap();
+    }
+}
+
+#[test]
+fn exact_unloaded_equilibrium_preserves_state_without_exponential_roundoff() {
+    for voltage in [[24.0, -12.0], [1e16, 0.0]] {
+        let model = unit_freewheel();
+        let initial = model.state(0.0, voltage).unwrap();
+        let mut prepared = model
+            .prepare_voltage_driven_controlled([1.0; 2], 0.3, budget(), heat_budget(), || false)
+            .unwrap();
+        let (mut next, mut mean) = ([123.0; 3], [456.0; 2]);
+        let record = prepared
+            .step_controlled(&initial, &voltage, &mut next, &mut mean, || false)
+            .unwrap();
+        assert_eq!(next.map(f64::to_bits), initial.map(f64::to_bits));
+        assert_eq!(mean, voltage);
+        assert_eq!(record.source_work_j, [0.0; 2]);
+        assert_eq!(record.terminal_resistor_heat_j, [0.0; 2]);
+        assert_eq!(record.converter.terminal_work_j[0], 0.0);
+        assert_eq!(record.converter.terminal_work_j[1], 0.0);
+        assert_eq!(record.converter.native.delta_h, 0.0);
+        assert_eq!(record.converter.native.dissipated, 0.0);
+    }
+}
