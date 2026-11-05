@@ -1830,3 +1830,56 @@ mechanical walls, and resource/overlap/source-binding refusals. Native execution
 remains pending in the current environment; source
 review and pinned rustfmt parsing establish neither numerical test passage nor
 full material or shell-model validity.
+
+## Exact pressure-release acoustic modes (M2.4-W1a / pexfp.93)
+
+`HelmholtzFe::modes_with_pressure_release` and
+`HeterogeneousHelmholtzFe::modes_with_pressure_release` impose exact homogeneous
+Dirichlet pressure on explicitly selected original boundary triangles. Every
+nonzero hierarchical face trace is eliminated, including vertex, edge and face
+coordinates through P4. All remaining faces are rigid. The common constraint
+map restricts the original sparse stiffness and consistent mass; it introduces
+no penalty, large admittance, resampled medium or spurious boundary eigenvalue.
+The heterogeneous pencil retains `1/rho` inside stiffness and `1/(rho c^2)` in
+mass, including conforming material interfaces.
+
+The original modal solver supplies free-equation residuals and inertia counts.
+Returned shapes use full original coordinates with exact zeros on constrained
+entries; constrained equation rows represent boundary reactions. Distinct
+`PressureReleaseModes` and `HeterogeneousPressureReleaseModes` wrappers retain
+canonical faces and free-DOF counts. They cannot be passed directly to the
+existing rigid-wall reduced constructor, whose static vectors are unconstrained.
+Empty face sets preserve the original rigid solver's eigenpairs. Repeated,
+internal or missing faces, an empty free space, and cancellation refuse without
+mutating the original operator. Cancellation brackets the native eigensolver;
+its existing single-call cancellation granularity is unchanged.
+
+Focused tests specify quarter/half-wave duct spectra over three P2 mesh rungs,
+mixed 3-D box modes, a closed-form density-interface resonance, original-mass
+normalization, P1--P4 trace elimination, winding invariance and refusal paths.
+This boundary is an explicit ideal `p=0` condition, not an opening-radiation or
+end-correction model. Curved/isoparametric geometry and the remaining M2.4-W1a
+qualification requirements remain outside this increment.
+
+`HeterogeneousHelmholtzFe::prepare_with_pressure_release` applies the same
+original trace constraints to driven harmonic fields. It factors only the free
+pressure coordinates and lifts exact zeros into the complete original field.
+The retained density and compressibility operators, passive complex admittances,
+spatial velocity traces and distributed volume sources remain physical; neither
+material interfaces nor sources are resampled. Dense factor limits count the
+free coordinates, while original sparse operators and lifted vectors retain
+their separately documented storage. Empty constraints preserve the original
+preparation and solution arithmetic.
+
+An ideal pressure-release face cannot simultaneously own an admittance or an
+imposed velocity. Adjacent faces may share constrained edge or vertex traces.
+Residual correction checks only the free equations; eliminated rows carry
+boundary reactions. Stored energy and signed input work use the full original
+operators, and the zero-pressure reactions do no work. Cancellation leaves a
+prepared factor reusable and does not publish a partial field.
+
+Driven regressions specify mesh-converged standing-wave pressure and both stored
+energy components, a conforming density/sound-speed interface with independent
+transfer-matrix pressure and passive boundary heat, P4 traces, original volume
+sources, dense-memory bounds and conflicting-law refusals. An ideal zero-pressure
+termination is still not a finite-opening radiation or end-correction model.

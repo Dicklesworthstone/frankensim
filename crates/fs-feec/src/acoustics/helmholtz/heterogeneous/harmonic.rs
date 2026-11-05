@@ -1,5 +1,6 @@
 //! Prepared full-space pressure solves and their original physical work.
 
+use super::super::pressure_release::PressureReleaseConstraints;
 use super::super::tri_quadrature;
 use super::{
     HeterogeneousError, HeterogeneousHelmholtzFe, VolumeVelocitySource, finite, invalid, poll,
@@ -33,7 +34,7 @@ pub type VelocityTrace = ([u32; 3], [C64; 3]);
 /// Explicit limits on full-space harmonic preparation.
 #[derive(Debug, Clone, Copy)]
 pub struct HarmonicLimits {
-    /// Pressure DOF cap, also bounded by [`MAX_HARMONIC_DOFS`].
+    /// Unconstrained pressure DOF cap, also bounded by [`MAX_HARMONIC_DOFS`].
     pub max_dofs: usize,
     /// Peak scalar dense matrices: input plus factor, `32 * ndof^2` bytes.
     /// Sparse operators, O(ndof) vectors, allocator/runtime and an explicitly
@@ -53,7 +54,9 @@ impl Default for HarmonicLimits {
     }
 }
 
-/// One factorization of the FULL heterogeneous pressure space at one frequency.
+/// One factorization of the heterogeneous pressure space at one frequency.
+/// Exact homogeneous pressure-release constraints are eliminated; all other
+/// original pressure coordinates remain, without a modal reduction.
 /// No original medium is queried while solving subsequent right-hand sides.
 pub struct PreparedHeterogeneous<'m, 'f, 'c> {
     model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
@@ -63,6 +66,7 @@ pub struct PreparedHeterogeneous<'m, 'f, 'c> {
     scales: Vec<f64>,
     conductance: Csr,
     susceptance: Csr,
+    pressure_release: PressureReleaseConstraints,
     residual_tolerance: f64,
 }
 
@@ -108,6 +112,34 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: HarmonicLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedHeterogeneous<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_with_pressure_release(frequency_hz, admittances, &[], limits, cancelled)
+    }
+
+    /// Prepare the original physical operator with exact `p = 0` on the
+    /// supplied boundary faces. Vertex, edge and face trace coefficients are
+    /// eliminated before factorization, then lifted as exact zeros on output.
+    /// No large-admittance penalty, altered material or modal truncation is used.
+    ///
+    /// Remaining faces are rigid unless they carry a passive admittance or
+    /// an imposed inward velocity. A pressure-release face cannot also own
+    /// either of those laws. Adjacent faces may share constrained trace DOFs.
+    /// Original volume sources and physical energy/work operators are retained.
+    /// Residual checks cover free equations: eliminated rows contain boundary
+    /// reactions, not failed equations. A zero-pressure reaction does no work.
+    ///
+    /// This ideal pressure-soft boundary is not an aperture radiation model:
+    /// exterior loading, end corrections and radiated power require their
+    /// corresponding coupled boundary owners. Empty faces retain `prepare`'s
+    /// original arithmetic. Dense limits count only the free pressure space;
+    /// original sparse matrices and lifted O(ndof) fields remain additional.
+    pub fn prepare_with_pressure_release<'m>(
+        &'m self,
+        frequency_hz: f64,
+        admittances: &[BoundaryAdmittance],
+        pressure_release_faces: &[[u32; 3]],
+        limits: HarmonicLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedHeterogeneous<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         let omega = core::f64::consts::TAU * frequency_hz;
         if !omega.is_finite()
@@ -124,11 +156,14 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         {
             return Err(invalid("positive harmonic limits and residual tolerance required").into());
         }
-        let n = self.ndof();
+        let pressure_release = self
+            .geometry
+            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let n = pressure_release.free_dofs.len();
         let cap = limits.max_dofs.min(MAX_HARMONIC_DOFS);
         if n > cap {
             return Err(HeterogeneousError::Limit {
-                what: "full pressure degrees of freedom",
+                what: "unconstrained pressure degrees of freedom",
                 requested: n,
                 maximum: cap,
             });
@@ -146,26 +181,50 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 maximum: limits.max_dense_bytes,
             });
         }
+        for boundary in admittances {
+            for &face in &boundary.faces {
+                poll(cancelled)?;
+                let mut key = face;
+                key.sort_unstable();
+                if pressure_release.faces.contains(&key) {
+                    return Err(
+                        invalid("pressure-release and admittance faces must not overlap").into(),
+                    );
+                }
+            }
+        }
         let (conductance, susceptance) = self.admittance_matrices(admittances, cancelled)?;
         let mut a = vec![C64::ZERO; entries];
         let mut scales = vec![0.0; n];
-        for row in 0..n {
+        for (row, &original_row) in pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
-            let (cols, vals) = self.stiffness.row(row);
+            let (cols, vals) = self.stiffness.row(original_row);
             for (&col, &value) in cols.iter().zip(vals) {
-                a[row * n + col].re += value;
+                let free_col = pressure_release.original_to_free[col];
+                if free_col != usize::MAX {
+                    a[row * n + free_col].re += value;
+                }
             }
-            let (cols, vals) = self.mass.row(row);
+            let (cols, vals) = self.mass.row(original_row);
             for (&col, &value) in cols.iter().zip(vals) {
-                a[row * n + col].re -= omega * omega * value;
+                let free_col = pressure_release.original_to_free[col];
+                if free_col != usize::MAX {
+                    a[row * n + free_col].re -= omega * omega * value;
+                }
             }
-            let (cols, vals) = susceptance.row(row);
+            let (cols, vals) = susceptance.row(original_row);
             for (&col, &value) in cols.iter().zip(vals) {
-                a[row * n + col].re -= omega * value;
+                let free_col = pressure_release.original_to_free[col];
+                if free_col != usize::MAX {
+                    a[row * n + free_col].re -= omega * value;
+                }
             }
-            let (cols, vals) = conductance.row(row);
+            let (cols, vals) = conductance.row(original_row);
             for (&col, &value) in cols.iter().zip(vals) {
-                a[row * n + col].im += omega * value;
+                let free_col = pressure_release.original_to_free[col];
+                if free_col != usize::MAX {
+                    a[row * n + free_col].im += omega * value;
+                }
             }
             let values = &a[row * n..(row + 1) * n];
             if values.iter().any(|&z| !finite(z)) {
@@ -199,6 +258,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             scales,
             conductance,
             susceptance,
+            pressure_release,
             residual_tolerance: limits.residual_tolerance,
         })
     }
@@ -308,8 +368,9 @@ impl PreparedHeterogeneous<'_, '_, '_> {
     }
 
     /// Solve for arbitrary simultaneous spatial velocity traces using the
-    /// retained full-space factor. Unlisted faces remain rigid unless they
-    /// carry an admittance. Sources and admittances can share a face.
+    /// retained factor. Unlisted faces remain rigid unless they carry an
+    /// admittance or were declared pressure-release during preparation.
+    /// Sources and admittances can share a face; pressure release cannot.
     ///
     /// At most two residual corrections use the original separate physical
     /// sparse operators and the same LU. No source is resampled or refactored.
@@ -319,6 +380,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
         poll(cancelled)?;
+        self.admit_velocity_faces(inward_velocity, cancelled)?;
         let load = self.model.velocity_load(inward_velocity, cancelled)?;
         self.solve_projected(&load, cancelled)
     }
@@ -334,6 +396,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
         poll(cancelled)?;
+        self.admit_velocity_faces(inward_velocity, cancelled)?;
         super::source::admit_count(sources.len())?;
         for &(source, amplitude) in sources {
             source.validate(self.model)?;
@@ -369,6 +432,25 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         Ok(field)
     }
 
+    fn admit_velocity_faces(
+        &self,
+        traces: &[VelocityTrace],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), HeterogeneousError> {
+        for &(face, _) in traces {
+            poll(cancelled)?;
+            let mut key = face;
+            key.sort_unstable();
+            if self.pressure_release.faces.contains(&key) {
+                return Err(invalid(
+                    "pressure-release and imposed-velocity faces must not overlap",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     fn solve_projected(
         &self,
         load: &[C64],
@@ -381,15 +463,24 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         if rhs.iter().any(|&z| !finite(z)) {
             return Err(invalid("harmonic velocity source overflow").into());
         }
-        let mut pressure = rhs
+        let mut free_pressure = self
+            .pressure_release
+            .free_dofs
             .iter()
             .zip(&self.scales)
-            .map(|(&b, &s)| b.scale(s))
+            .map(|(&original, &s)| rhs[original].scale(s))
             .collect::<Vec<_>>();
         self.factor
-            .solve_with_cancel(&mut pressure, &mut *cancelled)?;
-        for (p, &scale) in pressure.iter_mut().zip(&self.scales) {
-            *p = p.scale(scale);
+            .solve_with_cancel(&mut free_pressure, &mut *cancelled)?;
+        let mut pressure = vec![C64::ZERO; self.model.ndof()];
+        for ((&original, &p), &scale) in self
+            .pressure_release
+            .free_dofs
+            .iter()
+            .zip(&free_pressure)
+            .zip(&self.scales)
+        {
+            pressure[original] = p.scale(scale);
         }
         for correction in 0..=2 {
             poll(cancelled)?;
@@ -411,8 +502,8 @@ impl PreparedHeterogeneous<'_, '_, '_> {
             }
             self.factor
                 .solve_with_cancel(&mut residual, &mut *cancelled)?;
-            for (i, p) in pressure.iter_mut().enumerate() {
-                *p = *p + residual[i].scale(self.scales[i]);
+            for (i, &original) in self.pressure_release.free_dofs.iter().enumerate() {
+                pressure[original] = pressure[original] + residual[i].scale(self.scales[i]);
             }
         }
         unreachable!("the bounded correction loop returns on its last residual")
@@ -426,9 +517,9 @@ impl PreparedHeterogeneous<'_, '_, '_> {
     ) -> Result<(Vec<C64>, f64), HeterogeneousError> {
         let omega = Dd::from_f64(self.omega);
         let omega2 = omega * omega;
-        let mut residual = vec![C64::ZERO; pressure.len()];
+        let mut residual = vec![C64::ZERO; self.pressure_release.free_dofs.len()];
         let mut worst: f64 = 0.0;
-        for row in 0..pressure.len() {
+        for (free_row, &row) in self.pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
             let mut real = Dd::from_f64(rhs[row].re);
             let mut imaginary = Dd::from_f64(rhs[row].im);
@@ -458,7 +549,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
                 return Err(invalid("unrepresentable physical pressure residual").into());
             }
             worst = worst.max(value.abs() / scale.max(f64::MIN_POSITIVE));
-            residual[row] = value;
+            residual[free_row] = value;
         }
         Ok((residual, worst))
     }
@@ -537,3 +628,7 @@ fn quadratic_nonnegative(
     }
     Ok(value.max(0.0))
 }
+
+#[cfg(test)]
+#[path = "harmonic/pressure_release_tests.rs"]
+mod pressure_release_tests;

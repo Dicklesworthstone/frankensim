@@ -7,6 +7,8 @@
 //! - a specified inward particle velocity `v_in`: `dp/dn = +j w rho v_in`;
 //! - a locally reacting impedance `Z`: `p = Z v_out`, i.e. `dp/dn = -j k y p` with the dimensionless specific admittance
 //!   `y = rho c / Z`.
+//! - explicitly selected ideal pressure-release faces (`p = 0`), eliminated exactly by
+//!   [`HelmholtzFe::modes_with_pressure_release`] and the heterogeneous full-pressure owner.
 //!
 //! Weak form on the hierarchical H1 space of [`SimplexSpace`] (order `r`, straight-sided tets):
 //! `(K - k^2 M + j k sum_b y_b C_b) p = j k rho c v_in b_src`, with the stiffness `K`, the mass `M`, the boundary mass matrices
@@ -48,9 +50,12 @@ pub mod molecular;
 /// Full pressure waves in spatially varying, stationary fluids.
 pub mod heterogeneous;
 
+mod pressure_release;
+pub use pressure_release::PressureReleaseModes;
+
 /// Highest element order accepted; `MAX_ORDER + 1` refuses.
 pub const MAX_ORDER: usize = 4;
-/// Most Neumann modes a window may hold; more refuses (the window is never truncated).
+/// Most acoustic modes a window may hold; more refuses (the window is never truncated).
 pub const MAX_MODES: usize = 512;
 /// Largest reduced basis; more refuses.
 pub const MAX_REDUCED_DIM: usize = 640;
@@ -115,11 +120,13 @@ pub enum AcousticFeError {
         /// The cap.
         cap: usize,
     },
-    /// An input of the driven problem is inconsistent.
+    /// An input of the acoustic problem is inconsistent.
     InvalidInput {
         /// What is wrong.
         what: &'static str,
     },
+    /// The caller cancelled; no partial constraint map or modes are returned.
+    Cancelled,
     /// The reduced dense system is singular at this frequency.
     SingularAtFrequency {
         /// Frequency [Hz].
@@ -151,7 +158,11 @@ impl From<LdltError> for AcousticFeError {
     }
 }
 
-/// Rigid-wall eigenpairs of a cavity.
+/// Original-coordinate eigenpairs of a cavity.
+///
+/// [`HelmholtzFe::modes`] returns rigid-wall modes. Pressure-release modes
+/// remain explicitly wrapped in [`PressureReleaseModes`] so they cannot be
+/// passed directly to a rigid-wall reduced constructor.
 #[derive(Debug, Clone)]
 pub struct HelmholtzModes {
     /// Eigenvalues `k^2` [1/m^2], ascending.
@@ -161,6 +172,8 @@ pub struct HelmholtzModes {
     /// Mass-normalized mode shapes (`phi^T M phi = 1`), one dof vector per mode.
     pub shapes: Vec<Vec<f64>>,
     /// Certified residual `||K phi - lambda M phi||_{M^-1}` of each mode.
+    /// With pressure-release boundaries, the equations and mass norm are
+    /// restricted to free pressure coordinates; constrained rows are reactions.
     pub residual: Vec<f64>,
     /// Inertia-certified eigenvalue count strictly below the window's low end.
     pub below_low: usize,
