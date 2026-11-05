@@ -149,7 +149,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         })
     }
 
-    pub(in crate::compressible::mixture::molecular) fn additional_stabilized_workspace_bytes(
+    pub(in crate::compressible::mixture) fn additional_stabilized_workspace_bytes(
         &self,
     ) -> Result<usize, DissipationError> {
         let mut extra = Some(0usize);
@@ -171,7 +171,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         ))
     }
 
-    pub(in crate::compressible::mixture::molecular) fn reserve_stabilized_workspace(
+    pub(in crate::compressible::mixture) fn reserve_stabilized_workspace(
         &mut self,
         flow: &MixtureEuler2d,
         maximum_workspace_bytes: usize,

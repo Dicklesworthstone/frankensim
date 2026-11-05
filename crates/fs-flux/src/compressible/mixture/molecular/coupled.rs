@@ -426,9 +426,13 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                 .ok_or(DissipationError::Invalid(
                     "coupled stabilized mixture workspace size overflow",
                 ))?;
-            let allowance = self.maximum_workspace_bytes.checked_sub(outside).ok_or(
-                DissipationError::Invalid("coupled stabilized mixture total workspace budget"),
-            )?;
+            let allowance = self
+                .maximum_workspace_bytes
+                .min(MAX_MIXTURE_WORKSPACE_BYTES)
+                .checked_sub(outside)
+                .ok_or(DissipationError::Invalid(
+                    "coupled stabilized mixture total workspace budget",
+                ))?;
             self.molecular
                 .reserve_stabilized_workspace(&self.trial, allowance, &mut cancelled)?;
         }

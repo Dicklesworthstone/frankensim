@@ -5,7 +5,11 @@
 //! with the shared conservative Cartesian transport. No reaction, thermodynamic
 //! conversion, heat-release law or second spatial discretization is introduced.
 
-use super::molecular::{DissipationControl, MolecularReport, MolecularTransport2d, TransportLaw};
+use super::molecular::stabilized::{IntervalFailure, StepWork};
+use super::molecular::{
+    DissipationControl, MolecularReport, MolecularTransport2d, StabilizedDissipationControl,
+    TransportLaw,
+};
 use super::{
     BodyForce2d, BoundaryImpulse, BoundarySide, ForceChange2d, ForceControl2d, ForcingWorkspace2d,
     MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler2d, StepControl, StepReport as TransportStepReport,
@@ -75,6 +79,19 @@ pub struct SplitDissipationReport {
     pub second: MolecularReport,
 }
 
+/// Original complete reaction/flow balances and the cost of stabilized diffusion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedReactiveStepReport {
+    /// Accepted molecular/chemistry/advection/chemistry/molecular interval.
+    pub coupled: ReactiveStepReport,
+    /// Both molecular halves and every discarded complete-interval probe.
+    pub operator_evaluations: usize,
+    /// Largest stage count in the final accepted pair of molecular halves.
+    pub maximum_stages_used: usize,
+    /// Largest scaled parabolic number in the final accepted molecular halves.
+    pub maximum_scaled_parabolic_number: f64,
+}
+
 /// Source-owned reactions coupled to the shared two-dimensional gas field.
 ///
 /// All buffers are prepared once. Complete-step retries restore the original
@@ -121,6 +138,22 @@ impl ReactingEuler2d {
             })
             .ok_or(ReactiveError::Invalid(
                 "reacting Cartesian workspace size overflow",
+            ))
+    }
+
+    /// Complete current reactor, molecular buffers and unallocated RKL2 scratch.
+    /// Add supplied forcing workspace before passing the step's total byte limit.
+    /// Immutable source/provider allocations retain their original exclusions.
+    pub fn required_stabilized_workspace_bytes<L: TransportLaw>(
+        &self,
+        operator: &MolecularTransport2d<L>,
+    ) -> Result<usize, ReactiveError> {
+        let extra = operator.additional_stabilized_workspace_bytes()?;
+        self.workspace_bytes()
+            .checked_add(operator.workspace_bytes())
+            .and_then(|bytes| bytes.checked_add(extra))
+            .ok_or(ReactiveError::Invalid(
+                "reacting stabilized molecular workspace size overflow",
             ))
     }
 
@@ -253,6 +286,7 @@ impl ReactingEuler2d {
             DissipationControl::default(),
             MAX_MIXTURE_WORKSPACE_BYTES,
             None,
+            None,
             cancelled,
         )
     }
@@ -283,6 +317,7 @@ impl ReactingEuler2d {
             dissipation_controls,
             maximum_workspace_bytes,
             None,
+            None,
             cancelled,
         )
     }
@@ -308,6 +343,7 @@ impl ReactingEuler2d {
             DissipationControl::default(),
             MAX_MIXTURE_WORKSPACE_BYTES,
             Some((force, force_controls, workspace)),
+            None,
             cancelled,
         )
     }
@@ -336,8 +372,84 @@ impl ReactingEuler2d {
             dissipation_controls,
             maximum_workspace_bytes,
             Some((force, force_controls, workspace)),
+            None,
             cancelled,
         )
+    }
+
+    /// Opt into the original RKL2 molecular operator for both D halves of the
+    /// complete D-C-A-C-D interval. Chemistry keeps its original source, energy
+    /// chart, fixed-volume integrator and endpoint-temperature admission.
+    ///
+    /// One actual-operator counter spans both halves and every discarded trial,
+    /// including heat-release-induced acoustic restarts. Work exhaustion is
+    /// terminal; no shortened retry receives a fresh budget. The molecular
+    /// macrostep cap controls physical accuracy. The larger linear stability
+    /// interval alone establishes neither nonlinear positivity nor entropy decay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_stabilized_dissipation<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport2d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: StabilizedDissipationControl,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveStepReport, ReactiveError> {
+        let mut work = StepWork::new(dissipation_controls);
+        let coupled = self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls.transport,
+            maximum_workspace_bytes,
+            None,
+            Some(&mut work),
+            cancelled,
+        )?;
+        Ok(StabilizedReactiveStepReport {
+            coupled,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    /// Place original conservative body forcing between the same stabilized
+    /// diffusion and chemistry halves. All complete-owner and supplied forcing
+    /// storage counts even for zero force. Source work, chemistry and signed
+    /// boundary exchange retain separate original balance terms; failure or
+    /// cancellation preserves both owners' state, time, reports and loads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_stabilized_dissipation_and_forcing<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport2d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: StabilizedDissipationControl,
+        maximum_workspace_bytes: usize,
+        force: BodyForce2d<'_>,
+        force_controls: ForceControl2d,
+        workspace: &mut ForcingWorkspace2d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedReactiveStepReport, ReactiveError> {
+        let mut work = StepWork::new(dissipation_controls);
+        let coupled = self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls.transport,
+            maximum_workspace_bytes,
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            cancelled,
+        )?;
+        Ok(StabilizedReactiveStepReport {
+            coupled,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -349,6 +461,7 @@ impl ReactingEuler2d {
         dissipation_controls: DissipationControl,
         maximum_workspace_bytes: usize,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        mut stabilization: Option<&mut StepWork>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -392,6 +505,25 @@ impl ReactingEuler2d {
                 "reacting Cartesian duration or controls",
             ));
         }
+        if let (Some(operator), Some(work)) = (operator.as_deref_mut(), stabilization.as_ref()) {
+            work.controls.validate()?;
+            // The molecular allocator sees one field. Reserve the accepted
+            // field, chemistry, complete loads and supplied forcing in the
+            // same total allowance before it adds retained RKL2 scratch.
+            let outside = bytes
+                .checked_sub(self.trial.workspace_bytes())
+                .and_then(|value| value.checked_sub(operator.workspace_bytes()))
+                .ok_or(ReactiveError::Invalid(
+                    "reacting stabilized molecular workspace size overflow",
+                ))?;
+            let allowance = maximum_workspace_bytes
+                .min(MAX_MIXTURE_WORKSPACE_BYTES)
+                .checked_sub(outside)
+                .ok_or(ReactiveError::Invalid(
+                    "reacting stabilized molecular total workspace budget",
+                ))?;
+            operator.reserve_stabilized_workspace(&self.trial, allowance, &mut cancelled)?;
+        }
         let n = self.accepted.gas.species_count();
         let before = checked_totals(
             &self.accepted.states,
@@ -420,6 +552,9 @@ impl ReactingEuler2d {
         let mut last = ReactiveError::Invalid("no representable reacting Cartesian increment");
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
+            if let Some(work) = stabilization.as_deref_mut() {
+                work.reset_extrema();
+            }
             if !positive(0.5 * dt)
                 || !self.accepted.time.is_finite()
                 || self.accepted.time + dt <= self.accepted.time
@@ -435,11 +570,13 @@ impl ReactingEuler2d {
             let attempt = (|| {
                 let first = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_unpublished(
+                        let report = molecular_half(
+                            operator,
                             &mut self.trial,
                             Time::new(0.5 * dt),
                             dissipation_controls,
                             maximum_workspace_bytes,
+                            stabilization.as_deref_mut(),
                             &mut cancelled,
                         )?;
                         copy_values(
@@ -500,11 +637,13 @@ impl ReactingEuler2d {
                 let mut endpoint_rate: f64 = 0.0;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_unpublished(
+                        let report = molecular_half(
+                            operator,
                             &mut self.trial,
                             Time::new(0.5 * dt),
                             dissipation_controls,
                             maximum_workspace_bytes,
+                            stabilization.as_deref_mut(),
                             &mut cancelled,
                         )?;
                         add_impulses(
@@ -640,6 +779,11 @@ impl ReactingEuler2d {
                     return Ok(report);
                 }
                 Err(ReactiveError::Cancelled) => return Err(ReactiveError::Cancelled),
+                Err(ReactiveError::Dissipation(error))
+                    if stabilization.is_some() && error.is_terminal() =>
+                {
+                    return Err(ReactiveError::Dissipation(error.step_failure(0.0, dt)));
+                }
                 Err(error) => {
                     last = error;
                     dt = shortened.unwrap_or(0.5 * dt);
@@ -650,6 +794,41 @@ impl ReactingEuler2d {
             attempts: controls.maximum_coupling_retries + 1,
             last: Box::new(last),
         })
+    }
+}
+
+fn molecular_half<L: TransportLaw>(
+    operator: &mut MolecularTransport2d<L>,
+    flow: &mut MixtureEuler2d,
+    duration: Time,
+    controls: DissipationControl,
+    maximum_workspace_bytes: usize,
+    stabilization: Option<&mut StepWork>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<MolecularReport, ReactiveError> {
+    match stabilization {
+        None => Ok(operator.advance_unpublished(
+            flow,
+            duration,
+            controls,
+            maximum_workspace_bytes,
+            cancelled,
+        )?),
+        Some(work) => {
+            let report = operator.advance_stabilized_unpublished(
+                flow,
+                duration,
+                work.controls,
+                maximum_workspace_bytes,
+                &mut work.evaluations,
+                cancelled,
+            )?;
+            work.record(
+                report.maximum_stages_used,
+                report.maximum_scaled_parabolic_number,
+            );
+            Ok(report.transport)
+        }
     }
 }
 
