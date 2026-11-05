@@ -46,6 +46,9 @@ pub mod performance;
 #[cfg(feature = "nonlinear-brass")]
 pub mod nonlinear;
 
+mod tension;
+use tension::{TensionWork, spring_work_j};
+
 /// The lip island's reduced parameters plus their provenance labels.
 #[derive(Debug, Clone)]
 pub struct LipIsland {
@@ -137,7 +140,8 @@ pub enum BrassControl {
     SetBlowingPressure(f64),
     /// Dimensionless lip pre-stress multiplier: stiffness scales by
     /// `tension^2` (lip resonance scales by `tension`), damping by
-    /// `tension` (constant loss factor).
+    /// `tension` (constant loss factor). Displacement and momentum persist;
+    /// the signed spring-energy jump is work by the tension actuator.
     SetLipTension(f64),
     /// Valve combination switch with a crossfade length [samples].
     SetValve {
@@ -165,6 +169,12 @@ pub struct BrassBlockDiag {
     pub blow_work_j: f64,
     /// Wave energy sent into the bore this block [J].
     pub bore_work_j: f64,
+    /// Signed tension-actuator work [J] in each physical lip mode, in mode
+    /// order. Includes control changes since the previous successful block,
+    /// once; positive enters spring storage, negative returns to the actuator.
+    /// An absent or unchanged second mode contributes zero. This is separate
+    /// from pneumatic work and dissipation, not a whole lip/bore energy audit.
+    pub lip_tension_work_j: [f64; 2],
     /// Worst lip-island supply defect this block.
     pub supply_defect: f64,
 }
@@ -177,6 +187,7 @@ pub struct BrassVoice {
     lip_state: Vec<f64>,
     lip: LipIsland,
     tension: f64,
+    tension_work: TensionWork,
     blow_pa: f64,
     cup: CupState,
     cup_compliance: f64,
@@ -245,6 +256,7 @@ impl BrassVoice {
             lip_state: vec![0.0, 0.0],
             lip,
             tension: 1.0,
+            tension_work: TensionWork::default(),
             blow_pa: 0.0,
             cup: CupState::default(),
             cup_compliance,
@@ -428,9 +440,22 @@ impl BrassVoice {
                     what: "tensioned lip island refused admission",
                 })?;
                 let lip_linear = prepare_lip(&lip_sys)?;
+                let work_j = spring_work_j(
+                    &self.lip_sys,
+                    &lip_sys,
+                    &self.lip_state,
+                    self.lip.stiffness_n_m * self.tension * self.tension,
+                    self.lip.stiffness_n_m * t * t,
+                )
+                .map_err(|what| MmLineError::Invalid { what })?;
+                // The optional second mode has no admitted tension law: its
+                // original stiffness/state are unchanged, hence zero work.
+                let tension_work = self.tension_work.with_increment([work_j, 0.0])
+                    .map_err(|what| MmLineError::Invalid { what })?;
                 self.lip_sys = lip_sys;
                 self.lip_linear = lip_linear;
                 self.tension = t;
+                self.tension_work = tension_work;
             }
             BrassControl::SetValve {
                 combo,
@@ -443,7 +468,8 @@ impl BrassVoice {
     }
 
     /// Reset the whole voice to silence (lines, lip, cup) keeping the
-    /// realized bank — the probe/battery seam.
+    /// realized bank — the probe/battery seam. Starts a new tension-work
+    /// accounting horizon; previously recorded block diagnostics are retained.
     ///
     /// # Errors
     /// As [`MmLineBank::reset`].
@@ -455,6 +481,7 @@ impl BrassVoice {
         }
         self.cup = CupState::default();
         self.p_bore_prev = 0.0;
+        self.tension_work = TensionWork::default();
         if let Some(source) = self.jet_noise.as_mut() {
             source.record(0.0, 0.0);
         }
@@ -474,6 +501,13 @@ impl BrassVoice {
     #[must_use]
     pub fn diagnostics(&self) -> &[BrassBlockDiag] {
         &self.diags
+    }
+
+    /// Signed tension-actuator work [J] by mode since construction or reset,
+    /// including accepted controls not yet followed by a rendered block.
+    #[must_use]
+    pub fn lip_tension_work_j(&self) -> [f64; 2] {
+        self.tension_work.total_j()
     }
 
     /// Realization receipts of the bank, one per valve combination.
@@ -622,6 +656,7 @@ impl BrassVoice {
             *slot = p_now;
         }
         let n = out.len() as f64;
+        let lip_tension_work_j = self.tension_work.finish_block();
         self.diags.push(BrassBlockDiag {
             block: self.block_index,
             lock_hz: zero_crossing_lock_hz(out, dt),
@@ -630,6 +665,7 @@ impl BrassVoice {
             gap_max_m: gap_max,
             blow_work_j: blow_work,
             bore_work_j: bore_work,
+            lip_tension_work_j,
             supply_defect: worst_defect,
         });
         self.block_index += 1;
@@ -1178,7 +1214,7 @@ pub(crate) mod brass_loop_tests {
 
     #[test]
     #[ignore = "operating-point probe: valve ladder, slot walk, temperature"]
-    #[allow(clippy::too_many_lines)] // one coherent probe
+    #[allow(clippy::too_many_lines)]// one coherent probe
     fn zz_probe_gates_measurements() {
         let cfg = config();
         let load = MmLoad::Analytic(Termination::FlangedOpen);
@@ -1421,11 +1457,142 @@ pub(crate) mod brass_loop_tests {
     }
 
     #[test]
+    fn lip_tension_work_is_the_signed_storage_jump_at_retained_coordinates() {
+        let mut voice = second_mode_voice(None);
+        // An independent stored spring plus moving mass, without advancing time.
+        voice.lip_state = vec![2e-4, 1e-5];
+        let retained = voice.lip_state.clone();
+        let initial_energy = voice.lip_sys.hamiltonian(&retained);
+        let mut previous_tension = 1.0;
+        let mut expected = 0.0;
+        for t in [1.25, 0.75, 1.0, 0.5] {
+            let before = voice.lip_sys.hamiltonian(&retained);
+            let old_work = voice.lip_tension_work_j()[0];
+            voice.apply(BrassControl::SetLipTension(t)).unwrap();
+            let work = 0.5
+                * voice.lip.stiffness_n_m
+                * (t * t - previous_tension * previous_tension)
+                * retained[0]
+                * retained[0];
+            expected += work;
+            assert_eq!(
+                voice.lip_state, retained,
+                "a parameter change must not move the mass"
+            );
+            assert!(
+                ((voice.lip_sys.hamiltonian(&retained) - before) - work).abs() < 2e-14 * work.abs()
+            );
+            assert!((voice.lip_tension_work_j()[0] - old_work - work).abs() < 2e-14 * work.abs());
+            assert_eq!(voice.lip_tension_work_j()[1], 0.0);
+            previous_tension = t;
+        }
+        assert!(
+            expected < 0.0,
+            "the relaxed spring returns work to its actuator"
+        );
+        assert!((voice.lip_tension_work_j()[0] - expected).abs() < 1e-14 * expected.abs());
+        assert!(
+            (voice.lip_sys.hamiltonian(&retained) - initial_energy - expected).abs()
+                < 2e-14 * expected.abs()
+        );
+
+        let account = voice.tension_work;
+        let energy = voice.lip_sys.hamiltonian(&retained);
+        let reference = step_split(
+            &voice.lip_sys,
+            &voice.lip_linear,
+            LinearPropagator::ExactZoh,
+            &retained,
+            &[0.01],
+            voice.dt,
+        )
+        .unwrap();
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1e300] {
+            assert!(voice.apply(BrassControl::SetLipTension(invalid)).is_err());
+            assert_eq!(voice.tension, previous_tension);
+            assert_eq!(voice.lip_state, retained);
+            assert_eq!(voice.lip_sys.hamiltonian(&retained), energy);
+            assert_eq!(voice.tension_work, account);
+        }
+        voice.step_lip(0.01, voice.dt).unwrap();
+        assert_eq!(
+            voice.lip_state, reference.x,
+            "refusals preserve the prepared propagator"
+        );
+    }
+
+    #[test]
+    fn lip_tension_work_is_not_pressure_work_and_enters_one_successful_block() {
+        let mut voice = second_mode_voice(None);
+        voice.apply(BrassControl::SetLipTension(1.5)).unwrap();
+        assert_eq!(
+            voice.lip_tension_work_j(),
+            [0.0; 2],
+            "no work at zero displacement"
+        );
+        voice.lip_state = vec![2e-4, 0.0];
+        voice.apply(BrassControl::SetLipTension(1.25)).unwrap();
+        voice.apply(BrassControl::SetLipTension(1.75)).unwrap();
+        let work = voice.lip_tension_work_j();
+        assert!(work[0] > 0.0);
+        let staged = voice.tension_work;
+        voice.apply(BrassControl::SetLipTension(1.75)).unwrap();
+        assert_eq!(
+            voice.tension_work, staged,
+            "an unchanged control adds no work"
+        );
+        assert!(voice.step_block(&mut []).is_err());
+        assert!(
+            voice
+                .step_block_outgoing(&mut [0.0; 2], &mut [0.0; 1])
+                .is_err()
+        );
+        assert_eq!(
+            voice.tension_work, staged,
+            "refused blocks cannot consume pending work"
+        );
+        voice.step_block(&mut [0.0; 3]).unwrap();
+        let diag = voice.diagnostics().last().unwrap();
+        assert_eq!(diag.lip_tension_work_j, work);
+        assert_eq!(diag.blow_work_j, 0.0);
+        assert_eq!(diag.bore_work_j, 0.0);
+        voice.step_block(&mut [0.0; 1]).unwrap();
+        assert_eq!(
+            voice.diagnostics().last().unwrap().lip_tension_work_j,
+            [0.0; 2]
+        );
+        assert_eq!(voice.lip_tension_work_j(), work);
+        voice.reset().unwrap();
+        assert_eq!(voice.lip_tension_work_j(), [0.0; 2]);
+    }
+
+    #[test]
+    fn lip_tension_refuses_unrepresentable_storage_without_publishing_the_control() {
+        let mut voice = second_mode_voice(None);
+        voice.lip_state = vec![1e-4, 0.0];
+        voice.apply(BrassControl::SetLipTension(1.2)).unwrap();
+        let account = voice.tension_work;
+        voice.lip_state[0] = 1e154;
+        assert!(voice.apply(BrassControl::SetLipTension(1.1)).is_err());
+        assert_eq!(voice.tension, 1.2);
+        assert_eq!(voice.lip_state, [1e154, 0.0]);
+        assert_eq!(voice.tension_work, account);
+    }
+
+    #[test]
     fn second_lip_mode_runs_only_at_unit_tension_and_names_the_refusal() {
         let mut voice = second_mode_voice(Some(embouchure_7_mode2()));
+        voice.lip_state = vec![2e-4, 1e-5];
+        voice.lip2.as_mut().unwrap().state = vec![-2e-4, -3e-5];
+        let first = voice.lip_state.clone();
+        let second = voice.lip2.as_ref().unwrap().state.clone();
         voice.apply(BrassControl::SetLipTension(1.0)).expect("tension 1 is the printed state");
+        assert_eq!(voice.lip_tension_work_j(), [0.0; 2]);
         let refusal = voice.apply(BrassControl::SetLipTension(1.2)).expect_err("another tension has no printed law");
         assert!(format!("{refusal:?}").contains("lip_response_mode2"), "{refusal:?}");
+        assert_eq!(voice.lip_state, first);
+        assert_eq!(voice.lip2.as_ref().unwrap().state, second);
+        assert_eq!(voice.lip_tension_work_j(), [0.0; 2]);
         let mut one_mode = second_mode_voice(None);
         one_mode.apply(BrassControl::SetLipTension(1.2)).expect("the one-mode lip scales as before");
         let mut tensioned = second_mode_voice(None);

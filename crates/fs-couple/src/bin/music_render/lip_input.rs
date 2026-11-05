@@ -393,7 +393,7 @@ pub(super) fn run_with_gas_sources(
         .iter()
         .map(|w| {
             format!(
-                "{{\"start_s\":{},\"bore_mean_pa\":{},\"bore_ac_rms_pa\":{},\"bore_ac_peak_pa\":{},\"gap_min_m\":{},\"gap_mean_m\":{},\"gap_max_m\":{},\"closed_chunk_fraction\":{}}}",
+                "{{\"start_s\":{},\"bore_mean_pa\":{},\"bore_ac_rms_pa\":{},\"bore_ac_peak_pa\":{},\"gap_min_m\":{},\"gap_mean_m\":{},\"gap_max_m\":{},\"closed_chunk_fraction\":{},\"lip_tension_work_j\":[{},{}]}}",
                 number(w.start_s),
                 number(w.bore_mean_pa),
                 number(w.bore_ac_rms_pa),
@@ -401,7 +401,9 @@ pub(super) fn run_with_gas_sources(
                 number(w.gap_min_m),
                 number(w.gap_mean_m),
                 number(w.gap_max_m),
-                number(w.closed_chunk_fraction)
+                number(w.closed_chunk_fraction),
+                number(w.lip_tension_work_j[0]),
+                number(w.lip_tension_work_j[1]),
             )
         })
         .collect::<Vec<_>>()
@@ -412,7 +414,7 @@ pub(super) fn run_with_gas_sources(
     let fallbacks = performance.first_order_fallbacks().map_or_else(String::new, |n| {
         format!(",\"nonlinear_first_order_fallback_steps\":{n}")
     });
-    // Only a performance with the `jet_noise` row writes this; without it the sidecar is byte for byte what it was.
+    // Only a performance with the `jet_noise` row writes noise-band coverage.
     let jet_band = performance.jet_noise_coverage().map_or_else(String::new, |c| {
         format!(
             "\"jet_noise_band\":{{\"open_gate_steps\":{},\"whole\":{},\"truncated\":{},\"silent\":{}}},",
@@ -422,13 +424,19 @@ pub(super) fn run_with_gas_sources(
             c.silent
         )
     });
+    let tension_work = performance.lip_tension_work_j();
+    let tension_work_json = format!(
+        "\"lip_tension_work_j\":[{},{}]",
+        number(tension_work[0]),
+        number(tension_work[1]),
+    );
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"lip-input\",\
          \"sample_rate_hz\":{},\"samples\":{samples},\"block\":{block},\
          \"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
-         \"lip_windows_0p1s\":[{}],{jet_band}\
+         \"lip_windows_0p1s\":[{}],{tension_work_json},{jet_band}\
          \"observation\":{{\"mechanics_sample_rate_hz\":{mechanics_rate_hz},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\
          \"filter\":\"none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample\",\
          \"resampled\":false,\"declared_band_hz\":{}}}{fallbacks}{gas_sources}}}",

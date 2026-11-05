@@ -32276,3 +32276,30 @@ intakes. `superfluid_heat_link` now runs a sourced 1.8 K helium channel between
 finite caloric cells through authored quartic interfaces, with normal-profile
 memory and explicit distributed heat receivers. Its surface coefficient and
 geometry are illustrative inputs, not an experimental apparatus calibration.
+
+### Lip tension actuator work
+
+The linear and nonlinear brass control paths retain each lip coordinate and
+momentum when changing the admitted tension multiplier. The instantaneous
+actuator work is the signed spring increment `0.5 (K_after-K_before) q^2`;
+damping changes do not produce instantaneous heat. This increment is evaluated
+independently of unchanged kinetic storage, so a large kinetic energy cannot
+erase a smaller spring-work transfer. Nonfinite retained/candidate storage or
+an overflowing work account refuses before publishing the rebuilt island,
+control value or pending transfer. Subnormal decay whose energy rounds to zero
+retains that represented zero without introducing a control refusal.
+
+`lip_tension_work_j` retains one signed joule total per lip mode. Pending
+control changes enter the next successful nonempty `BrassBlockDiag` once;
+voice/performance getters also expose accepted work before rendering. The
+optional second mode has no admitted nonunit tension law and therefore keeps
+its original state and zero parameter-work increment. Linear voice reset starts
+a new work-accounting horizon while retaining historical block diagnostics.
+Performance windows and the `music_render lip` sidecar expose the same separate
+actuator account; control-clock order makes it independent of audio partitioning.
+
+Focused regressions cover spring-energy changes of both signs, rest and repeated
+controls, retained states, independent modes, rejected controls/blocks, staged
+changes, and scheduled output partitioning. Pneumatic work and physical losses
+retain their existing meanings. This control account does not close the still
+approximate lip/cup/gas swept-volume coupling or establish whole-system passivity.

@@ -40,8 +40,13 @@ use fs_gas::dynamics::Error as GasError;
 use fs_phs::linear_exact::{LinearPropagator, LinearSplit, step_split};
 use fs_phs::{PortHamiltonian, mass_spring_damper};
 
-use super::{BrassBlockDiag, BrassControl, LipIsland, prepare_lip, zero_crossing_lock_hz};
-use crate::turbulence_noise::{ConstrictionNoise, ConstrictionNoiseCard, JetNoiseCard, JetNoiseCoverage, LipJetNoise};
+use super::{
+    BrassBlockDiag, BrassControl, LipIsland, TensionWork, prepare_lip, spring_work_j,
+    zero_crossing_lock_hz,
+};
+use crate::turbulence_noise::{
+    ConstrictionNoise, ConstrictionNoiseCard, JetNoiseCard, JetNoiseCoverage, LipJetNoise,
+};
 
 mod finite_mouth;
 pub use finite_mouth::{FiniteMouthReport, FiniteMouthSpec, FiniteMouthState};
@@ -93,6 +98,8 @@ pub struct NonlinearLip {
     lip_linear: LinearSplit,
     lip_state: Vec<f64>,
     lip: LipIsland,
+    tension: f64,
+    tension_work: TensionWork,
     blow_pa: f64,
     mouth: Primitive,
     finite_mouth: Option<FiniteMouth>,
@@ -172,6 +179,8 @@ impl NonlinearLip {
             lip_linear,
             lip_state: vec![0.0, 0.0],
             lip,
+            tension: 1.0,
+            tension_work: TensionWork::default(),
             blow_pa: 0.0,
             mouth: room,
             finite_mouth: None,
@@ -302,8 +311,19 @@ impl NonlinearLip {
                     self.lip.damping_n_s_m * t,
                 )
                 .map_err(|_| "tensioned lip island refused admission".to_string())?;
-                self.lip_linear = prepare_lip(&lip_sys).map_err(|e| e.to_string())?;
+                let lip_linear = prepare_lip(&lip_sys).map_err(|e| e.to_string())?;
+                let work_j = spring_work_j(
+                    &self.lip_sys,
+                    &lip_sys,
+                    &self.lip_state,
+                    self.lip.stiffness_n_m * self.tension * self.tension,
+                    self.lip.stiffness_n_m * t * t,
+                )?;
+                let tension_work = self.tension_work.with_increment([work_j, 0.0])?;
+                self.lip_linear = lip_linear;
                 self.lip_sys = lip_sys;
+                self.tension = t;
+                self.tension_work = tension_work;
             }
             BrassControl::SetValve { .. } => {
                 return Err("the nonlinear bore is one held bore without valves".into());
@@ -316,6 +336,14 @@ impl NonlinearLip {
     #[must_use]
     pub fn diagnostics(&self) -> &[BrassBlockDiag] {
         &self.diags
+    }
+
+    /// Signed tension-actuator work [J] by mode since construction, including
+    /// accepted controls not yet rendered. This one-mode path has zero second
+    /// entry. It is not part of gas exchange or a lip/gas passivity claim.
+    #[must_use]
+    pub fn lip_tension_work_j(&self) -> [f64; 2] {
+        self.tension_work.total_j()
     }
 
     /// The bore's gas field and its receipts.
@@ -378,6 +406,7 @@ impl NonlinearLip {
         }
         let output_dt = 1.0 / f64::from(self.clock.output_rate_hz);
         let n = (mouthpiece.len() * ratio * steps) as f64;
+        let lip_tension_work_j = self.tension_work.finish_block();
         self.diags.push(BrassBlockDiag {
             block: self.block_index,
             lock_hz: zero_crossing_lock_hz(mouthpiece, output_dt),
@@ -386,6 +415,7 @@ impl NonlinearLip {
             gap_max_m: gap_max,
             blow_work_j: blow_work,
             bore_work_j: bore_work,
+            lip_tension_work_j,
             supply_defect: worst_defect,
         });
         self.block_index += 1;

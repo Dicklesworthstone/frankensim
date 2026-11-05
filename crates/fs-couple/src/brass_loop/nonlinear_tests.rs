@@ -516,6 +516,63 @@ fn probe_lip() -> NonlinearLip {
     NonlinearLip::new(&duct, gas, state.temperature, state.pressure, wall_gas, lip, 1.5e-6, clock).expect("nonlinear lip")
 }
 
+#[test]
+fn nonlinear_lip_tension_work_is_signed_atomic_and_separate_from_gas_exchange() {
+    let mut lip = probe_lip();
+    lip.apply(BrassControl::SetLipTension(1.5)).unwrap();
+    assert_eq!(lip.lip_tension_work_j(), [0.0; 2]);
+    lip.lip_state = vec![2e-4, 1e-5];
+    let retained = lip.lip_state.clone();
+    let gas_before = lip.bore.solver().states().to_vec();
+    let time_before = lip.bore.solver().time();
+    let energy_before = lip.lip_sys.hamiltonian(&retained);
+    // Two opposite actuator transfers before any gas or mechanical advancement.
+    lip.apply(BrassControl::SetLipTension(1.75)).unwrap();
+    assert!(lip.lip_tension_work_j()[0] > 0.0);
+    lip.apply(BrassControl::SetLipTension(1.25)).unwrap();
+    let expected = 0.5
+        * lip.lip.stiffness_n_m
+        * (1.25_f64.powi(2) - 1.5_f64.powi(2))
+        * retained[0]
+        * retained[0];
+    let work = lip.lip_tension_work_j();
+    assert!(work[0] < 0.0);
+    assert!((work[0] - expected).abs() < 2e-14 * expected.abs());
+    assert!(
+        (lip.lip_sys.hamiltonian(&retained) - energy_before - expected).abs()
+            < 2e-14 * expected.abs()
+    );
+    assert_eq!(work[1], 0.0);
+    assert_eq!(lip.lip_state, retained);
+    assert_eq!(lip.bore.solver().states(), gas_before);
+    assert_eq!(lip.bore.solver().time(), time_before);
+    let account = lip.tension_work;
+    let energy = lip.lip_sys.hamiltonian(&retained);
+    for invalid in [f64::NAN, 0.0, -1.0, f64::INFINITY, 1e300] {
+        assert!(lip.apply(BrassControl::SetLipTension(invalid)).is_err());
+        assert_eq!(lip.tension, 1.25);
+        assert_eq!(lip.lip_state, retained);
+        assert_eq!(lip.lip_sys.hamiltonian(&retained), energy);
+        assert_eq!(lip.tension_work, account);
+    }
+    lip.apply(BrassControl::SetLipTension(1.25)).unwrap();
+    assert_eq!(lip.tension_work, account);
+    assert!(lip.step_block(&mut [0.0], &mut []).is_err());
+    assert_eq!(lip.tension_work, account);
+    let mut pressure = [0.0];
+    let mut flow = vec![0.0; lip.clock.mechanics_per_output as usize];
+    lip.step_block(&mut pressure, &mut flow).unwrap();
+    let diag = lip.diagnostics().last().unwrap();
+    assert_eq!(diag.lip_tension_work_j, work);
+    assert_eq!(diag.blow_work_j, 0.0);
+    lip.step_block(&mut pressure, &mut flow).unwrap();
+    assert_eq!(
+        lip.diagnostics().last().unwrap().lip_tension_work_j,
+        [0.0; 2]
+    );
+    assert_eq!(lip.lip_tension_work_j(), work);
+}
+
 // Eight blocks of 32 output samples (4096 gas steps) of cup overpressure at a steady `blow` [Pa].
 fn jet_run(lip: &mut NonlinearLip, blow: f64) -> Vec<f64> {
     lip.apply(BrassControl::SetBlowingPressure(blow)).expect("blow");

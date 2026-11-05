@@ -1464,6 +1464,10 @@ pub struct LipWindow {
     pub gap_max_m: f64,
     /// Fraction of the control-tick chunks in which the lip closed at least once.
     pub closed_chunk_fraction: f64,
+    /// Signed tension-actuator work [J] by lip mode. Each instantaneous
+    /// control change belongs to the window containing its control sample;
+    /// it is neither blowing-pressure work nor dissipated heat.
+    pub lip_tension_work_j: [f64; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1478,10 +1482,11 @@ struct WindowAcc {
     gap_min: f64,
     gap_max: f64,
     gap_mean_sum: f64,
+    tension_work: super::TensionWork,
 }
 
 impl WindowAcc {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             n: 0,
             sum: 0.0,
@@ -1493,6 +1498,7 @@ impl WindowAcc {
             gap_min: f64::INFINITY,
             gap_max: 0.0,
             gap_mean_sum: 0.0,
+            tension_work: super::TensionWork::default(),
         }
     }
 }
@@ -1520,6 +1526,14 @@ impl Engine {
             Self::Linear { voice, .. } => voice.diagnostics(),
             #[cfg(feature = "nonlinear-brass")]
             Self::Nonlinear(lip) => lip.diagnostics(),
+        }
+    }
+
+    fn lip_tension_work_j(&self) -> [f64; 2] {
+        match self {
+            Self::Linear { voice, .. } => voice.lip_tension_work_j(),
+            #[cfg(feature = "nonlinear-brass")]
+            Self::Nonlinear(lip) => lip.lip_tension_work_j(),
         }
     }
 
@@ -1633,6 +1647,14 @@ impl LipPerformance {
         self.tap.as_deref().unwrap_or(&[])
     }
 
+    /// Cumulative signed work [J] supplied by the tension actuator to each
+    /// lip mode. Uses accepted controls in sample order, independent of audio
+    /// block partitioning. It does not assert a closed lip/bore energy balance.
+    #[must_use]
+    pub fn lip_tension_work_j(&self) -> [f64; 2] {
+        self.engine.lip_tension_work_j()
+    }
+
     /// Lip and bore statistics per tenth of a second rendered so far.
     #[must_use]
     pub fn windows(&self) -> Vec<LipWindow> {
@@ -1653,6 +1675,7 @@ impl LipPerformance {
                     gap_mean_m: a.gap_mean_sum / a.chunks as f64,
                     gap_max_m: a.gap_max,
                     closed_chunk_fraction: a.closed_chunks as f64 / a.chunks as f64,
+                    lip_tension_work_j: a.tension_work.total_j(),
                 }
             })
             .collect()
@@ -1725,6 +1748,7 @@ impl LipPerformance {
                 acc.p_max = acc.p_max.max(p);
             }
             if let Some(d) = diag {
+                acc.tension_work = acc.tension_work.with_increment(d.lip_tension_work_j)?;
                 acc.chunks += 1;
                 acc.closed_chunks += u64::from(d.gap_min_m <= 0.0);
                 acc.gap_min = acc.gap_min.min(d.gap_min_m);
@@ -2362,6 +2386,89 @@ mod tests {
         assert!((0.0..=1.0).contains(&w.closed_chunk_fraction));
         assert!(w.bore_ac_rms_pa.is_finite() && w.bore_ac_rms_pa <= w.bore_ac_peak_pa + 1e-9);
         assert!(w.bore_mean_pa.is_finite());
+        assert_eq!(w.lip_tension_work_j, [0.0; 2]);
+        assert_eq!(performance.lip_tension_work_j(), [0.0; 2]);
+    }
+
+    #[test]
+    fn scheduled_lip_tension_work_reaches_windows_once_independent_of_block_partition() {
+        use fs_scenario::gesture::{GestureEvent, GestureTrack, GestureValue};
+        let schedule = GestureSchedule::try_new(
+            700,
+            vec![
+                GestureTrack {
+                    id: "blow".into(),
+                    target: GestureTarget::BlowingPressure,
+                    initial: GestureValue::PressurePa(2800.0),
+                    events: Vec::new(),
+                },
+                GestureTrack {
+                    id: "tension".into(),
+                    target: GestureTarget::PreStress,
+                    initial: GestureValue::Multiplier(1.0),
+                    events: [(0.02, 1.2), (0.10, 0.8), (0.16, 1.1)]
+                        .into_iter()
+                        .map(|(time_s, value)| GestureEvent {
+                            time_s,
+                            transition_s: 0.0,
+                            value: GestureValue::Multiplier(value),
+                        })
+                        .collect(),
+                },
+            ],
+        )
+        .unwrap();
+        let schedule = String::from_utf8(schedule.to_canonical_bytes()).unwrap();
+        let text = fixture("")
+            .replace("audio 24000 2400", "audio 24000 4800")
+            .replace(SCHEDULE, &schedule);
+        let description = LipDescription::from_bytes(text.as_bytes()).unwrap();
+        let render = |chunk: usize| {
+            let mut performance = description.build().unwrap();
+            let mut pressure = vec![0.0; 4800];
+            for block in pressure.chunks_mut(chunk) {
+                performance.block(block).unwrap();
+            }
+            let changes: Vec<_> = performance
+                .engine
+                .diagnostics()
+                .iter()
+                .map(|d| d.lip_tension_work_j)
+                .filter(|w| *w != [0.0; 2])
+                .collect();
+            (
+                pressure,
+                performance.lip_tension_work_j(),
+                performance.windows(),
+                changes,
+            )
+        };
+        let (a, work_a, windows_a, changes_a) = render(37);
+        let (b, work_b, windows_b, changes_b) = render(600);
+        assert_eq!(
+            a, b,
+            "accounting must preserve the original sample trajectory"
+        );
+        assert_eq!(work_a, work_b);
+        assert_eq!(changes_a, changes_b);
+        assert_eq!(changes_a.len(), 3, "each control event is debited once");
+        assert!(changes_a[0][0] > 0.0 && changes_a[1][0] < 0.0 && changes_a[2][0] > 0.0);
+        assert!(changes_a.iter().all(|w| w[1] == 0.0));
+        assert_eq!(windows_a.len(), 2);
+        assert_eq!(windows_b.len(), 2);
+        for (a, b) in windows_a.iter().zip(&windows_b) {
+            assert_eq!(a.start_s, b.start_s);
+            assert_eq!(a.lip_tension_work_j, b.lip_tension_work_j);
+        }
+        assert_eq!(windows_a[0].lip_tension_work_j, changes_a[0]);
+        let in_second = changes_a[1][0] + changes_a[2][0];
+        assert_eq!(windows_a[1].lip_tension_work_j, [in_second, 0.0]);
+        let from_windows = windows_a
+            .iter()
+            .map(|w| w.lip_tension_work_j[0])
+            .sum::<f64>();
+        let scale = changes_a.iter().map(|w| w[0].abs()).sum::<f64>();
+        assert!((from_windows - work_a[0]).abs() <= 4.0 * f64::EPSILON * scale);
     }
 
     #[test]
