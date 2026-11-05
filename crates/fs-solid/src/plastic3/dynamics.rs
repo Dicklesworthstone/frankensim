@@ -83,7 +83,37 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             displacement_m.len(),
             cx,
         )?;
-        let inertia = Inertia::new(&mass, displacement_m, velocity_mps.as_flattened(), dt_s, cx)?;
+        self.advance_backward_euler_with_mass(
+            displacement_m,
+            velocity_mps,
+            element_states,
+            &mass,
+            dt_s,
+            cx,
+        )
+    }
+
+    /// Reuse an immutable mass bound to this exact reference geometry/inventory.
+    /// The retaining crate owner establishes that binding; this is not a public
+    /// ingress for replacing mass under accepted motion. Native geometry, state,
+    /// Newton, support and kinetic-work admission remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn advance_backward_euler_with_mass(
+        &self,
+        displacement_m: &[f64],
+        velocity_mps: &[[f64; 3]],
+        element_states: &[L::State],
+        mass: &P1ReferenceMass,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<BackwardEulerStep<L::State>, SmallStrainTetError> {
+        checkpoint(cx)?;
+        if self.load_path != [1.0] {
+            return Err(invalid(
+                "one endpoint load at factor one is required per inertial interval",
+            ));
+        }
+        let inertia = Inertia::new(mass, displacement_m, velocity_mps.as_flattened(), dt_s, cx)?;
         let solution =
             self.solve_candidate(Some((displacement_m, element_states)), Some(&inertia), cx)?;
         let (velocity_mps, energy) = inertia.motion(solution.displacement_m.as_flattened(), cx)?;

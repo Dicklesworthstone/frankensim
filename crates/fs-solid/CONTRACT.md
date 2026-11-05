@@ -8048,3 +8048,14 @@ The new regression definitions cover physical Y-plane selection after elastic
 preload, native softening after handoff, repeated-stress hints, heterogeneous
 sources and transactional refusal/retry. New code parsed/formatted and passed
 bounded API/analytical review; compilation and runtime execution remain pending.
+
+
+## Retained source-bound brittle physical-time motion
+
+`brittle::solid::dynamics::BrittleTetMotion` starts from the complete accepted `BrittleTetSolid`, including damaged histories and stored/fracture energy, plus actual nodal velocity and a bounded physical clock. It requires positive density from each original resolved material bundle, binds that snapshot to the supplied reference geometry, and assembles the native consistent P1 reference mass once. Every interval retains that exact mass inventory, source identity, fixed crack planes and irreversible history; damage cannot erase matter or momentum. No conversion from current/hot density to a different reference volume is inferred.
+
+Each physical endpoint uses the existing P1 backward-Euler Newton owner and its original support/inertial coupling through a crate-private immutable-mass entry point. Static and dynamic brittle paths share one native constitutive-work recovery. Loads and support displacements are actual endpoint values; free-body motion requires no artificial supports. Above-peak tensile loads may evolve dynamically when the inertial tangent admits the endpoint; this is not a claim that arbitrary softening steps converge.
+
+The returned receipt separates exact constitutive path work, recoverable storage, irreversible fracture dissipation, applied/support endpoint work, consistent-mass kinetic change, constitutive endpoint quadrature error, and backward-Euler numerical kinetic loss. Separate absolute gates bound equilibrium, physical/cumulative fracture work, retained kinetic storage, the native kinetic identity and both numerical accounts. Numerical damping is neither fracture work nor generated heat. A rejected solve, source, time, budget, cancellation or late energy gate preserves the entire old owner and physical clock.
+
+Four native regression definitions cover original density/mass scaling and free momentum, an independently calculated above-static-peak tensile-softening endpoint with retained damage, moving-support work with concurrent applied forces, and transactional refusal/restart. New Rust was parsed/formatted with the pinned nightly formatter; compile/runtime execution is not claimed in the full-filesystem editing environment. This remains a fixed-plane small-strain, first-order physical-time slice; it does not create crack topology, fragment contact, evolving reference inventory or a time-accuracy certificate. Physical timestep refinement remains required to control the separately visible integration losses.

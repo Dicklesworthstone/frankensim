@@ -9,9 +9,11 @@
 //! Ordinary mechanical endpoints keep material conditions fixed. The explicit
 //! [`temperature`] path transfers sourced coefficients and history before
 //! re-equilibrating. The [`initiation`] path preserves elastic preload while
-//! selecting fixed planes from a sourced tensile predictor. Fixed planes do not
-//! rotate; finite kinematics, contact, inertia and limit-load tracking are absent.
-//! The caller resolves loading reversals and softening with physical endpoints.
+//! selecting fixed planes from a sourced tensile predictor. The [`dynamics`]
+//! path retains reference mass and velocity through physical-time fracture.
+//! Fixed planes do not rotate; finite kinematics, contact and limit-load
+//! tracking are absent. The caller resolves loading reversals and softening
+//! with physical endpoints.
 
 /// Checked temperature/source transfer followed by native mechanical equilibration.
 pub mod temperature;
@@ -21,6 +23,9 @@ pub mod path;
 
 /// Retained elastic prehistory and source-bound fixed-plane brittle handoff.
 pub mod initiation;
+
+/// Source-bound reference mass and retained physical-time brittle motion.
+pub mod dynamics;
 
 use std::sync::Arc;
 
@@ -319,47 +324,7 @@ impl<'a> BrittleTetSolid<'a> {
             settings,
         };
         let solution = problem.solve_from(old_u, &self.solution.element_states, cx)?;
-        let mut energy = BrittleTetEnergy {
-            stored_before_j: self.stored_energy_j,
-            ..BrittleTetEnergy::default()
-        };
-        let mut cumulative_loss = 0.0;
-        let mut element_energy = Vec::with_capacity(self.materials.len());
-        for (element, source) in self.materials.iter().enumerate() {
-            checkpoint(cx)?;
-            let old = &self.solution.element_states[element];
-            let strain = &solution.element_strain[element];
-            let step = source
-                .law()
-                .trial(strain, old)
-                .map_err(|source| BrittleTetError::Material { element, source })?;
-            if step.state != solution.element_states[element]
-                || step.stress_pa != solution.element_stress[element]
-                || step.state.damage() < old.damage()
-                || step.state.dissipated_j_m3() < old.dissipated_j_m3()
-                || step.energy.dissipated < 0.0
-            {
-                return Err(BrittleTetError::Invalid(
-                    "native history/stress or irreversibility mismatch",
-                ));
-            }
-            let volume = self.bands[element].reference_volume_m3();
-            energy.stored_after_j =
-                volume.mul_add(step.state.stored_energy_j_m3(), energy.stored_after_j);
-            energy.material_work_j = volume.mul_add(step.energy.work, energy.material_work_j);
-            energy.fracture_dissipation_j =
-                volume.mul_add(step.energy.dissipated, energy.fracture_dissipation_j);
-            cumulative_loss = volume.mul_add(step.state.dissipated_j_m3(), cumulative_loss);
-            let mut endpoint_density = 0.0;
-            for component in 0..6 {
-                let weight = if component < 3 { 1.0 } else { 2.0 };
-                let change = weight * (strain[component] - old.strain()[component]);
-                endpoint_density = step.stress_pa[component].mul_add(change, endpoint_density);
-            }
-            energy.internal_endpoint_work_j =
-                volume.mul_add(endpoint_density, energy.internal_endpoint_work_j);
-            element_energy.push(step.energy);
-        }
+        let (mut energy, element_energy, cumulative_loss) = self.material_energy(&solution, cx)?;
         let new_u = solution.displacement_m.as_flattened();
         for &(dof, force) in nodal_forces_n {
             checkpoint(cx)?;
@@ -424,6 +389,57 @@ impl<'a> BrittleTetSolid<'a> {
             element_energy,
             energy,
         })
+    }
+
+    /// Recover original constitutive work once for static and inertial endpoints.
+    /// Geometry, native state ownership and solver admission stay with callers.
+    fn material_energy(
+        &self,
+        solution: &SmallStrainTetSolution<BrittleState<'a>>,
+        cx: &Cx<'_>,
+    ) -> Result<(BrittleTetEnergy, Vec<BrittleEnergy>, f64), BrittleTetError> {
+        let mut energy = BrittleTetEnergy {
+            stored_before_j: self.stored_energy_j,
+            ..BrittleTetEnergy::default()
+        };
+        let mut cumulative_loss = 0.0;
+        let mut element_energy = Vec::with_capacity(self.materials.len());
+        for (element, source) in self.materials.iter().enumerate() {
+            checkpoint(cx)?;
+            let old = &self.solution.element_states[element];
+            let strain = &solution.element_strain[element];
+            let step = source
+                .law()
+                .trial(strain, old)
+                .map_err(|source| BrittleTetError::Material { element, source })?;
+            if step.state != solution.element_states[element]
+                || step.stress_pa != solution.element_stress[element]
+                || step.state.damage() < old.damage()
+                || step.state.dissipated_j_m3() < old.dissipated_j_m3()
+                || step.energy.dissipated < 0.0
+            {
+                return Err(BrittleTetError::Invalid(
+                    "native history/stress or irreversibility mismatch",
+                ));
+            }
+            let volume = self.bands[element].reference_volume_m3();
+            energy.stored_after_j =
+                volume.mul_add(step.state.stored_energy_j_m3(), energy.stored_after_j);
+            energy.material_work_j = volume.mul_add(step.energy.work, energy.material_work_j);
+            energy.fracture_dissipation_j =
+                volume.mul_add(step.energy.dissipated, energy.fracture_dissipation_j);
+            cumulative_loss = volume.mul_add(step.state.dissipated_j_m3(), cumulative_loss);
+            let mut endpoint_density = 0.0;
+            for component in 0..6 {
+                let weight = if component < 3 { 1.0 } else { 2.0 };
+                let change = weight * (strain[component] - old.strain()[component]);
+                endpoint_density = step.stress_pa[component].mul_add(change, endpoint_density);
+            }
+            energy.internal_endpoint_work_j =
+                volume.mul_add(endpoint_density, energy.internal_endpoint_work_j);
+            element_energy.push(step.energy);
+        }
+        Ok((energy, element_energy, cumulative_loss))
     }
 }
 
