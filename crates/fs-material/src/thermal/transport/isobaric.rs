@@ -14,6 +14,7 @@
 //! second integrator or material-name branch is introduced.
 
 /// Source-exact free expansion with explicit constant-pressure boundary work.
+#[path = "isobaric/expansion.rs"]
 pub mod expansion;
 
 use super::{
