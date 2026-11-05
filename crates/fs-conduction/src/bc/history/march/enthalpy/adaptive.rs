@@ -5,6 +5,94 @@ use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
 use super::super::events::{self, adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, component_error, select_step, temperature_error}};
 use fs_exec::Cx;
+use crate::transient::enthalpy::EnthalpyError;
+use crate::transient::enthalpy::adaptive::combine_entropy;
+use crate::transient::enthalpy::entropy::{EnthalpyEntropyBalance, EnthalpyEntropyError};
+
+/// The accepted physical fine trajectory and its separate entropy accounts.
+/// Coarse comparison and rejected trials contribute to none of these accounts.
+#[derive(Debug, Clone)]
+pub struct EntropyAdaptiveHistoryStep<T> {
+    /// Original native half-step reports, accepted clock and adaptation work.
+    pub physical: AdaptiveHistoryStep<T>,
+    /// Native entropy account for each accepted half, in chronological order.
+    pub half_entropy: [EnthalpyEntropyBalance; 2],
+    /// Whole-pair account with exact original-to-final caloric storage change.
+    /// Physical exchanges and signed numerical defects retain their identity.
+    pub entropy: EnthalpyEntropyBalance,
+}
+
+impl<T> EntropyAdaptiveHistoryStep<T> {
+    pub(super) fn from_halves(
+        selected: AdaptiveHistoryStep<(T, EnthalpyEntropyBalance)>,
+        entropy: EnthalpyEntropyBalance,
+    ) -> Self {
+        let AdaptiveHistoryStep {
+            start_time_s, midpoint_time_s, end_time_s, first_half, second_half,
+            normalized_error, rejected_attempts, endpoint_solves, suggested_step_s,
+        } = selected;
+        Self {
+            physical: AdaptiveHistoryStep {
+                start_time_s, midpoint_time_s, end_time_s,
+                first_half: first_half.0, second_half: second_half.0,
+                normalized_error, rejected_attempts, endpoint_solves, suggested_step_s,
+            },
+            half_entropy: [first_half.1, second_half.1],
+            entropy,
+        }
+    }
+}
+
+/// Original history admission or native entropy refusal; neither publishes state.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntropyAdaptiveHistoryError {
+    /// Schedule, material, nonlinear, energy, cancellation or temporal admission.
+    History(HeterogeneousEnthalpyError),
+    /// Native physical entropy account or its whole-pair allowance failed.
+    Entropy(EnthalpyEntropyError),
+}
+
+impl From<HeterogeneousEnthalpyError> for EntropyAdaptiveHistoryError {
+    fn from(error: HeterogeneousEnthalpyError) -> Self { Self::History(error) }
+}
+impl From<EnthalpyError> for EntropyAdaptiveHistoryError {
+    fn from(error: EnthalpyError) -> Self { Self::History(error.into()) }
+}
+impl From<EnthalpyEntropyError> for EntropyAdaptiveHistoryError {
+    fn from(error: EnthalpyEntropyError) -> Self { Self::Entropy(error) }
+}
+impl std::fmt::Display for EntropyAdaptiveHistoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::History(error) => write!(f, "{error}"),
+            Self::Entropy(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for EntropyAdaptiveHistoryError {}
+
+pub(super) fn entropy_conduction(error: crate::ConductionError) -> EntropyAdaptiveHistoryError {
+    conduction(error).into()
+}
+
+pub(super) fn admit_entropy_tolerance(tolerance: f64) -> Result<(), EntropyAdaptiveHistoryError> {
+    // Reuse the native allowance admission before any candidate solve.
+    EnthalpyEntropyBalance::default().admit(tolerance)?;
+    Ok(())
+}
+
+pub(super) fn accepted_entropy(
+    cx: &Cx<'_>,
+    run: &EnthalpyHistoryRun<'_, '_, '_>,
+    final_h: &[f64],
+    halves: [EnthalpyEntropyBalance; 2],
+    tolerance: f64,
+) -> Result<EnthalpyEntropyBalance, EntropyAdaptiveHistoryError> {
+    let storage = run.storage.thermal_entropy_change_j_k(cx, &run.specific_h, final_h)?;
+    let entropy = combine_entropy(halves[0], halves[1], storage)?;
+    entropy.admit(tolerance)?;
+    Ok(entropy)
+}
 
 /// Additional error coordinates for a primary-enthalpy trajectory.
 /// All three gates (temperature, enthalpy, liquid fraction) must pass.
@@ -76,6 +164,66 @@ impl EnthalpyHistoryRun<'_, '_, '_> {
         })?;
         self.publish(cx, selected.end_time_s, &selected.second_half)?;
         self.accepted_steps += 1; // Two reserved physical half steps, one atomic publication.
+        Ok(selected)
+    }
+    /// Adapt using the original energy-only coarse comparison and entropy-admitted
+    /// native fine steps. The complete accepted pair must also pass ONE entropy
+    /// allowance before any state or accepted-step counter is published.
+    ///
+    /// Exact storage is queried between the original and final caloric states.
+    /// Reservoir exchange, unclassified source entropy, physical generation and
+    /// signed temporal/algebraic defects are accumulated only from accepted fine
+    /// intervals. Rejected candidates never enter the returned entropy balance.
+    ///
+    /// Original physical or entropy refusals propagate without introducing a
+    /// different retry policy. Temporal retries retain the ordinary controller's
+    /// floor, event limits and work budget; every failure preserves history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_adaptive_step_with_entropy(
+        &mut self, cx: &Cx<'_>, target_s: f64, proposed_step_s: f64,
+        step: EnthalpyStepConfig, adaptive: AdaptiveHistoryConfig,
+        phase: PhaseErrorTolerance, entropy_tolerance_j_k: f64,
+    ) -> Result<EntropyAdaptiveHistoryStep<EnthalpyStepSolution>, EntropyAdaptiveHistoryError> {
+        poll(cx, self.accepted_steps).map_err(entropy_conduction)?;
+        phase.validate()?;
+        admit_entropy_tolerance(entropy_tolerance_j_k)?;
+        let start = self.time_s;
+        let cap = admit_proposal(cx, self.accepted_steps, self.max_steps,
+            proposed_step_s, adaptive).map_err(entropy_conduction)?;
+        let end = events::next_endpoint(cx, self.problem.boundary, &self.problem.source,
+            std::iter::empty(), start, target_s, cap).map_err(entropy_conduction)?;
+        let solve = |old: &[f64], from: f64, to: f64, entropy: bool|
+            -> Result<(EnthalpyStepSolution, Option<EnthalpyEntropyBalance>), EntropyAdaptiveHistoryError>
+        {
+            let boundary = events::boundary_before(cx, self.problem.boundary, to)
+                .map_err(entropy_conduction)?;
+            self.storage.admit_prescribed_boundary(cx, &boundary)?;
+            let source = events::source_before(&self.problem.source, to, old.len())
+                .map_err(entropy_conduction)?;
+            let problem = self.conduction_problem(&boundary, &source)?;
+            if entropy {
+                let (physical, balance) = self.storage.advance_with_entropy(cx, problem,
+                    self.problem.interfaces, old, to - from, step, entropy_tolerance_j_k)?;
+                Ok((physical, Some(balance)))
+            } else {
+                Ok((self.storage.advance(cx, problem, self.problem.interfaces,
+                    old, to - from, step)?, None))
+            }
+        };
+        let selected = select_step(cx, start, end, adaptive, entropy_conduction,
+            |middle, end| -> Result<_, EntropyAdaptiveHistoryError> {
+                let coarse = solve(&self.specific_h, start, end, false)?.0;
+                let (first, first_entropy) = solve(&self.specific_h, start, middle, true)?;
+                let (second, second_entropy) = solve(&first.specific_enthalpy_j_kg, middle, end, true)?;
+                let error = phase_error(cx, self, &coarse, &second, adaptive, phase)?;
+                Ok(((first, first_entropy.expect("requested native fine-step entropy")),
+                    (second, second_entropy.expect("requested native fine-step entropy")), error))
+            })?;
+        let entropy = accepted_entropy(cx, self, &selected.second_half.0.specific_enthalpy_j_kg,
+            [selected.first_half.1, selected.second_half.1], entropy_tolerance_j_k)?;
+        let selected = EntropyAdaptiveHistoryStep::from_halves(selected, entropy);
+        self.publish(cx, selected.physical.end_time_s, &selected.physical.second_half)?;
+        self.accepted_steps += 1;
         Ok(selected)
     }
 }

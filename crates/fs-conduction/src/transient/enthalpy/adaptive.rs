@@ -20,6 +20,9 @@
 
 pub mod contact;
 pub mod material;
+mod entropy;
+pub use entropy::{AdaptiveEnthalpyEntropyReport, AdaptiveEnthalpyEntropyState};
+pub(crate) use entropy::combine_entropy;
 
 use std::ops::ControlFlow;
 
@@ -406,13 +409,37 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         end: f64,
         max_trials: usize,
         mut advance: impl FnMut(&[f64], f64) -> Result<EnthalpyStepSolution, EnthalpyError>,
-        mut observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+        observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
+        self.advance_with_account(
+            cx, end, max_trials,
+            |h, dt, _| Ok((advance(h, dt)?, None)), None, observe,
+        ).map_err(|error| match error {
+            super::entropy::EnthalpyEntropyError::Physical(error) => error,
+            // This path supplies neither entropy metadata nor an account, so
+            // it cannot run an entropy gate.
+            _ => EnthalpyError::InvalidInput("unexpected entropy gate on a physical-only trajectory"),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn advance_with_account(
+        &mut self,
+        cx: &Cx<'_>,
+        end: f64,
+        max_trials: usize,
+        mut advance: impl FnMut(&[f64], f64, bool) -> Result<
+            (EnthalpyStepSolution, Option<super::entropy::EnthalpyEntropyBalance>),
+            super::entropy::EnthalpyEntropyError,
+        >,
+        mut entropy: Option<&mut entropy::EntropyAccount>,
+        mut observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyReport, super::entropy::EnthalpyEntropyError> {
         poll(cx, 0)?;
         if !end.is_finite() || end < self.time_s || !(end - self.time_s).is_finite() {
             return Err(EnthalpyError::InvalidInput(
                 "adaptive end time must be finite and not precede history",
-            ));
+            ).into());
         }
         let before = (self.accepted, self.rejected, self.endpoint_solves);
         self.accepted
@@ -468,25 +495,27 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             }
             let candidate = (|| {
                 self.endpoint_solves += 1;
-                let coarse = advance(self.specific_enthalpy_j_kg(), dt)?;
+                let (coarse, _) = advance(self.specific_enthalpy_j_kg(), dt, false)?;
                 poll(cx, trial)?;
                 self.endpoint_solves += 1;
-                let first = advance(self.specific_enthalpy_j_kg(), first_dt)?;
+                let (first, first_entropy) = advance(self.specific_enthalpy_j_kg(), first_dt, true)?;
                 poll(cx, trial)?;
                 self.endpoint_solves += 1;
-                let fine = advance(&first.specific_enthalpy_j_kg, second_dt)?;
+                let (fine, second_entropy) = advance(&first.specific_enthalpy_j_kg, second_dt, true)?;
                 let input_first = finite(first_dt * external_heat_w(&first)?)?;
                 let input_second = finite(second_dt * external_heat_w(&fine)?)?;
                 let error = estimate(cx, self, &coarse, &fine)?;
-                Ok::<_, EnthalpyError>((first, fine, input_first, input_second, error))
+                Ok::<_, super::entropy::EnthalpyEntropyError>((
+                    first, fine, input_first, input_second, error, first_entropy, second_entropy,
+                ))
             })();
-            let (first, fine, input_first, input_second, error) = match candidate {
+            let (first, fine, input_first, input_second, error, first_entropy, second_entropy) = match candidate {
                 Ok(candidate) => candidate,
-                Err(
+                Err(super::entropy::EnthalpyEntropyError::Physical(
                     error @ (EnthalpyError::NotConverged(_)
                         | EnthalpyError::EndpointResidual { .. }
                         | EnthalpyError::EnergyBalance { .. }),
-                ) => {
+                )) => {
                     poll(cx, trial)?;
                     self.rejected += 1;
                     self.last_error = None;
@@ -534,6 +563,14 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                 )?;
             }
             finite(stored - sum)?;
+            let entropy_candidate = if let Some(account) = entropy.as_deref() {
+                Some(account.extended(
+                    self.storage, cx, &self.initial_h, &fine.specific_enthalpy_j_kg,
+                    first_entropy, second_entropy,
+                )?)
+            } else {
+                None
+            };
             let factor = if error.normalized == 0.0 {
                 2.0
             } else {
@@ -552,6 +589,9 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             self.accepted += 1;
             self.last_error = Some(error);
             self.last_endpoint_refusal = None;
+            if let (Some(account), Some(candidate)) = (entropy.as_deref_mut(), entropy_candidate) {
+                *account = candidate;
+            }
             // Publish an atomic borrowed pair only after accepting ALL physical
             // state and accounting. The first half was already computed for the
             // comparison; keeping it alive through this callback adds no clone.

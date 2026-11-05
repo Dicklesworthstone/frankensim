@@ -1,5 +1,7 @@
 //! Latent error coordinates, radiative material retention and accepted-pair work.
 mod support;
+#[path = "thermal_phase_adaptive/entropy.rs"]
+mod entropy;
 
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem, ThermalHistoryRun};

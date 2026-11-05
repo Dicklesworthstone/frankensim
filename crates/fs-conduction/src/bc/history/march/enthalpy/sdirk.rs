@@ -6,7 +6,11 @@
 
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, HeterogeneousEnthalpyError,
     conduction, invalid, poll};
-use super::adaptive::{PhaseErrorTolerance, PhaseFields, phase_field_error};
+use super::adaptive::{
+    EntropyAdaptiveHistoryError, EntropyAdaptiveHistoryStep, PhaseErrorTolerance, PhaseFields,
+    accepted_entropy, admit_entropy_tolerance, entropy_conduction, phase_field_error,
+};
+use crate::transient::enthalpy::entropy::EnthalpyEntropyBalance;
 use super::radiation::enclosure::MaterialEnclosureHistoryBinding;
 use super::super::events::{self, HistoryEventStep,
     adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step}};
@@ -129,6 +133,50 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         Ok(selected)
     }
 
+    /// Adapt with native entropy accounts on the actual two SDIRK2 fine
+    /// intervals. The energy-only coarse comparison is never entropy-admitted.
+    ///
+    /// Each half retains its authentic two-stage quadrature and numerical
+    /// defect. The accepted pair also passes one whole-window entropy allowance,
+    /// using exact original-to-final storage. No discarded solve, internal carry
+    /// or stage is counted as an independently accepted physical interval.
+    ///
+    /// Schedule sampling, material/contact identity and unsupported radiation
+    /// refusals are shared with the native solver. Any physical, entropy or
+    /// temporal refusal preserves all accepted fields, time and counters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_adaptive_step_with_entropy(
+        &mut self, cx: &Cx<'_>, target_s: f64, proposed_step_s: f64,
+        config: EnthalpyStepConfig, adaptive: AdaptiveHistoryConfig,
+        phase: PhaseErrorTolerance, entropy_tolerance_j_k: f64,
+    ) -> Result<EntropyAdaptiveHistoryStep<EnthalpySdirk2Step>, EntropyAdaptiveHistoryError> {
+        poll(cx, self.run.accepted_steps).map_err(entropy_conduction)?;
+        phase.validate()?;
+        admit_entropy_tolerance(entropy_tolerance_j_k)?;
+        let start = self.run.time_s;
+        let cap = admit_proposal(cx, self.run.accepted_steps, self.run.max_steps,
+            proposed_step_s, adaptive).map_err(entropy_conduction)?;
+        let end = self.next_endpoint(cx, target_s, cap)?;
+        let selected = select_step(cx, start, end, adaptive, entropy_conduction,
+            |middle, end| -> Result<_, EntropyAdaptiveHistoryError> {
+                let coarse = self.solve(cx, &self.run.specific_h, start, end, config, true)?;
+                let first = self.solve_with_entropy(cx, &self.run.specific_h, start, middle,
+                    config, true, entropy_tolerance_j_k)?;
+                let second = self.solve_with_entropy(cx, &first.0.second_stage.specific_enthalpy_j_kg,
+                    middle, end, config, true, entropy_tolerance_j_k)?;
+                let error = phase_field_error(cx, &self.run,
+                    fields(&coarse.second_stage), fields(&second.0.second_stage), adaptive, phase)?;
+                Ok((first, second, error))
+            })?;
+        let entropy = accepted_entropy(cx, &self.run,
+            &selected.second_half.0.second_stage.specific_enthalpy_j_kg,
+            [selected.first_half.1, selected.second_half.1], entropy_tolerance_j_k)?;
+        let selected = EntropyAdaptiveHistoryStep::from_halves(selected, entropy);
+        self.publish(cx, selected.physical.end_time_s, &selected.physical.second_half.second_stage)?;
+        self.run.accepted_steps += 1;
+        Ok(selected)
+    }
+
     fn admit_one(&self, cx: &Cx<'_>) -> Result<(), HeterogeneousEnthalpyError> {
         poll(cx, self.run.accepted_steps).map_err(conduction)?;
         if self.run.accepted_steps >= self.run.max_steps {
@@ -149,6 +197,28 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     fn solve(&self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64,
         config: EnthalpyStepConfig, before: bool) -> Result<EnthalpySdirk2Step, HeterogeneousEnthalpyError>
     {
+        let solved = self.with_stage_inputs(cx, old, from, to, before,
+            |inputs, dt| self.run.storage.advance_sdirk2(cx, inputs, old, dt, config))?;
+        Ok(solved?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_entropy(
+        &self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64,
+        config: EnthalpyStepConfig, before: bool, entropy_tolerance_j_k: f64,
+    ) -> Result<(EnthalpySdirk2Step, EnthalpyEntropyBalance), EntropyAdaptiveHistoryError> {
+        let solved = self.with_stage_inputs(cx, old, from, to, before,
+            |inputs, dt| self.run.storage.advance_sdirk2_with_entropy(
+                cx, inputs, old, dt, config, entropy_tolerance_j_k))?;
+        Ok(solved?)
+    }
+
+    /// One schedule sampler supplies either native finish mode. Every local
+    /// boundary/radiation owner stays alive throughout its actual stage solves.
+    fn with_stage_inputs<R>(
+        &self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64, before: bool,
+        solve: impl for<'a> FnOnce([EnthalpySdirk2Input<'a>; 2], f64) -> R,
+    ) -> Result<R, HeterogeneousEnthalpyError> {
         let dt = to - from;
         let stage_time = SDIRK2_GAMMA.mul_add(dt, from);
         if ![from, to, dt, stage_time].iter().all(|x| x.is_finite()) || dt <= 0.0
@@ -171,16 +241,16 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let endpoint = |radiation| EnthalpySdirk2Input { problem: second_problem,
             interfaces: self.run.problem.interfaces, radiation, contacts };
         match &self.radiation {
-            None => Ok(self.run.storage.advance_sdirk2(cx,
-                [inputs(EnthalpyRadiation::None), endpoint(EnthalpyRadiation::None)], old, dt, config)?),
+            None => Ok(solve(
+                [inputs(EnthalpyRadiation::None), endpoint(EnthalpyRadiation::None)], dt)),
             Some(binding) => {
                 let first_base = binding.sample(cx, history.mesh(), &first_boundary, stage_time, false)?;
                 let second_base = binding.sample(cx, history.mesh(), &second_boundary, to, before)?;
                 let first = MaterialPointwiseEnclosureRadiation::new(cx, &first_base, binding.patches()).map_err(conduction)?;
                 let second = MaterialPointwiseEnclosureRadiation::new(cx, &second_base, binding.patches()).map_err(conduction)?;
-                Ok(self.run.storage.advance_sdirk2(cx,
+                Ok(solve(
                     [inputs(EnthalpyRadiation::MaterialEnclosure(&first)),
-                     endpoint(EnthalpyRadiation::MaterialEnclosure(&second))], old, dt, config)?)
+                     endpoint(EnthalpyRadiation::MaterialEnclosure(&second))], dt))
             }
         }
     }

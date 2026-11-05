@@ -4687,3 +4687,77 @@ negative finite-element production; near-equilibrium heat exchange; original
 material emissivity feedback on a latent plateau and caloric datum shifts; and
 unchanged source/chart/cancellation refusal. They do not assert a photon-flux
 or continuum entropy certificate.
+
+## Entropy across the accepted adaptive enthalpy history
+
+`adaptive_state_with_entropy` prepares a resumable
+`AdaptiveEnthalpyEntropyState` using the original backward-Euler adaptive
+controller. The physical history is exposed read-only through `history()`;
+`entropy_balance()` retains the complete accepted window. The original
+energy-only methods continue through the same controller with the optional
+account disabled. No separate Newton solve, spatial discretization, time-error
+estimator or controller is introduced.
+
+Each comparison trial keeps its coarse solve energy-only and entropy-admits
+the two actual fine endpoints through their original final physical operators.
+Only a pair accepted by the native time-error controller enters the retained
+account. Rejected comparison work contributes to work counters, never to
+storage or heat/entropy totals. Ten double-double accumulators retain signed
+reservoir transfers, conductive/Robin/radiative production, unclassified
+source and flux terms, temporal defects and algebraic residuals across
+resumption. Material and bonded-film storage is remeasured directly from the
+original initial enthalpies to the accepted final field. The unclassified-input
+flag survives cancellation of signed source totals.
+
+One caller-supplied absolute J/K tolerance applies to each fine endpoint and
+to the whole accepted window; it is not multiplied by the number of steps.
+The next account is checked before the physical field, clock and entropy are
+published together. A refused pair leaves earlier accepted pairs intact.
+Observer cancellation after publication retains that complete pair, matching
+the existing controller. Original recoverable physical endpoint refusals keep
+their bounded step backoff; entropy refusals propagate without a new retry
+policy. Source laws may change between calls while the original caloric owners
+and fixed reference masses remain bound to the history.
+
+`advance_to_with_radiation` and its observed counterpart admit the existing
+fixed and material-state pointwise ambient radiation owners with their actual
+black-bath account. Mean-patch and reflected-enclosure radiation remain
+unsupported. No photon entropy is inferred. Regression definitions compare
+native accepted trajectory bits, budget-resumed totals, rejected-work
+exclusion, latent storage and signed source cancellation, observer
+cancellation, and radiative cooling with the original native energy path.
+
+
+### Entropy admission for scheduled adaptive enthalpy histories
+
+`EnthalpyHistoryRun::advance_adaptive_step_with_entropy` and
+`Sdirk2EnthalpyHistoryRun::advance_adaptive_step_with_entropy` use the original
+event-limited, phase-aware adaptive controller. The coarse solve remains an
+energy-only error comparator. Each of the two actual fine intervals uses its
+native entropy finish, and only the accepted fine pair enters the returned
+`EntropyAdaptiveHistoryStep`. Its physical report preserves the original
+accepted trajectory and work counters; `half_entropy` retains both native
+accounts; `entropy` combines their exchanges and signed defects with storage
+queried directly between the original and final caloric states.
+
+The declared absolute J/K allowance applies to each fine interval and once to
+the complete accepted pair. It is not doubled for the two intervals. The pair
+must pass before fields, time or accepted-step counters are published.
+Cancellation, material-domain, nonlinear, energy and entropy refusals preserve
+the previously accepted history. Temporal retries retain the existing
+controller's event boundaries, phase coordinates, step floor and attempt
+budget. Discarded trials contribute no entropy to the result.
+
+Scheduled SDIRK2 retains its original two-stage quadrature, including genuine
+stage temperatures and interval-end left limits for held sources and boundary
+schedules. Its internal stages and stage carry are not independently accepted
+physical intervals or external heat. The shared stage sampler supplies the
+same native source, boundary, material and contact declarations to either
+finish mode. Unsupported entropy models, including the scheduled reflected
+enclosure radiation binding, retain their native refusal.
+
+These scheduled reports cover one accepted pair per call; they do not create a
+persistent lifetime entropy account or multiply a lifetime allowance by the
+number of calls. Entropy admission is separate from the local temporal-error
+estimator and does not provide a global discretization or phase-transition-time
+certificate.

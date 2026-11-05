@@ -2,6 +2,8 @@
 //! piecewise-linear latent-heat solutions, including rejected work and resume.
 
 mod support;
+#[path = "adaptive_enthalpy/entropy.rs"]
+mod entropy;
 
 use std::ops::ControlFlow;
 
@@ -450,6 +452,21 @@ fn adaptive_pointwise_radiation_resolves_independent_quartic_cooling() {
         let stored = capacity * (state.temperature().iter().sum::<f64>() / 4.0 - 400.0);
         assert!((report.stored_energy_change_j - stored).abs() < 1e-10);
         assert!(state.last_endpoint().unwrap().pointwise_radiation.is_some());
+
+        // The entropy path uses the same fine radiation trajectory and bath.
+        let mut audited = stepper.adaptive_state_with_entropy(
+            cx, &[600.0; 4], 0.0, 0.02, policy, 1e-8,
+        ).unwrap();
+        let entropy = audited.advance_to_with_radiation(
+            cx, problem(&mesh, &boundary, &material, &source), None,
+            fs_conduction::transient::enthalpy::heterogeneous::EnthalpyRadiation::PointwiseAmbient(&radiation),
+            0.02, 10000,
+        ).unwrap();
+        assert_eq!(bits(audited.history().specific_enthalpy_j_kg()), bits(state.specific_enthalpy_j_kg()));
+        assert_eq!(entropy.thermal, report);
+        assert!((entropy.entropy.radiation_entropy_input_j_k-report.integrated_net_input_j/300.0).abs() < 1e-9);
+        assert!(entropy.entropy.radiation_generation_j_k > 0.0);
+        assert!(entropy.entropy.balance_residual_j_k.abs() < 1e-8);
     });
 }
 
