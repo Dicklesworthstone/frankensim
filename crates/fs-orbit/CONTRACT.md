@@ -207,11 +207,27 @@ The corrector retains every original HB row and adds an integral phase row
 from all non-DC state harmonics, plus a fixed-parameter seed row or arclength
 plane. It works when the first state has no oscillatory component. Frequency
 and physical parameter are independent unknowns. A phase-projected secant
-predicts later points; central differences, native LU, residual-decreasing
+predicts later points; shared exact island tangents when supplied, central
+differences for the remaining columns, native LU, residual-decreasing
 backtracking and bounded step halving/growth correct them. No damping,
 equilibrium deflation or diagonal jitter is introduced on this path.
 
 Original AFT buffers and trigonometric tables are reused within each corrector.
+When `island_state_jacobian` is declared at the current physical parameter,
+the original `tangent::Workspace` prepares every coefficient derivative from
+the current waveform before any frequency or parameter perturbation. The same
+physical row/column scales and exact phase/arclength rows apply. Frequency and
+parameter columns retain centered original-residual probes; absent tangents
+retain all original probes. Refused, nonfinite or incomplete declared tangents
+propagate without fallback. Optional tangent storage, including replacement
+phase tables at refinement, is admitted within the existing payload cap before
+allocation. It does not increase the payload requirement of a family that
+never supplies the callback. The residual limit counts actual HB evaluations;
+tangent samples are bounded by the existing order, quadrature and Newton caps.
+Cancellation is checked on both sides of a complete sampled tangent and at
+each coefficient column, preserving the original atomic AFT/linear-algebra
+boundary.
+
 The existing independent odd-grid sampling test applies to every accepted
 point. Its `HbOrbit` retains physical coefficients/frequency and unscaled HB
 residual/trace/defect; separate fields retain the combined dimensionless

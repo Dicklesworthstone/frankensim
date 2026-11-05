@@ -112,6 +112,7 @@ struct Chart {
     /// physical packed coefficient = normalized coefficient * state_unit
     state_units: Vec<f64>,
     row_units: Vec<f64>,
+    analytic_payload_admitted: bool,
 }
 impl Chart {
     fn new(d: usize, seeds: [(f64, &HbOrbit); 2], b: &AutonomousContinuationBudget) -> Result<Self> {
@@ -150,6 +151,16 @@ impl Chart {
         if bytes > b.maximum_payload_bytes as u128 {
             return Err(invalid("complete continuation payload exceeds its allowance"));
         }
+        // An optional exact tangent can become available after a parameter
+        // change. Admit its complete workspace before allocating it, including
+        // both old and replacement phase tables during quadrature refinement.
+        // Families without this callback retain their original payload bound.
+        let square = (d as u128) * (d as u128);
+        let orders = 2 * b.harmonics as u128 + 1;
+        let analytic_bytes = 8 * (4 * square * orders
+            + 2 * square * (b.harmonics as u128 + 1) + 2 * orders
+            + 2 * square + 4 * finest * orders);
+        let analytic_payload_admitted = bytes + analytic_bytes <= b.maximum_payload_bytes as u128;
         let pack = Packing { d, n_harm: b.harmonics, omega_slot: Some(nc) };
         let mut state_units = vec![0.0; nz];
         let mut row_units = vec![0.0; nc];
@@ -168,7 +179,7 @@ impl Chart {
         if state_units.iter().chain(&row_units).any(|&v| !positive(v)) {
             return Err(invalid("physical normalization is not representable"));
         }
-        Ok(Self { pack, state_units, row_units })
+        Ok(Self { pack, state_units, row_units, analytic_payload_admitted })
     }
     fn seed(&self, parameter: f64, orbit: &HbOrbit) -> Result<Vec<f64>> {
         let mut physical = pack_orbit(orbit, &HbAnchor::Autonomous { omega_guess: orbit.omega });
@@ -268,6 +279,7 @@ fn correct<P: ContinuableProblem, F: FnMut() -> bool>(
     let mut plus = vec![0.0; nc];
     let mut minus = vec![0.0; nc];
     let mut jac = vec![0.0; nz * nz];
+    let mut tangent_workspace = None;
     let mut trace = Vec::with_capacity(b.max_newton);
     for _ in 0..b.max_newton {
         eval.eval(&z, &mut aft, &mut raw)?;
@@ -302,8 +314,34 @@ fn correct<P: ContinuableProblem, F: FnMut() -> bool>(
             aft = finer;
             continue;
         }
+        // The base residual has set the physical parameter and synthesized
+        // this iterate's waveform. Prepare before frequency/parameter probes
+        // can change either; a declared refusal is never replaced by probes.
+        let exact = if let Some(callback) = eval.problem.island_state_jacobian() {
+            poll(eval.cancelled)?;
+            if !chart.analytic_payload_admitted {
+                return Err(invalid("analytic continuation tangent payload exceeds its allowance"));
+            }
+            if tangent_workspace.is_none() {
+                tangent_workspace = Some(super::tangent::Workspace::new(&chart.pack)?);
+            }
+            let workspace = tangent_workspace.as_mut().expect("prepared tangent workspace");
+            workspace.prepare(eval.problem, callback, &chart.pack, eval.physical[nc], &aft)?;
+            poll(eval.cancelled)?;
+            Some(&*workspace)
+        } else { None };
         for col in 0..nz {
             poll(eval.cancelled)?;
+            jac[nc * nz + col] = phase[col];
+            jac[(nc + 1) * nz + col] = plane[col];
+            if let Some(workspace) = exact.filter(|_| col < nc) {
+                for row in 0..nc {
+                    jac[row * nz + col] =
+                        (workspace.coefficient_entry(row, col, &chart.pack) / chart.row_units[row])
+                            * chart.state_units[col];
+                }
+                continue;
+            }
             let old = z[col];
             let h = if col == nc { (1e-6 * old.abs().max(1.0)).min(0.25 * old) }
                 else { 1e-6 * old.abs().max(1.0) };
@@ -318,8 +356,6 @@ fn correct<P: ContinuableProblem, F: FnMut() -> bool>(
             for row in 0..nc {
                 jac[row * nz + col] = ((plus[row] - minus[row]) / (2.0 * h)) / chart.row_units[row];
             }
-            jac[nc * nz + col] = phase[col];
-            jac[(nc + 1) * nz + col] = plane[col];
         }
         if jac.iter().any(|v| !v.is_finite()) { return Err(invalid("corrector Jacobian overflow")); }
         let factor = lu(&jac, nz).map_err(|_| OrbitError::SingularJacobian)?;
@@ -373,10 +409,16 @@ fn tangent(chart: &Chart, old: &[f64], now: &[f64], floor: f64) -> Result<Vec<f6
 /// parameter is restored to the last accepted value, or the first seed value
 /// before the first acceptance. No partial branch is published. Source callbacks
 /// must be deterministic and may not hide evolving state in parameter setters.
-/// Cancellation is polled between residuals, Jacobian columns and steps; native
-/// AFT evaluation and a dense LU remain bounded noninterruptible units.
+/// A declared exact island tangent supplies all coefficient columns through
+/// the shared AFT derivative owner. Its workspace is included in admission;
+/// refusal propagates without fallback. Frequency and parameter columns retain
+/// centered residual probes, and phase/arclength rows remain exact. The residual
+/// evaluation cap counts actual original-balance calls, not tangent samples.
+/// Cancellation is polled before and after each complete sampled tangent and
+/// between residuals, Jacobian columns and steps. Each native AFT/tangent
+/// evaluation and dense LU remains a bounded noninterruptible unit.
 ///
-/// Fixed harmonic truncation and finite-difference Newton remain disclosed.
+/// Fixed harmonic truncation and the remaining finite differences are disclosed.
 /// This neither classifies stability nor certifies folds, branch identity,
 /// fundamental period, omitted Fourier tails, hybrid cycles or conservative
 /// families with more than one neutral direction. Source-band limits belong to
