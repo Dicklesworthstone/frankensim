@@ -165,3 +165,41 @@ fn original_law_enthalpy_closes_energy_and_flow_work_and_reverses() {
         }
     }
 }
+
+#[test]
+fn weak_real_gas_energy_and_enthalpy_match_independent_finite_changes() {
+    let rho = 47.889_003_167_633_395;
+    // 85-digit Decimal PR/NASA differences with the exact f64 coordinates.
+    // These changes are thousands of coordinate ULPs above resolution, but
+    // subtraction of rounded residual energy/pressure loses about 0.02%.
+    for reference in [0.0, -1e24, 1e24] {
+        let model = bound_with_reference(reference);
+        for (t1, rho1, expected_u, expected_h) in [
+            (300.000_000_01, rho, 9.591_597_381_493_554_6e-6, 1.387_949_738_165_587_2e-5),
+            (300.0, 47.889_003_167_681_29, -2.422_959_241_806_747_6e-8, -3.137_111_222_645_165_1e-8),
+            (300.000_000_01, 47.889_003_172_422_3, 7.168_717_227_411_026_5e-6, 1.074_248_855_739_969_5e-5),
+        ] {
+            let du = model.specific_internal_energy_change_between_densities(rho, 300.0, rho1, t1).unwrap();
+            let dh = model.specific_enthalpy_change_between_densities(rho, 300.0, rho1, t1).unwrap();
+            assert!((du / expected_u - 1.0).abs() < 1e-12);
+            assert!((dh / expected_h - 1.0).abs() < 1e-12);
+            assert_eq!(model.specific_internal_energy_change_between_densities(rho1, t1, rho, 300.0).unwrap(), -du);
+            assert_eq!(model.specific_enthalpy_change_between_densities(rho1, t1, rho, 300.0).unwrap(), -dh);
+        }
+    }
+}
+
+#[test]
+fn weak_heating_reconstructs_without_relaxing_the_requested_energy_tolerance() {
+    let rho = 47.889_003_167_633_395;
+    let target = 9.591_597_381_493_554_6e-6; // Independent finite-energy oracle.
+    let controls = GasEnergySolve { energy_tolerance_j_kg: 1e-15, ..controls() };
+    for reference in [0.0, -1e24, 1e24] {
+        let model = bound_with_reference(reference);
+        let solved = model.reconstruct_density_internal_energy_increment(
+            &point(300.0, 5e6), rho, target, controls, || false).unwrap();
+        assert_eq!(solved.state().temperature_k().to_bits(), 300.000_000_01_f64.to_bits());
+        assert!(solved.residual_j_kg().abs() <= controls.energy_tolerance_j_kg);
+        assert_eq!(solved.state().density_kg_m3().to_bits(), rho.to_bits());
+    }
+}

@@ -5,6 +5,7 @@ use crate::thermochemical_gas::ThermochemicalGasModel;
 use crate::thermochemical_gas::nonideal::PengRobinsonSpeciesBinding;
 use crate::thermochemical_gas::tests::{model, point};
 use fs_thermochem::SpeciesId;
+use fs_qty::Pressure;
 
 fn bound(source: ThermochemicalGasModel) -> ThermochemicalPengRobinsonModel {
     ThermochemicalPengRobinsonModel::new(
@@ -42,6 +43,27 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance,
         "{actual} != {expected}"
     );
+}
+
+#[test]
+fn weak_entropy_changes_and_inverse_use_the_original_density_reference() {
+    let model = bound(model(vec![0.75, 0.25], 0.001));
+    let rho = 47.889_003_167_633_395;
+    for (t1, rho1, expected) in [
+        (300.000_000_01, rho, 3.197_199_127_111_231_4e-8),
+        (300.0, 47.889_003_167_681_29, -4.288_037_820_368_550_7e-10),
+        (300.000_000_01, 47.889_003_172_422_3, -1.090_698_727_435_800_5e-8),
+    ] {
+        // Independent 85-digit Cv/T integral plus PR density departure.
+        let change = model.specific_entropy_change_between_densities(rho, 300.0, rho1, t1).unwrap();
+        assert!((change / expected - 1.0).abs() < 1e-12);
+        assert_eq!(model.specific_entropy_change_between_densities(rho1, t1, rho, 300.0).unwrap(), -change);
+    }
+    let controls = GasEntropySolve { entropy_tolerance_j_kg_k: 1e-18, ..controls() };
+    let solved = model.reconstruct_density_entropy_change(&point(300.0, 5e6), rho, rho,
+        3.197_199_127_111_231_4e-8, controls, || false).unwrap();
+    assert_eq!(solved.state().temperature_k().to_bits(), 300.000_000_01_f64.to_bits());
+    assert!(solved.residual_j_kg_k().abs() <= controls.entropy_tolerance_j_kg_k);
 }
 
 #[test]

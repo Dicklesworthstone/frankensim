@@ -15,6 +15,8 @@ pub mod entropy;
 
 use fs_matdb::QueryPoint;
 use fs_qty::{Density, Temperature};
+use fs_thermochem::eos::peng_robinson::PengRobinsonDensityCaloricEvaluationV1;
+use fs_thermochem::eos::peng_robinson::caloric::PengRobinsonCaloricReferenceV1;
 
 use super::{ResolvedThermochemicalRealGasState, ThermochemicalPengRobinsonModel};
 use crate::thermochemical_gas::{coordinates, failure, positive};
@@ -53,8 +55,13 @@ impl ThermochemicalPengRobinsonModel {
         let direct = self.mechanics().evaluate_density_caloric(
             Temperature::new(t), Density::new(density),
         ).map_err(|error| failure("real-gas density mechanics", error))?;
+        self.caloric_from_eos(&direct)
+    }
+
+    fn caloric_from_eos(&self, direct: &PengRobinsonDensityCaloricEvaluationV1)
+        -> Result<CaloricSample, GasEnergyError> {
         let properties = self.source().thermodynamics()
-            .evaluate_properties(Temperature::new(t), direct.pressure())
+            .evaluate_properties(direct.temperature(), direct.pressure())
             .map_err(|error| failure("real-gas reference calorics", error))?;
         let molar_mass = properties.molar_mass().value();
         let residual_energy_j_kg = direct.residual_internal_energy_j_mol() / molar_mass;
@@ -68,6 +75,13 @@ impl ThermochemicalPengRobinsonModel {
         }
         Ok(CaloricSample { internal_energy_j_kg, residual_energy_j_kg, cv_j_kg_k,
             pressure_pa: direct.pressure().value(), pressure_temperature_derivative })
+    }
+
+    fn caloric_reference(&self, initial_density: f64, initial_temperature: f64, final_density: f64)
+        -> Result<PengRobinsonCaloricReferenceV1<'_>, GasEnergyError> {
+        self.mechanics().prepare_density_caloric_change(Temperature::new(initial_temperature),
+            Density::new(initial_density), Density::new(final_density))
+            .map_err(|error| failure("real-gas caloric reference", error).into())
     }
 
     /// Reconstruct temperature and pressure from density and absolute internal
@@ -136,47 +150,48 @@ impl ThermochemicalPengRobinsonModel {
         &self, initial_density_kg_m3: f64, initial_temperature_k: f64,
         final_density_kg_m3: f64, final_temperature_k: f64,
     ) -> Result<f64, GasEnergyError> {
-        let initial = self.caloric_at_density(initial_density_kg_m3, initial_temperature_k)?;
-        let final_state = self.caloric_at_density(final_density_kg_m3, final_temperature_k)?;
+        let reference = self.caloric_reference(initial_density_kg_m3,
+            initial_temperature_k, final_density_kg_m3)?;
+        self.caloric_from_eos(reference.initial_state())?;
+        let change = reference.evaluate(Temperature::new(final_temperature_k))
+            .map_err(|error| failure("real-gas caloric increment", error))?;
+        self.caloric_from_eos(change.state())?;
         self.caloric_increment(initial_temperature_k, final_temperature_k,
-            initial.residual_energy_j_kg, final_state.residual_energy_j_kg)
+            change.residual_internal_energy_change_j_mol())
     }
 
     /// Original-law Delta h [J/kg] between explicit density/temperature states.
-    /// The same two EOS/caloric samples supply Delta u and Delta(p/rho); no
-    /// absolute formation enthalpies are subtracted or extra EOS pass required.
-    /// Pressure and density differences retain small flow-work changes, using
-    /// the exact product identity Delta(p/rho) =
-    /// [Delta p - mean(p/rho) Delta rho] / mean(rho).
-    /// The means are symmetric, including when the endpoints are reversed.
+    /// The original NASA enthalpy increment and finite PR departure include
+    /// pressure work once. No absolute formation/departure enthalpy or rounded
+    /// endpoint pressure is subtracted. The two original EOS/caloric samples
+    /// are shared with the finite difference; endpoint reversal is preserved.
     pub fn specific_enthalpy_change_between_densities(
         &self, initial_density_kg_m3: f64, initial_temperature_k: f64,
         final_density_kg_m3: f64, final_temperature_k: f64,
     ) -> Result<f64, GasEnergyError> {
-        let initial = self.caloric_at_density(initial_density_kg_m3, initial_temperature_k)?;
-        let final_state = self.caloric_at_density(final_density_kg_m3, final_temperature_k)?;
-        let internal_energy_change = self.caloric_increment(
-            initial_temperature_k, final_temperature_k,
-            initial.residual_energy_j_kg, final_state.residual_energy_j_kg,
-        )?;
-        let mean_density = 0.5 * initial_density_kg_m3 + 0.5 * final_density_kg_m3;
-        let mean_flow_work = 0.5 * (initial.pressure_pa / initial_density_kg_m3)
-            + 0.5 * (final_state.pressure_pa / final_density_kg_m3);
-        let flow_work_change = (final_state.pressure_pa - initial.pressure_pa) / mean_density
-            - mean_flow_work * ((final_density_kg_m3 - initial_density_kg_m3) / mean_density);
-        let change = internal_energy_change + flow_work_change;
+        let reference = self.caloric_reference(initial_density_kg_m3,
+            initial_temperature_k, final_density_kg_m3)?;
+        self.caloric_from_eos(reference.initial_state())?;
+        let departure = reference.evaluate(Temperature::new(final_temperature_k))
+            .map_err(|error| failure("real-gas enthalpy increment", error))?;
+        self.caloric_from_eos(departure.state())?;
+        let ideal = self.source().thermodynamics().specific_enthalpy_change(
+            Temperature::new(initial_temperature_k), Temperature::new(final_temperature_k),
+        ).map_err(|error| failure("real-gas reference enthalpy increment", error))?.value();
+        let change = ideal + departure.residual_enthalpy_change_j_mol()
+            / self.mechanics().molar_mass().value();
         if !change.is_finite() {
             return Err(GasEnergyError::Invalid("real-gas enthalpy increment is unrepresentable"));
         }
         Ok(change)
     }
 
-    fn caloric_increment(&self, initial: f64, final_t: f64, residual_initial: f64,
-        residual_final: f64) -> Result<f64, GasEnergyError> {
+    fn caloric_increment(&self, initial: f64, final_t: f64, residual_change_j_mol: f64)
+        -> Result<f64, GasEnergyError> {
         let ideal = self.source().thermodynamics().specific_internal_energy_change(
             Temperature::new(initial), Temperature::new(final_t),
         ).map_err(|error| failure("real-gas reference energy increment", error))?.value();
-        let change = ideal + (residual_final - residual_initial);
+        let change = ideal + residual_change_j_mol / self.mechanics().molar_mass().value();
         if !change.is_finite() {
             return Err(GasEnergyError::Invalid("real-gas energy increment is not representable"));
         }
@@ -220,12 +235,11 @@ impl ThermochemicalPengRobinsonModel {
             return Err(GasEnergyError::Invalid("real-gas increment needs positive density, finite heat and bracketed reference temperature"));
         }
         let initial = self.evaluate_density_temperature(context, initial_density_kg_m3)?;
-        let residual_initial = initial.root().residual_internal_energy_j_mol()
-            / self.mechanics().molar_mass().value();
         if change_j_kg == 0.0 && density_kg_m3 == initial_density_kg_m3 {
             poll(&mut cancelled)?;
             return Ok(RealGasEnergySolution { state: initial, residual_j_kg: 0.0, iterations: 0 });
         }
+        let reference = self.caloric_reference(initial_density_kg_m3, initial_t, density_kg_m3)?;
         let tolerance = if change_j_kg == 0.0 { controls.energy_tolerance_j_kg }
             else { controls.energy_tolerance_j_kg.min(0.5 * change_j_kg.abs()) };
         if !positive(tolerance) {
@@ -236,10 +250,12 @@ impl ThermochemicalPengRobinsonModel {
         } else if change_j_kg > 0.0 { (initial_t, controls.maximum_temperature_k) }
             else { (controls.minimum_temperature_k, initial_t) };
         let solved = root::solve(lo, hi, tolerance, controls.maximum_iterations, |t| {
-            let sample = self.caloric_at_density(density_kg_m3, t)?;
+            let change = reference.evaluate(Temperature::new(t))
+                .map_err(|error| failure("real-gas caloric increment", error))?;
+            let sample = self.caloric_from_eos(change.state())?;
             Ok::<_, GasEnergyError>(root::Sample {
                 residual: self.caloric_increment(initial_t, t,
-                    residual_initial, sample.residual_energy_j_kg)? - change_j_kg,
+                    change.residual_internal_energy_change_j_mol())? - change_j_kg,
                 tangent: sample.cv_j_kg_k,
                 pressure_pa: sample.pressure_pa,
             })
@@ -247,8 +263,10 @@ impl ThermochemicalPengRobinsonModel {
         poll(&mut cancelled)?;
         let point = updated_point(context, solved.temperature_k, solved.sample.pressure_pa)?;
         let state = self.evaluate_density_temperature(&point, density_kg_m3)?;
-        let change = self.caloric_increment(initial_t, state.temperature_k(), residual_initial,
-            state.root().residual_internal_energy_j_mol() / self.mechanics().molar_mass().value())?;
+        let departure = reference.evaluate(Temperature::new(state.temperature_k()))
+            .map_err(|error| failure("real-gas accepted caloric increment", error))?;
+        let change = self.caloric_increment(initial_t, state.temperature_k(),
+            departure.residual_internal_energy_change_j_mol())?;
         let residual = change - change_j_kg;
         if change_j_kg != 0.0 && (change == 0.0
             || change.is_sign_positive() != change_j_kg.is_sign_positive()

@@ -11013,14 +11013,15 @@ source support, confinement, seals and unsupported combined-law refusal.
 ## Formation-reference-independent real-gas nozzle energy
 
 `ThermochemicalPengRobinsonModel::specific_enthalpy_change_between_densities`
-evaluates the original NASA/PR internal-energy increment and the change in
-`p/rho` from the same two density/temperature samples. Symmetric product
-differences preserve small flow-work changes and endpoint reversal. The nozzle
-uses `velocity^2 = -2 Delta h`; absolute upstream enthalpy remains the stream
-datum, never a subtraction-based kinetic-energy law. This retains the existing
-frozen-composition homogeneous source domain and bounded entropy/sonic roots.
-Regression sources cover positive and negative formation-reference shifts,
-near-shut pressure drives, and independent variable-Cp PR throat references.
+combines the original NASA enthalpy increment with a finite PR enthalpy departure.
+The prepared source reference retains both density coordinates and factors small
+attraction, volume and logarithmic changes before combining them; no absolute
+residual enthalpy or rounded pressure difference is subtracted. The nozzle uses
+`velocity^2 = -2 Delta h`; absolute upstream enthalpy remains the stream datum.
+The existing frozen-composition homogeneous source domain and bounded
+entropy/sonic roots remain authoritative. Independent high-precision weak-change
+references, endpoint reversal and formation-reference shifts test this coordinate.
+Existing near-shut pressure-drive and variable-Cp PR throat references remain.
 
 Real-gas energy/enthalpy trial samples use the original PR scalar density
 evaluator and NASA property-only calorics. The repeated reconstruction path
@@ -11028,6 +11029,15 @@ therefore needs no component-vector allocation or fugacity calculation; it
 retains the same residual U, complete Cv, pressure and temperature derivative.
 The accepted material state still resolves the full EOS and original transport
 sources, preserving source-domain, fugacity and complete caloric/acoustic checks.
+
+Relative energy and entropy reconstruction, including simultaneous midpoint
+heat/volume stages, use the same prepared finite owner and actual source Cv
+tangents. Entropy combines source NASA changes at unchanged pressure, the ideal
+density correction and the PR density departure, avoiding cancellation of
+real-pressure and ln Z terms. Requested tolerances, cancellation, exact density
+and full accepted material/transport checks remain unchanged. Cross-composition
+receiving energy retains each mixture's own departure; the frozen-composition
+finite owner is used only after that receiving composition is fixed.
 
 ## Reversible volume work on source-bound real gas
 

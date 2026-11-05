@@ -16,7 +16,7 @@ use crate::thermochemical_gas::energy::{
     GasEnergyError, GasEnergySolve, map_root, poll, root, updated_point,
 };
 use crate::thermochemical_gas::{failure, positive};
-use fs_qty::{Pressure, Temperature};
+use fs_qty::Temperature;
 
 /// The original common candidate/report owner, retaining complete real states.
 pub type RealGasHeatVolumeCandidate =
@@ -107,11 +107,8 @@ impl IsochoricRealGasParcel {
             ));
         }
         let molar_mass = self.model.mechanics().molar_mass().value();
-        let initial_residual = self.state.root().residual_internal_energy_j_mol() / molar_mass;
-        let increment = |t, departure| {
-            self.model
-                .caloric_increment(temperature, t, initial_residual, departure)
-        };
+        let reference = self.model.caloric_reference(self.density_kg_m3,
+            temperature, midpoint_density)?;
         let unchanged = dv == 0.0 && heat_j == 0.0;
         let (midpoint, midpoint_iterations) = if unchanged {
             (self.state.clone(), 0)
@@ -122,10 +119,12 @@ impl IsochoricRealGasParcel {
                 inner.energy_tolerance_j_kg,
                 inner.maximum_iterations,
                 |t| {
-                    let sample: CaloricSample =
-                        self.model.caloric_at_density(midpoint_density, t)?;
+                    let departure = reference.evaluate(Temperature::new(t))
+                        .map_err(|error| failure("real-gas midpoint caloric increment", error))?;
+                    let sample: CaloricSample = self.model.caloric_from_eos(departure.state())?;
                     Ok::<_, GasEnergyError>(root::Sample {
-                        residual: increment(t, sample.residual_energy_j_kg)?
+                        residual: self.model.caloric_increment(temperature, t,
+                            departure.residual_internal_energy_change_j_mol())?
                             + sample.pressure_pa * half_specific_volume_change
                             - 0.5 * q,
                         tangent: sample.cv_j_kg_k
@@ -149,10 +148,10 @@ impl IsochoricRealGasParcel {
             }
             (state, solved.iterations)
         };
-        let midpoint_increment = increment(
-            midpoint.temperature_k(),
-            midpoint.root().residual_internal_energy_j_mol() / molar_mass,
-        )?;
+        let midpoint_departure = reference.evaluate(Temperature::new(midpoint.temperature_k()))
+            .map_err(|error| failure("real-gas accepted midpoint caloric increment", error))?;
+        let midpoint_increment = self.model.caloric_increment(temperature, midpoint.temperature_k(),
+            midpoint_departure.residual_internal_energy_change_j_mol())?;
         let change = 2.0 * midpoint_increment;
         let work = midpoint.pressure_pa() * dv;
         if !change.is_finite() || !work.is_finite() || (dv != 0.0 && work == 0.0) {
@@ -185,28 +184,13 @@ impl IsochoricRealGasParcel {
             endpoint.volume_m3 = volume_m3;
             (endpoint, iterations)
         };
-        let final_residual = endpoint.state.root().residual_internal_energy_j_mol() / molar_mass;
-        let du = increment(endpoint.state.temperature_k(), final_residual)?;
+        let du = self.model.specific_internal_energy_change_between_densities(
+            self.density_kg_m3, temperature, final_density, endpoint.state.temperature_k())?;
         let stored = self.mass_kg * du;
         let energy_residual = (stored + work) - heat_j;
         let stage_residual = change - du;
-        let ideal_entropy = self
-            .model
-            .source()
-            .thermodynamics()
-            .specific_entropy_change(
-                Temperature::new(temperature),
-                Pressure::new(self.state.pressure_pa()),
-                Temperature::new(endpoint.state.temperature_k()),
-                Pressure::new(endpoint.state.pressure_pa()),
-            )
-            .map_err(|error| failure("real-gas midpoint relative entropy", error))?
-            .value();
-        let entropy_change = self.mass_kg
-            * (ideal_entropy
-                + (endpoint.state.root().residual_entropy_j_mol_k()
-                    - self.state.root().residual_entropy_j_mol_k())
-                    / molar_mass);
+        let entropy_change = self.mass_kg * self.model.specific_entropy_change_between_densities(
+            self.density_kg_m3, temperature, final_density, endpoint.state.temperature_k())?;
         if !stored.is_finite()
             || !energy_residual.is_finite()
             || energy_residual.abs() > tolerance_j

@@ -19,6 +19,22 @@ fn relative(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn weak_midpoint_heating_uses_finite_departures_at_both_stages() {
+    let gas = parcel();
+    let rho = gas.density_kg_m3();
+    let target_t = 300.000_000_01;
+    let heat = gas.mass_kg() * gas.model().specific_internal_energy_change_at_density(
+        rho, gas.state().temperature_k(), target_t).unwrap();
+    let controls = GasEnergySolve { energy_tolerance_j_kg: 1e-15, ..solve_controls() };
+    let candidate = gas.midpoint_heat_volume(gas.volume_m3(), heat, controls, || false).unwrap();
+    assert_eq!(candidate.endpoint().state().temperature_k(), target_t);
+    assert!(candidate.step().energy_residual_j.abs() <= gas.mass_kg() * controls.energy_tolerance_j_kg);
+    assert!(candidate.step().midpoint_energy_residual_j_kg.abs() <= controls.energy_tolerance_j_kg);
+    assert_eq!(candidate.endpoint().mass_kg(), gas.mass_kg());
+    assert_eq!(candidate.endpoint().density_kg_m3(), rho);
+}
+
+#[test]
 fn real_gas_midpoint_matches_independent_dense_heat_work_entropy_and_derivatives() {
     let gas = parcel();
     let saved = gas.clone();
