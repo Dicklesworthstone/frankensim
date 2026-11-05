@@ -815,6 +815,24 @@ but noninterruptible. G1/G3 regressions include separate-coordinate order-1/2/4
 cancellation down to 0.001 Hz, complex directional phases, angular-branch
 agreement, 128 retained modes, source/basis/frame changes and exact nulls.
 
+`PreparedSurface::prepare_coherent_radiation` retains the same signed modal
+motion as complex cell volume flows, then reuses those flows for arbitrary
+far-field angular grids. `PreparedCoherentRadiation::far_field` returns complex
+F [Pa m], where p(r d) approaches F(d) exp(i k r)/r on the loading owner's
+exp(-i omega t) clock. Translation phase is restored after relative phase
+evaluation; coherent mode sums precede propagation and pressure squaring.
+The infinite baffle's lower half-space returns zero. This full-sphere image
+can feed the existing representation-neutral SH directivity adapter, whose
+angular convergence gates still apply to the baffle-plane discontinuity.
+Preparation costs O(cells * modes), storage O(cells), and each subsequent image
+O(cells * directions), independent of mode count. The caller admits the complete
+kernel count before allocation; shared work, six-cell-per-wavelength, finite
+arithmetic and tiled cancellation checks remain in force. This is prescribed
+point-area Rayleigh radiation, not a finite-cell quadrature bound or new BEM
+solve. Analytic 1 kHz two-source steering/null and translated-clock regressions
+check complex phase; hemisphere pressure integration is compared with the
+existing coherent-power image at 100 Hz, 1 kHz and 3 kHz.
+
 Rows use `exp(-i omega t)`: resistance is `Re Z`, added mass is `-Im Z/omega`.
 The unchanged matrix must have relative reciprocity defect at most
 `DENSE_RECIPROCITY_BOUND` = 1e-12 (an iterative row's bound is below) and

@@ -3,6 +3,96 @@ use core::f64::consts::TAU;
 
 fn air() -> Medium { Medium { density: 1.2, sound_speed: 343.0 } }
 
+#[test]
+fn g1_prepared_far_field_keeps_complex_steering_nulls_and_origin_phase() {
+    // Two independently driven cells at half a wavelength, 1 kHz. A quarter
+    // cycle drive offset steers the maximum to +30 degrees and a null to -30.
+    let omega = TAU * 1000.0;
+    let separation = 0.5 * air().sound_speed / 1000.0;
+    let cells = [AreaSample { position_m: [-0.5 * separation, 0.0], area_m2: 1e-4,
+        mode_shape: vec![1.0, 0.0] },
+        AreaSample { position_m: [0.5 * separation, 0.0], area_m2: 1e-4,
+        mode_shape: vec![0.0, 1.0] }];
+    let source = PreparedSurface::new(&cells).unwrap();
+    let velocities = [C64::ONE, C64::new(0.0, 1.0)];
+    let prepared = source.prepare_coherent_radiation(omega, air(), &velocities, || false).unwrap();
+    let z = 0.75_f64.sqrt();
+    let directions = [[0.5, 0.0, z], [-0.5, 0.0, z], [0.0, 0.0, 1.0], [0.5, 0.0, -z]];
+    let actual = prepared.far_field(&directions, 8, || false).unwrap();
+    let scale = air().density * omega / TAU * 1e-4;
+    let expected = C64::new(2.0_f64.sqrt() * scale, -2.0_f64.sqrt() * scale);
+    assert!((actual[0] - expected).abs() < 2e-15 * expected.abs());
+    assert!(actual[1].abs() < 2e-15 * expected.abs(), "opposite side must be a pressure null");
+    assert!((actual[2] - C64::new(scale, -scale)).abs() < 2e-15 * expected.abs());
+    assert_eq!(actual[3], C64::ZERO, "the rigid baffle blocks its lower half-space");
+
+    let translation = [0.25, -0.4];
+    let translated = cells.map(|mut cell| {
+        for axis in 0..2 { cell.position_m[axis] += translation[axis]; }
+        cell
+    });
+    let translated = PreparedSurface::new(&translated).unwrap();
+    let clock = C64::new(0.7_f64.cos(), 0.7_f64.sin());
+    let changed = translated.prepare_coherent_radiation(
+        omega, air(), &velocities.map(|v| v * clock), || false).unwrap()
+        .far_field(&directions, 8, || false).unwrap();
+    for (index, d) in directions[..3].iter().enumerate() {
+        let phase = -omega / air().sound_speed * (d[0] * translation[0] + d[1] * translation[1]);
+        let reference = actual[index] * clock * C64::new(phase.cos(), phase.sin());
+        assert!((changed[index] - reference).abs() < 5e-15 * expected.abs());
+    }
+}
+
+#[test]
+fn g1_prepared_far_field_integrates_to_the_existing_coherent_radiation_power() {
+    let cells = surface(3);
+    let source = PreparedSurface::new(&cells).unwrap();
+    let velocities = [C64::new(0.7, -0.3), C64::new(-0.4, 0.5), C64::new(0.2, 0.8)];
+    let (nodes, weights) = super::super::gauss_legendre(24);
+    let mut directions = Vec::new();
+    let mut solid_angles = Vec::new();
+    for (&node, &weight) in nodes.iter().zip(&weights) {
+        let z = 0.5 * (1.0 + node);
+        let radial = (1.0 - z * z).sqrt();
+        for azimuth in 0..48 {
+            let angle = TAU * azimuth as f64 / 48.0;
+            directions.push([radial * angle.cos(), radial * angle.sin(), z]);
+            solid_angles.push(0.5 * weight * TAU / 48.0);
+        }
+    }
+    for frequency in [100.0, 1000.0, 3000.0] {
+        let omega = TAU * frequency;
+        let prepared = source.prepare_coherent_radiation(omega, air(), &velocities, || false).unwrap();
+        let fields = prepared.far_field(&directions, cells.len() * directions.len(), || false).unwrap();
+        let measured: f64 = fields.iter().zip(&solid_angles)
+            .map(|(p, w)| p.norm_sq() * w / (2.0 * air().density * air().sound_speed)).sum();
+        let expected = source.coherent_radiated_power(omega, air(), &velocities, || false).unwrap().power_w;
+        assert!((measured / expected - 1.0).abs() < 3e-12, "{frequency} Hz: {measured} vs {expected}");
+    }
+}
+
+#[test]
+fn g0_prepared_far_field_refuses_incomplete_motion_budget_and_invalid_directions() {
+    let source = PreparedSurface::new(&surface(3)).unwrap();
+    let velocity = [C64::ONE; 3];
+    assert!(source.prepare_coherent_radiation(TAU * 1000.0, air(), &velocity[..2], || false).is_err());
+    let prepared = source.prepare_coherent_radiation(TAU * 1000.0, air(), &velocity, || false).unwrap();
+    assert!(matches!(prepared.far_field(&[[0.0, 0.0, 1.0]], 8, || false),
+        Err(HelmholtzError::FarFieldBudget { required_evaluations: 9, maximum_evaluations: 8 })));
+    assert!(prepared.far_field(&[[0.0, 0.0, 2.0]], 9, || false).is_err());
+    assert!(matches!(prepared.far_field(&[[0.0, 0.0, 1.0]], 9, || true), Err(HelmholtzError::Cancelled)));
+    let mut directions = [[0.0, 0.0, 1.0]; 129];
+    directions[128][2] = 2.0;
+    let mut polls = 0;
+    // Cancellation at the second validation tile must precede the later bad
+    // direction, without scanning the complete list or allocating an image.
+    assert!(matches!(prepared.far_field(&directions, 9 * directions.len(), || {
+        polls += 1;
+        polls == 3
+    }), Err(HelmholtzError::Cancelled)));
+    assert!(prepared.far_field(&[], 0, || false).unwrap().is_empty());
+}
+
 fn work(z: &[C64], velocity: &[C64]) -> f64 {
     let n = velocity.len();
     let mut result = C64::ZERO;

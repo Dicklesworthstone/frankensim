@@ -98,6 +98,106 @@ pub struct PreparedSurface {
     maximum_distance_m: f64,
 }
 
+/// One coherent motion of the retained surface, reusable across angular grids.
+/// Modal velocities have already been combined at each physical area cell;
+/// subsequent observation costs O(cells * directions), independent of mode count.
+pub struct PreparedCoherentRadiation<'a> {
+    surface: &'a PreparedSurface,
+    flow: Vec<[Dd; 2]>,
+    total_flow: [Dd; 2],
+    k: f64,
+    pressure_scale: f64,
+}
+
+impl PreparedCoherentRadiation<'_> {
+    /// Complex far-field amplitude F [Pa m], with p(r d) -> F(d) exp(i k r)/r
+    /// on the same exp(-i omega t) clock as the modal loading. All directions
+    /// must be unit vectors. The infinite rigid baffle radiates into z >= 0;
+    /// z < 0 returns zero, so this evaluator also fits the existing
+    /// `directivity_sh_table_from_evaluator_with_options` full-sphere adapter.
+    /// Its angular convergence gates still apply to the baffle-plane jump.
+    ///
+    /// Relative source phases are evaluated about a retained cell, then the
+    /// common origin phase is restored. Cosine-minus-one is formed without
+    /// subtracting near-unit values, retaining compact cancelling source fields.
+    /// No modal power, absolute value or far-receiver distance approximation is
+    /// substituted for a coherent pressure. This is the SAME point-area model
+    /// as `power_consistent_impedance`, not a finite-cell integration bound.
+    ///
+    /// # Errors
+    /// Invalid directions, explicit complete-request kernel budget, the shared
+    /// scalar-work ceiling, allocation, cancellation or nonfinite arithmetic.
+    /// Cancellation is polled every 64 directions during validation before
+    /// allocation, then at each direction and each 64-cell tile. A failed
+    /// request publishes no partial image. Empty direction lists are admitted.
+    pub fn far_field(
+        &self,
+        directions: &[[f64; 3]],
+        maximum_kernel_evaluations: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HelmholtzError> {
+        if cancelled() { return Err(HelmholtzError::Cancelled); }
+        let work = directions.len().checked_mul(self.surface.count);
+        if work.is_none_or(|n| n > maximum_kernel_evaluations) {
+            return Err(HelmholtzError::FarFieldBudget {
+                required_evaluations: work.unwrap_or(usize::MAX),
+                maximum_evaluations: maximum_kernel_evaluations,
+            });
+        }
+        admit_modal_work(8 * work.unwrap_or(0) as u128)?;
+        for (index, d) in directions.iter().enumerate() {
+            if index % 64 == 0 && cancelled() { return Err(HelmholtzError::Cancelled); }
+            if d.iter().any(|v| !v.is_finite())
+                || (det::hypot(det::hypot(d[0], d[1]), d[2]) - 1.0).abs() > 1e-10 {
+                return Err(invalid("Rayleigh far-field directions must be finite unit vectors"));
+            }
+        }
+        let mut output = reserved(directions.len(), "coherent Rayleigh far-field image")?;
+        let origin = self.surface.positions[0];
+        let k = Dd::from_f64(-self.k);
+        for d in directions {
+            if cancelled() { return Err(HelmholtzError::Cancelled); }
+            if d[2] < 0.0 {
+                output.push(C64::ZERO);
+                continue;
+            }
+            let direction = [Dd::from_f64(d[0]), Dd::from_f64(d[1])];
+            let reference_phase = (k * (direction[0] * Dd::from_f64(origin[0])
+                + direction[1] * Dd::from_f64(origin[1]))).to_f64();
+            if !reference_phase.is_finite() {
+                return Err(invalid("Rayleigh far-field phase exceeds finite numerical range"));
+            }
+            let mut sum = self.total_flow;
+            for (cell, (point, flow)) in self.surface.positions.iter().zip(&self.flow).enumerate() {
+                if cell % 64 == 0 && cancelled() { return Err(HelmholtzError::Cancelled); }
+                let phase = (k * (direction[0] * (Dd::from_f64(point[0]) - Dd::from_f64(origin[0]))
+                    + direction[1] * (Dd::from_f64(point[1]) - Dd::from_f64(origin[1])))).to_f64();
+                if !phase.is_finite() {
+                    return Err(invalid("Rayleigh far-field phase exceeds finite numerical range"));
+                }
+                let sine = Dd::from_f64(det::sin(phase));
+                let half_sine = Dd::from_f64(det::sin(0.5 * phase));
+                let cosine_minus_one = Dd::from_f64(-2.0) * half_sine * half_sine;
+                sum[0] = sum[0] + flow[0] * cosine_minus_one - flow[1] * sine;
+                sum[1] = sum[1] + flow[1] * cosine_minus_one + flow[0] * sine;
+            }
+            let (sine, cosine) = det::sin_cos(reference_phase);
+            let (sine, cosine) = (Dd::from_f64(sine), Dd::from_f64(cosine));
+            let scale = Dd::from_f64(self.pressure_scale);
+            let value = C64::new(
+                ((sum[0] * sine + sum[1] * cosine) * scale).to_f64(),
+                (-(sum[0] * cosine - sum[1] * sine) * scale).to_f64(),
+            );
+            if !value.re.is_finite() || !value.im.is_finite() {
+                return Err(invalid("Rayleigh far-field pressure exceeds finite numerical range"));
+            }
+            output.push(value);
+        }
+        if cancelled() { return Err(HelmholtzError::Cancelled); }
+        Ok(output)
+    }
+}
+
 fn invalid(what: &'static str) -> HelmholtzError {
     HelmholtzError::BadParameter { what }
 }
@@ -272,6 +372,65 @@ impl PreparedSurface {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoherentRadiatedPower, HelmholtzError> {
         resistance::coherent_power(self, omega, medium, velocity, &mut cancelled)
+    }
+
+    /// Prepare a complex far-field observer of this same loaded surface motion.
+    /// Peak modal velocity phasors are combined into physical cell volume flows
+    /// with retained double-double area products before any propagation or
+    /// angular observation. All signed modes and relative phases are retained.
+    /// This supplies directional pressure where `coherent_radiated_power`
+    /// supplies only an angular integral; it performs no boundary solve.
+    ///
+    /// Source contraction costs O(cells * modes) once and stores two
+    /// double-doubles per cell. Reuse the result for directivity refinement.
+    /// The six-cell-per-wavelength admission is the existing area-resolution
+    /// diagnostic, not a spatial quadrature or finite-baffle accuracy promise.
+    /// # Errors
+    /// Invalid medium/frequency, incomplete or nonfinite modal motion, spatial
+    /// resolution, work, allocation, cancellation or nonfinite cell volume flow.
+    pub fn prepare_coherent_radiation(
+        &self,
+        omega: f64,
+        medium: Medium,
+        velocity: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedCoherentRadiation<'_>, HelmholtzError> {
+        if cancelled() { return Err(HelmholtzError::Cancelled); }
+        let ppw = self.equivalent_disc_ppw(omega, medium)?;
+        if ppw < MIN_PANELS_PER_WAVELENGTH {
+            return Err(HelmholtzError::TooCoarse { panels_per_wavelength: ppw });
+        }
+        if velocity.len() != self.modes
+            || velocity.iter().any(|v| !v.re.is_finite() || !v.im.is_finite()) {
+            return Err(invalid("Rayleigh far-field requires every finite modal velocity"));
+        }
+        admit_modal_work(self.count as u128 * self.modes as u128)?;
+        let pressure_scale = medium.density * (omega / (2.0 * PI));
+        if !pressure_scale.is_finite() || pressure_scale <= 0.0 {
+            return Err(invalid("Rayleigh far-field scale exceeds finite numerical range"));
+        }
+        let mut flow = reserved(self.count, "coherent Rayleigh cell volume velocities")?;
+        let mut total_flow = [Dd::ZERO; 2];
+        for cell in 0..self.count {
+            if cell % 64 == 0 && cancelled() { return Err(HelmholtzError::Cancelled); }
+            let mut value = [Dd::ZERO; 2];
+            for (mode, v) in velocity.iter().enumerate() {
+                let weight = self.weighted_shape[cell * self.modes + mode];
+                value[0] = value[0] + weight * Dd::from_f64(v.re);
+                value[1] = value[1] + weight * Dd::from_f64(v.im);
+            }
+            if value.iter().any(|x| !x.hi.is_finite() || !x.lo.is_finite()) {
+                return Err(invalid("Rayleigh cell volume flow exceeds finite numerical range"));
+            }
+            for axis in 0..2 { total_flow[axis] = total_flow[axis] + value[axis]; }
+            flow.push(value);
+        }
+        if total_flow.iter().any(|x| !x.hi.is_finite() || !x.lo.is_finite()) {
+            return Err(invalid("Rayleigh total volume flow exceeds finite numerical range"));
+        }
+        if cancelled() { return Err(HelmholtzError::Cancelled); }
+        Ok(PreparedCoherentRadiation { surface: self, flow, total_flow,
+            k: omega / medium.sound_speed, pressure_scale })
     }
 
     fn impedance_image(&self, omega: f64, medium: Medium, power_consistent: bool)
