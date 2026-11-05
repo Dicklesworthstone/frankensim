@@ -40,6 +40,10 @@ pub mod stack;
 #[path = "transport/isobaric.rs"]
 pub mod isobaric;
 
+/// Source Cv(T) on the native fixed-density, internal-energy heat timeline.
+#[path = "transport/isochoric.rs"]
+pub mod isochoric;
+
 // Shared affine-capacity integration and inversion, independent of its units.
 #[path = "transport/capacity.rs"]
 mod capacity;

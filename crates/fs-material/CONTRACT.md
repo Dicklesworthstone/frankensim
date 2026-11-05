@@ -8111,6 +8111,37 @@ There is no inferred mass transfer, constrained strain, phase law, evolving fram
 cross-source specimen match or propagated uncertainty.
 
 
+## Source-backed fixed-volume heat capacity
+
+`thermal::transport::isochoric::IsochoricHeatCapacityLaw` binds an explicitly
+selected single-phase mass-specific Cv(T) source to the existing thermal
+timeline. The source must continuously support the actual fixed mass density
+and complete typed temperature path. Adding a density coordinate to an
+unqualified query cannot establish source support. Fixed pressure/stress
+coordinates refuse; a Cv curve evaluated along an isobar is not an isochore.
+All other composition/source conditions remain fixed.
+
+The shared capacity kernel integrates the original affine Cv exactly for
+internal-energy increments and Cv/T for relative entropy. Its existing
+prepared inverse provides logarithmic source lookup and analytic segment
+inversion, with bounded direct fallback at unrepresentable search coordinates.
+Runtime queries allocate nothing and neither query nor resample the source.
+Source receipts, card identity, density, coordinates and energy datum remain
+bound to the immutable law. Cell admission checks mass/volume against this
+density, allowing only arithmetic roundoff. `ThermalStorageBasis::InternalEnergy`
+keeps heat-only coupling available while the existing mass-advection owners
+reject treating this storage as stream enthalpy.
+
+Six G0/G1 regression tests specify independent affine-Cv energy and entropy
+integrals, heating and cooling across knots, inverse/domain boundaries, retained
+source conditions, native heat-driven energy conservation, incompatible-volume
+refusal and open-stream refusal without publishing a candidate. These newly
+added tests were not executed in the authoring session: dependency compilation
+stopped on shared-storage exhaustion, then the execution environment disconnected.
+This is numerical single-phase calorimetry, not an EOS, pressure prediction,
+phase transition, chemical reaction, evolving strain model or experimental
+material validation.
+
 ## Source-exact heating with free expansion
 
 `thermal::transport::isobaric::expansion::IsobaricFreeExpansion` combines
