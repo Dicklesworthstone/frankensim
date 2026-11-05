@@ -14142,3 +14142,29 @@ and early refusal with the parcel unchanged.
 ### Causal rigid-frame porous diffusion
 
 `porous::diffusive::PorousDiffusive` retains the original `PorousFluidLaw` and one coherent thermoviscous fluid snapshot. High-frequency storage is `alpha_inf*rho/phi` and `K_s/phi`, with the original static Darcy drag and positive viscous/thermal relaxation arms. Analytic positive measures are discretized by bounded midpoint quadrature; thermal relaxation includes its isolated real pole. Cp=Cv removes only thermal memory. Fluid substitution keeps intrinsic permeability and actual adiabatic modulus. Admission checks both complex response and each nonzero real loss against the original JCA/JCAL law on 129 logarithmic frequencies inside the card's support. Reported maxima are sampled discrepancies, not continuous-band bounds. This frozen rigid-frame realization supplies coefficients rather than an integrator; it does not qualify elastic-frame waves, mean flow, phase change, or source accuracy outside its declared band.
+
+## Free and clamped elastic surface reflection
+
+`elastic::acoustic::interface::surface::IsotropicElasticSurface` retains one
+original explicitly isotropic elastic state. `TractionFree` imposes zero
+traction; `Clamped` imposes zero velocity at an ideal stationary support. The
+solid occupies z < 0, with the bonded-interface owner's modal velocity, outward
+traction and peak phasor conventions. There is no artificial second material,
+finite-impedance approximation to a clamp, or guessed loss.
+
+Preparation reuses the original tensor-based traces and critical-slowness
+arithmetic. One row-scaled 2x2 native complex LU supplies coupled P/SV
+reflection; SH has its independent free/clamped sign. The fixed-size prepared
+operator applies coherent amplitudes without allocation or another solve.
+Converted evanescent P fields retain phase and traction while carrying zero
+individual normal power. Finite drives enforce the original half-space strain
+bound and independently check reflected power and surface work. Incoming
+nonpropagating modes, anisotropic sources, singular systems and unrepresentable
+inputs refuse; preparation is cancellable.
+
+G0/G1/G3/G4 regressions compare free/clamped analytical coefficients, normal
+reflection phase and clamp reaction, coherent power unitarity, supercritical
+conversion, common material scaling, original domain limits and cancellation.
+This is an infinite bulk-wave surface model, not a flexural plate-edge law,
+Rayleigh-wave source, compliant support, rough surface, attenuation model or
+experimental qualification of the source material.
