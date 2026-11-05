@@ -20,6 +20,9 @@
 //! Attached JKR/Maugis folds, nonconvergence and out-of-domain paths refuse;
 //! no snap, contact discovery, evolving frame or shear law is invented.
 
+/// Atomic original-source temperature changes on the shared native network.
+pub mod temperature;
+
 use super::{
     BoundNormalContact, CancelGate, CoupledModalSystem, ModalAcousticTimeModel, NormalLawSource,
     NormalLawSourceError, SourceNormalModalConfig, SourceNormalModalError, admit_contact,
@@ -532,46 +535,65 @@ impl MultipleSourceNormalModalSystem {
     }
 
     fn coupled_stability(&mut self, gate: &CancelGate) -> Result<(), SourceNormalModalError> {
-        let p = self.points.len();
         for (i, point) in self.points.iter().enumerate() {
             poll(Some(gate))?;
-            let source = point.contact.source();
-            let slope = source
-                .mean_force_end_derivative(self.before[i], self.trial_approaches[i])?
-                .ok_or(SourceNormalModalError::Unresolved(
-                    "original source path derivative unavailable",
-                ))?;
-            let mut negative = (-finite(slope)?).max(0.0);
-            // Across its finite tail DMT has a known global lower slope. Keep
-            // that original bound even if the current point is compressive.
-            if let NormalLawSource::DmtSphere(law) = source
-                && point.config.minimum_approach_m < 0.0
-                && point.config.maximum_approach_m > -law.interaction_range_m()
-            {
-                let tail = law
-                    .evaluate(0.0)
-                    .map_err(NormalLawSourceError::Dmt)?
-                    .one_sided_tangents_n_per_m[0];
-                negative = negative.max(-0.5 * tail);
-            }
-            self.negative_slopes[i] = det::sqrt(negative);
+            self.negative_slopes[i] = negative_slope_root(
+                point.contact.source(),
+                point.config,
+                self.before[i],
+                self.trial_approaches[i],
+            )?;
         }
-        for i in 0..p {
-            poll(Some(gate))?;
-            let mut row = 0.0;
-            for j in 0..p {
-                row = finite(
-                    row + self.negative_slopes[i]
-                        * self.compliance[i * p + j].abs()
-                        * self.negative_slopes[j],
-                )?;
-            }
-            if row >= 1.0 - 64.0 * f64::EPSILON {
-                return Err(SourceNormalModalError::Unresolved(
-                    "coupled adhesive negative curvature needs a smaller native step",
-                ));
-            }
-        }
-        Ok(())
+        check_coupled_stability(&self.compliance, &self.negative_slopes, gate)
     }
+}
+
+// Shared by mechanical paths and source replacement. In particular, a refresh
+// must check the final complete set, including untouched adhesive neighbours.
+fn negative_slope_root(
+    source: &NormalLawSource,
+    config: SourceNormalModalConfig,
+    before: f64,
+    after: f64,
+) -> Result<f64, SourceNormalModalError> {
+    let slope = source.mean_force_end_derivative(before, after)?.ok_or(
+        SourceNormalModalError::Unresolved("original source path derivative unavailable"),
+    )?;
+    let mut negative = (-finite(slope)?).max(0.0);
+    // Across its finite tail DMT has a known global lower slope. Keep
+    // that original bound even if the current point is compressive.
+    if let NormalLawSource::DmtSphere(law) = source
+        && config.minimum_approach_m < 0.0
+        && config.maximum_approach_m > -law.interaction_range_m()
+    {
+        let tail = law
+            .evaluate(0.0)
+            .map_err(NormalLawSourceError::Dmt)?
+            .one_sided_tangents_n_per_m[0];
+        negative = negative.max(-0.5 * tail);
+    }
+    Ok(det::sqrt(negative))
+}
+
+fn check_coupled_stability(
+    compliance: &[f64],
+    negative_slopes: &[f64],
+    gate: &CancelGate,
+) -> Result<(), SourceNormalModalError> {
+    let p = negative_slopes.len();
+    for i in 0..p {
+        poll(Some(gate))?;
+        let mut row = 0.0;
+        for j in 0..p {
+            row = finite(
+                row + negative_slopes[i] * compliance[i * p + j].abs() * negative_slopes[j],
+            )?;
+        }
+        if row >= 1.0 - 64.0 * f64::EPSILON {
+            return Err(SourceNormalModalError::Unresolved(
+                "coupled adhesive negative curvature needs a smaller native step",
+            ));
+        }
+    }
+    Ok(())
 }

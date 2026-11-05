@@ -1,4 +1,6 @@
 //! Thermal finite-zone sources continue the original native modal/Maxwell owner.
+mod batch;
+
 use super::*;
 use fs_contact::normal_patch::maugis::continuation::{
     MaugisContinuationBudget, MaugisPhase,

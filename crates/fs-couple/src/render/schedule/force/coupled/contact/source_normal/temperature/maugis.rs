@@ -1,12 +1,11 @@
 //! Original finite-zone temperature continuation on the complete native network.
 
 use super::super::{
-    BoundNormalContact, CancelGate, ModalCouplingError, NormalLawSource, NormalLawSourceError,
-    SourceNormalModalError, SourceNormalModalSystem, check_contact_work, finite, invalid,
-    limit, poll, solve,
+    BoundNormalContact, CancelGate, SourceNormalModalError, SourceNormalModalSystem, finite, limit,
+    poll, solve,
 };
+use super::prepare_maugis_contact_refresh;
 use fs_contact::normal_patch::adhesive::temperature::SourceMaugisThermalRefresh;
-use fs_math::dd::Dd;
 
 /// Accepted finite-zone source change at unchanged native sample and geometry.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,7 +49,9 @@ impl SourceNormalModalSystem {
     where
         E: From<SourceNormalModalError>,
     {
-        let (candidate, report) = self.prepare_maugis_refresh(refreshed, gate).map_err(E::from)?;
+        let (candidate, report) = self
+            .prepare_maugis_refresh(refreshed, gate)
+            .map_err(E::from)?;
         let receiving = admit(&report, &candidate)?;
         poll(Some(gate))
             .map_err(SourceNormalModalError::from)
@@ -65,59 +66,19 @@ impl SourceNormalModalSystem {
         gate: &CancelGate,
     ) -> Result<(BoundNormalContact, SourceNormalMaugisRefreshReport), SourceNormalModalError> {
         poll(Some(gate))?;
-        let NormalLawSource::MaugisAttached(previous) = self.contact.source() else {
-            return Err(invalid(
-                "Maugis temperature continuation requires the original finite-zone potential",
-            )
-            .into());
-        };
         let approach = self.approach(self.components())?;
         self.check_approach(approach)?;
-        let before = previous
-            .evaluate(approach)
-            .map_err(NormalLawSourceError::Maugis)?;
-        let next = previous.with_held_indentation_refresh(approach, refreshed)?;
-        let after = next
-            .evaluate(approach)
-            .map_err(NormalLawSourceError::Maugis)?;
-        limit(
-            "refreshed native Maugis force",
-            after.normal_force_n().abs(),
-            self.config.maximum_force_n,
-        )?;
-        let work = finite(refreshed.parameter_work_j())?;
-        let residual = finite(
-            (Dd::from_f64(after.potential_j())
-                - Dd::from_f64(before.potential_j())
-                - Dd::from_f64(work))
-            .to_f64(),
-        )?;
-        let scale = before
-            .potential_j()
-            .abs()
-            .max(after.potential_j().abs())
-            .max(work.abs());
-        let tolerance = finite(
-            self.config.contact_energy_absolute_tolerance_j
-                + self.config.contact_energy_relative_tolerance * scale,
-        )?;
-        check_contact_work(residual, tolerance)?;
-        check_contact_work(finite(refreshed.potential_change_j() - work)?, tolerance)?;
+        let (candidate, change) =
+            prepare_maugis_contact_refresh(&self.contact, self.config, approach, refreshed, gate)?;
         let native_energy = self.network.total_energy_j()?;
-        let energy_before = finite(native_energy + before.potential_j())?;
-        let energy_after = finite(native_energy + after.potential_j())?;
+        let energy_before = finite(native_energy + change.contact_energy_before_j)?;
+        let energy_after = finite(native_energy + change.contact_energy_after_j)?;
         limit(
             "refreshed native/source energy magnitude",
             energy_after.abs(),
             self.network.config.maximum_total_energy_j,
         )?;
 
-        let candidate = BoundNormalContact::new(
-            next.into(),
-            self.contact.work_column().to_vec(),
-            self.contact.gap_m(),
-        )
-        .map_err(ModalCouplingError::ContactLaw)?;
         solve::positive_slope(
             candidate.source(),
             approach,
@@ -129,11 +90,11 @@ impl SourceNormalModalSystem {
             approach_m: approach,
             energy_before_j: energy_before,
             energy_after_j: energy_after,
-            contact_energy_before_j: before.potential_j(),
-            contact_energy_after_j: after.potential_j(),
-            parameter_work_j: work,
-            energy_residual_j: residual,
-            energy_tolerance_j: tolerance,
+            contact_energy_before_j: change.contact_energy_before_j,
+            contact_energy_after_j: change.contact_energy_after_j,
+            parameter_work_j: change.parameter_work_j,
+            energy_residual_j: change.energy_residual_j,
+            energy_tolerance_j: change.energy_tolerance_j,
         };
         poll(Some(gate))?;
         Ok((candidate, report))

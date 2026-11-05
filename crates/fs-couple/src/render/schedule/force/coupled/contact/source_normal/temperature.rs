@@ -9,13 +9,27 @@ mod maugis;
 pub use maugis::SourceNormalMaugisRefreshReport;
 
 use super::{
-    BoundNormalContact, CancelGate, NormalLawSource, NormalLawSourceError, SourceNormalModalError,
-    SourceNormalModalSystem, check_contact_work, finite, invalid, limit, poll, solve,
+    BoundNormalContact, CancelGate, ModalCouplingError, NormalLawSource, NormalLawSourceError,
+    SourceNormalModalConfig, SourceNormalModalError, SourceNormalModalSystem, check_contact_work,
+    finite, invalid, limit, poll, solve,
 };
 use fs_contact::normal_patch::adhesive::temperature::{
-    AdhesiveThermalControl, SourceJkrThermalRefresh,
+    AdhesiveThermalControl, SourceJkrThermalRefresh, SourceMaugisThermalRefresh,
 };
 use fs_math::dd::Dd;
+
+/// Original source work at a held actual indentation, independent of how many
+/// contacts share the native network. This is prescribed parameter work, not
+/// inferred heat. Each contact passes its own energy gate before aggregation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceNormalThermalChange {
+    pub approach_m: f64,
+    pub contact_energy_before_j: f64,
+    pub contact_energy_after_j: f64,
+    pub parameter_work_j: f64,
+    pub energy_residual_j: f64,
+    pub energy_tolerance_j: f64,
+}
 
 /// One accepted source change, at unchanged native sample and coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,70 +87,19 @@ impl SourceNormalModalSystem {
         gate: &CancelGate,
     ) -> Result<(BoundNormalContact, SourceNormalJkrRefreshReport), SourceNormalModalError> {
         poll(Some(gate))?;
-        let NormalLawSource::JkrAttached(previous) = self.contact.source() else {
-            return Err(invalid(
-                "JKR temperature continuation requires the original attached JKR source",
-            )
-            .into());
-        };
         let approach = self.approach(self.components())?;
         self.check_approach(approach)?;
-        let before = previous
-            .evaluate_attached(approach)
-            .map_err(NormalLawSourceError::Jkr)?;
-        let next = refreshed.source();
-        let after = next
-            .evaluate_attached(approach)
-            .map_err(NormalLawSourceError::Jkr)?;
-        if refreshed.original_model_identity() != previous.identity()
-            || refreshed.control() != AdhesiveThermalControl::HeldIndentation
-            || refreshed.mechanical_work_j() != 0.0
-            || *refreshed.before() != before
-            || *refreshed.response() != after
-            || previous.effective_radius_m() != next.effective_radius_m()
-            || previous.interaction_range_m() != next.interaction_range_m()
-            || previous.envelope() != next.envelope()
-        {
-            return Err(invalid("JKR refresh must retain original source, actual held approach, attached branch and geometry").into());
-        }
-        limit(
-            "refreshed native JKR force",
-            after.normal_force_n.abs(),
-            self.config.maximum_force_n,
-        )?;
-        let work = finite(refreshed.parameter_work_j())?;
-        let residual = finite(
-            (Dd::from_f64(after.reversible_energy_j)
-                - Dd::from_f64(before.reversible_energy_j)
-                - Dd::from_f64(work))
-            .to_f64(),
-        )?;
-        let scale = before
-            .reversible_energy_j
-            .abs()
-            .max(after.reversible_energy_j.abs())
-            .max(work.abs());
-        let tolerance = finite(
-            self.config.contact_energy_absolute_tolerance_j
-                + self.config.contact_energy_relative_tolerance * scale,
-        )?;
-        check_contact_work(residual, tolerance)?;
-        check_contact_work(finite(refreshed.potential_change_j() - work)?, tolerance)?;
+        let (candidate, change) =
+            prepare_jkr_contact_refresh(&self.contact, self.config, approach, refreshed, gate)?;
         let native_energy = self.network.total_energy_j()?;
-        let energy_before = finite(native_energy + before.reversible_energy_j)?;
-        let energy_after = finite(native_energy + after.reversible_energy_j)?;
+        let energy_before = finite(native_energy + change.contact_energy_before_j)?;
+        let energy_after = finite(native_energy + change.contact_energy_after_j)?;
         limit(
             "refreshed native/source energy magnitude",
             energy_after.abs(),
             self.network.config.maximum_total_energy_j,
         )?;
 
-        let candidate = BoundNormalContact::new(
-            NormalLawSource::JkrAttached(Box::new(next.clone())),
-            self.contact.work_column().to_vec(),
-            self.contact.gap_m(),
-        )
-        .map_err(super::ModalCouplingError::ContactLaw)?;
         solve::positive_slope(
             candidate.source(),
             approach,
@@ -148,13 +111,140 @@ impl SourceNormalModalSystem {
             approach_m: approach,
             energy_before_j: energy_before,
             energy_after_j: energy_after,
-            contact_energy_before_j: before.reversible_energy_j,
-            contact_energy_after_j: after.reversible_energy_j,
-            parameter_work_j: work,
-            energy_residual_j: residual,
-            energy_tolerance_j: tolerance,
+            contact_energy_before_j: change.contact_energy_before_j,
+            contact_energy_after_j: change.contact_energy_after_j,
+            parameter_work_j: change.parameter_work_j,
+            energy_residual_j: change.energy_residual_j,
+            energy_tolerance_j: change.energy_tolerance_j,
         };
         poll(Some(gate))?;
         Ok((candidate, report))
     }
+}
+
+// The original single-contact and simultaneous-contact owners share these
+// validators. A replacement retains its complete work column and fixed gap;
+// neither helper advances a native state or selects a different branch policy.
+pub(super) fn prepare_jkr_contact_refresh(
+    contact: &BoundNormalContact,
+    config: SourceNormalModalConfig,
+    approach: f64,
+    refreshed: &SourceJkrThermalRefresh,
+    gate: &CancelGate,
+) -> Result<(BoundNormalContact, SourceNormalThermalChange), SourceNormalModalError> {
+    poll(Some(gate))?;
+    let NormalLawSource::JkrAttached(previous) = contact.source() else {
+        return Err(invalid(
+            "JKR temperature continuation requires the original attached JKR source",
+        )
+        .into());
+    };
+    let before = previous
+        .evaluate_attached(approach)
+        .map_err(NormalLawSourceError::Jkr)?;
+    let next = refreshed.source();
+    let after = next
+        .evaluate_attached(approach)
+        .map_err(NormalLawSourceError::Jkr)?;
+    if refreshed.original_model_identity() != previous.identity()
+        || refreshed.control() != AdhesiveThermalControl::HeldIndentation
+        || refreshed.mechanical_work_j() != 0.0
+        || *refreshed.before() != before
+        || *refreshed.response() != after
+        || previous.effective_radius_m() != next.effective_radius_m()
+        || previous.interaction_range_m() != next.interaction_range_m()
+        || previous.envelope() != next.envelope()
+    {
+        return Err(invalid("JKR refresh must retain original source, actual held approach, attached branch and geometry").into());
+    }
+    limit(
+        "refreshed native JKR force",
+        after.normal_force_n.abs(),
+        config.maximum_force_n,
+    )?;
+    let change = thermal_change(
+        approach,
+        before.reversible_energy_j,
+        after.reversible_energy_j,
+        refreshed.parameter_work_j(),
+        refreshed.potential_change_j(),
+        config,
+    )?;
+    let candidate = BoundNormalContact::new(
+        NormalLawSource::JkrAttached(Box::new(next.clone())),
+        contact.work_column().to_vec(),
+        contact.gap_m(),
+    )
+    .map_err(ModalCouplingError::ContactLaw)?;
+    poll(Some(gate))?;
+    Ok((candidate, change))
+}
+
+pub(super) fn prepare_maugis_contact_refresh(
+    contact: &BoundNormalContact,
+    config: SourceNormalModalConfig,
+    approach: f64,
+    refreshed: &SourceMaugisThermalRefresh,
+    gate: &CancelGate,
+) -> Result<(BoundNormalContact, SourceNormalThermalChange), SourceNormalModalError> {
+    poll(Some(gate))?;
+    let NormalLawSource::MaugisAttached(previous) = contact.source() else {
+        return Err(invalid(
+            "Maugis temperature continuation requires the original finite-zone potential",
+        )
+        .into());
+    };
+    let before = previous
+        .evaluate(approach)
+        .map_err(NormalLawSourceError::Maugis)?;
+    let next = previous.with_held_indentation_refresh(approach, refreshed)?;
+    let after = next
+        .evaluate(approach)
+        .map_err(NormalLawSourceError::Maugis)?;
+    limit(
+        "refreshed native Maugis force",
+        after.normal_force_n().abs(),
+        config.maximum_force_n,
+    )?;
+    let change = thermal_change(
+        approach,
+        before.potential_j(),
+        after.potential_j(),
+        refreshed.parameter_work_j(),
+        refreshed.potential_change_j(),
+        config,
+    )?;
+    let candidate =
+        BoundNormalContact::new(next.into(), contact.work_column().to_vec(), contact.gap_m())
+            .map_err(ModalCouplingError::ContactLaw)?;
+    poll(Some(gate))?;
+    Ok((candidate, change))
+}
+
+fn thermal_change(
+    approach: f64,
+    before: f64,
+    after: f64,
+    parameter_work: f64,
+    potential_change: f64,
+    config: SourceNormalModalConfig,
+) -> Result<SourceNormalThermalChange, SourceNormalModalError> {
+    let work = finite(parameter_work)?;
+    let residual =
+        finite((Dd::from_f64(after) - Dd::from_f64(before) - Dd::from_f64(work)).to_f64())?;
+    let scale = before.abs().max(after.abs()).max(work.abs());
+    let tolerance = finite(
+        config.contact_energy_absolute_tolerance_j
+            + config.contact_energy_relative_tolerance * scale,
+    )?;
+    check_contact_work(residual, tolerance)?;
+    check_contact_work(finite(potential_change - work)?, tolerance)?;
+    Ok(SourceNormalThermalChange {
+        approach_m: approach,
+        contact_energy_before_j: before,
+        contact_energy_after_j: after,
+        parameter_work_j: work,
+        energy_residual_j: residual,
+        energy_tolerance_j: tolerance,
+    })
 }
