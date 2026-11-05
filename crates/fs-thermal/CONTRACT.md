@@ -1787,6 +1787,28 @@ preceding interval's coefficient payload and phase receipts, while a later birth
 stays pending. Actual birth-time material/branch failures and late cancellation
 still discard the whole proposed trajectory.
 
+`EvaporatingCellSource` and
+`solve_implicit_evaporating_network_step_with_films` admit original liquid laws
+with source-resolved pressure, vapor partial pressure, gas temperature and mass
+transfer coefficients. Initial films are queried once from the actual initial
+state. `EvaporatingNetworkBackwardEulerStep::evaluate_with_films` then resolves
+the complete film map at each uncached endpoint BEFORE evaluating any phase rate.
+The heat callback receives those exact validated films and all proposed liquid
+inventories, so heat and environmental response participate in one residual.
+Every film map must match selected active cell identities exactly; missing,
+extra, wrong-id or invalid films refuse before the heat callback.
+
+Fixed and source-resolved paths share the same physical residual, Newton loop,
+two-entry cache, numerical work bounds and independent final acceptance. The
+final endpoint queries both sources afresh; only its payload is returned. The
+residual budget counts complete endpoint evaluations, with one additional
+bounded initial-film query for preparation. Callbacks retain immutable accepted
+history during all trials. A film temperature supplies the mass-transfer model;
+reciprocal sensible heat remains explicitly supplied thermal coefficients.
+This entry supplies environmental feedback, without creating an atmosphere
+inventory or a gas caloric model. A finite-gas coupling must separately close
+species/energy changes and upstream-vapor enthalpy for nonisothermal condensation.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry

@@ -19,6 +19,21 @@ use crate::evaporation::{
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+/// Original liquid identity and caloric support for a source-resolved gas film.
+/// The film is queried from the actual initial/endpoint state rather than stored
+/// here. No pressure, humidity, gas temperature or transport coefficient is inferred.
+pub struct EvaporatingCellSource<'l, L: EvaporationLaw + ?Sized = dyn EvaporationLaw + 'l> {
+    pub id: CellId,
+    pub law: &'l L,
+    pub pure_liquid_enthalpy_range_j_kg: [f64; 2],
+}
+impl<L: EvaporationLaw + ?Sized> Copy for EvaporatingCellSource<'_, L> {}
+impl<L: EvaporationLaw + ?Sized> Clone for EvaporatingCellSource<'_, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 /// One existing thermal cell's phase law and prescribed far-field boundary.
 /// Mass, geometry, caloric identity and stored enthalpy stay in the timeline.
 /// The default trait object admits heterogeneous laws in the same binding slice;
@@ -82,6 +97,68 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
         initial: &'s DepositionSimulation<'m>,
         bindings: &[EvaporatingCellBinding<'l, L>],
         target_s: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ThermalEvaporationError> {
+        Self::prepare(initial, bindings, target_s, None, checkpoint)
+    }
+
+    /// Prepare the same heat/phase owner with source-resolved INITIAL films.
+    /// Every selected cell must be active and appear exactly once in the map.
+    /// The returned step retains these films as its initial physical reference;
+    /// use `evaluate_with_films` to resolve later speculative endpoints.
+    pub fn new_with_films(
+        initial: &'s DepositionSimulation<'m>,
+        sources: &[EvaporatingCellSource<'l, L>],
+        target_s: f64,
+        resolve_films: impl FnOnce(
+            &DepositionSimulation<'m>,
+        )
+            -> Result<BTreeMap<CellId, GasFilm>, ThermalEvaporationError>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ThermalEvaporationError> {
+        checkpoint()?;
+        if sources.len() > initial.cells.len() {
+            return Err(DepositionError::InvalidInput("too many evaporating cell sources").into());
+        }
+        let heat = BackwardEulerStep::new(initial, target_s, &mut checkpoint)?;
+        let mut selected = BTreeMap::new();
+        for (index, source) in sources.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            LiquidBranch::new(source.id, source.pure_liquid_enthalpy_range_j_kg)?.check(initial)?;
+            if !initial.cells.contains_key(&source.id) {
+                return Err(DepositionError::InvalidInput(
+                    "evaporation requires an active liquid cell",
+                )
+                .into());
+            }
+            if selected.insert(source.id, ()).is_some() {
+                return Err(
+                    DepositionError::InvalidInput("duplicate evaporating cell source").into(),
+                );
+            }
+        }
+        checkpoint()?;
+        let films = resolve_films(initial)?;
+        validate_films(selected.keys().copied(), &films, &mut checkpoint)?;
+        let bindings: Vec<_> = sources
+            .iter()
+            .map(|source| EvaporatingCellBinding {
+                id: source.id,
+                law: source.law,
+                film: films[&source.id],
+                pure_liquid_enthalpy_range_j_kg: source.pure_liquid_enthalpy_range_j_kg,
+            })
+            .collect();
+        Self::prepare(initial, &bindings, target_s, Some(heat), checkpoint)
+    }
+
+    fn prepare(
+        initial: &'s DepositionSimulation<'m>,
+        bindings: &[EvaporatingCellBinding<'l, L>],
+        target_s: f64,
+        prepared_heat: Option<BackwardEulerStep<'s, 'm>>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ThermalEvaporationError> {
         checkpoint()?;
@@ -143,7 +220,10 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                 }
             }
         }
-        let heat = BackwardEulerStep::new(initial, target_s, &mut checkpoint)?;
+        let heat = match prepared_heat {
+            Some(heat) => heat,
+            None => BackwardEulerStep::new(initial, target_s, &mut checkpoint)?,
+        };
         for surface in surfaces.values_mut() {
             checkpoint()?;
             let binding = surface.binding;
@@ -190,12 +270,74 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
     where
         E: From<ThermalEvaporationError> + From<DepositionError>,
     {
+        self.evaluate_resolved(
+            energy_increments_j,
+            |_| Ok(None),
+            |thermal, liquids, _| resolve(thermal, liquids),
+            checkpoint,
+        )
+    }
+
+    /// Resolve all endpoint films BEFORE evaluating any interface rate. The
+    /// heat callback sees the exact validated films and proposed liquid masses
+    /// used in this residual. Returned maps must match the selected cells
+    /// exactly, including an empty map for a heat-only step.
+    ///
+    /// Film sources may depend on time and all endpoint caloric states; their
+    /// accepted history must remain immutable during speculative calls. This
+    /// remains a prescribed-film thermal balance: a finite-gas owner must also
+    /// close its species, energy and upstream-vapor enthalpy accounts.
+    pub fn evaluate_with_films<T, E>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve_films: impl FnOnce(&DepositionSimulation<'m>) -> Result<BTreeMap<CellId, GasFilm>, E>,
+        resolve_heat: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &BTreeMap<CellId, LiquidSurfaceState>,
+            &BTreeMap<CellId, GasFilm>,
+        ) -> Result<BoundaryExchangeStepCoefficients<T>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<EvaporatingNetworkBackwardEulerTrial<'m, T>, E>
+    where
+        E: From<ThermalEvaporationError> + From<DepositionError>,
+    {
+        self.evaluate_resolved(
+            energy_increments_j,
+            |thermal| resolve_films(thermal).map(Some),
+            |thermal, liquids, films| {
+                resolve_heat(thermal, liquids, films.expect("resolved endpoint films"))
+            },
+            checkpoint,
+        )
+    }
+
+    fn evaluate_resolved<T, E>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve_films: impl FnOnce(
+            &DepositionSimulation<'m>,
+        ) -> Result<Option<BTreeMap<CellId, GasFilm>>, E>,
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &BTreeMap<CellId, LiquidSurfaceState>,
+            Option<&BTreeMap<CellId, GasFilm>>,
+        ) -> Result<BoundaryExchangeStepCoefficients<T>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<EvaporatingNetworkBackwardEulerTrial<'m, T>, E>
+    where
+        E: From<ThermalEvaporationError> + From<DepositionError>,
+    {
         let checkpoint = RefCell::new(checkpoint);
         let dt = self.duration_s();
         let heat = self.heat.evaluate_with_boundary_exchanges::<_, E>(
             energy_increments_j,
             |thermal| {
                 let mut poll = || checkpoint.borrow_mut()();
+                poll()?;
+                let films = resolve_films(thermal)?;
+                if let Some(films) = &films {
+                    validate_films(self.surfaces.keys().copied(), films, &mut poll)?;
+                }
                 let mut liquids = BTreeMap::new();
                 let mut receipts = BTreeMap::new();
                 for (&id, prepared) in &self.surfaces {
@@ -206,8 +348,10 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                     let temperature_k = thermal.temperature_k(id)?;
                     let p = properties(prepared.binding.law, temperature_k)
                         .map_err(ThermalEvaporationError::from)?;
-                    let rate =
-                        flux(p, prepared.binding.film).map_err(ThermalEvaporationError::from)?;
+                    let film = films
+                        .as_ref()
+                        .map_or(prepared.binding.film, |films| films[&id]);
+                    let rate = flux(p, film).map_err(ThermalEvaporationError::from)?;
                     let raw_dm = finite(rate.mass_flux_kg_m2_s * prepared.area_m2 * dt)?;
                     let mass = finite(old.mass_kg - raw_dm)?;
                     if mass <= 0.0 {
@@ -283,7 +427,7 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                             transfers,
                         },
                     exchanges,
-                } = resolve(thermal, &liquids)?;
+                } = resolve(thermal, &liquids, films.as_ref())?;
                 let mut physical = thermal.clone();
                 physical.set_step_conductances(&conductances_w_k, &mut poll)?;
                 physical.add_step_sources(&sources_w, &mut poll)?;
@@ -368,6 +512,32 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
         checkpoint.borrow_mut()()?;
         Ok(EvaporatingNetworkBackwardEulerTrial { heat })
     }
+}
+
+fn validate_films(
+    ids: impl ExactSizeIterator<Item = CellId>,
+    films: &BTreeMap<CellId, GasFilm>,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<(), ThermalEvaporationError> {
+    if films.len() != ids.len() {
+        return Err(DepositionError::InvalidInput(
+            "resolved films must exactly match selected liquid cells",
+        )
+        .into());
+    }
+    for (index, id) in ids.enumerate() {
+        if index % 256 == 0 {
+            checkpoint()?;
+        }
+        films
+            .get(&id)
+            .ok_or(DepositionError::InvalidInput(
+                "resolved films must exactly match selected liquid cells",
+            ))?
+            .validate()?;
+    }
+    checkpoint()?;
+    Ok(())
 }
 
 struct Endpoint<T> {

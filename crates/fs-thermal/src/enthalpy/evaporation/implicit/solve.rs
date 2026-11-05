@@ -15,8 +15,9 @@ use fs_solver::{
 };
 
 use super::{
-    EvaporatingBackwardEulerAudit, EvaporatingCellBinding, EvaporatingNetworkBackwardEulerAudit,
-    EvaporatingNetworkBackwardEulerStep,
+    EvaporatingBackwardEulerAudit, EvaporatingCellBinding, EvaporatingCellSource,
+    EvaporatingNetworkBackwardEulerAudit, EvaporatingNetworkBackwardEulerStep,
+    EvaporatingNetworkBackwardEulerTrial,
 };
 use crate::enthalpy::backward_euler::BoundaryExchangeStepCoefficients;
 use crate::enthalpy::evaporation::ThermalEvaporationError;
@@ -275,99 +276,180 @@ impl<'m> DepositionSimulation<'m> {
         controls.validate()?;
         let step =
             EvaporatingNetworkBackwardEulerStep::new(self, bindings, target_s, &mut checkpoint)?;
-        let poll = RefCell::new(&mut checkpoint);
-        let source = RefCell::new(&mut resolve);
-        let evaluations = Cell::new(0usize);
-        let cache: RefCell<Vec<(Vec<f64>, Vec<f64>)>> = RefCell::new(Vec::with_capacity(2));
-        let problem = FallibleFiniteDifference::new(
-            step.cell_ids().len(),
-            controls.difference_step_j,
-            |x: &[f64]| {
-                (poll.borrow_mut())()?;
-                let coordinates = step.resolvable_increments_j(x);
-                {
-                    let mut entries = cache.borrow_mut();
-                    if let Some(index) = entries
-                        .iter()
-                        .position(|(point, _)| same_point(point, &coordinates))
-                    {
-                        let entry = entries.remove(index);
-                        let residual = entry.1.clone();
-                        entries.push(entry);
-                        return Ok(residual);
-                    }
-                }
-                spend_evaluation(&evaluations, controls.maximum_evaluations)?;
-                let trial = step.evaluate(
-                    &coordinates,
-                    |state, liquid| (source.borrow_mut())(state, liquid),
-                    || (poll.borrow_mut())(),
-                )?;
-                let residual = trial.residual_j().to_vec();
-                let mut entries = cache.borrow_mut();
-                if entries.len() == 2 {
-                    entries.remove(0);
-                }
-                entries.push((coordinates, residual.clone()));
-                Ok::<_, ThermalEvaporationError>(residual)
-            },
+        solve_prepared(
+            &step,
+            controls,
+            |coordinates, poll| step.evaluate(coordinates, &mut resolve, poll),
+            checkpoint,
         )
-        .map_err(difference_error)?;
-        let initialization =
-            NewtonKrylovState::new(&problem, vec![0.0; step.cell_ids().len()], controls.newton);
-        if let Some(error) = problem.take_failure() {
-            return Err(difference_error(error));
-        }
-        let mut solver = initialization?;
-        let mut checkpoint_error = None;
-        let run = solver.run_controlled(&problem, controls.maximum_iterations, &mut || {
-            if problem.has_failed() {
-                return true;
-            }
-            match (poll.borrow_mut())() {
-                Ok(()) => false,
-                Err(error) => {
-                    checkpoint_error = Some(error);
-                    true
+    }
+
+    /// Solve the same simultaneous endpoint with source-resolved gas films.
+    /// `sources` carries only original liquid laws and admitted enthalpy ranges;
+    /// every film comes from `resolve_films`, without a default atmosphere.
+    ///
+    /// The resolver first sees the original initial state for preparation, then
+    /// each uncached endpoint before phase rates are computed, including the
+    /// fresh final physical check. Every map must exactly match selected active
+    /// cell identities. The heat callback receives those SAME endpoint films
+    /// and proposed liquid inventories. Neither callback may advance accepted
+    /// physical history during speculative evaluation.
+    ///
+    /// Film temperature is a transport input to the phase rate. Reciprocal
+    /// sensible gas heat remains an explicit part of the heat coefficients.
+    ///
+    /// The residual budget counts complete endpoint evaluations; initial film
+    /// preparation is one additional bounded query. This supplies environmental
+    /// feedback, not a gas inventory or caloric model. A finite atmosphere must
+    /// also close its species, energy and upstream-vapor enthalpy accounts.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn solve_implicit_evaporating_network_step_with_films<L: EvaporationLaw + ?Sized, T>(
+        &self,
+        sources: &[EvaporatingCellSource<'_, L>],
+        target_s: f64,
+        controls: EvaporationNetworkImplicitControls,
+        mut resolve_films: impl FnMut(
+            &DepositionSimulation<'m>,
+        )
+            -> Result<BTreeMap<CellId, GasFilm>, ThermalEvaporationError>,
+        mut resolve_heat: impl FnMut(
+            &DepositionSimulation<'m>,
+            &BTreeMap<CellId, LiquidSurfaceState>,
+            &BTreeMap<CellId, GasFilm>,
+        ) -> Result<
+            BoundaryExchangeStepCoefficients<T>,
+            ThermalEvaporationError,
+        >,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, T, EvaporationNetworkImplicitReport), EvaporationImplicitError> {
+        checkpoint()?;
+        controls.validate()?;
+        let step = EvaporatingNetworkBackwardEulerStep::new_with_films(
+            self,
+            sources,
+            target_s,
+            &mut resolve_films,
+            &mut checkpoint,
+        )?;
+        solve_prepared(
+            &step,
+            controls,
+            |coordinates, poll| {
+                step.evaluate_with_films(coordinates, &mut resolve_films, &mut resolve_heat, poll)
+            },
+            checkpoint,
+        )
+    }
+}
+
+/// One numerical owner for fixed and source-resolved films. Only the physical
+/// endpoint evaluator differs; cache, work bounds and final admission are shared.
+#[allow(clippy::type_complexity)]
+fn solve_prepared<'m, L: EvaporationLaw + ?Sized, T>(
+    step: &EvaporatingNetworkBackwardEulerStep<'_, 'm, '_, L>,
+    controls: EvaporationNetworkImplicitControls,
+    mut evaluate: impl FnMut(
+        &[f64],
+        &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        EvaporatingNetworkBackwardEulerTrial<'m, T>,
+        ThermalEvaporationError,
+    >,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<
+    (
+        DepositionSimulation<'m>,
+        T,
+        EvaporationNetworkImplicitReport,
+    ),
+    EvaporationImplicitError,
+> {
+    let poll = RefCell::new(&mut checkpoint);
+    let source = RefCell::new(&mut evaluate);
+    let evaluations = Cell::new(0usize);
+    let cache: RefCell<Vec<(Vec<f64>, Vec<f64>)>> = RefCell::new(Vec::with_capacity(2));
+    let problem = FallibleFiniteDifference::new(
+        step.cell_ids().len(),
+        controls.difference_step_j,
+        |x: &[f64]| {
+            (poll.borrow_mut())()?;
+            let coordinates = step.resolvable_increments_j(x);
+            {
+                let mut entries = cache.borrow_mut();
+                if let Some(index) = entries
+                    .iter()
+                    .position(|(point, _)| same_point(point, &coordinates))
+                {
+                    let entry = entries.remove(index);
+                    let residual = entry.1.clone();
+                    entries.push(entry);
+                    return Ok(residual);
                 }
             }
-        });
-        if let Some(error) = problem.take_failure() {
-            return Err(difference_error(error));
-        }
-        if let Some(error) = checkpoint_error {
-            return Err(error.into());
-        }
-        if run.progress != SolverRunProgress::Complete {
-            return Err(EvaporationImplicitError::Interrupted(run.progress));
-        }
-        if !run.report.converged {
-            return Err(EvaporationImplicitError::NonConverged(run.report));
-        }
-        spend_evaluation(&evaluations, controls.maximum_evaluations)?;
-        let trial = step.evaluate(
-            &step.resolvable_increments_j(&solver.x),
-            |state, liquid| (source.borrow_mut())(state, liquid),
-            || (poll.borrow_mut())(),
-        )?;
-        let (next, payload, physical) = trial.accept(
-            controls.cell_energy_tolerance_j,
-            controls.total_energy_tolerance_j,
-            controls.mass_tolerance_kg,
-            || (poll.borrow_mut())(),
-        )?;
-        (poll.borrow_mut())()?;
-        Ok((
-            next,
-            payload,
-            EvaporationNetworkImplicitReport {
-                physical,
-                newton_iterations: run.report.iterations,
-                residual_evaluations: evaluations.get(),
-                maximum_accepted_residual_norm_j: run.report.residual_norm,
-            },
-        ))
+            spend_evaluation(&evaluations, controls.maximum_evaluations)?;
+            let trial = (source.borrow_mut())(&coordinates, &mut || (poll.borrow_mut())())?;
+            let residual = trial.residual_j().to_vec();
+            let mut entries = cache.borrow_mut();
+            if entries.len() == 2 {
+                entries.remove(0);
+            }
+            entries.push((coordinates, residual.clone()));
+            Ok::<_, ThermalEvaporationError>(residual)
+        },
+    )
+    .map_err(difference_error)?;
+    let initialization =
+        NewtonKrylovState::new(&problem, vec![0.0; step.cell_ids().len()], controls.newton);
+    if let Some(error) = problem.take_failure() {
+        return Err(difference_error(error));
     }
+    let mut solver = initialization?;
+    let mut checkpoint_error = None;
+    let run = solver.run_controlled(&problem, controls.maximum_iterations, &mut || {
+        if problem.has_failed() {
+            return true;
+        }
+        match (poll.borrow_mut())() {
+            Ok(()) => false,
+            Err(error) => {
+                checkpoint_error = Some(error);
+                true
+            }
+        }
+    });
+    if let Some(error) = problem.take_failure() {
+        return Err(difference_error(error));
+    }
+    if let Some(error) = checkpoint_error {
+        return Err(error.into());
+    }
+    if run.progress != SolverRunProgress::Complete {
+        return Err(EvaporationImplicitError::Interrupted(run.progress));
+    }
+    if !run.report.converged {
+        return Err(EvaporationImplicitError::NonConverged(run.report));
+    }
+    spend_evaluation(&evaluations, controls.maximum_evaluations)?;
+    let trial = (source.borrow_mut())(&step.resolvable_increments_j(&solver.x), &mut || {
+        (poll.borrow_mut())()
+    })?;
+    let (next, payload, physical) = trial.accept(
+        controls.cell_energy_tolerance_j,
+        controls.total_energy_tolerance_j,
+        controls.mass_tolerance_kg,
+        || (poll.borrow_mut())(),
+    )?;
+    (poll.borrow_mut())()?;
+    Ok((
+        next,
+        payload,
+        EvaporationNetworkImplicitReport {
+            physical,
+            newton_iterations: run.report.iterations,
+            residual_evaluations: evaluations.get(),
+            maximum_accepted_residual_norm_j: run.report.residual_norm,
+        },
+    ))
 }
 
 fn spend_evaluation(count: &Cell<usize>, limit: usize) -> Result<(), ThermalEvaporationError> {

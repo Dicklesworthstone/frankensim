@@ -23,7 +23,7 @@ use crate::evaporation::{EvaporationLaw, GasFilm, LiquidSurfaceState, SurfaceSte
 #[path = "implicit/network.rs"]
 pub mod network;
 pub use network::{
-    EvaporatingCellBinding, EvaporatingNetworkBackwardEulerAudit,
+    EvaporatingCellBinding, EvaporatingCellSource, EvaporatingNetworkBackwardEulerAudit,
     EvaporatingNetworkBackwardEulerStep, EvaporatingNetworkBackwardEulerTrial,
 };
 
