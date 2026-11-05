@@ -3001,3 +3001,30 @@ doses. Separate CLI modes resolve source formation-H and direct formation-G.
 `mining_clay_acid_sources` compiles all five new packs and checks all 23 facts,
 identity/domain refusals, three H/G sums, finite reactants and staged acid return.
 See `data/matdb/seed-v1/MINING_CLAY_ACID_DEMAND.md` for equations and commands.
+
+### Partial molar calorics for selective real-gas streams
+
+`PengRobinsonMixtureV1::evaluate_density_partial_calorics` supplies the original
+homogeneous scalar state and each component's fixed-temperature, fixed-pressure
+partial enthalpy departure and partial molar volume. The result borrows the
+original mixture and retains its exact component order, including zero-fraction
+entries. At most 64 records are stored; evaluation allocates nothing and shares
+one original mixing traversal. Analytic composition and pressure derivatives
+retain the original alpha-sign behavior. A converged analytic series evaluates
+the attractive-integral derivative in its dilute cancellation regime; it is not
+a replacement caloric law.
+
+The material owner adds each original NASA species enthalpy to its partial
+departure and converts with that species' molar mass. This already includes flow
+work. Partial molar volumes remain signed. The Euler identities recover the
+mixture enthalpy and volume without redistributing rounding residuals. Admission
+retains the original positive-pressure, covolume and local mechanical-stability
+checks; complete Cv, material support and phase equilibrium remain separate
+original-source responsibilities. The API does not select phases, supply a
+diffusion rate or certify a two-phase bulk partial enthalpy.
+
+Focused checks cover independent 90-digit extensive derivatives at fixed T,p,
+original fugacity/Gibbs–Helmholtz derivatives, Euler closure, pure and dilute
+limits, dense/alpha-sign states, negative partial volumes, permutation, exact
+absence, the 64-component bound and physical refusals. Existing scalar-state and
+finite-caloric regressions remain unchanged.

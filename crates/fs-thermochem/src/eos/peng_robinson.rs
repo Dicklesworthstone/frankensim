@@ -24,6 +24,8 @@ pub mod stability;
 pub mod saturation;
 /// Stable finite caloric changes on the same homogeneous density branch.
 pub mod caloric;
+/// Original fixed-T,p partial molar calorics for selective species energy.
+pub mod partial_caloric;
 
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;
