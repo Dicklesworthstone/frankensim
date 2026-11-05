@@ -103,6 +103,8 @@ pub use compliant_wall::DgCompliantWallHeat;
 pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
+mod boundary_power;
+pub use boundary_power::{DgBoundaryEnergy, DgBoundaryStepOutput, PreparedDgBoundaryEnergy};
 mod side_ports;
 pub use side_ports::{DgSidePort, DgSidePortGeometry, DgSidePortSource, MAX_DG_SIDE_PORTS};
 mod gas_update;

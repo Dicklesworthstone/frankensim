@@ -917,6 +917,26 @@ pipe `Z_in = +i Zc cot(kL)`.
     - For the lossless image and lossless boundaries `E(t) - E(0) - W` is a conservation check.
     - For `Matched`, `Resistive` or wall memory the absorbed energy is inferred from the deficit
       (unclamped), so `balance_checked` is false.
+  - `prepare_boundary_energy` independently integrates the physical characteristic
+    load power and its numerical upwind mismatch on the same complete held-input
+    trajectory. Each channel comes from its original positive source square;
+    neither is inferred from storage disappearance. Endpoint material, area,
+    outward orientation, all retained memories and every source/history cross
+    term remain. Only `load_absorbed_j` is physical boundary work;
+    `numerical_loss_j` must never become deposited heat. Warm observations use
+    caller-owned scratch without an exponential or allocation. The existing
+    source-integral owner bounds the full state to 128 coordinates; the two
+    caches share explicit preparation byte/work limits.
+  - `step_with_boundary_energy` advances the original `DgPropagator` and uses
+    `candidate_from_trajectory` to check its independent interval energy closure
+    before publishing the state. For this complete balance, internal porous,
+    viscothermal, molecular and compliant-wall attachments refuse until their
+    independent losses are supplied by a composed accounting window. Read-only
+    boundary integrals still support those full trajectories. Wrong source or
+    clock, nonfinite data, excessive residual or cancellation leave the original
+    state and accepted clock intact. Earlier history keeps its original scope;
+    this does not certify spatial accuracy, the entire historical balance, a
+    reactive load, or a measured radiation model.
   - Origin: QuietLotus's uncommitted 2026-10-16 work, reworked (see the
     commit for what changed).
 
