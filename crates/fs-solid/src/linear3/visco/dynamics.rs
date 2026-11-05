@@ -24,6 +24,12 @@ pub use source::ViscoDynamicMaterialChange;
 mod impulse;
 pub use impulse::{ViscoDynamicImpulse, ViscoDynamicImpulseProposal};
 
+mod ports;
+pub use ports::{
+    ViscoDynamicPortBudget, ViscoDynamicPortOperator, ViscoDynamicPortResponse,
+    ViscoDynamicPortStep,
+};
+
 /// Explicit trajectory, sparse solve and energy-balance limits.
 #[derive(Clone, Copy, Debug)]
 pub struct ViscoDynamicConfig {
@@ -360,7 +366,8 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         mean_force_n: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
-        self.advance_impl(mean_force_n, None, None, cx)
+        self.advance_impl(mean_force_n, None, None, None, cx)
+            .map(|r| r.0)
     }
 
     /// Advance the original inertial trajectory while imposing source-integrated
@@ -376,7 +383,8 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         thermal: impl Into<super::super::QuadraticThermalStrainField<'t>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
-        self.advance_impl(mean_force_n, None, Some(thermal.into()), cx)
+        self.advance_impl(mean_force_n, None, Some(thermal.into()), None, cx)
+            .map(|r| r.0)
     }
 
     /// Advance with prescribed support endpoint velocities [m/s]. The full
@@ -390,7 +398,8 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         support_velocity_mps: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
-        self.advance_impl(mean_force_n, Some(support_velocity_mps), None, cx)
+        self.advance_impl(mean_force_n, Some(support_velocity_mps), None, None, cx)
+            .map(|r| r.0)
     }
 
     /// The same imposed support motion combined with original thermal strain.
@@ -406,8 +415,10 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
             mean_force_n,
             Some(support_velocity_mps),
             Some(thermal.into()),
+            None,
             cx,
         )
+        .map(|r| r.0)
     }
 
     fn advance_impl(
@@ -415,12 +426,16 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         mean_force_n: &[f64],
         support_velocity_mps: Option<&[f64]>,
         thermal: Option<super::super::QuadraticThermalStrainField<'_>>,
+        port: Option<(&ViscoDynamicPortOperator<'_, '_>, &[f64])>,
         cx: &Cx<'_>,
-    ) -> Result<ViscoDynamicStep, ViscoElementError> {
+    ) -> Result<(ViscoDynamicStep, Option<ViscoDynamicPortResponse>), ViscoElementError> {
         checkpoint(cx)?;
         let prepared = self.prepared;
         let system = prepared.system;
         let h = prepared.dt_s;
+        if let Some((port, history)) = port {
+            port.admit(prepared, history, cx)?;
+        }
         let time = self.time_s + h;
         if self.steps >= prepared.config.maximum_steps
             || !time.is_finite()
@@ -541,7 +556,7 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         if !scale.is_finite() || rhs.iter().any(|v| !v.is_finite()) {
             return Err(ViscoElementError::NonFiniteResult);
         }
-        let (mean_velocity, iterations) = solve_linear(
+        let (mut mean_velocity, iterations) = solve_linear(
             &prepared.operator,
             &prepared.preconditioner,
             &rhs,
@@ -549,6 +564,9 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
             prepared.config.solve,
             cx,
         )?;
+        if let Some((port, history)) = port {
+            port.correct(&mut mean_velocity, history, cx)?;
+        }
         for (i, &d) in free.iter().enumerate() {
             displacement[d] = finite(displacement[d] + h * mean_velocity[i])?;
             // Recover the actual representable increment, ensuring constitutive
@@ -556,6 +574,33 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
             let actual_mean = (displacement[d] - self.material.displacement_m[d]) / h;
             next_velocity[d] = finite(2.0 * actual_mean - self.velocity_mps[d])?;
         }
+        // The source law sees the actual representable displacement increment.
+        // Reconstruct its force before the original momentum, reaction and
+        // material-work checks; a predicted port effort never bypasses them.
+        let port_result = port
+            .map(|(port, history)| {
+                port.response(
+                    mean_force_n,
+                    self.material.displacement_m(),
+                    &displacement,
+                    history,
+                    cx,
+                )
+            })
+            .transpose()?;
+        let (mean_force_n, port_response, scale) = match port_result.as_ref() {
+            Some((net_force, response)) => {
+                let boundary_scale =
+                    euclidean_norm(free.iter().map(|&d| mean_force_n[d] - net_force[d]));
+                let net_scale = euclidean_norm(free.iter().map(|&d| net_force[d]));
+                (
+                    net_force.as_slice(),
+                    Some(response),
+                    finite(scale.max(0.5 * h * boundary_scale).max(0.5 * h * net_scale))?,
+                )
+            }
+            None => (mean_force_n, None, scale),
+        };
         let mut candidate = self.material.clone();
         let constitutive =
             candidate.step_internal_force_impl(&displacement, h, thermal.as_ref(), cx)?;
@@ -623,6 +668,20 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
                 allowance_j: allowance,
             });
         }
+        if let Some(port) = port_response {
+            let residual_j = finite(port.applied_work_j - port.boundary_work_j - work)?;
+            let allowance_j = finite(
+                allowance
+                    + prepared.config.relative_energy_tolerance
+                        * (port.applied_work_j.abs() + port.boundary_work_j.abs()),
+            )?;
+            if residual_j.abs() > allowance_j {
+                return Err(ViscoElementError::DynamicEnergy {
+                    residual_j,
+                    allowance_j,
+                });
+            }
+        }
         let external_work = finite(self.external_work_j + work)?;
         let support_work = finite(self.support_work_j + support_work_j)?;
         let eigenstrain_work =
@@ -636,16 +695,19 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         self.eigenstrain_work_j = eigenstrain_work;
         self.time_s = time;
         self.steps += 1;
-        Ok(ViscoDynamicStep {
-            time_s: time,
-            iterations,
-            force_residual_n,
-            kinetic_energy_j: kinetic_j,
-            external_work_j: work,
-            support_work_j,
-            mean_reaction_force_n,
-            balance_residual_j: defect,
-            constitutive,
-        })
+        Ok((
+            ViscoDynamicStep {
+                time_s: time,
+                iterations,
+                force_residual_n,
+                kinetic_energy_j: kinetic_j,
+                external_work_j: work,
+                support_work_j,
+                mean_reaction_force_n,
+                balance_residual_j: defect,
+                constitutive,
+            },
+            port_result.map(|(_, response)| response),
+        ))
     }
 }

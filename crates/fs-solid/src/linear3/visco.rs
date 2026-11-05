@@ -55,7 +55,8 @@ pub use quasistatic::{ViscoQuasistaticOperator, ViscoQuasistaticStep};
 mod dynamics;
 pub use dynamics::{
     ViscoDynamicConfig, ViscoDynamicImpulse, ViscoDynamicImpulseProposal, ViscoDynamicMaterialChange,
-    ViscoDynamicOperator, ViscoDynamicState, ViscoDynamicStep,
+    ViscoDynamicOperator, ViscoDynamicPortBudget, ViscoDynamicPortOperator,
+    ViscoDynamicPortResponse, ViscoDynamicPortStep, ViscoDynamicState, ViscoDynamicStep,
 };
 mod harmonic;
 pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicResponse};
