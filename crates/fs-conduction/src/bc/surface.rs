@@ -70,6 +70,94 @@ impl SurfaceHeatConduction {
         Self::nodal_tensor(boundary_face, tangent_axes, [conductance_w_per_k; 3])
     }
 
+    /// Reduce a uniform world-space bulk tensor [W/(m K)] under an explicitly
+    /// declared zero-normal-heat-flux constraint, with positive thickness [m].
+    ///
+    /// In the orthonormal tangent/normal frame, `K = [[A,b],[b^T,c]]` gives
+    /// `grad_n(T) = -b^T grad_s(T)/c` and `K_s = thickness*(A-b*b^T/c)`.
+    /// The bulk tensor must be finite, symmetric and positive semidefinite,
+    /// with strictly positive normal conductivity. Its Schur complement is
+    /// checked without replacing negative eigenvalues by zero. Zero/rank-one
+    /// reduced sheets remain admissible when the reduction is representable.
+    ///
+    /// Zero normal flux can require a NONZERO normal temperature gradient.
+    /// The caller must justify neglecting the resulting temperature drop
+    /// across this thin, bonded film. Neither perfect bonding nor thickness
+    /// alone establishes that regime. A prescribed nonzero normal flux would
+    /// add `thickness*b*q_n/c` to the tangential flux; this law does not include
+    /// that coupling or solve a through-thickness field. It adds no storage,
+    /// normal resistance or material-source authority.
+    pub fn uniform_from_bulk_zero_normal_flux(
+        boundary_face: usize,
+        tangent_axes: [[f64; 3]; 2],
+        bulk_w_per_m_k: [[f64; 3]; 3],
+        thickness_m: f64,
+    ) -> Result<Self, ConductionError> {
+        check_axes(tangent_axes)?;
+        crate::require_finite("sheet thickness", thickness_m)?;
+        if thickness_m <= 0.0 {
+            return Err(invalid("bulk sheet reduction needs positive thickness"));
+        }
+        let mut scale = 0.0_f64;
+        for i in 0..3 {
+            for j in 0..3 {
+                let value = bulk_w_per_m_k[i][j];
+                crate::require_finite("bulk sheet conductivity", value)?;
+                if value != bulk_w_per_m_k[j][i] {
+                    return Err(invalid("bulk sheet conductivity must be symmetric"));
+                }
+                scale = scale.max(value.abs());
+            }
+        }
+        if scale == 0.0 {
+            return Err(invalid(
+                "bulk sheet reduction needs positive normal conductivity",
+            ));
+        }
+        let scaled = bulk_w_per_m_k.map(|row| row.map(|v| v / scale));
+        for (original, normalized) in bulk_w_per_m_k
+            .into_iter()
+            .flatten()
+            .zip(scaled.into_iter().flatten())
+        {
+            if original != 0.0 && normalized == 0.0 {
+                return Err(invalid("bulk sheet normalization underflowed"));
+            }
+        }
+        let normal = cross(tangent_axes[0], tangent_axes[1]);
+        let action = |v| scaled.map(|row| dot(row, v));
+        let normal_action = action(normal);
+        let normal_k = dot(normal, normal_action);
+        if !normal_k.is_finite() || normal_k <= 0.0 {
+            return Err(invalid(
+                "bulk sheet reduction needs positive normal conductivity",
+            ));
+        }
+        // Dividing by sqrt(c) BEFORE multiplying avoids an underflowed b_i*b_j
+        // numerator when its quotient by c is still physically significant.
+        let root_normal_k = fs_math::det::sqrt(normal_k);
+        let coupling = tangent_axes.map(|axis| dot(axis, normal_action) / root_normal_k);
+        for value in coupling {
+            crate::require_finite("relaxed bulk sheet coupling", value)?;
+        }
+        let a = dot(tangent_axes[0], action(tangent_axes[0]));
+        let b = dot(tangent_axes[0], action(tangent_axes[1]));
+        let c = dot(tangent_axes[1], action(tangent_axes[1]));
+        let off_diagonal = (-coupling[0]).mul_add(coupling[1], b);
+        let reduced = [
+            [(-coupling[0]).mul_add(coupling[0], a), off_diagonal],
+            [off_diagonal, (-coupling[1]).mul_add(coupling[1], c)],
+        ];
+        check_tensor(reduced)?;
+        let mut sheet = [[0.0; 2]; 2];
+        for i in 0..2 {
+            for j in 0..2 {
+                sheet[i][j] = sheet_product(reduced[i][j], scale, thickness_m)?;
+            }
+        }
+        Self::uniform_tensor(boundary_face, tangent_axes, sheet)
+    }
+
     /// Declare three P1 sheet tensors [W/K] in one fixed tangent frame, in the
     /// original face's vertex order. Interpolating PSD tensors preserves local
     /// nonnegative dissipation. The coefficient, rather than its eigenvalues
@@ -79,35 +167,9 @@ impl SurfaceHeatConduction {
         tangent_axes: [[f64; 3]; 2],
         nodal_w_per_k: [[[f64; 2]; 2]; 3],
     ) -> Result<Self, ConductionError> {
-        for axis in tangent_axes {
-            for value in axis {
-                crate::require_finite("sheet tangent axis", value)?;
-            }
-            if (dot(axis, axis) - 1.0).abs() > FRAME_TOLERANCE {
-                return Err(invalid("sheet tangent axes must have unit length"));
-            }
-        }
-        if dot(tangent_axes[0], tangent_axes[1]).abs() > FRAME_TOLERANCE {
-            return Err(invalid("sheet tangent axes must be orthogonal"));
-        }
+        check_axes(tangent_axes)?;
         for tensor in nodal_w_per_k {
-            for value in tensor.into_iter().flatten() {
-                crate::require_finite("sheet conductance tensor", value)?;
-            }
-            if tensor[0][1] != tensor[1][0] {
-                return Err(invalid("sheet conductance tensor must be symmetric"));
-            }
-            // sqrt(a)*sqrt(c) avoids overflow/underflow in the determinant
-            // a*c-b*b, including highly anisotropic and rank-one sheets.
-            if tensor[0][0] < 0.0
-                || tensor[1][1] < 0.0
-                || tensor[0][1].abs()
-                    > fs_math::det::sqrt(tensor[0][0]) * fs_math::det::sqrt(tensor[1][1])
-            {
-                return Err(invalid(
-                    "sheet conductance tensor must be positive semidefinite",
-                ));
-            }
+            check_tensor(tensor)?;
         }
         Ok(Self {
             boundary_face,
@@ -353,6 +415,56 @@ impl ThermalBoundary {
 }
 
 const FRAME_TOLERANCE: f64 = 1e-12;
+
+fn check_axes(axes: [[f64; 3]; 2]) -> Result<(), ConductionError> {
+    for axis in axes {
+        for value in axis {
+            crate::require_finite("sheet tangent axis", value)?;
+        }
+        if (dot(axis, axis) - 1.0).abs() > FRAME_TOLERANCE {
+            return Err(invalid("sheet tangent axes must have unit length"));
+        }
+    }
+    if dot(axes[0], axes[1]).abs() > FRAME_TOLERANCE {
+        return Err(invalid("sheet tangent axes must be orthogonal"));
+    }
+    Ok(())
+}
+
+fn check_tensor(tensor: [[f64; 2]; 2]) -> Result<(), ConductionError> {
+    for value in tensor.into_iter().flatten() {
+        crate::require_finite("sheet conductance tensor", value)?;
+    }
+    if tensor[0][1] != tensor[1][0] {
+        return Err(invalid("sheet conductance tensor must be symmetric"));
+    }
+    // The square-root product avoids overflow/underflow in a*c-b*b.
+    if tensor[0][0] < 0.0
+        || tensor[1][1] < 0.0
+        || tensor[0][1].abs() > fs_math::det::sqrt(tensor[0][0]) * fs_math::det::sqrt(tensor[1][1])
+    {
+        return Err(invalid(
+            "sheet conductance tensor must be positive semidefinite",
+        ));
+    }
+    Ok(())
+}
+
+fn sheet_product(value: f64, bulk_scale: f64, thickness: f64) -> Result<f64, ConductionError> {
+    if value == 0.0 {
+        return Ok(value);
+    }
+    // Multiply the smallest and largest magnitudes first. A common k*t scale
+    // can overflow even though each final reduced coefficient is representable.
+    let mut factors = [value.abs(), bulk_scale, thickness];
+    factors.sort_by(f64::total_cmp);
+    let magnitude = (factors[0] * factors[2]) * factors[1];
+    crate::require_finite("reduced sheet conductance", magnitude)?;
+    if magnitude == 0.0 {
+        return Err(invalid("nonzero reduced sheet conductance underflowed"));
+    }
+    Ok(magnitude.copysign(value))
+}
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0].mul_add(b[0], a[1].mul_add(b[1], a[2] * b[2]))

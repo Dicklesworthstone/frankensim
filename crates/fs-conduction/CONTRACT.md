@@ -82,6 +82,29 @@ scalar means: the isotropic coefficient accessor returns `None` for them.
 The frame is fixed on each original triangle, and no projection or reduction of
 a general bulk tensor with normal/tangential coupling is inferred.
 
+`uniform_from_bulk_zero_normal_flux` makes one bulk reduction explicit. For a
+finite symmetric bulk tensor in world coordinates, positive supplied thickness,
+and the declared tangent frame, it eliminates the normal gradient under the
+constraint `q_n=0`: `K_s=t*(K_tt-K_tn*K_nt/K_nn)`. Normal conductivity must be
+positive and the Schur complement positive semidefinite. A zero normal heat
+flux can require a nonzero normal temperature gradient. The caller must justify
+the thin-film trace approximation, including the resulting temperature drop;
+perfect bonding and small thickness alone do not establish it. A nonzero normal
+flux would additionally drive `t*K_tn*q_n/K_nn` tangential heat, which this
+reduced law does not include. No externally heated or general through-thickness
+anisotropic layer is inferred from this constructor.
+
+The reduction scales the original tensor before projection, computes normal
+coupling through `K_tn/sqrt(K_nn)`, and multiplies each reduced coefficient,
+bulk scale and thickness with balanced magnitudes. Lost normalization terms,
+unrepresentable nonzero outputs and nonpassive reductions refuse; negative
+Schur entries are not clamped. The resulting law uses the same tensor assembly,
+heat flux, storage composition and boundary-history paths as an explicitly
+declared intrinsic sheet. G1/G3 regressions independently reconstruct 3-D
+Fourier flux with its relaxed normal gradient, compare the assembled operator,
+and check rigid rotations, normal reversal, isotropic/rank-one limits and
+finite-output scaling.
+
 This declared linear sheet law adds no material-source authority, temperature
 dependence, finite through-thickness resistance or film-property derivative.
 Continuum mean verification explicitly refuses active coatings until its flux

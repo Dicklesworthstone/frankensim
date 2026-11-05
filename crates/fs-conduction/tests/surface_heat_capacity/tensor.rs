@@ -226,3 +226,194 @@ fn rank_one_sheets_admit_insulated_directions_and_refuse_nonphysical_laws() {
         );
     });
 }
+
+#[test]
+fn bulk_zero_normal_flux_reduction_matches_relaxed_fourier_flux_and_original_assembly() {
+    with_cx(|cx| {
+        let bulk = [[6.0, 2.0, 2.0], [2.0, 5.0, 1.0], [2.0, 1.0, 2.0]];
+        // For grad_t=[3,-2], q_n=0 requires grad_n=-2. Independent 3-D
+        // Fourier multiplication gives q_bulk=[-10,6,0], hence t*q_t=[-2.5,1.5].
+        let relaxed_gradient = [3.0, -2.0, -2.0];
+        let bulk_flux = bulk.map(|row| {
+            -row.iter()
+                .zip(relaxed_gradient)
+                .map(|(k, g)| k * g)
+                .sum::<f64>()
+        });
+        assert_eq!(bulk_flux, [-10.0, 6.0, 0.0]);
+        for rotated in [false, true] {
+            let (mesh, face) = tetrahedron(rotated);
+            let axes = if rotated { AXES.map(rotate) } else { AXES };
+            let world_bulk = if rotated {
+                let columns = [AXES[0], AXES[1], [0.0, 0.0, 1.0]].map(rotate);
+                let mut result = [[0.0; 3]; 3];
+                for i in 0..3 {
+                    for j in i..3 {
+                        let mut entry = 0.0;
+                        for a in 0..3 {
+                            for b in 0..3 {
+                                entry += columns[a][i] * bulk[a][b] * columns[b][j];
+                            }
+                        }
+                        result[i][j] = entry;
+                        result[j][i] = entry;
+                    }
+                }
+                result
+            } else {
+                bulk
+            };
+            let reduced = SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(
+                face, axes, world_bulk, 0.25,
+            )
+            .unwrap();
+            let expected_tensor = [[1.0, 0.25], [0.25, 1.125]];
+            for tensor in reduced.nodal_tensor_conductance_w_per_k().unwrap() {
+                for i in 0..2 {
+                    for j in 0..2 {
+                        close(tensor[i][j], expected_tensor[i][j], 3e-14);
+                    }
+                }
+            }
+            let temperature = [300.0, 303.0, 298.0, 305.0];
+            let expected_flux = bulk_flux.map(|q| 0.25 * q);
+            let expected_flux = if rotated {
+                rotate(expected_flux)
+            } else {
+                expected_flux
+            };
+            let flux = reduced.mean_heat_flux_w_per_m(&mesh, &temperature).unwrap();
+            for i in 0..3 {
+                close(flux[i], expected_flux[i], 2e-13);
+            }
+            let boundary = ThermalBoundaryBuilder::new(&mesh)
+                .adiabatic_remainder()
+                .finish()
+                .unwrap();
+            let reduced_boundary = boundary
+                .clone()
+                .with_surface_heat_conduction(cx, &mesh, &[reduced])
+                .unwrap();
+            let analytic =
+                SurfaceHeatConduction::uniform_tensor(face, axes, expected_tensor).unwrap();
+            let analytic_boundary = boundary
+                .with_surface_heat_conduction(cx, &mesh, &[analytic])
+                .unwrap();
+            let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let residual = |boundary| {
+                let system =
+                    assemble_operator(cx, &mesh, boundary, &material, &source, &temperature)
+                        .unwrap();
+                full_residual(&system, &temperature)
+            };
+            for (actual, expected) in residual(&reduced_boundary)
+                .iter()
+                .zip(residual(&analytic_boundary))
+            {
+                close(*actual, expected, 2e-12);
+            }
+        }
+    });
+}
+
+#[test]
+fn bulk_sheet_reduction_recovers_isotropy_and_normal_reversal() {
+    let (mesh, face) = tetrahedron(false);
+    let bulk = [[6.0, 2.0, 2.0], [2.0, 5.0, 1.0], [2.0, 1.0, 2.0]];
+    let temperature = [300.0, 303.0, 298.0, 305.0];
+    for axes in [AXES, [AXES[0], [0.0, -1.0, 0.0]]] {
+        let film =
+            SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(face, axes, bulk, 0.25)
+                .unwrap();
+        for (actual, expected) in film
+            .mean_heat_flux_w_per_m(&mesh, &temperature)
+            .unwrap()
+            .into_iter()
+            .zip([-2.5, 1.5, 0.0])
+        {
+            close(actual, expected, 2e-13);
+        }
+        let isotropic = SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(
+            face,
+            axes,
+            [[6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 6.0]],
+            0.25,
+        )
+        .unwrap();
+        assert_eq!(
+            isotropic.nodal_tensor_conductance_w_per_k(),
+            Some([[[1.5, 0.0], [0.0, 1.5]]; 3])
+        );
+    }
+}
+
+#[test]
+fn bulk_sheet_reduction_retains_rank_one_and_refuses_invalid_constitutive_constraints() {
+    let (mesh, face) = tetrahedron(false);
+    let bulk = [[1.0, 0.0, 2.0], [0.0, 2.0, 0.0], [2.0, 0.0, 4.0]];
+    let film =
+        SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(face, AXES, bulk, 0.25).unwrap();
+    assert_eq!(
+        film.nodal_tensor_conductance_w_per_k(),
+        Some([[[0.0, 0.0], [0.0, 0.5]]; 3])
+    );
+    assert_eq!(
+        film.mean_heat_flux_w_per_m(&mesh, &[300.0, 301.0, 300.0, 300.0])
+            .unwrap(),
+        [0.0; 3]
+    );
+    for invalid_bulk in [
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]],
+        [[1.0, 0.0, 2.0], [0.0, 1.0, 0.0], [2.0, 0.0, 1.0]],
+        [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [[f64::NAN, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [
+            [f64::from_bits(1), 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1e308],
+        ],
+    ] {
+        assert!(
+            SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(
+                face,
+                AXES,
+                invalid_bulk,
+                0.25
+            )
+            .is_err()
+        );
+    }
+    for thickness in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        assert!(
+            SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(face, AXES, bulk, thickness)
+                .is_err()
+        );
+    }
+    assert!(
+        SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(face, [AXES[0]; 2], bulk, 0.25)
+            .is_err()
+    );
+}
+
+#[test]
+fn bulk_sheet_reduction_avoids_an_unrepresentable_common_conductance_scale() {
+    let bulk = [[1e300, 0.0, 0.0], [0.0, 2e300, 0.0], [0.0, 0.0, 1e308]];
+    // max(|K|)*t overflows, although both physical sheet entries are finite.
+    let film =
+        SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(0, AXES, bulk, 10.0).unwrap();
+    let sheet = film.nodal_tensor_conductance_w_per_k().unwrap()[0];
+    close(sheet[0][0] / 1e301, 1.0, 3e-15);
+    close(sheet[1][1] / 2e301, 1.0, 3e-15);
+    assert_eq!(sheet[0][1], 0.0);
+    assert!(
+        SurfaceHeatConduction::uniform_from_bulk_zero_normal_flux(
+            0,
+            AXES,
+            [[1e308, 0.0, 0.0], [0.0, 1e308, 0.0], [0.0, 0.0, 1e308]],
+            10.0,
+        )
+        .is_err()
+    );
+}
