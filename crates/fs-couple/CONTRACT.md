@@ -32608,3 +32608,20 @@ and formatting were checked; native tests remain unrun under the dependency
 memory and workspace-space blockers. Independent analytical-oracle exchange
 errors were 6.500772e-6, 1.618632e-6 and 4.042733e-7 on 20/40/80 steps over 0.4 s;
 these are oracle results, not native implementation evidence.
+
+### Atomic scenario velocity face updates
+
+`scenario_velocity::rebind_velocity_faces3` samples all explicitly selected
+typed velocity histories at one physical time and publishes them through one
+native open-boundary transaction. Its fixed six-slot input and output follow
+`Face3::ALL`; absent slots retain their current targets and spatial profiles.
+Every selected history, frame, full-vector speed bound and profile precedence
+check completes before publication. A later refusal cannot leave an earlier
+face at a different control time. The single-face API uses this same path.
+
+No histories, fields or populations are copied, and no physical step occurs.
+The native restriction to open faces on one axis remains authoritative. This
+is atomic prescribed-velocity control, not an inferred mass-flow balance.
+The native integration regressions exercise paired signed histories in distinct
+frames, later-history and native-kind refusals, selected versus unselected
+profile authority, empty selections and cancellation.

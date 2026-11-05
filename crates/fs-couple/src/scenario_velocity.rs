@@ -110,34 +110,81 @@ pub fn rebind_velocity_face3<F: FluidTransport + ?Sized>(
     scaling: &MaterialScaling<'_, F>,
     gate: &CancelGate,
 ) -> Result<VelocitySample3, ScenarioVelocityError> {
-    let sample = sample_velocity3(boundary, frames, time_s, scaling, &mut || {
+    let mut boundaries = [None; 6];
+    boundaries[face as usize] = Some(boundary);
+    let samples = rebind_velocity_faces3(grid, boundaries, frames, time_s, scaling, gate)?;
+    // Every selected slot is sampled before the batch can publish successfully.
+    Ok(samples[face as usize].expect("selected velocity face has a sample"))
+}
+
+/// Sample and publish several typed velocity histories as one native update.
+///
+/// Input and output slots follow [`Face3::ALL`]: x-min, x-max, y-min, y-max,
+/// z-min, z-max. A selected slot explicitly binds that boundary's region to
+/// its face. `None` retains the face's complete existing control, including any
+/// installed spatial profile. Each selected slot is sampled at the same
+/// physical time, rotated in its declared frame, and admitted against the
+/// original material scaling's full-vector speed bound.
+///
+/// Sampling and profile checks finish for every selected face before one call
+/// to the original open-boundary owner publishes any target. A later invalid
+/// history, bound violation, incompatible face, or cancellation therefore
+/// cannot leave an earlier face at a new time. Selected spatial profiles refuse
+/// even if the new uniform target equals their dormant uniform value.
+///
+/// This uses fixed six-slot storage, without copying histories or populations.
+/// It does not advance time or enforce a mass-flow balance between faces. The
+/// native restriction to open faces on one axis remains authoritative. Empty
+/// selections preserve all controls but still require finite time and no
+/// cancellation. Other semantics are those of [`rebind_velocity_face3`].
+pub fn rebind_velocity_faces3<F: FluidTransport + ?Sized>(
+    grid: &mut BoundaryGrid3,
+    boundaries: [Option<&BoundaryCondition>; 6],
+    frames: &FrameTree,
+    time_s: f64,
+    scaling: &MaterialScaling<'_, F>,
+    gate: &CancelGate,
+) -> Result<[Option<VelocitySample3>; 6], ScenarioVelocityError> {
+    let mut checkpoint = || {
         if gate.is_requested() {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
         }
-    })?;
-    // The native owner deliberately leaves unchanged profiles authoritative.
-    // A scenario sample must not succeed while a profile overrides its value,
-    // including when the sample equals the otherwise dormant uniform target.
-    if grid.velocity_profile(face).is_some() {
-        return Err(ScenarioVelocityError::Boundary(
-            BoundaryForcingError3::Invalid(
-                "clear the selected velocity profile before applying a uniform scenario target",
-            ),
+    };
+    if checkpoint().is_break() {
+        return Err(ScenarioVelocityError::Scenario(
+            VectorEvaluationError::Cancelled,
+        ));
+    }
+    if !time_s.is_finite() {
+        return Err(ScenarioVelocityError::Scenario(
+            VectorEvaluationError::InvalidTime,
         ));
     }
     let before = grid.boundaries();
-    let targets = Face3::ALL.map(|candidate| {
-        if candidate == face {
-            FaceBoundary3::Velocity {
-                velocity: sample.lattice,
-            }
-        } else {
-            before.face(candidate)
+    let mut targets = Face3::ALL.map(|face| before.face(face));
+    let mut samples = [None; 6];
+    for (index, boundary) in boundaries.into_iter().enumerate() {
+        let Some(boundary) = boundary else {
+            continue;
+        };
+        let sample = sample_velocity3(boundary, frames, time_s, scaling, &mut checkpoint)?;
+        // Unchanged native profiles remain authoritative. A selected scenario
+        // target must never report success while an installed profile hides it.
+        if grid.velocity_profile(Face3::ALL[index]).is_some() {
+            return Err(ScenarioVelocityError::Boundary(
+                BoundaryForcingError3::Invalid(
+                    "clear the selected velocity profile before applying a uniform scenario target",
+                ),
+            ));
         }
-    });
+        targets[index] = FaceBoundary3::Velocity {
+            velocity: sample.lattice,
+        };
+        samples[index] = Some(sample);
+    }
     grid.rebind_open_boundaries(BoundarySpec3::new(targets), gate)
         .map_err(ScenarioVelocityError::Boundary)?;
-    Ok(sample)
+    Ok(samples)
 }
