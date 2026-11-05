@@ -4,6 +4,8 @@
 mod coupled_tests;
 #[path = "molecular_endpoint.rs"]
 mod endpoint_tests;
+#[path = "molecular_gas_law.rs"]
+mod gas_law_tests;
 
 use super::*;
 use fs_gas::material::transport::parcel::{

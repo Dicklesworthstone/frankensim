@@ -8,15 +8,18 @@
 /// Adaptive accuracy over the complete molecular/thermal/electromechanical assembly.
 #[path = "molecular_coupled.rs"]
 pub mod coupled;
+/// Molecular transport with caller-selected gas/body conductance and receipts.
+#[path = "molecular_gas_law.rs"]
+pub mod gas_law;
+#[path = "molecular_stage.rs"]
+mod stage;
 
 use super::*;
 use fs_gas::material::transport::parcel::{
     ParcelMolecularLink, ParcelMolecularSolve, ParcelMolecularStep, ParcelMolecularTransport,
 };
 use fs_gas::multicomponent::dissipation::TransportLaw;
-use fs_material::thermochemical_gas::energy::parcel::transfer::{
-    snapshot::MAX_SNAPSHOT_PARCELS, species::network::transport::GasTransportPaths,
-};
+use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportPaths;
 
 impl<'m> MaterialExchangeState<'m> {
     /// Preview molecular transport followed by the existing complete assembly.
@@ -67,71 +70,16 @@ impl<'m> MaterialExchangeState<'m> {
         controls: NetworkSolve,
         guess_j: &[f64],
     ) -> Result<(Self, MaterialFlowAdvance<ParcelMolecularStep>), MaterialFlowError> {
-        checkpoint(cx)?;
-        let duration_s = target_s - self.time_s();
-        if !duration_s.is_finite()
-            || duration_s <= 0.0
-            || self.chambers.is_empty()
-            || self.chambers.len() > controls.maximum_chambers
-            || self.chambers.len() > MAX_SNAPSHOT_PARCELS
-            || drives.len() != self.chambers.len()
-        {
-            return Err(MaterialFlowError::Invalid(
-                "one forward clock and one gas solver per bounded live chamber required",
-            ));
-        }
-        let mut endpoints = BTreeMap::new();
-        for drive in drives {
-            checkpoint(cx)?;
-            if !self.chambers.contains_key(&drive.chamber)
-                || endpoints
-                    .insert(drive.chamber, drive.piston_solve.gas)
-                    .is_some()
-            {
-                return Err(MaterialFlowError::Invalid(
-                    "duplicate drive or unknown live chamber",
-                ));
-            }
-        }
-        let mut parcels = BTreeMap::new();
-        for (&id, chamber) in &self.chambers {
-            checkpoint(cx)?;
-            parcels.insert(id, chamber.gas().clone());
-        }
-        let (parcels, flow) = molecular
-            .step_candidate(
-                &parcels,
-                links,
-                paths,
-                duration_s,
-                &endpoints,
-                molecular_controls,
-                || cx.checkpoint().is_err(),
-            )?
-            .into_parts();
-        let mut moved: BTreeSet<_> = flow
-            .transport
-            .exchange
-            .parcels
-            .iter()
-            .filter(|p| p.incoming_mass_kg > 0.0 || p.outgoing_mass_kg > 0.0)
-            .map(|p| p.id)
-            .collect();
-        // A cell's net heat can vanish between incident links. Retain the
-        // actual edges, including cancelling molecular corrections, rather
-        // than inferring a closed two-port history from that net balance.
-        for link in &flow.links {
-            checkpoint(cx)?;
-            if link.heat_correction_left_to_right_j != 0.0 {
-                moved.extend(link.parcels);
-            }
-        }
-        for heat in &flow.transport.exchange.heat {
-            checkpoint(cx)?;
-            if heat.heat_left_to_right_j != 0.0 {
-                moved.extend(heat.parcels);
-            }
-        }
+        let stage = self.molecular_stage(
+            cx,
+            target_s,
+            drives,
+            molecular,
+            links,
+            paths,
+            molecular_controls,
+            controls,
+        )?;
         let (next, report) = self.finish_flow_candidate(
             prepared,
             cx,
@@ -142,35 +90,9 @@ impl<'m> MaterialExchangeState<'m> {
             gas_patches,
             controls,
             guess_j,
-            FlowStage {
-                parcels,
-                moved,
-                report: flow,
-                mass_tolerance_kg: molecular_controls.physical.exchange.mass_tolerance_kg,
-            },
+            stage,
         )?;
-        let mut endpoints = BTreeMap::new();
-        for (&id, chamber) in &next.chambers {
-            checkpoint(cx)?;
-            endpoints.insert(id, chamber.gas().clone());
-        }
-        report
-            .flow
-            .transport
-            .admit_endpoint_driving_forces(&endpoints, || cx.checkpoint().is_err())?;
-        let molecular_endpoints: BTreeSet<_> = report
-            .flow
-            .links
-            .iter()
-            .flat_map(|link| link.parcels)
-            .collect();
-        for id in molecular_endpoints {
-            let parcel = endpoints.get(&id).ok_or(MaterialFlowError::Invalid(
-                "missing final molecular gas owner",
-            ))?;
-            molecular
-                .qualify_parcel(parcel, molecular_controls.face, || cx.checkpoint().is_err())?;
-        }
+        next.admit_molecular_endpoint(cx, molecular, &report.flow, molecular_controls)?;
         Ok((next, report))
     }
 

@@ -60,6 +60,8 @@ pub enum MaterialGasLawFlowError<E> {
     Invalid(&'static str),
     Flow(GasNetworkError),
     Transport(fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportError),
+    #[cfg(feature = "molecular-transport")]
+    Molecular(fs_gas::material::transport::parcel::ParcelMolecularError),
     Exchange(ReactiveExchangeError<E>),
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
@@ -70,6 +72,16 @@ impl<E: core::fmt::Debug> core::fmt::Display for MaterialGasLawFlowError<E> {
     }
 }
 impl<E: core::fmt::Debug> std::error::Error for MaterialGasLawFlowError<E> {}
+#[cfg(feature = "molecular-transport")]
+impl<E> From<fs_gas::material::transport::parcel::ParcelMolecularError> for MaterialGasLawFlowError<E> {
+    fn from(error: fs_gas::material::transport::parcel::ParcelMolecularError) -> Self {
+        use fs_gas::material::transport::parcel::ParcelMolecularError;
+        match error {
+            ParcelMolecularError::Cancelled => Self::Cancelled,
+            other => Self::Molecular(other),
+        }
+    }
+}
 impl<E> From<GasNetworkError> for MaterialGasLawFlowError<E> {
     fn from(error: GasNetworkError) -> Self {
         match error { GasNetworkError::Cancelled => Self::Cancelled, other => Self::Flow(other) }
