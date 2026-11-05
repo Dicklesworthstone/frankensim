@@ -1450,7 +1450,7 @@ fn port_inputs_into(
         return Err(PhsError::Unadmitted { what: "nonfinite physical port input" });
     }
     for (row, value) in out.iter_mut().enumerate() {
-        *value = port_input_row(&g[row*m..(row+1)*m], |p| input[p])
+        *value = interconnection::accumulation::Sum::dot(&g[row*m..(row+1)*m], input)
             .and_then(interconnection::accumulation::Sum::value)
             .ok_or(PhsError::Unadmitted { what: "unrepresentable physical port forcing" })?;
     }
@@ -1494,29 +1494,6 @@ fn port_work_from_effort(
     if duration == 0.0 { return Ok(0.0); }
     let mut power = port_work_sum(n, m, g, effort, input)?;
     let result = (|| {
-        power.product(1.0, other_power)?;
-        let mut work = interconnection::accumulation::Sum::default();
-        work.add_scaled(power, duration)?;
-        work.value()
-    })();
-    result.ok_or(PhsError::Unadmitted { what: "unrepresentable physical port work" })
-}
-
-// Work from the original conjugate port samples or already integrated outputs.
-// Keep all signed source terms together before applying the duration. In
-// particular, regeneration and nonlinear supply are never positive-only sums.
-fn port_work(input: &[f64], output: &[f64], duration: f64, other_power: f64)
-    -> Result<f64, PhsError>
-{
-    if input.len() != output.len() || !duration.is_finite() || duration < 0.0 {
-        return Err(PhsError::Dimension { what: "physical port work extents or duration" });
-    }
-    if !other_power.is_finite() || input.iter().chain(output).any(|v| !v.is_finite()) {
-        return Err(PhsError::Unadmitted { what: "nonfinite physical port work" });
-    }
-    if duration == 0.0 { return Ok(0.0); }
-    let result = (|| {
-        let mut power = interconnection::accumulation::Sum::dot(input, output)?;
         power.product(1.0, other_power)?;
         let mut work = interconnection::accumulation::Sum::default();
         work.add_scaled(power, duration)?;

@@ -231,11 +231,8 @@ impl PositiveHeat {
             return Ok(0.0);
         }
         let root_rate = det::sqrt(self.rate);
+        sys.vector_field_from_effort_into(effort, input, derivative)?;
         for i in 0..n {
-            let force: f64 = (0..self.m).map(|p| sys.g[i * self.m + p] * input[p]).sum();
-            let conservative: f64 = (0..n).map(|j| sys.j[i * n + j] * effort[j]).sum();
-            let resistive: f64 = (0..n).map(|j| sys.r[i * n + j] * effort[j]).sum();
-            derivative[i] = (force + conservative) - resistive;
             let loss = (0..n)
                 .map(|j| self.resistance_root[i * n + j] * effort[j])
                 .sum::<f64>();

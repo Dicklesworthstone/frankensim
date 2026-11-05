@@ -1,7 +1,7 @@
 //! G1/G3: positive, independently integrated physical heat at very small motion.
 use fs_phs::linear_exact::{
-    LinearSplitBudget, PreparedCommonFlowZoh, PreparedExactZoh, integrated_resistance_loss,
-    split_quadratic, step_render,
+    LinearPropagator, LinearSplitBudget, PreparedCommonFlowZoh, PreparedExactZoh,
+    integrated_resistance_loss, split_quadratic, step_render, step_split,
 };
 use fs_phs::{
     AcousticSection, ChainOutlet, PortHamiltonian, QuadraticStorage, RelaxationBranch,
@@ -43,6 +43,73 @@ fn rk4<const N: usize>(
         }
     }
     x
+}
+
+#[test]
+fn coherent_held_ports_preserve_weak_motion_and_force_supported_heat() {
+    let large = 2.0_f64.powi(54);
+    let dt = 0.25;
+    for resistance in [0.0, 1.0] {
+        let sys = PortHamiltonian::new(
+            1, 3, vec![0.0], vec![resistance], vec![1.0; 3],
+            Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+        ).unwrap();
+        let split = split_quadratic(&sys, budget(1)).unwrap();
+        let mut prepared = PreparedExactZoh::new(&sys, dt, budget(1)).unwrap();
+        let initial = [resistance];
+        let expected_x = if resistance == 0.0 { dt } else { 1.0 };
+        let expected_y = if resistance == 0.0 { 0.5 * dt } else { 1.0 };
+        let expected_work = dt * expected_y;
+        for input in [[large, 1.0, -large], [-large, 1.0, large]] {
+            for record in [
+                step_render(&sys, &split, &initial, &input, dt).unwrap(),
+                prepared.step(&initial, &input).unwrap(),
+                step_split(&sys, &split, LinearPropagator::FrequencyMatched,
+                    &initial, &input, dt).unwrap(),
+            ] {
+                assert!((record.x[0] - expected_x).abs() < 1e-12);
+                assert!(record.y.iter().all(|y| (y - expected_y).abs() < 1e-12));
+                assert!((record.supplied - expected_work).abs() < 1e-12 * expected_work);
+                assert!((record.dissipated - resistance * dt).abs() < 1e-12);
+                assert!(record.balance_residual().abs() < 1e-12);
+            }
+            let (mut next, mut output) = ([0.0], [0.0; 3]);
+            let record = prepared.step_into(&initial, &input, &mut next, &mut output).unwrap();
+            assert!((next[0] - expected_x).abs() < 1e-12);
+            assert!(output.iter().all(|y| (y - expected_y).abs() < 1e-12));
+            assert!((record.supplied - expected_work).abs() < 1e-12 * expected_work);
+        }
+    }
+}
+
+#[test]
+fn integrated_work_retains_port_information_that_rounded_observations_cannot_hold() {
+    let large = 2.0_f64.powi(54);
+    let dt = 0.25;
+    let sys = PortHamiltonian::new(
+        2, 2, vec![0.0; 4], vec![0.0, 0.0, 0.0, 1.0], vec![1.0, 1.0, 1.0, 0.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap()),
+    ).unwrap();
+    let initial = [large, 1.0];
+    let input = [1.0, -1.0];
+    // Gu=[0,1] supports the dissipative equilibrium. Both represented port
+    // observations round to large, but physical work and heat remain dt.
+    assert_eq!(sys.output(&initial), vec![large, large]);
+    let split = split_quadratic(&sys, budget(2)).unwrap();
+    let prepared = PreparedExactZoh::new(&sys, dt, budget(2)).unwrap();
+    for record in [
+        step_render(&sys, &split, &initial, &input, dt).unwrap(),
+        prepared.step(&initial, &input).unwrap(),
+        step_split(&sys, &split, LinearPropagator::FrequencyMatched,
+            &initial, &input, dt).unwrap(),
+    ] {
+        assert_eq!(record.x[0], large);
+        assert!((record.x[1] - 1.0).abs() < 1e-12);
+        assert_eq!(record.y, vec![large, large]);
+        assert!((record.supplied - dt).abs() < 1e-12 * dt);
+        assert!((record.dissipated - dt).abs() < 1e-12 * dt);
+        assert!(record.balance_residual().abs() < 1e-12 * dt);
+    }
 }
 
 #[test]

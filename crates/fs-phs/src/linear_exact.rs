@@ -18,6 +18,7 @@
 
 use crate::{PhsError, PortHamiltonian, StepRecord, Storage, discrete_gradient,
     quadratic_midpoint_remainder, storage_energy_change};
+use crate::interconnection::accumulation::Sum;
 use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::lu;
 use fs_math::det;
@@ -931,16 +932,22 @@ fn held_input_transition(
     }
     let balanced = product(&product(forward, &flow, n), inverse, n);
     let effort_map = product(&split.quadratic.matrix, inverse, n);
+    let forcing: Vec<_> = (0..n)
+        .map(|i| crate::port_input_row(&sys.g[i * split.m..(i + 1) * split.m], |p| u[p]))
+        .collect::<Option<_>>()
+        .ok_or_else(|| refuse("held input forcing is unrepresentable"))?;
     let mut b = vec![0.0; d * d];
     for i in 0..n {
         for j in 0..n {
             b[i * d + j] = balanced[i * n + j];
         }
-        for a in 0..n {
-            for p in 0..split.m {
-                b[i * d + n] += forward[i * n + a] * sys.g[a * split.m + p] * u[p];
-            }
+        let mut force = Sum::default();
+        for (a, &row) in forcing.iter().enumerate() {
+            force.add_scaled(row, forward[i * n + a])
+                .ok_or_else(|| refuse("balanced held input is unrepresentable"))?;
         }
+        b[i * d + n] = force.value()
+            .ok_or_else(|| refuse("balanced held input is unrepresentable"))?;
     }
     // Integrators for EVERY port output, independently of the held input.
     for p in 0..split.m {
@@ -1011,9 +1018,17 @@ fn exact_zoh_loss(
         held_input_transition(sys, split, &forward, &inverse, dt, u)
     })?;
     let mut end = vec![0.0; d];
+    let mut work = Sum::default();
     for i in 0..d {
-        for j in 0..d {
-            end[i] += transition[i * d + j] * initial[j];
+        let row = crate::port_input_row(&transition[i * d..(i + 1) * d], |j| initial[j])
+            .ok_or_else(|| refuse("exact transition contraction is unrepresentable"))?;
+        end[i] = row.value()
+            .ok_or_else(|| refuse("exact transition contraction is unrepresentable"))?;
+        if i > n {
+            // Retain the integrated output's low word until conjugate work
+            // is summed: two rounded port observations can hide real work.
+            work.add_scaled(row, u[i - n - 1])
+                .ok_or_else(|| refuse("exact supplied work is unrepresentable"))?;
         }
     }
     // The factor reads the system, split, clock and channel only, never x0 or u: a holder that steps one fixed
@@ -1024,7 +1039,8 @@ fn exact_zoh_loss(
         .map(|i| (0..n).map(|j| inverse[i * n + j] * end[j]).sum())
         .collect();
     let y: Vec<_> = end[n + 1..].iter().map(|v| v / dt).collect();
-    let supplied = end[n + 1..].iter().zip(u).map(|(a, b)| a * b).sum::<f64>();
+    let supplied = work.value()
+        .ok_or_else(|| refuse("exact supplied work is unrepresentable"))?;
     let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x,
         &mut vec![0.0; n], &mut vec![0.0; n]);
     let energy_scale = energetic_scale(sys, x0)
@@ -1113,24 +1129,18 @@ fn gonzalez(
 ) -> Result<StepRecord, PhsError> {
     let n = sys.n;
     let owned_rule = storage.discrete_gradient_rule();
-    let forcing: Vec<f64> = (0..n)
-        .map(|i| (0..sys.m).map(|p| sys.g[i * sys.m + p] * u[p]).sum())
-        .collect();
-    let residual = |x: &[f64]| {
+    let mut forcing = vec![0.0; n];
+    sys.input_flow_into(u, &mut forcing)?;
+    let residual = |x: &[f64]| -> Result<Vec<f64>, PhsError> {
         let dg = discrete_gradient(storage, x0, x);
-        (0..n)
-            .map(|i| {
-                x[i] - x0[i]
-                    - dt * (forcing[i]
-                        + (0..n)
-                            .map(|j| (sys.j[i * n + j] - sys.r[i * n + j]) * dg[j])
-                            .sum::<f64>())
-            })
-            .collect::<Vec<_>>()
+        let mut flow = vec![0.0; n];
+        sys.vector_field_from_effort_into(&dg, u, &mut flow)?;
+        for i in 0..n { flow[i] = x[i] - x0[i] - dt * flow[i]; }
+        Ok(flow)
     };
     let mut x = x0.to_vec();
     for iterations in 0..=50 {
-        let res = residual(&x);
+        let res = residual(&x)?;
         if !finite(&res) || !finite(&x) {
             return Err(refuse("nonfinite Gonzalez trial"));
         }
@@ -1158,8 +1168,9 @@ fn gonzalez(
             }
             if resolved {
                 let dissipated = dt * quadratic(&sys.r, &dg);
-                let y = sys.output_from_effort(&dg);
-                let supplied = dt * u.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
+                let mut y = vec![0.0; sys.m];
+                sys.output_from_effort_into(&dg, &mut y)?;
+                let supplied = crate::port_work_from_effort(n, sys.m, &sys.g, &dg, u, dt, 0.0)?;
                 let delta_h = storage_energy_change(storage, x0, &x,
                     &mut vec![0.0; n], &mut vec![0.0; n]);
                 if !finite(&[delta_h, dissipated, supplied])
@@ -1209,8 +1220,8 @@ fn gonzalez(
                 let mut minus = x.clone();
                 plus[j] += h;
                 minus[j] -= h;
-                let rp = residual(&plus);
-                let rm = residual(&minus);
+                let rp = residual(&plus)?;
+                let rm = residual(&minus)?;
                 for i in 0..n {
                     jac[i * n + j] = (rp[i] - rm[i]) / (2.0 * h);
                 }

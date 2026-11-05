@@ -194,10 +194,9 @@ fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQua
         return Ok(PreparedStepRecord { delta_h: 0.0, dissipated: 0.0, supplied: 0.0,
             newton_iters: 0, solver_residual: 0.0, solver_certificate: None });
     };
-    flow.evaluate_into(initial, input, &mut scratch.augmented, &mut scratch.balanced,
+    let supplied = flow.evaluate_port_work_into(initial, input, &mut scratch.augmented, &mut scratch.balanced,
         &mut scratch.endpoint, &mut scratch.integrals)?;
     for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals) { *out = value/duration; }
-    let supplied = crate::port_work(input, &scratch.integrals, 1.0, 0.0)?;
     let dissipated = heat.ok_or_else(||refuse("prepared positive heat is missing"))?
         .evaluate_into(sys,initial,input,&mut scratch.effort,&mut scratch.balanced,
             &mut scratch.heat_state)?;

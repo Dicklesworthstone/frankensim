@@ -296,7 +296,7 @@ impl Core {
         self.admit(initial, input, &mut scratch.effort)?;
         let (n, m) = (self.original.n, self.original.m);
         let (delta_h, dissipated, supplied) = if let Some(flow) = &self.flow {
-            flow.evaluate_into(
+            let supplied = flow.evaluate_port_work_into(
                 initial,
                 input,
                 &mut scratch.augmented,
@@ -307,11 +307,6 @@ impl Core {
             for (out, integral) in scratch.output.iter_mut().zip(&scratch.integrals) {
                 *out = integral / self.dt;
             }
-            let supplied: f64 = input
-                .iter()
-                .zip(&scratch.integrals)
-                .map(|(u, y)| u * y)
-                .sum();
             let dissipated = self
                 .heat
                 .as_ref()

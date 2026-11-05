@@ -675,6 +675,30 @@ impl PreparedQuadraticFlow {
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64],
     ) -> Result<(), PhsError> {
+        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, false).map(|_| ())
+    }
+
+    /// Held physical-port observations retain their integrated low words
+    /// through multiplication by the conjugate inputs. General observations
+    /// and rotating sources keep the public evaluator's existing semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_port_work_into(
+        &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
+        endpoint: &mut [f64], integrals: &mut [f64],
+    ) -> Result<f64, PhsError> {
+        if self.rotating_sources || self.integrals.len() != self.m
+            || self.integrals.iter().any(|form| !matches!(form, CachedIntegral::Linear(_)))
+        {
+            return Err(refuse("held port work requires one linear observation per input"));
+        }
+        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_impl(
+        &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
+        endpoint: &mut [f64], integrals: &mut [f64], physical_work: bool,
+    ) -> Result<f64, PhsError> {
         if state.len() != self.n || input.len() != self.m || !finite(state) || !finite(input)
             || z.len() != self.d || balanced.len() != self.n || endpoint.len() != self.n
             || integrals.len() != self.integrals.len()
@@ -691,26 +715,43 @@ impl PreparedQuadraticFlow {
         }
         z[self.d - 1] = 1.0;
         for i in 0..self.n {
-            balanced[i] = (0..self.d)
-                .map(|j| self.transition[i * self.d + j] * z[j])
-                .sum();
+            balanced[i] = crate::port_input_row(
+                &self.transition[i * self.d..(i + 1) * self.d], |j| z[j],
+            ).and_then(Sum::value)
+                .ok_or_else(|| refuse("prepared transition contraction is unrepresentable"))?;
         }
         for i in 0..self.n {
             endpoint[i] = (0..self.n)
                 .map(|j| self.inverse[i * self.n + j] * balanced[j])
                 .sum();
         }
-        for (out, form) in integrals.iter_mut().zip(&self.integrals) {
+        let mut work = Sum::default();
+        for (p, (out, form)) in integrals.iter_mut().zip(&self.integrals).enumerate() {
             *out = match form {
                 CachedIntegral::Dense { matrix, affine: true } => affine_integral(matrix, z),
                 CachedIntegral::Dense { matrix, affine: false } => quadratic(matrix, z),
+                CachedIntegral::Linear(row) if physical_work => {
+                    // z[last]=1: the off-diagonal half-row occurs twice;
+                    // its final diagonal contributes only once.
+                    let last = self.d - 1;
+                    let half = crate::port_input_row(&row[..last], |j| z[j])
+                        .ok_or_else(|| refuse("prepared port integral is unrepresentable"))?;
+                    let mut integral = half;
+                    integral.add_scaled(half, 1.0)
+                        .and_then(|()| integral.product(row[last], 1.0))
+                        .ok_or_else(|| refuse("prepared port integral is unrepresentable"))?;
+                    work.add_scaled(integral, input[p])
+                        .ok_or_else(|| refuse("prepared supplied work is unrepresentable"))?;
+                    integral.value()
+                        .ok_or_else(|| refuse("prepared port integral is unrepresentable"))?
+                }
                 CachedIntegral::Linear(row) => compact_affine_integral(row, z),
             };
         }
         if !finite(endpoint) || !finite(integrals) {
             return Err(refuse("prepared quadratic candidate overflows"));
         }
-        Ok(())
+        work.value().ok_or_else(|| refuse("prepared supplied work is unrepresentable"))
     }
 
 }
