@@ -147,7 +147,10 @@ impl DonnanOsmoticPair {
         hydraulic: HydraulicPermeance,
         maximum_workspace_bytes: usize,
     ) -> Result<Self> {
-        if compartments.iter().any(|cell| cell.solubility.is_some()) {
+        if compartments
+            .iter()
+            .any(OsmoticCompartment::has_phase_inventory)
+        {
             return Err(invalid(
                 "neutral finite solid stocks cannot participate in the fast-ion Donnan model",
             ));

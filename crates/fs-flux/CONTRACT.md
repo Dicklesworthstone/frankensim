@@ -3345,14 +3345,51 @@ cells may share the network under its existing solvent and species convention.
 A membrane touching a phase-enabled cell must be well mixed and bare:
 quasi-steady or transient films would need their own precipitation inventory.
 Donnan ion owners refuse these neutral phase stocks; nonideal diffusion owners
-continue to require their original shared virial model. The isothermal network
-does not evolve dissolution heat, electrolyte speciation or crystal kinetics.
+continue to require their original shared virial model. This instantaneous-equilibrium option
+does not evolve dissolution heat, electrolyte speciation or crystal kinetics;
+the finite-rate option below retains the same original constitutive sources.
 
 Focused numerical cases cover exact phase-boundary limits, strong-transfer
 traces, orientation, all affine phase combinations, finite reservoir depletion,
 water-driven precipitation and redissolution, independently manufactured
 coupled water/solute endpoints, ordinary unsaturated parity, conserved
 checkpoints, unsupported mode admission and atomic cancellation.
+
+### Finite-rate dissolution and crystallization on the native timeline
+
+`OsmoticCompartment::with_kinetic_solubility` instead binds the original
+`KineticSolubilitySolution` and retains its actual dissolved and crystal stocks.
+Exact fixed-temperature, fixed-volume phase half-stages surround the existing
+implicit membrane sweep. Only dissolved molecules are exchanged in that sweep;
+crystals remain in place. The original material boundary then updates solvent
+and dissolved inventories without repartitioning or erasing a trace solid.
+Equilibrium, kinetic and ordinary aqueous compartments can share one network
+when their original laws and species ordering are compatible. Conductances and
+explicit growth-surface policies may differ by compartment.
+
+The native whole-step/two-half-step comparison controls phase/transport coupling,
+including separate dissolved, total and solid amount scales. The membrane
+substage remains first-order implicit Euler, so symmetric phase placement does
+not confer second-order temporal accuracy on the complete method. Every trial
+uses prepared buffers; copied states retain full phase receipts. No additional
+transport integrator or per-sweep heap allocation is introduced. Positive-time
+phase evaluations, including discarded trials, have a separate report counter;
+zero-time target refreshes during inventory replacement are additional work.
+
+Complete phase changes enter the conservation report directly, preserving small
+solid contributions against dominant dissolved stocks. Cancellation and work
+refusal publish no partial state or clock. The independent kinetic checkpoint
+exposes actual phases and the final half-stage receipt. Finite-storage films,
+Donnan exchange, and nonideal/coupled molecular diffusion explicitly refuse
+these phase owners until those pathways account for their evolution and energy.
+
+This is still a well-mixed isothermal ideal-neutral model with fixed declared
+surface conductance. It supplies no phase heat, variable crystal area,
+spontaneous nucleation or reactive electrolyte transport. Eight focused
+regressions cover an independent continuous dissolution/permeation oracle,
+finite-rate concentration/dilution, seeding, temporal refinement, complete
+rollback and retry, trace crystals, mixed equilibrium/kinetic cells and
+unsupported-path refusal.
 
 ## Nonideal finite-volume osmosis
 

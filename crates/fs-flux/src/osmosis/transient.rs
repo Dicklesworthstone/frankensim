@@ -530,7 +530,7 @@ impl TransientOsmoticPair {
         right_film: Option<TransientFilm>,
         maximum_workspace_bytes: usize,
     ) -> Result<Self> {
-        if bulks.iter().any(|bulk| bulk.solubility.is_some()) {
+        if bulks.iter().any(OsmoticCompartment::has_phase_inventory) {
             return Err(invalid(
                 "transient concentration films do not model finite solid stocks or surface precipitation",
             ));

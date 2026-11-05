@@ -178,7 +178,9 @@ impl KineticSolubilitySolution {
             self.solution
                 .heap_bytes()
                 .saturating_add(core::mem::size_of_val(self.models.as_ref()))
-                .saturating_add(core::mem::size_of_val(self.steps.as_ref())),
+                .saturating_add(core::mem::size_of_val(self.steps.as_ref()))
+                .saturating_add(2 * core::mem::size_of::<usize>())
+                .saturating_add(core::mem::align_of::<SolubilityKineticsV1>()),
             |bytes, model| bytes.saturating_add(model.law().heap_bytes()),
         )
     }

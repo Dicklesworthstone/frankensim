@@ -343,6 +343,11 @@ pub(super) fn prepare_solution_diffusion(
     controls: SolutionDiffusionControls,
     maximum_workspace_bytes: usize,
 ) -> Result<usize, OsmoticNetworkError> {
+    if cells.iter().any(OsmoticCompartment::has_phase_inventory) {
+        return Err(OsmoticNetworkError::Invalid(
+            "solution diffusion does not evolve solid phase inventories or their free energy",
+        ));
+    }
     let friction = controls.constitutive.friction;
     if cells.is_empty()
         || cells.len() > MAX_COMPARTMENTS
