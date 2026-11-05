@@ -8,7 +8,11 @@ use fs_qty::Temperature;
 
 mod body;
 pub(super) use body::BodyAtmosphere;
-pub use body::{FreeSurfaceBodyGasExchange, FreeSurfaceBodyGasFace, FreeSurfaceBodyGasSample};
+pub(super) use body::PreparedBodyGasConvection;
+pub use body::{
+    FreeSurfaceBodyConvectionQuery, FreeSurfaceBodyConvectionSample, FreeSurfaceBodyGasConvection,
+    FreeSurfaceBodyGasExchange, FreeSurfaceBodyGasFace, FreeSurfaceBodyGasSample,
+};
 
 /// Finite gas account over one accepted native VOF/enthalpy interval.
 ///

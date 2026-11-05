@@ -9,7 +9,7 @@ use fs_matdb::{ClaimSelection, PropertyKey, PropertyLineSlice, PropertySupportEr
 use fs_qty::{QuantitySpec, semantic::{QuantityKind, SemanticType, ValueForm}};
 
 /// Original source/caloric failures are retained rather than replaced by k=const.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LayerSourceError {
     Invalid(&'static str),
     Phase(PhaseStateError),

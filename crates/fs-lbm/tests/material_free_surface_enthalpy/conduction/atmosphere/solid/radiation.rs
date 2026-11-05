@@ -8,7 +8,7 @@ use fs_material::thermal::source::{
     EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, ThermalMaterialPoint,
 };
 
-fn emissive_wall(scale: f64, upper_k: f64) -> MaterialCard {
+pub(super) fn emissive_wall(scale: f64, upper_k: f64) -> MaterialCard {
     let base = body::wall_card(0.5, 500.0);
     let mut claims = base.claims().clone();
     claims
@@ -36,7 +36,7 @@ fn emissive_wall(scale: f64, upper_k: f64) -> MaterialCard {
     MaterialCard::assemble(base.id().clone(), claims, base.models().to_vec()).unwrap()
 }
 
-fn radiant_face(surroundings_k: f64) -> FreeSurfaceBodyRadiationFace {
+pub(super) fn radiant_face(surroundings_k: f64) -> FreeSurfaceBodyRadiationFace {
     let film = solid_face();
     FreeSurfaceBodyRadiationFace {
         wall: film.wall,

@@ -3580,6 +3580,19 @@ World-rotation regressions cover both forced regimes, natural vertical and
 horizontal branches in both heat directions, aiding mixed flow and its pure
 limits, plus non-tangent flow and small but physical orientation mismatches.
 
+The same single-plate provider implements fs-lbm's
+`FreeSurfaceBodyGasConvection` for finite stationary solid faces. Both providers
+delegate to one physical plate evaluator using the actual outward normal,
+solved surface temperature and original bulk/film gas states. The body adapter
+retains signed outer-wall geometry and never fabricates a liquid patch. Solid
+conductivity, surface balance, finite gas storage and time integration remain
+with the original fs-lbm/material owners. The same forced, natural and aiding
+mixed cards, source support, physical length and orientation requirements apply.
+Two focused body-provider test functions cover an independent forced-plate
+equation, pressure dependence, both heat directions, natural/mixed evidence,
+equilibrium and source/orientation refusal. They were syntax/API reviewed;
+native compilation and execution remain pending constellation dependencies.
+
 The single-plate provider explicitly admits uniform boundary evolution: its
 authored plate frame, dimensions and flow do not depend on old patch indices.
 Coefficients still depend on the actual trial temperatures and original film

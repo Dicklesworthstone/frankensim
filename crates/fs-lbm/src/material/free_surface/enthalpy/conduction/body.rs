@@ -32,11 +32,13 @@ pub struct FreeSurfaceThermalBody<'m> {
     geometry: CellGeometry,
     mass_kg: f64,
     specific_h_j_kg: f64,
+    conductivity_key: PropertyKey,
     requirements: Vec<ScalarPropertyRequirement>,
     selection: MaterialPropertySelection,
     material: ResolvedMaterialStatePoint,
     conduction_links: Vec<FreeSurfaceBodyLink>,
     gas_faces: Vec<atmosphere::FreeSurfaceBodyGasFace>,
+    gas_convection: Option<atmosphere::PreparedBodyGasConvection<'m>>,
     radiation_faces: Vec<radiation::FreeSurfaceBodyRadiationFace>,
 }
 
@@ -192,11 +194,13 @@ impl<'m> FreeSurfaceThermalBody<'m> {
             geometry,
             mass_kg: density * geometry.volume_m3,
             specific_h_j_kg,
+            conductivity_key: conductivity.clone(),
             requirements: vec![requirement],
             selection,
             material,
             conduction_links: Vec::new(),
             gas_faces: Vec::new(),
+            gas_convection: None,
             radiation_faces: Vec::new(),
         };
         // The common owner admits geometry, extensive storage and the actual
@@ -265,6 +269,62 @@ impl<'m> FreeSurfaceThermalBody<'m> {
         &self.gas_faces
     }
 
+    /// Resolve the original solid k(T) line once and apply gas convection at
+    /// the conducting surface, in series with each solid centroid half-path.
+    ///
+    /// The original selected conductivity claim and pure-solid caloric branch
+    /// remain pinned. Every participating face must have positive area and solid
+    /// distance, with ZERO gas thickness: the provider replaces that film.
+    /// The shared finite gas owns bulk temperature, EOS pressure and all heat.
+    /// Body clones and thermal trials share this prepared source line.
+    ///
+    /// A positive radiating patch on the same native face refuses: the existing
+    /// radiation law uses cell temperature, whereas this boundary resolves a
+    /// distinct surface temperature. Radiation on other faces remains available.
+    pub fn with_gas_convection(
+        mut self,
+        provider: &'m dyn atmosphere::FreeSurfaceBodyGasConvection,
+        temperature_range_k: [f64; 2],
+        config: fs_material::thermal::conduction::LayerConductionConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        use fs_material::thermal::conduction::source::ResolvedConductionLayer;
+        if self.gas_convection.is_some() {
+            return Err(Error::Invalid("finite wall convection is already source-bound"));
+        }
+        if config.max_iterations == 0
+            || !config.absolute_heat_tolerance_w.is_finite()
+            || config.absolute_heat_tolerance_w < 0.0
+            || !config.relative_heat_tolerance.is_finite()
+            || config.relative_heat_tolerance < 0.0
+        {
+            return Err(Error::Invalid("invalid finite wall convection solve controls"));
+        }
+        let selected = self.material.property_by_key(&self.conductivity_key)
+            .ok_or(Error::Invalid("finite wall lost its original conductivity key"))?
+            .answer().receipt.selected;
+        let layer = ResolvedConductionLayer::new(
+            self.caloric,
+            self.source,
+            &self.conductivity_key,
+            fs_matdb::ClaimSelection::Pinned(selected),
+            fs_material::phase::SolidLiquidPhase::Solid,
+            temperature_range_k,
+            || checkpoint(gate),
+        )?;
+        layer.temperature_at_enthalpy(self.specific_h_j_kg)?;
+        self.gas_convection = Some(atmosphere::PreparedBodyGasConvection {
+            provider,
+            layer: std::sync::Arc::new(layer),
+            config,
+        });
+        Ok(self)
+    }
+
+    pub(super) fn gas_convection(&self) -> Option<&atmosphere::PreparedBodyGasConvection<'m>> {
+        self.gas_convection.as_ref()
+    }
+
     /// Attach exposed diffuse-gray patches and select emissivity from this
     /// body's ORIGINAL material at its actual accepted caloric state.
     ///
@@ -274,7 +334,8 @@ impl<'m> FreeSurfaceThermalBody<'m> {
     /// zero is a reflecting surface; absent data never becomes a guessed value.
     /// This one-time attachment cannot silently replace an already pinned law.
     /// Geometry and aggregate exposed-area/work budgets are checked by the
-    /// shared timeline. Gas films may use the same patch in parallel.
+    /// shared timeline. Prescribed gas films may use the same patch in parallel;
+    /// a resolved conducting convection surface requires a distinct face.
     pub fn with_radiation_faces(
         mut self,
         faces: Vec<radiation::FreeSurfaceBodyRadiationFace>,

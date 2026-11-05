@@ -44,6 +44,7 @@ pub use surface::{FreeSurfaceImplicitReport, FreeSurfaceImplicitSolve};
 /// Finite atmospheric storage on the same thermal and native VOF interval.
 pub mod atmosphere;
 pub use atmosphere::{
+    FreeSurfaceBodyConvectionQuery, FreeSurfaceBodyConvectionSample, FreeSurfaceBodyGasConvection,
     FreeSurfaceBodyGasExchange, FreeSurfaceBodyGasFace, FreeSurfaceBodyGasSample,
     FreeSurfaceFiniteGasExchange, FreeSurfaceFiniteGasPressureLoad,
 };

@@ -5,6 +5,9 @@ use fs_lbm::material::free_surface::enthalpy::conduction::FreeSurfaceBodyGasFace
 #[path = "solid/radiation.rs"]
 mod radiation;
 
+#[path = "solid/convection.rs"]
+mod convection;
+
 fn solid_face() -> FreeSurfaceBodyGasFace {
     FreeSurfaceBodyGasFace {
         wall: [-1, 0, 3],

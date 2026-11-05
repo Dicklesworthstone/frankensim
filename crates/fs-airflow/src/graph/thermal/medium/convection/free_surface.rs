@@ -1,16 +1,18 @@
-//! Source-backed plate convection on the original moving-liquid heat owner.
+//! Source-backed plate convection on original liquid and finite-solid heat owners.
 //!
-//! The liquid solver supplies its actual trial interface T, original gas at
-//! bulk T, and the same source claims at mean-film T. The existing correlation
-//! owner computes every group and h from that one film state. The original
-//! liquid-side resistance, radiation and finite-gas energy owner remain active.
+//! The native heat owner supplies actual trial surface T, original gas at bulk
+//! T, and the same source claims at mean-film T. The existing correlation owner
+//! computes every group and h from that one film state. Material resistance,
+//! applicable radiation and finite-gas energy remain with that native owner.
 
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::FreeSurfaceEnthalpyError;
+use fs_lbm::material::free_surface::enthalpy::conduction::FreeSurfaceBodyConvectionQuery;
 use fs_lbm::material::free_surface::enthalpy::conduction::surface::convection::{
     FreeSurfaceConvectionQuery, FreeSurfaceGasConvection, FreeSurfaceHeatTransferCoefficient,
 };
 use fs_material::fluid_transport::{AidingVerticalPlateFrame, ThermalFluidTransportState};
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 
 /// Spatially resolved external plate transfer on fixed original surface patches.
 pub mod sections;
@@ -30,7 +32,7 @@ pub enum PlanarForcedConvectionRegime {
 pub enum PlanarFreeSurfaceHeatLaw {
     Forced {
         regime: PlanarForcedConvectionRegime,
-        /// Physical gas velocity RELATIVE to the liquid surface [m/s]. Must be
+        /// Physical gas velocity RELATIVE to the material surface [m/s]. Must be
         /// tangent to the plate. The caller supplies the actual relative field;
         /// this bounded model does not infer gas momentum or moving-wall drag.
         relative_velocity_m_s: [f64; 3],
@@ -49,7 +51,7 @@ pub enum PlanarFreeSurfaceHeatLaw {
         /// Physical plate-up direction, tangent to the actual face. Need not
         /// be normalized. Nonzero gravity must be opposite this direction.
         plate_up: [f64; 3],
-        /// Actual gas velocity relative to the moving liquid [m/s], parallel
+        /// Actual gas velocity relative to the material surface [m/s], parallel
         /// to plate-up. Its sign must aid the source-owned buoyant response.
         relative_velocity_m_s: [f64; 3],
         /// Physical gravity [m/s²]. Zero retains the pure forced limit.
@@ -59,19 +61,19 @@ pub enum PlanarFreeSurfaceHeatLaw {
     },
 }
 
-/// A declared physical isothermal plate patch in the moving liquid's world frame.
+/// A declared physical isothermal plate patch in the native owner's world frame.
 ///
 /// `characteristic_length` is the WHOLE physical plate's streamwise length for
 /// forced flow, height for a vertical natural/mixed plate, or area/perimeter for a
 /// horizontal natural plate. It must not become a fresh thermal entrance at
 /// each mesh face. A provider can be shared by several faces of that same plate;
-/// every face retains its physical integration area and original liquid owner.
+/// every face retains its physical integration area and original heat owner.
 ///
 /// Applying a plate-average relation locally assumes the declared patch is
 /// approximately isothermal with locally held film properties. Spatially varying
 /// wall temperatures require refinement/model assessment; this is not a resolved
 /// gas boundary layer. Unsupported regimes fail instead of switching models.
-/// The authored unit normal must match the actual liquid-to-gas normal, including
+/// The authored unit normal must match the actual material-to-gas normal, including
 /// reconstructed planar interfaces. Unit length, direction agreement and
 /// tangency admit only `64 * f64::EPSILON` normalization roundoff; this is not
 /// an empirical angular allowance. Gas speed and gravity are never projected
@@ -80,10 +82,13 @@ pub enum PlanarFreeSurfaceHeatLaw {
 /// Curved, enclosed and evaporating surfaces are outside this adapter. Natural
 /// convection admits only vertical/horizontal plates relative to actual gravity.
 /// Mixed convection admits only the declared aiding vertical-plate model, not
-/// opposing flow or crossflow. Geometry and area remain with the liquid owner.
+/// opposing flow or crossflow. Geometry and area remain with the native owner.
+/// Both moving-liquid interfaces and source-integrated finite solid gas faces
+/// use this same evaluator. Solid walls retain their actual signed coordinates,
+/// original conductivity path and finite-atmosphere energy account.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlanarFreeSurfaceConvection {
-    /// Physical unit normal, outward from the liquid into gas.
+    /// Physical unit normal, outward from the material into gas.
     pub outward_normal: [f64; 3],
     pub characteristic_length: Length,
     pub law: PlanarFreeSurfaceHeatLaw,
@@ -97,8 +102,30 @@ fn original(error: impl core::fmt::Display) -> FreeSurfaceEnthalpyError {
     FreeSurfaceEnthalpyError::Convection(error.to_string())
 }
 
+// Only physical surface/source data enter a plate correlation. Native patch
+// identity, signed wall coordinates, coverage, storage and heat remain with
+// the original liquid or solid owner; neither is represented as the other.
+#[derive(Clone, Copy)]
+struct PlateQuery<'a> {
+    outward_normal: [f64; 3],
+    surface_temperature_k: f64,
+    bulk: &'a ResolvedThermochemicalGasState,
+    film: &'a ResolvedThermochemicalGasState,
+}
+
+impl<'a> From<FreeSurfaceConvectionQuery<'a>> for PlateQuery<'a> {
+    fn from(query: FreeSurfaceConvectionQuery<'a>) -> Self {
+        Self {
+            outward_normal: query.outward_normal,
+            surface_temperature_k: query.surface_temperature_k,
+            bulk: query.bulk,
+            film: query.film,
+        }
+    }
+}
+
 fn thermal_film(
-    query: &FreeSurfaceConvectionQuery<'_>,
+    query: &PlateQuery<'_>,
 ) -> Result<ThermalFluidTransportState, FreeSurfaceEnthalpyError> {
     let thermal = query.film.thermal_transport_state().map_err(original)?;
     let transport = query.film.transport_state().map_err(original)?;
@@ -180,11 +207,19 @@ fn admit_plate_query(
     outward_normal: [f64; 3],
     characteristic_length: Length,
 ) -> Result<[f64; 3], FreeSurfaceEnthalpyError> {
+    admit_plate_state(&(*query).into(), outward_normal, characteristic_length)
+}
+
+fn admit_plate_state(
+    query: &PlateQuery<'_>,
+    outward_normal: [f64; 3],
+    characteristic_length: Length,
+) -> Result<[f64; 3], FreeSurfaceEnthalpyError> {
     let normal = unit_normal(outward_normal)?;
     let actual_normal = unit_normal(query.outward_normal)?;
     if !aligned(normal, actual_normal) {
         return Err(invalid(
-            "the declared plate normal must match its actual liquid/gas surface",
+            "the declared plate normal must match its actual material/gas surface",
         ));
     }
     if !characteristic_length.value().is_finite() || characteristic_length.value() <= 0.0 {
@@ -204,13 +239,13 @@ fn admit_plate_query(
     Ok(actual_normal)
 }
 
-impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
-    fn coefficient(
+impl PlanarFreeSurfaceConvection {
+    fn coefficient_at(
         &self,
-        query: FreeSurfaceConvectionQuery<'_>,
+        query: PlateQuery<'_>,
     ) -> Result<Option<Evidence<FreeSurfaceHeatTransferCoefficient>>, FreeSurfaceEnthalpyError>
     {
-        let actual_normal = admit_plate_query(
+        let actual_normal = admit_plate_state(
             &query, self.outward_normal, self.characteristic_length,
         )?;
         let wall = query.surface_temperature_k;
@@ -342,12 +377,37 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
         let (_, _, coefficient) = evaluated.into_parts();
         Ok(Some(coefficient))
     }
+}
+
+impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
+    fn coefficient(
+        &self,
+        query: FreeSurfaceConvectionQuery<'_>,
+    ) -> Result<Option<Evidence<FreeSurfaceHeatTransferCoefficient>>, FreeSurfaceEnthalpyError> {
+        self.coefficient_at(query.into())
+    }
 
     fn admits_uniform_boundary_evolution(&self) -> bool {
         // One authored plate frame, whole-plate length and external-flow law
         // apply independently of old patch indices. Newly reconstructed faces
         // must still pass every actual-normal and material-state check above.
         true
+    }
+}
+
+impl fs_lbm::material::free_surface::enthalpy::conduction::FreeSurfaceBodyGasConvection
+    for PlanarFreeSurfaceConvection
+{
+    fn coefficient(
+        &self,
+        query: FreeSurfaceBodyConvectionQuery<'_>,
+    ) -> Result<Option<Evidence<FreeSurfaceHeatTransferCoefficient>>, FreeSurfaceEnthalpyError> {
+        self.coefficient_at(PlateQuery {
+            outward_normal: query.outward_normal,
+            surface_temperature_k: query.surface_temperature_k,
+            bulk: query.bulk,
+            film: query.film,
+        })
     }
 }
 

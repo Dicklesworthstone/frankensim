@@ -202,6 +202,16 @@ pub enum FreeSurfaceEnthalpyError {
     /// The higher correlation owner retains its original error description.
     #[cfg(feature = "enthalpy-coupling")]
     Convection(String),
+    /// Original pure-solid conductivity line or caloric branch refused.
+    #[cfg(feature = "enthalpy-coupling")]
+    ConductionLayer(fs_material::thermal::conduction::source::LayerSourceError),
+    /// The shared material/convection surface solve exhausted its work budget.
+    #[cfg(feature = "enthalpy-coupling")]
+    BodyConvectionBalance {
+        body_id: u64,
+        residual_w: f64,
+        iterations: usize,
+    },
     /// The original scalar electrical source could not adopt the liquid bundle.
     #[cfg(feature = "enthalpy-coupling")]
     Conductor(fs_material::conductor::ConductorError),
@@ -234,6 +244,13 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
             Self::Gas(e) => write!(f, "free-surface finite atmosphere: {e}"),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Convection(e) => write!(f, "free-surface gas convection: {e}"),
+            #[cfg(feature = "enthalpy-coupling")]
+            Self::ConductionLayer(e) => write!(f, "free-surface conducting body: {e}"),
+            #[cfg(feature = "enthalpy-coupling")]
+            Self::BodyConvectionBalance { body_id, residual_w, iterations } => write!(
+                f,
+                "free-surface body {body_id} convection did not converge in {iterations} trials (heat residual {residual_w} W)",
+            ),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Conductor(e) => write!(f, "free-surface electrical source: {e}"),
             #[cfg(feature = "implicit-enthalpy-coupling")]
@@ -293,6 +310,16 @@ impl From<fs_conduction::enthalpy::DepositionError> for FreeSurfaceEnthalpyError
 impl From<fs_material::thermochemical_gas::energy::GasEnergyError> for FreeSurfaceEnthalpyError {
     fn from(error: fs_material::thermochemical_gas::energy::GasEnergyError) -> Self {
         Self::Gas(error)
+    }
+}
+
+#[cfg(feature = "enthalpy-coupling")]
+impl From<fs_material::thermal::conduction::source::LayerSourceError> for FreeSurfaceEnthalpyError {
+    fn from(error: fs_material::thermal::conduction::source::LayerSourceError) -> Self {
+        match error {
+            fs_material::thermal::conduction::source::LayerSourceError::Thermal(error) => error.into(),
+            error => Self::ConductionLayer(error),
+        }
     }
 }
 

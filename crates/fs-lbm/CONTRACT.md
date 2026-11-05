@@ -10290,6 +10290,47 @@ aggregate small-gas timestep control, geometry/coverage/domain refusal,
 cancellation, retained histories and successful retry.
 
 
+### Conducting solid surfaces with source-backed gas convection
+
+`FreeSurfaceThermalBody::with_gas_convection` replaces the explicitly prescribed
+gas film on that body's exposed faces with a borrowed
+`FreeSurfaceBodyGasConvection` provider. The original conductivity key and
+selected claim prepare one continuously supported pure-solid k(T) line inside
+an explicit temperature span. The same original caloric chart, material
+context and fixed mass remain authoritative. Body clones and thermal trials
+share this preparation; they do not rebuild conductivity charts.
+
+Each face requires positive area and solid centroid distance, with zero gas
+thickness. The shared material kernel solves the supported conductivity
+integral against convection at the actual surface temperature. Each provider
+query receives the original signed wall/dry-gas geometry, outward normal,
+finite bulk gas and original film sources at mean surface/bulk temperature and
+current EOS pressure. Driven coefficients must be finite and positive. `None`
+is admitted only at exact equilibrium. A source, correlation, arithmetic,
+surface-budget or cancellation refusal aborts the original transaction.
+
+The actual gas-side power enters finite solid storage and the same aggregate
+opposite gas debit once. Existing explicit and implicit timelines, gas energy
+residuals, capacity bounds and rollback retain their owners. The reported
+secant conductance is a frozen heat-rate representation, not a nonlinear
+derivative. `FreeSurfaceBodyGasSample::convection` retains surface temperature,
+original coefficient evidence, shared source line, integral-coordinate power,
+heat-continuity residual and iteration count.
+
+The existing body radiation law uses cell temperature. A positive radiating
+patch therefore cannot share a native face with a conducting convection
+surface; distinct faces remain supported. Prescribed gas-film behavior remains
+available. This is a fixed-geometry, quasi-steady, pure-solid surface closure
+coupled to the original well-mixed finite gas. Spatial, temporal and correlation
+validity require their existing assessment; no new gas momentum or phase
+handoff is supplied.
+
+Four focused native regressions cover an independent affine-k surface and
+finite-store energy oracle in both heat directions, source sharing, convection
+feedback into native populations, equilibrium, distinct-face radiation and
+atomic refusal. Source parsing and whitespace checks passed; native compilation
+and execution remain pending the required constellation dependencies.
+
 ### Independent fragment conservation in tetrahedral liquid ingress
 
 The original `free_surface3_from_tetrahedra` and
