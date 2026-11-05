@@ -11,6 +11,7 @@ pub mod boundary;
 pub mod conjugate;
 /// Original source rheology on native moving immersed-body transactions.
 pub mod immersed;
+mod stress;
 
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};

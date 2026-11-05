@@ -3299,6 +3299,25 @@ ladder on both D3Q19 and D3Q27, analytic viscous enstrophy decay of the exact
 two-dimensional Taylor--Green solution extruded in z, NSF moving-wall and
 characteristic-throughflow sampling, solid exclusion and bounded refusal/retry.
 
+`MaterialScaling::viscous_stress_from_lattice_kinematics` evaluates the shared
+`fs-material::fluid_transport::viscous` law on that original resolved gradient,
+divided once by the retained physical timestep. The retained source transport
+supplies molecular shear viscosity; the caller supplies independent bulk
+viscosity. Tensor stress, oriented shear/normal traction, dissipation and the
+constitutive tangent use SI units and xx/yy/zz/xy/yz/zx tensor-shear ordering.
+The companion `thermal_viscous_stress_from_lattice_kinematics` evaluates the
+authored thermal Carreau-Yasuda law at the actual temperature and deviatoric
+rate, retaining its source support, shift and derivatives. Dilation cannot
+masquerade as shear thinning. These read-only observations allocate no buffers,
+do not resample the retained transport, and do not insert forces or heat.
+They are continuum constitutive stress on the native spatial stencil, distinct
+from collision stress and discrete wall-link momentum exchange; no SGS stress,
+thermodynamic pressure or additional validation claim is included.
+`tests/material_shear_stress.rs` checks both lattices and all six shear-plane
+orientations against prescribed Couette/Poiseuille profiles with moving walls
+and current spatial half-force correction, signed tractions, physical power,
+thermal law evaluation, rigid rotation, independent bulk loss and source refusal.
+
 ### Source-resolved rheology with local and dynamic SGS
 
 `lattice3::rheology::RheologySgs3` selects a local closure, periodic dynamic
