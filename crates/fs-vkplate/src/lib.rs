@@ -79,6 +79,9 @@ pub fn standard_gas() -> GasState {
 mod material_gas_tests;
 
 #[cfg(test)]
+mod microphone_delay_tests;
+
+#[cfg(test)]
 mod material_tests;
 
 #[cfg(test)]
@@ -2598,7 +2601,33 @@ impl Drive {
     }
 }
 
+/// Coefficients for a geometric fractional-sample propagation delay. Centered cubic
+/// Lagrange interpolation preserves the first four time moments, reducing the
+/// fraction-dependent gain/phase error that otherwise distorts interference.
+/// Its leading lobe starts one sample before the integer part of the delay.
+/// Subsample paths use linear interpolation so every tap remains causal;
+/// integer delays take the exact two-slot fast path. This polynomial FIR is
+/// not an antialias filter.
+fn microphone_delay_taps(delay: f64) -> (usize, [f64; 4]) {
+    let whole = delay.floor() as usize;
+    let fraction = delay - whole as f64;
+    if whole == 0 || fraction == 0.0 {
+        return (whole, [1.0 - fraction, fraction, 0.0, 0.0]);
+    }
+    let f = fraction;
+    (
+        whole - 1,
+        [
+            -f * (1.0 - f) * (2.0 - f) / 6.0,
+            (1.0 + f) * (1.0 - f) * (2.0 - f) / 2.0,
+            (1.0 + f) * f * (2.0 - f) / 2.0,
+            -(1.0 + f) * f * (1.0 - f) / 6.0,
+        ],
+    )
+}
+
 /// Rayleigh pressure microphone, optionally with the unbaffled thin-source approximation.
+/// Each prepared path uses cubic fractional-delay interpolation (linear below one sample of flight).
 #[derive(Clone)]
 pub struct Mic {
     pub pos: [f64; 3],
@@ -3582,16 +3611,19 @@ impl Instrument {
                         }
                         let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                         let delay = r / self.gas.sound_speed * self.rate;
-                        let di = delay.floor() as usize;
-                        let fr = delay - di as f64;
+                        let (di, weights) = microphone_delay_taps(delay);
                         // w is outward on the facing side. An unbaffled sheet's back face
                         // has the opposite outward velocity: it radiates rarefaction when
                         // the front compresses. Use the path's side, including floor images;
                         // a rigid reflection itself still has positive pressure gain.
                         let polarity = if side < 0.0 { -1.0 } else { 1.0 };
                         let wgt = polarity * self.gas.density * h2 / (2.0 * PI * r) / (k * k);
-                        m.taps.push((bi, i, di, wgt * (1.0 - fr), wgt * fr));
+                        m.taps.push((bi, i, di, wgt * weights[0], wgt * weights[1]));
                         dmax = dmax.max(di + 2);
+                        if weights[2] != 0.0 || weights[3] != 0.0 {
+                            m.taps.push((bi, i, di + 2, wgt * weights[2], wgt * weights[3]));
+                            dmax = dmax.max(di + 4);
+                        }
                     }
                 }
             }
@@ -3605,11 +3637,14 @@ impl Instrument {
                         }
                         let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                         let delay = r / self.gas.sound_speed * self.rate;
-                        let di = delay.floor() as usize;
-                        let fr = delay - di as f64;
+                        let (di, weights) = microphone_delay_taps(delay);
                         let wgt = self.gas.density / (2.0 * PI * r);
-                        m.ptaps.push((ci, di, wgt * (1.0 - fr), wgt * fr));
+                        m.ptaps.push((ci, di, wgt * weights[0], wgt * weights[1]));
                         dmax = dmax.max(di + 2);
+                        if weights[2] != 0.0 || weights[3] != 0.0 {
+                            m.ptaps.push((ci, di + 2, wgt * weights[2], wgt * weights[3]));
+                            dmax = dmax.max(di + 4);
+                        }
                     }
                 }
             }
@@ -3959,6 +3994,8 @@ pub struct BodyImage {
 
 /// A microphone's prepared taps: (body, node, whole-sample delay, weight on that sample, weight on
 /// the next) on surface acceleration, and (cavity, delay, weights) on port flow acceleration.
+/// A cubic path occupies two consecutive pairs; consumers must sum every pair,
+/// including its signed interpolation coefficients.
 #[derive(Clone, Debug)]
 pub struct MicImage {
     pub taps: Vec<(usize, usize, usize, f64, f64)>,

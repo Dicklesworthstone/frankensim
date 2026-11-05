@@ -66,6 +66,12 @@ Node count alone does not establish audio-band fidelity.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
   A baffled microphone hears only surfaces facing it. Over a rigid floor (any plane,
   `floor_z`, `floor_y`) it also hears, by the floor's image, the surfaces facing that image.
+  Direct and reflected head and port paths use four-coefficient cubic fractional delays before
+  pressure summation, reducing frequency-dependent gain and phase errors in interference.
+  Coefficients are prepared once; stepping only scatters into the existing pressure ring.
+  Integer delays stay exact; paths below one sample of flight use causal linear interpolation.
+  This polynomial FIR approximation has a one-sample leading lobe. It is not an antialias
+  filter, an exact wavefront, or a qualification of the instrument's broadband radiation model.
   A cymbal is not in a baffle: its microphones hear both faces with opposite pressure polarity,
   including the delayed back-face sound reflected by a floor. They apply the unbaffled-disc
   axial amplitude limit (`(4/3pi) ka` times the baffled field for `ka << 1`), joined to the

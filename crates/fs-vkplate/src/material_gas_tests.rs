@@ -58,13 +58,18 @@ fn pressure_temperature_and_composition_reach_force_delay_and_pressure() {
         let area = 0.02_f64.powi(2);
         let stiffness = medium.gamma * medium.pressure * area.powi(2) / 0.001;
         near(ins.admission_rate2().0, stiffness / 0.002);
-        let tap = image.mics[0].taps[0];
+        let taps = &image.mics[0].taps;
+        let gain: f64 = taps.iter().map(|t| t.3 + t.4).sum();
+        let delay_moment: f64 = taps
+            .iter()
+            .map(|t| t.2 as f64 * t.3 + (t.2 + 1) as f64 * t.4)
+            .sum();
         near(
-            tap.2 as f64 + tap.4 / (tap.3 + tap.4),
+            delay_moment / gain,
             ins.rate / medium.sound_speed,
         );
         near(
-            tap.3 + tap.4,
+            gain,
             medium.density * area * ins.rate.powi(2) / (2.0 * PI),
         );
         let dt = ins.k();
