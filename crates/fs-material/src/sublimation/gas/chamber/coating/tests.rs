@@ -102,6 +102,73 @@ fn bare_substrate_captures_finite_vapor_and_shares_real_sensible_storage() {
 }
 
 #[test]
+fn prescribed_gas_film_limits_supported_deposition_and_zero_seals_it() {
+    let catalog = fixture::catalog(0.0);
+    let binding = fixture::binding(0.0);
+    let chart = fixture::chart(&catalog, &binding);
+    let deposit_h = |t| Ok(chart.0 + chart.1 * (t - 400.0));
+    let law = fixture::phase();
+    let gas = fixture::gas(&catalog, 400.0, 3000.0);
+    let initial = state(300.0, 0.0, 0.0);
+    let row = surface(1, &law, &binding, initial, &substrate, &deposit_h);
+
+    let free =
+        advance_supported_chamber(&[row], None, &gas, &catalog, 0.1, controls(), || false)
+            .unwrap();
+    let limited = advance_supported_chamber_with_films(
+        &[row],
+        None,
+        &BTreeMap::from([(1, 0.002)]),
+        &gas,
+        &catalog,
+        0.1,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let sealed = advance_supported_chamber_with_films(
+        &[row],
+        None,
+        &BTreeMap::from([(1, 0.0)]),
+        &gas,
+        &catalog,
+        0.1,
+        controls(),
+        || false,
+    )
+    .unwrap();
+
+    let free_row = free.surfaces()[0];
+    let limited_row = limited.surfaces()[0];
+    assert!(limited_row.exchange.incoming_mass_kg > 0.0);
+    assert!(limited_row.exchange.incoming_mass_kg < free_row.exchange.incoming_mass_kg);
+    assert!(limited_row.state.deposit_mass_kg < free_row.state.deposit_mass_kg);
+    assert!(limited.gas().species_mass_kg(&fixture::species()).unwrap()
+        > free.gas().species_mass_kg(&fixture::species()).unwrap());
+
+    let sealed_row = sealed.surfaces()[0];
+    assert_eq!(sealed_row.exchange.outgoing_mass_kg, 0.0);
+    assert_eq!(sealed_row.exchange.incoming_mass_kg, 0.0);
+    assert_eq!(sealed_row.exchange.transferred_mass_kg, 0.0);
+    assert_eq!(sealed_row.state, initial);
+    assert_eq!(sealed.gas(), &gas);
+    fixture::near(limited.step().mass_residual_kg, 0.0, 1e-14);
+    fixture::near(limited.step().energy_residual_j, 0.0, 1e-7);
+
+    assert!(advance_supported_chamber_with_films(
+        &[row],
+        None,
+        &BTreeMap::from([(99, 0.002)]),
+        &gas,
+        &catalog,
+        0.1,
+        controls(),
+        || false,
+    )
+    .is_err());
+}
+
+#[test]
 fn bare_surfaces_share_species_budget_and_one_order_independent_gas_endpoint() {
     let catalog = fixture::catalog(0.0);
     let binding = fixture::binding(0.0);
