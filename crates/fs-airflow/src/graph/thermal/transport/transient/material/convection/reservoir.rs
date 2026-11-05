@@ -193,7 +193,7 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
         }).map_err(GraphReservoirConvectionError::Convection)?;
         let transport = primary.thermal.transport();
         core.admit_density(fluid_cell, transport).map_err(source_error)?;
-        let surface = if matches!(law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+        let surface = if law.needs_surface_viscosity() {
             poll(cx).map_err(source_error)?;
             Some(material_at(fluid_cell, wall_temperature_k, || {
                 resolve(Temperature::new(wall_temperature_k))

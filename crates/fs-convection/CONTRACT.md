@@ -21,11 +21,12 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names twenty-two implemented relations: circular-duct 3.66 and
+- `CorrelationId` names twenty-three implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
-  `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; laminar and
+  `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; Sieder-Tate turbulent
+  tube convection with explicit bulk/wall viscosity correction; laminar and
   leading-edge-corrected turbulent average flat-plate relations;
   Churchill-Bernstein cylinder crossflow; and Churchill-Chu vertical-plate
   natural convection; Churchill-Chu horizontal-cylinder natural convection;
@@ -297,6 +298,32 @@ None.
   heat removal.
 
 ## No-claim boundaries
+
+- `SiederTateTurbulent` implements `Nu_D = 0.027 Re_D^(4/5) Pr^(1/3)
+  (mu_bulk/mu_wall)^0.14` as printed in Matuska and Zmrhal, CTU Prague,
+  [KOLEKTOR 2.2 Reference Handbook (January 2009), Table 2.5, p. 28](https://users.fs.cvut.cz/tomas.matuska/wordpress/wp-content/uploads/2015/02/Reference_Handbook_KOLEKTOR_012009.pdf#page=28).
+  The exact `0.027` convention is cited to that table rather than attributed
+  to an unverified equation in the 1936 paper. The source supplies `Re >= 1e4`
+  and `Pr in [0.7,16700]`; the additional `Re <= 1e6`, `L/D in [60,1e6]`
+  and viscosity-ratio interval `[0.1,10]` are explicit implementation admission
+  limits, not experimental validation ranges. The length ratio screens a
+  fully developed smooth, straight circular tube; it does not supply an
+  entrance correction. Diameter remains the characteristic length in `h=Nu k/D`.
+  Re, Pr and conductivity use bulk properties. The same fluid's wall
+  temperature supplies only `mu_wall`, and that viscosity ratio must be
+  supplied explicitly with `with_viscosity_ratio`; neither a heating/cooling
+  enum nor omission can substitute a unit ratio. Both ratios below and above
+  one are admitted. The input remains visible as `mu_bulk_over_surface` in
+  `NusseltEvaluation::groups()`. Analytic input partials include Re, Pr and
+  viscosity ratio; the interior length-ratio partial is zero. Only partials
+  that move a validity endpoint are omitted. The 25% model-form discrepancy
+  is an engineering allowance, not a source-published confidence interval.
+  Transition, roughness, non-circular secondary flow, non-Newtonian fluids,
+  buoyancy, phase change, and property changes beyond the represented
+  viscosity correction remain outside this model. Tests use independently
+  evaluated 80-digit decimal source-formula anchors, flow/viscosity response,
+  explicit missing/outside refusals, and finite-difference derivative checks;
+  they establish implementation correctness, not experimental validation.
 
 - `WhitakerSphere` implements the average isolated-isothermal-sphere relation
   in [Whitaker (1972), Eq. (33), Table 1](https://doi.org/10.1002/aic.690180219).

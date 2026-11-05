@@ -27,6 +27,9 @@ pub enum ConvectionPropertyTemperature {
 /// Expansion is supplied by the same resolved material as the transport tuple.
 #[derive(Clone, Copy, Debug)]
 pub enum SourceCellConvectionLaw {
+    /// Original forced relation. Sieder-Tate additionally resolves this same
+    /// fluid at the wall for viscosity; it requires Reservoir bulk properties
+    /// and an explicit circular tube heated length/diameter in `settings`.
     Forced {
         correlation: CorrelationId,
         speed_m_s: f64,
@@ -68,12 +71,29 @@ pub enum SourceCellConvectionLaw {
 }
 
 impl SourceCellConvectionLaw {
+    /// These original relations require a second query of the SAME fluid at
+    /// its actual wall temperature. Only that state's viscosity is consumed.
+    pub(crate) fn needs_surface_viscosity(self) -> bool {
+        matches!(self, Self::ForcedSphere { .. }
+            | Self::Forced { correlation: CorrelationId::SiederTateTurbulent, .. })
+    }
+
     // Admit prescribed strip geometry before invoking an external resolver.
     // The same native law also checks it when consuming a borrowed snapshot.
     pub(crate) fn admit_geometry(self, length: Length) -> Result<(), ConvectionSourceError> {
         if let Self::ForcedPlateSection { correlation, speed_m_s, start } = self {
             CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start }
                 .admit_area(0.0, length)?;
+        }
+        if let Self::Forced { correlation: CorrelationId::SiederTateTurbulent, settings, .. } = self {
+            if settings.aspect_ratio.is_some()
+                || settings.length_over_hydraulic_diameter
+                    .is_none_or(|ratio| !ratio.is_finite() || ratio <= 0.0)
+            {
+                return Err(ConvectionSourceError::Invalid(
+                    "Sieder-Tate requires a circular tube and explicit positive heated length/diameter",
+                ));
+            }
         }
         Ok(())
     }
@@ -82,11 +102,11 @@ impl SourceCellConvectionLaw {
         self,
         convention: ConvectionPropertyTemperature,
     ) -> Result<(), ConvectionSourceError> {
-        if matches!(self, Self::ForcedSphere { .. })
+        if self.needs_surface_viscosity()
             && convention != ConvectionPropertyTemperature::Reservoir
         {
             return Err(ConvectionSourceError::Invalid(
-                "forced spheres require bulk properties plus separately resolved wall viscosity",
+                "viscosity-corrected convection requires bulk properties plus separately resolved wall viscosity",
             ));
         }
         if matches!(
@@ -123,6 +143,19 @@ impl SourceCellConvectionLaw {
                 ))
         };
         Ok(match self {
+            Self::Forced {
+                correlation: CorrelationId::SiederTateTurbulent,
+                speed_m_s,
+                settings,
+            } => CellConvectionLaw::ForcedTube {
+                speed_m_s,
+                length_over_diameter: settings.length_over_hydraulic_diameter.ok_or(
+                    ConvectionSourceError::Invalid("Sieder-Tate requires an explicit heated length/diameter"),
+                )?,
+                surface_transport: surface.ok_or(ConvectionSourceError::Invalid(
+                    "Sieder-Tate is missing its original fluid evaluated at wall temperature",
+                ))?.transport(),
+            },
             Self::Forced {
                 correlation,
                 speed_m_s,
@@ -177,7 +210,7 @@ pub struct CellConvectionMaterialSample<F> {
     pub property_temperature_k: f64,
     pub material: F,
     pub thermal: ThermalFluidTransportState,
-    /// Present for forced spheres. This is the SAME fluid at the actual wall
+    /// Present for forced spheres and Sieder-Tate tubes: the SAME fluid at the actual wall
     /// temperature; it has no separate thermal storage or mass.
     pub surface: Option<SurfaceConvectionMaterialSample<F>>,
 }
@@ -256,7 +289,7 @@ impl<E: fmt::Debug> std::error::Error for SourceCellConvectionError<E> {}
 ///
 /// Call with the proposed enthalpy endpoint, not only the interval's initial
 /// state. The resolver receives the declared property temperature exactly once
-/// per primary state, in CellId order. Forced spheres additionally query the
+/// per primary state, in CellId order. Spheres and Sieder-Tate tubes also query the
 /// same resolver at the actual wall temperature and retain that second owner.
 /// It must retain one material law across temperatures and trials
 /// (for example a prepared `LiquidTemperatureLaw` or a fixed gas-mixture model)
@@ -338,7 +371,7 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
         let primary = material_at(binding.cell, property_temperature_k, || {
             resolve(binding, Temperature::new(property_temperature_k))
         })?;
-        let surface = if matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+        let surface = if binding.law.needs_surface_viscosity() {
             check(&mut cancelled)?;
             Some(material_at(binding.cell, wall, || {
                 resolve(binding, Temperature::new(wall))

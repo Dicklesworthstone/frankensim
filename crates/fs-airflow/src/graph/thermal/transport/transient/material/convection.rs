@@ -32,7 +32,7 @@ use crate::graph::thermal::medium::convection::{
         },
     },
     evaluate_flat_plate_section_from_material, evaluate_forced_from_material,
-    evaluate_sphere_from_material,
+    evaluate_sphere_from_material, evaluate_tube_from_material,
 };
 use fs_convection::{CorrelationId, ThermalDirection};
 use fs_material::fluid_transport::ThermalFluidTransport;
@@ -99,6 +99,13 @@ pub enum GraphConvectionLaw {
         plate_up: [f64; 3],
         maximum_relative_density_departure: f64,
     },
+}
+
+impl GraphConvectionLaw {
+    fn needs_surface_viscosity(self) -> bool {
+        matches!(self, Self::ForcedSphere { .. }
+            | Self::Forced { correlation: CorrelationId::SiederTateTurbulent, .. })
+    }
 }
 
 /// A native zero-conductance contact; native link area/coverage remain the
@@ -220,7 +227,7 @@ fn link_material<M: ThermalFluidTransport>(
 ) -> Result<M, SourceGraphError> {
     poll(cx)?;
     let material = resolve(temperature)?;
-    if !matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+    if !binding.law.needs_surface_viscosity() {
         core.admit_density(
             binding.fluid_cell,
             material
@@ -228,7 +235,7 @@ fn link_material<M: ThermalFluidTransport>(
                 .map_err(SourceGraphError::Material)?,
         )?;
     }
-    // A sphere's additional query supplies only surface viscosity. Its density
+    // The additional wall query supplies only surface viscosity. Its density
     // is not another stored fluid state; admit the primary bulk snapshot below.
     Ok(material)
 }
@@ -247,7 +254,7 @@ fn admit_link_sample<M: ThermalFluidTransport>(
         )));
     }
     poll(cx).map_err(GraphConvectionError::Source)?;
-    if matches!(binding.law, GraphConvectionLaw::ForcedSphere { .. }) {
+    if binding.law.needs_surface_viscosity() {
         core.admit_density(binding.fluid_cell, sample.thermal.transport())
             .map_err(GraphConvectionError::Source)?;
     }

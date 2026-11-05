@@ -195,6 +195,11 @@ fn input_elasticity(
                 0.0
             }
         }
+        CorrelationId::SiederTateTurbulent => match axis {
+            "Pr" => 1.0 / 3.0,
+            "mu_bulk_over_surface" => 0.14,
+            _ => 0.0,
+        },
         CorrelationId::Gnielinski => {
             if axis == "Pr" {
                 let z = 0.79_f64.mul_add(det::ln(group("Re")), -1.64);
@@ -401,7 +406,7 @@ impl NusseltEvaluation {
                 let b = 0.04*det::pow(gz, 2.0/3.0);
                 (0.0668*gz/(1.0+b))/nu*(1.0+b/3.0)/(1.0+b)
             }
-            CorrelationId::DittusBoelter => 0.8,
+            CorrelationId::DittusBoelter | CorrelationId::SiederTateTurbulent => 0.8,
             CorrelationId::Gnielinski => {
                 let re = group("Re")?; let pr = group("Pr")?;
                 let z = 0.79*det::ln(re)-1.64;

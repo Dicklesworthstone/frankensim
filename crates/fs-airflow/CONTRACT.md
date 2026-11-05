@@ -898,6 +898,33 @@ implicit reciprocal energy and reversed endpoints, and native observed link
 advancement. Rust syntax/format and scoped whitespace checks passed; these
 new integration regressions were authored but not executed in this change.
 
+### Variable-viscosity turbulent circular tubes
+
+`evaluate_tube_from_material` retains separate original bulk and wall-temperature
+fluid sources for the shared `SiederTateTurbulent` card. Bulk density, heat
+capacity, conductivity and viscosity supply Re, Pr and the dimensional `Nu k/D`;
+only wall viscosity enters its correction. The source-backed `Forced` cell,
+finite-link and reservoir paths automatically query the SAME fluid at both
+actual temperatures when this card is selected. `Reservoir` property sampling
+is required; a film tuple, missing heated length or rectangular aspect ratio
+refuses. Every original source/domain and caloric check remains active.
+
+Native liquid/gas graph heat bindings use the same two snapshots at actual
+step-average flow and recheck the initial/final rates and any zero crossing.
+The authored circular diameter must agree with the original pipe area. Wall
+density is not a second stored fluid state; the original bulk density still
+owns inventory admission. Finite walls, source-integrated wall surfaces and
+prescribed reservoirs keep their original heat owner, conservation and clock.
+No diagnostic watts are added again as a source.
+
+The correlation is restricted to its declared smooth, straight, fully developed,
+single-phase Newtonian regime. Geometry, pressure/composition identity and the
+frozen-property approximation remain caller obligations; generic borrowed
+snapshots cannot prove common material identity. Original source re-evaluation
+and native energy closure do not establish empirical accuracy, turbulence
+resolution or temporal order. Focused regressions cover both viscosity-ratio
+directions, original source queries, reciprocal enthalpy feedback and refusal.
+
 ### Reciprocal material convection on finite thermal links
 
 `source::links::evaluate_source_link_convection` resolves the original fluid

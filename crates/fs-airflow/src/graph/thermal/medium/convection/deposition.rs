@@ -65,6 +65,13 @@ pub enum CellConvectionLaw {
         speed_m_s: f64,
         surface_transport: FluidTransportState,
     },
+    /// Sieder-Tate turbulent circular tube. Primary properties remain bulk;
+    /// the same fluid at the actual wall supplies only surface viscosity.
+    ForcedTube {
+        speed_m_s: f64,
+        length_over_diameter: f64,
+        surface_transport: FluidTransportState,
+    },
     /// Churchill-Chu isothermal vertical plate. Gravity is a nonnegative
     /// magnitude [m/s²]; volumetric expansion [1/K] is explicitly supplied.
     /// Negative expansion is admitted by the original vertical-plate owner.
@@ -399,6 +406,13 @@ pub(crate) fn evaluate_convection_state(
         CellConvectionLaw::ForcedSphere { speed_m_s, surface_transport } => {
             let result = evaluate_sphere_from_material(
                 transport, &surface_transport, speed_m_s, length,
+            )?;
+            let (_, nusselt, coefficient) = result.into_parts();
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None }));
+        }
+        CellConvectionLaw::ForcedTube { speed_m_s, length_over_diameter, surface_transport } => {
+            let result = evaluate_tube_from_material(
+                transport, &surface_transport, speed_m_s, length, length_over_diameter,
             )?;
             let (_, nusselt, coefficient) = result.into_parts();
             return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None }));

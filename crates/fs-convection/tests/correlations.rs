@@ -92,9 +92,9 @@ fn assert_level_a_convection_limit(case_id: &str, observed: f64) {
 }
 
 #[test]
-fn catalog_has_twenty_two_sourced_cards_and_no_unlabeled_discrepancy() {
+fn catalog_has_twenty_three_sourced_cards_and_no_unlabeled_discrepancy() {
     let catalog = correlation_catalog();
-    assert_eq!(catalog.len(), 22);
+    assert_eq!(catalog.len(), 23);
     assert_eq!(catalog.len(), CorrelationId::ALL.len());
 
     let mut names = std::collections::BTreeSet::new();
@@ -393,6 +393,13 @@ fn every_nonconstant_formula_has_a_frozen_source_formula_spot_value() {
             CorrelationId::Gnielinski,
             CorrelationInputs::forced(100_000.0, 0.7).with_length_ratio(100.0),
             178.622_951_779_291_2,
+        ),
+        (
+            CorrelationId::SiederTateTurbulent,
+            CorrelationInputs::forced(100_000.0, 7.0)
+                .with_length_ratio(100.0)
+                .with_viscosity_ratio(4.0),
+            627.121_239_206_940_3,
         ),
         (
             CorrelationId::FlatPlateLaminarAverage,

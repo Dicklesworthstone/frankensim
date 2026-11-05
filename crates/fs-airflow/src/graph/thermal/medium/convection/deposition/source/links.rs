@@ -39,8 +39,9 @@ pub struct ConvectiveLinkSample<F> {
     pub heat_into_fluid_w: f64,
     pub material: F,
     pub thermal: ThermalFluidTransportState,
-    /// Forced-sphere fluid query at the ACTUAL wall temperature. Only its
-    /// viscosity enters Whitaker's correction; the primary state stays bulk.
+    /// Fluid query at the ACTUAL wall temperature for Whitaker spheres and
+    /// Sieder-Tate tubes. Only its viscosity enters the wall correction;
+    /// the primary state stays bulk.
     pub surface: Option<SurfaceConvectionMaterialSample<F>>,
     /// None only at exact natural-convection thermal equilibrium.
     pub evaluation: Option<CellConvectionEvaluation>,
@@ -90,7 +91,7 @@ impl<F> ResolvedLinkConvection<F> {
 /// and fixed conditions as the native caloric law; a generic transport trait
 /// cannot prove this identity or invent pressure/composition evolution. Retain
 /// prepared material laws across calls so nonlinear trials do not select new
-/// sources. Forced spheres query the same original fluid again at the wall
+/// sources. Forced spheres and Sieder-Tate tubes query that fluid at the wall
 /// temperature. Every returned owner stays with its heat-transfer result.
 ///
 /// This returns total conductances for existing links. Use them directly in
@@ -260,7 +261,7 @@ fn evaluate_admitted_surface<F: ThermalFluidTransport, E>(
     let primary = material_at(fluid_cell, property_temperature_k, || {
         resolve(binding, thermal, Temperature::new(property_temperature_k))
     })?;
-    let surface = if matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+    let surface = if binding.law.needs_surface_viscosity() {
         check(cancelled)?;
         Some(material_at(fluid_cell, wall_temperature_k, || {
             resolve(binding, thermal, Temperature::new(wall_temperature_k))

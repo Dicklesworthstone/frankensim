@@ -300,14 +300,36 @@ pub(super) fn admit_envelope<M: ThermalFluidTransport>(
                 settings.direction = ThermalDirection::CoolingFluid;
             }
             let admit = |flow: f64| {
-                evaluate_forced_from_material(
-                    correlation,
-                    point.material,
-                    flow.abs() / area,
-                    point.characteristic_length,
-                    settings,
-                )
-                .map_err(FlowConvectionError::Envelope)
+                if correlation == CorrelationId::SiederTateTurbulent {
+                    let surface = point.surface.ok_or_else(|| source_error(
+                        SourceGraphError::Invalid("tube convection requires retained wall viscosity"),
+                    ))?;
+                    let diameter = point.characteristic_length.value();
+                    let circular_area = core::f64::consts::PI * diameter * diameter / 4.0;
+                    if !positive(circular_area)
+                        || (circular_area - area).abs()
+                            > 64.0 * f64::EPSILON * circular_area.max(area)
+                    {
+                        return Err(source_error(SourceGraphError::Invalid(
+                            "Sieder-Tate requires the original circular pipe area and diameter",
+                        )));
+                    }
+                    let length = settings.length_over_hydraulic_diameter.ok_or_else(|| source_error(
+                        SourceGraphError::Invalid("tube convection requires heated length/diameter"),
+                    ))?;
+                    evaluate_tube_from_material(
+                        &point.thermal.transport(), &surface.transport(), flow.abs() / area,
+                        point.characteristic_length, length,
+                    ).map(|_| ()).map_err(FlowConvectionError::Envelope)
+                } else {
+                    evaluate_forced_from_material(
+                        correlation,
+                        point.material,
+                        flow.abs() / area,
+                        point.characteristic_length,
+                        settings,
+                    ).map(|_| ()).map_err(FlowConvectionError::Envelope)
+                }
             };
             // Native evaluation already admitted the actual average. Check
             // both endpoints, including lower Reynolds limits, and the minimum

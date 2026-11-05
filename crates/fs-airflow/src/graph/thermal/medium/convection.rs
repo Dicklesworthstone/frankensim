@@ -29,6 +29,10 @@ pub use mixed::{
 pub mod sphere;
 pub use sphere::{MaterialSphereConvection, evaluate_sphere_from_material};
 
+/// Turbulent circular tubes with source-resolved bulk and wall viscosity.
+pub mod tube;
+pub use tube::{MaterialTubeConvection, evaluate_tube_from_material};
+
 /// Streamwise sections retain the physical external plate's leading edge.
 pub mod plate;
 pub use plate::{
