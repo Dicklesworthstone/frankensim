@@ -1,5 +1,18 @@
 # fs-material — CONTRACT
 
+## Native brittle mean-stress assembly adapter
+
+`BrittleCrackBand::mean_small_strain_law` borrows the original crack-band owner
+for native small-strain assembly. Its force response and algorithmic tangent
+are the analytic path-mean stress and its derivative at fixed accepted history;
+its state update remains the original physical endpoint `BrittleState`. Mean
+response and endpoint stress must remain distinct in receiving observations.
+A valid path without a classical derivative retains `None` in the checked API
+and a nonfinite tangent in the infallible trait. This includes virgin held
+zero paths and nonsmooth retained maxima. The adapter never substitutes an
+endpoint or numerical tangent; an explicitly admitted nonlinear-solver fallback
+owns such cases. Original source identity, strain domains and work gates remain.
+
 ## Exact brittle path-mean stress and derivative
 
 `brittle::path` projects the existing analytic cohesive path mean into the

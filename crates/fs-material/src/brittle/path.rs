@@ -25,7 +25,8 @@ use super::{
     finite_tangent, finite_voigt,
 };
 use crate::cohesive::CohesiveStep;
-use crate::{Tangent6, Voigt};
+use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
+use fs_evidence::ModelCard;
 
 /// Original endpoint and a distinct work-conjugate stress for its whole path.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,7 +42,31 @@ pub struct BrittlePathStep<'a> {
     pub path_work_defect_j_m3: f64,
 }
 
+/// Borrowed work-conjugate force adapter for the native small-strain assembly.
+///
+/// `strain` is the NEW endpoint and `State` is the original accepted
+/// [`BrittleState`]. The force response is the exact path-mean stress, whereas
+/// `update_state` retains the original endpoint history. This adapter neither
+/// averages history nor supplies time integration, mass or a Newton fallback.
+///
+/// A classical derivative can be absent even for a valid zero-length path.
+/// The infallible trait reports this with a nonfinite tangent; the checked
+/// [`Self::trial`] preserves the native `Option`. A nonlinear consumer must
+/// explicitly admit its own numerical or semismooth fallback. No endpoint
+/// tangent is substituted for the derivative of the mean force.
+#[derive(Clone, Copy, Debug)]
+pub struct BrittleMeanSmallStrain<'a> {
+    owner: &'a BrittleCrackBand,
+}
+
 impl BrittleCrackBand {
+    /// Borrow the original law for assembly of its exact path-mean stress.
+    /// See [`BrittleMeanSmallStrain`] for the explicit nonsmooth-tangent boundary.
+    #[must_use]
+    pub fn mean_small_strain_law(&self) -> BrittleMeanSmallStrain<'_> {
+        BrittleMeanSmallStrain { owner: self }
+    }
+
     /// Original endpoint trial plus the exact vector stress average. This
     /// force-only entry avoids evaluating the optional path-mean derivative.
     ///
@@ -134,5 +159,65 @@ impl BrittleCrackBand {
         }
         finite_tangent(&tangent)?;
         Ok(tangent)
+    }
+}
+
+impl<'a> BrittleMeanSmallStrain<'a> {
+    /// One original cohesive trial supplies endpoint history, path-mean stress,
+    /// work audit and its optional classical derivative at fixed old history.
+    /// Physical refusals and valid paths without a derivative remain distinct.
+    pub fn trial(
+        &self,
+        strain: &Voigt,
+        state: &BrittleState<'a>,
+    ) -> Result<(BrittlePathStep<'a>, Option<Tangent6>), BrittleError> {
+        self.owner.trial_with_mean_stress_tangent(strain, state)
+    }
+}
+
+impl<'a> SmallStrainLaw for BrittleMeanSmallStrain<'a> {
+    type State = BrittleState<'a>;
+
+    fn initial_state(&self) -> Self::State {
+        self.owner.initial_state()
+    }
+
+    fn stress(&self, strain: &Voigt, state: &Self::State) -> Voigt {
+        self.owner
+            .trial_with_mean_stress(strain, state)
+            .map(|path| path.mean_stress_pa)
+            .unwrap_or([f64::NAN; 6])
+    }
+
+    fn tangent(&self, strain: &Voigt, state: &Self::State) -> Tangent6 {
+        self.trial(strain, state)
+            .ok()
+            .and_then(|(_, tangent)| tangent)
+            .unwrap_or([[f64::NAN; 6]; 6])
+    }
+
+    fn update_state(&self, strain: &Voigt, state: &Self::State) -> Self::State {
+        self.owner.small_strain_law().update_state(strain, state)
+    }
+
+    fn admissibility(&self) -> MaterialAdmissibility {
+        self.owner.small_strain_law().admissibility()
+    }
+
+    fn card(&self) -> ModelCard {
+        let mut card = self.owner.small_strain_law().card();
+        card.name = "material.brittle-fixed-plane-path-mean".into();
+        card.assumptions.push(
+            "exact stress average on one straight strain increment at fixed accepted history; original endpoint state and work retained".into(),
+        );
+        card.known_failures.push(
+            "native path-mean derivative can be absent at held contact or damage switches, including zero-length Newton starts; consumer owns an explicitly admitted fallback".into(),
+        );
+        card.known_failures.push(
+            "mean force stress is not the endpoint stress; no time integration, mass or intermediate strain reversals are supplied".into(),
+        );
+        card.assumptions.sort_unstable();
+        card.known_failures.sort_unstable();
+        card
     }
 }
