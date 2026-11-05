@@ -2738,6 +2738,9 @@ pub struct Mic {
     hp: (f64, f64),
     /// The drum heard as one closed body below the table's band (`Instrument::attach_closed_body`).
     closed: Option<Box<closed_body::ClosedBodyObserver>>,
+    /// Additional, disjoint source bodies observed at this same microphone.
+    closed_more: Vec<closed_body::ClosedBodyObserver>,
+    closed_alignment: Option<closed_body::CoherentObserverMix>,
 }
 
 /// A rigid plane: the point `point` on it and its unit `normal`, pointing into the air.
@@ -2771,16 +2774,22 @@ impl Floor {
 
 impl Mic {
     pub fn new(pos: [f64; 3]) -> Mic {
-        Mic { pos, taps: vec![], ptaps: vec![], ring: vec![], unbaffled: None, floor: None, hp: (0.0, 0.0), closed: None }
+        Mic { pos, taps: vec![], ptaps: vec![], ring: vec![], unbaffled: None, floor: None, hp: (0.0, 0.0), closed: None, closed_more: vec![], closed_alignment: None }
     }
-    /// The closed-body observer on this microphone, if one is attached.
+    /// The primary closed-body observer, if one is attached. Use `closed_bodies`
+    /// to enumerate every source when this microphone hears several bodies.
     pub fn closed_body(&self) -> Option<&closed_body::ClosedBodyObserver> {
         self.closed.as_deref()
     }
-    /// Samples by which this microphone's output lags the instrument's clock: the closed-body
-    /// observer's latency, else 0. `kit::render` trims it.
+    /// All closed-body source transfers, in attachment order.
+    pub fn closed_bodies(&self) -> impl Iterator<Item = &closed_body::ClosedBodyObserver> {
+        self.closed.iter().map(|observer| observer.as_ref()).chain(self.closed_more.iter())
+    }
+    /// Samples by which this microphone's output lags the instrument's clock:
+    /// the largest closed-body latency, else 0. `kit::render` trims it. Physical
+    /// propagation delays remain in the signal; numerical latencies never add.
     pub fn output_latency(&self) -> usize {
-        self.closed.as_ref().map_or(0, |c| c.latency())
+        self.closed_bodies().map(|observer| observer.latency()).max().unwrap_or(0)
     }
 }
 
@@ -3447,10 +3456,11 @@ impl Instrument {
     }
     /// Hear microphone `mic` as fs-bem's closed body (pexfp.378): the drum whose batter and
     /// resonant heads are bodies `batter` and `resonant`, its shell rigid, on the table's floor.
-    /// Refused unless the table was baked for this clock, gas, microphone position and floor, and
-    /// for heads placed as the kit builder places them; refused after the first step and on an
-    /// unbaffled microphone. The head motion is unchanged: the observer is outside the loop. Returns
-    /// the route receipt.
+    /// The table geometry may be translated rigidly by the batter's origin; its
+    /// relative head placement, microphone and floor must match exactly. Clock
+    /// and gas must match too. Refused after the first step and on an unbaffled
+    /// microphone. This replaces all closed-body transfers on the microphone;
+    /// use `add_closed_body` for additional sources. Head motion is unchanged.
     pub fn attach_closed_body(
         &mut self,
         mic: usize,
@@ -3458,6 +3468,52 @@ impl Instrument {
         batter: usize,
         resonant: usize,
     ) -> Result<String, String> {
+        let observer = self.closed_body_observer(mic, table, batter, resonant)?;
+        let m = &mut self.mics[mic];
+        m.closed = Some(Box::new(observer));
+        m.closed_more.clear();
+        m.closed_alignment = None;
+        self.prepared = false;
+        Ok(table.receipt())
+    }
+
+    /// Add another disjoint source pair to one microphone's coherent pressure.
+    /// Each supplied transfer retains its physical phase and delay. Numerical
+    /// FIR latencies align to their maximum before the corrections add to one
+    /// Rayleigh baseline; they are never cascaded. Reusing either head already
+    /// owned by a transfer on this microphone refuses without changing it.
+    /// This does not compute acoustic scattering or fluid loading between bodies.
+    pub fn add_closed_body(
+        &mut self,
+        mic: usize,
+        table: &closed_body::ClosedBodyTable,
+        batter: usize,
+        resonant: usize,
+    ) -> Result<String, String> {
+        if self.mics.get(mic).is_some_and(|m| m.closed_bodies().any(|observer| {
+            observer.owns_body(batter) || observer.owns_body(resonant)
+        })) {
+            return Err(format!("closed-body observer ({}): a head already belongs to this microphone's source transfers", table.piece));
+        }
+        let observer = self.closed_body_observer(mic, table, batter, resonant)?;
+        let m = &mut self.mics[mic];
+        if m.closed.is_none() {
+            m.closed = Some(Box::new(observer));
+        } else {
+            m.closed_more.push(observer);
+        }
+        m.closed_alignment = None;
+        self.prepared = false;
+        Ok(table.receipt())
+    }
+
+    fn closed_body_observer(
+        &self,
+        mic: usize,
+        table: &closed_body::ClosedBodyTable,
+        batter: usize,
+        resonant: usize,
+    ) -> Result<closed_body::ClosedBodyObserver, String> {
         let refuse = |what: String| Err(format!("closed-body observer ({}): {what}", table.piece));
         if self.step_index != 0 {
             return refuse("the instrument has already stepped".into());
@@ -3474,12 +3530,6 @@ impl Instrument {
                 table.gas.0, table.gas.1, self.gas.density, self.gas.sound_speed
             ));
         }
-        if table.mic != m.pos {
-            return refuse(format!("baked for a microphone at {:?}, this one is at {:?}", table.mic, m.pos));
-        }
-        if m.floor.map(|f| (f.point, f.normal)) != Some(table.floor) {
-            return refuse("baked for another floor".into());
-        }
         if m.unbaffled.is_some() {
             return refuse("the microphone hears an unbaffled source".into());
         }
@@ -3488,22 +3538,30 @@ impl Instrument {
             return refuse("the head bodies are not two distinct bodies of this instrument".into());
         }
         let (b, r) = (&self.bodies[batter], &self.bodies[resonant]);
-        if b.origin != [0.0, 0.0, 0.0]
+        let origin = b.origin;
+        let expected_resonant = [origin[0], origin[1], origin[2] - table.depth];
+        if origin.iter().chain(&expected_resonant).any(|v| !v.is_finite())
             || b.facing != 1.0
-            || r.origin != [0.0, 0.0, -table.depth]
+            || r.origin != expected_resonant
             || r.facing != -1.0
             || !b.radiates
             || !r.radiates
         {
             return refuse(format!(
-                "the heads are not placed as the table's: the batter at the origin facing +z, the resonant head {} m below it facing -z, both radiating",
+                "the heads are not a rigid translation of the table's: batter facing +z, resonant head {} m below it facing -z, both radiating",
                 table.depth
             ));
         }
-        let observer = closed_body::ClosedBodyObserver::new(table, [(batter, b), (resonant, r)])?;
-        self.mics[mic].closed = Some(Box::new(observer));
-        self.prepared = false;
-        Ok(table.receipt())
+        let expected_mic: [f64; 3] = std::array::from_fn(|i| table.mic[i] + origin[i]);
+        if expected_mic.iter().any(|v| !v.is_finite()) || expected_mic != m.pos {
+            return refuse(format!("baked for a translated microphone at {expected_mic:?}, this one is at {:?}", m.pos));
+        }
+        if !m.floor.is_some_and(|floor| {
+            closed_body::same_translated_plane(table.floor, (floor.point, floor.normal), origin)
+        }) {
+            return refuse("baked for another translated floor".into());
+        }
+        closed_body::ClosedBodyObserver::new(table, [(batter, b), (resonant, r)])
     }
     pub fn add(&mut self, b: Body) -> usize {
         self.bodies.push(b);
@@ -3817,6 +3875,15 @@ impl Instrument {
             if let Some(observer) = m.closed.as_mut() {
                 observer.prepare(&m.taps, m.ring.len());
             }
+            for observer in &mut m.closed_more {
+                observer.prepare(&m.taps, m.ring.len());
+            }
+            m.closed_alignment = if m.closed_more.is_empty() {
+                None
+            } else {
+                let latencies: Vec<_> = m.closed_bodies().map(|observer| observer.latency()).collect();
+                Some(closed_body::CoherentObserverMix::new(&latencies))
+            };
         }
         self.prepared = true;
     }
@@ -4061,7 +4128,20 @@ impl Instrument {
                 y = yn;
             }
             if let Some(observer) = m.closed.as_mut() {
-                y = observer.step(y, &self.bodies, k, base);
+                if m.closed_more.is_empty() {
+                    y = observer.step(y, &self.bodies, k, base);
+                } else {
+                    let full = y;
+                    let more = &mut m.closed_more;
+                    let alignment = m.closed_alignment.as_mut().expect("prepared closed-body alignment");
+                    y = alignment.step(full, |index| {
+                        if index == 0 {
+                            observer.step_correction(full, &self.bodies, k, base)
+                        } else {
+                            more[index - 1].step_correction(full, &self.bodies, k, base)
+                        }
+                    });
+                }
             }
             out[mi] = y;
             m.ring[slot] = 0.0;

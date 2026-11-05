@@ -236,7 +236,7 @@ fn main() {
         }
     }
     for m in &p.instrument.mics {
-        if let Some(o) = m.closed_body() {
+        for o in m.closed_bodies() {
             eprintln!("{}", o.report());
         }
     }

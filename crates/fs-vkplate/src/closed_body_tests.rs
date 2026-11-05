@@ -308,6 +308,52 @@ fn n3_any_header_mismatch_refuses() {
     assert!(stepped.attach_closed_body(0, &parsed, batter, resonant).is_err());
 }
 
+#[test]
+fn n3_translated_sources_share_one_mic_without_overlapping_ownership() {
+    let spec = DrumSpec { mic: [0.25, 0.125, 0.5], ..test_drum() };
+    let mut ins = kit::drum(&spec, &[]).unwrap().instrument;
+    let (batter, resonant) = heads(&ins);
+    let first = Synthetic::for_drum(&ins, &spec, shapes());
+    let first_table = ClosedBodyTable::parse(&first.write(&|_, _| (0.0, 0.0))).unwrap();
+    let shift = [0.5, -0.25, 0.0];
+    let mut second_batter = ins.bodies[batter].clone();
+    let mut second_resonant = ins.bodies[resonant].clone();
+    for body in [&mut second_batter, &mut second_resonant] {
+        body.origin = std::array::from_fn(|i| body.origin[i] + shift[i]);
+    }
+    let second_batter = ins.add(second_batter);
+    let second_resonant = ins.add(second_resonant);
+    let second = Synthetic {
+        mic: std::array::from_fn(|i| spec.mic[i] - shift[i]),
+        latency: 256,
+        ..first.clone()
+    };
+    let second_table = ClosedBodyTable::parse(&second.write(&|_, _| (0.0, 0.0))).unwrap();
+    ins.attach_closed_body(0, &first_table, batter, resonant).unwrap();
+    ins.add_closed_body(0, &second_table, second_batter, second_resonant).unwrap();
+    assert_eq!(ins.mics[0].closed_bodies().count(), 2);
+    assert_eq!(ins.mics[0].closed_body().unwrap().latency(), first.latency);
+    assert_eq!(ins.mics[0].output_latency(), second.latency);
+    assert!(ins.add_closed_body(0, &second_table, second_batter, second_resonant).is_err());
+    assert!(ins.add_closed_body(0, &second_table, batter, second_resonant).is_err());
+    assert_eq!(ins.mics[0].closed_bodies().count(), 2, "failed admission is transactional");
+
+    // Existing replacement semantics and the legacy export refusal predicate
+    // remain valid; replacing clears every old source and alignment history.
+    let mut replacement = ins.clone();
+    replacement.attach_closed_body(0, &first_table, batter, resonant).unwrap();
+    assert_eq!(replacement.mics[0].closed_bodies().count(), 1);
+    assert_eq!(replacement.mics[0].output_latency(), first.latency);
+    assert!(replacement.mics[0].closed_body().is_some());
+
+    let _ = ins.image();
+    assert!(ins.mics[0].closed_alignment.is_some());
+    let mut sample = vec![0.0; ins.mics.len()];
+    ins.step(&mut sample);
+    assert!(sample.iter().all(|x| x.is_finite()));
+    assert!(ins.add_closed_body(0, &first_table, batter, resonant).is_err());
+}
+
 /// The dipole's length from the committed tables, on z-floors and the kick's y-floor, against an independent axisymmetric
 /// boundary-integral solve of the closed cylinder in free field (its net-flow power reaches 0.9987 of the monopole law).
 /// The script's read of the table's own rows is the first number; the solve's power-equivalent length is the second.

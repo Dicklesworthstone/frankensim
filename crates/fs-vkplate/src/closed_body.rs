@@ -29,12 +29,18 @@
 //! render trims. The observer is outside the loop: the head motion is
 //! unchanged. No table: the microphone is untouched.
 //!
+//! Several disjoint source bodies may contribute to one microphone. Their
+//! corrections `C_i = h_i*qdot_i - g_i*U_i` retain each table's own latency
+//! `D_i`; the microphone emits `R(t-D) + sum_i C_i(t-(D-D_i))`, with
+//! `D = max_i D_i`. This is coherent superposition of the supplied transfers,
+//! not a cascade of observers and not a new inter-body scattering/loading solve.
+//!
 //! Only arithmetic, `sqrt` and `fs_math::det`'s sin, cos and tan are used, so
 //! every build reconstructs the same kernels.
 
 use crate::Body;
 use crate::radiation::{MODE_SET, ModeShape};
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 use std::f64::consts::TAU;
 
 pub const TABLE_FORMAT: &str = "frankensim.vkplate-closed-body-observer.v1";
@@ -502,6 +508,68 @@ impl History {
     }
 }
 
+/// Delay only the observation's numerical latency, never its physical path.
+/// One full Rayleigh signal plus independently aligned additive corrections.
+#[derive(Clone, Debug)]
+pub(crate) struct CoherentObserverMix {
+    latency: usize,
+    full: History,
+    corrections: Vec<(usize, History)>,
+    step: usize,
+}
+
+impl CoherentObserverMix {
+    pub(crate) fn new(latencies: &[usize]) -> Self {
+        let latency = latencies.iter().copied().max().unwrap_or(0);
+        Self {
+            latency,
+            full: History::new(latency + 1),
+            corrections: latencies.iter().map(|&own| {
+                let lag = latency - own;
+                (lag, History::new(lag + 1))
+            }).collect(),
+            step: 0,
+        }
+    }
+
+    /// `correction(i)` advances source i once on this same physical clock.
+    /// Prepared histories keep every streaming step allocation-free.
+    pub(crate) fn step(&mut self, full: f64, mut correction: impl FnMut(usize) -> f64) -> f64 {
+        let t = self.step;
+        self.full.write(t, full);
+        let mut output = Dd::from_f64(if t >= self.latency { self.full.at(t, self.latency) } else { 0.0 });
+        for (i, (lag, history)) in self.corrections.iter_mut().enumerate() {
+            history.write(t, correction(i));
+            if t >= *lag {
+                // Retain a quiet field even when it precedes cancellation of
+                // larger contributions. Round only the completed pressure.
+                output = output + Dd::from_f64(history.at(t, *lag));
+            }
+        }
+        self.step += 1;
+        output.to_f64()
+    }
+}
+
+/// A rigid translation preserves a plane even when its chosen reference point
+/// moves tangentially. Bind the normal and signed plane offset, not that point.
+pub(crate) fn same_translated_plane(
+    baked: ([f64; 3], [f64; 3]),
+    observed: ([f64; 3], [f64; 3]),
+    origin: [f64; 3],
+) -> bool {
+    let (point, normal) = baked;
+    let (actual, actual_normal) = observed;
+    if normal != actual_normal
+        || point.iter().chain(&normal).chain(&actual).chain(&origin).any(|v| !v.is_finite())
+    {
+        return false;
+    }
+    let expected: f64 = (0..3).map(|i| (point[i] + origin[i]) * normal[i]).sum();
+    let offset: f64 = (0..3).map(|i| actual[i] * normal[i]).sum();
+    expected.is_finite() && offset.is_finite() && expected == offset
+}
+
 /// The observer on one microphone.
 #[derive(Clone, Debug)]
 pub struct ClosedBodyObserver {
@@ -640,6 +708,10 @@ impl ClosedBodyObserver {
         self.latency
     }
 
+    pub(crate) fn owns_body(&self, body: usize) -> bool {
+        self.heads.iter().any(|head| head.body == body)
+    }
+
     /// Aggregate the microphone's baffled taps per retained shape.
     pub(crate) fn prepare(&mut self, taps: &[(usize, usize, usize, f64, f64)], ring_len: usize) {
         let total: usize = self.heads.iter().map(|h| h.sources.len()).sum();
@@ -668,6 +740,16 @@ impl ClosedBodyObserver {
 
     /// One step: `full` is today's baffled sample at this step.
     pub(crate) fn step(&mut self, full: f64, bodies: &[Body], k: f64, base: usize) -> f64 {
+        self.step_impl(full, bodies, k, base, true)
+    }
+
+    /// Only this body's additive transfer correction, with the table's own
+    /// latency. A shared observer mixer supplies the full pressure once.
+    pub(crate) fn step_correction(&mut self, full: f64, bodies: &[Body], k: f64, base: usize) -> f64 {
+        self.step_impl(full, bodies, k, base, false)
+    }
+
+    fn step_impl(&mut self, full: f64, bodies: &[Body], k: f64, base: usize, include_full: bool) -> f64 {
         for head in &self.heads {
             let b = &bodies[head.body];
             for (j, &s) in head.sources.iter().enumerate() {
@@ -701,7 +783,7 @@ impl ClosedBodyObserver {
         for (h, &v) in self.qdot.iter_mut().zip(&self.rate_now) {
             h.write(t, v);
         }
-        let mut y = if t >= self.latency { self.full.at(t, self.latency) } else { 0.0 };
+        let mut y = if include_full && t >= self.latency { self.full.at(t, self.latency) } else { 0.0 };
         y -= self.u.dot(t, 0, &self.complement);
         for ((delay, taps), h) in self.kernels.iter().zip(&self.qdot) {
             y += h.dot(t, *delay, taps);
@@ -713,13 +795,14 @@ impl ClosedBodyObserver {
         y
     }
 
-    /// After a render: the baffled signal's split between the retained shapes
-    /// and the head motion outside them (heard as today at every frequency).
+    /// After a render: the baffled signal's split between this transfer's
+    /// retained shapes and everything outside them. Other attached transfers
+    /// may correct other source bodies on the same microphone.
     pub fn report(&self) -> String {
         let [full, retained, residual] = self.energies;
         let db = |x: f64| if full > 0.0 && x > 0.0 { 10.0 * (x / full).log10() } else { f64::NEG_INFINITY };
         format!(
-            "closed-body observer (table fnv {:016x}): of the baffled overhead signal, the retained shapes' projection carries {:+.1} dB and the motion outside them {:+.1} dB (energy re the whole); the latter stays baffled",
+            "closed-body observer (table fnv {:016x}): of the baffled overhead signal, the retained shapes' projection carries {:+.1} dB and the motion outside them {:+.1} dB (energy re the whole); this transfer corrects only its retained projection",
             self.digest,
             db(retained),
             db(residual)
@@ -730,3 +813,7 @@ impl ClosedBodyObserver {
 #[cfg(test)]
 #[path = "closed_body_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "closed_body_alignment_tests.rs"]
+mod alignment_tests;

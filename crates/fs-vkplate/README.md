@@ -103,6 +103,29 @@ Node count alone does not establish audio-band fidelity.
   This receiver approximation does not resolve edge diffraction or the low-frequency dipole's
   angular directivity; it is not a full exterior acoustic solve.
 
+## Several closed-body sources at one microphone
+
+`Instrument::add_closed_body` adds an authored closed-body radiation transfer
+without replacing the microphone's existing transfer. Each transfer owns a
+disjoint batter/resonant head pair; sharing either head refuses. Table geometry
+may be rigidly translated by the batter's origin, while microphone position,
+head separation and the physical floor plane remain bound to that table.
+`attach_closed_body` retains its replacement semantics.
+
+The microphone delays its one complete Rayleigh signal by `D = max(D_i)`, then
+adds each body's transfer correction delayed by `D - D_i`. This retains coherent
+phase between bodies with different FIR latencies and preserves physical flight
+times. Latencies are never cascaded and the Rayleigh baseline is counted once.
+Histories are allocated during preparation; stepping allocates nothing.
+`Mic::output_latency` reports `D` for the existing render-time alignment, and
+`Mic::closed_bodies` exposes every transfer and its report. GPU rendering keeps
+its explicit refusal of closed-body observers.
+
+This is superposition of the supplied source-to-microphone transfers. It adds
+no inter-body acoustic scattering, fluid loading, or shared cavity model; those
+interactions require their own physical operators. Existing table bands,
+retained-shape limits and the Rayleigh complement still apply to each source.
+
 ## Shared atmosphere
 
 `Instrument::with_gas` and the `kit::*_with_gas` builders take one coherent
