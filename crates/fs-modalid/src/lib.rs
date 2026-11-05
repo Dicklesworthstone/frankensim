@@ -660,17 +660,54 @@ pub fn stabilization(orders: &[Vec<(f64, f64)>], rule: &StabilizationRule) -> Ve
 
 /// Modal assurance criterion between two complex shapes:
 /// `|a^H b|^2 / (a^H a)(b^H b)`.
+/// Independent finite amplitude scales and a common phase do not change the
+/// result. Each shape is scaled before products, so a finite nonzero shape
+/// remains usable even when its physical squared norm is unrepresentable.
+/// Zero shapes return zero; unequal channel counts or nonfinite components
+/// return NaN and are not candidates for [`mac_pairing`].
 #[must_use]
 pub fn mac(a: &[C64], b: &[C64]) -> f64 {
+    if a.len() != b.len() {
+        return f64::NAN;
+    }
+    let (sa, sb) = (shape_scale(a), shape_scale(b));
+    if !sa.is_finite() || !sb.is_finite() {
+        return f64::NAN;
+    }
+    scaled_mac(a, b, sa, sb)
+}
+
+// Componentwise scaling also admits finite complex values whose magnitude
+// itself overflows. Never form a reciprocal: 1/scale may overflow for a
+// nonzero subnormal shape even though every component/scale is bounded by one.
+fn shape_scale(shape: &[C64]) -> f64 {
+    let mut scale = 0.0_f64;
+    for value in shape {
+        if !value.re.is_finite() || !value.im.is_finite() {
+            return f64::NAN;
+        }
+        scale = scale.max(value.re.abs()).max(value.im.abs());
+    }
+    scale
+}
+
+fn scaled_mac(a: &[C64], b: &[C64], sa: f64, sb: f64) -> f64 {
+    if sa == 0.0 || sb == 0.0 {
+        return 0.0;
+    }
     let mut num = C64::ZERO;
     let mut na = 0.0;
     let mut nb = 0.0;
     for (x, y) in a.iter().zip(b) {
-        num = num + x.conj() * *y;
+        let x = C64::new(x.re / sa, x.im / sa);
+        let y = C64::new(y.re / sb, y.im / sb);
+        num = num + x.conj() * y;
         na += x.norm_sq();
         nb += y.norm_sq();
     }
-    num.norm_sq() / (na * nb).max(f64::MIN_POSITIVE)
+    // Each nonzero shape has a component of magnitude one. The denominator
+    // needs no absolute floor, which would make MAC depend on physical units.
+    (num.norm_sq() / (na * nb)).clamp(0.0, 1.0)
 }
 
 /// Full MAC matrix (rows = `a` modes, cols = `b` modes).
@@ -692,7 +729,7 @@ pub fn mac_pairing(a: &[Vec<C64>], b: &[Vec<C64>], floor: f64) -> Vec<(usize, Op
     for (i, row) in m.iter().enumerate() {
         let mut best: Option<(usize, f64)> = None;
         for (j, &v) in row.iter().enumerate() {
-            if !used[j] && best.is_none_or(|(_, bv)| v > bv) {
+            if !used[j] && v.is_finite() && best.is_none_or(|(_, bv)| v > bv) {
                 best = Some((j, v));
             }
         }
@@ -759,7 +796,7 @@ pub struct ModeTableComparison {
 /// assignment or statistical uncertainty/coverage is claimed.
 ///
 /// Each table must use a common shape length (zero means unavailable). Shapes
-/// must have finite nonzero squared norm; frequency and damping are validated.
+/// must have finite components and be nonzero; frequency and damping are validated.
 /// Confidence-interval fields are not used as matching tolerances.
 ///
 /// # Errors
@@ -777,8 +814,9 @@ pub fn compare_mode_tables(
             what: "mode comparison needs MAC in [0,1] and finite non-negative cents",
         });
     }
-    let channels = |table: &[Mode]| -> Result<usize, ModalIdError> {
+    let channels = |table: &[Mode]| -> Result<(usize, Vec<f64>), ModalIdError> {
         let width = table.first().map_or(0, |mode| mode.shape.len());
+        let mut scales = Vec::with_capacity(table.len());
         for mode in table {
             if !(mode.frequency_hz > 0.0 && mode.frequency_hz.is_finite())
                 || !(mode.damping_ratio >= 0.0 && mode.damping_ratio.is_finite())
@@ -788,38 +826,21 @@ pub fn compare_mode_tables(
                     what: "mode table frequency, damping or channel shape",
                 });
             }
-            if width > 0 {
-                let norm: f64 = mode.shape.iter().map(|v| v.norm_sq()).sum();
-                if !(norm > 0.0 && norm.is_finite()) {
-                    return Err(ModalIdError::Shape {
-                        what: "mode shape needs finite nonzero squared norm",
-                    });
-                }
+            let scale = shape_scale(&mode.shape);
+            if width > 0 && !(scale > 0.0 && scale.is_finite()) {
+                return Err(ModalIdError::Shape {
+                    what: "mode shape needs finite components and nonzero amplitude",
+                });
             }
+            scales.push(scale);
         }
-        Ok(width)
+        Ok((width, scales))
     };
-    let (reference_channels, candidate_channels) = (channels(reference)?, channels(candidate)?);
+    let ((reference_channels, r_scales), (candidate_channels, c_scales)) =
+        (channels(reference)?, channels(candidate)?);
     let use_mac = reference_channels > 0 && reference_channels == candidate_channels;
-    let normalize = |table: &[Mode]| -> Vec<Vec<C64>> {
-        table
-            .iter()
-            .map(|mode| {
-                let norm = fs_math::det::sqrt(mode.shape.iter().map(|v| v.norm_sq()).sum());
-                mode.shape
-                    .iter()
-                    .map(|v| C64::new(v.re / norm, v.im / norm))
-                    .collect()
-            })
-            .collect()
-    };
-    // Residue scales are arbitrary; normalization keeps products of otherwise
-    // finite shape norms from overflowing inside the MAC calculation.
-    let (r_shapes, c_shapes) = if use_mac {
-        (normalize(reference), normalize(candidate))
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    // Keep one scalar per mode instead of copying every sensor shape. The
+    // original calibrated residues remain intact and are scaled only in MAC.
     let cents = |r: f64, c: f64| {
         // Difference of logs also handles finite extreme frequencies whose
         // ratio could overflow or underflow before taking its logarithm.
@@ -838,7 +859,7 @@ pub fn compare_mode_tables(
                 continue;
             }
             let score = if use_mac {
-                let value = mac(&r_shapes[i], &c_shapes[j]).clamp(0.0, 1.0);
+                let value = scaled_mac(&r.shape, &c.shape, r_scales[i], c_scales[j]);
                 if value < opts.mac_floor {
                     continue;
                 }

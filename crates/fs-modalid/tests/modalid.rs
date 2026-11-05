@@ -396,6 +396,65 @@ fn mac_identity_and_orthogonality() {
 }
 
 #[test]
+fn mac_and_pairing_preserve_independent_physical_amplitude_scales() {
+    let shape = [C64::ONE, C64::new(0.0, 1.0)];
+    let other = [C64::ONE, C64::ONE];
+    // The analytic MAC is |1-i|²/(2*2) = 1/2. This includes a shape
+    // whose squared norm underflows and one whose squared norm overflows.
+    let scales = [f64::from_bits(1), 1e-200, 1.0, 1e200, f64::MAX];
+    for a_scale in scales {
+        let a: Vec<_> = shape.iter().map(|v| v.scale(a_scale)).collect();
+        for b_scale in scales {
+            // Independent gain and a quarter-cycle phase shift must preserve
+            // both a true identity and the nontrivial partial match.
+            let b: Vec<_> = shape
+                .iter()
+                .map(|v| C64::new(-v.im * b_scale, v.re * b_scale))
+                .collect();
+            let c: Vec<_> = other.iter().map(|v| v.scale(b_scale)).collect();
+            assert!((mac(&a, &b) - 1.0).abs() < 1e-14);
+            assert!((mac(&a, &c) - 0.5).abs() < 1e-14);
+            let paired = mac_pairing(&[a.clone()], &[c, b], 0.9);
+            assert_eq!(paired[0].1, Some(1));
+        }
+    }
+    assert_eq!(mac(&shape, &[C64::ZERO; 2]), 0.0);
+    assert!(mac(&shape, &[C64::ONE]).is_nan());
+    let invalid = vec![C64::new(f64::NAN, 0.0), C64::ONE];
+    let paired = mac_pairing(&[shape.to_vec()], &[invalid, shape.to_vec()], 0.9);
+    assert_eq!(paired[0].1, Some(1));
+}
+
+#[test]
+fn mode_comparison_admits_finite_residues_without_squaring_their_units() {
+    let reference = [
+        comparison_mode(100.0, &[1e-200, 0.0]),
+        comparison_mode(200.0, &[0.0, f64::MAX]),
+    ];
+    let candidate = [
+        comparison_mode(201.0, &[0.0, -f64::from_bits(1)]),
+        comparison_mode(100.0, &[1e200, 0.0]),
+    ];
+    let compared = compare_mode_tables(
+        &reference,
+        &candidate,
+        &ModeCompareOptions {
+            mac_floor: 0.95,
+            max_cents: 1.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(compared.pairs.len(), 2);
+    assert!(compared.unmatched_reference.is_empty());
+    assert!(compared.unmatched_candidate.is_empty());
+    assert_eq!(compared.pairs[0].candidate_hz, 100.0);
+    assert_eq!(compared.pairs[1].candidate_hz, 201.0);
+    assert!(compared.pairs[0].within_tolerance);
+    assert!(!compared.pairs[1].within_tolerance);
+    assert!(compared.pairs.iter().all(|pair| pair.mac == Some(1.0)));
+}
+
+#[test]
 fn perturbed_plate_modes_flagged_by_mac() {
     // Simulated-vs-perturbed calibration diff: perturb two of six
     // synthetic plate-like shapes; pairing must keep the four intact

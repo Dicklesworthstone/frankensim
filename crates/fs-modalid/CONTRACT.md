@@ -73,6 +73,10 @@ measurement side of the simulate-vs-measure calibration loop.
   fs-vfit are the other two); disagreement is a diagnostic.
 - `mac` / `mac_matrix` / `mac_pairing` — modal assurance criterion
   and greedy floor-gated pairing: the calibration diff primitive.
+  Independent component scaling precedes every product, preserving identity
+  for finite nonzero residues even when their unscaled squared norms would
+  overflow or underflow. Zero shapes score zero; nonfinite or differently
+  sized shapes return NaN from `mac` and cannot win a greedy pairing.
 - `compare_mode_tables` / `ModeCompareOptions` / `ModePair` /
   `ModeTableComparison` — QP mode-table comparison. Common-channel shapes
   pair by highest unused MAC, otherwise by nearest unused frequency inside
@@ -81,8 +85,9 @@ measurement side of the simulate-vs-measure calibration loop.
   High-MAC identity pairs retain out-of-band signed cents errors and set
   `within_tolerance=false`; frequency-only pairs never claim a MAC. Inputs
   require positive finite frequencies, finite nonnegative damping, uniform
-  shape widths per table and finite nonzero shape norms when present.
-  Shapes are normalized before MAC products to remove arbitrary residue scale.
+  shape widths per table and finite nonzero shapes when present. One cached
+  scale per mode removes arbitrary residue amplitude from MAC products without
+  allocating normalized copies of every sensor shape.
 - `correct_exponential_window_pole` — undo a declared common exponential
   response window by translating the measured Laplace pole by `+1/tau`.
   The damped frequency stays fixed; natural frequency and damping are
