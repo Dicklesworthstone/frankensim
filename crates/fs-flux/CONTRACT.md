@@ -3307,6 +3307,86 @@ convergence to exponential relaxation, once-bound material ownership with
 heterogeneous porous/free cells and constrained boundary reactions, exact
 free-fluid operator equivalence, and history/callback refusal boundaries.
 
+### Native nonlinear Brinkman–Forchheimer momentum
+
+`ForchheimerCell` retains the complete original `BrinkmanCell` and adds an
+explicitly authored isotropic beta [1/m]. The physical pore resistance is
+`mu K^-1 w + rho beta |w| w`, with `w = u-u_s`; the two contributions are
+independent, and there is no factor of 1/2, diagonal permeability substitute,
+velocity floor or fitted effective permeability. Positive beta requires an
+actual porous cell; beta=0 is admitted in both porous and free-fluid cells.
+The coefficient convention matches the existing directional Forchheimer law
+in `fs-material::porous::permeability`. That owner's specimen/gas/direction
+calibration is not silently promoted into an isotropic two-dimensional material
+law. Authored beta alone carries no measured source authority or applicability
+support envelope; the caller must establish its physical validity.
+
+`FluxSystem::solve_brinkman_forchheimer_mixed` solves the steady nonlinear
+Stokes–Brinkman equation. `bdf1_brinkman_forchheimer_mixed_step` consumes immutable
+previous BDM velocity and adds the original implicit fluid mass/history term.
+Both use one bounded Newton/backtracking loop and the original dense/sparse
+linear solve. Linear subproblems retain both native residual checks. The
+consistent quadratic tangent is `beta (|w| I + w tensor w / |w|)` for nonzero
+relative speed, and exactly zero at co-motion. The original anisotropic Darcy
+terms compile once outside iteration; all-zero beta follows the unchanged
+original steady/BDF1 Darcy solve and its diagnostic arithmetic.
+
+The nonlinear owner reassembles `J(u)` and the affine load `J(u)u-F(u)` at every
+candidate and accepts only the actual endpoint equations. Its convergence
+normalization is fixed: row weights and physical reference loads come from the
+zero-velocity operator, including skeleton forcing, original boundaries and
+BDF1 history. A zero reference load norm uses the initial actual defect instead;
+it is never replaced by the changing artificial Newton affine source. The full
+Newton velocity correction uses the fixed larger norm of the projected initial
+velocity and first Newton candidate. Both original and fixed-row-scaled defects
+and that unrelaxed correction must satisfy the requested tolerance. This admits
+homogeneous relaxation to rest without dividing by a vanishing quadratic
+Newton load or introducing an artificial velocity scale. The line search uses
+the fixed-row-scaled absolute defect and bounded halvings. Exhaustion,
+stagnation and unrepresentable states return refusal without a candidate flow.
+
+Native boundary ownership selects the exact normal moments and component-local
+pressure pins; their original RHS values are projected into the initial iterate
+and every candidate. No numerical row-shape heuristic selects constraints.
+SIP interfaces, total traction, Navier slip, continuity, pressure datums and
+constrained momentum reaction rows remain with the original owner. The accepted
+reaction report uses the endpoint constitutive force, rather than a previous
+frozen tangent. Existing rigid-chart history and spatial-density inertia paths
+are preserved by the internal cell-resistance hook; this new public closure
+still uses one fixed reference density and fixed geometry.
+
+`ForchheimerSolution` separates Darcy from Forchheimer cell exchanges. In each
+channel the skeleton reaction is opposite the fluid force, signed fluid and
+skeleton powers sum to minus nonnegative relative loss, and an imposed skeleton
+can transfer positive work to the fluid. The inertial relative loss is
+`integral(beta |w|^3)` per reference density. Force, tangent and inertial work use
+the same original positive degree-four cell quadrature. General varying-slip
+norms remain nonpolynomial: this is a discretized closure requiring mesh
+convergence, not an exact continuum integration claim.
+
+The matching `MaterialFluxSystem` steady and BDF1 entries preserve the original
+once-bound transport snapshot. They apply the same density to inertial force,
+pressure, boundary reactions and physical work; molecular viscosity still owns
+Darcy drag and the authored effective-viscosity ratio only modifies shear
+stress. `MaterialForchheimerSolution::flow()` retains the full accepted nonlinear
+flow and original Darcy account; its separate Forchheimer exchanges report
+physical force [N/m] and signed power/loss [W/m] per unit out-of-plane depth.
+Neither physical loss is automatically deposited as heat or conflated with
+skeleton work or backward-Euler numerical energy loss.
+
+Scope remains saturated incompressible unsteady Stokes on frozen geometry with
+the parent's one-domain/phi=1 velocity convention. This is not convective
+Navier–Stokes, turbulent stress, finite-porosity storage, pore-scale added mass,
+poromechanical evolution, moving-interface flow or a nonlinear adjoint. No new
+async/cancellation execution guarantee is added. Native regressions in
+`tests/brinkman/forchheimer.rs` exercise independent scalar roots, rotated
+anisotropic/moving-skeleton force and work, homogeneous relaxation to rest,
+exact boundary projection, heterogeneous physical source/reaction closure,
+implicit relaxation and BDF1 energy balance, exact zero-beta arithmetic, and
+failure without accepted state. The production constitutive leaf has direct
+force-difference, symmetry, positive tangent, frame-work, scaling, zero-limit
+and representability tests.
+
 ## Inclined two-fluid capillary displacement
 
 The circular meniscus owner now includes both phase columns' hydrostatic head

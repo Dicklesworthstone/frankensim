@@ -1,12 +1,16 @@
 //! Molecular source viscosity and physical units for native Brinkman momentum.
 
+mod forchheimer;
+pub use forchheimer::MaterialForchheimerSolution;
+
 use super::{MaterialBoundaryLoad, MaterialFluxError, MaterialFluxSystem, MaterialStokesBoundary};
 use crate::ns::FluxSolution;
 use crate::ns::boundary::{StokesBoundary, StokesPressureReference, StokesSolution};
 use crate::ns::porous::{BrinkmanCell, BrinkmanDragExchange};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
-/// Physical Darcy force and work per metre of out-of-plane depth.
+/// Physical porous-resistance force and work per metre of out-of-plane depth.
+/// The accessor identifies the Darcy or Forchheimer law being accounted for.
 ///
 /// Positive power acts ON the named subsystem. The two signed powers sum
 /// to minus the nonnegative relative dissipation. No heat or solid dynamics
@@ -15,11 +19,12 @@ use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 pub struct MaterialBrinkmanDragExchange {
     /// Reaction exerted by the fluid on the skeleton [N/m].
     pub skeleton_force_n_per_m: [f64; 2],
-    /// Signed Darcy work on the fluid [W/m].
+    /// Signed work of the identified resistance on the fluid [W/m].
     pub fluid_power_w_per_m: f64,
     /// Signed reaction work on the prescribed skeleton [W/m].
     pub skeleton_power_w_per_m: f64,
-    /// Nonnegative `integral(mu (u-u_s).K^-1.(u-u_s))` [W/m].
+    /// Nonnegative relative loss [W/m]: `integral(mu w.K^-1.w)` for Darcy
+    /// or `integral(rho beta |w|^3)` for Forchheimer, where `w = u-u_s`.
     pub dissipation_w_per_m: f64,
 }
 
@@ -58,7 +63,7 @@ impl MaterialBrinkmanDragExchange {
             || self.dissipation_w_per_m < 0.0
         {
             Err(MaterialFluxError::Invalid(
-                "Brinkman physical Darcy force or work is not representable",
+                "Brinkman physical resistance force or work is not representable",
             ))
         } else {
             Ok(())

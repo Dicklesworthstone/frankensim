@@ -348,7 +348,10 @@ impl StokesAssembly<'_, '_> {
 
     // Share the physical pressure interpretation after either checked linear
     // convergence or checked nonlinear endpoint convergence.
-    fn report_solution(&self, field: FluxSolution) -> Result<StokesSolution, StokesBoundaryError> {
+    pub(in crate::ns) fn report_solution(
+        &self,
+        field: FluxSolution,
+    ) -> Result<StokesSolution, StokesBoundaryError> {
         let pressure = self.system.pressure_in_gauges(&field.x, &self.has_traction);
         if !pressure.iter().all(|value| value.is_finite()) {
             return Err(StokesBoundaryError::InvalidInput(
@@ -555,6 +558,37 @@ impl<'m> FluxSystem<'m> {
         } else {
             None
         };
+        self.assemble_stokes_admitted_cell_resistance(
+            params,
+            viscosity,
+            force,
+            admitted,
+            darcy.map(super::porous::CellResistance::Darcy),
+            inv_dt,
+            previous_velocity,
+            advecting_velocity,
+            history_rotation,
+            inertia_weights,
+        )
+    }
+
+    // Cell laws enter before the original constrained reaction rows are
+    // retained. Accepted nonlinear states must be reassembled here. Existing
+    // rigid-chart history and density-weighted inertia keep their exact path.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::ns) fn assemble_stokes_admitted_cell_resistance<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        admitted: &AdmittedBoundary,
+        resistance: Option<super::porous::CellResistance<'_>>,
+        inv_dt: f64,
+        previous_velocity: Option<&[f64]>,
+        advecting_velocity: Option<&[f64]>,
+        history_rotation: Option<[f64; 2]>,
+        inertia_weights: Option<Vec<[f64; 6]>>,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
         let bad_viscosity = Cell::new(None);
         let checked_viscosity = |cell, point| {
             if bad_viscosity.get().is_some() {
@@ -591,7 +625,7 @@ impl<'m> FluxSystem<'m> {
             previous_velocity,
             history_rotation,
             Some(admitted),
-            darcy,
+            resistance,
             Some(&mut reactions),
             inertia_weights.as_deref(),
         );

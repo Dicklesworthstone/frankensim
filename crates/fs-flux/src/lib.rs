@@ -79,10 +79,10 @@ pub use material::{
     MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialFluxError,
     MaterialFluxNewtonStep, MaterialFluxNumerics, MaterialFluxRheologyPoint,
     MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
-    MaterialFluxViscosityTangent, MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep,
-    MaterialNavierStokesStep, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
-    MaterialStokesFieldSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
-    MaterialViscousDissipation,
+    MaterialFluxViscosityTangent, MaterialForchheimerSolution, MaterialNavierStokesBoundary,
+    MaterialNavierStokesRheologyStep, MaterialNavierStokesStep, MaterialStokesBoundary,
+    MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
+    MaterialStokesRheologySolution, MaterialStokesSolution, MaterialViscousDissipation,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
@@ -100,7 +100,10 @@ pub use ns::linearization::{
 #[cfg(feature = "continuum")]
 pub use ns::newton::{FluxNewtonControls, FluxNewtonError, FluxNewtonStep};
 #[cfg(feature = "continuum")]
-pub use ns::porous::{BrinkmanAssembly, BrinkmanCell, BrinkmanDragExchange};
+pub use ns::porous::{
+    BrinkmanAssembly, BrinkmanCell, BrinkmanDragExchange, ForchheimerCell, ForchheimerControls,
+    ForchheimerSolution,
+};
 #[cfg(feature = "continuum")]
 pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
 #[cfg(feature = "continuum")]

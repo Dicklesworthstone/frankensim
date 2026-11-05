@@ -28,7 +28,10 @@ use crate::bdm::{CellBasis, eval_basis, tri_quad};
 use fs_material::porous::permeability::IntrinsicPermeability;
 use fs_sparse::Csr;
 
+mod forchheimer;
 mod transient;
+
+pub use forchheimer::{ForchheimerCell, ForchheimerControls, ForchheimerSolution};
 
 /// One cell's fixed geometry and explicitly selected Brinkman shear closure.
 /// The original permeability tensor and its world axes remain intact.
@@ -175,6 +178,33 @@ pub(super) struct DarcyDrag {
     skeleton_velocity: [f64; 2],
 }
 
+/// Integrated momentum matrix/load, already in the native six BDM cell dofs.
+pub(super) type CellDragTerms = ([[f64; 6]; 6], [f64; 6]);
+
+/// One dispatch per cell keeps ordinary Darcy assembly unchanged. Nonlinear
+/// laws supply their consistent tangent and affine load before boundary rows
+/// are eliminated, retaining the same pressure, continuity and reaction owner.
+#[derive(Clone, Copy)]
+pub(super) enum CellResistance<'a> {
+    Darcy(&'a [DarcyDrag]),
+    Linearized(&'a [CellDragTerms]),
+}
+
+impl CellResistance<'_> {
+    pub(super) fn local_matrix_and_load(
+        self,
+        cell: usize,
+        basis: &CellBasis,
+        vertices: [[f64; 2]; 3],
+        area: f64,
+    ) -> CellDragTerms {
+        match self {
+            Self::Darcy(cells) => cells[cell].local_matrix_and_load(basis, vertices, area),
+            Self::Linearized(cells) => cells[cell],
+        }
+    }
+}
+
 impl DarcyDrag {
     fn compile(cell: BrinkmanCell, nu: f64) -> Result<Self, StokesBoundaryError> {
         let Some(permeability) = cell.permeability else {
@@ -280,7 +310,8 @@ impl DarcyDrag {
     }
 }
 
-/// Area-integrated Darcy exchange divided by the same reference density.
+/// Area-integrated porous-resistance exchange divided by reference density.
+/// The accessor identifies the Darcy or Forchheimer law being accounted for.
 ///
 /// Force is per out-of-plane depth/density [m³/s²], and powers are per
 /// depth/density [m⁴/s³]. Positive power is work ON the named subsystem.
@@ -292,11 +323,12 @@ impl DarcyDrag {
 pub struct BrinkmanDragExchange {
     /// Force exerted by the fluid ON the skeleton; fluid force is its negative.
     pub skeleton_force: [f64; 2],
-    /// Signed work rate of Darcy force on the fluid.
+    /// Signed work rate of the identified resistance force on the fluid.
     pub fluid_power: f64,
     /// Signed work rate of the opposite reaction on the prescribed skeleton.
     pub skeleton_power: f64,
-    /// Nonnegative `integral(nu (u-u_s).K^-1.(u-u_s))`.
+    /// Nonnegative relative loss: `integral(nu w.K^-1.w)` for Darcy or
+    /// `integral(beta |w|^3)` for Forchheimer, where `w = u-u_s`.
     pub dissipation: f64,
 }
 

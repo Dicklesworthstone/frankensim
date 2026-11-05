@@ -478,7 +478,7 @@ impl<'m> FluxSystem<'m> {
             uprev,
             history_rotation,
             boundary,
-            darcy,
+            darcy.map(porous::CellResistance::Darcy),
             reactions,
             None,
         )
@@ -498,7 +498,7 @@ impl<'m> FluxSystem<'m> {
         uprev: Option<&[f64]>,
         history_rotation: Option<[f64; 2]>,
         boundary: Option<&boundary::AdmittedBoundary>,
-        darcy: Option<&[porous::DarcyDrag]>,
+        resistance: Option<porous::CellResistance<'_>>,
         mut reactions: Option<&mut ReactionAssembly>,
         inertia_weights: Option<&[[f64; 6]]>,
     ) -> (Csr, Vec<f64>) {
@@ -552,7 +552,7 @@ impl<'m> FluxSystem<'m> {
                     .map(|(q, w)| w * positive_viscosity(field(t, q)))
                     .sum::<f64>()
             });
-            let drag_terms = darcy.map(|cells| cells[t].local_matrix_and_load(basis, p, area));
+            let drag_terms = resistance.map(|law| law.local_matrix_and_load(t, basis, p, area));
             let mut mass_quadrature = tri_quad(p, area);
             if let Some(weights) = inertia_weights {
                 for (q, (_, weight)) in mass_quadrature.iter_mut().enumerate() {

@@ -48,7 +48,9 @@ pub use navier_stokes::{
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
 };
 pub use newton::{MaterialFluxNewtonStep, MaterialFluxViscosityTangent};
-pub use porous::{MaterialBrinkmanDragExchange, MaterialBrinkmanSolution};
+pub use porous::{
+    MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialForchheimerSolution,
+};
 
 /// Numerical choices, separate from the material's physical viscosity.
 #[derive(Clone, Copy, Debug)]
