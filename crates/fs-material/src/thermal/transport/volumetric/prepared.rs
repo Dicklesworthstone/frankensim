@@ -6,7 +6,7 @@
 //! No mechanical work, latent heat, moisture transport or phase change is added.
 
 use super::super::{
-    capacity::{CapacityCurve, CapacityKnot},
+    capacity::{CapacityCurve, CapacityInverse, CapacityKnot},
     source_value,
 };
 use super::{
@@ -234,6 +234,18 @@ impl PreparedVolumetricThermalTransport {
         change_j_m3: f64,
     ) -> Result<f64, ThermalTransportError> {
         CapacityCurve::new(&self.knots).temperature_after_energy_change(initial_k, change_j_m3)
+    }
+
+    pub(super) fn capacity_inverse(&self, datum_k: f64) -> Option<CapacityInverse> {
+        CapacityInverse::new(&CapacityCurve::new(&self.knots), datum_k).ok()
+    }
+
+    pub(super) fn temperature_from_index(
+        &self,
+        inverse: &CapacityInverse,
+        storage_j_m3: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        inverse.temperature(&CapacityCurve::new(&self.knots), storage_j_m3)
     }
 
     #[must_use]

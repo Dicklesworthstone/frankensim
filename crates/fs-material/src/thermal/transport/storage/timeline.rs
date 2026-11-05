@@ -1,5 +1,6 @@
 //! Bind total sensible storage to the existing conservative thermal owner.
 
+use super::super::capacity::{CapacityCurve, CapacityInverse};
 use super::{HeatStorageAmount, PreparedHeatStorage, ThermalTransportError, invalid, positive};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{DepositedCell, DepositionError, ThermalLaw};
@@ -18,6 +19,7 @@ pub struct HeatStorageThermalLaw<'a> {
     reference_mass: f64,
     datum: f64,
     span: [f64; 2],
+    inverse: Option<CapacityInverse>,
     maximum_slope: f64,
     sensible_entropy: bool,
     identity: ContentHash,
@@ -78,7 +80,9 @@ impl<'a> HeatStorageThermalLaw<'a> {
         if !positive(maximum_slope) {
             return Err(invalid("assembly temperature slope is not representable"));
         }
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.heat-storage-thermal-law.v1");
+        let inverse =
+            CapacityInverse::new(&CapacityCurve::new(&storage.knots), datum_temperature_k).ok();
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.heat-storage-thermal-law.v2");
         hash.update(storage.identity().as_bytes());
         hash.update(&reference_mass_kg.to_bits().to_le_bytes());
         hash.update(&datum_temperature_k.to_bits().to_le_bytes());
@@ -87,6 +91,7 @@ impl<'a> HeatStorageThermalLaw<'a> {
             reference_mass: reference_mass_kg,
             datum: datum_temperature_k,
             span,
+            inverse,
             maximum_slope,
             sensible_entropy: false,
             identity: hash.finalize(),
@@ -177,8 +182,15 @@ impl ThermalLaw for HeatStorageThermalLaw<'_> {
         if !energy.is_finite() || (h != 0.0 && energy == 0.0) {
             return Err(DepositionError::MaterialDomain);
         }
-        self.storage
-            .temperature_after_energy_change(self.datum, energy)
+        self.inverse
+            .as_ref()
+            .map_or_else(
+                || {
+                    self.storage
+                        .temperature_after_energy_change(self.datum, energy)
+                },
+                |inverse| inverse.temperature(&CapacityCurve::new(&self.storage.knots), energy),
+            )
             .map_err(|_| DepositionError::MaterialDomain)
     }
 

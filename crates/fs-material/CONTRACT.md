@@ -8366,6 +8366,21 @@ volumetric, tabulated and assembled capacities. G1 regressions check signed
 nonlinear calorimetry, source-boundary refusal and source-query counts on
 64- and 4096-knot curves; this is a work bound, not a general throughput claim.
 
+The fixed-datum timeline laws (`IsobaricHeatCapacityLaw`,
+`FixedVolumeThermalLaw` and `HeatStorageThermalLaw`) additionally prepare a
+compensated caloric search index in O(knots) time and storage. Repeated h-to-T
+queries locate the source segment logarithmically and invert its original
+affine-capacity integral analytically, including decreasing capacity. They do
+not approximate the energy curve by straight lines or resample its source.
+Relative heat and entropy still integrate the crossed intervals directly.
+Numerically indistinguishable search knots or roundoff at a source boundary
+retain the direct inverse and its original refusal semantics. Law identities
+advance to v2 for this numerical operation change; source identities and
+uncertainty are unchanged. G1 tests cover both signs, interior datums, exact
+support endpoints, near-datum increments and at most 16 capacity reads for
+ordinary queries on 64-, 4096- and 262144-knot tables. This is an algorithmic
+work test, not a hardware throughput or experimental-accuracy claim.
+
 `HeatStorageThermalLaw` binds this total storage to the existing thermal
 timeline's specific-energy coordinate with an explicit total mass and datum.
 Mass-only assemblies must match their known total mass; mixed assemblies require
