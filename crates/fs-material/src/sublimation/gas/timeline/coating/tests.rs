@@ -89,6 +89,27 @@ fn initial<'a>(
     masses: [f64; 2],
     max_steps: usize,
 ) -> CoatingSimulation<'a> {
+    initial_with_film(
+        substrate,
+        law,
+        deposit_h,
+        bindings,
+        events,
+        masses,
+        max_steps,
+        None,
+    )
+}
+fn initial_with_film<'a>(
+    substrate: &'a Substrate,
+    law: &'a dyn fs_thermal::sublimation::SublimationLaw,
+    deposit_h: &'a dyn Fn(f64) -> Result<f64, SublimationError>,
+    bindings: &[GasSurfaceBinding; 2],
+    events: Vec<TimedEvent>,
+    masses: [f64; 2],
+    max_steps: usize,
+    mass_transfer_coefficient_m_s: Option<f64>,
+) -> CoatingSimulation<'a> {
     let thermal = DepositionSimulation::new(
         events,
         &[(MaterialId(1), substrate)],
@@ -106,7 +127,7 @@ fn initial<'a>(
         deposit_enthalpy: deposit_h,
         kinetics: SurfaceKinetics {
             accommodation_coefficient: bindings[i].accommodation_coefficient,
-            mass_transfer_coefficient_m_s: None,
+            mass_transfer_coefficient_m_s,
         },
         initial_mass_kg: masses[i],
         reservoir: VaporReservoir::Prescribed {
@@ -220,6 +241,75 @@ fn bare_substrates_gain_real_coatings_and_heat_while_one_gas_cools_or_warms() {
     assert_eq!(accepted.audit().phase_steps, 2);
     assert!(original.cells().is_empty());
     check(&accepted);
+}
+
+#[test]
+fn evolving_timeline_retains_film_limited_coating_kinetics() {
+    let catalog = fixture::catalog(0.0);
+    let gas = fixture::gas(&catalog, 350.0, 6000.0);
+    let bindings = [fixture::binding(0.0), fixture::binding(0.0)];
+    let chart = fixture::chart(&catalog, &bindings[0]);
+    let deposit_h = |t| Ok(chart.0 + chart.1 * (t - 400.0));
+    let substrate = Substrate { datum: 0.0 };
+    let law = fixture::phase();
+    let events = vec![
+        birth(0.0, cell(1, substrate, 0.0)),
+        birth(0.0, cell(2, substrate, 0.0)),
+    ];
+    let free = initial_with_film(
+        &substrate,
+        &law,
+        &deposit_h,
+        &bindings,
+        events.clone(),
+        [0.0; 2],
+        8,
+        None,
+    );
+    let limited = initial_with_film(
+        &substrate,
+        &law,
+        &deposit_h,
+        &bindings,
+        events.clone(),
+        [0.0; 2],
+        8,
+        Some(0.002),
+    );
+    let sealed = initial_with_film(
+        &substrate,
+        &law,
+        &deposit_h,
+        &bindings,
+        events,
+        [0.0; 2],
+        8,
+        Some(0.0),
+    );
+    let selection = selected(&bindings);
+    let free = advance_coatings_with_gas(
+        &free, &selection, None, &gas, &catalog, 0.001, heat(0.001), controls(), || Ok(()),
+    )
+    .unwrap();
+    let limited = advance_coatings_with_gas(
+        &limited, &selection, None, &gas, &catalog, 0.001, heat(0.001), controls(), || Ok(()),
+    )
+    .unwrap();
+    let sealed = advance_coatings_with_gas(
+        &sealed, &selection, None, &gas, &catalog, 0.001, heat(0.001), controls(), || Ok(()),
+    )
+    .unwrap();
+
+    assert!(limited.coating().deposit_mass_kg() > 0.0);
+    assert!(limited.coating().deposit_mass_kg() < free.coating().deposit_mass_kg());
+    assert_eq!(sealed.coating().deposit_mass_kg(), 0.0);
+    assert_eq!(sealed.audit().transferred_mass_kg, 0.0);
+    assert_eq!(sealed.audit().incoming_mass_kg, 0.0);
+    assert_eq!(sealed.audit().outgoing_mass_kg, 0.0);
+    assert_eq!(sealed.gas(), &gas);
+    check(&free);
+    check(&limited);
+    check(&sealed);
 }
 
 #[test]
