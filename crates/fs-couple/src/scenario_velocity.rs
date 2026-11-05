@@ -1,4 +1,4 @@
-//! Typed scenario velocities on the original D3Q19 open-boundary operator.
+//! Typed scenario velocities on the native three-dimensional open-boundary owners.
 //!
 //! The caller explicitly maps the scenario region to a lattice face. Lattice
 //! axes are WORLD Cartesian axes, and velocities are absolute inertial values
@@ -13,6 +13,9 @@ use fs_material::fluid_transport::FluidTransport;
 use fs_scenario::vector::VectorEvaluationError;
 use fs_scenario::{BoundaryCondition, FrameTree};
 use std::ops::ControlFlow;
+
+/// Typed velocity controls for the shared native D3Q19/D3Q27 grid.
+pub mod lattice3;
 
 /// One checked time sample, retaining coherent SI and native lattice units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -145,6 +148,36 @@ pub fn rebind_velocity_faces3<F: FluidTransport + ?Sized>(
     scaling: &MaterialScaling<'_, F>,
     gate: &CancelGate,
 ) -> Result<[Option<VelocitySample3>; 6], ScenarioVelocityError> {
+    let prepared = prepare_velocity_faces3(
+        grid.boundaries(),
+        boundaries,
+        frames,
+        time_s,
+        scaling,
+        gate,
+        |face| grid.velocity_profile(face).is_some(),
+    )?;
+    grid.rebind_open_boundaries(prepared.targets, gate)
+        .map_err(ScenarioVelocityError::Boundary)?;
+    Ok(prepared.samples)
+}
+
+struct PreparedVelocityFaces3 {
+    targets: BoundarySpec3,
+    samples: [Option<VelocitySample3>; 6],
+}
+
+/// Both native owners share this preparation; only profile ownership and final
+/// native admission differ. Nothing is published by this fixed-size operation.
+fn prepare_velocity_faces3<F: FluidTransport + ?Sized>(
+    before: BoundarySpec3,
+    boundaries: [Option<&BoundaryCondition>; 6],
+    frames: &FrameTree,
+    time_s: f64,
+    scaling: &MaterialScaling<'_, F>,
+    gate: &CancelGate,
+    mut has_profile: impl FnMut(Face3) -> bool,
+) -> Result<PreparedVelocityFaces3, ScenarioVelocityError> {
     let mut checkpoint = || {
         if gate.is_requested() {
             ControlFlow::Break(())
@@ -162,7 +195,6 @@ pub fn rebind_velocity_faces3<F: FluidTransport + ?Sized>(
             VectorEvaluationError::InvalidTime,
         ));
     }
-    let before = grid.boundaries();
     let mut targets = Face3::ALL.map(|face| before.face(face));
     let mut samples = [None; 6];
     for (index, boundary) in boundaries.into_iter().enumerate() {
@@ -172,7 +204,7 @@ pub fn rebind_velocity_faces3<F: FluidTransport + ?Sized>(
         let sample = sample_velocity3(boundary, frames, time_s, scaling, &mut checkpoint)?;
         // Unchanged native profiles remain authoritative. A selected scenario
         // target must never report success while an installed profile hides it.
-        if grid.velocity_profile(Face3::ALL[index]).is_some() {
+        if has_profile(Face3::ALL[index]) {
             return Err(ScenarioVelocityError::Boundary(
                 BoundaryForcingError3::Invalid(
                     "clear the selected velocity profile before applying a uniform scenario target",
@@ -184,7 +216,8 @@ pub fn rebind_velocity_faces3<F: FluidTransport + ?Sized>(
         };
         samples[index] = Some(sample);
     }
-    grid.rebind_open_boundaries(BoundarySpec3::new(targets), gate)
-        .map_err(ScenarioVelocityError::Boundary)?;
-    Ok(samples)
+    Ok(PreparedVelocityFaces3 {
+        targets: BoundarySpec3::new(targets),
+        samples,
+    })
 }

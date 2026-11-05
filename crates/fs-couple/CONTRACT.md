@@ -32787,3 +32787,21 @@ bit-identical empty-source compatibility. Parsing and formatting passed; native
 tests remain unrun in this environment. This extends interconnection only:
 supplied exterior realizations must describe the same original physical
 quadratic modes and retain their original qualification limits.
+
+### Typed velocity controls on shared D3Q19/D3Q27 reservoirs
+
+`scenario_velocity::lattice3` applies the same typed SI velocity histories to
+the original `OpenBoundaryGrid3<L, Q>`. The specialized D3Q19 and shared native
+adapters use one fixed-size preparation function for history sampling, frame
+rotation, dimensional conversion, full-vector speed bounds and profile policy.
+The shared grid has no spatial profiles; the specialized owner still refuses
+selected profiles and retains unselected ones.
+
+One native target transaction follows preparation. Native grid/collision Mach
+limits and boundary-kind admission remain authoritative, and `Error::Boundary`
+retains the complete `GridError3<L::Error>` instead of reducing it to text.
+No collision model, equilibrium, time step, force or population is replaced by
+the adapter. The subsequent native step owns physical force correction and
+measured reservoir exchange. Regression cases drive signed rotated histories
+through actual factorized D3Q27 steps and check later-face refusal, native Mach
+and kind errors, cancellation and unchanged accepted state.

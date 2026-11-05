@@ -1,5 +1,8 @@
 //! G0/G3: typed SI histories drive the native force-corrected velocity inlet.
 
+#[path = "scenario_velocity/lattice3.rs"]
+mod lattice3;
+
 use fs_couple::scenario_velocity::{
     ScenarioVelocityError, rebind_velocity_face3, rebind_velocity_faces3, sample_velocity3,
 };
