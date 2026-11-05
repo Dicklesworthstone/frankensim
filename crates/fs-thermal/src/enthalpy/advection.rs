@@ -337,14 +337,13 @@ impl<O> Advected<O> {
 }
 
 impl Advected<()> {
-    fn admit_implicit_bulk(&self) -> Result<(), DepositionError> {
-        if self.liquid_carrier.is_some()
-            || self.stationary_species.is_some()
+    fn admit_implicit_transport(&self) -> Result<(), DepositionError> {
+        if self.stationary_species.is_some()
             || !self.selective_outlets.is_empty()
             || self.entropy.is_some()
         {
             return Err(invalid(
-                "implicit bulk enthalpy excludes liquid carriers, species, selective streams and flow entropy histories",
+                "implicit enthalpy excludes species, selective streams and flow entropy histories",
             ));
         }
         Ok(())
@@ -360,14 +359,7 @@ impl Advected<()> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<(CellId, CellId, f64)>, DepositionError> {
         checkpoint()?;
-        if self.stationary_species.is_some()
-            || !self.selective_outlets.is_empty()
-            || self.entropy.is_some()
-        {
-            return Err(invalid(
-                "implicit enthalpy excludes species, selective streams and flow entropy histories",
-            ));
-        }
+        self.admit_implicit_transport()?;
         let mut entries = BTreeMap::<(CellId, CellId), (f64, f64)>::new();
         let mut add = |row, col, amount| -> Result<(), DepositionError> {
             let value = entries.entry((row, col)).or_default();

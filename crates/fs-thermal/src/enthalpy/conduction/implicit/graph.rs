@@ -93,7 +93,7 @@ impl<'a> ImplicitConductionGraph<'a> {
         })
     }
 
-    /// Classify the already attached bulk-upwind flow on the native entropy
+    /// Classify the already attached bulk or liquid upwind flow on the native entropy
     /// account. See [`ImplicitConductionChain::with_implicit_advection_entropy`]
     /// for the caloric, stage-quadrature and reconstruction restrictions.
     pub fn with_implicit_advection_entropy(

@@ -49,7 +49,7 @@ pub struct AdvectionEntropyAudit {
     pub advective_balance_residual_j_k: f64,
 }
 
-/// Instantaneous entropy terms from the original bulk-upwind endpoint, W/K.
+/// Instantaneous entropy terms from the original upwind carrier endpoint, W/K.
 /// No physical interval, accepted history or extra heat source is implied.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AdvectionEntropyRates {
@@ -81,7 +81,7 @@ impl AdvectionEntropyRates {
 }
 
 impl Advected<()> {
-    /// Query native bulk-upwind enthalpy and its entropy at the SAME endpoint.
+    /// Query native upwind carried enthalpy and entropy at the SAME endpoint.
     ///
     /// The original transport owner admits fixed mass, continuity, caloric
     /// storage and source conventions before entropy is evaluated. Inlet/outlet
@@ -89,10 +89,16 @@ impl Advected<()> {
     /// donor/receiver enthalpy, with no arbitrary absolute entropy datum.
     /// Temperature and caloric entropy must be supported by the original laws.
     ///
+    /// Ordinary bulk flow carries the stored h. An admitted stationary-skeleton
+    /// liquid carrier instead transports its original pure-liquid h and entropy,
+    /// including on the latent plateau. Mixture h and entropy remain in storage;
+    /// local liquid mass balance cancels the stationary-phase offset. No second
+    /// latent heat or entropy source is introduced.
+    ///
     /// This stateless query does not advance an observer or impose an explicit
-    /// flow CFL. Liquid carriers, species, selective outlets and attached flow
-    /// histories retain the implicit bulk owner's refusal. Reconstructed face
-    /// enthalpies require their own entropy closure and are not substituted here.
+    /// flow CFL. Species, selective outlets and attached flow histories retain
+    /// the implicit owner's refusal. Reconstructed face enthalpies require their
+    /// own entropy closure and are not substituted here.
     pub fn endpoint_transport_with_entropy(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -108,7 +114,7 @@ impl Advected<()> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(TransportStepCoefficients<()>, EndpointAdvectionEntropy), DepositionError> {
         checkpoint()?;
-        self.admit_implicit_bulk()?;
+        self.admit_implicit_transport()?;
         let transport = self.endpoint_transport(thermal, &mut checkpoint)?;
         let mut enthalpies = BTreeMap::new();
         let mut temperatures = BTreeMap::new();
@@ -119,7 +125,7 @@ impl Advected<()> {
         }
         let (boundary, mixing) = flux_entropy_rates(
             thermal, &self.flows, &self.boundaries, &self.reference_cells,
-            None, &enthalpies, &temperatures, None, &mut checkpoint,
+            self.liquid_carrier, &enthalpies, &temperatures, None, &mut checkpoint,
         )?;
         // Use the exact powers returned by the physical transport owner, not
         // a reconstructed stored-energy difference or an independently evolved
@@ -259,7 +265,8 @@ fn flux_entropy_rates(
     check: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<(f64, f64), DepositionError> {
     // At coexistence the carrier uses original pure-liquid h/s; stationary
-    // solid remains in cell storage. The implicit bulk path passes no carrier.
+    // solid remains in cell storage. Explicit and implicit callers supply the
+    // same original descriptor; ordinary bulk flow passes no carrier.
     let carried = |id| -> Result<f64, DepositionError> {
         let h = *enthalpies.get(&id).ok_or(DepositionError::Arithmetic)?;
         match liquid_carrier {

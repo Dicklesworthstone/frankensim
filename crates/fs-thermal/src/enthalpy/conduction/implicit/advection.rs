@@ -200,7 +200,7 @@ impl ImplicitConductionChain<'_> {
         Ok(self)
     }
 
-    /// Classify entropy of an already attached ordinary bulk-upwind flow.
+    /// Classify entropy of an already attached bulk or liquid upwind flow.
     ///
     /// The existing caloric integral supplies actual storage, and the original
     /// flow owner supplies inlet/outlet entropy and upwind mixing. The native
@@ -212,9 +212,12 @@ impl ImplicitConductionChain<'_> {
     ///
     /// Every flowing material must supply its original caloric entropy. No
     /// chemical entropy, pressure-work model or full fluid dissipation law is
-    /// inferred. Liquid carriers and nonempty face reconstruction require their
-    /// own implicit entropy closures and refuse this opt-in; their existing
-    /// energy-only APIs are unchanged.
+    /// inferred. A stationary-skeleton liquid carrier uses its original liquid
+    /// h/s at every stage while storage uses mixture entropy; no additional
+    /// latent-energy source is introduced. Original phase support, source
+    /// identity and fixed-density admission remain authoritative.
+    /// Nonempty face reconstruction requires its own entropy closure and
+    /// refuses this opt-in; its existing energy-only API is unchanged.
     pub fn with_implicit_advection_entropy(
         mut self,
         thermal: &DepositionSimulation<'_>,

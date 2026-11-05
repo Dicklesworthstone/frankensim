@@ -2040,8 +2040,8 @@ inlet and conservative endpoint admission remain owned by the original carrier.
 Stationary species, selective streams and flow-entropy histories still refuse
 until their own endpoint closures exist. Thermal entropy leaves mass-carried
 transfers unclassified unless the caller selects
-`with_implicit_advection_entropy` after binding an ordinary bulk-upwind flow.
-Liquid carriers retain their existing energy-only implicit account.
+`with_implicit_advection_entropy` after binding an admitted bulk or liquid
+upwind flow.
 No phase mobility, moving inventory, pressure work or momentum feedback is
 inferred. The selected method's time error and upwind spatial diffusion still
 require independent refinement.
@@ -2057,6 +2057,16 @@ spatial discretization/control-volume contribution, not constitutive fluid
 dissipation, and is nonnegative for monotone T(h) in exact arithmetic. Isothermal
 latent transport carries entropy without inventing mixing production.
 
+For a stationary solid skeleton, both explicit and implicit entropy fluxes use
+the same original carrier: `h_liquid=max(h,h_liquidus)` and its caloric entropy.
+Mixture h and entropy remain in the native storage account. At coexistence,
+`s_liquid-s_mixture=(h_liquid-h_mixture)/T_m`; balanced liquid mass cancels this
+stationary-phase offset. Superheat can melt the retained solid through the
+single original energy equation. No second latent heat or melting-entropy
+source is added. Original caloric identity, equal phase density, fixed inventory,
+pure-liquid inlet and nonzero-liquid support checks apply at every endpoint.
+This extends neither phase mobility nor the admitted stationary-skeleton model.
+
 Backward Euler samples the actual endpoint; native SDIRK2 retains each stage's
 entropy with precisely the same positive quadrature weights as its enthalpy
 rates. Exact caloric storage, actual-reservoir entropy and conductive production
@@ -2068,7 +2078,7 @@ roundoff; none is converted to physical heat or dissipation. Adaptive comparison
 publish only their accepted fine trajectory. Rejection and late cancellation
 publish no entropy or physical prefix.
 
-`Advected::endpoint_transport_with_entropy` exposes the same stateless bulk
+`Advected::endpoint_transport_with_entropy` exposes the same stateless bulk/liquid
 transport query for callers needing instantaneous rates. No observer history
 or explicit CFL step is advanced. Nonempty face reconstruction requires its
 own entropy closure and refuses the implicit entropy opt-in; the energy-only
@@ -2088,8 +2098,13 @@ Focused entropy regressions cover high-Courant closed loops with independent
 conductive/spatial/temporal terms, open flow with independently solved BE/SDIRK
 stage temperatures, unequal-mass latent transport, fine-trajectory-only adaptive
 integration, cancelling genuine sources, and late cancellation/reconstruction
-refusal. These are analytic numerical conformance checks, not full fluid
-second-law or experimental accuracy certificates.
+refusal. Liquid-carrier checks retain isothermal stationary-solid inventory,
+separate conductive and liquid-mixing production during melting, compare actual
+BE/SDIRK phase-crossing quadrature against independent scalar solutions, retain
+the pure-liquid limit, and exclude discarded adaptive trajectories. Fully solid
+flow, unsupported histories and late cancellation preserve the original state.
+These are analytic numerical conformance checks, not full fluid second-law or
+experimental accuracy certificates.
 
 ## Limited axial convection in the native implicit graph
 
