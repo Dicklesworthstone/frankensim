@@ -1,11 +1,320 @@
 //! G0/G1/G3 checks for the bounded isothermal gas-film foundation.
 
 use fs_flux::{
-    ContactExclusionMask, GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget,
-    GasFilmError, GasFilmGrid1d, GasFilmIdentity, GasFilmInput, GasFilmInputAuthority,
-    GasFilmUncertainty, IsothermalIdealGas, MovingWallInput, RoughnessPolicy, SlipPolicy,
-    isothermal_compressible_reynolds_model_id, solve_isothermal_gas_film_1d,
+    CapillaryVent, ContactExclusionMask, GasFilmApplicability, GasFilmBoundaryTopology,
+    GasFilmBudget, GasFilmError, GasFilmGrid1d, GasFilmIdentity, GasFilmInput,
+    GasFilmInputAuthority, GasFilmUncertainty, IsothermalIdealGas, MovingWallInput,
+    RoughnessPolicy, SlipPolicy, isothermal_compressible_reynolds_model_id,
+    solve_isothermal_gas_film_1d,
 };
+
+fn capillary_fixture(cells: usize, bath_pressure: f64, count_per_m: f64) -> GasFilmInput {
+    let mut input = fixture(cells);
+    input.boundary = GasFilmBoundaryTopology::CapillaryVented {
+        cell_index: 0,
+        absolute_pressure_pa: bath_pressure,
+        capillary: CapillaryVent {
+            radius_m: 1.0e-5,
+            length_m: 1.0e-2,
+            capillaries_per_m: count_per_m,
+        },
+    };
+    input.budget.mass_residual_tolerance_kg_m2_s = 1.0e-12;
+    input
+}
+
+#[test]
+fn g1_capillary_vent_retains_pressure_and_closes_signed_mass_work_and_enthalpy() {
+    for bath in [100_325.0, 102_325.0] {
+        let mut coefficients = Vec::new();
+        for radius in [1.0e-5, 2.0e-5] {
+            let mut input = capillary_fixture(4, bath, 5_000.0);
+            input.timestep_s = 5.0e-4;
+            let GasFilmBoundaryTopology::CapillaryVented { capillary, .. } = &mut input.boundary
+            else {
+                unreachable!()
+            };
+            capillary.radius_m = radius;
+            let tube = *capillary;
+            let step = solve_isothermal_gas_film_1d(&input, None).unwrap();
+            let p = step.absolute_pressure_pa[0].unwrap();
+            assert!(p > bath.min(input.initial_absolute_pressure_pa));
+            assert!(p < bath.max(input.initial_absolute_pressure_pa));
+            assert!(
+                (p - bath).abs() > 100.0,
+                "finite vent must not pin its cell"
+            );
+            let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+            let coefficient = tube.capillaries_per_m * std::f64::consts::PI * radius.powi(4)
+                / (16.0 * input.gas.dynamic_viscosity_pa_s * tube.length_m * rt);
+            let expected = coefficient * (p * p - bath * bath);
+            let flow = step.receipt.vent_outward_mass_flux_kg_per_m_s;
+            assert!((flow - expected).abs() < expected.abs() * 1.0e-12);
+            coefficients.push(flow / ((p - bath) * (p + bath)));
+            assert!(flow * (input.initial_absolute_pressure_pa - bath) > 0.0);
+            assert!(step.receipt.mass_closure_residual_kg_per_m_s.abs() < 2.0e-14);
+            assert_eq!(step.receipt.left_boundary_outward_mass_flux_kg_per_m_s, 0.0);
+            assert_eq!(
+                step.receipt.right_boundary_outward_mass_flux_kg_per_m_s,
+                0.0
+            );
+            assert_eq!(
+                step.receipt.vent_outward_enthalpy_flux_w_per_m,
+                flow * input.gas.declared_specific_enthalpy_j_kg
+            );
+            let report = step.receipt.capillary_vent.unwrap();
+            let pressure_work = flow * rt * (p / bath).ln();
+            assert!(report.viscous_dissipation_w_per_m > 0.0);
+            assert!(
+                (report.viscous_dissipation_w_per_m - pressure_work).abs()
+                    < pressure_work * 2.0e-12
+            );
+            let peak = 2.0 * flow.abs() * rt
+                / (tube.capillaries_per_m * std::f64::consts::PI * radius * radius * p.min(bath));
+            assert!(
+                (report.maximum_gas_mach_number
+                    - peak / input.applicability.speed_of_sound_m_per_s)
+                    .abs()
+                    < 1.0e-16
+            );
+            // Capillary work is outside the planar film: adding it to either
+            // side of this identity would count the connection twice.
+            assert!(
+                (step.receipt.viscous_heat_w_per_m
+                    - step.receipt.pressure_gradient_power_to_gas_w_per_m)
+                    .abs()
+                    < 1.0e-15
+            );
+        }
+        assert!((coefficients[1] / coefficients[0] - 16.0).abs() < 1.0e-12);
+    }
+}
+
+#[test]
+fn g1_capillary_pressure_relaxation_converges_to_independent_conservative_ode() {
+    let mut input = capillary_fixture(2, 100_325.0, 10_000.0);
+    let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+    let dx = input.grid.length_m / 2.0;
+    let h = input.grid.gap_m[0];
+    let mu = input.gas.dynamic_viscosity_pa_s;
+    let storage = h * dx / rt;
+    let film = h.powi(3) / (24.0 * mu * rt * dx);
+    let vent = 10_000.0 * std::f64::consts::PI * 1.0e-5_f64.powi(4) / (16.0 * mu * 1.0e-2 * rt);
+    let bath = 100_325.0;
+    let rate = |p: [f64; 2]| {
+        let transfer = film * (p[0] - p[1]) * (p[0] + p[1]);
+        let discharge = vent * (p[0] - bath) * (p[0] + bath);
+        [-(transfer + discharge) / storage, transfer / storage]
+    };
+    // Independently integrate the two physical storage balances with RK4.
+    // Production uses backward Euler and a coupled nonlinear pressure solve.
+    let duration = 5.0e-3;
+    let dt = duration / 8_192.0;
+    let mut reference = [input.initial_absolute_pressure_pa; 2];
+    for _ in 0..8_192 {
+        let a = rate(reference);
+        let b = rate(core::array::from_fn(|i| reference[i] + 0.5 * dt * a[i]));
+        let c = rate(core::array::from_fn(|i| reference[i] + 0.5 * dt * b[i]));
+        let d = rate(core::array::from_fn(|i| reference[i] + dt * c[i]));
+        reference = core::array::from_fn(|i| {
+            reference[i] + dt * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0
+        });
+    }
+    let mut errors = Vec::new();
+    for count in [16, 32, 64] {
+        input.timestep_s = duration / f64::from(count);
+        let mut checkpoint = None;
+        let mut exchanged = 0.0;
+        let mut last = None;
+        for index in 0..count {
+            let step = solve_isothermal_gas_film_1d(&input, checkpoint.as_ref()).unwrap();
+            if index == count / 2 {
+                assert_eq!(
+                    step,
+                    solve_isothermal_gas_film_1d(&input, checkpoint.as_ref()).unwrap()
+                );
+            }
+            exchanged += input.timestep_s * step.receipt.vent_outward_mass_flux_kg_per_m_s;
+            checkpoint = Some(step.checkpoint.clone());
+            last = Some(step);
+        }
+        let last = last.unwrap();
+        let initial_mass = input.initial_absolute_pressure_pa * h * input.grid.length_m / rt;
+        assert!((last.receipt.gas_mass_kg_per_m + exchanged - initial_mass).abs() < 1.0e-15);
+        let error = last
+            .checkpoint
+            .active_absolute_pressure_pa
+            .iter()
+            .zip(reference)
+            .map(|(p, expected)| (p - expected).abs())
+            .fold(0.0_f64, f64::max);
+        errors.push(error);
+    }
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!(
+            ratio > 1.8 && ratio < 2.1,
+            "first-order pressure convergence: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn g1_restricted_vent_interpolates_sealed_and_ideal_vent_squeeze_pressure() {
+    let mut sealed = fixture(4);
+    sealed.grid.gap_m.fill(1.0e-6);
+    sealed.wall_motion.gap_rate_m_per_s = -1.0e-5;
+    sealed.timestep_s = 1.0e-3;
+    sealed.slip_policy = SlipPolicy::MaxwellFirstOrder {
+        source_id: "declared-film-only-accommodation".into(),
+        tangential_momentum_accommodation: 0.9,
+    };
+    sealed.applicability.maximum_knudsen_number = 0.1;
+    sealed.budget.mass_residual_tolerance_kg_m2_s = 1.0e-12;
+    let sealed_step = solve_isothermal_gas_film_1d(&sealed, None).unwrap();
+    let bath = sealed.initial_absolute_pressure_pa;
+    let mut pinned = sealed.clone();
+    pinned.boundary = GasFilmBoundaryTopology::Vented {
+        cell_index: 0,
+        absolute_pressure_pa: bath,
+    };
+    let pinned_step = solve_isothermal_gas_film_1d(&pinned, None).unwrap();
+    let mut previous = sealed_step.checkpoint.active_absolute_pressure_pa[0];
+    for count in [1.0, 100.0, 20_000.0] {
+        let mut finite = sealed.clone();
+        finite.boundary = capillary_fixture(4, bath, count).boundary;
+        let step = solve_isothermal_gas_film_1d(&finite, None).unwrap();
+        let p = step.checkpoint.active_absolute_pressure_pa[0];
+        assert!(p < previous && p > bath);
+        assert!(step.receipt.vent_outward_mass_flux_kg_per_m_s > 0.0);
+        assert!(
+            step.receipt.gauge_pressure_load_n_per_m
+                > pinned_step.receipt.gauge_pressure_load_n_per_m
+        );
+        assert!(
+            step.receipt.gauge_pressure_load_n_per_m
+                < sealed_step.receipt.gauge_pressure_load_n_per_m
+        );
+        assert!(step.receipt.mass_closure_residual_kg_per_m_s.abs() < 2.0e-14);
+        previous = p;
+    }
+    assert!(
+        previous - bath < 0.1 * (sealed_step.checkpoint.active_absolute_pressure_pa[0] - bath),
+        "restricted vent pressure={previous}, bath={bath}, sealed pressure={}",
+        sealed_step.checkpoint.active_absolute_pressure_pa[0]
+    );
+}
+
+#[test]
+fn g4_capillary_admits_its_own_no_slip_geometry_and_endpoint_flow_regime() {
+    let input = capillary_fixture(4, 100_325.0, 1_000.0);
+    for field in [0, 1, 2] {
+        let mut bad = input.clone();
+        let GasFilmBoundaryTopology::CapillaryVented { capillary, .. } = &mut bad.boundary else {
+            unreachable!()
+        };
+        match field {
+            0 => capillary.radius_m = 0.0,
+            1 => capillary.length_m = f64::NAN,
+            _ => capillary.capillaries_per_m = -1.0,
+        }
+        assert!(matches!(
+            solve_isothermal_gas_film_1d(&bad, None),
+            Err(GasFilmError::InvalidInput { .. })
+        ));
+    }
+    let mut short = input.clone();
+    let GasFilmBoundaryTopology::CapillaryVented { capillary, .. } = &mut short.boundary else {
+        unreachable!()
+    };
+    capillary.length_m = 10.0 * capillary.radius_m;
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&short, None),
+        Err(GasFilmError::Unavailable {
+            reason: "capillary-outside-long-tube-envelope",
+        })
+    );
+    let mut fast = capillary_fixture(4, 80_000.0, 1_000.0);
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&fast, None),
+        Err(GasFilmError::Unavailable {
+            reason: "capillary-reynolds-outside-creeping-envelope",
+        })
+    );
+    fast.boundary = capillary_fixture(4, 10_000.0, 1_000.0).boundary;
+    fast.slip_policy = SlipPolicy::MaxwellFirstOrder {
+        source_id: "film-accommodation-does-not-admit-tube-slip".into(),
+        tangential_momentum_accommodation: 0.9,
+    };
+    fast.applicability.maximum_knudsen_number = 0.1;
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&fast, None),
+        Err(GasFilmError::Unavailable {
+            reason: "capillary-knudsen-outside-no-slip-envelope",
+        })
+    );
+    // A mean-speed gate would admit this; the centreline speed is twice as large.
+    let mut mach = input.clone();
+    let p = mach.initial_absolute_pressure_pa;
+    let bath = 100_325.0;
+    let mean_speed = 1.0e-5_f64.powi(2) * (p * p - bath * bath)
+        / (16.0 * mach.gas.dynamic_viscosity_pa_s * 0.01 * bath);
+    mach.applicability.maximum_mach_number =
+        1.5 * mean_speed / mach.applicability.speed_of_sound_m_per_s;
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&mach, None),
+        Err(GasFilmError::Unavailable {
+            reason: "capillary-mach-outside-quasisteady-envelope",
+        })
+    );
+}
+
+#[test]
+fn g3_capillary_restart_keeps_geometry_but_allows_reversed_bath_pressure() {
+    let input = capillary_fixture(4, 100_325.0, 1_000.0);
+    let first = solve_isothermal_gas_film_1d(&input, None).unwrap();
+    let saved = first.checkpoint.clone();
+    let mut reverse = input.clone();
+    let GasFilmBoundaryTopology::CapillaryVented {
+        absolute_pressure_pa,
+        ..
+    } = &mut reverse.boundary
+    else {
+        unreachable!()
+    };
+    *absolute_pressure_pa = 102_325.0;
+    let second = solve_isothermal_gas_film_1d(&reverse, Some(&saved)).unwrap();
+    assert!(first.receipt.vent_outward_mass_flux_kg_per_m_s > 0.0);
+    assert!(second.receipt.vent_outward_mass_flux_kg_per_m_s < 0.0);
+    assert_eq!(
+        second,
+        solve_isothermal_gas_film_1d(&reverse, Some(&saved)).unwrap()
+    );
+    for field in [0, 1, 2, 3] {
+        let mut changed = input.clone();
+        let GasFilmBoundaryTopology::CapillaryVented {
+            cell_index,
+            capillary,
+            ..
+        } = &mut changed.boundary
+        else {
+            unreachable!()
+        };
+        match field {
+            0 => *cell_index = 1,
+            1 => capillary.radius_m *= 1.1,
+            2 => capillary.length_m *= 1.1,
+            _ => capillary.capillaries_per_m *= 1.1,
+        }
+        assert!(matches!(
+            solve_isothermal_gas_film_1d(&changed, Some(&saved)),
+            Err(GasFilmError::CheckpointMismatch {
+                field: "configuration_fingerprint"
+            })
+        ));
+    }
+    assert_eq!(saved, first.checkpoint);
+}
 
 fn fixture(cells: usize) -> GasFilmInput {
     let pressure = 101_325.0;

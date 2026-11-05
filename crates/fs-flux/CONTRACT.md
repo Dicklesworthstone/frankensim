@@ -629,6 +629,48 @@ convergent total dissipation, off-centre gas-speed limits in both flow direction
 and moving wedges with sealed/open/vented boundaries and restart. Invalid
 accommodation, out-of-regime pressure states, and changes of wall law refuse.
 
+#### Finite-conductance capillary vents
+
+`GasFilmBoundaryTopology::CapillaryVented` connects one retained film cell to
+an isothermal pressure bath through declared parallel circular capillaries.
+`CapillaryVent` supplies radius `r`, length `L` and tube count per out-of-plane
+width `N`. Unlike the existing ideal `Vented` boundary, it does not pin that
+cell's pressure or replace its mass-storage equation. The signed outward flow
+is `m_dot = N*pi*r^4*(p_cell^2-p_bath^2)/(16*mu*L*R*T)`, the ideal-gas
+long-capillary limit in [Berg (2005), equation (5)](https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=915339).
+The geometry/gas coefficient is compiled once per step. Its exact positive
+pressure derivative enters the existing implicit pressure iteration, and the
+same signed flow enters the accepted local/global mass balances and boundary
+enthalpy receipt. There is no separate explicit discharge timestep restriction.
+
+The capillary walls are stationary and **no-slip independently of the film's
+Maxwell accommodation**. The restrictive envelope requires `r/L <= 0.01`,
+diameter-based mean-flow `Re <= 1`, radius-based `Kn <= 0.01`, and centreline
+`Mach <= 0.1`; stricter caller Kn/Mach caps remain effective. The initial and
+accepted tube flows are checked. Mean free path and peak parabolic speed use
+the lower of the two absolute endpoint pressures, including reverse flow.
+The tube's radius-based Kn is separate from the film's gap-based Kn. These
+gates do not certify an error bound on neglected entrance/exit corrections.
+
+The optional `capillary_vent` receipt reports these tube descriptors and its
+nonnegative pressure-gradient work/viscous dissipation,
+`m_dot*R*T*ln(p_cell/p_bath)`. This work is outside the film: it is neither
+added to film viscous heat nor counted again as boundary enthalpy. No wall/gas
+thermal partition is supplied. Bath pressure may change between steps while
+connection cell and capillary geometry remain bound to restart identity.
+
+This is a quasi-steady fully developed creeping-flow connection to an infinite
+bath, not an orifice, a finite gas inventory, a stored tube-pressure field or
+a choked-flow law. The cell-local branch does not resolve junction flow or
+finite-aperture surface traction. The caller must justify isothermal behavior and forcing
+slow compared with the tube's viscous/thermal adjustment; timestep size alone
+does not establish those physical assumptions. The cited paper's slip, inertia,
+nonideal-gas and thermal corrections and metrological accuracy are not claimed.
+Focused regressions cover signed discharge/ingress, the radius-fourth-power
+law and work accounting, pressure relaxation against independent two-cell ODE
+integration, time refinement, squeeze pressure between sealed and ideal-vent
+limits, separate tube applicability, and restart/reversed-bath behavior.
+
 The implementation is bit-deterministic on one ISA by fixed cell/face order and
 bounded Jacobi/Picard sweeps. It has no RNG, no `Cx` cancellation hook, no
 entropy model, and no thermochemical or material-data admission; the
