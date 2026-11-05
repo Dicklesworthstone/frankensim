@@ -1693,6 +1693,64 @@ independent versus factored source statistics, all p/u moments, native harmonic
 lines, per-source diagnostics, shared work exhaustion, empty arrays and input
 or cancellation refusals.
 
+## Full spherical-wave transmission through a finite fluid layer
+
+`curle3d::refraction::full_wave::layer::PreparedLayeredFullWaveMonopole`
+extends the prescribed original volume source to two parallel faces enclosing
+one homogeneous lossless fluid layer. `PlanarFluidLayer` retains all three
+original `FluidAcousticState` snapshots, a first-face point, a unit receiving
+normal and the finite nonnegative thickness. The source and receiver lie
+strictly outside opposite faces. The Green function sums every coherent
+internal return and retains propagating, critical and evanescent incident
+components, including frustrated transmission through an evanescent layer.
+Pressure and both cylindrical velocity components share that Green function;
+the returned Cartesian field retains active and signed reactive intensity.
+
+With outgoing `zeta_j = sqrt(k_j^2-q^2)`, `Y_j=zeta_j/rho_j`, and original
+exterior clearances a and b, the transmitted source spectrum is
+`p/Q = omega/(2 pi) integral q J0(qR) exp(i zeta_1 a+i zeta_3 b)/L dq`, where
+`L=(Y_1+Y_3)cos(zeta_2 h)-i h(zeta_2^2/rho_2+rho_2 Y_1 Y_3)sinc(zeta_2 h)`.
+This follows pressure and normal-velocity continuity, as in Mei, MIT Wave
+Propagation, chapter 3, equations (1.18)--(1.25):
+<https://web.mit.edu/1.138j/www/material/chap-3.pdf>.
+The sinc form is regular at internal grazing. Multiplying the denominator by
+`exp(-Im(zeta_2) h)` removes growing hyperbolic intermediates; the matching
+physical decay remains attached to the exterior spectrum. A common vertical
+wavenumber factor is cancelled analytically when all original speeds agree.
+Density scaling and logarithmic weighting preserve representable attenuated
+fields. Unrepresentable original coefficient ratios or distinct wavenumbers
+rounded to the same value refuse explicitly.
+
+The shared bounded Gauss--Kronrod engine splits at every distinct original
+fluid wavenumber. It requires phase/attenuation resolution and a conservative
+bound on within-panel denominator variation before accepting any embedded
+quadrature estimate. A narrow layer resonance cannot be accepted merely
+because the embedded samples both miss it. The all-evanescent omitted tail has
+an analytic envelope with total clearance `a+h+b`, preserving layer decay;
+pressure and velocity tails are reported separately in physical units. These
+are numerical estimates plus analytic spectral-tail bounds, not interval
+certificates: geometry, Bessel, floating-point and coordinate errors remain
+outside the estimates. There is no implicit ray fallback or added damping.
+
+A nonzero layer must satisfy `c_layer >= min(c_incident,c_receiving)`.
+Slower-than-both layers may have real guided poles and require a separate
+pole/residue or physical-loss treatment; this owner refuses that class.
+Zero thickness delegates the original two-fluid interface exactly, and three
+identical fluid snapshots delegate its exact spherical field. Preparation
+retains explicit work/depth limits and cancellation; failure publishes no
+partial owner. The cached four-coefficient transfer applies complex peak Q
+or produces a native harmonic line without allocation, quadrature, or a second
+propagation delay. Absorption, multiple layers, finite lateral edges, moving
+fluids and source feedback are outside this model.
+
+`tests/full_wave_layer_refraction.rs` covers independent 35/50-digit direct-q
+references for unequal exteriors, an evanescent barrier and a narrow coherent
+resonance; an independent spherical-image series with equal speeds and unequal
+densities; exact and vanishing-thickness limits; receiving-fluid momentum,
+reciprocity, rotation, refinement, observation clocks, work and cancellation.
+Private regressions check internal grazing, large evanescent layer depth and a
+resonance that passes the phase-span test but fails denominator resolution.
+
 ## Resolved volume-stress quadrupoles
 
 `curle3d::quadrupole::PreparedQuadrupoleObserver` propagates prescribed symmetric

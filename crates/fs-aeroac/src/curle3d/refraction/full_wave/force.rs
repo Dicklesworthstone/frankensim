@@ -370,8 +370,11 @@ fn equal_speed(
 struct ForceKernel(Kernel);
 
 impl Spectrum<7> for ForceKernel {
-    fn geometry(&self) -> &Kernel {
-        &self.0
+    fn extent(&self) -> (f64, f64) {
+        Spectrum::<3>::extent(&self.0)
+    }
+    fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
+        self.0.resolved(region, lower, upper)
     }
 
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 7], AeroacError> {
@@ -478,7 +481,7 @@ fn times_i(value: C64) -> C64 {
     C64::new(-value.im, value.re)
 }
 
-fn j1_over_argument(argument: f64, jone: f64) -> f64 {
+pub(super) fn j1_over_argument(argument: f64, jone: f64) -> f64 {
     if argument.abs() < 1e-3 {
         // Analytic continuation at zero; the omitted x^8 term is <2e-32.
         let square = argument * argument;

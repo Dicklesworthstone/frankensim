@@ -36,6 +36,8 @@ use std::collections::BinaryHeap;
 
 /// Coherent and statistically specified arrays of physical Q/F sources.
 pub mod array;
+/// Spherical-wave transmission through one finite original fluid layer.
+pub mod layer;
 
 mod force;
 pub use force::{
@@ -586,13 +588,21 @@ impl QuadratureLimits {
 /// Statically sized samples keep the original monopole's three-channel work
 /// unchanged; force derivatives share the same nodes with seven channels.
 trait Spectrum<const N: usize> {
-    fn geometry(&self) -> &Kernel;
+    fn regions(&self) -> usize {
+        3
+    }
+    fn extent(&self) -> (f64, f64);
+    fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool;
     fn sample(&self, region: usize, x: f64) -> Result<[C64; N], AeroacError>;
 }
 
 impl Spectrum<3> for Kernel {
-    fn geometry(&self) -> &Kernel {
-        self
+    fn extent(&self) -> (f64, f64) {
+        let cutoff = det::hypot(self.kmax, self.tail_extent);
+        (cutoff, cutoff * self.range)
+    }
+    fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
+        Kernel::resolved(self, region, lower, upper)
     }
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
         Kernel::sample(self, region, x)
@@ -774,7 +784,7 @@ impl Work {
             depth,
             value,
             error,
-            unresolved: !kernel.geometry().resolved(region, lower, upper),
+            unresolved: !kernel.resolved(region, lower, upper),
             priority,
             serial: self.serial,
         };
@@ -813,17 +823,15 @@ fn integrate_spectrum<const N: usize, const PRESSURE: usize>(
     limits: QuadratureLimits,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<IntegratedSpectrum<N>, AeroacError> {
-    let geometry = kernel.geometry();
-    let cutoff = det::hypot(geometry.kmax, geometry.tail_extent);
-    let maximum_argument = cutoff * geometry.range;
+    let (cutoff, maximum_argument) = kernel.extent();
     if !cutoff.is_finite() || !maximum_argument.is_finite() {
         return Err(nonfinite("full-wave retained spectral extent"));
     }
     let mut panels = BinaryHeap::new();
-    // Three roots cost 45 evaluations; each split adds one retained panel and
-    // costs another 30. This capacity covers all admitted work without growth.
+    // Each transformed-region root costs 15 evaluations; each split adds one
+    // retained panel and costs another 30. No allocation occurs while sampling.
     panels
-        .try_reserve_exact(limits.maximum_evaluations / 30 + 3)
+        .try_reserve_exact(limits.maximum_evaluations / 30 + kernel.regions())
         .map_err(|_| invalid("full-wave quadrature allocation exceeds available memory"))?;
     let mut sums = [ComplexSum::default(); N];
     let mut errors = [Dd::ZERO; N];
@@ -833,7 +841,7 @@ fn integrate_spectrum<const N: usize, const PRESSURE: usize>(
         maximum_depth_reached: 0,
         serial: 0,
     };
-    for region in 0..3 {
+    for region in 0..kernel.regions() {
         let panel = work.panel::<N, PRESSURE>(kernel, region, 0.0, 1.0, 0, limits, cancelled)?;
         for component in 0..N {
             sums[component].add(panel.value[component])?;
