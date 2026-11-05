@@ -1302,8 +1302,8 @@ refuse without publishing a candidate.
 
 ## Unsteady buoyant sphere with reciprocal viscous memory
 
-`CreepingSphere::unsteady_motion` releases the original nonrotating material
-sphere from rest in its quiescent fluid. Body mass, displaced-fluid mass,
+`CreepingSphere::unsteady_motion` starts the original nonrotating material
+sphere comoving with its uniform fluid. Body mass, displaced-fluid mass,
 dynamic viscosity, geometry, gravity and the existing Reynolds cap retain
 their original owners. The native rigid-body midpoint advances the only body
 trajectory. Its load includes Archimedes force, steady Stokes resistance,
@@ -1318,7 +1318,8 @@ omitted cutoffs are explicit numerical resolution. `impedance_kg_s` exposes
 the actual discrete operator; the omitted-tail bound excludes quadrature and
 time error. Refine all three spectral axes and dt on the intended time window.
 The steady Stokes coefficient and added mass remain exact at every resolution.
-Initial body and fluid momenta are zero. Clones retain all accepted memory;
+Initial relative translation and spin are zero, up to the native momentum
+conversion's represented roundoff. Clones retain all accepted memory;
 resuming never reconstructs it from current body velocity alone.
 
 Each accepted step reports represented fluid storage, viscous heat, native
@@ -1338,8 +1339,38 @@ non-Newtonian transport, thermal evolution or a finite heat destination.
 `tests/creeping_flow/unsteady.rs` supplies G1/G3/G4 analytic impedance and
 inverse-Laplace settling ladders, source-density acceleration/direction,
 native receipt identity, storage/heat closure and restart/late cancellation.
-The primary force-law reference is Candelier et al., JFM 954 (2023), A25,
+The quiescent force-law reference is Candelier et al., JFM 954 (2023), A25,
 equation (1.1), DOI `10.1017/jfm.2022.1015`.
+
+`step_with_flow_acceleration` advances the accepted uniform ambient velocity
+with held world acceleration on this SAME native midpoint and history owner.
+The slip equation is `(m_body+m_added)*w_dot = F_applied +
+(m_body-m_fluid)*(g-a_ambient) - c*w - history`, with `w=v-U`.
+The original displaced-fluid mass supplies the separate pressure-gradient
+force `m_fluid*a_ambient`; added mass reacts to relative acceleration.
+This is the uniform-flow reduction of Maxey & Riley, Physics of Fluids 26
+(1983), 883–889, DOI `10.1063/1.864230`. It does not infer spatial convection,
+ambient strain/vorticity, Faxen corrections or a finite-vessel fluid solution.
+
+The accepted ambient velocity travels with the body, clock and all history;
+ordinary `step`/`step_with_wrench` hold that current velocity. Initial native
+velocity or canonical momentum `mass*U` must match the supplied ambient flow;
+no arbitrary slipping prehistory or velocity impulse is silently inserted.
+The existing spectral-velocity getter returns RELATIVE branch velocities in
+world axes. Added-mass and branch energies/momenta use those same relative
+coordinates; native dry-body energy remains in the inertial world frame.
+The prescribed flow supplies explicit work
+`dt*(m_fluid*a_ambient dot v_mid + F_disturbance dot U_mid)`.
+`F_disturbance` includes drag/history/added mass and excludes pressure/buoyancy.
+The linear impulse balance separately includes `m_fluid*a_ambient*dt`.
+Neither background work nor a numerical defect is assigned to heat.
+
+G1/G3/G4 additions in `tests/creeping_flow/unsteady.rs` cover the neutral
+comoving limit, density-dependent startup, a continuum inverse-Laplace
+acceleration-response ladder, Galilean equivalence of slip/history/heat,
+native replay, and refusal/cancellation/restart of the complete flow state.
+The rotating wrapper exposes the same explicit flow-acceleration operation;
+uniform translation leaves its world-fixed rotary memory unchanged.
 
 ## Finite-rotation hydrostatic restoring motion
 
@@ -1745,4 +1776,4 @@ The main receipt includes total body/fluid storage, heat and external force/coup
 
 Five regression groups cover independent analytic rotary impedance and spectral tails, zero instantaneous added inertia, convergence to an independently inverted continuum spin-up response, simultaneous changing force/three-axis torque with native replay and work/impulse checks, world-frame covariance of both histories, and refusal/cancellation/retry. The original nonrotating entry point retains its existing path and rejects applied torque.
 
-Scope remains a no-slip uniform sphere, frozen unbounded Newtonian fluid initially at rest, low translational and rotational Reynolds numbers, and zero initial body momenta. Cutoff, quadrature and physical-time refinement remain required. No ambient vorticity/strain, wall/gap interaction, fluid prehistory, finite-Re Magnus force or nonspherical history is inferred.
+Scope remains a no-slip uniform sphere, frozen transport in an unbounded Newtonian fluid, low relative translational and rotational Reynolds numbers, initially comoving translation and zero initial spin. The explicit uniform-flow acceleration path above can drive translation on the same clock; it does not rotate the ambient fluid. Cutoff, quadrature and physical-time refinement remain required. No ambient vorticity/strain, wall/gap interaction, fluid prehistory, finite-Re Magnus force or nonspherical history is inferred.

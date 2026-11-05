@@ -371,18 +371,54 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         self.load_frame_with_lift(frame, state, SphereLift::None, cancelled)
     }
 
+    /// Shared instantaneous Stokes admission for a time-evolving uniform flow.
+    /// Its acceleration pressure and history remain with the unsteady owner.
+    fn load_frame_in_flow(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        ambient_velocity_world: Vec3,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingLoad, Error> {
+        self.load_frame_in_flow_with_lift(
+            frame,
+            state,
+            ambient_velocity_world,
+            SphereLift::None,
+            cancelled,
+        )
+    }
+
     fn load_frame_with_lift(
         &self,
         frame: &PrincipalFrame,
         state: RigidBodyState,
         lift_model: SphereLift,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingLoad, Error> {
+        self.load_frame_in_flow_with_lift(
+            frame,
+            state,
+            self.ambient_velocity_world,
+            lift_model,
+            cancelled,
+        )
+    }
+
+    fn load_frame_in_flow_with_lift(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        ambient_velocity_world: Vec3,
+        lift_model: SphereLift,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingLoad, Error> {
         poll(&mut cancelled)?;
+        vector(ambient_velocity_world)?;
         let properties = frame.properties();
         let relative = state
             .center_of_mass_velocity_world(properties)?
-            .sub(self.ambient_velocity_world);
+            .sub(ambient_velocity_world);
         let omega = properties.angular_velocity_body_checked(state.angular_momentum_body())?;
         let translation_reynolds = self
             .transport
@@ -416,7 +452,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             SphereLift::None => drag,
             SphereLift::RubinowKeller => vector(drag.add(lift))?,
         };
-        let background_power_w = finite(fluid_force.dot(self.ambient_velocity_world))?;
+        let background_power_w = finite(fluid_force.dot(ambient_velocity_world))?;
         if dissipated_power_w < 0.0
             || (relative != Vec3::ZERO || omega != Vec3::ZERO) && dissipated_power_w == 0.0
         {

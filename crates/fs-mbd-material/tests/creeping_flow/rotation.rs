@@ -36,6 +36,70 @@ fn vector_near(a: NativeVec3, b: NativeVec3, tolerance: f64) {
 }
 
 #[test]
+fn accelerating_translation_shares_the_native_clock_without_rotating_fluid_memory() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let mut still = medium
+        .unsteady_rotating_motion(&body, rest, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let mut flowing = still.clone();
+    let applied = Wrench {
+        torque_body: NativeVec3::new(1e-7, -2e-7, 3e-7),
+        ..Wrench::ZERO
+    };
+    let acceleration = NativeVec3::new(0.01, -0.02, 0.03);
+    for _ in 0..40 {
+        let (next_still, _) = still
+            .step_with_wrench(applied, controls(0.001), || false)
+            .unwrap();
+        let (next_flowing, audit) = flowing
+            .step_with_flow_acceleration(applied, acceleration, controls(0.001), || false)
+            .unwrap();
+        assert_eq!(
+            next_still.state().angular_momentum_body(),
+            next_flowing.state().angular_momentum_body()
+        );
+        assert_eq!(
+            next_still.state().pose().orientation(),
+            next_flowing.state().pose().orientation()
+        );
+        assert_eq!(
+            next_still.fluid_angular_velocities_world_rad_s(),
+            next_flowing.fluid_angular_velocities_world_rad_s()
+        );
+        assert_eq!(next_still.time_s(), next_flowing.time_s());
+        assert!(audit.background_work_j != 0.0);
+        assert!(audit.energy_defect_j.abs() < 1e-18);
+        let replay = RigidBodyIntegrator::new(Gravity::ZERO)
+            .step_cayley(
+                flowing.state(),
+                body.properties(),
+                Wrench {
+                    force_world: audit.fluid_wrench.force_world,
+                    torque_body: audit.fluid_wrench.torque_body.add(applied.torque_body),
+                },
+                0.001,
+            )
+            .unwrap();
+        assert_eq!(replay, audit.dynamics);
+        still = next_still;
+        flowing = next_flowing;
+    }
+    vector_near(
+        flowing.ambient_velocity_world_m_s(),
+        acceleration.scale(0.04),
+        1e-17,
+    );
+    assert!(magnitude(flowing.state().linear_momentum_world()) > 0.0);
+}
+
+#[test]
 fn rotary_memory_matches_the_exact_impedance_and_has_no_instantaneous_added_inertia() {
     let source = sphere(2000.0);
     let body = source.principal_body(1e-12, || false).unwrap();

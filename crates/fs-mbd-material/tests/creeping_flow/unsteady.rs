@@ -489,3 +489,331 @@ fn driven_unsteady_refusal_and_late_cancellation_leave_all_history_unchanged() {
     );
     assert_eq!(retried_audit, expected_audit);
 }
+
+fn vector_close(actual: NativeVec3, expected: NativeVec3, tolerance: f64) {
+    let error = actual.sub(expected);
+    assert!(
+        error.x.hypot(error.y).hypot(error.z) <= tolerance,
+        "{actual:?} != {expected:?} within {tolerance:e}"
+    );
+}
+
+#[test]
+fn neutrally_buoyant_sphere_follows_accelerating_fluid_without_slip_heat() {
+    let source = sphere(1000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let start = body
+        .state_from_kinematics(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(0.13, -0.07, 0.2)),
+        )
+        .unwrap();
+    let mut velocity = NativeVec3::new(0.13, -0.07, 0.2);
+    // The large common velocity is deliberately outside the old absolute-velocity
+    // Reynolds gate. Only slip is a creeping-flow criterion.
+    let medium = CreepingSphere::new(&material, RADIUS, gravity(), velocity, limits()).unwrap();
+    let mut motion = medium
+        .unsteady_motion(&body, start, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let mut position = start.pose().position_world();
+    let dt = 0.002;
+    for i in 0..100 {
+        let acceleration = if i < 50 {
+            NativeVec3::new(0.02, -0.01, 0.03)
+        } else {
+            NativeVec3::new(-0.04, 0.03, -0.01)
+        };
+        position = position.add(velocity.add(acceleration.scale(0.5 * dt)).scale(dt));
+        velocity = velocity.add(acceleration.scale(dt));
+        let (next, audit) = motion
+            .step_with_flow_acceleration(Wrench::ZERO, acceleration, step_controls(dt), || false)
+            .unwrap();
+        vector_close(next.ambient_velocity_world_m_s(), velocity, 1e-15);
+        vector_close(
+            next.state()
+                .center_of_mass_velocity_world(body.properties())
+                .unwrap(),
+            velocity,
+            2e-15,
+        );
+        vector_close(next.state().pose().position_world(), position, 2e-15);
+        vector_close(
+            audit.ambient_pressure_force_world_n,
+            acceleration.scale(body.properties().mass()),
+            1e-18,
+        );
+        assert!(
+            audit.viscous_heat_j < 1e-28,
+            "neutral heat {:?}",
+            audit.viscous_heat_j
+        );
+        assert!((audit.stored_energy_change_j - audit.background_work_j).abs() < 1e-18);
+        assert_eq!(audit.applied_work_j, 0.0);
+        motion = next;
+    }
+}
+
+#[test]
+fn ambient_pressure_and_added_mass_give_the_correct_density_dependent_startup() {
+    let material = fluid(1000.0, 1.0);
+    let acceleration = NativeVec3::new(0.02, -0.03, 0.01);
+    let dt = 1e-10;
+    for density in [500.0, 1000.0, 2000.0] {
+        let source = sphere(density);
+        let body = source.principal_body(1e-12, || false).unwrap();
+        let medium =
+            CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits())
+                .unwrap();
+        let rest = body
+            .state_from_kinematics(Se3::identity(), Twist::zero())
+            .unwrap();
+        let motion = medium
+            .unsteady_motion(&body, rest, resolution(1e-4, 1000.0, 128), || false)
+            .unwrap();
+        let (next, audit) = motion
+            .step_with_flow_acceleration(Wrench::ZERO, acceleration, step_controls(dt), || false)
+            .unwrap();
+        let actual = next
+            .state()
+            .center_of_mass_velocity_world(body.properties())
+            .unwrap()
+            .scale(1.0 / dt);
+        let expected = acceleration.scale(1500.0 / (density + 500.0));
+        vector_close(actual, expected, 2e-7);
+        let displaced_mass = 1000.0 * 4.0 * core::f64::consts::PI * RADIUS.powi(3) / 3.0;
+        vector_close(
+            audit.ambient_pressure_force_world_n,
+            acceleration.scale(displaced_mass),
+            1e-18,
+        );
+        let native = RigidBodyIntegrator::new(Gravity::ZERO)
+            .step(rest, body.properties(), audit.fluid_wrench, dt)
+            .unwrap();
+        assert_eq!(native, audit.dynamics);
+    }
+}
+
+#[test]
+fn accelerating_current_converges_to_independent_continuum_basset_response() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let acceleration = NativeVec3::new(0.01, -0.02, 0.015);
+    let volume = 4.0 * core::f64::consts::PI * RADIUS.powi(3) / 3.0;
+    let c = 6.0 * core::f64::consts::PI * RADIUS;
+    let moving_mass = 2500.0 * volume;
+    let b = c * (RADIUS.powi(2) / 0.001).sqrt();
+    let target = 0.1;
+    let slip =
+        acceleration.scale(-1000.0 * volume * settling_fraction(target, moving_mass, c, b) / c);
+    let expected = acceleration.scale(target).add(slip);
+    let mut previous = f64::INFINITY;
+    for (lo, hi, branches, steps) in [
+        (0.01, 100.0, 32, 50),
+        (0.001, 1000.0, 128, 200),
+        (0.0001, 10000.0, 256, 800),
+    ] {
+        let mut motion = medium
+            .unsteady_motion(&body, rest, resolution(lo, hi, branches), || false)
+            .unwrap();
+        let mut accounts = [0.0; 3];
+        for _ in 0..steps {
+            let (next, audit) = motion
+                .step_with_flow_acceleration(
+                    Wrench::ZERO,
+                    acceleration,
+                    step_controls(target / f64::from(steps)),
+                    || false,
+                )
+                .unwrap();
+            accounts[0] += audit.stored_energy_change_j;
+            accounts[1] += audit.viscous_heat_j;
+            accounts[2] += audit.background_work_j;
+            motion = next;
+        }
+        let actual = motion
+            .state()
+            .center_of_mass_velocity_world(body.properties())
+            .unwrap();
+        let error = actual.sub(expected).norm_squared().sqrt() / slip.norm_squared().sqrt();
+        assert!(
+            error < 0.2 * previous,
+            "accelerating-flow ladder {error:e} >= {previous:e}"
+        );
+        assert!(accounts[1] > 0.0 && accounts[2] > 0.0);
+        assert!((accounts[0] + accounts[1] - accounts[2]).abs() < 1e-11 * accounts[2]);
+        previous = error;
+    }
+    assert!(previous < 3e-4);
+}
+
+#[test]
+fn ambient_translation_preserves_slip_memory_and_heat_under_a_galilean_boost() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let boosted = body
+        .state_from_kinematics(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(0.125, -0.25, 0.0625)),
+        )
+        .unwrap();
+    let boost = boosted
+        .center_of_mass_velocity_world(body.properties())
+        .unwrap();
+    let still_medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let moving_medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, boost, limits()).unwrap();
+    let mut still = still_medium
+        .unsteady_motion(&body, rest, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let mut moving = moving_medium
+        .unsteady_motion(&body, boosted, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let dt = 0.001;
+    for i in 0..100 {
+        let acceleration = if i < 50 {
+            NativeVec3::new(0.01, -0.02, 0.015)
+        } else {
+            NativeVec3::ZERO
+        };
+        let applied = Wrench {
+            force_world: NativeVec3::new(1e-5, -2e-5, 0.0),
+            ..Wrench::ZERO
+        };
+        let (next_still, a) = still
+            .step_with_flow_acceleration(applied, acceleration, step_controls(dt), || false)
+            .unwrap();
+        let (next_moving, b) = moving
+            .step_with_flow_acceleration(applied, acceleration, step_controls(dt), || false)
+            .unwrap();
+        vector_close(
+            next_moving
+                .state()
+                .center_of_mass_velocity_world(body.properties())
+                .unwrap(),
+            next_still
+                .state()
+                .center_of_mass_velocity_world(body.properties())
+                .unwrap()
+                .add(boost),
+            2e-14,
+        );
+        vector_close(
+            next_moving.state().pose().position_world(),
+            next_still
+                .state()
+                .pose()
+                .position_world()
+                .add(boost.scale(next_still.time_s())),
+            2e-15,
+        );
+        for (a, b) in next_still
+            .fluid_velocities_world_m_s()
+            .iter()
+            .zip(next_moving.fluid_velocities_world_m_s())
+        {
+            vector_close(*a, *b, 2e-14);
+        }
+        assert!((a.viscous_heat_j - b.viscous_heat_j).abs() < 1e-20);
+        assert!((a.added_mass_energy_change_j - b.added_mass_energy_change_j).abs() < 1e-20);
+        still = next_still;
+        moving = next_moving;
+    }
+    // The ordinary no-acceleration API holds the accepted current, not the
+    // immutable reservoir's initial velocity and not a new quiescent history.
+    let (held, held_audit) = moving
+        .step_with_wrench(Wrench::ZERO, step_controls(dt), || false)
+        .unwrap();
+    let (explicit, explicit_audit) = moving
+        .step_with_flow_acceleration(Wrench::ZERO, NativeVec3::ZERO, step_controls(dt), || false)
+        .unwrap();
+    assert_eq!(
+        held.ambient_velocity_world_m_s(),
+        moving.ambient_velocity_world_m_s()
+    );
+    assert_eq!(held.state(), explicit.state());
+    assert_eq!(held_audit, explicit_audit);
+}
+
+#[test]
+fn accelerating_flow_refusal_preserves_ambient_clock_body_and_history() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let motion = medium
+        .unsteady_motion(&body, rest, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let acceleration = NativeVec3::new(0.01, -0.02, 0.015);
+    let (motion, _) = motion
+        .step_with_flow_acceleration(Wrench::ZERO, acceleration, step_controls(0.001), || false)
+        .unwrap();
+    let mut polls = 0;
+    let (expected, expected_audit) = motion
+        .step_with_flow_acceleration(Wrench::ZERO, acceleration, step_controls(0.001), || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut visited = 0;
+    assert!(matches!(
+        motion.step_with_flow_acceleration(
+            Wrench::ZERO,
+            acceleration,
+            step_controls(0.001),
+            || {
+                visited += 1;
+                visited == polls
+            }
+        ),
+        Err(CreepingFlowError::Cancelled)
+    ));
+    for invalid in [
+        NativeVec3::new(f64::NAN, 0.0, 0.0),
+        NativeVec3::new(1e20, 0.0, 0.0),
+        NativeVec3::new(1e-100, 0.0, 0.0),
+    ] {
+        assert!(
+            motion
+                .step_with_flow_acceleration(Wrench::ZERO, invalid, step_controls(0.001), || false)
+                .is_err()
+        );
+    }
+    let (retried, retried_audit) = motion
+        .clone()
+        .step_with_flow_acceleration(Wrench::ZERO, acceleration, step_controls(0.001), || false)
+        .unwrap();
+    assert_eq!(retried.state(), expected.state());
+    assert_eq!(retried.time_s(), expected.time_s());
+    assert_eq!(
+        retried.ambient_velocity_world_m_s(),
+        expected.ambient_velocity_world_m_s()
+    );
+    assert_eq!(
+        retried.fluid_velocities_world_m_s(),
+        expected.fluid_velocities_world_m_s()
+    );
+    assert_eq!(retried_audit, expected_audit);
+    assert!(
+        medium
+            .unsteady_motion(&body, motion.state(), resolution(0.001, 1000.0, 64), || {
+                false
+            })
+            .is_err()
+    );
+}

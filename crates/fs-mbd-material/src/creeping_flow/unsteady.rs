@@ -18,6 +18,11 @@
 //! position and attitude; no alternate body trajectory is advanced here.
 //! The explicit [`rotation`] owner adds the distinct causal rotary impedance
 //! and one shared native Cayley step; the original owner remains nonrotating.
+//!
+//! A uniformly accelerating ambient flow adds its displaced-fluid pressure
+//! force m_f*a_U separately from added mass -m_a*d(v-U)/dt. All diffusive
+//! branches act on the slip v-U. This is the spatially uniform limit of Maxey
+//! & Riley, Physics of Fluids 26 (1983), 883–889, DOI 10.1063/1.864230.
 
 use super::*;
 use std::sync::Arc;
@@ -56,23 +61,32 @@ pub struct UnsteadyStepControls {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnsteadySphereStep {
     pub dynamics: StepReceipt,
-    /// Includes buoyancy, steady resistance, memory and added-mass reaction.
+    /// Includes buoyancy, ambient pressure, steady resistance, memory and added mass.
     /// With spin history, its body torque is the work-conjugate Cayley pullback
     /// of the physical world torque in `rotation`, not an instantaneous rotation.
     pub fluid_wrench: Wrench,
     pub history_force_world_n: Vec3,
+    /// Reaction to acceleration RELATIVE to the uniform ambient flow.
     pub added_mass_force_world_n: Vec3,
+    /// Displaced-fluid pressure force m_fluid*a_ambient, excluding buoyancy.
+    pub ambient_pressure_force_world_n: Vec3,
     /// Steady Stokes loss plus all branch dashpot loss, never stored energy.
     pub viscous_heat_j: f64,
     /// Work of the separately supplied centre-of-mass force and optional
     /// body-frame couple, using the accepted native midpoint velocities.
     pub applied_work_j: f64,
+    /// Work supplied by the prescribed translating/accelerating far field.
+    /// This includes pressure-force work at the body and disturbance-reaction
+    /// work at the ambient velocity; it is neither viscous heat nor storage.
+    pub background_work_j: f64,
+    /// Change of represented added-mass energy `m_added*|v-U|²/2`.
     pub added_mass_energy_change_j: f64,
     /// Sum of all represented translational and optional rotary fluid storage.
     pub memory_energy_change_j: f64,
-    /// Added mass and branch generalized momentum, not total field momentum.
+    /// Added mass and branch momentum RELATIVE to the ambient flow, expressed
+    /// in world axes. This is not the total momentum of a finite fluid field.
     pub spectral_fluid_momentum_change_ns: Vec3,
-    /// Impulse delivered to the eliminated stationary Stokes exterior.
+    /// Impulse delivered to the eliminated Stokes exterior by relative motion.
     pub far_field_impulse_ns: Vec3,
     pub momentum_residual_ns: Vec3,
     /// Dry-body kinetic + gravity/buoyancy potential + represented fluid energy.
@@ -91,6 +105,7 @@ pub struct UnsteadySphereMotion<'s, 'f, 'b, F: FluidTransport + ?Sized> {
     branches: Arc<[BassetBranch]>,
     fluid_velocities: Vec<Vec3>,
     rotation: Option<rotation::RotationHistory>,
+    ambient_velocity_world: Vec3,
     state: RigidBodyState,
     time_s: f64,
 }
@@ -104,6 +119,7 @@ impl<F: FluidTransport + ?Sized> Clone for UnsteadySphereMotion<'_, '_, '_, F> {
             branches: Arc::clone(&self.branches),
             fluid_velocities: self.fluid_velocities.clone(),
             rotation: self.rotation.clone(),
+            ambient_velocity_world: self.ambient_velocity_world,
             state: self.state,
             time_s: self.time_s,
         }
@@ -111,12 +127,16 @@ impl<F: FluidTransport + ?Sized> Clone for UnsteadySphereMotion<'_, '_, '_, F> {
 }
 
 impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
-    /// Release the original sphere from rest, with quiescent fluid memory.
+    /// Start the original sphere comoving with its uniform ambient fluid.
     ///
     /// This retains the original source snapshot, geometry, native gravity and
     /// Reynolds cap. The quasi-steady diffusion/relaxation restriction is replaced
     /// by actual added mass and viscous memory; it is NOT relaxed by density.
-    /// Both initial momenta and the prescribed ambient velocity must be zero.
+    /// Initial translation must be comoving and angular momentum must vanish.
+    /// The native velocity or its canonical momentum `mass * ambient_velocity`
+    /// must match; ordinary momentum/velocity roundoff is retained, not clipped.
+    /// All relative memory starts at zero; arbitrary slip and prior history
+    /// are not inferred.
     /// No spin, thermal shape/source change, free surface, wall, other particle,
     /// nonlinear convection, compressibility or Basset prehistory is inferred.
     ///
@@ -136,8 +156,11 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         self.load_frame(body.frame(), state, &mut cancelled)?;
         let lo = resolution.minimum_wavenumber_radius;
         let hi = resolution.maximum_wavenumber_radius;
-        if self.ambient_velocity_world != Vec3::ZERO
-            || state.linear_momentum_world() != Vec3::ZERO
+        let initial_velocity = state.center_of_mass_velocity_world(body.properties())?;
+        let comoving_momentum =
+            vector(self.ambient_velocity_world.scale(body.properties().mass()))?;
+        if (initial_velocity != self.ambient_velocity_world
+            && state.linear_momentum_world() != comoving_momentum)
             || state.angular_momentum_body() != Vec3::ZERO
             || !lo.is_finite()
             || lo <= 0.0
@@ -146,7 +169,7 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
             || !(1..=4096).contains(&resolution.intervals)
         {
             return Err(Error::Invalid(
-                "unsteady sphere needs rest, quiescent fluid and finite positive ordered spectral cutoffs with 1..=4096 intervals",
+                "unsteady sphere needs initial comoving translation, zero spin and finite positive ordered spectral cutoffs with 1..=4096 intervals",
             ));
         }
         positive(0.5 * self.fluid_mass_kg)?;
@@ -175,6 +198,7 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
             branches: branches.into(),
             fluid_velocities: vec![Vec3::ZERO; resolution.intervals],
             rotation: None,
+            ambient_velocity_world: self.ambient_velocity_world,
             state,
             time_s: 0.0,
         })
@@ -194,8 +218,14 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
     pub fn branches(&self) -> &[BassetBranch] {
         &self.branches
     }
+    /// Spectral branch velocities RELATIVE to the uniform far field, expressed
+    /// in world axes. These are not sampled physical fluid-field velocities.
     pub fn fluid_velocities_world_m_s(&self) -> &[Vec3] {
         &self.fluid_velocities
+    }
+    /// Accepted uniform far-field velocity, retained across step and restart.
+    pub const fn ambient_velocity_world_m_s(&self) -> Vec3 {
+        self.ambient_velocity_world
     }
     pub fn added_mass_kg(&self) -> f64 {
         0.5 * self.sphere.fluid_mass_kg
@@ -258,18 +288,52 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
     /// from both stored fluid energy and dissipated heat. Momentum admission
     /// includes the applied impulse. The nonrotating translational Basset law
     /// refuses every nonzero applied torque; it does not infer spin drag.
+    /// This holds the currently accepted ambient velocity, including after a
+    /// previous [`Self::step_with_flow_acceleration`] call.
     pub fn step_with_wrench(
         &self,
         applied: Wrench,
         controls: UnsteadyStepControls,
         cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, UnsteadySphereStep), Error> {
-        self.advance_with_wrench(applied, controls, None, cancelled)
+        self.advance_with_wrench(applied, Vec3::ZERO, controls, None, cancelled)
+    }
+
+    /// Advance in a spatially uniform flow with held world acceleration [m/s²].
+    ///
+    /// The accepted ambient velocity advances by `a_ambient * dt`; no unrelated
+    /// endpoint can reset it or discard history. Sample a smooth acceleration
+    /// and applied wrench at the midpoint and refine dt. Changing acceleration
+    /// at a boundary is allowed; an ambient velocity jump/impulse is not.
+    ///
+    /// The original source mass gives the pressure-gradient force `m_fluid*a`.
+    /// Added mass and Basset history respond to slip acceleration and slip,
+    /// respectively. For a neutrally buoyant, comoving unforced sphere the
+    /// density-contrast driving term vanishes, so it follows the ambient flow.
+    /// Background source work is explicit, with no artificial dissipation.
+    /// Spatial gradients, vorticity, Faxen corrections and convection remain
+    /// outside this uniform-flow model. Refusal changes neither accepted body,
+    /// ambient velocity nor memory.
+    pub fn step_with_flow_acceleration(
+        &self,
+        applied: Wrench,
+        ambient_acceleration_world_m_s2: Vec3,
+        controls: UnsteadyStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, UnsteadySphereStep), Error> {
+        self.advance_with_wrench(
+            applied,
+            ambient_acceleration_world_m_s2,
+            controls,
+            None,
+            cancelled,
+        )
     }
 
     fn advance_with_wrench(
         &self,
         applied: Wrench,
+        ambient_acceleration: Vec3,
         controls: UnsteadyStepControls,
         rotational_controls: Option<rotation::RotatingStepControls>,
         mut cancelled: impl FnMut() -> bool,
@@ -277,6 +341,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
         poll(&mut cancelled)?;
         vector(applied.force_world)?;
         vector(applied.torque_body)?;
+        vector(ambient_acceleration)?;
         if self.rotation.is_none() && applied.torque_body != Vec3::ZERO {
             return Err(Error::Invalid(
                 "unsteady translational sphere drag requires zero applied torque",
@@ -296,6 +361,30 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
         }
         let p = self.body.properties();
         let v0 = self.state.center_of_mass_velocity_world(p)?;
+        let ambient_change = vector(ambient_acceleration.scale(dt))?;
+        let ambient_after = vector(self.ambient_velocity_world.add(ambient_change))?;
+        for (acceleration, before, after) in [
+            (
+                ambient_acceleration.x,
+                self.ambient_velocity_world.x,
+                ambient_after.x,
+            ),
+            (
+                ambient_acceleration.y,
+                self.ambient_velocity_world.y,
+                ambient_after.y,
+            ),
+            (
+                ambient_acceleration.z,
+                self.ambient_velocity_world.z,
+                ambient_after.z,
+            ),
+        ] {
+            if acceleration != 0.0 && before == after {
+                return Err(Error::Invalid("unresolved ambient velocity increment"));
+            }
+        }
+        let slip0 = vector(v0.sub(self.ambient_velocity_world))?;
         let half_dt = positive(0.5 * dt)?;
         let added_mass = self.added_mass_kg();
         let moving_mass = positive(p.mass() + added_mass)?;
@@ -315,18 +404,24 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
             let denominator = positive(1.0 + half_dt * branch.rate_per_s)?;
             let c = positive(branch.resistance_kg_s / denominator)?;
             memory_resistance = finite(memory_resistance + c)?;
-            history_at_start = vector(history_at_start.sub(v0.sub(u0).scale(c)))?;
+            history_at_start = vector(history_at_start.sub(slip0.sub(u0).scale(c)))?;
         }
         let resistance = finite(self.sphere.resistance_kg_s + memory_resistance)?;
         let force = vector(
-            effective_weight
+            self.sphere
+                .gravity
+                .acceleration_world()
+                .sub(ambient_acceleration)
+                .scale(p.mass() - self.sphere.fluid_mass_kg)
                 .add(applied.force_world)
-                .sub(v0.scale(self.sphere.resistance_kg_s))
+                .sub(slip0.scale(self.sphere.resistance_kg_s))
                 .add(history_at_start),
         )?;
+        // Solve the slip acceleration directly. Adding two separately large
+        // pressure/added-mass forces first would lose the exact neutral limit.
         let acceleration =
             vector(force.scale(1.0 / positive(moving_mass + half_dt * resistance)?))?;
-        let predicted_midpoint = vector(v0.add(acceleration.scale(half_dt)))?;
+        let predicted_midpoint = vector(slip0.add(acceleration.scale(half_dt)))?;
         let history_force =
             vector(history_at_start.sub(acceleration.scale(half_dt * memory_resistance)))?;
         let added_force = vector(acceleration.scale(-added_mass))?;
@@ -336,13 +431,14 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 .acceleration_world()
                 .scale(-self.sphere.fluid_mass_kg),
         )?;
+        let ambient_pressure = vector(ambient_acceleration.scale(self.sphere.fluid_mass_kg))?;
+        let disturbance = vector(
+            history_force
+                .add(added_force)
+                .sub(predicted_midpoint.scale(self.sphere.resistance_kg_s)),
+        )?;
         let mut wrench = Wrench {
-            force_world: vector(
-                buoyancy
-                    .add(history_force)
-                    .add(added_force)
-                    .sub(predicted_midpoint.scale(self.sphere.resistance_kg_s)),
-            )?,
+            force_world: vector(buoyancy.add(ambient_pressure).add(disturbance))?,
             torque_body: Vec3::ZERO,
         };
         let total_wrench = Wrench {
@@ -371,23 +467,31 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 None,
             ),
         };
-        self.sphere
-            .load_frame(self.body.frame(), dynamics.state_after, &mut cancelled)?;
+        self.sphere.load_frame_in_flow(
+            self.body.frame(),
+            dynamics.state_after,
+            ambient_after,
+            &mut cancelled,
+        )?;
         let v1 = dynamics.state_after.center_of_mass_velocity_world(p)?;
         let vm = vector(v0.add(v1).scale(0.5))?;
+        let slip1 = vector(v1.sub(ambient_after))?;
+        let slip_midpoint = vector(slip0.add(slip1).scale(0.5))?;
+        let ambient_midpoint = vector(self.ambient_velocity_world.add(ambient_after).scale(0.5))?;
         let mut fluid_velocities = Vec::with_capacity(self.branches.len());
         let mut memory_energy = 0.0;
-        let mut heat = finite(dt * self.sphere.resistance_kg_s * vm.norm_squared())?;
-        let mut fluid_impulse = vector(v1.sub(v0).scale(added_mass))?;
+        let mut heat = finite(dt * self.sphere.resistance_kg_s * slip_midpoint.norm_squared())?;
+        let mut fluid_impulse = vector(slip1.sub(slip0).scale(added_mass))?;
         for (branch, &u0) in self.branches.iter().zip(&self.fluid_velocities) {
             poll(&mut cancelled)?;
             let alpha = finite(half_dt * branch.rate_per_s)?;
-            let du = vector(vm.sub(u0).scale(2.0 * (alpha / (1.0 + alpha))))?;
+            let du = vector(slip_midpoint.sub(u0).scale(2.0 * (alpha / (1.0 + alpha))))?;
             let u1 = vector(u0.add(du))?;
             let um = vector(u0.add(u1).scale(0.5))?;
             memory_energy = finite(memory_energy + branch.mass_kg * du.dot(um))?;
             fluid_impulse = vector(fluid_impulse.add(du.scale(branch.mass_kg)))?;
-            heat = finite(heat + dt * branch.resistance_kg_s * vm.sub(um).norm_squared())?;
+            heat =
+                finite(heat + dt * branch.resistance_kg_s * slip_midpoint.sub(um).norm_squared())?;
             fluid_velocities.push(u1);
         }
         let (rotation, rotation_receipt) =
@@ -406,15 +510,18 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 }
                 _ => (None, None),
             };
-        let added_energy = finite(added_mass * v1.sub(v0).dot(vm))?;
+        let added_energy = finite(added_mass * slip1.sub(slip0).dot(slip_midpoint))?;
         let dx = dynamics
             .state_after
             .pose()
             .position_world()
             .sub(self.state.pose().position_world());
         let mut stored = finite(
-            dynamics.diagnostics_after.translational_kinetic_energy
-                - dynamics.diagnostics_before.translational_kinetic_energy
+            dynamics
+                .state_after
+                .linear_momentum_world()
+                .sub(self.state.linear_momentum_world())
+                .dot(vm)
                 - effective_weight.dot(dx)
                 + added_energy
                 + memory_energy,
@@ -435,14 +542,22 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 "unsteady drive work vanished in conversion to energy",
             ));
         }
-        let energy_defect = finite(stored + heat - applied_work)?;
+        let background_power =
+            finite(ambient_pressure.dot(vm) + disturbance.dot(ambient_midpoint))?;
+        let background_work = finite(dt * background_power)?;
+        if background_power != 0.0 && background_work == 0.0 {
+            return Err(Error::Invalid(
+                "unsteady background work vanished in conversion to energy",
+            ));
+        }
+        let energy_defect = finite(stored + heat - applied_work - background_work)?;
         if energy_defect.abs() > controls.maximum_energy_defect_j {
             return Err(Error::EnergyDefect {
                 defect_j: energy_defect,
                 maximum_j: controls.maximum_energy_defect_j,
             });
         }
-        let far_field = vector(vm.scale(dt * self.sphere.resistance_kg_s))?;
+        let far_field = vector(slip_midpoint.scale(dt * self.sphere.resistance_kg_s))?;
         let momentum_residual = vector(
             dynamics
                 .state_after
@@ -450,7 +565,14 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 .sub(self.state.linear_momentum_world())
                 .add(fluid_impulse)
                 .add(far_field)
-                .sub(vector(effective_weight.add(applied.force_world))?.scale(dt)),
+                .sub(
+                    vector(
+                        effective_weight
+                            .add(applied.force_world)
+                            .add(ambient_pressure),
+                    )?
+                    .scale(dt),
+                ),
         )?;
         if norm(momentum_residual)? > controls.maximum_momentum_defect_ns {
             return Err(Error::MomentumDefect {
@@ -466,6 +588,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
             branches: Arc::clone(&self.branches),
             fluid_velocities,
             rotation,
+            ambient_velocity_world: ambient_after,
             state: dynamics.state_after,
             time_s,
         };
@@ -476,8 +599,10 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 fluid_wrench: wrench,
                 history_force_world_n: history_force,
                 added_mass_force_world_n: added_force,
+                ambient_pressure_force_world_n: ambient_pressure,
                 viscous_heat_j: heat,
                 applied_work_j: applied_work,
+                background_work_j: background_work,
                 added_mass_energy_change_j: added_energy,
                 memory_energy_change_j: memory_energy,
                 spectral_fluid_momentum_change_ns: fluid_impulse,

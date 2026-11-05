@@ -63,7 +63,7 @@ pub(super) struct RotationHistory {
     velocities: Vec<Vec3>,
 }
 
-/// Rest-started translation and rotation with separate fluid-memory channels.
+/// Initially comoving translation and rest-started spin with separate memories.
 /// The original material rigid body remains the sole owner of pose/momentum.
 /// The continuum/nonlinear-convection limits of the parent sphere still apply.
 pub struct RotatingSphereMotion<'s, 'f, 'b, F: FluidTransport + ?Sized> {
@@ -79,9 +79,10 @@ impl<F: FluidTransport + ?Sized> Clone for RotatingSphereMotion<'_, '_, '_, F> {
 }
 
 impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
-    /// Admit a quiescent fluid and stationary sphere, including spin memory.
+    /// Admit an initially comoving sphere and uniform fluid, with zero spin.
     ///
-    /// Both momenta initially vanish. No prehistory, ambient vorticity, wall,
+    /// Translational slip and angular momentum initially vanish.
+    /// No prehistory, ambient vorticity, wall,
     /// finite-Reynolds lift/Magnus force, or nonspherical coupling is inferred.
     /// Spectral cutoffs/count and dt need refinement over the observation window.
     pub fn unsteady_rotating_motion<'s, 'b>(
@@ -111,8 +112,12 @@ impl<F: FluidTransport + ?Sized> RotatingSphereMotion<'_, '_, '_, F> {
     pub fn translational_branches(&self) -> &[BassetBranch] {
         &self.inner.branches
     }
+    /// Spectral velocities relative to the accepted uniform flow, in world axes.
     pub fn fluid_velocities_world_m_s(&self) -> &[Vec3] {
         &self.inner.fluid_velocities
+    }
+    pub const fn ambient_velocity_world_m_s(&self) -> Vec3 {
+        self.inner.ambient_velocity_world
     }
     pub fn rotational_branches(&self) -> &[RotationalMemoryBranch] {
         self.inner
@@ -184,6 +189,29 @@ impl<F: FluidTransport + ?Sized> RotatingSphereMotion<'_, '_, '_, F> {
     ) -> Result<(Self, UnsteadySphereStep), Error> {
         let (inner, receipt) = self.inner.advance_with_wrench(
             applied,
+            Vec3::ZERO,
+            controls.mechanical,
+            Some(controls),
+            cancelled,
+        )?;
+        Ok((Self { inner }, receipt))
+    }
+
+    /// The same coupled body/spin owner in a uniformly accelerating flow.
+    /// Translational pressure, added mass and relative memory use
+    /// [`UnsteadySphereMotion::step_with_flow_acceleration`]'s convention.
+    /// Uniform translation introduces no ambient vorticity or extra torque;
+    /// rotary memory remains in the original world axes on the same clock.
+    pub fn step_with_flow_acceleration(
+        &self,
+        applied: Wrench,
+        ambient_acceleration_world_m_s2: Vec3,
+        controls: RotatingStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, UnsteadySphereStep), Error> {
+        let (inner, receipt) = self.inner.advance_with_wrench(
+            applied,
+            ambient_acceleration_world_m_s2,
             controls.mechanical,
             Some(controls),
             cancelled,
