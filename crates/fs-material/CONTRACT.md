@@ -14641,6 +14641,34 @@ independently prescribes shear stress, checks actual relaxation/rate and
 momentum/thermal populations, common `a=2` SI/lattice parity, and transactional
 calibration refusal.
 
+## Physical viscous stress and shear traction
+
+`fluid_transport::viscous` evaluates the three-dimensional isotropic law
+`tau = 2 mu dev(sym(grad u)) + zeta div(u) I` in physical SI units and native
+tensor-Voigt xy/yz/zx order. `NewtonianViscosity::from_transport` consumes the
+original gas/liquid snapshot; independent nonnegative bulk viscosity is always
+explicit. Spin produces no stress and isotropic expansion produces no shear.
+Thermodynamic pressure stays with its original owner.
+
+The same response supplies oriented normal/tangential traction, nonnegative
+physical `tau:D` heating, and an allocation-free exact tangent action. The
+optional 6-by-6 tangent uses tensor double-contraction weights. Tangential
+traction is evaluated from deviatoric stress before adding bulk stress.
+`ThermalCarreauYasuda::viscous_response` evaluates the original bounded
+temperature/shear law at `sqrt(2 dev(D):dev(D))`, retains its original response,
+and returns full strain-rate and temperature derivatives. The positive original
+differential stress avoids subtractive cancellation in the thinning tangent;
+the tensor tangent remains finite at rest even when the scalar viscosity slope
+is singular. Invalid states or unrepresentable outputs return no response.
+
+This is a local constitutive evaluation, not a velocity-gradient reconstruction,
+momentum advance or heat insertion. Shear calibration is not an extensional or
+compressible-flow validation; independent bulk viscosity has no inferred
+temperature law. No elastic memory, yield stress, turbulence or numerical
+loss is added. G0/G1/G3 regressions cover analytic Couette/extension/dilation,
+all shear orientations, rotation/spin invariance, tensor and thermal derivative
+finite differences, work conjugacy, bulk/shear separation and source support.
+
 ## Independent heat and work in the driven-mixture first law
 
 `DrivenMixtureEquilibriumParcel::advance` checks the independently supplied
