@@ -274,7 +274,7 @@ struct Endpoint {
     reservoir_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     ambient_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     heat_source_states: BTreeMap<CellId, ImplicitHeatSourceState>,
-    reconstruction_tangent: Vec<(usize, usize, f64)>,
+    transport_tangent: Vec<(usize, usize, f64)>,
 }
 
 impl<'a> ImplicitConductionChain<'a> {
@@ -695,7 +695,7 @@ impl<'a> ImplicitConductionChain<'a> {
             reservoir_exchange_states,
             ambient_exchange_states,
             heat_source_states,
-            reconstruction_tangent: Vec::new(),
+            transport_tangent: Vec::new(),
         })
     }
 
@@ -751,7 +751,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 let (transport, tangent) = advection.endpoint(
                     thermal, &self.index, &mut || (checkpoint.borrow_mut())(),
                 )?;
-                endpoint.reconstruction_tangent = tangent;
+                endpoint.transport_tangent = tangent;
                 for (id, watts) in transport.heat.bulk.sources_w {
                     let value = sources_w.entry(id).or_default();
                     *value = finite(*value + watts)?;
@@ -808,7 +808,7 @@ impl<'a> ImplicitConductionChain<'a> {
                             .checked_mul(2)
                             .and_then(|n| n.checked_add(self.advection.as_ref()
                                 .map_or(0, |flow| flow.tangent.len())))
-                            .and_then(|n| n.checked_add(endpoint.reconstruction_tangent.len()))
+                            .and_then(|n| n.checked_add(endpoint.transport_tangent.len()))
                             .ok_or(TridiagonalError::Capacity)?,
                     )
                     .map_err(|_| TridiagonalError::Capacity)?;
@@ -918,7 +918,7 @@ impl<'a> ImplicitConductionChain<'a> {
         }
         if let Some(advection) = &self.advection {
             for &(row, col, derivative) in advection.tangent.iter()
-                .chain(&endpoint.reconstruction_tangent)
+                .chain(&endpoint.transport_tangent)
             {
                 checkpoint()?;
                 add_entry(workspace, row, col, -dt * derivative)?;

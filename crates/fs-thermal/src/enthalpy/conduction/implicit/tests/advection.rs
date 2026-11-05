@@ -2,6 +2,9 @@ use super::*;
 use crate::enthalpy::advection::reconstruction::{AxialCellStencil, LimitedEnthalpyReconstruction};
 use crate::enthalpy::advection::{Advected, MassBoundary, MassFlow};
 
+#[path = "advection/liquid.rs"]
+mod liquid;
+
 fn circulating<O>(inner: O, rate: f64) -> Advected<O> {
     Advected::new(
         inner,
@@ -29,6 +32,9 @@ struct ShiftedLaw {
     datum: f64,
 }
 impl ThermalLaw for ShiftedLaw {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        Some([7; 32])
+    }
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
         self.base.temperature_k(h - self.datum)
     }

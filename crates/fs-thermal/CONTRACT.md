@@ -1965,10 +1965,23 @@ no explicit flow CFL restriction; the same endpoints also reach their existing
 adaptive h/T/phase controllers. Other observed sources retain their own timestep
 restrictions.
 
-This binding is an immutable snapshot of ordinary bulk enthalpy transport.
-Liquid carriers, stationary species, selective streams and flow-entropy
-histories refuse until their own endpoint closures exist. Thermal entropy marks
-these transfers unclassified. No phase mobility, moving inventory, pressure
+This binding is an immutable snapshot of ordinary bulk enthalpy transport or
+the original `LiquidEnthalpyCarrier` on a stationary pure-substance skeleton.
+Liquid transport retains mixture enthalpy for storage and carries
+`h_liquid=max(h,h_liquidus)` on its admitted mobile domain. The same compiled
+directed coefficients are multiplied by each CURRENT trial's analytic carrier
+slope: zero on the latent plateau and one on the fully liquid branch. The
+liquid-side generalized derivative is selected at the liquidus. These dynamic
+columns include the component-reference derivative and original cell mass;
+they are never added on top of a bulk tangent that would advect solid energy.
+Initial fully solid flow refuses. A Newton trial leaving liquid support returns
+a material-domain exit for the existing line search; no accepted trajectory
+crosses that support boundary. Source identity, fixed density, pure-liquid
+inlet and conservative endpoint admission remain owned by the original carrier.
+
+Stationary species, selective streams and flow-entropy histories still refuse
+until their own endpoint closures exist. Thermal entropy marks these transfers
+unclassified. No phase mobility, moving inventory, pressure
 work, momentum feedback or entropy-generation model is inferred. The selected
 method's time error and upwind spatial diffusion still require independent
 refinement.

@@ -173,6 +173,26 @@ impl LiquidEnthalpyCarrier {
         }
         Ok(h.max(self.plateau_enthalpy_bounds_j_kg[1]))
     }
+
+    /// Analytic generalized derivative of the SAME max(h, h_liquidus) law.
+    /// The liquid-side value at the kink is deterministic; the native nonlinear
+    /// residual and line search, not the selected derivative, accept a step.
+    pub(super) fn implicit_carried_h_slope(
+        &self,
+        cell: &DepositedCell,
+    ) -> Result<f64, DepositionError> {
+        // A trial may leave the moving liquid's domain before line search has
+        // found an admissible fraction. This does not admit fully solid flow.
+        if cell.specific_h_j_kg <= self.plateau_enthalpy_bounds_j_kg[0] {
+            return Err(DepositionError::MaterialDomain);
+        }
+        self.carried_h(cell)?;
+        Ok(if cell.specific_h_j_kg < self.plateau_enthalpy_bounds_j_kg[1] {
+            0.0
+        } else {
+            1.0
+        })
+    }
 }
 
 impl<O> Advected<O> {
@@ -196,6 +216,9 @@ impl<O> Advected<O> {
     /// entropy audit uses liquid-side entropy for transport and the original
     /// mixture entropy for storage. Species mixing and nonempty bulk-h
     /// reconstruction remain unsupported.
+    /// Native implicit conduction can bind this same carrier: its exact
+    /// phase-dependent endpoint tangent removes the explicit flow CFL while
+    /// preserving the original caloric, inventory and liquid-support checks.
     pub fn with_liquid_carrier(mut self, carrier: LiquidEnthalpyCarrier) -> Result<Self, DepositionError> {
         if self.stationary_species.is_some() || !self.selective_outlets.is_empty() {
             return Err(invalid("liquid-carrier transport excludes species mixing and selective streams"));

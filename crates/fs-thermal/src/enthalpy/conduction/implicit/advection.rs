@@ -8,6 +8,10 @@ pub(super) struct ImplicitAdvection {
     // d(heat into row)/d(cell energy in column), in 1/s. Fixed mass and
     // prescribed flow make this constant even for nonlinear/latent T(h).
     pub(super) tangent: Vec<(usize, usize, f64)>,
+    // The same compiled connectivity in carried-enthalpy coordinates, divided
+    // by original cell masses. Liquid mobility changes its column slopes at
+    // each endpoint, so these entries must never enter the static Jacobian.
+    liquid_tangent: Vec<(usize, CellId, f64)>,
     reconstruction: Option<LimitedEnthalpyReconstruction>,
 }
 
@@ -20,9 +24,20 @@ impl ImplicitAdvection {
     ) -> Result<(TransportStepCoefficients<()>, Vec<(usize, usize, f64)>), ImplicitConductionError>
     {
         let Some(reconstruction) = &self.reconstruction else {
+            let mut tangent = Vec::new();
+            tangent
+                .try_reserve_exact(self.liquid_tangent.len())
+                .map_err(|_| TridiagonalError::Capacity)?;
+            for &(row, cell, coefficient) in &self.liquid_tangent {
+                checkpoint()?;
+                let slope = self.flow.implicit_carried_enthalpy_slope(&thermal.cells[&cell])?;
+                if slope != 0.0 {
+                    tangent.push((row, index[&cell], finite(coefficient * slope)?));
+                }
+            }
             return Ok((
                 self.flow.endpoint_transport(thermal, checkpoint)?,
-                Vec::new(),
+                tangent,
             ));
         };
         let (transport, rates) =
@@ -45,7 +60,7 @@ impl ImplicitAdvection {
 }
 
 impl ImplicitConductionChain<'_> {
-    /// Solve prescribed bulk upwind enthalpy and nonlinear conduction together.
+    /// Solve prescribed upwind enthalpy and nonlinear conduction together.
     ///
     /// This binds an immutable snapshot of the original `Advected` graph. Its
     /// endpoint query retains native continuity, material, caloric-datum and
@@ -59,8 +74,12 @@ impl ImplicitConductionChain<'_> {
     /// retained even for admitted continuity roundoff. No symmetric diffusion
     /// surrogate or numerical enthalpy differences are used.
     ///
-    /// Only ordinary fixed-mass bulk enthalpy is admitted. Liquid carriers,
-    /// stationary species, selective outlets and an attached flow entropy
+    /// Ordinary fixed-mass bulk enthalpy and the original stationary-skeleton
+    /// liquid carrier are admitted. For liquid flow, the carrier tangent is zero
+    /// on its latent plateau and one on its fully liquid branch, reevaluated at
+    /// every trial. Thus liquid circulation does not advect stationary-solid
+    /// latent energy. Fully solid flow still refuses; no mobility is inferred.
+    /// Stationary species, selective outlets and an attached flow entropy
     /// history require separate closures and refuse. The native thermal entropy
     /// account marks mass-carried transfers unclassified; it does not infer
     /// entropy generation or pressure work. The supplied observer's history is
@@ -104,9 +123,18 @@ impl ImplicitConductionChain<'_> {
             }
             tangent.push((row, col, derivative));
         }
+        let liquid_tangent = if flow.liquid_carrier().is_some() {
+            std::mem::take(&mut tangent)
+                .into_iter()
+                .map(|(row, col, coefficient)| (row, self.ids[col], coefficient))
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.advection = Some(ImplicitAdvection {
             flow: flow.clone(),
             tangent,
+            liquid_tangent,
             reconstruction: None,
         });
         checkpoint()?;

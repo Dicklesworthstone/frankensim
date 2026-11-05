@@ -515,6 +515,19 @@ fn finite_ambient_film_and_material_derivatives_close_nonlinear_cell_energy() {
 struct AmbientOnly;
 impl DepositionObserver for AmbientOnly {
     type Error = DepositionError;
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn step(
+        &mut self,
+        _: f64,
+        _: f64,
+        _: &BTreeMap<CellId, f64>,
+        _: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        checkpoint()
+    }
     fn ambient_conductances(
         &mut self,
         _: &DepositionSimulation<'_>,

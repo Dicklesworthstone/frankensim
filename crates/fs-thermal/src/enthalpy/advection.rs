@@ -338,21 +338,21 @@ impl<O> Advected<O> {
 
 impl Advected<()> {
     /// Analytic derivative of the original endpoint heat rates with respect
-    /// to each cell's specific enthalpy, in kg/s. Only bulk upwind enthalpy has
-    /// this constant tangent. Other carriers and entropy/species histories
-    /// must retain their own endpoint closure rather than borrow this one.
+    /// to each cell's CARRIED specific enthalpy, in kg/s. Ordinary bulk flow
+    /// carries the stored h itself. A liquid carrier must additionally apply
+    /// its original phase-dependent dh_liquid/dh at each proposed endpoint.
+    /// Entropy/species histories require their own endpoint closure.
     pub(super) fn implicit_enthalpy_tangent(
         &self,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<(CellId, CellId, f64)>, DepositionError> {
         checkpoint()?;
-        if self.liquid_carrier.is_some()
-            || self.stationary_species.is_some()
+        if self.stationary_species.is_some()
             || !self.selective_outlets.is_empty()
             || self.entropy.is_some()
         {
             return Err(invalid(
-                "implicit bulk enthalpy excludes liquid carriers, species, selective streams and flow entropy histories",
+                "implicit enthalpy excludes species, selective streams and flow entropy histories",
             ));
         }
         let mut entries = BTreeMap::<(CellId, CellId), (f64, f64)>::new();
@@ -399,6 +399,19 @@ impl Advected<()> {
             }
         }
         Ok(tangent)
+    }
+
+    /// Original carrier derivative at one trial cell. A trial outside liquid
+    /// support is a material-domain exit so the implicit line search can shorten
+    /// its proposal; initial binding still uses the native flow admission.
+    pub(super) fn implicit_carried_enthalpy_slope(
+        &self,
+        cell: &super::DepositedCell,
+    ) -> Result<f64, DepositionError> {
+        match &self.liquid_carrier {
+            Some(carrier) => carrier.implicit_carried_h_slope(cell),
+            None => Ok(1.0),
+        }
     }
 }
 
