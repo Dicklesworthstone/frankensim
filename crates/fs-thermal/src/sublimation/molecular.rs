@@ -12,11 +12,13 @@
 //! <https://doi.org/10.1007/978-3-030-63963-1_27>. Energy-dependent sticking or
 //! non-Maxwellian distributions require a different boundary law.
 //!
-//! Assumes a local free-molecular gas, equal incoming/outgoing accommodation,
-//! and specular reflection of nonsticking molecules. No gas-film resistance,
-//! diffuse thermal accommodation, Knudsen-layer drift, or transport from a
-//! remote pressure is inferred. Gross fluxes are nonnegative; net flux is
-//! positive for sublimation and negative for deposition.
+//! Assumes a local Maxwellian gas, equal incoming/outgoing accommodation,
+//! and specular reflection of nonsticking molecules. The kinetics-aware entry
+//! point may add the SAME optional series gas-film resistance used by
+//! `surface_flux`; it is a prescribed transport closure, not a resolved film.
+//! Diffuse thermal accommodation, Knudsen-layer drift and remote-film energy
+//! storage are not inferred. Gross fluxes are nonnegative; net flux is positive
+//! for sublimation and negative for deposition.
 
 use super::{
     SublimationError, SublimationLaw, SurfaceKinetics, VaporReservoir, coefficients, finite,
@@ -54,18 +56,35 @@ pub fn molecular_mass_flux<L: SublimationLaw + ?Sized>(
     accommodation_coefficient: f64,
     reservoir: VaporReservoir,
 ) -> Result<MolecularMassFlux, SublimationError> {
-    let p = properties(law, surface_temperature_k)?;
-    let vapor_pressure = reservoir.partial_pressure_pa(p.molar_mass_kg_mol)?;
-    let gas_temperature = reservoir.temperature_k();
-    let (outgoing_coefficient, incoming_coefficient) = coefficients(
-        p,
+    molecular_mass_flux_with_kinetics(
+        law,
         surface_temperature_k,
-        gas_temperature,
         SurfaceKinetics {
             accommodation_coefficient,
             mass_transfer_coefficient_m_s: None,
         },
-    )?;
+        reservoir,
+    )
+}
+
+/// Opposing molecular streams with the complete admitted surface kinetics.
+///
+/// A finite `mass_transfer_coefficient_m_s` is the same pressure-conductance
+/// series resistance used by `surface_flux`. It scales BOTH gross streams,
+/// preserving detailed balance and the temperatures at which crossing-molecule
+/// energies must be evaluated. `Some(0.0)` seals the film exactly; `None`
+/// retains the free-molecular Hertz-Knudsen limit.
+pub fn molecular_mass_flux_with_kinetics<L: SublimationLaw + ?Sized>(
+    law: &L,
+    surface_temperature_k: f64,
+    kinetics: SurfaceKinetics,
+    reservoir: VaporReservoir,
+) -> Result<MolecularMassFlux, SublimationError> {
+    let p = properties(law, surface_temperature_k)?;
+    let vapor_pressure = reservoir.partial_pressure_pa(p.molar_mass_kg_mol)?;
+    let gas_temperature = reservoir.temperature_k();
+    let (outgoing_coefficient, incoming_coefficient) =
+        coefficients(p, surface_temperature_k, gas_temperature, kinetics)?;
     let outgoing = finite(outgoing_coefficient * p.saturation_pressure_pa)?;
     let incoming = finite(incoming_coefficient * vapor_pressure)?;
     let net = if surface_temperature_k == gas_temperature {
