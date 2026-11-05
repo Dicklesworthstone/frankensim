@@ -32,6 +32,7 @@ struct MemoryCycle {
     tangent: Tangent,
     island_calls: Cell<usize>,
     tangent_calls: Rc<Cell<usize>>,
+    tangent_parameter: Cell<f64>,
 }
 
 fn lambda(radius: f64) -> f64 {
@@ -72,6 +73,7 @@ impl MemoryCycle {
             tangent,
             island_calls: Cell::new(0),
             tangent_calls: Rc::new(Cell::new(0)),
+            tangent_parameter: Cell::new(f64::NAN),
         }
     }
 
@@ -118,6 +120,7 @@ impl MemoryCycle {
 
     fn exact_tangent(&self, _: f64, physical: &[f64], out: &mut [f64]) -> bool {
         self.tangent_calls.set(self.tangent_calls.get() + 1);
+        self.tangent_parameter.set(self.parameter);
         match self.tangent {
             Tangent::Refused => return false,
             Tangent::Conditional if self.parameter / self.parameter_unit >= 0.1 => return false,
@@ -280,7 +283,7 @@ fn exact_tangents_preserve_coupled_memory_cycles_and_units_with_fewer_source_cal
 }
 
 #[test]
-fn declared_refused_or_incomplete_tangents_do_not_fall_back_and_restore_the_parameter() {
+fn declared_refused_or_incomplete_tangents_restore_the_last_accepted_seed_without_fallback() {
     for tangent in [Tangent::Refused, Tangent::Incomplete] {
         let mut problem = MemoryCycle::new(tangent, true);
         let seeds = [problem.seed(0.65, 0.0), problem.seed(0.70, 0.0)];
@@ -302,7 +305,10 @@ fn declared_refused_or_incomplete_tangents_do_not_fall_back_and_restore_the_para
             ))
         ));
         assert_eq!(problem.tangent_calls.get(), 1);
-        assert_eq!(problem.parameter, unit * lambda(0.70));
+        // The physical second seed has a different relaxation phase lag. Its
+        // integral phase alignment needs a correction before it is accepted.
+        assert!((problem.tangent_parameter.get() / unit - lambda(0.70)).abs() < 1e-14);
+        assert_eq!(problem.parameter, unit * lambda(0.65));
     }
 }
 
@@ -332,7 +338,7 @@ fn cached_workspace_rechecks_the_current_parameter_before_using_an_exact_tangent
 }
 
 #[test]
-fn cancellation_after_the_analytic_pass_publishes_no_branch_and_restores_the_parameter() {
+fn cancellation_after_the_analytic_pass_restores_the_last_accepted_seed_without_a_branch() {
     let mut problem = MemoryCycle::new(Tangent::Exact, false);
     let calls = Rc::clone(&problem.tangent_calls);
     let seeds = [problem.seed(0.65, 0.0), problem.seed(0.70, 0.0)];
@@ -348,7 +354,8 @@ fn cancellation_after_the_analytic_pass_publishes_no_branch_and_restores_the_par
         Err(AutonomousContinuationError::Cancelled)
     ));
     assert!(calls.get() > 0);
-    assert_eq!(problem.parameter, lambda(0.70));
+    assert!((problem.tangent_parameter.get() - lambda(0.70)).abs() < 1e-14);
+    assert_eq!(problem.parameter, lambda(0.65));
 }
 
 #[test]
@@ -374,7 +381,7 @@ fn analytic_workspace_is_admitted_before_tangent_callbacks_and_residual_limits_s
             ));
             assert!(problem.island_calls.get() > 0);
             assert_eq!(problem.tangent_calls.get(), 0);
-            assert_eq!(problem.parameter, lambda(0.70));
+            assert_eq!(problem.parameter, lambda(0.65));
         } else {
             assert_eq!(result.unwrap().points.len(), 3);
         }
@@ -392,5 +399,7 @@ fn analytic_workspace_is_admitted_before_tangent_callbacks_and_residual_limits_s
         ),
         Err(AutonomousContinuationError::EvaluationLimit { evaluations: 5 })
     ));
-    assert_eq!(problem.parameter, lambda(0.70));
+    // The cap interrupts the second seed's phase correction after the first
+    // seed's two independent residual evaluations accepted that first point.
+    assert_eq!(problem.parameter, lambda(0.65));
 }

@@ -55,7 +55,8 @@ pub struct SidebandControls {
     /// Absolute Frobenius norm of the two normalized tangent Fourier arrays'
     /// difference. This does not certify absence of aliases on both grids.
     pub maximum_tangent_sampling_defect: f64,
-    /// Componentwise backward-error ceiling for the retained complex solve.
+    /// Componentwise backward-error ceiling for the retained complex solve,
+    /// after at most four original-equation residual corrections if needed.
     pub maximum_relative_residual: f64,
     /// Norm of normalized omitted equation coefficients for N<|k|<=2*N+2.
     /// Outside input coefficients are exactly zero by the input's definition.
@@ -315,6 +316,17 @@ impl<'a, P: OrbitProblem> PreparedPeriodicLinearization<'a, P> {
         // One explicitly selected worker keeps this numerical payload bound
         // independent of an outer thread-local LU scheduling declaration.
         let factor = lu_complex_blocked_with_cancel(&operator, n, 1, &mut cancelled)?;
+        let mut single_entry_rows = Vec::new();
+        for (row, entries) in operator.chunks_exact(n).enumerate() {
+            poll(&mut cancelled)?;
+            let mut nonzero = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, z)| z.re != 0.0 || z.im != 0.0);
+            if let (Some((column, _)), None) = (nonzero.next(), nonzero.next()) {
+                single_entry_rows.push((row, column));
+            }
+        }
         poll(&mut cancelled)?;
         Ok(PreparedSidebandResponse {
             dimension: d,
@@ -325,6 +337,7 @@ impl<'a, P: OrbitProblem> PreparedPeriodicLinearization<'a, P> {
             tangent: &self.tangent,
             operator,
             factor,
+            single_entry_rows,
         })
     }
 }
@@ -339,6 +352,7 @@ pub struct PreparedSidebandResponse<'a> {
     tangent: &'a [C64],
     operator: Vec<C64>,
     factor: LuComplex,
+    single_entry_rows: Vec<(usize, usize)>,
 }
 
 /// Peak complex perturbations in sideband-major, original-state order.
@@ -354,6 +368,18 @@ pub struct SidebandResponse {
 }
 
 impl PreparedSidebandResponse<'_> {
+    fn enforce_homogeneous_rows(&self, rhs: &[C64], solution: &mut [C64]) {
+        // An ORIGINAL equation with exactly one nonzero coefficient and an
+        // exactly zero RHS fixes that unknown to zero. Enforce this algebraic
+        // identity after floating-point pivoting; no magnitude threshold or
+        // sideband truncation is involved. Every coupled row is still checked.
+        for &(row, column) in &self.single_entry_rows {
+            if rhs[row].re == 0.0 && rhs[row].im == 0.0 {
+                solution[column] = C64::ZERO;
+            }
+        }
+    }
+
     /// Number of complete original state coordinates.
     pub fn dimension(&self) -> usize {
         self.dimension
@@ -410,7 +436,41 @@ impl PreparedSidebandResponse<'_> {
         if solution.iter().any(|&z| !finite(z)) {
             return Err(invalid("sideband solution is not representable"));
         }
-        let relative_residual = residual(&self.operator, &solution, &rhs, &mut cancelled)?;
+        self.enforce_homogeneous_rows(&rhs, &mut solution);
+        // Pivoting can leave tiny spurious states in exactly homogeneous rows.
+        // Their componentwise backward error is legitimately large even when
+        // a normwise check is tiny. Correct the ORIGINAL equations with the
+        // same factor and double-double residuals; never loosen the denominator
+        // or clip a response coefficient merely because it looks small.
+        let mut correction = vec![C64::ZERO; n];
+        let mut relative_residual = residual(
+            &self.operator,
+            &solution,
+            &rhs,
+            &mut correction,
+            &mut cancelled,
+        )?;
+        for _ in 0..4 {
+            if relative_residual <= self.controls.maximum_relative_residual {
+                break;
+            }
+            self.factor
+                .solve_with_cancel(&mut correction, &mut cancelled)?;
+            for (value, &delta) in solution.iter_mut().zip(&correction) {
+                *value = *value + delta;
+                if !finite(*value) {
+                    return Err(invalid("refined sideband response is not representable"));
+                }
+            }
+            self.enforce_homogeneous_rows(&rhs, &mut solution);
+            relative_residual = residual(
+                &self.operator,
+                &solution,
+                &rhs,
+                &mut correction,
+                &mut cancelled,
+            )?;
+        }
         if relative_residual > self.controls.maximum_relative_residual {
             return Err(SidebandError::Residual {
                 measured: relative_residual,
@@ -503,7 +563,7 @@ fn admit(d: usize, orbit: &HbOrbit, c: SidebandControls, s: &SidebandScales) -> 
         + 128 * dimension * dimension
         + 128 * dimension
         + 96 * n * n
-        + 512 * n
+        + 576 * n
         + 32 * width.max(3 * c.harmonics + 3) as u128;
     bound(
         "numerical payload bytes",
@@ -513,7 +573,7 @@ fn admit(d: usize, orbit: &HbOrbit, c: SidebandControls, s: &SidebandScales) -> 
     let samples = (3 * c.samples_per_period + 1) as u128;
     let work = samples * (16 * entries + 32 * base + 32 * dimension * dimension)
         + 16 * n * n * n
-        + 128 * n * n;
+        + 2048 * n * n;
     bound("numerical work", work, c.maximum_work as u128)
 }
 
@@ -570,6 +630,7 @@ fn residual(
     a: &[C64],
     x: &[C64],
     rhs: &[C64],
+    correction: &mut [C64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64> {
     let n = x.len();
@@ -584,7 +645,9 @@ fn residual(
         }
         sum.re = sum.re - Dd::from_f64(rhs[row].re);
         sum.im = sum.im - Dd::from_f64(rhs[row].im);
-        let defect = sum.value().abs();
+        let remainder = sum.value();
+        correction[row] = -remainder;
+        let defect = remainder.abs();
         let scale = scale.total();
         if !defect.is_finite() || !scale.is_finite() {
             return Err(invalid("sideband residual is not representable"));

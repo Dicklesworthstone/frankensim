@@ -579,6 +579,11 @@ LU owner once per carrier and each factor serves multiple original-equation
 forcing vectors without further source/tangent callbacks. Independent row
 contractions report retained backward error, and original-equation defects
 are checked in the finite omitted bands `N < |k| <= 2*N+2`.
+Exactly one-entry homogeneous equations retain their algebraically required
+zero unknowns after floating-point pivoting. Up to four original-residual
+corrections reuse the same factor when needed; every retained coupled row
+must still meet the strict componentwise backward-error allowance. No numerical
+zero threshold changes an equation or removes a response band.
 Independent state/equation scales, numerical payload/work admission and
 cancellation apply before publication. No physical source is mutated.
 
