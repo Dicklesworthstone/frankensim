@@ -445,5 +445,44 @@ class BlindSpotsAndDescriptors(unittest.TestCase):
         print(json.dumps(dict(test="segmentation_counts", files=len(wavs), refused=report)))
 
 
+class BarPitch(unittest.TestCase):
+    """instrgrade-6: a bar's pitch is its strongest line, and it doesn't move when the clip's end does."""
+
+    CLIPS_MS = (660, 670, 675, 680, 685, 690, 700, 720, 760, 800, 900, 1000)
+
+    @staticmethod
+    def spread_cents(values):
+        return 1200 * math.log2(max(values) / min(values))
+
+    def test_a_clean_bars_pitch_holds_as_the_clip_end_moves(self):
+        # A rendered C5 bar's first line and its ratios, falling at the family's loss law. No noise, as in a render.
+        f1 = 523.254
+        ratios = (1.0, 1.857, 3.1556, 3.9999, 6.5288, 7.8925)
+        t = np.arange(int(1.1 * ig.SR), dtype=np.float64) / ig.SR
+        y = sum(np.exp(-(7.263 + 2.1237e-5 * (r * f1) ** 2) * t) * np.sin(2 * np.pi * r * f1 * t) / (1 + i)
+                for i, r in enumerate(ratios))
+        lo, hi = f1 * 2 ** (-7 / 12), f1 * 2 ** (7 / 12)
+        reads, combs = [], []
+        for ms in self.CLIPS_MS:
+            x = y[: int(ms * 1e-3 * ig.SR)]
+            d = ig.describe(x, "decaying", f1, inharmonic=True, _skip_q3_heavy=True)
+            reads.append(d["f0"])
+            t0, t1 = d["windows"]["sustain"]
+            combs.append(ig.f0_spectral(*ig.spectrum(x, t0, t1), lo, hi))
+        print(json.dumps(dict(test="bar_pitch", line_spread_cents=round(self.spread_cents(reads), 4),
+                              comb_spread_cents=round(self.spread_cents(combs), 1))))
+        self.assertLess(self.spread_cents(reads), 0.5)
+        for f in reads:
+            self.assertLess(abs(1200 * math.log2(f / f1)), 0.5)
+        # The comb this replaces, on the same windows. If this ever holds still, the reason for the branch has gone.
+        self.assertGreater(self.spread_cents(combs), 5.0)
+
+    def test_the_strongest_line_is_a_peak_and_not_the_skirt_of_something_outside_the_band(self):
+        f = np.arange(0.0, 400.0, 0.25)
+        s = 1e6 / (1.0 + (f - 50.0) ** 2) + 2000.0 * np.exp(-0.5 * ((f - 100.0) / 2.0) ** 2)
+        self.assertGreater(s[np.argmin(np.abs(f - 62.0))], s[np.argmin(np.abs(f - 100.0))])  # the skirt tops the line
+        self.assertAlmostEqual(ig.strongest_line(f, s, 62.0, 140.0), 100.0, delta=0.1)
+
+
 if __name__ == "__main__":
     unittest.main()
