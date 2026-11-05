@@ -1634,6 +1634,39 @@ closure. This remains a fixed-geometry, first-order thermal reduction; no
 spatial convergence or empirical material-accuracy claim follows from its
 algebraic energy residual.
 
+### Nonlinear ambient radiation on the original enthalpy graph
+
+`boundary::GrayAmbientBoundary` supplies a complete exterior heat flux to the
+same implicit boundary seam. A bounded scalar solve resolves the exterior
+surface temperature through the original cellwise `k(h)`, centre-to-face
+distance and optional coating/contact resistance. Convection and gray radiation
+then act in parallel at that surface. The explicitly fixed emissivity and htc
+are used once; authored htc and another radiation source must not also own the
+selected channel. Air and the large black radiative surroundings share the
+actual bath temperature supplied by the original boundary, including its events.
+
+Factored fourth-power differences retain near-equilibrium exchange. The
+allocation-free analytic tangent includes both `dT/dh` and `dk/dh`; phase-driven
+conductivity changes can affect heat flux even at a latent plateau. The
+original chain/graph solver, enthalpy storage, nonlinear convergence controls,
+adaptive time owner and heat/entropy accounts remain authoritative. A surface
+response exposes temperature, separate convective/radiative powers, applied
+power and closure residual; these are descriptions of the same transfer, never
+extra energy credits. Invalid data, exhausted surface work and cancellation
+return no response or accepted thermal candidate.
+
+This uses the native cellwise conductivity approximation, not an integrated
+within-cell `k(T)` profile. It assumes an opaque gray surface with a complete
+view of one isothermal surrounding, fixed geometry and no surface heat capacity.
+Separate radiative/convective bath temperatures, variable emissivity, finite
+enclosure reflections and spectral photon entropy require their own closures.
+The existing thermal entropy account describes bulk/bath entropy exchange,
+not a spectral radiation field. G1/G3 regressions independently reconstruct
+Stefan-Boltzmann plus film heat and the material tangent, exercise sharp latent
+storage on chain and graph paths, and refine adaptive cooling toward a separate
+continuous calorimetry integral. This is numerical verification, not material
+validation. The boundary relation follows [MOOSE's radiation formulation](https://mooseframework.inl.gov/docs/site/source/components/HSBoundaryRadiation.html).
+
 ## Implicit upwind enthalpy with native conduction
 
 `ImplicitConductionChain::with_implicit_advection` and its graph counterpart
