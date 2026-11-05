@@ -2,10 +2,11 @@
 //!
 //! The original material supplies the full homogeneous NSF acoustic mode.
 //! The stable two-port owner propagates traction and volume flow; pressure is
-//! reconstructed separately. Only the two traveling acoustic waves are kept.
-//! No no-slip wall loss, transverse modes, thermal end conditions, abrupt
-//! material interfaces or radius changes are solved. The mechanical power
-//! port does not include the independent thermal acoustic-energy flux.
+//! reconstructed separately. [`BulkTractionCylinder`] keeps only the two
+//! traveling acoustic waves and their mechanical power. [`thermal`] also
+//! retains thermal diffusion, physical temperature/heat ports and thermal end
+//! conditions. Neither model adds no-slip wall loss, transverse modes, abrupt
+//! material interfaces or radius changes.
 
 use super::{FluidDuctError, bad, wave_from_state};
 use crate::compose::{ComposeOptions, TwoPort, compose_chain};
@@ -14,6 +15,10 @@ use fs_material::fluid_acoustics::thermoviscous::absorption::{
     BulkThermoviscousWave, ClassicalBulkAbsorption,
 };
 use fs_math::c64::C64;
+
+/// Full homogeneous acoustic AND thermal diffusion propagation, with physical
+/// temperature/heat ports and independently imposed thermal end conditions.
+pub mod thermal;
 
 /// Prepared acoustic-mode cylinder. The underlying pressure-named two-port
 /// algebra is private: every exposed mechanical quantity here is traction.

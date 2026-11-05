@@ -140,6 +140,35 @@ pressure and transmitted flow, segment splitting including opaque propagation,
 and exact viscous-heating integrals against mechanical work for reflecting and
 zero-flow loads, with invalid geometry/frequency/load refusal.
 
+### Full homogeneous thermal diffusion and end conditions
+
+`fluid::bulk::thermal::BulkThermalCylinder` retains the complete homogeneous
+one-dimensional Navier--Stokes--Fourier system, including both acoustic and
+thermal diffusion modes. `BulkThermoviscousEquilibrium` supplies one coherent
+original equilibrium, signed expansion, temperature, shear/bulk viscosity and
+conductivity. Physical efforts are total traction and `theta=T'/T0`; conjugate
+flows are volume flow and heat power. Their rightward quadratic energy flux is
+`Re(t conj(U) + theta conj(Q))/2`. The full 4x4 scattering is exposed with
+explicit real power references and left/right inward-wave orientation.
+
+Independent isothermal (`T'=0`) or adiabatic (`Q=0`) axial ends reduce the
+thermal channels before mechanical traction-load composition. The response
+returns distinct traction and thermodynamic pressure, physical temperature and
+rightward heat power at both ends. Pressure follows the actual constitutive
+equations, avoiding subtraction of nearly equal pressure/viscous-stress terms.
+A dimensionless power scaling balances the acoustic and thermal lengths; the
+native exponential solves only a bounded short span, followed by at most 48
+native Redheffer doublings. Local inverse and feedback condition limits are
+explicit, and original numerical refusals propagate without mode removal.
+
+Native tests recover the exact uncoupled viscous acoustic mode, adiabatic versus
+isothermal static compressibility, signed-expansion symmetry and stable opaque
+propagation. Independent dimensional NSF integration closes endpoint states and
+equates work loss to integrated `eta*A*|u'|²/2 + kappa*T0*A*|theta'|²/2`, with
+`eta=4 mu/3+zeta`. Radius supplies area only: lateral no-slip/thermal wall layers,
+transverse modes, varying area, interfaces and nonlinear evolution remain
+outside this uniform-medium model.
+
 ### Regional shared-fluid pressure and flow
 
 `fluid::regional::{duct_chain,input_impedance_load}` and their `_with_loss`

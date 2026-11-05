@@ -9590,6 +9590,18 @@ close the original momentum/heat equations and full energy flux, the exact
 Cp=Cv viscous solution, separate shear/bulk heating, and weak/strong-loss limits.
 The existing wavenumber evaluation order and branch/refusal policy are retained.
 
+`BulkThermoviscousEquilibrium` binds the original `ThermoviscousFluid` and
+`ThermalFluidTransport` views for consumers that retain both acoustic and
+thermal diffusion. Both views must supply the identical transport tuple and
+known signed isobaric expansion. The snapshot retains the actual absolute
+temperature, signed expansion and explicit independent bulk viscosity, and
+checks `beta_S = beta_T - alpha_p² T0/(rho Cp)` with
+`beta_T = (Cp/Cv)/(rho c²)`. Unknown expansion, mismatched source views and
+inconsistent caloric/acoustic derivatives refuse; Cp/Cv never supplies an
+invented expansion sign. Positive, negative and zero expansion are admitted
+when the original thermodynamic identity closes. Propagation and thermal
+terminal conditions remain the responsibility of the consuming operator.
+
 `fluid_acoustics::FluidAcoustics` admits one immutable acoustic snapshot with
 positive finite density, adiabatic sound speed, bulk modulus `K_s = rho c²`,
 compressibility `1/K_s` and plane-wave impedance `rho c`. Gas adapters reuse the
