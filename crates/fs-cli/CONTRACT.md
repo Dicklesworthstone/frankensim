@@ -1,5 +1,37 @@
 # CONTRACT: fs-cli
 
+## Local-temperature emissivity in reflected enclosures — driver 129
+
+Closed and open `enclosure-radiation` declarations may now select
+`:emissivity-response local-temperature` with pointwise spatial integration and
+primary-enthalpy storage. Omission preserves their fixed source-query behavior.
+Ambient and enclosure lowering share source preparation, claim pinning and one
+trace-ownership scan; each trace retains its original material card and the
+exact caloric objects used by its storage nodes.
+
+The existing native material enclosure computes the correlated P1 emissivity
+and fourth-power-temperature integral. Its current numerical mean emissivity
+enters the original diffuse-gray reflection equations; material changes refresh
+the radiosity factors, including the reflected contribution to the complete
+enthalpy Newton tangent. The adapter keeps the admitted base geometry alive
+around the borrowing material owner for the entire response and physical audit.
+No self-referential storage or frozen reflection approximation is introduced.
+
+Both source-contact solve methods, natural convection and transported-air
+responses use this same owner. Closed exchange remains internal. Open deficits
+see one declared external black reservoir whose independently computed heat
+enters solid energy once; original convection alone heats air. Reports retain
+actual nodal emissivities, the numerical mean used in reflection, original
+source identities, reciprocal view-factor identity and separate bath power.
+
+Material report storage is charged before either time grid starts. Driver 129
+invalidates older cached producer results. Forward regressions reconstruct P1
+emission moments and two-patch radiosity independently and check closed/open
+energy accounting. Syntax and source review do not establish runtime execution.
+Local enclosure trajectory controls are refused until their original-source
+reflected pullback is connected. Phase-dependent source emissivity, separate
+coatings, moving visibility and participating media remain outside this CLI mode.
+
 ## Original emissivity-source trajectory adjoints — driver 128
 
 Final-temperature and sampled-peak adjoints now consume the original accepted
@@ -28,8 +60,8 @@ energy derivative, exercise both heat-flow signs, verify inactive source
 ordinates and initial-peak zeros, and split one source across four physical
 faces with independent bath perturbations. Compilation and numerical execution
 remain unverified in this session; syntax and source checks alone are not a
-gradient validation. Phase-dependent emissivity, local-state enclosure
-declarations and phase-dependent contact remain outside this CLI increment.
+gradient validation. Phase-dependent emissivity and phase-dependent contact
+remain outside this CLI increment; driver 129 adds local-state enclosure declarations.
 
 ## Local-temperature material emissivity — driver 127
 

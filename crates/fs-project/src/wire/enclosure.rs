@@ -75,6 +75,9 @@ pub(super) fn lower(enclosure: &ConductionEnclosure) -> Result<Node, ProjectErro
     if let Some(model) = enclosure.spatial_model {
         declaration.extend([kw("spatial-model"), sym(model.slug())]);
     }
+    if let Some(response) = enclosure.emissivity_response {
+        declaration.extend([kw("emissivity-response"), sym(response.slug())]);
+    }
     if let Some(temperature) = enclosure.ambient_temperature {
         declaration.push(kw("ambient-temperature"));
         declaration.push(qty(temperature)?);
@@ -103,6 +106,7 @@ pub(super) fn read(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionEn
         "enclosure-radiation",
         &[
             "spatial-model",
+            "emissivity-response",
             "ambient-temperature",
             "surfaces",
             "view-factors",
@@ -266,6 +270,9 @@ pub(super) fn read(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionEn
             field(&pairs, "spatial-model"),
             "enclosure.spatial-model",
             out,
+        ),
+        emissivity_response: read_radiation_emissivity_response(
+            field(&pairs, "emissivity-response"), "enclosure.emissivity-response", out,
         ),
         surfaces,
         view_factors,

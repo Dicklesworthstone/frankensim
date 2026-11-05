@@ -139,6 +139,7 @@ pub(super) fn lower(
     let mut targets = BTreeSet::new();
     let mut names = BTreeSet::new();
     let mut surfaces = Vec::with_capacity(declaration.surfaces.len());
+    let mut material_sources = Vec::new();
     for surface in &declaration.surfaces {
         if !names.insert(surface.name.as_str()) || !targets.insert(surface.target.as_str()) {
             return Err(bad("enclosure names and physical targets must be unique"));
@@ -164,16 +165,26 @@ pub(super) fn lower(
                 "each native enclosure patch must retain its original convection or prescribed outward flux; zero flux declares vacuum",
             ));
         }
-        surfaces.push(SurfaceSource {
-            name: surface.name.clone(),
-            target: surface.target.clone(),
-            emissivity: resolve_emissivity(
+        let emissivity = if declaration.emissivity_response.is_some() {
+            let (emissivity, source) = super::material::lower_source(
+                &surface.name, &surface.card, surface.claim.as_deref(),
+                surface.query_temperature.value, cards,
+            )?;
+            material_sources.push(source);
+            emissivity
+        } else {
+            resolve_emissivity(
                 &surface.name,
                 &surface.card,
                 surface.claim.as_deref(),
                 surface.query_temperature.value,
                 cards,
-            )?,
+            )?
+        };
+        surfaces.push(SurfaceSource {
+            name: surface.name.clone(),
+            target: surface.target.clone(),
+            emissivity,
         });
     }
     Ok(LoweredRadiation {
@@ -187,8 +198,8 @@ pub(super) fn lower(
         },
         surfaces,
         pointwise: declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise),
-        emissivity_response: None,
-        material_sources: Vec::new(),
+        emissivity_response: declaration.emissivity_response,
+        material_sources,
         enclosure: Some(LoweredEnclosure {
             declaration: declaration.clone(),
         }),

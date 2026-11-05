@@ -318,6 +318,7 @@ fn radiation(f: &mut Fixture, model: usize) {
     } else {
         let view = if model == 2 { 1.0 } else { 0.35 };
         setup.enclosure_radiation = Some(ConductionEnclosure {
+            emissivity_response: None,
             spatial_model: Some(RadiationSpatialModel::Pointwise),
             ambient_temperature: (model == 3).then_some(QtyAny::new(300.0, dims::TEMPERATURE)),
             surfaces: ["cold", "hot"]

@@ -1,7 +1,7 @@
 //! Declared reciprocal surface irradiation, with an optional black environment.
 
 use super::{
-    BTreeSet, ConductionSetup, QtyAny, RadiationSpatialModel, ThermalBoundaryCondition, Violation,
+    BTreeSet, ConductionSetup, QtyAny, RadiationEmissivityResponse, RadiationSpatialModel, ThermalBoundaryCondition, Violation,
     check_dims, dims,
     is_canonical_binding_text, is_hex_digest, violation,
 };
@@ -14,10 +14,13 @@ pub struct EnclosureRadiatingSurface {
     /// Existing complete uniform convective or prescribed-flux boundary target.
     pub target: String,
     /// Immutable surface-finish material-card content hash.
+    /// Local-temperature response requires the original storage-material card.
     pub card: String,
     /// Exact emissivity claim pin, when selection would otherwise be ambiguous.
     pub claim: Option<String>,
     /// Explicit temperature for the immutable emissivity query, K.
+    /// With local-temperature response this selects the retained source; its
+    /// emissivity is then re-queried at every original enthalpy node's state.
     pub query_temperature: QtyAny,
 }
 
@@ -50,6 +53,10 @@ pub struct ConductionEnclosure {
     /// Explicit emission discretization. Absence retains patch-mean emission;
     /// irradiation still follows the declared fixed patch view factors.
     pub spatial_model: Option<RadiationSpatialModel>,
+    /// Explicit source response. Absence retains the fixed query-temperature
+    /// sample and its canonical spelling. Local-temperature requires pointwise
+    /// radiation and primary enthalpy; reflection follows the current source.
+    pub emissivity_response: Option<RadiationEmissivityResponse>,
     /// Explicit positive black-environment temperature, K. Each physical row's
     /// deficit sees this reservoir; absence requires closed surface exchange.
     pub ambient_temperature: Option<QtyAny>,
@@ -79,6 +86,17 @@ pub(super) fn validate(
     enclosure: &ConductionEnclosure,
     out: &mut Vec<Violation>,
 ) {
+    if enclosure.emissivity_response.is_some()
+        && (enclosure.spatial_model != Some(RadiationSpatialModel::Pointwise)
+            || !setup.transient.as_ref().is_some_and(|time|
+                time.enthalpy.is_some() && time.capacities.is_empty()))
+    {
+        out.push(violation(
+            "project-enclosure-radiation-emissivity-response",
+            "local-temperature enclosure emissivity requires pointwise radiation with primary total-enthalpy storage",
+            "declare spatial-model pointwise and transient enthalpy, or omit emissivity-response to retain the fixed source sample",
+        ));
+    }
     if setup.radiation.is_some() {
         out.push(violation(
             "project-enclosure-radiation-overlap",

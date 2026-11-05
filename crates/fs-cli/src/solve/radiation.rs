@@ -33,7 +33,7 @@ pub(super) struct LoweredRadiation {
     enclosure: Option<enclosure::LoweredEnclosure>,
     pointwise: bool,
     emissivity_response: Option<fs_project::RadiationEmissivityResponse>,
-    material_sources: Vec<material::MaterialAmbientSource>,
+    material_sources: Vec<material::MaterialSource>,
 }
 
 struct SurfaceSource {
@@ -43,8 +43,21 @@ struct SurfaceSource {
 }
 
 impl LoweredRadiation {
-    pub(super) fn is_material_ambient(&self) -> bool {
+    pub(super) fn is_material(&self) -> bool {
         self.emissivity_response == Some(fs_project::RadiationEmissivityResponse::LocalTemperature)
+    }
+
+    pub(super) fn is_material_ambient(&self) -> bool {
+        self.is_material() && !self.is_enclosure()
+    }
+
+    pub(super) fn is_material_enclosure(&self) -> bool {
+        self.is_material() && self.is_enclosure()
+    }
+
+    /// Original source snapshot in physical patch order for both model families.
+    pub(super) fn source_emissivity(&self, patch: usize) -> Option<&SurfaceEmissivity> {
+        self.surfaces.get(patch).map(|source| &source.emissivity)
     }
 
     pub(super) fn is_pointwise(&self) -> bool {
@@ -141,7 +154,10 @@ pub(super) fn lower(
             ));
         }
         let emissivity = if declaration.emissivity_response.is_some() {
-            let (emissivity, source) = material::lower_source(surface, cards)?;
+            let (emissivity, source) = material::lower_source(
+                &surface.name, &surface.card, surface.claim.as_deref(),
+                surface.query_temperature.value, cards,
+            )?;
             material_sources.push(source);
             emissivity
         } else {

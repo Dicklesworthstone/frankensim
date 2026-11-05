@@ -69,6 +69,12 @@ pub(in crate::solve) fn receipt(
             _ => Err(bad("local material emissivity lost its ambient endpoint report")),
         };
     }
+    if lowering.is_material_enclosure() {
+        return match (ambient, enclosure) {
+            (None, Some(report)) => material::enclosure_receipt(report, lowering, convective_out_w),
+            _ => Err(bad("local material emissivity lost its reflected enclosure endpoint report")),
+        };
+    }
     let (model, heat, rows, extra) = match (ambient, enclosure) {
         (Some(report), None) if !lowering.is_enclosure() => {
             let rows = report.patches.iter().map(|row| {

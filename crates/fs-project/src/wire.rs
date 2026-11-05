@@ -3233,13 +3233,14 @@ fn read_radiation_spatial_model(
 
 fn read_radiation_emissivity_response(
     node: Option<&Node>,
+    context: &'static str,
     out: &mut Vec<Violation>,
 ) -> Option<RadiationEmissivityResponse> {
     let node = node?;
     let NodeKind::Symbol(value) = &node.kind else {
         out.push(Violation {
             code: "project-malformed-clause",
-            what: "`radiation.emissivity-response` expected a source-response symbol".to_string(),
+            what: format!("`{context}` expected a source-response symbol"),
             fix: "use symbol `local-temperature` or omit the field for a fixed emissivity sample".to_string(),
         });
         return None;
@@ -3247,7 +3248,7 @@ fn read_radiation_emissivity_response(
     match value.as_str() {
         "local-temperature" => Some(RadiationEmissivityResponse::LocalTemperature),
         _ => {
-            invalid_enum(out, "radiation.emissivity-response", value, "`local-temperature`");
+            invalid_enum(out, context, value, "`local-temperature`");
             None
         }
     }
@@ -3347,7 +3348,7 @@ fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRad
             out,
         ),
         emissivity_response: read_radiation_emissivity_response(
-            field(&pairs, "emissivity-response"), out,
+            field(&pairs, "emissivity-response"), "radiation.emissivity-response", out,
         ),
         surfaces,
         max_iterations,

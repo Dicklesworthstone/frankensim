@@ -21,6 +21,7 @@ fn enclosed_fixture(cooling: Cooling) -> Fixture {
     let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     let ambient = setup.radiation.take().unwrap();
     setup.enclosure_radiation = Some(ConductionEnclosure {
+        emissivity_response: None,
         spatial_model: None,
         ambient_temperature: None,
         surfaces: ["cold", "hot"].into_iter().map(|target| EnclosureRadiatingSurface {

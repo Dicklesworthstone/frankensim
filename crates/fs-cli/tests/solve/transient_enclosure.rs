@@ -85,6 +85,7 @@ fn project(card: &str) -> ProjectSpec {
         }).collect();
     setup.adiabatic_remainder = true;
     setup.enclosure_radiation = Some(ConductionEnclosure {
+        emissivity_response: None,
         spatial_model: None,
         ambient_temperature: None,
         surfaces: ["wall-x", "wall-z"].into_iter().enumerate()
@@ -539,3 +540,6 @@ mod vacuum;
 
 #[path = "transient_enclosure/pointwise_adjoint.rs"]
 mod pointwise_adjoint;
+
+#[path = "transient_enclosure/material_emissivity.rs"]
+mod material_emissivity;

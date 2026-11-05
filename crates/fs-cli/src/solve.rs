@@ -326,7 +326,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// pointwise enthalpy solve, including live contact and boundary feedback.
 /// Version 128 differentiates original shared emissivity-source ordinates and
 /// independent radiation reservoirs through those complete enthalpy histories.
-pub const SOLVE_DRIVER_VERSION: u32 = 128;
+/// Version 129 admits local-temperature material emission and reflection in
+/// closed/open pointwise enthalpy enclosures, including source-backed contact.
+pub const SOLVE_DRIVER_VERSION: u32 = 129;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

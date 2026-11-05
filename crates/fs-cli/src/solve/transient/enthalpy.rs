@@ -718,6 +718,9 @@ pub(super) fn solve(
         .as_ref()
         .ok_or_else(|| bad("missing enthalpy storage"))?;
     let objective = adjoint::requested(spec)?;
+    if objective.is_some() && radiation.is_some_and(radiation::LoweredRadiation::is_material_enclosure) {
+        return Err(bad("local-temperature enclosure emissivity requires its original-source reflected trajectory controls; fixed-emissivity controls cannot replace them"));
+    }
     if temperature_contacts.is_some() && (interfaces.is_some()
         || radiation.is_some_and(|lowering| !lowering.is_pointwise()))
     {
@@ -850,7 +853,7 @@ pub(super) fn solve(
         // one patch, so three times the boundary-face count bounds all such
         // samples without allocating a dense node-by-patch table. Include the
         // active endpoint/audit copies as well as both time-grid report rows.
-        let material_reports = if lowering.is_material_ambient() {
+        let material_reports = if lowering.is_material() {
             problem.mesh.boundary().len().checked_mul(3)
                 .and_then(|samples| total_steps.checked_add(3)
                     .and_then(|steps| samples.checked_mul(steps)))
@@ -1221,6 +1224,11 @@ pub(super) fn solve(
     };
     let radiation_receipt = if let Some(lowering) = radiation {
         let method = match (lowering.is_pointwise(), lowering.is_enclosure()) {
+            (true, true) if lowering.is_material_enclosure()
+                && lowering.open_ambient_temperature_k().is_some() =>
+                "implicit-pointwise-p1-material-open-gray-diffuse-enclosure",
+            (true, true) if lowering.is_material_enclosure() =>
+                "implicit-pointwise-p1-material-closed-gray-diffuse-enclosure",
             (true, false) if lowering.is_material_ambient() =>
                 "implicit-pointwise-p1-material-gray-radiation",
             (true, true) if lowering.open_ambient_temperature_k().is_some() =>
