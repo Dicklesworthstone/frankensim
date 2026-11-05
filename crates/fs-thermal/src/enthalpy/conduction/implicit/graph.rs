@@ -46,6 +46,22 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Resolve two actual prescribed baths through one selected physical face.
+    /// The original rate/entropy owner retains each signed bath contribution
+    /// through backward Euler and native SDIRK stages. See the chain attachment
+    /// for caloric identity, geometry and exclusive channel ownership checks.
+    pub fn with_boundary_exchanges(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        reservoirs: &[(CellId, &'a dyn super::boundary::ImplicitBoundaryExchangeLaw)],
+        ambient: &[(CellId, &'a dyn super::boundary::ImplicitBoundaryExchangeLaw)],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_boundary_exchanges(thermal, reservoirs, ambient, checkpoint)?,
+        })
+    }
+
     /// Bind original endpoint upwind enthalpy to this same nonlinear graph.
     /// Directed flows may join any active cells. The analytic nonsymmetric
     /// tangent uses the existing sparse FGMRES path. See the chain method for

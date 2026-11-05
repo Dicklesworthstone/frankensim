@@ -620,7 +620,18 @@ impl<'a> DepositionSimulation<'a> {
         boundaries: &backward_euler::BoundaryConductances,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<HeatRates, DepositionError> {
-        self.heat_rates_with_calorics_and_boundaries(
+        self.heat_rates_with_boundary_exchanges(maximum_explicit_dt, boundaries,
+            &backward_euler::BoundaryExchanges::default(), checkpoint)
+    }
+
+    fn heat_rates_with_boundary_exchanges(
+        &self,
+        maximum_explicit_dt: f64,
+        boundaries: &backward_euler::BoundaryConductances,
+        exchanges: &backward_euler::BoundaryExchanges,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<HeatRates, DepositionError> {
+        self.heat_rates_with_calorics_and_boundary_exchanges(
             maximum_explicit_dt,
             |id, cell| {
                 Ok((
@@ -629,6 +640,7 @@ impl<'a> DepositionSimulation<'a> {
                 ))
             },
             boundaries,
+            exchanges,
             checkpoint,
         )
     }
@@ -648,11 +660,32 @@ impl<'a> DepositionSimulation<'a> {
     fn heat_rates_with_calorics_and_boundaries(
         &self,
         maximum_explicit_dt: f64,
-        mut calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
+        calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
         boundaries: &backward_euler::BoundaryConductances,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<HeatRates, DepositionError> {
+        self.heat_rates_with_calorics_and_boundary_exchanges(maximum_explicit_dt, calorics,
+            boundaries, &backward_euler::BoundaryExchanges::default(), checkpoint)
+    }
+
+    // Resolved bath exchanges are implicit endpoint data. Their two signed
+    // powers replace one occupied channel; a net-zero sum does not erase the
+    // underlying transfers or their actual reservoir temperatures.
+    fn heat_rates_with_calorics_and_boundary_exchanges(
+        &self,
+        maximum_explicit_dt: f64,
+        mut calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
+        boundaries: &backward_euler::BoundaryConductances,
+        exchanges: &backward_euler::BoundaryExchanges,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<HeatRates, DepositionError> {
         boundaries.admit(self, checkpoint)?;
+        exchanges.admit(self, boundaries, checkpoint)?;
+        if !exchanges.is_empty() && maximum_explicit_dt != f64::MAX {
+            return Err(DepositionError::InvalidInput(
+                "resolved bath heat requires the implicit endpoint owner",
+            ));
+        }
         // Per-cell rates and outgoing conductances; no quadratic cell searches.
         let mut temperatures = BTreeMap::new();
         let mut rates = BTreeMap::new();
@@ -699,16 +732,28 @@ impl<'a> DepositionSimulation<'a> {
                     "contacts exceed surface area",
                 ));
             }
-            let ambient_g = boundaries.ambient(id, area, cell.boundary.htc_w_m2_k)?;
-            let mut g = finite(outgoing[&id].0 + ambient_g)?;
-            let mut external = finite(
-                cell.boundary.source_w + ambient_g * (cell.boundary.ambient_k - temperatures[&id]),
-            )?;
+            let mut g = outgoing[&id].0;
+            let mut external = cell.boundary.source_w;
+            if let Some(baths) = exchanges.ambient.get(&id) {
+                if area == 0.0 && baths.iter().any(|bath| bath.outward_power_w != 0.0) {
+                    return Err(DepositionError::InvalidInput(
+                        "nonzero bath heat needs an exposed reference patch",
+                    ));
+                }
+                external = finite(external - backward_euler::BoundaryExchanges::outward_power(baths)?)?;
+            } else {
+                let ambient_g = boundaries.ambient(id, area, cell.boundary.htc_w_m2_k)?;
+                g = finite(g + ambient_g)?;
+                external = finite(external + ambient_g * (cell.boundary.ambient_k - temperatures[&id]))?;
+            }
             if let Some(r) = cell.boundary.reservoir {
-                let reservoir_g = boundaries.reservoir_w_k.get(&id).copied().unwrap_or(r.conductance_w_k);
-                g = finite(g + reservoir_g)?;
-                external =
-                    finite(external + reservoir_g * (r.temperature_k - temperatures[&id]))?;
+                if let Some(baths) = exchanges.reservoir.get(&id) {
+                    external = finite(external - backward_euler::BoundaryExchanges::outward_power(baths)?)?;
+                } else {
+                    let reservoir_g = boundaries.reservoir_w_k.get(&id).copied().unwrap_or(r.conductance_w_k);
+                    g = finite(g + reservoir_g)?;
+                    external = finite(external + reservoir_g * (r.temperature_k - temperatures[&id]))?;
+                }
             }
             external_w = finite(external_w + external)?;
             let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;

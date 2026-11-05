@@ -24,6 +24,7 @@
 use super::*;
 use crate::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, BoundaryConductances, BoundaryStepCoefficients,
+    BoundaryExchangeStepCoefficients, BoundaryExchanges,
     StageQuadrature, StepCoefficients, TransportStepCoefficients, resolvable_increment_j,
 };
 use crate::enthalpy::entropy::EntropyAudit;
@@ -60,7 +61,8 @@ use link::{ImplicitLinkLaw, ImplicitLinkState};
 /// Integrated material-to-bath fluxes on original reservoir and ambient faces.
 #[path = "implicit/boundary.rs"]
 pub mod boundary;
-use boundary::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState};
+use boundary::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState,
+    ImplicitBoundaryExchangeLaw, ImplicitBoundaryExchangeState};
 
 /// Endpoint upwind enthalpy in the same conservative nonlinear solve.
 #[path = "implicit/advection.rs"]
@@ -249,6 +251,8 @@ pub struct ImplicitConductionChain<'a> {
     link_laws: BTreeMap<u64, &'a dyn ImplicitLinkLaw>,
     reservoir_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
     ambient_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
+    reservoir_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
+    ambient_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
     advection: Option<ImplicitAdvection>,
 }
 
@@ -256,10 +260,13 @@ struct Endpoint {
     states: Vec<ImplicitConductionState>,
     link_values: BTreeMap<u64, f64>,
     boundary_values: BoundaryConductances,
+    exchange_values: BoundaryExchanges,
     contacts: BTreeMap<u64, ImplicitContactState>,
     link_states: BTreeMap<u64, ImplicitLinkState>,
     reservoir_states: BTreeMap<CellId, ImplicitBoundaryState>,
     ambient_states: BTreeMap<CellId, ImplicitBoundaryState>,
+    reservoir_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
+    ambient_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     reconstruction_tangent: Vec<(usize, usize, f64)>,
 }
 
@@ -328,6 +335,8 @@ impl<'a> ImplicitConductionChain<'a> {
             link_laws: BTreeMap::new(),
             reservoir_laws: BTreeMap::new(),
             ambient_laws: BTreeMap::new(),
+            reservoir_exchanges: BTreeMap::new(),
+            ambient_exchanges: BTreeMap::new(),
             advection: None,
         };
         result.admit(thermal, &mut checkpoint)?;
@@ -550,10 +559,32 @@ impl<'a> ImplicitConductionChain<'a> {
             );
         }
         let mut boundary_values = BoundaryConductances::default();
+        let mut exchange_values = BoundaryExchanges::default();
         let mut reservoir_states = BTreeMap::new();
         let mut ambient_states = BTreeMap::new();
+        let mut reservoir_exchange_states = BTreeMap::new();
+        let mut ambient_exchange_states = BTreeMap::new();
         for (&id, binding) in &self.conduction.reservoirs {
             checkpoint()?;
+            if let Some(law) = self.reservoir_exchanges.get(&id) {
+                let cell = &thermal.cells[&id];
+                let reservoir = cell.boundary.reservoir.ok_or(ImplicitConductionError::Invalid(
+                    "implicit exchange reservoir disappeared",
+                ))?;
+                let state = law.state_at_specific_enthalpy(
+                    cell.specific_h_j_kg,
+                    reservoir.temperature_k,
+                    ImplicitBoundaryGeometry {
+                        area_m2: binding.area_m2,
+                        half_distance_m: binding.geometry.half_distance_m,
+                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
+                    },
+                    checkpoint,
+                )?.validate()?;
+                exchange_values.reservoir.insert(id, state.baths);
+                reservoir_exchange_states.insert(id, state);
+                continue;
+            }
             if let Some(law) = self.reservoir_laws.get(&id) {
                 let cell = &thermal.cells[&id];
                 let reservoir = cell
@@ -590,6 +621,22 @@ impl<'a> ImplicitConductionChain<'a> {
         }
         for (&id, binding) in &self.conduction.ambient_faces {
             checkpoint()?;
+            if let Some(law) = self.ambient_exchanges.get(&id) {
+                let cell = &thermal.cells[&id];
+                let state = law.state_at_specific_enthalpy(
+                    cell.specific_h_j_kg,
+                    cell.boundary.ambient_k,
+                    ImplicitBoundaryGeometry {
+                        area_m2: binding.area_m2,
+                        half_distance_m: binding.geometry.half_distance_m,
+                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
+                    },
+                    checkpoint,
+                )?.validate()?;
+                exchange_values.ambient.insert(id, state.baths);
+                ambient_exchange_states.insert(id, state);
+                continue;
+            }
             if let Some(law) = self.ambient_laws.get(&id) {
                 let cell = &thermal.cells[&id];
                 let state = law.state_at_specific_enthalpy(
@@ -622,10 +669,13 @@ impl<'a> ImplicitConductionChain<'a> {
             states,
             link_values,
             boundary_values,
+            exchange_values,
             contacts,
             link_states,
             reservoir_states,
             ambient_states,
+            reservoir_exchange_states,
+            ambient_exchange_states,
             reconstruction_tangent: Vec::new(),
         })
     }
@@ -669,6 +719,9 @@ impl<'a> ImplicitConductionChain<'a> {
         let resolve = |thermal: &DepositionSimulation<'m>| {
             let mut endpoint = self.endpoint(thermal, &mut || (checkpoint.borrow_mut())())?;
             let boundaries = endpoint.boundary_values.clone();
+            // The residual owner consumes the bath powers; the analytic
+            // Jacobian retains only the already prepared exchange states.
+            let exchanges = std::mem::take(&mut endpoint.exchange_values);
             let mut sources_w = sources_w.clone();
             let mut transfers = transfers.to_vec();
             if let Some(advection) = &self.advection {
@@ -682,33 +735,29 @@ impl<'a> ImplicitConductionChain<'a> {
                 }
                 transfers.extend(transport.transfers);
             }
-            Ok::<_, ImplicitConductionError>(TransportStepCoefficients {
-                heat: BoundaryStepCoefficients {
-                    bulk: StepCoefficients {
-                        sources_w,
-                        conductances_w_k: endpoint.link_values.clone(),
-                        payload: endpoint,
+            Ok::<_, ImplicitConductionError>(BoundaryExchangeStepCoefficients {
+                transport: TransportStepCoefficients {
+                    heat: BoundaryStepCoefficients {
+                        bulk: StepCoefficients {
+                            sources_w,
+                            conductances_w_k: endpoint.link_values.clone(),
+                            payload: endpoint,
+                        },
+                        boundaries,
                     },
-                    boundaries,
+                    // Observed transfers stay at the accepted start; an explicitly
+                    // bound flow graph is evaluated at this actual endpoint.
+                    // Both use the original paired debit/credit owner exactly once.
+                    transfers,
                 },
-                // Observed transfers stay at the accepted start; an explicitly
-                // bound flow graph is evaluated at this actual endpoint.
-                // Both use the original paired debit/credit owner exactly once.
-                transfers,
+                exchanges,
             })
         };
         if let Some(stage) = quadrature {
-            step.evaluate_stage(energy, resolve, stage, entropy, || {
-                (checkpoint.borrow_mut())()
-            })
-        } else if entropy {
-            step.evaluate_with_transport_and_entropy(energy, resolve, || {
-                (checkpoint.borrow_mut())()
-            })
+            step.evaluate_stage(energy, resolve, stage, entropy, || (checkpoint.borrow_mut())())
         } else {
-            step.evaluate_with_transport(energy, resolve, || {
-                (checkpoint.borrow_mut())()
-            })
+            step.evaluate_exchange_option(energy, resolve, entropy, None,
+                || (checkpoint.borrow_mut())())
         }
     }
 
@@ -804,7 +853,9 @@ impl<'a> ImplicitConductionChain<'a> {
             if area < 0.0 {
                 return Err(DepositionError::Arithmetic.into());
             }
-            let mut derivative = if let Some(boundary) = endpoint.ambient_states.get(&id) {
+            let mut derivative = if let Some(boundary) = endpoint.ambient_exchange_states.get(&id) {
+                -boundary.power_enthalpy_derivative_w_kg_j
+            } else if let Some(boundary) = endpoint.ambient_states.get(&id) {
                 -boundary.power_enthalpy_derivative_w_kg_j
             } else if let Some(binding) = self.conduction.ambient_faces.get(&id) {
                 let g = endpoint.boundary_values.ambient_w_k[&id];
@@ -820,7 +871,9 @@ impl<'a> ImplicitConductionChain<'a> {
                 -(area * cell.boundary.htc_w_m2_k) * state.temperature_slope_kg_k_j
             };
             if let Some(reservoir) = cell.boundary.reservoir {
-                if let Some(boundary) = endpoint.reservoir_states.get(&id) {
+                if let Some(boundary) = endpoint.reservoir_exchange_states.get(&id) {
+                    derivative -= boundary.power_enthalpy_derivative_w_kg_j;
+                } else if let Some(boundary) = endpoint.reservoir_states.get(&id) {
                     derivative -= boundary.power_enthalpy_derivative_w_kg_j;
                 } else {
                     let binding = self.conduction.reservoirs[&id];

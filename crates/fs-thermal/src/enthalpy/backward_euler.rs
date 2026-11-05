@@ -24,6 +24,10 @@ pub use boundaries::{BoundaryConductances, BoundaryStepCoefficients};
 mod transport;
 pub use transport::TransportStepCoefficients;
 
+#[path = "backward_euler/exchanges.rs"]
+mod exchanges;
+pub use exchanges::{BoundaryExchangeStepCoefficients, BoundaryExchanges, PrescribedBathHeat};
+
 // Native Runge--Kutta stages retain the original storage/rate owner. Earlier
 // stage heat is distinct from authored sources and from physical old enthalpy.
 #[path = "backward_euler/stages.rs"]
@@ -356,7 +360,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
         self.evaluate_endpoint_option(
             energy_increments_j,
-            |state| resolve(state).map(|transport| (transport, None)),
+            |state| resolve(state).map(|transport| (transport, None, BoundaryExchanges::default())),
             false,
             with_entropy,
             None,
@@ -386,7 +390,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             energy_increments_j,
             |state| {
                 resolve(state)
-                    .map(|(calorics, heat)| (TransportStepCoefficients::from(heat), Some(calorics)))
+                    .map(|(calorics, heat)| (TransportStepCoefficients::from(heat), Some(calorics), BoundaryExchanges::default()))
             },
             true,
             false,
@@ -404,6 +408,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             (
                 TransportStepCoefficients<T>,
                 Option<BTreeMap<CellId, (f64, f64)>>,
+                BoundaryExchanges,
             ),
             E,
         >,
@@ -471,6 +476,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 transfers,
             },
             calorics,
+            exchanges,
         ) = resolve(&next)?;
         checkpoint()?;
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
@@ -485,10 +491,11 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                     "stateful implicit calorics must cover exactly the active cells without inferred entropy",
                 ).into());
             }
-            next.heat_rates_with_calorics_and_boundaries(
+            next.heat_rates_with_calorics_and_boundary_exchanges(
                 f64::MAX,
                 |id, _| Ok(calorics[&id]),
                 &boundaries,
+                &exchanges,
                 &mut checkpoint,
             )?
         } else {
@@ -498,7 +505,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 )
                 .into());
             }
-            next.heat_rates_with_boundaries(f64::MAX, &boundaries, &mut checkpoint)?
+            next.heat_rates_with_boundary_exchanges(f64::MAX, &boundaries, &exchanges, &mut checkpoint)?
         };
         if !transfers.is_empty() {
             next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
@@ -525,6 +532,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             let mut audit = if transfers.is_empty()
                 && boundaries.ambient_w_k.is_empty()
                 && boundaries.reservoir_w_k.is_empty()
+                && exchanges.is_empty()
             {
                 next.entropy_step_audit(
                     &initial_h,
@@ -533,7 +541,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                     &mut checkpoint,
                 )?
             } else {
-                next.entropy_step_audit_with_boundary_coefficients(
+                next.entropy_step_audit_with_boundary_exchanges(
                     &initial_h,
                     &rates.temperatures,
                     rate_duration_s,
@@ -541,6 +549,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                     &BTreeMap::new(),
                     &boundaries.ambient_w_k,
                     &boundaries.reservoir_w_k,
+                    &exchanges,
                     &mut checkpoint,
                 )?
             };

@@ -1790,6 +1790,40 @@ storage on chain and graph paths, and refine adaptive cooling toward a separate
 continuous calorimetry integral. This is numerical verification, not material
 validation. The boundary relation follows [MOOSE's radiation formulation](https://mooseframework.inl.gov/docs/site/source/components/HSBoundaryRadiation.html).
 
+### Distinct convective and radiative baths on one enthalpy face
+
+`GrayTwoBathBoundary` resolves one common exterior surface through the original
+half-cell/coating resistance. The selected native boundary supplies actual gas
+temperature and its admitted events; an explicitly prescribed, fixed radiation
+temperature supplies the large black surrounding. Fixed htc and emissivity act
+once at that surface. The analytic total enthalpy tangent retains both `dT/dh`
+and `dk/dh`, including phase-driven conductivity on a latent plateau.
+
+`with_boundary_exchanges` carries the two signed outward powers and their
+actual bath temperatures through the original rate and entropy owners. The
+new `BoundaryExchangeStepCoefficients` ingress preserves the existing public
+coefficient structs. A selected channel cannot also have a legacy conductance
+or boundary-law owner. Reference coverage, mass, caloric identity and authored
+sources remain authoritative; no second half-cell or generated-heat source is
+introduced. The heat account uses `-sum(Q_out)`, reservoir entropy uses
+`-sum(Q_out/T_bath)`, and transfer generation uses
+`sum(Q_out*(1/T_bath - 1/T_cell))` at each actual quadrature point.
+
+Opposing bath powers therefore survive zero net body heat. A zero-conductivity
+bulk still permits exterior exchange between its baths while its body tangent
+is zero. Net surface-balance tolerances do not scale with large cancelling
+gross bath powers. Backward Euler and native SDIRK retain the same energy and
+entropy stage weights, including the current left-limit gas-bath event rules.
+
+Nine new native regressions cover independently prescribed surfaces and
+tangents, latent storage, zero-net-heat bath entropy, insulating bulk, separate
+SDIRK stage references, gas-bath events, partially covered ambient faces with
+internal conduction, and transactional ownership/refusals.
+These and the five prior radiation regressions passed in a focused build of
+the complete production thermal library and original numerical dependencies.
+This remains fixed-geometry, cellwise-conductivity, gray full-view exchange
+without surface storage, variable emissivity or spectral radiation entropy.
+
 ## Implicit upwind enthalpy with native conduction
 
 `ImplicitConductionChain::with_implicit_advection` and its graph counterpart

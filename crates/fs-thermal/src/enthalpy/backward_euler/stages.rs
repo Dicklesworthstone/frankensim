@@ -113,15 +113,14 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     pub(in crate::enthalpy) fn evaluate_stage<T, E: From<DepositionError>>(
         &self,
         energy_increments_j: &[f64],
-        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<TransportStepCoefficients<T>, E>,
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<BoundaryExchangeStepCoefficients<T>, E>,
         quadrature: StageQuadrature<'_>,
         with_entropy: bool,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
-        self.evaluate_endpoint_option(
+        self.evaluate_exchange_option(
             energy_increments_j,
-            |state| resolve(state).map(|transport| (transport, None)),
-            false,
+            resolve,
             with_entropy,
             Some(quadrature),
             checkpoint,

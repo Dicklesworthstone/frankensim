@@ -157,6 +157,22 @@ impl DepositionSimulation<'_> {
         reservoirs: &BTreeMap<CellId, f64>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<EntropyAudit, DepositionError> {
+        self.entropy_step_audit_with_boundary_exchanges(initial_h, temperatures, duration_s,
+            sources, conductances, ambient_conductances, reservoirs,
+            &super::backward_euler::BoundaryExchanges::default(), checkpoint)
+    }
+
+    // Each resolved bath supplies its own signed power and actual temperature.
+    // This remains the original entropy owner, including native stage weights.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn entropy_step_audit_with_boundary_exchanges(
+        &self, initial_h: &BTreeMap<CellId, f64>, temperatures: &BTreeMap<CellId, f64>,
+        duration_s: f64, sources: &BTreeMap<CellId, f64>,
+        conductances: &BTreeMap<u64, f64>, ambient_conductances: &BTreeMap<CellId, f64>,
+        reservoirs: &BTreeMap<CellId, f64>,
+        exchanges: &super::backward_euler::BoundaryExchanges,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<EntropyAudit, DepositionError> {
         checkpoint()?;
         if initial_h.len() != self.cells.len()
             || temperatures.len() != self.cells.len()
@@ -212,18 +228,36 @@ impl DepositionSimulation<'_> {
                     "invalid entropy temperature or exposed area",
                 ));
             }
-            let ambient = cell.boundary.ambient_k;
-            let g = if let Some(&g) = ambient_conductances.get(&id) {g}
-                else {finite(area * cell.boundary.htc_w_m2_k)?};
-            let q = finite(g * (ambient - t))?;
-            boundary.add(finite(q / ambient)?)?;
-            generation.add(finite((q / t) * ((ambient - t) / ambient))?)?;
+            if let Some(baths) = exchanges.ambient.get(&id) {
+                for bath in baths {
+                    let q = bath.outward_power_w;
+                    let tb = bath.temperature_k;
+                    boundary.add(finite(-q / tb)?)?;
+                    generation.add(finite((q / t) * ((t - tb) / tb))?)?;
+                }
+            } else {
+                let ambient = cell.boundary.ambient_k;
+                let g = if let Some(&g) = ambient_conductances.get(&id) {g}
+                    else {finite(area * cell.boundary.htc_w_m2_k)?};
+                let q = finite(g * (ambient - t))?;
+                boundary.add(finite(q / ambient)?)?;
+                generation.add(finite((q / t) * ((ambient - t) / ambient))?)?;
+            }
             if let Some(reservoir) = cell.boundary.reservoir {
-                let tr = reservoir.temperature_k;
-                let g = reservoirs.get(&id).copied().unwrap_or(reservoir.conductance_w_k);
-                let q = finite(g * (tr - t))?;
-                boundary.add(finite(q / tr)?)?;
-                generation.add(finite((q / t) * ((tr - t) / tr))?)?;
+                if let Some(baths) = exchanges.reservoir.get(&id) {
+                    for bath in baths {
+                        let q = bath.outward_power_w;
+                        let tb = bath.temperature_k;
+                        boundary.add(finite(-q / tb)?)?;
+                        generation.add(finite((q / t) * ((t - tb) / tb))?)?;
+                    }
+                } else {
+                    let tr = reservoir.temperature_k;
+                    let g = reservoirs.get(&id).copied().unwrap_or(reservoir.conductance_w_k);
+                    let q = finite(g * (tr - t))?;
+                    boundary.add(finite(q / tr)?)?;
+                    generation.add(finite((q / t) * ((tr - t) / tr))?)?;
+                }
             }
             let watts = sources.get(&id).copied().unwrap_or(cell.boundary.source_w);
             source.add(finite(watts / t)?)?;
