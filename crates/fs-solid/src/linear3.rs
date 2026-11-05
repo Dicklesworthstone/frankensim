@@ -6345,3 +6345,4 @@ mod tests {
             + columns[2][0] * (columns[0][1] * columns[1][2] - columns[0][2] * columns[1][1])
     }
 }
+

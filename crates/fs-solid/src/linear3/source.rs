@@ -53,3 +53,4 @@ impl From<TetElasticError> for SolidMaterialError {
         Self::Solid(error)
     }
 }
+
