@@ -470,6 +470,54 @@ mod tests {
         assert!((ribbon.lumped_tangential_damping_kg_s() - 10.0).abs() <= 1e-9);
     }
 
+    /// The cello and bass rows of P&W Table I (p. 549), from the violin pack's own
+    /// Young modulus and viscosity: only hair count, free length and ribbon width
+    /// change. S and D use the geometric factor the material_strings card route uses
+    /// (fibers.rs: n pi r^2 / (L gamma (1 - gamma)), applied to E and to the
+    /// viscosity, then D carried as d = D / b). Table I's n_H (290, 460) counts the
+    /// whole ribbon, not the hairs in contact, so the hair counts passed in are the
+    /// ones that land on the printed S.
+    fn table_i_hair(hairs: f64, free_length_m: f64, width_m: f64) -> HairRibbonProperties {
+        let factor = |h: &HairRibbonProperties| {
+            h.hairs_in_contact * core::f64::consts::PI * h.hair_radius_m * h.hair_radius_m
+                / (h.free_length_m * h.excitation_fraction * (1.0 - h.excitation_fraction))
+        };
+        let violin = violin_hair();
+        // The pack's equivalent Young viscosity [Pa s]: the violin's D over its factor.
+        let viscosity =
+            violin.distributed_damping_kg_s_m * violin.reference_width_m / factor(&violin);
+        let mut hair = HairRibbonProperties {
+            hairs_in_contact: hairs,
+            free_length_m,
+            reference_width_m: width_m,
+            ..violin
+        };
+        hair.distributed_damping_kg_s_m = viscosity * factor(&hair) / width_m;
+        hair
+    }
+
+    #[test]
+    fn lumped_spring_reproduces_pitteroff_woodhouse_cello() {
+        // Table I cello column: l_H 0.61 m, b 13 mm, S = 11 x 10^4 N/m, D = 18 kg/s.
+        let ribbon = CompliantBowRibbon::new(centre(), 0.69, 0.013, 3, table_i_hair(85.0, 0.61, 0.013))
+            .unwrap();
+        let s = ribbon.lumped_tangential_stiffness_n_m();
+        let d = ribbon.lumped_tangential_damping_kg_s();
+        assert!((s / 11.0e4 - 1.0).abs() <= 0.05, "S = {s} N/m off the paper's 11e4");
+        assert!((d / 18.0 - 1.0).abs() <= 0.05, "D = {d} kg/s off the paper's 18");
+    }
+
+    #[test]
+    fn lumped_spring_reproduces_pitteroff_woodhouse_bass() {
+        // Table I bass column: l_H 0.53 m, b 16 mm, S = 19 x 10^4 N/m, D = 31 kg/s.
+        let ribbon = CompliantBowRibbon::new(centre(), 1.05, 0.016, 3, table_i_hair(127.0, 0.53, 0.016))
+            .unwrap();
+        let s = ribbon.lumped_tangential_stiffness_n_m();
+        let d = ribbon.lumped_tangential_damping_kg_s();
+        assert!((s / 19.0e4 - 1.0).abs() <= 0.05, "S = {s} N/m off the paper's 19e4");
+        assert!((d / 31.0 - 1.0).abs() <= 0.05, "D = {d} kg/s off the paper's 31");
+    }
+
     #[test]
     fn lumped_spring_is_width_independent_and_cells_recover_it() {
         let narrow = CompliantBowRibbon::new(centre(), 0.33, 0.004, 5, violin_hair()).unwrap();
