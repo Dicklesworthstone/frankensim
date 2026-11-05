@@ -5364,3 +5364,51 @@ the original mechanism validity and work budgets, and backward-Euler heat
 stages. It adds no molecular transport, material-contact correction, leakage,
 thermal expansion, wall temperature gradients, temperature-dependent damping,
 general second-order accuracy, entropy inequality or FSI-stability certificate.
+
+### Closed molecular state-entropy admission
+
+`DissipationOperator::advance_for_with_entropy` adds an opt-in entropy and
+per-species inventory gate to the original axial SSP-RK2 molecular owner.
+Periodic fields, stationary adiabatic reflecting walls, and transmissive ends
+with zero molecular heat/species flux are admitted. The existing Maxwell-Stefan,
+partial-enthalpy, Fourier, viscous and authored Soret/Dufour fluxes still produce
+every candidate. Actual admitted temperatures come from the native total-energy
+inversion, including kinetic-to-internal conversion; accepted trajectories are
+unchanged when the additional gate passes. The flow clock remains owned by its
+composing integrator.
+
+The account uses original source entropy intervals and ideal-mixture partial
+pressures. A fixed original temperature and species-density basis removes
+arbitrary linear species reference terms from the admission quantity.
+Double-double density differences and a cancellation-safe relative-entropy
+remainder retain weak mixing and finite absent-species limits. The report
+separates the admitted thermal/mixing increment, the original source-state
+increment, and the reference contribution from numerical inventory residuals.
+Each species' continuity residual is independently bounded relative to its
+original mass; an originally absent species must stay absent. Conserving only
+total mass or elements cannot substitute for this species check.
+
+Every actual candidate must satisfy the caller's absolute entropy allowance.
+Entropy or inventory failure uses the existing bounded step-halving policy,
+without clipping species, temperature or energy. After all internal steps,
+the direct original-to-final entropy and species account must satisfy the same
+single allowance before any caller field is published. Internal accepted
+substeps therefore cannot accumulate a larger allowance. Cancellation, work
+exhaustion and final refusal preserve the complete original field and clock.
+Only the opt-in lane allocates entropy temperature storage; it reuses native
+candidate inversions and adds no spatial constitutive evaluations.
+
+This is a measured finite-step state-entropy admission, not a decomposition into
+constitutive physical production or a fully discrete entropy/invariant-domain
+theorem. Spatial and temporal numerical effects remain in its signed result.
+In particular, the existing arithmetic partial-enthalpy face can have negative
+entropy rate even while conserving physical energy; reducing the step need not
+repair that spatial defect. Reservoir chemical/thermal entropy exchange,
+moving walls, reactive or advective composition, RKL2 and network/spatial
+owners are outside this entry point.
+
+Five focused G0/G3/G4 regression definitions cover native trajectory parity
+under all three admitted boundary types and large formation-reference shifts;
+independent thermal/mixing entropy with viscous conversion; an energy-conserving
+negative-entropy face that must refuse; complete-interval allowance and rollback;
+weak mixing, absent species, late cancellation and reuse.

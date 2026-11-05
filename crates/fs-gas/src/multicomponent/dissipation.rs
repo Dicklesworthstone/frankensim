@@ -10,11 +10,13 @@
 //! fixed varying areas while refusing shear and bulk viscosity at every state.
 
 pub(super) mod evolve;
+mod entropy;
 mod face;
 mod law;
 pub(in crate::multicomponent) mod reservoir;
 pub(in crate::multicomponent) mod stabilized;
 
+pub use entropy::{MolecularEntropyControl, MolecularEntropyReport};
 pub use face::{PlanarTransport, SpatialTransport, TransportFaceReport, WallThermalCondition};
 #[cfg(feature = "material")]
 pub(crate) use law::validate_binary;
@@ -134,6 +136,16 @@ pub enum DissipationError {
     /// A full/two-half molecular probe exceeded its declared local accuracy.
     /// This is a measured estimate, not a bound on global or splitting error.
     EstimatedTemporalError { observed: f64, maximum: f64 },
+    /// An opt-in closed molecular trial decreased its inventory-corrected
+    /// original-state entropy beyond the caller's absolute allowance.
+    EntropyDecrease { change_j_k: f64, tolerance_j_k: f64 },
+    /// A closed molecular trial changed one species' total mass beyond its
+    /// relative allowance. Entropy references cannot hide this continuity defect.
+    SpeciesInventoryDrift {
+        species: usize,
+        residual_kg: f64,
+        tolerance_kg: f64,
+    },
     /// Complete requested evolution exceeded its bounded attempt count.
     WorkLimit {
         elapsed_time_s: f64,

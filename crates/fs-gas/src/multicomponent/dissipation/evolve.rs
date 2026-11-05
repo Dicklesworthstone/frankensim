@@ -30,7 +30,18 @@ pub(super) fn advance<L: TransportLaw>(
     reservoirs: ReservoirEnds<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
-    advance_inner(owner, flow, duration, controls, reservoirs, None, cancelled)
+    advance_inner(owner, flow, duration, controls, reservoirs, None, None, cancelled)
+}
+
+pub(super) fn advance_with_entropy<L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: DissipationControl,
+    entropy: &mut super::entropy::EntropyTracker,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<DissipationReport, DissipationError> {
+    advance_inner(owner, flow, duration, controls, [None; 2], None, Some(entropy), cancelled)
 }
 
 pub(super) fn advance_moving<L: TransportLaw>(
@@ -59,6 +70,7 @@ pub(super) fn advance_moving<L: TransportLaw>(
         controls,
         [None; 2],
         Some(wall_velocity),
+        None,
         cancelled,
     )
 }
@@ -71,6 +83,7 @@ fn advance_inner<L: TransportLaw>(
     controls: DissipationControl,
     reservoirs: ReservoirEnds<'_>,
     wall_velocity: Option<[f64; 2]>,
+    mut entropy: Option<&mut super::entropy::EntropyTracker>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
     poll(cancelled)?;
@@ -196,6 +209,9 @@ fn advance_inner<L: TransportLaw>(
                     last: Box::new(last),
                 });
             }
+            if let Some(account) = &mut entropy {
+                account.begin_attempt(&work.primitive);
+            }
             let attempt = (|| {
                 forward(
                     gas,
@@ -249,12 +265,24 @@ fn advance_inner<L: TransportLaw>(
                     for k in 0..m {
                         q[k] = 0.5 * work.current[i * m + k] + 0.5 * q[k];
                     }
-                    gas.decode(q, Some(work.primitive[i].temperature), cancelled)?;
+                    let state = gas.decode(q, Some(work.primitive[i].temperature), cancelled)?;
+                    if let Some(account) = &mut entropy {
+                        account.candidate_cell(
+                            gas, i, &work.current[i * m..(i + 1) * m], q,
+                            state.temperature, mesh.volumes()[i], cancelled,
+                        )?;
+                    }
+                }
+                if let Some(account) = &mut entropy {
+                    account.check_attempt(n)?;
                 }
                 Ok::<_, DissipationError>(b)
             })();
             match attempt {
                 Ok(b) => {
+                    if let Some(account) = &mut entropy {
+                        account.accept_attempt();
+                    }
                     for k in 0..m {
                         let transfers = [
                             0.5 * step * end_areas[0] * (a.left[k] + b.left[k]),
@@ -330,6 +358,9 @@ fn advance_inner<L: TransportLaw>(
         return Err(DissipationError::Invalid(
             "non-finite molecular extensive balance",
         ));
+    }
+    if let Some(account) = &mut entropy {
+        account.finish(gas, mesh.volumes(), &flow.states, &work.current, cancelled)?;
     }
     poll(cancelled)?;
     // No scratch clock is advanced: the composing time integrator owns time.
