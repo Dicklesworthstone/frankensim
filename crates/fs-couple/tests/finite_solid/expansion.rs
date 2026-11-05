@@ -1,4 +1,6 @@
 //! Directional finite expansion, original-mass mechanics and derivative oracles.
+mod visco;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_couple::finite_solid::thermal::{
@@ -107,7 +109,11 @@ fn frame(q: [[f64; 3]; 3]) -> ExpansionThermalFrame {
     }
 }
 
-pub(super) fn bind_expansion(card: &MaterialCard, q: [[f64; 3]; 3], temperature: f64) -> FiniteSolidMaterial {
+pub(super) fn bind_expansion(
+    card: &MaterialCard,
+    q: [[f64; 3]; 3],
+    temperature: f64,
+) -> FiniteSolidMaterial {
     let thermal = ExpansionThermalReference::try_new(
         card,
         path(card, false, "T", point(300.0)),

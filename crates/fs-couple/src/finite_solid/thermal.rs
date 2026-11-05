@@ -12,10 +12,14 @@
 //! isotropy these reduce to W0 = s^3 W(Fe), P0 = s^2 Pe and A0 = s Ae.
 //! Density belongs to the original reference at T_ref.
 //! Temperature is held per element during mechanics. This preparation supplies
-//! no heat equation, entropy evolution, temperature-change work or heat claim.
+//! no heat equation or entropy evolution. The explicit [`visco`] owner retains
+//! finite viscoelastic histories across prescribed temperature changes and
+//! reports their signed reference work separately from viscous heat.
 
 mod expansion;
 pub use expansion::{ExpansionThermalFrame, ExpansionThermalReference};
+/// Source-preserving thermal-reference changes in finite viscoelastic histories.
+pub mod visco;
 
 use super::{FiniteSolidError, FiniteSolidMaterial};
 use fs_blake3::ContentHash;

@@ -20,6 +20,12 @@ impl<M> ShiftedViscoelastic<M> {
         &self.law
     }
 
+    /// Move out the prepared law without cloning its branches. Callers that
+    /// retain this law must also retain its temperature/calibration context.
+    pub fn into_law(self) -> M {
+        self.law
+    }
+
     /// Actual temperature, shift factor, derivative and calibration declaration.
     pub const fn state(&self) -> &TemperatureShiftState {
         &self.state
