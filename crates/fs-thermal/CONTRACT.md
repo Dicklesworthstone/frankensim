@@ -1618,6 +1618,30 @@ geometry and authored sources; it does not automatically apply their heat.
 The existing `advance_evaporating_to` timeline remains first-order heat/phase
 splitting. Its original calls use zero additional supplied heat.
 
+`advance_coupled_evaporating_to` feeds the original start-state source,
+convection, reservoir and contact heat directly into that phase endpoint on
+each native interval. Other cells receive their original explicit heat update,
+including the equal-and-opposite contact exchange. The liquid never visits a
+sensible-only intermediate state. Original conductive CFL bounds are computed
+again after every actual mass change; one substep budget spans the whole
+request. Birth, contact and boundary events clip both heat and mass exchange,
+with exposure changes applied only after the preceding interval completes.
+
+`CoupledEvaporationAudit` reports actual mass/storage changes, incoming birth
+mass/energy, external heat and full carried vapor energy. Latent energy is a
+subaccount of that vapor stream. Compensated balances cancel each cell's
+original or birth enthalpy datum before summing, avoiding subtraction of large
+absolute energies. Failure or final cancellation
+publishes no state. This method is first-order IMEX: the phase endpoint is
+implicit but contact and boundary heat remain explicit and require temporal
+refinement. It does not remove the original thermal CFL restriction or evolve
+the prescribed gas film or reference geometry.
+
+Six native coupled-timeline regressions cover direct latent heat supply,
+independently solved source/contact/bath balances, mass-dependent CFL limits,
+birth and coverage events, large shifted birth-energy datums with an unchanged
+high-energy neighbor, and late event/cancellation rollback.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry

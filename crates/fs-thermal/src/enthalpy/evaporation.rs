@@ -21,6 +21,10 @@ use crate::evaporation::{
     advance_surface_with_heat,
 };
 
+#[path = "evaporation/coupled.rs"]
+mod coupled;
+pub use coupled::CoupledEvaporationAudit;
+
 /// A failed phase or thermal proposal leaves all accepted state unchanged.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ThermalEvaporationError {

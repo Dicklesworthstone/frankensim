@@ -785,11 +785,28 @@ impl<'a> DepositionSimulation<'a> {
         unrepresented_heat_j: &mut f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
+        self.thermal_step_except_cell(rates, audit, unrepresented_heat_j, None, checkpoint)
+    }
+
+    // A coupled open-mass owner advances its one liquid cell with these SAME
+    // heat rates. All other cells retain the original explicit update and
+    // representability checks; internal link heat is never evaluated twice.
+    fn thermal_step_except_cell(
+        &mut self,
+        rates: HeatRates,
+        audit: &mut EnergyAudit,
+        unrepresented_heat_j: &mut f64,
+        excluded: Option<CellId>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
         let HeatRates { temperatures, watts: rates, external_w, explicit_dt_s: dt } =
             rates;
         for (i, (&id, cell)) in self.cells.iter_mut().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
+            }
+            if excluded == Some(id) {
+                continue;
             }
             let old_h = cell.specific_h_j_kg;
             let next_h = finite(old_h + finite(dt * rates[&id] / cell.mass_kg)?)?;

@@ -573,12 +573,12 @@ impl<'a> DepositionSimulation<'a> {
 // Fixed cell order and Neumaier correction retain small terms of either sign.
 // The sum contains physical changes, not arbitrary formation-energy datums.
 #[derive(Default)]
-struct EnergySum {
+pub(super) struct EnergySum {
     sum: f64,
     correction: f64,
 }
 impl EnergySum {
-    fn add(&mut self, value: f64) -> Result<(), DepositionError> {
+    pub(super) fn add(&mut self, value: f64) -> Result<(), DepositionError> {
         finite(value)?;
         let next = finite(self.sum + value)?;
         let lost = if self.sum.abs() >= value.abs() {
@@ -590,7 +590,7 @@ impl EnergySum {
         self.sum = next;
         Ok(())
     }
-    fn value(self) -> Result<f64, DepositionError> {
+    pub(super) fn value(self) -> Result<f64, DepositionError> {
         finite(self.sum + self.correction)
     }
 }

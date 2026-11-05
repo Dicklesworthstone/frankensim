@@ -576,3 +576,6 @@ fn external_liquid_batch_validates_all_cells_and_final_cancellation_before_writi
 
 #[path = "tests/heating.rs"]
 mod heating;
+
+#[path = "tests/coupled.rs"]
+mod coupled;
