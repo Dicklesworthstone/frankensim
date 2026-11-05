@@ -134,7 +134,7 @@ pub struct SolidGasConvectionSample {
 impl<'c, 'm> PreparedContact<'c, 'm> {
     /// Compile after reference source selection, before any nonlinear endpoint
     /// or explicit wall-substep trial. Trial fluxes borrow this original chart.
-    pub(super) fn prepare_solid_profile(
+    pub(crate) fn prepare_solid_profile(
         &self,
         source: &StructuralSource<'m>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
