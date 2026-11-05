@@ -216,6 +216,37 @@ fn component_identity_fluid_roles_tie_addresses_and_bridge_extent_refuse_before_
     });
 }
 
+/// The optional block closes the v4 records: absent it stays empty, present it is read in full, and a bad one refuses.
+#[test]
+fn a_point_mass_block_reads_after_the_bridges_and_a_bad_one_refuses() {
+    use fs_couple::shear_shell::assembly::ShellPointMass;
+    let with = |block: &str| format!("{}\n{block}", ASSEMBLED.trim_end());
+    let parsed = |text: &str| {
+        let profile = Profile::parse(text.as_bytes()).unwrap();
+        let BodyModel::Assembly(spec) = profile.model else { panic!("not an assembled profile") };
+        spec.point_masses
+    };
+    assert!(parsed(ASSEMBLED).is_empty());
+    assert_eq!(
+        parsed(&with("point-masses 1\npoint-mass left 0.25 2\nmass-node 3\nmass-node 4\n")),
+        vec![ShellPointMass { component: 0, nodes: vec![3, 4], mass_kg: 0.25 }]
+    );
+    for block in [
+        "point-masses 0\n",
+        "point-masses 17\n",
+        "point-masses 1\npoint-mass unknown 0.25 1\nmass-node 3\n",
+        "point-masses 1\npoint-mass left -0.25 1\nmass-node 3\n",
+        "point-masses 1\npoint-mass left 0 1\nmass-node 3\n",
+        "point-masses 1\npoint-mass left NaN 1\nmass-node 3\n",
+        "point-masses 1\npoint-mass left 0.25 1\nmass-node 90\n",
+        "point-masses 1\npoint-mass left 0.25 2\nmass-node 3\nmass-node 3\n",
+        "point-masses 1\npoint-mass left 0.25 1\nmass-node 3\nmass-node 4\n",
+        "point-mass left 0.25 1\nmass-node 3\n",
+    ] {
+        assert!(Profile::parse(with(block).as_bytes()).is_err(), "accepted {block}");
+    }
+}
+
 /// The window's mode count is only known once the whole window is solved, so a request beyond it refuses naming the count
 /// it holds. Cut between the fixture's second and third modes, the window holds two, and asking for three says so.
 #[test]

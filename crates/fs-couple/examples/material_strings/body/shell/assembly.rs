@@ -48,7 +48,7 @@ pub(crate) struct Spec {
     window: (f64, f64),
     projection_work: usize,
     coating_memory: Option<coating::MemoryInput>,
-    point_masses: Vec<ShellPointMass>,
+    pub(crate) point_masses: Vec<ShellPointMass>,
 }
 
 impl Spec {
