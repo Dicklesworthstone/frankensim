@@ -17,9 +17,15 @@ pub(super) struct KernelBins {
 
 impl KernelBins {
     pub(super) fn add(&mut self, delay: usize, gain: f64, weight: f64, shapes: &[f64]) {
+        self.add_scaled(delay, Dd::from_f64(gain) * Dd::from_f64(weight), shapes);
+    }
+
+    /// Keep normalized aperture weights in DD until every source/capsule path
+    /// has joined the same coefficient; rounding a small area weight early
+    /// can erase a weak residue between cancelling large patches.
+    pub(super) fn add_scaled(&mut self, delay: usize, scale: Dd, shapes: &[f64]) {
         let row = self.rows.entry(delay).or_insert_with(|| vec![Dd::ZERO; shapes.len()]);
         debug_assert_eq!(row.len(), shapes.len());
-        let scale = Dd::from_f64(gain) * Dd::from_f64(weight);
         for (value, &shape) in row.iter_mut().zip(shapes) {
             *value = *value + scale * Dd::from_f64(shape);
         }

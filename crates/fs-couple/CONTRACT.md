@@ -27094,6 +27094,47 @@ model. Ideal microphone velocity sensitivity retains the source's equilibrium
 relaxation polynomial, outward intensity decay, signed unequal propagation paths,
 spatial finite differences, and the original causal material-pressure observer.
 
+### Finite-area coherent microphone capsules
+
+`pcm_wav::baffled::aperture::Aperture` describes positive sensing-area
+quadrature in the original source frame. Its circular builder exposes radial
+and azimuthal refinement independently. The measured quantity is the area
+average of pressure and particle velocity, followed by the original common
+`FirstOrder` pattern; it is never an average of magnitudes, powers, source
+distances or independent recordings. The plane normal and microphone front
+axis are separately declared. The actual source-to-capsule paths retain their
+own phase, travel time and reactive velocity, so a pressure null may retain
+directional output. DD-normalized area weights survive until the complete
+coherent field or FIR coefficient is rounded.
+
+`BaffledPressure::{new_aperture_first_order,new_multirate_aperture_first_order}`
+compile the complete surface/capsule product into the original one pressure
+bank and optional aligned reactive-velocity bank. Their callback and physical
+clock are unchanged. The reported position is the area centroid for metadata;
+it never replaces the physical path geometry. Every point retains the 5 cm
+baffle-clearance admission. Up to 4096 sensing points are accepted, with an
+explicit complete coefficient-projection work limit, bounded history, and
+cancellation checks before/after point-template preparation and during merged
+path projection. A singleton delegates bit for bit to the point constructor.
+
+`harmonic::Prepared::{new_aperture,new_relaxing_aperture}` tile the existing
+Green-kernel owner in groups of at most 64 receivers, then retain just one
+pressure/vector row per source input. Warm source evaluation allocates nothing
+and is independent of capsule quadrature count. Molecular propagation uses the
+original source-owned complex wavenumber on each path, including its gradient;
+no second absorption law is applied. The harmonic work budget covers all
+source/input/capsule contributions before any tile is prepared.
+
+Focused G1/G2/G3/G4 tests cover a three-rung disk ladder against independent
+closed-form pressure and axial-velocity area integrals, coherent pressure
+cancellation with live velocity, a 2^-60 sensing-area residual, singleton
+equivalence, multirate waveforms against the continuous vector field, and
+complete-work/clearance/cancellation refusal. Source and capsule spatial
+refinement remain separate caller obligations. These are ideal stationary
+sensing apertures in the same infinite rigid baffle model, not diaphragm
+mechanics, capsule-body scattering, measured capsule frequency responses,
+acoustic backreaction or closure of the broader M2.6-W1 bead.
+
 ## Three-dimensional principal-axis moisture transport and swelling
 
 `moisture::cartesian::MoistureCartesian` evolves dry-basis bound moisture on

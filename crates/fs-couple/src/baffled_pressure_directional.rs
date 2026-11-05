@@ -9,7 +9,7 @@
 use super::path::{HALF, TAPS, KernelBins, taps, window};
 use super::{BaffledPressure, CircularOutletReceiver, MAX_HISTORY, RayleighMedium, SurfaceSample};
 use fs_bem::near_field::FirstOrder;
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 
 use std::f64::consts::TAU;
 
@@ -103,35 +103,10 @@ impl BaffledPressure {
         reactive.interpolation_delay = HALF;
         let alignment =
             receiver.decimator.delay_output_frames() - reactive.decimator.delay_output_frames();
-        let front = microphone.front_axis();
-        let window = window();
         let mut acceleration_bins = KernelBins::default();
         let mut velocity_bins = KernelBins::default();
-        for sample in surface {
-            let delta: [f64; 3] = std::array::from_fn(|i| position_m[i] - sample.position_m[i]);
-            let radius = det::sqrt(delta.iter().map(|x| x * x).sum());
-            let projection = (0..3).map(|i| front[i] * delta[i] / radius).sum::<f64>();
-            let gain = medium.density * sample.area_m2 / (TAU * radius);
-            let acceleration_gain = gain * (alpha - (1.0 - alpha) * projection);
-            let velocity_gain = -gain * (1.0 - alpha) * medium.sound_speed * projection / radius;
-            let travel = radius * f64::from(output_rate) / medium.sound_speed;
-            for (bins, delay, weight) in [
-                (&mut acceleration_bins, travel, acceleration_gain),
-                (&mut velocity_bins, travel + alignment, velocity_gain),
-            ] {
-                if !delay.is_finite() || delay >= (MAX_HISTORY - TAPS) as f64 {
-                    return Err(
-                        "first-order propagation/alignment exceeds the causal history budget"
-                            .into(),
-                    );
-                }
-                let first = delay.floor() as usize;
-                let interpolation = taps(delay - first as f64, &window);
-                for (tap, interpolation_weight) in interpolation.iter().enumerate() {
-                    bins.add(first + tap, weight, *interpolation_weight, &sample.mode_shape);
-                }
-            }
-        }
+        add_paths(surface, output_rate, position_m, medium, microphone, alignment,
+            Dd::ONE, &window(), &mut acceleration_bins, &mut velocity_bins, &mut || false)?;
         install(&mut receiver, acceleration_bins)?;
         install(&mut reactive, velocity_bins)?;
         receiver.delay_samples = (
@@ -175,7 +150,56 @@ impl BaffledPressure {
     }
 }
 
-fn install(receiver: &mut BaffledPressure, bins: KernelBins) -> Result<(), String> {
+/// Shared point/aperture path preparation. Only the receiver quadrature weight
+/// varies: both images retain the same reactive term and causal alignment.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn add_paths(
+    surface: &[SurfaceSample],
+    output_rate: u32,
+    position_m: [f64; 3],
+    medium: RayleighMedium,
+    microphone: FirstOrder,
+    alignment: f64,
+    aperture_weight: Dd,
+    kernel_window: &[f64; TAPS],
+    acceleration_bins: &mut KernelBins,
+    velocity_bins: &mut KernelBins,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), String> {
+    let alpha = microphone.pressure_fraction();
+    let front = microphone.front_axis();
+    for (index, sample) in surface.iter().enumerate() {
+        if index % 64 == 0 && cancelled() {
+            return Err("Rayleigh aperture preparation cancelled".into());
+        }
+        let delta: [f64; 3] = std::array::from_fn(|i| position_m[i] - sample.position_m[i]);
+        let radius = det::sqrt(delta.iter().map(|x| x * x).sum());
+        let projection = (0..3).map(|i| front[i] * delta[i] / radius).sum::<f64>();
+        let gain = medium.density * sample.area_m2 / (TAU * radius);
+        let acceleration_gain = gain * (alpha - (1.0 - alpha) * projection);
+        let velocity_gain = -gain * (1.0 - alpha) * medium.sound_speed * projection / radius;
+        let travel = radius * f64::from(output_rate) / medium.sound_speed;
+        for (bank, delay, weight) in [
+            (0, travel, acceleration_gain),
+            (1, travel + alignment, velocity_gain),
+        ] {
+            if bank == 1 && alpha == 1.0 { continue; }
+            if !delay.is_finite() || delay < 1.0 || delay >= (MAX_HISTORY - TAPS) as f64 {
+                return Err("first-order propagation/alignment exceeds the causal history budget".into());
+            }
+            let first = delay.floor() as usize;
+            let interpolation = taps(delay - first as f64, kernel_window);
+            let bins = if bank == 0 { &mut *acceleration_bins } else { &mut *velocity_bins };
+            for (tap, interpolation_weight) in interpolation.iter().enumerate() {
+                let scale = Dd::from_f64(weight) * Dd::from_f64(*interpolation_weight) * aperture_weight;
+                bins.add_scaled(first + tap, scale, &sample.mode_shape);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn install(receiver: &mut BaffledPressure, bins: KernelBins) -> Result<(), String> {
     let kernels = bins.finish()?;
     let first = kernels
         .first()

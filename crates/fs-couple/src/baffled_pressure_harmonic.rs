@@ -23,7 +23,7 @@ use super::{MAX_RAYLEIGH_INPUTS, RayleighMedium, SurfaceSample};
 use fs_bem::helmholtz::Medium;
 use fs_bem::near_field::FirstOrder;
 use fs_material::relaxation::RelaxationState;
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 use std::f64::consts::TAU;
 
 /// Same receiver-array bound as the existing exterior BEM observer.
@@ -202,6 +202,96 @@ impl Prepared {
             options,
             cancelled,
         )
+    }
+
+    /// One finite-area ideal capsule, retaining the coherent area average of
+    /// pressure, gradient and particle velocity. Apply any common `FirstOrder`
+    /// pattern afterwards with `observe_into`, exactly as for a point receiver.
+    ///
+    /// The original point Green kernels are prepared in bounded receiver tiles,
+    /// then collapsed in DD before returning one row per input. Point kernels
+    /// retain their original C64 precision before area reduction. Source and
+    /// capsule quadrature must both be refined; there is no magnitude averaging or
+    /// effective-distance approximation. Repeated evaluation allocates nothing
+    /// and its work/storage are independent of the number of capsule points.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_aperture(
+        surface: &[SurfaceSample], inputs: usize, aperture: &super::aperture::Aperture,
+        frequency_hz: f64, medium: RayleighMedium, options: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        Self::prepare_aperture(surface, inputs, aperture, frequency_hz, medium,
+            None, options, cancelled)
+    }
+
+    /// The same finite sensing area through the source-owned molecular
+    /// absorption and dispersion. Every path retains its original complex
+    /// wavenumber, distance and reactive velocity; absorption is counted once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_relaxing_aperture(
+        surface: &[SurfaceSample], inputs: usize, aperture: &super::aperture::Aperture,
+        frequency_hz: f64, relaxation: &RelaxationState, options: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        Self::prepare_aperture(surface, inputs, aperture, frequency_hz,
+            RayleighMedium::from(relaxation.gas()), Some(relaxation), options, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_aperture(
+        surface: &[SurfaceSample], inputs: usize, aperture: &super::aperture::Aperture,
+        frequency_hz: f64, medium: RayleighMedium, relaxation: Option<&RelaxationState>,
+        options: Options, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        let terms = surface.len().checked_mul(inputs)
+            .and_then(|n| n.checked_mul(aperture.samples().len()));
+        if !(1..=MAX_RAYLEIGH_INPUTS).contains(&inputs) || surface.is_empty()
+            || !(1..=MAX_KERNEL_TERMS).contains(&options.maximum_kernel_terms)
+            || terms.is_none_or(|n| n > options.maximum_kernel_terms)
+        {
+            return Err("harmonic capsule complete source/receiver kernel-work budget exceeded".into());
+        }
+        let positions: Vec<_> = aperture.samples().iter().map(|s| s.position_m).collect();
+        if positions.len() == 1 {
+            return Self::prepare(surface, inputs, &positions, frequency_hz, medium,
+                relaxation, options, cancelled);
+        }
+        let mut sums = vec![[[Dd::ZERO; 2]; 4]; inputs];
+        let mut first = None;
+        for (tile, positions) in positions.chunks(MAX_RECEIVERS).enumerate() {
+            let prepared = Self::prepare(surface, inputs, positions, frequency_hz,
+                medium, relaxation, options, &mut cancelled)?;
+            for (receiver, row) in prepared.columns.chunks_exact(inputs).enumerate() {
+                if cancelled() { return Err("harmonic aperture preparation cancelled".into()); }
+                let weight = aperture.weights()[tile * MAX_RECEIVERS + receiver];
+                for (sum, column) in sums.iter_mut().zip(row) {
+                    for (value, field) in sum.iter_mut().zip([
+                        column.pressure, column.velocity[0], column.velocity[1], column.velocity[2],
+                    ]) {
+                        value[0] = value[0] + weight * Dd::from_f64(field.re);
+                        value[1] = value[1] + weight * Dd::from_f64(field.im);
+                    }
+                }
+            }
+            if first.is_none() { first = Some(prepared); }
+        }
+        let mut prepared = first.ok_or("empty harmonic capsule quadrature")?;
+        let mut columns = Vec::with_capacity(inputs);
+        for sum in sums {
+            if sum.iter().flatten().any(|x| !x.hi.is_finite() || !x.lo.is_finite()) {
+                return Err("harmonic aperture field overflow".into());
+            }
+            let field = sum.map(|x| C64::new(x[0].to_f64(), x[1].to_f64()));
+            let column = Column { pressure: field[0], velocity: [field[1], field[2], field[3]] };
+            if !finite_field(&column.field(prepared.omega_rho)) {
+                return Err("harmonic aperture field overflow".into());
+            }
+            columns.push(column);
+        }
+        if cancelled() { return Err("harmonic aperture preparation cancelled".into()); }
+        prepared.columns = columns;
+        prepared.receivers = 1;
+        Ok(prepared)
     }
 
     #[allow(clippy::too_many_arguments)]

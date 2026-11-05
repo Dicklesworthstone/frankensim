@@ -36,6 +36,10 @@ mod bandlimited;
 #[path = "baffled_pressure_directional.rs"]
 mod directional;
 
+/// Finite-area pressure/velocity capsules through the same retarded field.
+#[path = "baffled_pressure_aperture.rs"]
+pub mod aperture;
+
 #[path = "baffled_pressure_path.rs"]
 mod path;
 
