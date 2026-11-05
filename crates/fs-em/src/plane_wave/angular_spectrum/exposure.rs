@@ -20,6 +20,12 @@ use fs_math::dd::Dd;
 mod sources;
 use sources::{ExposureLine, ExposureLines, ExposureSide};
 
+mod interferometer;
+pub use interferometer::{
+    AngularSpectrumExposureInterferenceArm, AngularSpectrumExposureInterferenceLimits,
+    PreparedAngularSpectrumExposureInterferometer,
+};
+
 mod aperture;
 mod cell;
 pub use aperture::{

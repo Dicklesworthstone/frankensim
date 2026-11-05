@@ -3035,6 +3035,39 @@ budget boundaries, cancellation and replay. G1/G3 cell-power regressions cover
 x/y Nyquist traveling waves, mixed real/proper ensembles, spatial refinement
 of the same physical wave and a short-window opposite-mode interference null.
 
+### Prepared broadband interference between analyzed observation arms
+
+The original `AngularSpectrumExposure` and `AngularSpectrumExposureEnsemble`
+owners expose `prepare_interferometer` for 1–4096 exterior observation arms,
+each with an explicit Cartesian analyzer and one of the original six
+illumination sides. Frequency-grouped Maxwell fields and the original
+`HarmonicWindow` kernels are prepared once for the authored shutter. Distinct
+points on a common side/depth share modal reconstruction; direct spatial
+synthesis reuses the monochromatic coherence owner's DD envelope/carrier path.
+
+Readings apply an explicit complex amplitude gain and time delay to each arm.
+With the original positive-time convention the delay multiplies each actual
+frequency by `exp(-i*omega*delay)`. Delays are relative source-clock offsets;
+no optical path, splitter transmission or dispersion is inferred. Equal-
+frequency arm fields combine before products with their DD low components
+retained. The deterministic mean and real covariance factors retain carrier
+sum and difference tones; proper factors retain only their original difference
+tones. Independent factors never acquire cross products from frequency equality.
+Uniform and triangular shutters keep the shared temporal owner's normalization.
+
+Preparation admits conservative A*N*sum(L_r) mode work, triangular temporal
+pair counts sum(F_r*(F_r+1)/2), retained amplitudes/kernels, one modal plane and
+reusable frequency scratch before allocation. Repeated gain/delay readings
+allocate nothing and cost O(A*sum(F_r)+sum(F_r²)), without FFTs or material
+solves. Geometry, gains, delays, finite arithmetic, budgets and cancellation
+remain checked for dark banks. These are electric mean squares in V²/m²,
+not detector watts, source PSD inference or detector back-action. The shared
+DD temporal arithmetic gives no relative guarantee at an arbitrary beat null.
+
+Focused regressions compare independent analytic multi-arm delay fringes under
+both shutters, mixed real/proper source moments, original two-face fields,
+sub-ulp modal residuals at a dark port, exact budgets and transactional refusals.
+
 ### Finite exposures of proper complex spectral covariance
 
 `angular_spectrum::AngularSpectrumExposureEnsemble` composes the existing

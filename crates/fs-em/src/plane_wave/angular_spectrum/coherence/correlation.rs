@@ -9,8 +9,8 @@
 
 use super::*;
 
-type ComplexDd = [Dd; 2];
-type Electric = [ComplexDd; 3];
+pub(in crate::plane_wave::angular_spectrum) type ComplexDd = [Dd; 2];
+pub(in crate::plane_wave::angular_spectrum) type Electric = [ComplexDd; 3];
 type Tensor = [[ComplexDd; 3]; 3];
 const ZERO_COMPLEX: ComplexDd = [Dd::ZERO; 2];
 const ZERO_TENSOR: Tensor = [[ZERO_COMPLEX; 3]; 3];
@@ -388,7 +388,9 @@ impl AngularSpectrumCoherence<'_, '_, '_> {
     }
 }
 
-fn admit_arm_count(count: usize) -> Result<(), AngularSpectrumError> {
+pub(in crate::plane_wave::angular_spectrum) fn admit_arm_count(
+    count: usize,
+) -> Result<(), AngularSpectrumError> {
     if count == 0 || count > 4096 {
         return Err(bad("interferometer requires one to 4096 observation arms"));
     }
@@ -412,37 +414,60 @@ fn synthesize<const N: usize>(
     observations: [AngularSpectrumObservation; N],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[Electric; N], AngularSpectrumError> {
+    synthesize_electric_parts(
+        factor,
+        observations.map(|observation| observation.position_m),
+        |index, point| {
+            let observation = observations[point];
+            let (electric, _) = factor.mode_field(
+                &factor.modes[index],
+                observation.side,
+                observation.distance_from_face_m,
+            )?;
+            Ok(electric.map(lift))
+        },
+        cancelled,
+    )
+}
+
+// One direct spatial synthesis for original coherent fields and frequency-
+// grouped DD fields. The callback supplies the original Maxwell amplitudes;
+// envelope/carrier phase evaluation and cancellation stay in this owner.
+pub(in crate::plane_wave::angular_spectrum) fn synthesize_electric_parts<const N: usize>(
+    factor: &PlanarAngularSpectrum<'_, '_>,
+    positions: [[f64; 2]; N],
+    mut electric: impl FnMut(usize, usize) -> Result<Electric, AngularSpectrumError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Electric; N], AngularSpectrumError> {
     poll(cancelled)?;
     let mut sums = [[ZERO_COMPLEX; 3]; N];
-    for (index, mode) in factor.modes.iter().enumerate() {
+    for index in 0..factor.modes.len() {
         if index % 32 == 0 {
             poll(cancelled)?;
         }
         let kx = factor.envelope_wavenumber(0, index % factor.grid.width);
         let ky = factor.envelope_wavenumber(1, index / factor.grid.width);
-        for (sum, observation) in sums.iter_mut().zip(observations) {
-            let (electric, _) =
-                factor.mode_field(mode, observation.side, observation.distance_from_face_m)?;
+        for (point, (sum, position)) in sums.iter_mut().zip(positions).enumerate() {
+            let electric = electric(index, point)?;
             // Keep the original envelope offsets: adding a much larger carrier
             // in binary64 can erase distinct bins before phase reconstruction.
-            let phase = Dd::from_f64(kx) * Dd::from_f64(observation.position_m[0])
-                + Dd::from_f64(ky) * Dd::from_f64(observation.position_m[1]);
+            let phase = Dd::from_f64(kx) * Dd::from_f64(position[0])
+                + Dd::from_f64(ky) * Dd::from_f64(position[1]);
             if !phase.hi.is_finite() || !phase.lo.is_finite() {
                 return Err(bad("two-point spatial phase is unrepresentable"));
             }
             let (sine, cosine) = det::sin_cos_dd(phase);
             for (value, amplitude) in sum.iter_mut().zip(electric) {
-                *value = plus(*value, multiply(lift(amplitude), [cosine, -sine]));
+                *value = plus(*value, multiply(amplitude, [cosine, -sine]));
             }
         }
     }
     // The common carrier multiplies each completed envelope once. It cancels
     // in local moments, but its relative phase survives between observations.
     if factor.carrier_rad_m != [0.0; 2] {
-        for (field, observation) in sums.iter_mut().zip(observations) {
-            let phase = Dd::from_f64(factor.carrier_rad_m[0])
-                * Dd::from_f64(observation.position_m[0])
-                + Dd::from_f64(factor.carrier_rad_m[1]) * Dd::from_f64(observation.position_m[1]);
+        for (field, position) in sums.iter_mut().zip(positions) {
+            let phase = Dd::from_f64(factor.carrier_rad_m[0]) * Dd::from_f64(position[0])
+                + Dd::from_f64(factor.carrier_rad_m[1]) * Dd::from_f64(position[1]);
             if !phase.hi.is_finite() || !phase.lo.is_finite() {
                 return Err(bad("two-point carrier phase is unrepresentable"));
             }
@@ -482,7 +507,10 @@ fn contract(tensor: &Tensor, a: [C64; 3], b: [C64; 3]) -> ComplexDd {
     sum
 }
 
-fn analyze(field: Electric, weights: [C64; 3]) -> ComplexDd {
+pub(in crate::plane_wave::angular_spectrum) fn analyze(
+    field: Electric,
+    weights: [C64; 3],
+) -> ComplexDd {
     let mut sum = ZERO_COMPLEX;
     for (value, weight) in field.into_iter().zip(weights) {
         sum = plus(sum, multiply(conjugate(lift(weight)), value));
@@ -490,35 +518,41 @@ fn analyze(field: Electric, weights: [C64; 3]) -> ComplexDd {
     sum
 }
 
-fn admit_analyzers(analyzers: [[C64; 3]; 2]) -> Result<(), AngularSpectrumError> {
+pub(in crate::plane_wave::angular_spectrum) fn admit_analyzers(
+    analyzers: [[C64; 3]; 2],
+) -> Result<(), AngularSpectrumError> {
     if analyzers.iter().flatten().any(|&z| !finite(z)) {
         return Err(bad("electric analyzer weights must be finite"));
     }
     Ok(())
 }
 
-fn lift(z: C64) -> ComplexDd {
+pub(in crate::plane_wave::angular_spectrum) fn lift(z: C64) -> ComplexDd {
     [Dd::from_f64(z.re), Dd::from_f64(z.im)]
 }
-fn conjugate(z: ComplexDd) -> ComplexDd {
+pub(in crate::plane_wave::angular_spectrum) fn conjugate(z: ComplexDd) -> ComplexDd {
     [z[0], -z[1]]
 }
-fn plus(a: ComplexDd, b: ComplexDd) -> ComplexDd {
+pub(in crate::plane_wave::angular_spectrum) fn plus(a: ComplexDd, b: ComplexDd) -> ComplexDd {
     [a[0] + b[0], a[1] + b[1]]
 }
-fn multiply(a: ComplexDd, b: ComplexDd) -> ComplexDd {
+pub(in crate::plane_wave::angular_spectrum) fn multiply(a: ComplexDd, b: ComplexDd) -> ComplexDd {
     [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
 }
 fn half(z: ComplexDd) -> ComplexDd {
     z.map(|value| value * Dd::from_f64(0.5))
 }
-fn rounded(z: ComplexDd) -> Result<C64, AngularSpectrumError> {
+pub(in crate::plane_wave::angular_spectrum) fn rounded(
+    z: ComplexDd,
+) -> Result<C64, AngularSpectrumError> {
     if z.iter().any(|v| !v.hi.is_finite() || !v.lo.is_finite()) {
         return Err(bad("two-point electric moment is unrepresentable"));
     }
     Ok(C64::new(z[0].to_f64(), z[1].to_f64()))
 }
-fn nonnegative(value: Dd) -> Result<f64, AngularSpectrumError> {
+pub(in crate::plane_wave::angular_spectrum) fn nonnegative(
+    value: Dd,
+) -> Result<f64, AngularSpectrumError> {
     rounded([value, Dd::ZERO])?;
     if value.lt(Dd::ZERO) {
         return Err(bad("electric mean square must remain nonnegative"));

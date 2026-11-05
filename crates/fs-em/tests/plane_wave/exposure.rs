@@ -6,6 +6,7 @@ mod carrier_stress;
 mod exterior_momentum;
 mod heat_spectrum;
 mod integrated_heat;
+mod interferometer;
 mod statistics;
 mod stress;
 mod stress_momentum;

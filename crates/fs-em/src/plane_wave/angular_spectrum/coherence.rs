@@ -11,7 +11,7 @@ use super::*;
 use crate::plane_wave::layers::FIELD_PREPARATION_WORKSPACE_BYTES;
 use fs_math::dd::Dd;
 
-mod correlation;
+pub(super) mod correlation;
 pub use correlation::{
     AngularSpectrumCorrelationLimits, AngularSpectrumInterferenceArm,
     AngularSpectrumInterferenceStatistics, AngularSpectrumMutualCoherence,
