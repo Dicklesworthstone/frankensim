@@ -1,5 +1,7 @@
 //! G1/G3/G4 original-source temperature continuation of retained film mass.
 //! These manufactured curves test coupling, not measured fluid accuracy.
+#[path = "compressible_film.rs"]
+mod compressible_film;
 #[path = "power_law.rs"]
 mod power_law;
 

@@ -4018,6 +4018,47 @@ resolver, cavitation material functions, full matdb/thermochem dependencies and
 native film solver. Unrelated adapters are excluded; missing `asupersync`
 prevents a full workspace run, and no full-constellation result is claimed.
 
+### Source-bound compressive storage and thermal expansion in films
+
+`MaterialCavitatingFilm<ResolvedCavitationState>::with_isothermal_bulk_modulus`
+binds the original source to the native `CompressibleCavitatingFilm`. The caller
+names an explicit static semantic Pressure query coordinate, which must equal
+the native ambient reference pressure. This establishes the meaning of source
+`rho(T,p_ref)`; density at saturation or an unspecified pressure cannot silently
+become the reference density. An independently authored positive ISOTHERMAL
+bulk modulus supplies `rho(T,p)=rho(T,p_ref)*exp((p-p_ref)/B)`. Source sound speed
+is not substituted for that modulus. The native geometry, viscosity, absolute
+supplies and solve controls remain shared. The compressible owner has a distinct
+inventory identity and must supply the initial state.
+
+`MaterialCompressibleCavitatingFilm::advance_with_temperature_source` refreshes
+the same pinned card/claims, with every nonthermal coordinate and quantity
+convention fixed. The endpoint source supplies density, dynamic viscosity and
+saturation pressure together; kinematic viscosity uses the new reference
+density. The native solver reconstructs the OLD compressed mass before applying
+endpoint coefficients. At constant sealed volume, full liquid therefore obeys
+`p_new-p_old = B*ln(rho_ref,old/rho_ref,new)`. Existing cavities and explicit
+absolute supplies are retained. The dilute-vapor cap is checked against native
+liquid density AT CAVITATION, including its pressure correction, before either
+initial binding or an endpoint pair is published.
+
+The returned `MaterialCompressibleCavitationContinuation` contains the matching
+source, native owner and candidate state. All refusals preserve the accepted
+pair. This first-order endpoint material split retains fixed B and requires
+caller-owned temperature, energy and temporal refinement. Reference-card
+pressure validity does not certify the independent barotropic law across all
+film pressures. No heat capacity, latent heat, compressive-energy receipt or
+integrated mechanical work is inferred from endpoint pressure forces.
+
+All thirteen focused original-source film tests pass: the nine retained thermal
+and nonlinear groups plus four compressible groups covering already-compressed
+sealed heating/cooling, dynamic and kinematic source viscosity, drained
+expansion against an independent closed-form finite-B balance, retained supplies,
+typed pressure/lineage/vapor-cap refusal, exact native coefficient parity and
+late-cancellation retry. Validation uses the original material resolver and
+cavitation code, full native fs-tribo, and selected original fs-couple film
+modules; it is not a full workspace or distributed-build claim.
+
 When saturated vapor density is supplied, its ratio to liquid density must fit
 the explicitly declared dilute-vapor cap; a dense vapor state is refused.
 Missing vapor density retains an explicit caller applicability assumption.

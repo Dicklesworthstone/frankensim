@@ -39,6 +39,12 @@ pub mod dissolved_gas;
 pub mod power_law;
 pub use power_law::{MaterialCavitatingPowerLawContinuation, MaterialCavitatingPowerLawFilm};
 
+/// Pressure-dependent liquid storage with original-source thermal continuation.
+pub mod compressible_film;
+pub use compressible_film::{
+    MaterialCompressibleCavitatingFilm, MaterialCompressibleCavitationContinuation,
+};
+
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState, ResolvedCavitationState};
 use fs_tribo::resistive_film::cavitation::{CavitatingFilm, CavitationLiquid};
