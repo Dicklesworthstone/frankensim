@@ -47,7 +47,8 @@ pub(super) struct Sample {
     pub delta: bool,
     pub pdf_fwd: f64,
     pub pdf_rev: f64,
-    // Mirror R / proposal mass, or entry T / diffuse mass times exit T.
+    // Mirror R / proposal mass, or entry T / diffuse mass times exit T and
+    // both physical Beer paths through the coat.
     coefficient: f64,
 }
 
@@ -127,7 +128,8 @@ pub(super) fn sample(
         delta: false,
         pdf_fwd: diffuse_mass * coating.diffuse_direction_pdf(normal.dot(direction).clamp(0.0, 1.0))?,
         pdf_rev: exit.event_probabilities()[1] * coating.diffuse_direction_pdf(cosine.clamp(0.0, 1.0))?,
-        coefficient: (interface.transmittance / diffuse_mass) * exit.transmittance,
+        coefficient: (interface.transmittance / diffuse_mass) * exit.transmittance
+            * coating.path_pair_transmittance(interface.transmitted_cosine, exit.transmitted_cosine),
     }))
 }
 
@@ -150,6 +152,52 @@ mod tests {
 
     fn diffuse_draw(mass: [f64; 2], unit: f64) -> f64 {
         if mass[0] <= mass[1] { mass[0] + mass[1] * unit } else { mass[1] * unit }
+    }
+
+    #[test]
+    fn absorbing_coating_sample_weights_retain_physical_paths_and_both_pdfs() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let outgoing = Vec3::new(0.6, 0.0, 0.8);
+        for (outside, inside) in [(1.0, 1.0), (1.0, 1.5), (1.5, 1.0)] {
+            let clear = SmoothDiffuseCoating::try_new(outside, inside).unwrap();
+            let coating = clear.with_absorption(0.001, 700.0).unwrap();
+            let mass = coating.branch_probabilities(0.8).unwrap();
+            for rho in [0.0, 0.6, 1.0] {
+                let mat = material(rho, coating);
+                for unit in [0.0, 0.3, 0.9, 0.999] {
+                    let event = sample(coating, normal, outgoing, diffuse_draw(mass, unit), 0.2)
+                        .unwrap().unwrap();
+                    let cosine = normal.dot(event.direction);
+                    assert!(!event.delta);
+                    let physical = coating.diffuse_brdf(0.8, cosine, rho).unwrap();
+                    assert!((event.weight(coating, rho).unwrap()
+                        - physical*cosine/event.pdf_fwd).abs() < 3e-13);
+                    assert_eq!(event.pdf_fwd, bsdf_pdf(&mat, normal, outgoing, event.direction, None));
+                    assert_eq!(event.pdf_rev, bsdf_pdf(&mat, normal, event.direction, outgoing, None));
+                }
+                assert_ne!(mat.content_identity(), material(rho, clear).content_identity());
+                assert_ne!(mat.content_identity(), material(rho,
+                    clear.with_absorption(0.001, 1400.0).unwrap()).content_identity());
+                assert_ne!(mat.content_identity(), material(rho,
+                    clear.with_absorption(0.002, 700.0).unwrap()).content_identity());
+            }
+        }
+    }
+
+    #[test]
+    fn absorbing_scalar_material_evaluates_the_original_substrate_at_each_wavelength() {
+        let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap()
+            .with_absorption(0.001, 250.0).unwrap();
+        let reflectance = SpectralReflectance::table(&[(380.0, 0.15), (780.0, 0.85)]).unwrap();
+        let mat = Material::CoatedDiffuse { coating, reflectance };
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let wo = Vec3::new(0.6, 0.0, 0.8);
+        let wi = Vec3::new(0.0, 0.6, 0.8);
+        for wavelength in [380.0, 500.0, 650.0, 780.0] {
+            let actual = opaque_bsdf_eval(&mat, n, wo, wi, wavelength, None, None).unwrap();
+            let expected = coating.diffuse_brdf(0.8, 0.8, reflectance.at(wavelength).unwrap()).unwrap();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

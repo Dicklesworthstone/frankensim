@@ -971,12 +971,13 @@ pub enum Material {
         /// black and white. Wavelengths and interpolation remain explicit.
         reflectance: crate::spectral::SpectralReflectance,
     },
-    /// Smooth lossless dielectric coat over a spectral depolarizing diffuse
-    /// substrate. The collapsed layer retains entry/exit Fresnel, Snell etendue
-    /// and every internal diffuse return. The actual exterior medium must match
-    /// the declared constant index; both reflection branches stay in that medium.
+    /// Smooth dielectric coat over a spectral depolarizing diffuse substrate.
+    /// The collapsed layer retains entry/exit Fresnel, Snell etendue, optional
+    /// homogeneous gray Beer absorption and every internal diffuse return.
+    /// The actual exterior medium must match the declared constant index;
+    /// both reflection branches stay in that medium.
     CoatedDiffuse {
-        /// Prepared constant indices and cached hemispherical escape.
+        /// Prepared indices, gray bulk path and cached escape/absorption.
         coating: crate::coated_diffuse::SmoothDiffuseCoating,
         /// Original wavelength-resolved substrate reflectance in [0,1].
         reflectance: crate::spectral::SpectralReflectance,
@@ -1083,6 +1084,11 @@ impl Material {
                 hasher.update(b"smooth-diffuse-coating.v1");
                 update_material_scalar(&mut hasher, coating.exterior_index());
                 update_material_scalar(&mut hasher, coating.coating_index());
+                if coating.thickness_m() != 0.0 || coating.absorption_per_m() != 0.0 {
+                    hasher.update(b"incoherent-gray-beer.v1");
+                    update_material_scalar(&mut hasher, coating.thickness_m());
+                    update_material_scalar(&mut hasher, coating.absorption_per_m());
+                }
                 hasher.update(&[reflectance.knots().len() as u8]);
                 for &(wavelength_nm, value) in reflectance.knots() {
                     update_material_scalar(&mut hasher, wavelength_nm);

@@ -1,12 +1,15 @@
-//! A transparent smooth dielectric above an ideal diffuse, depolarizing base.
+//! A smooth dielectric above an ideal diffuse, depolarizing base.
 //!
-//! The coating is geometrically collapsed and lossless, with constant absolute
+//! The coating is geometrically collapsed, with constant absolute
 //! phase indices. Its exterior index must match the actual surrounding medium.
 //! Either index ordering is supported, including external total internal
-//! reflection when the exterior has the larger index. There is no finite optical
-//! thickness, coherent-film interference, lateral displacement, roughness,
-//! bulk absorption or inferred material spectrum. The substrate's reflectance
-//! is supplied at the actual wavelength by the existing spectral owner.
+//! reflection when the exterior has the larger index. An optional homogeneous
+//! gray Beer layer retains its actual internal path lengths and every absorbed
+//! return. It has no coherent-film interference, lateral displacement, optical
+//! flight time, roughness, volume scattering or inferred material spectrum.
+//! The substrate's reflectance is supplied at the actual wavelength by the
+//! existing spectral owner. Absorption and real-index Fresnel are separate,
+//! as in the native bulk Beer model; this is not a complex-index film solver.
 //!
 //! Entry/exit Fresnel transmission and Snell etendue are retained. Every base
 //! reflection depolarizes, so all repeated internal returns form a geometric
@@ -15,8 +18,24 @@
 //! <https://mitsuba.readthedocs.io/en/latest/src/generated/plugins_bsdfs.html#smooth-plastic-material-plastic>.
 
 use crate::dielectric::{DielectricError, admitted_dielectric_index, fresnel_dielectric};
+use fs_math::det;
 
-/// An admitted smooth, lossless coat and its hemispherical escape probability.
+#[path = "coated_diffuse/absorption.rs"]
+mod absorption;
+
+/// Fractions of unit unpolarized incident power after every internal return.
+///
+/// Coating and substrate absorption remain separate physical destinations.
+/// Their sum with reflectance is one to angular-quadrature and roundoff error;
+/// no residual is silently assigned to either material as heat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoatedDiffusePower {
+    pub reflectance: f64,
+    pub coating_absorptance: f64,
+    pub substrate_absorptance: f64,
+}
+
+/// An admitted smooth coat and its hemispherical escape/absorption probabilities.
 ///
 /// Indices and all probabilities are dimensionless. Construction performs the
 /// bounded angular integration once; reflection queries allocate no memory.
@@ -27,6 +46,10 @@ pub struct SmoothDiffuseCoating {
     exterior_index: f64,
     coating_index: f64,
     escape_probability: f64,
+    layer_absorption_probability: f64,
+    thickness_m: f64,
+    absorption_per_m: f64,
+    normal_optical_depth: f64,
 }
 
 impl SmoothDiffuseCoating {
@@ -70,15 +93,59 @@ impl SmoothDiffuseCoating {
             || escape_probability <= 0.0 || escape_probability > 1.0 {
             return Err(DielectricError::InvalidInterface);
         }
-        Ok(Self { exterior_index, coating_index, escape_probability })
+        Ok(Self { exterior_index, coating_index, escape_probability,
+            layer_absorption_probability: 0.0, thickness_m: 0.0,
+            absorption_per_m: 0.0, normal_optical_depth: 0.0 })
+    }
+
+    /// Set a homogeneous gray intensity-absorption coefficient [1/m] and
+    /// physical normal thickness [m]. Both must be finite and nonnegative.
+    ///
+    /// The slab is locally parallel and incoherent. Its attenuation along an
+    /// internal ray is exp(-alpha*thickness/cos(theta)); the geometric hit and
+    /// path clock stay collapsed. This constructor integrates all internal
+    /// escape and absorption probabilities once, never during ray transport.
+    /// Zero optical depth recovers the original lossless calculation exactly.
+    /// Unrepresentable depth or unconverged bounded quadrature refuses.
+    pub fn with_absorption(self, thickness_m: f64, absorption_per_m: f64)
+        -> Result<Self, DielectricError> {
+        if !thickness_m.is_finite() || thickness_m < 0.0
+            || !absorption_per_m.is_finite() || absorption_per_m < 0.0 {
+            return Err(DielectricError::InvalidAbsorption);
+        }
+        let depth = thickness_m * absorption_per_m;
+        if !depth.is_finite() || (thickness_m > 0.0 && absorption_per_m > 0.0 && depth == 0.0) {
+            return Err(DielectricError::InvalidAbsorption);
+        }
+        let clear = if self.normal_optical_depth == 0.0 { self }
+            else { Self::try_new(self.exterior_index, self.coating_index)? };
+        let [escape_probability, layer_absorption_probability] = if depth == 0.0 {
+            [clear.escape_probability, 0.0]
+        } else {
+            absorption::probabilities(self.exterior_index, self.coating_index,
+                depth, clear.escape_probability)?
+        };
+        Ok(Self { escape_probability, layer_absorption_probability,
+            thickness_m: if thickness_m == 0.0 { 0.0 } else { thickness_m },
+            absorption_per_m: if absorption_per_m == 0.0 { 0.0 } else { absorption_per_m },
+            normal_optical_depth: depth, ..self })
     }
 
     pub const fn exterior_index(self) -> f64 { self.exterior_index }
     pub const fn coating_index(self) -> f64 { self.coating_index }
+    pub const fn thickness_m(self) -> f64 { self.thickness_m }
+    pub const fn absorption_per_m(self) -> f64 { self.absorption_per_m }
+    pub const fn normal_optical_depth(self) -> f64 { self.normal_optical_depth }
 
     /// Probability that unpolarized Lambertian flux at the base escapes the
-    /// internal interface on its next encounter, including its escape cone.
+    /// internal interface on its next encounter, including Beer loss and its
+    /// escape cone. This is E = <A T> in the internal projected-angle measure.
     pub const fn escape_probability(self) -> f64 { self.escape_probability }
+
+    /// Probability that an upward Lambertian ray is absorbed in the coating
+    /// before escaping or returning to the base. Includes both legs when the
+    /// interface reflects it: C = <(1-A)(1+A R)>.
+    pub const fn layer_absorption_probability(self) -> f64 { self.layer_absorption_probability }
 
     pub(crate) const fn is_matched(self) -> bool { self.exterior_index == self.coating_index }
 
@@ -101,7 +168,8 @@ impl SmoothDiffuseCoating {
             return Ok(0.0);
         }
         Ok((self.diffuse_weight(reflectance)? / core::f64::consts::PI)
-            * incoming.transmittance * outgoing.transmittance)
+            * incoming.transmittance * outgoing.transmittance
+            * self.path_pair_transmittance(incoming.transmitted_cosine, outgoing.transmitted_cosine))
     }
 
     /// Total reflected fraction for unpolarized collimated illumination.
@@ -110,9 +178,46 @@ impl SmoothDiffuseCoating {
         -> Result<f64, DielectricError> {
         let interface = fresnel_dielectric(incident_cosine, self.exterior_index, self.coating_index)?;
         let denominator = self.return_denominator(reflectance)?;
-        let diffuse = if reflectance == 1.0 { 1.0 }
+        let diffuse = if reflectance == 1.0 && self.normal_optical_depth == 0.0 { 1.0 }
             else { reflectance * self.escape_probability / denominator };
-        Ok(interface.reflectance + interface.transmittance * diffuse)
+        Ok(interface.reflectance + interface.transmittance
+            * self.path_transmittance(interface.transmitted_cosine) * diffuse)
+    }
+
+    /// Resolve reflected, coating-absorbed and substrate-absorbed power for
+    /// unpolarized collimated illumination at the actual incident angle.
+    ///
+    /// The initial downward Beer loss is counted before the first base hit.
+    /// Subsequent layer loss and base absorption share the same geometric
+    /// return denominator as the BRDF, including total internal reflections.
+    pub fn directional_power(self, incident_cosine: f64, reflectance: f64)
+        -> Result<CoatedDiffusePower, DielectricError> {
+        let interface = fresnel_dielectric(incident_cosine, self.exterior_index, self.coating_index)?;
+        let denominator = self.return_denominator(reflectance)?;
+        let downward = self.path_transmittance(interface.transmitted_cosine);
+        let absorbed = if self.normal_optical_depth == 0.0 { 0.0 }
+            else { -det::expm1(-self.normal_optical_depth / interface.transmitted_cosine) };
+        Ok(CoatedDiffusePower {
+            reflectance: self.directional_reflectance(incident_cosine, reflectance)?,
+            coating_absorptance: interface.transmittance * (absorbed + downward
+                * (reflectance * self.layer_absorption_probability / denominator)),
+            substrate_absorptance: interface.transmittance * downward
+                * ((1.0 - reflectance) / denominator),
+        })
+    }
+
+    pub(crate) fn path_pair_transmittance(self, incoming: f64, outgoing: f64) -> f64 {
+        if self.normal_optical_depth == 0.0 { 1.0 } else {
+            // Add optical depths before exponentiation: two Beer evaluations
+            // and their product are unnecessary for a locally parallel slab.
+            det::exp(-(self.normal_optical_depth / incoming
+                + self.normal_optical_depth / outgoing))
+        }
+    }
+
+    fn path_transmittance(self, internal_cosine: f64) -> f64 {
+        if self.normal_optical_depth == 0.0 { 1.0 }
+        else { det::exp(-self.normal_optical_depth / internal_cosine) }
     }
 
     /// The diffuse Mueller coefficient before either interface transmission.
@@ -161,8 +266,11 @@ impl SmoothDiffuseCoating {
 
     fn return_denominator(self, reflectance: f64) -> Result<f64, DielectricError> {
         if !(0.0..=1.0).contains(&reflectance) { return Err(DielectricError::InvalidAbsorption); }
-        // 1-rho*(1-escape), written without cancellation near a white base.
-        Ok((1.0 - reflectance) + reflectance * self.escape_probability)
+        // B=<A²R>, E=<AT>, C=<(1-A)(1+AR)> and B+E+C=1. Retain weak
+        // escape and absorption directly instead of subtracting B from one.
+        let loss = if self.is_matched() { 1.0 }
+            else { self.escape_probability + self.layer_absorption_probability };
+        Ok((1.0 - reflectance) + reflectance * loss)
     }
 }
 
@@ -199,6 +307,121 @@ fn external_transmission(exterior: f64, coating: f64, panels: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g1_absorbing_coats_match_independent_internal_return_and_power_integrals() {
+        for (exterior, inside) in [(1.0, 1.0), (1.0, 1.5), (1.5, 1.0), (1.2, 2.4)] {
+            for depth in [1e-4, 0.03, 0.8, 6.0] {
+                let coating = SmoothDiffuseCoating::try_new(exterior, inside).unwrap()
+                    .with_absorption(0.001, depth / 0.001).unwrap();
+                let critical = if inside > exterior {
+                    (1.0_f64 - (exterior / inside).powi(2)).sqrt()
+                } else { 0.0 };
+                // Independent Simpson integration in the ORIGINAL internal
+                // angle, split at TIR and squared at each lower endpoint.
+                // It uses textbook Fresnel and std exp, not native owners.
+                let moment = |kind: usize| {
+                    [(0.0, critical), (critical, 1.0)].iter().map(|&(lo, hi)| {
+                        integrate(|x| {
+                            let mu = lo + (hi-lo)*x*x;
+                            if x == 0.0 || mu == 0.0 { return 0.0; }
+                            let t = transmission(mu, exterior / inside);
+                            let a = (-depth / mu).exp();
+                            let value = match kind {
+                                0 => a * t,
+                                1 => a*a*(1.0-t),
+                                _ => -(-depth/mu).exp_m1() * (1.0+a*(1.0-t)),
+                            };
+                            4.0 * (hi-lo) * x * mu * value
+                        })
+                    }).sum::<f64>()
+                };
+                let (escape, returned, absorbed) = (moment(0), moment(1), moment(2));
+                assert!((escape+returned+absorbed-1.0).abs() < 2e-11);
+                assert!((coating.escape_probability()-escape).abs() < 2e-10);
+                assert!((coating.layer_absorption_probability()-absorbed).abs() < 2e-10);
+                for incident in [0.3, 0.8, 1.0] {
+                    let entering = transmission(incident, inside/exterior);
+                    let mu_squared = 1.0-(1.0-incident*incident)*(exterior/inside).powi(2);
+                    let downward = if mu_squared <= 0.0 { 0.0 }
+                        else { (-depth/mu_squared.sqrt()).exp() };
+                    for rho in [0.0, 0.35, 1.0] {
+                        let denominator = 1.0-rho*returned;
+                        let p = coating.directional_power(incident, rho).unwrap();
+                        assert!((p.reflectance - ((1.0-entering)
+                            + entering*downward*rho*escape/denominator)).abs() < 3e-10);
+                        assert!((p.coating_absorptance - entering*((1.0-downward)
+                            + downward*rho*absorbed/denominator)).abs() < 3e-10);
+                        assert!((p.substrate_absorptance
+                            - entering*downward*(1.0-rho)/denominator).abs() < 3e-10);
+                        assert!((p.reflectance+p.coating_absorptance+p.substrate_absorptance-1.0).abs() < 5e-12);
+                        assert!(p.reflectance >= 0.0 && p.coating_absorptance >= 0.0
+                            && p.substrate_absorptance >= 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_absorbing_coat_beer_limit_reciprocity_and_physical_depth_scaling() {
+        for (exterior, inside) in [(1.33, 1.33), (1.0, 1.5), (1.5, 1.0)] {
+            let clear = SmoothDiffuseCoating::try_new(exterior, inside).unwrap();
+            let coat = clear.with_absorption(0.0002, 1500.0).unwrap();
+            let same_depth = clear.with_absorption(0.0001, 3000.0).unwrap();
+            assert_eq!(coat.escape_probability(), same_depth.escape_probability());
+            assert_eq!(coat.layer_absorption_probability(), same_depth.layer_absorption_probability());
+            let restored = coat.with_absorption(0.0002, 0.0).unwrap();
+            assert_eq!(restored.escape_probability(), clear.escape_probability());
+            assert_eq!(restored.layer_absorption_probability(), 0.0);
+            for incoming in [0.8, 0.9, 1.0] {
+                for outgoing in [0.85, 0.96, 1.0] {
+                    let value = coat.diffuse_brdf(incoming, outgoing, 0.7).unwrap();
+                    let reverse = coat.diffuse_brdf(outgoing, incoming, 0.7).unwrap();
+                    assert!((value-reverse).abs() < 3e-14);
+                    assert_eq!(value, same_depth.diffuse_brdf(incoming, outgoing, 0.7).unwrap());
+                    assert_eq!(clear.diffuse_brdf(incoming, outgoing, 0.7).unwrap(),
+                        restored.diffuse_brdf(incoming, outgoing, 0.7).unwrap());
+                    if exterior == inside {
+                        let expected = (0.7/core::f64::consts::PI)
+                            * (-coat.normal_optical_depth()*(1.0/incoming+1.0/outgoing)).exp();
+                        assert!((value-expected).abs() < 3e-14);
+                    }
+                }
+            }
+        }
+        let immersed = SmoothDiffuseCoating::try_new(1.5, 1.0).unwrap()
+            .with_absorption(0.001, 100.0).unwrap();
+        assert_eq!(immersed.directional_power(0.3, 1.0).unwrap(), CoatedDiffusePower {
+            reflectance: 1.0, coating_absorptance: 0.0, substrate_absorptance: 0.0 });
+    }
+
+    #[test]
+    fn g0_gray_coat_retains_weak_absorption_and_opaque_limit_without_clipping() {
+        for (exterior, inside) in [(1.0, 1.0), (1.0, 1.5), (1.5, 1.0)] {
+            let clear = SmoothDiffuseCoating::try_new(exterior, inside).unwrap();
+            for depth in [1e-300, 1e-14, 1e-8, 700.0, 740.0, 1000.0] {
+                let coat = clear.with_absorption(1.0, depth).unwrap();
+                assert!(coat.layer_absorption_probability() > 0.0);
+                if depth < 1e-10 && exterior == inside {
+                    assert!((coat.layer_absorption_probability() / (2.0*depth)-1.0).abs() < 1e-10);
+                }
+                let p = coat.directional_power(1.0, 0.7).unwrap();
+                assert!((p.reflectance+p.coating_absorptance+p.substrate_absorptance-1.0).abs() < 5e-12);
+                if depth == 1000.0 {
+                    let fresnel = fresnel_dielectric(1.0, exterior, inside).unwrap();
+                    assert_eq!(p.reflectance, fresnel.reflectance);
+                    assert_eq!(p.coating_absorptance, fresnel.transmittance);
+                    assert_eq!(p.substrate_absorptance, 0.0);
+                }
+            }
+            for (thickness, alpha) in [(-1.0, 1.0), (1.0, -1.0),
+                (f64::NAN, 1.0), (1.0, f64::INFINITY), (f64::MAX, 2.0),
+                (1e-300, 1e-300)] {
+                assert_eq!(clear.with_absorption(thickness, alpha), Err(DielectricError::InvalidAbsorption));
+            }
+        }
+    }
 
     // Independent textbook s/p fields, with Snell geometry expressed directly.
     fn transmission(cosine: f64, eta: f64) -> f64 {

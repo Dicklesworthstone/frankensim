@@ -15,6 +15,65 @@ fn beam_in_medium(direction: Vec3, state: Stokes, index: f64) -> PolarizedBeam {
 }
 
 #[test]
+fn g1_absorbing_coats_share_scalar_power_pdfs_and_connections_in_either_medium() {
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    for (outside, inside) in [(1.0, 1.0), (1.0, 1.5), (1.5, 1.0)] {
+        let coating = SmoothDiffuseCoating::try_new(outside, inside).unwrap()
+            .with_absorption(0.001, 700.0).unwrap();
+        let input = beam_in_medium(Vec3::new(0.6, 0.0, -0.8), Stokes::unpolarized(2.0), outside);
+        let masses = coating.branch_probabilities(0.8).unwrap();
+        let draw = if masses[0] <= masses[1] { masses[0]+0.5*masses[1] } else { 0.5*masses[1] };
+        for unit in [0.0, 0.3, 0.8] {
+            let event = input.sample_coated_diffuse(normal, coating, 0.7, [unit, 0.2, draw]).unwrap();
+            assert!(!event.delta);
+            let direction = event.beam.frame().direction();
+            close(event.beam.power().i*event.pdf/(2.0*direction.z),
+                coating.diffuse_brdf(0.8, direction.z, 0.7).unwrap());
+            close(event.pdf, masses[1]*coating.diffuse_direction_pdf(direction.z).unwrap());
+            let source = PolarizationFrame::try_new(direction.scale(-1.0), event.beam.frame().horizontal()).unwrap();
+            let response = input.evaluate_coated_diffuse_connection(normal, coating, 0.7,
+                source, Stokes::unpolarized(1.0)).unwrap();
+            close(response.factor, coating.diffuse_brdf(0.8, direction.z, 0.7).unwrap());
+            close(response.pdf, event.pdf);
+        }
+        let a = beam_in_medium(Vec3::new(0.6, 0.0, -0.8),
+            Stokes { i: 1.0, q: 0.2, u: 0.3, v: 0.4 }, outside);
+        let b = beam_in_medium(Vec3::new(0.0, 0.6, -0.8),
+            Stokes { i: 1.0, q: -0.3, u: 0.1, v: 0.2 }, outside);
+        let forward = a.evaluate_coated_diffuse_connection(normal, coating, 0.7, b.frame(), b.power()).unwrap();
+        let reverse = b.evaluate_coated_diffuse_connection(normal, coating, 0.7, a.frame(), a.power()).unwrap();
+        close(forward.factor, reverse.factor);
+    }
+}
+
+#[test]
+fn g1_absorbing_coat_furnace_retains_polarized_entry_and_repeated_layer_loss() {
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap()
+        .with_absorption(0.001, 400.0).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let fresnel = fresnel_dielectric_polarized(0.8, 1.0, 1.5).unwrap();
+    let masses = coating.branch_probabilities(0.8).unwrap();
+    let rho = 0.7;
+    let denominator = (1.0-rho)+rho*(coating.escape_probability()+coating.layer_absorption_probability());
+    let downward = (-coating.normal_optical_depth()/fresnel.scalar.transmitted_cosine).exp();
+    for q in [-1.0, 0.0, 1.0] {
+        let input = beam(Vec3::new(0.6, 0.0, -0.8), Stokes { i: 1.0, q, u: 0.0, v: 0.0 });
+        let mirror = input.sample_coated_diffuse(normal, coating, rho, [0.3, 0.2, 0.0]).unwrap();
+        let mut diffuse = 0.0;
+        const N: usize = 8192;
+        for i in 0..N {
+            let event = input.sample_coated_diffuse(normal, coating, rho,
+                [(i as f64+0.5)/N as f64, 0.2, 0.9]).unwrap();
+            diffuse += event.beam.power().i/N as f64;
+        }
+        let entered = fresnel.transmission.apply_diagonal_jones(input.power()).i;
+        let expected = fresnel.reflection.apply_diagonal_jones(input.power()).i
+            + entered*downward*rho*coating.escape_probability()/denominator;
+        assert!((masses[0]*mirror.beam.power().i+masses[1]*diffuse-expected).abs() < 4e-6);
+    }
+}
+
+#[test]
 fn g1_immersed_coat_scalar_agreement_and_external_tir_support() {
     let coating = SmoothDiffuseCoating::try_new(1.5, 1.0).unwrap();
     let normal = Vec3::new(0.0, 0.0, 1.0);

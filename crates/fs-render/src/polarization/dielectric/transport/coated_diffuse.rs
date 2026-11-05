@@ -1,4 +1,4 @@
-//! Polarized smooth clear-coat reflection over an ideal depolarizing substrate.
+//! Polarized smooth coating reflection over an ideal depolarizing substrate.
 
 use super::{BeamError, BeamSample, PolarizationFrame, PolarizedBeam, cross, unit};
 use super::connection::{SurfaceConnectionResponse, checked_product, normalized_camera, reciprocal_contraction};
@@ -9,7 +9,7 @@ use crate::polarization::dielectric::fresnel_dielectric_polarized;
 use fs_geom::Vec3;
 
 impl PolarizedBeam {
-    /// Sample the mirror delta or diffuse return from a smooth lossless coat.
+    /// Sample the mirror delta or diffuse return from a smooth dielectric coat.
     ///
     /// The first two uniform coordinates drive the original cosine-hemisphere
     /// proposal; the third selects the Fresnel branch. All lie in `[0,1)`.
@@ -18,8 +18,9 @@ impl PolarizedBeam {
     ///
     /// Entry retains its full s/p response, the substrate depolarizes at each
     /// encounter, all internal returns are summed, and escape can repolarize
-    /// the light. The geometrically collapsed coat has no propagation length,
-    /// coherent-film phase, bulk Beer loss or independently inferred index.
+    /// the light. Optional gray Beer absorption retains both internal path
+    /// lengths and every return. The geometrically collapsed coat adds no
+    /// displacement, flight time, coherent-film phase or inferred index.
     pub fn sample_coated_diffuse(
         self,
         normal: Vec3,
@@ -32,7 +33,7 @@ impl PolarizedBeam {
             return Err(BeamError::InvalidDiffuseSample);
         }
         let normal = self.coated_normal(normal, coating)?;
-        if coating.is_matched() {
+        if coating.is_matched() && coating.normal_optical_depth() == 0.0 {
             let sample = self.sample_depolarizing_diffuse(normal, reflectance, [samples[0], samples[1]])?;
             return Ok(BeamSample { beam: sample.beam, pdf: sample.pdf_solid_angle,
                 event: DielectricEvent::Reflection, delta: false });
@@ -118,6 +119,8 @@ impl PolarizedBeam {
         }
         let weight = if sampled { coating.sampled_diffuse_weight(reflectance)? }
             else { coating.diffuse_weight(reflectance)? };
+        let weight = checked_product(weight, coating.path_pair_transmittance(
+            entry.scalar.transmitted_cosine, exit.scalar.transmitted_cosine))?;
         // A sampled transmission is conditional on its branch. Normalize the
         // native coefficients before applying them: weight/probability can
         // overflow at grazing, and T*input can underflow before /probability

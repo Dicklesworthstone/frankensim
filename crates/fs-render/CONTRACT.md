@@ -7500,14 +7500,14 @@ Five focused controls cover liquid/vapor many-cell propagation with nonparallel 
 ## Smooth dielectric coats over diffuse substrates
 
 `SmoothDiffuseCoating` declares constant dimensionless indices
-`n_exterior >= 1` and `n_coating >= 1` for a smooth, lossless, geometrically collapsed
+`n_exterior >= 1` and `n_coating >= 1` for a smooth, geometrically collapsed
 dielectric above the original wavelength-resolved, depolarizing Lambertian
 substrate. Its actual surrounding phase index must agree. Both reflection
 branches remain in that medium; this material never changes the bulk-medium
 stack or invents a thermal-emission law.
 
-The original native Fresnel owner supplies entry and exit transmission.
-Construction caches internal escape
+The original native Fresnel owner supplies lossless entry and exit transmission.
+The clear constructor caches internal escape
 `E = (n_exterior/n_coating)^2 * 2*integral(mu*T(mu), mu=0..1)`
 using bounded Gauss-Legendre refinement on the lower-index hemisphere. For
 `n_coating < n_exterior`, the directly integrated internal hemisphere supplies
@@ -7521,15 +7521,38 @@ Fresnel. This is the physical nonlinear smooth-plastic model described in
 The cached quadrature is a convergence check, not a certified enclosure or
 measured-material claim. Ray queries perform no angular integration or allocation.
 
+`with_absorption(thickness_m, absorption_per_m)` adds an explicit homogeneous
+gray intensity-absorption law in the locally parallel slab. The physical
+internal angle supplies `A(mu)=exp(-alpha*thickness/mu)`, including the initial
+descent, final escape and both legs of each internally reflected return.
+Preparation caches `E=<A*T>` and coating loss `C=<(1-A)*(1+A*R)>` in the
+internal Lambertian flux measure. Returned flux is `B=<A^2*R>`; `B+E+C=1`.
+The shared denominator is `D=(1-rho)+rho*(E+C)`, and the diffuse BRDF is
+`rho*(n_exterior/n_coating)^2*T_in*T_out*A_in*A_out/(pi*D)`. Separate trapped
+and escaping angular domains retain TIR. Bounded adaptive Gauss panels use
+`expm1` for weak absorption and a factored normal transmission for nearly
+opaque escape; unresolved convergence or unrepresentable optical depth refuses.
+The exact zero-depth path retains the original clear calculation.
+
+`directional_power` reports reflected power and distinct coating/substrate
+absorptances. Initial descent absorption is counted before the first base hit;
+repeated layer loss and substrate absorption share the original return sum.
+No arithmetic balance residual is assigned to either material as a heat source.
+This optical partition does not itself evolve temperature or authorize emission.
+Native scalar, BDPT and polarized sampling/connections retain both Beer paths;
+their proposal densities remain the original explicit mixed measures. The
+material identity includes declared thickness and gray absorption coefficient,
+and the substrate still uses its original reflectance at each path wavelength.
+
 Native polarized scene/camera transport retains full entry s/p response,
 substrate depolarization and polarization on escape. Scalar
 `Material::CoatedDiffuse`, spectral path continuation and BDPT share the same
 law, with a discrete mirror branch and unconditional continuous density
-`diffuse_mass*cos(theta)/(pi*C)` on the accessible exterior cone, where
-`C = min(1, (n_coating/n_exterior)^2)`. The cosine sampler scales its squared
-radius by `C`; it does not waste samples outside the transmitted cone. Its
+`diffuse_mass*cos(theta)/(pi*F)` on the accessible exterior cone, where
+`F = min(1, (n_coating/n_exterior)^2)`. The cosine sampler scales its squared
+radius by `F`; it does not waste samples outside the transmitted cone. Its
 conditional weight cancels the cone's reciprocal etendue analytically, before
-forming large coefficients. For the original high-index coats, `C=1` and the
+forming large coefficients. For the original high-index coats, `F=1` and the
 original full-hemisphere law remains. Forward/reverse densities, emitting-surface
 addition, material identity, actual-medium admission and existing receiver
 lighting remain explicit. The smaller sampling branch lies next to zero, so
@@ -7541,8 +7564,9 @@ After spectral splitting, only active coated material responses are queried;
 the original complete packet still determines every medium/source query,
 free-flight proposal and MIS escape density. Calibrated jobs refuse active
 point fixtures with a nonzero coating mirror because specular point-source
-connections are absent. Exactly matched-index coats reduce to the original
-diffuse law. Intermediate analytic bundle mirror plans still refuse this mixed
+connections are absent. Clear matched-index coats reduce to the original
+diffuse law; matched absorbing coats retain their actual Beer paths.
+Intermediate analytic bundle mirror plans still refuse this mixed
 material; ordinary sampled continuation and continuous bundle receivers apply.
 
 Independent numerical controls cover flux integrals, white-furnace conservation,
@@ -7550,10 +7574,15 @@ internal returns, reciprocity, matched/black limits, full Stokes frames,
 conditional grazing/subnormal power and mixed forward/reverse PDFs. Lower-index
 coats additionally test independent internal flux integrals, external TIR for
 black and white substrates, escape-cone densities, scalar/polarized agreement
-and polarized white-furnace conservation. Native
-scene, scalar Material and BDPT integration regressions are also present.
-The model supplies no finite thickness, coherent interference, roughness,
-bulk absorption or lateral displacement.
+and polarized white-furnace conservation. Absorbing coats add independent
+internal-angle flux/return integrals, separate coating/substrate energy,
+matched-index Beer limits, physical depth scaling, reciprocity, weak and opaque
+limits, wavelength-specific substrate evaluation and native adapter checks.
+Native scene, scalar Material and BDPT integration regressions are also present.
+The model supplies no coherent interference, complex-index interface response,
+roughness, volume scattering, spectral coating absorption, optical flight time
+or lateral displacement. Its geometric surface remains collapsed even when a
+physical thickness supplies Beer attenuation.
 
 ## Selected point-fixture transmission through ordinary scene glass
 
