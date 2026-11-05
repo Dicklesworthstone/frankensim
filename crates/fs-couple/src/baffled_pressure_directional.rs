@@ -6,11 +6,11 @@
 //! one velocity term. The latter is the reactive near field, not an EQ curve.
 //! Both terms use the existing anti-alias, derivative and travel-time owners.
 
-use super::path::{HALF, TAPS, taps, window};
+use super::path::{HALF, TAPS, KernelBins, taps, window};
 use super::{BaffledPressure, CircularOutletReceiver, MAX_HISTORY, RayleighMedium, SurfaceSample};
 use fs_bem::near_field::FirstOrder;
 use fs_math::det;
-use std::collections::BTreeMap;
+
 use std::f64::consts::TAU;
 
 impl BaffledPressure {
@@ -105,8 +105,8 @@ impl BaffledPressure {
             receiver.decimator.delay_output_frames() - reactive.decimator.delay_output_frames();
         let front = microphone.front_axis();
         let window = window();
-        let mut acceleration_bins = BTreeMap::<usize, Vec<f64>>::new();
-        let mut velocity_bins = BTreeMap::<usize, Vec<f64>>::new();
+        let mut acceleration_bins = KernelBins::default();
+        let mut velocity_bins = KernelBins::default();
         for sample in surface {
             let delta: [f64; 3] = std::array::from_fn(|i| position_m[i] - sample.position_m[i]);
             let radius = det::sqrt(delta.iter().map(|x| x * x).sum());
@@ -128,10 +128,7 @@ impl BaffledPressure {
                 let first = delay.floor() as usize;
                 let interpolation = taps(delay - first as f64, &window);
                 for (tap, interpolation_weight) in interpolation.iter().enumerate() {
-                    let row = bins.entry(first + tap).or_insert_with(|| vec![0.0; inputs]);
-                    for (value, shape) in row.iter_mut().zip(&sample.mode_shape) {
-                        *value += weight * interpolation_weight * shape;
-                    }
+                    bins.add(first + tap, weight, *interpolation_weight, &sample.mode_shape);
                 }
             }
         }
@@ -178,23 +175,21 @@ impl BaffledPressure {
     }
 }
 
-fn install(receiver: &mut BaffledPressure, bins: BTreeMap<usize, Vec<f64>>) -> Result<(), String> {
-    if bins.values().flatten().any(|v| !v.is_finite()) {
-        return Err("first-order Rayleigh kernel overflow".into());
-    }
-    let first = *bins
-        .first_key_value()
+fn install(receiver: &mut BaffledPressure, bins: KernelBins) -> Result<(), String> {
+    let kernels = bins.finish()?;
+    let first = kernels
+        .first()
         .ok_or("empty first-order Rayleigh kernel")?
         .0;
-    let last = *bins
-        .last_key_value()
+    let last = kernels
+        .last()
         .ok_or("empty first-order Rayleigh kernel")?
         .0;
     let frames = last + 1;
     let samples = frames
         .checked_mul(receiver.modes)
         .ok_or("first-order history size overflow")?;
-    receiver.kernels = bins.into_iter().collect();
+    receiver.kernels = kernels;
     receiver.history = vec![0.0; samples];
     receiver.history_frames = frames;
     receiver.delay_samples = (first, last);

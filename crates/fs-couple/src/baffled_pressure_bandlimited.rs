@@ -43,7 +43,7 @@ impl BaffledPressure {
         let mut receiver = Self::new_multirate(surface, inputs, mechanics_rate,
             output_rate, position_m, medium)?;
         let window = window();
-        let mut bins = std::collections::BTreeMap::<usize, Vec<f64>>::new();
+        let mut bins = super::path::KernelBins::default();
         for p in surface {
             let radius = det::sqrt((0..3).map(|i| (position_m[i] - p.position_m[i]).powi(2)).sum());
             let delay = radius * f64::from(output_rate) / medium.sound_speed;
@@ -54,20 +54,15 @@ impl BaffledPressure {
             let h = taps(delay - first as f64, &window);
             let gain = medium.density * p.area_m2 / (TAU * radius);
             for (tap, weight) in h.iter().enumerate() {
-                let row = bins.entry(first + tap).or_insert_with(|| vec![0.0; inputs]);
-                for (i, shape) in p.mode_shape.iter().enumerate() {
-                    row[i] += gain * weight * shape;
-                }
+                bins.add(first + tap, gain, *weight, &p.mode_shape);
             }
         }
-        if bins.values().flatten().any(|v| !v.is_finite()) {
-            return Err("bandlimited radiation kernel overflow".into());
-        }
-        let first = *bins.first_key_value().ok_or("empty radiation kernel")?.0;
-        let last = *bins.last_key_value().ok_or("empty radiation kernel")?.0;
+        let kernels = bins.finish()?;
+        let first = kernels.first().ok_or("empty radiation kernel")?.0;
+        let last = kernels.last().ok_or("empty radiation kernel")?.0;
         let frames = last + 1;
         let samples = frames.checked_mul(inputs).ok_or("microphone history size overflow")?;
-        receiver.kernels = bins.into_iter().collect();
+        receiver.kernels = kernels;
         receiver.history = vec![0.0; samples];
         receiver.history_frames = frames;
         receiver.delay_samples = (first, last);

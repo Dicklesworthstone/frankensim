@@ -21,6 +21,9 @@
 //! Differentiating constructors additionally reconstruct acceleration with the
 //! shared bandlimited derivative, retaining high partials without finite-
 //! difference sinc attenuation. All numerical delay is reported, never hidden.
+//! Signed surface products accumulate in double-double during cold kernel
+//! preparation, preserving weak residuals under destructive interference.
+//! Completed coefficients and the audio callback retain their f64 layout.
 use crate::pcm_wav::decimate as antialias;
 use fs_math::det;
 
@@ -370,7 +373,7 @@ impl BaffledPressure {
             || !medium.sound_speed.is_finite() || medium.sound_speed<=0.0 {
             return Err("invalid surface/microphone/medium budget; microphone must be >=5 cm above z=0".into());
         }
-        let mut bins=std::collections::BTreeMap::<usize,Vec<f64>>::new();
+        let mut bins=path::KernelBins::default();
         for p in surface {
             if !p.area_m2.is_finite() || p.area_m2<=0.0
                 || p.position_m.iter().any(|v|!v.is_finite()) || p.position_m[2]!=0.0
@@ -385,16 +388,15 @@ impl BaffledPressure {
             let first=delay.floor() as usize; let fraction=delay-first as f64;
             let gain=medium.density*p.area_m2/(2.0*std::f64::consts::PI*radius);
             for (d,weight) in [(first,1.0-fraction),(first+1,fraction)] {
-                let row=bins.entry(d).or_insert_with(||vec![0.0;modes]);
-                for (i,value) in p.mode_shape.iter().enumerate() {row[i]+=gain*weight*value;}
+                bins.add(d,gain,weight,&p.mode_shape);
             }
         }
-        if bins.values().flatten().any(|v|!v.is_finite()) {return Err("radiation kernel overflow".into());}
-        let first=*bins.first_key_value().ok_or("empty radiation kernel")?.0;
-        let last=*bins.last_key_value().ok_or("empty radiation kernel")?.0;
+        let kernels=bins.finish()?;
+        let first=kernels.first().ok_or("empty radiation kernel")?.0;
+        let last=kernels.last().ok_or("empty radiation kernel")?.0;
         let history_frames=last+1;
         let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
-        let mut receiver = Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
+        let mut receiver = Self { kernels, history: vec![0.0;samples],history_frames,
             directional_velocity:None,fft:None,
             taps:Vec::new(),packed_weights:Vec::new(),tap_offsets:Vec::new(),tap_history:0,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
@@ -776,6 +778,38 @@ mod tests {
             peak=peak.max(side.step(&velocity).unwrap().abs());
         }
         assert!(peak>1.0);
+    }
+
+    #[test]
+    fn cold_surface_interference_keeps_weak_radiation_in_all_inviscid_receivers() {
+        let weak=2.0_f64.powi(-60);
+        let positions=[[0.125,0.0,0.0],[0.0,0.125,0.0],[-0.125,0.0,0.0]];
+        let amplitudes=[1.0,weak,-1.0];
+        for kind in 0..3 {
+            let make=|surface:&[SurfaceSample]| match kind {
+                0=>BaffledPressure::new(surface,1,48_000,[0.0,0.0,1.0],medium()),
+                1=>BaffledPressure::new_differentiating(surface,1,48_000,[0.0,0.0,1.0],medium()),
+                _=>BaffledPressure::new_first_order(surface,1,48_000,[0.0,0.0,1.0],medium(),
+                    fs_bem::near_field::FirstOrder::new(0.5,[0.0,0.0,-1.0]).unwrap()),
+            }.unwrap();
+            let expected=make(&[SurfaceSample {position_m:positions[1],area_m2:0.1,mode_shape:vec![weak]}]);
+            for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]] {
+                let surface:Vec<_>=order.iter().map(|&i|SurfaceSample {
+                    position_m:positions[i],area_m2:0.1,mode_shape:vec![amplitudes[i]],
+                }).collect();
+                let actual=make(&surface);
+                for (a,e) in std::iter::once(&actual).chain(actual.directional_velocity.as_deref())
+                    .zip(std::iter::once(&expected).chain(expected.directional_velocity.as_deref())) {
+                    assert_eq!(a.delay_samples,e.delay_samples);
+                    assert_eq!(a.kernels.len(),e.kernels.len());
+                    for ((at,av),(et,ev)) in a.kernels.iter().zip(&e.kernels) {
+                        assert_eq!(at,et);
+                        assert!((av[0]-ev[0]).abs()<=8e-14*ev[0].abs(),
+                            "kind {kind}, order {order:?}, delay {at}: {} versus {}",av[0],ev[0]);
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn pressure_is_linear_and_invalid_samples_leave_history_untouched() {

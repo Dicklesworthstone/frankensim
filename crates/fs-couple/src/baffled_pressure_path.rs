@@ -1,10 +1,43 @@
 //! Causal path convolution shared by lossless and material-loaded Rayleigh kernels.
 //! This leaf owns interpolation/composition only, never a propagation law.
-use fs_math::det;
+use fs_math::{dd::Dd, det};
+use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
 pub(super) const HALF: usize = 32;
 pub(super) const TAPS: usize = 2 * HALF + 1;
+
+/// Cold signed surface projection. Preserve products and cancellation until
+/// every area sample contributing to a (delay, input) coefficient is present.
+/// The installed FIR remains f64: no extra work or storage in sample stepping.
+#[derive(Default)]
+pub(super) struct KernelBins {
+    rows: BTreeMap<usize, Vec<Dd>>,
+}
+
+impl KernelBins {
+    pub(super) fn add(&mut self, delay: usize, gain: f64, weight: f64, shapes: &[f64]) {
+        let row = self.rows.entry(delay).or_insert_with(|| vec![Dd::ZERO; shapes.len()]);
+        debug_assert_eq!(row.len(), shapes.len());
+        let scale = Dd::from_f64(gain) * Dd::from_f64(weight);
+        for (value, &shape) in row.iter_mut().zip(shapes) {
+            *value = *value + scale * Dd::from_f64(shape);
+        }
+    }
+
+    /// Round once per completed coefficient, in deterministic delay order.
+    pub(super) fn finish(self) -> Result<Vec<(usize, Vec<f64>)>, String> {
+        if self.rows.is_empty() { return Err("empty Rayleigh radiation kernel".into()); }
+        self.rows.into_iter().map(|(delay, row)| {
+            let weights = row.into_iter().map(|value| {
+                if !value.hi.is_finite() || !value.lo.is_finite() {
+                    Err("Rayleigh radiation kernel overflow".into())
+                } else { Ok(value.to_f64()) }
+            }).collect::<Result<Vec<_>, String>>()?;
+            Ok((delay, weights))
+        }).collect()
+    }
+}
 
 pub(super) fn window() -> [f64; TAPS] {
     let mut w = [0.0; TAPS];

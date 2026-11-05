@@ -1,6 +1,55 @@
 //! Exact production interpolation/convolution leaf, also directly rustc-testable.
 use super::*;
 
+#[test]
+fn signed_surface_projection_keeps_a_weak_mode_for_every_source_order() {
+    let weak = 2.0_f64.powi(-60);
+    let amplitudes = [1.0, weak, -1.0];
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        let mut bins = KernelBins::default();
+        for index in order {
+            for (delay, weight) in [(3, 1.0), (9, -0.75), (17, 0.03125)] {
+                bins.add(delay, 0.137, weight, &[amplitudes[index], -0.5 * amplitudes[index]]);
+            }
+        }
+        let rows = bins.finish().unwrap();
+        assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), [3, 9, 17]);
+        for ((_, row), weight) in rows.iter().zip([1.0, -0.75, 0.03125]) {
+            for (&actual, shape) in row.iter().zip([1.0, -0.5]) {
+                let expected = 0.137 * weight * weak * shape;
+                assert!((actual - expected).abs() <= 8e-14 * expected.abs(),
+                    "order {order:?}: {actual:e} versus {expected:e}");
+            }
+        }
+    }
+}
+
+#[test]
+fn surface_products_retain_residuals_before_the_first_rounding() {
+    // The exact binary product is 1 - 2^-54, which rounds to 1 in f64.
+    // Compensating only the subsequent sum cannot recover this residual.
+    let epsilon = 2.0_f64.powi(-27);
+    assert_eq!((1.0 + epsilon) * (1.0 - epsilon), 1.0);
+    let mut bins = KernelBins::default();
+    bins.add(11, 1.0 + epsilon, 1.0 - epsilon, &[1.0]);
+    bins.add(11, 1.0, 1.0, &[-1.0]);
+    assert_eq!(bins.finish().unwrap(), vec![(11, vec![-epsilon * epsilon])]);
+}
+
+#[test]
+fn cold_projection_rejects_empty_or_unrepresentable_coefficients() {
+    assert!(KernelBins::default().finish().is_err());
+    for value in [f64::NAN, f64::INFINITY, f64::MAX] {
+        let mut bins = KernelBins::default();
+        bins.add(3, value, 2.0, &[1.0]);
+        assert!(bins.finish().is_err());
+    }
+    let mut bins = KernelBins::default();
+    bins.add(4, 0.2, 0.3, &[1.0]);
+    bins.add(4, 0.2, 0.3, &[-1.0]);
+    assert_eq!(bins.finish().unwrap(), vec![(4, vec![0.0])]);
+}
+
 fn response(taps: &[f64], first: usize, omega: f64) -> [f64; 2] {
     taps.iter()
         .enumerate()

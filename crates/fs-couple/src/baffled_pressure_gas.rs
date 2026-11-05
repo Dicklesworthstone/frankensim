@@ -372,7 +372,7 @@ impl BaffledPressure {
             // taps while the other exact-distance kernels are prepared.
             prepared.response = Vec::new();
         }
-        let mut bins = BTreeMap::<usize, Vec<f64>>::new();
+        let mut bins = path::KernelBins::default();
         for (sample, &index) in surface.iter().zip(&indices) {
             poll(cancelled)?;
             let prepared = &prepared[index];
@@ -387,30 +387,23 @@ impl BaffledPressure {
             remaining_terms -= terms;
             let gain = medium.density * sample.area_m2 / (TAU * prepared.range_m);
             for (tap, &weight) in prepared.kernel.iter().enumerate() {
-                let row = bins
-                    .entry(prepared.first + tap)
-                    .or_insert_with(|| vec![0.0; inputs]);
-                for (value, &shape) in row.iter_mut().zip(&sample.mode_shape) {
-                    *value += gain * weight * shape;
-                }
+                bins.add(prepared.first + tap, gain, weight, &sample.mode_shape);
             }
         }
-        if bins.values().flatten().any(|value| !value.is_finite()) {
-            return Err("material Rayleigh kernel is unrepresentable".into());
-        }
-        let first = *bins
-            .first_key_value()
+        let kernels = bins.finish()?;
+        let first = kernels
+            .first()
             .ok_or("empty material Rayleigh kernel")?
             .0;
-        let last = *bins
-            .last_key_value()
+        let last = kernels
+            .last()
             .ok_or("empty material Rayleigh kernel")?
             .0;
         let frames = last + 1;
         let samples = frames
             .checked_mul(inputs)
             .ok_or("material Rayleigh history overflow")?;
-        receiver.kernels = bins.into_iter().collect();
+        receiver.kernels = kernels;
         receiver.history = vec![0.0; samples];
         receiver.history_frames = frames;
         receiver.delay_samples = (first, last);
