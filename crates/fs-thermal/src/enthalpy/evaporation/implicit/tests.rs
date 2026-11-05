@@ -8,6 +8,9 @@ mod timeline;
 #[path = "tests/network.rs"]
 mod network;
 
+#[path = "tests/adaptive.rs"]
+mod adaptive;
+
 use super::*;
 use crate::enthalpy::backward_euler::{
     BoundaryExchanges, BoundaryStepCoefficients, PrescribedBathHeat, StepCoefficients,

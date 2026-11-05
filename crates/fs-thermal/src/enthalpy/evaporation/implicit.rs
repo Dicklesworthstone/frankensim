@@ -8,8 +8,9 @@
 //! `dm*(h1+L1)` once. There is no sensible-only intermediate temperature.
 //!
 //! Low-level residuals and bounded native nonlinear solves share one physical
-//! owner. Endpoint convergence does not establish time accuracy. Callers own
-//! timestep refinement and the prescribed film's mass/energy account.
+//! owner. Endpoint convergence does not establish time accuracy; the adaptive
+//! march controls physical h/T/mass error separately. The film remains prescribed
+//! and its receiving mass/energy account belongs to the caller.
 //! Geometry and exposure stay fixed over the step;
 //! endpoint events remain pending until all coupled owners accept the interval.
 
@@ -37,6 +38,14 @@ pub use solve::{
     EvaporationNetworkImplicitControls, EvaporationNetworkImplicitReport,
 };
 pub use timeline::{EvaporationImplicitTimelineControls, EvaporationImplicitTimelineReport};
+
+/// Conservative multi-surface advancement with physical h/T/mass time accuracy.
+#[path = "implicit/adaptive.rs"]
+pub mod adaptive;
+pub use adaptive::{
+    AdaptiveEvaporationControls, AdaptiveEvaporationError, AdaptiveEvaporationReport,
+    EvaporationSurfaceTotals, EvaporationTimeError,
+};
 
 /// Physical open-system account for one interval, before endpoint events.
 #[derive(Clone, Copy, Debug, PartialEq)]

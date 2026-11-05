@@ -1717,8 +1717,8 @@ independent source/exposure balances, resolve nonlinear time/mass-dependent
 heating, enforce shared work limits and final rollback, and refine toward the
 analytic variable-mass heat equation. Backward Euler remains first order; the
 maximum timestep still controls physical time error independently of algebraic
-convergence. No automatic time-error controller or evolving gas/geometry is
-inferred.
+convergence. That maximum-step entry point does not infer automatic time-error
+control or evolving gas/geometry.
 
 `EvaporatingNetworkBackwardEulerStep` and
 `DepositionSimulation::solve_implicit_evaporating_network_step` bind multiple
@@ -1740,6 +1740,41 @@ and every original material validation pass. The original single-cell residual
 and automatic solve delegate to these shared owners, preserving their explicit
 liquid range, callback and unsized-law support. Geometry and films remain
 prescribed, and endpoint convergence alone does not establish time accuracy.
+
+`DepositionSimulation::advance_adaptive_evaporating_network_to` adds local
+time-error control to that shared multi-surface solve. Each comparison solves
+one backward-Euler interval and two actual half intervals. The original
+`ConductionTimeOrder::First` supplies the correction for unequal representable
+halves and bounded step-size factors. Only the conservative fine trajectory is
+accepted; mass and enthalpy are never extrapolated.
+
+Time accuracy measures original specific stored energy and temperature for every
+active heat cell and actual mass for each selected liquid independently. It can
+therefore detect latent-storage error at constant temperature and mass-loss error
+when two endpoints have the same temperature. Relative allowances scale with
+changes from the accepted state, preserving the original caloric datum and
+avoiding an allowance set by a large retained inventory. Absolute time-error
+allowances in J/kg, K and kg remain distinct from nonlinear joule/kilogram gates.
+
+Comparisons stop at original events, which retain authored order and exposure
+semantics. Only accepted fine intervals contribute external heat, latent energy,
+complete carried vapor enthalpy or the returned coefficient payload. Compensated
+`surface_totals` preserve each cell's signed mass/latent/vapor/recession account,
+including simultaneous condensation and evaporation that cancel globally.
+`last_surfaces` keeps the final accepted half-interval receipts; endpoint events
+still follow that interval's coefficient payload.
+
+All coarse work and accuracy-rejected comparisons spend the same whole-request
+Newton and residual-evaluation budgets. Comparison count, accepted half-interval
+count and consecutive accuracy reductions are bounded separately. Absolute
+accepted energy and represented-mass-rate defects accumulate without cancellation,
+and original whole-trajectory mass/energy gates still govern publication. A
+source, nonlinear, material, work-budget or cancellation failure returns no
+partial state. A final or event-clipped span below the step floor must still pass
+accuracy. Reports expose accepted error estimates, rejected work and the next
+suggested comparison span. Backward Euler remains first order; the local
+estimator is not a certified accumulated-error bound, and source corners require
+independent refinement. Reference geometry and gas films remain prescribed.
 
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
