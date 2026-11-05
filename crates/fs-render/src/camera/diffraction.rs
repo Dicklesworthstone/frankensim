@@ -1,4 +1,4 @@
-//! Scalar incoherent imaging through uniformly illuminated camera pupils.
+//! Scalar diffraction through uniformly illuminated camera pupils.
 //!
 //! In the focused image plane, `alpha = pi*D/(lambda*q)` and the unit-integral
 //! PSF is `alpha^2/(4*pi) * [2*J1(alpha*r)/(alpha*r)]^2`. Here `q` is image
@@ -20,14 +20,17 @@
 //! after a depth-independent proposal and all-pupil scene visibility admission.
 //! Native material-based thin elements may explicitly add wavelength-dependent
 //! lens power to that quadratic phase. Geometric pupil blur is not added to a
-//! wave PSF. Coherence between scene points, polarization, other aberrations
-//! and pupil-dependent occlusion are outside this paraxial, isoplanatic model.
+//! wave PSF. The radiance renderer uses incoherent imaging. Explicit complex
+//! transfer queries retain the pupil phase for authored coherent fields;
+//! they do not infer coherence or propagation phase between scene points.
+//! Polarization, other aberrations and pupil-dependent occlusion are outside
+//! this paraxial, isoplanatic model.
 
 use super::{ApertureKind, CameraError, LensSample, PhysicalCamera, direct_unit};
 use crate::charts::Ray;
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
-use fs_math::det;
+use fs_math::{c64::C64, det};
 
 mod annular;
 mod circular;
@@ -143,6 +146,75 @@ pub struct SpectralCameraRay<const N: usize> {
     pub ray: Ray,
     /// Importance weights, in the same order as the supplied wavelengths.
     pub weights: [f64; N],
+}
+
+/// A single-wavelength pupil transfer. Repeated coherent observations reuse
+/// the admitted original material, physical wavelength and pupil coefficients.
+pub(super) struct PreparedDiffractionAmplitude<'a> {
+    scale: f64,
+    pupil: AmplitudePupil<'a>,
+}
+
+enum AmplitudePupil<'a> {
+    Circular(CircularDefocus),
+    Annular(AnnularPupil),
+    Polygon { pupil: PolygonPupil<'a>, phase: f64 },
+}
+
+impl<'a> PreparedDiffractionAmplitude<'a> {
+    pub(super) fn new(camera: &'a PhysicalCamera, wavelength_nm: f64) -> Result<Self, CameraError> {
+        if camera.diffraction.is_none() && camera.defocused_diffraction.is_none() {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        camera.diffraction_wavelength_range(&[wavelength_nm])?;
+        let phase = if let Some(policy) = camera.defocused_diffraction {
+            camera.defocus_phase(policy, wavelength_nm)?
+        } else {
+            0.0
+        };
+        let scale = (camera.pupil_wavelength_nm(wavelength_nm)? * 1.0e-9
+            / camera.aperture.radius_m())
+            / (2.0 * PI);
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        let pupil = match &camera.aperture.kind {
+            ApertureKind::Circular { .. } => AmplitudePupil::Circular(CircularDefocus::new(phase)),
+            ApertureKind::Annular { .. } => AmplitudePupil::Annular(AnnularPupil::new(
+                camera.aperture.obscuration_ratio(),
+                phase,
+            )),
+            ApertureKind::RegularPolygon { vertices, .. } => AmplitudePupil::Polygon {
+                pupil: PolygonPupil::new(camera.aperture.radius_m(), vertices),
+                phase,
+            },
+            ApertureKind::Pinhole => return Err(CameraError::InvalidDiffraction),
+        };
+        Ok(Self { scale, pupil })
+    }
+
+    pub(super) fn amplitude(&self, tangent_offset: [f64; 2]) -> Result<C64, CameraError> {
+        if tangent_offset.iter().any(|v| !v.is_finite()) {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        let q = tangent_offset.map(|value| value / self.scale);
+        let radius = det::hypot(q[0], q[1]);
+        if !radius.is_finite() {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        let amplitude = match &self.pupil {
+            AmplitudePupil::Circular(pupil) => pupil.normalized_amplitude(radius),
+            AmplitudePupil::Annular(pupil) => pupil.normalized_amplitude(radius),
+            AmplitudePupil::Polygon { pupil, phase } => pupil
+                .normalized_defocused_amplitude(q, *phase)
+                .ok_or(CameraError::InvalidDiffraction)?,
+        };
+        let amplitude = C64::new(amplitude.re / self.scale, amplitude.im / self.scale);
+        if !amplitude.re.is_finite() || !amplitude.im.is_finite() {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        Ok(amplitude)
+    }
 }
 
 impl PhysicalCamera {
@@ -449,6 +521,30 @@ impl PhysicalCamera {
         Ok(density)
     }
 
+    /// Evaluate the normalized complex transfer of the selected focused pupil.
+    /// Its squared magnitude equals [`Self::in_focus_diffraction_density`],
+    /// per unit area in the camera's two tangent coordinates. Wavelength is
+    /// the original vacuum wavelength in nanometres; an authored exterior
+    /// phase-index law supplies the physical wavelength inside the pupil.
+    ///
+    /// The phase reference is the pupil plane: with unit-circumradius pupil P,
+    /// area A, `s=lambda_medium/(2*pi*a)` and `q=tangent_offset/s`, this is
+    /// `integral_P exp(-i*q.r) dA / (2*pi*sqrt(A)*s)`. The axial transfer is
+    /// positive real. Odd-blade pupil phase and signed diffraction rings are
+    /// preserved before any coherent sum. A common sensor propagation phase
+    /// is omitted; no source-to-pupil phase or scene-point coherence is inferred.
+    /// This allocation-free query retains the density API's optical admission.
+    pub fn in_focus_diffraction_amplitude(
+        &self,
+        tangent_offset: [f64; 2],
+        wavelength_nm: f64,
+    ) -> Result<C64, CameraError> {
+        if self.diffraction.is_none() {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        PreparedDiffractionAmplitude::new(self, wavelength_nm)?.amplitude(tangent_offset)
+    }
+
     /// Evaluate the selected finite-defocus PSF per angular-raster area.
     /// The integral is one; the on-axis value is physical pupil area divided
     /// by physical medium wavelength squared, times `sinc(phase/2)^2` for a circular pupil;
@@ -493,6 +589,28 @@ impl PhysicalCamera {
             return Err(CameraError::InvalidDiffraction);
         }
         Ok(density)
+    }
+
+    /// Evaluate the selected finite-defocus pupil's normalized complex transfer.
+    /// Its squared magnitude equals [`Self::defocused_diffraction_density`].
+    /// This uses the same reference as [`Self::in_focus_diffraction_amplitude`]
+    /// with integrand `exp(i*phi*|r|^2-i*q.r)`, retaining the complete signed
+    /// quadratic pupil phase. For odd-blade pupils, reversing defocus conjugates
+    /// the transfer only when the tangent offset is also reversed.
+    ///
+    /// The original source-plane, physical-medium wavelength and dispersive
+    /// lens laws still control phi, including its 16-radian limit. The caller
+    /// supplies any additional authored source propagation phases. This query
+    /// does not convert stochastic radiance paths into coherent field samples.
+    pub fn defocused_diffraction_amplitude(
+        &self,
+        tangent_offset: [f64; 2],
+        wavelength_nm: f64,
+    ) -> Result<C64, CameraError> {
+        if self.defocused_diffraction.is_none() {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        PreparedDiffractionAmplitude::new(self, wavelength_nm)?.amplitude(tangent_offset)
     }
 
     /// Admit the actual first visible depth under the selected phase budget.

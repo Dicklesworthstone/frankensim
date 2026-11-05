@@ -94,6 +94,200 @@ fn axial_camera(aperture: Aperture, focus_distance_m: f64) -> PhysicalCamera {
     .unwrap()
 }
 
+/// G1/G3: complex transfer retains the original camera's physical normalization
+/// across every pupil, spectral scale, small-q limit and propagated tail.
+#[test]
+fn coherent_pupil_amplitude_matches_original_camera_density() {
+    let radius = 0.001;
+    let focus = 0.25;
+    let object_depth =
+        1.0 / (1.0 / focus + 6.0 * 550e-9 / (core::f64::consts::PI * radius * radius));
+    for aperture in [
+        Aperture::try_circular(radius).unwrap(),
+        Aperture::try_annular(radius, 0.6 * radius).unwrap(),
+        Aperture::try_regular_polygon(radius, 3, 0.0).unwrap(),
+        Aperture::try_regular_polygon(radius, 4, core::f64::consts::FRAC_PI_4).unwrap(),
+    ] {
+        let area = aperture.transmitting_area_m2().unwrap();
+        let focused = axial_camera(aperture.clone(), focus)
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.01).unwrap())
+            .unwrap();
+        let defocused = axial_camera(aperture, focus)
+            .with_defocused_diffraction(
+                DefocusedDiffraction::try_new(Some(object_depth), 0.0).unwrap(),
+            )
+            .unwrap();
+        for wavelength in [400.0, 550.0, 700.0] {
+            let scale = wavelength * 1e-9 / (2.0 * core::f64::consts::PI * radius);
+            let peak = focused
+                .in_focus_diffraction_amplitude([0.0; 2], wavelength)
+                .unwrap();
+            assert_close(
+                peak.re,
+                area.sqrt() / (wavelength * 1e-9),
+                2e-11,
+                "positive axial transfer",
+            );
+            assert_eq!(peak.im, 0.0);
+            for q in [
+                [0.0; 2],
+                [3e-6, -2e-6],
+                [3.0, 2.0],
+                [32.001, 0.1],
+                [200.0, 131.0],
+            ] {
+                let offset = q.map(|value| value * scale);
+                for (amplitude, density) in [
+                    (
+                        focused
+                            .in_focus_diffraction_amplitude(offset, wavelength)
+                            .unwrap(),
+                        focused
+                            .in_focus_diffraction_density(offset, wavelength)
+                            .unwrap(),
+                    ),
+                    (
+                        defocused
+                            .defocused_diffraction_amplitude(offset, wavelength)
+                            .unwrap(),
+                        defocused
+                            .defocused_diffraction_density(offset, wavelength)
+                            .unwrap(),
+                    ),
+                ] {
+                    assert_close(
+                        amplitude.norm_sq(),
+                        density,
+                        3e-11 * density.max(1e-30),
+                        "transfer squared equals density",
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// G3/G0: signed pupil curvature conjugates with reversed transverse offset;
+/// amplitude queries retain all original mode, wavelength and phase refusals.
+#[test]
+fn coherent_pupil_amplitude_preserves_phase_and_optical_admission() {
+    let radius = 0.001;
+    let inverse_shift = 6.0 * 550e-9 / (core::f64::consts::PI * radius * radius);
+    for aperture in [
+        Aperture::try_circular(radius).unwrap(),
+        Aperture::try_annular(radius, 0.6 * radius).unwrap(),
+        Aperture::try_regular_polygon(radius, 3, 0.37).unwrap(),
+    ] {
+        let make = |shift| {
+            axial_camera(aperture.clone(), 0.25)
+                .with_defocused_diffraction(
+                    DefocusedDiffraction::try_new(Some(1.0 / (4.0 + shift)), 0.0).unwrap(),
+                )
+                .unwrap()
+        };
+        let positive = make(inverse_shift);
+        let negative = make(-inverse_shift);
+        for offset in [[0.0; 2], [2e-4, -1e-4], [0.02, 0.013]] {
+            let a = positive
+                .defocused_diffraction_amplitude(offset, 550.0)
+                .unwrap();
+            let b = negative
+                .defocused_diffraction_amplitude(offset.map(|v| -v), 550.0)
+                .unwrap();
+            assert!((a - b.conj()).abs() < 3e-10 * a.abs().max(1.0));
+        }
+        assert!(
+            positive
+                .in_focus_diffraction_amplitude([0.0; 2], 550.0)
+                .is_err()
+        );
+        for wavelength in [0.0, f64::INFINITY, f64::NAN, 100.0] {
+            assert!(
+                positive
+                    .defocused_diffraction_amplitude([0.0; 2], wavelength)
+                    .is_err()
+            );
+        }
+        assert!(
+            positive
+                .defocused_diffraction_amplitude([f64::NAN, 0.0], 550.0)
+                .is_err()
+        );
+    }
+    let geometric = axial_camera(Aperture::try_circular(radius).unwrap(), 0.25);
+    assert!(
+        geometric
+            .in_focus_diffraction_amplitude([0.0; 2], 550.0)
+            .is_err()
+    );
+    assert!(
+        geometric
+            .defocused_diffraction_amplitude([0.0; 2], 550.0)
+            .is_err()
+    );
+}
+
+/// G1: the original vacuum-wavelength material laws supply lambda/n and lens
+/// power, while the complex pupil phase uses the physical medium wavelength.
+#[cfg(feature = "tracer")]
+#[test]
+fn coherent_pupil_amplitude_uses_original_medium_wavelength_and_source_band() {
+    use fs_render::camera::{DispersiveThinLens, ThinLensElement};
+    use fs_render::dielectric::CauchyIor;
+
+    let index = 1.33;
+    let lens = DispersiveThinLens::try_new_in_medium(
+        550.0,
+        &[ThinLensElement::try_new(
+            CauchyIor::try_new(2.0, 0.0, 0.0).unwrap().into(),
+            20.0,
+            -20.0,
+        )
+        .unwrap()],
+        CauchyIor::try_new(index, 0.0, 0.0).unwrap().into(),
+    )
+    .unwrap();
+    for aperture in [
+        Aperture::try_circular(0.001).unwrap(),
+        Aperture::try_annular(0.001, 0.0006).unwrap(),
+        Aperture::try_regular_polygon(0.001, 3, 0.37).unwrap(),
+    ] {
+        let policy = DefocusedDiffraction::try_new(Some(1.5), 0.0).unwrap();
+        let immersed = PhysicalCamera::try_look_at(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            CameraProjection::try_focal_sensor(lens.reference_focal_length_m(), 0.002).unwrap(),
+            2.0,
+            aperture.clone(),
+        )
+        .unwrap()
+        .with_defocused_diffraction(policy)
+        .unwrap()
+        .with_dispersive_lens(lens.clone())
+        .unwrap();
+        let reference = axial_camera(aperture, 2.0)
+            .with_defocused_diffraction(policy)
+            .unwrap();
+        for wavelength in [400.0, 550.0, 700.0] {
+            for offset in [[0.0; 2], [1e-4, -7e-5], [0.04, 0.03]] {
+                let actual = immersed
+                    .defocused_diffraction_amplitude(offset, wavelength)
+                    .unwrap();
+                let expected = reference
+                    .defocused_diffraction_amplitude(offset, wavelength / index)
+                    .unwrap();
+                assert!((actual - expected).abs() < 2e-11 * expected.abs().max(1.0));
+            }
+        }
+        assert!(
+            immersed
+                .defocused_diffraction_amplitude([0.0; 2], 379.0)
+                .is_err()
+        );
+    }
+}
+
 fn lens_coordinates(camera: &PhysicalCamera, origin: Point3) -> [f64; 2] {
     let displacement = origin.delta_from(camera.eye());
     [

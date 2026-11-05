@@ -11,7 +11,7 @@
 //! blade-normal ridges and the generic inverse-fourth-power intensity tails.
 //! An isotropic inverse-cubic proposal alone poorly resolves those ridges.
 
-use fs_math::det;
+use fs_math::{c64::C64, det};
 
 #[path = "polygon/defocus.rs"]
 mod defocus;
@@ -69,6 +69,23 @@ impl<'a> PolygonPupil<'a> {
             return self.area * self.area * (1.0 - self.second_moment * radius_squared)
                 / normalization;
         }
+        let amplitude = self.focused_transform(q);
+        (amplitude.re * amplitude.re + amplitude.im * amplitude.im) / normalization
+    }
+
+    /// Fourier pupil transfer with exp(-i*q.r), normalized per square-root
+    /// dqx dqy. Odd-blade pupils retain their nonzero imaginary transform.
+    pub(super) fn normalized_amplitude(&self, q: [f64; 2]) -> C64 {
+        let amplitude = if dot(q, q) < 1.0e-8 {
+            self.small_phase_transform(q, 0.0)
+        } else {
+            self.focused_transform(q)
+        };
+        amplitude.scale(1.0 / (2.0 * PI * det::sqrt(self.area)))
+    }
+
+    fn focused_transform(&self, q: [f64; 2]) -> C64 {
+        let radius_squared = dot(q, q);
         let mut real = 0.0;
         let mut imaginary = 0.0;
         let mut real_correction = 0.0;
@@ -98,7 +115,7 @@ impl<'a> PolygonPupil<'a> {
                 coefficient * imaginary_factor,
             );
         }
-        (real * real + imaginary * imaginary) / normalization
+        C64::new(real, imaginary)
     }
 
     /// One exact mixture selection and two conditional Cauchy coordinates from

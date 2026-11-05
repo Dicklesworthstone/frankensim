@@ -11,7 +11,7 @@
 //! Axis and small focused-radius limits avoid removable cancellation.
 
 use super::circular::{CircularDefocus, jinc};
-use fs_math::det;
+use fs_math::{c64::C64, det};
 
 const PI: f64 = core::f64::consts::PI;
 
@@ -69,6 +69,43 @@ impl AnnularPupil {
             amplitude.re * amplitude.re + amplitude.im * amplitude.im
         };
         power / (4.0 * PI * self.clear_fraction)
+    }
+
+    /// Normalized complex transfer, including the phase of the whole opening.
+    /// The axial sinc law retains its piston and sign before coherent sums.
+    pub(super) fn normalized_amplitude(&self, radius: f64) -> C64 {
+        if self.ratio == 0.0 {
+            return self.outer.normalized_amplitude(radius);
+        }
+        let ratio_squared = self.ratio * self.ratio;
+        let amplitude = if radius == 0.0 {
+            let argument = 0.5 * self.phase * self.clear_fraction;
+            let sinc = if argument.abs() < 1.0e-4 {
+                1.0 + argument * argument * (-1.0 / 6.0 + argument * argument / 120.0)
+            } else {
+                det::sin(argument) / argument
+            };
+            let (sin, cos) = det::sin_cos(0.5 * self.phase * (1.0 + ratio_squared));
+            C64::new(cos, sin).scale(self.clear_fraction * sinc)
+        } else if self.phase == 0.0 {
+            let value = if radius < 1.0e-4 {
+                let square = radius * radius;
+                self.clear_fraction
+                    * (1.0 - (1.0 + ratio_squared) * square / 8.0
+                        + (1.0 + ratio_squared + ratio_squared * ratio_squared) * square * square
+                            / 192.0)
+            } else {
+                jinc(radius) - ratio_squared * jinc(self.ratio * radius)
+            };
+            C64::from_re(value)
+        } else {
+            self.outer.amplitude(radius)
+                - self
+                    .inner
+                    .amplitude(self.ratio * radius)
+                    .scale(ratio_squared)
+        };
+        amplitude.scale(1.0 / det::sqrt(4.0 * PI * self.clear_fraction))
     }
 }
 
@@ -175,6 +212,39 @@ mod tests {
             let negative = CircularDefocus::new(-6.0).amplitude(radius);
             assert_eq!(positive.re.to_bits(), negative.re.to_bits());
             assert_eq!(positive.im.to_bits(), (-negative.im).to_bits());
+        }
+    }
+
+    #[test]
+    fn annular_complex_transfer_keeps_absolute_axial_phase_and_power() {
+        // G1/G3: direct integration of exp(i*phi*r²) over the opening gives
+        // delta*sinc(phi*delta/2)*exp(i*phi*(1+e²)/2), before normalization.
+        for ratio in [0.0_f64, 0.2, 0.6, 0.95] {
+            let delta = (1.0 - ratio) * (1.0 + ratio);
+            for phase in [-16.0_f64, -6.0, 0.0, 1.0e-8, 6.0, 16.0] {
+                let pupil = AnnularPupil::new(ratio, phase);
+                let argument = 0.5 * phase * delta;
+                let sinc = if argument == 0.0 {
+                    1.0
+                } else {
+                    argument.sin() / argument
+                };
+                let piston = 0.5 * phase * (1.0 + ratio * ratio);
+                let expected =
+                    C64::new(piston.cos(), piston.sin()).scale(sinc * (delta / (4.0 * PI)).sqrt());
+                let actual = pupil.normalized_amplitude(0.0);
+                assert!((actual - expected).abs() < 4.0e-16);
+                for radius in [0.0, 1.0e-8, 0.5, 8.0, 128.001, 1000.0] {
+                    let value = pupil.normalized_amplitude(radius);
+                    let density = pupil.density(radius);
+                    assert!(
+                        (value.norm_sq() - density).abs() < 3.0e-14 * density.max(1.0e-30),
+                        "ratio={ratio}, phase={phase}, radius={radius}"
+                    );
+                    let opposite = AnnularPupil::new(ratio, -phase).normalized_amplitude(radius);
+                    assert!((value - opposite.conj()).abs() < 4.0e-16);
+                }
+            }
         }
     }
 

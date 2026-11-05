@@ -81,6 +81,12 @@ impl CircularDefocus {
         C64::new(re, im) * C64::new(cos, sin)
     }
 
+    /// Complex transfer per square-root dimensionless image area. Its square
+    /// is the unit-integral density; the pupil's full signed phase is retained.
+    pub(super) fn normalized_amplitude(&self, radius: f64) -> C64 {
+        self.amplitude(radius).scale(1.0 / det::sqrt(4.0 * PI))
+    }
+
     fn reduced_amplitude(&self, radius: f64) -> (f64, f64) {
         let radial = odd_bessel_over_radius(radius);
         let (mut re, mut im, mut cr, mut ci) = (0.0, 0.0, 0.0, 0.0);

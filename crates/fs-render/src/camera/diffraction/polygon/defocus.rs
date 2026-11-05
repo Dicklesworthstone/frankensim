@@ -50,6 +50,46 @@ impl PolygonPupil<'_> {
                     / normalization,
             );
         }
+        let amplitude = self.defocused_reduced_amplitude(q, phase)?.0;
+        let density = (amplitude.re * amplitude.re + amplitude.im * amplitude.im) / normalization;
+        (density.is_finite() && density >= 0.0).then_some(density)
+    }
+
+    /// Normalized complex pupil transform, with both branch-specific unit
+    /// phases restored. Those phases cancel in a density but not between waves.
+    pub(crate) fn normalized_defocused_amplitude(&self, q: [f64; 2], phase: f64) -> Option<C64> {
+        if !phase.is_finite() || phase.abs() > 16.0 || q.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        if phase == 0.0 {
+            let value = self.normalized_amplitude(q);
+            return (value.re.is_finite() && value.im.is_finite()).then_some(value);
+        }
+        let radius = det::hypot(q[0], q[1]);
+        if !radius.is_finite() {
+            return None;
+        }
+        let amplitude = if radius < 1.0e-5 && phase.abs() < 1.0e-5 {
+            self.small_phase_transform(q, phase)
+        } else {
+            let (reduced, stationary_phase) = self.defocused_reduced_amplitude(q, phase)?;
+            if let Some(common) = stationary_phase {
+                reduced * exp_i(common)
+            } else {
+                // The exterior boundary identity has the exact common i.
+                C64::new(-reduced.im, reduced.re)
+            }
+        }
+        .scale(1.0 / (2.0 * PI * det::sqrt(self.area)));
+        (amplitude.re.is_finite() && amplitude.im.is_finite()).then_some(amplitude)
+    }
+
+    /// The existing density uses only the reduced amplitude, preserving its
+    /// arithmetic. Some carries the stationary formula's omitted phase;
+    /// None denotes the exterior formula's omitted multiplication by i.
+    fn defocused_reduced_amplitude(&self, q: [f64; 2], phase: f64) -> Option<(C64, Option<f64>)> {
+        let radius = det::hypot(q[0], q[1]);
+        let mut stationary_phase = None;
         let mut sum = ComplexSum::default();
         if radius <= 4.0 * phase.abs() {
             // c=q/(2phi) has |c|<=2. With exprel(z)=(exp(z)-1)/z,
@@ -57,6 +97,7 @@ impl PolygonPupil<'_> {
             // The common unit phase is immaterial to intensity. The removable
             // limit is valid even when c lies exactly on an edge or vertex.
             let center = q.map(|value| 0.5 * value / phase);
+            stationary_phase = Some(-phase * dot(center, center));
             for index in 0..self.vertices.len() {
                 let (a, b) = self.edge(index);
                 let midpoint = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
@@ -169,9 +210,35 @@ impl PolygonPupil<'_> {
                 sum.add(integral);
             }
         }
-        let amplitude = sum.value();
-        let density = (amplitude.re * amplitude.re + amplitude.im * amplitude.im) / normalization;
-        (density.is_finite() && density >= 0.0).then_some(density)
+        Some((sum.value(), stationary_phase))
+    }
+
+    /// Integrate the cubic Taylor polynomial of exp(iS), including the odd
+    /// moments discarded by intensity-only DC limits. Four-by-four Duffy/Gauss
+    /// rules integrate this degree-six pupil polynomial exactly. The fourth
+    /// Taylor remainder is at most area*(|q|+|phi|)^4/24: below 5e-18 per unit
+    /// area in the focused branch and 7e-21 in the tiny-defocus branch.
+    pub(super) fn small_phase_transform(&self, q: [f64; 2], phase: f64) -> C64 {
+        let mut correction = ComplexSum::default();
+        for index in 0..self.vertices.len() {
+            let (a, b) = self.edge(index);
+            let jacobian = cross(a, b);
+            for &(u, wu) in &GL4_UNIT {
+                for &(v, wv) in &GL4_UNIT {
+                    let r = [
+                        u * ((1.0 - v) * a[0] + v * b[0]),
+                        u * ((1.0 - v) * a[1] + v * b[1]),
+                    ];
+                    let argument = phase * dot(r, r) - dot(q, r);
+                    let square = argument * argument;
+                    correction.add(
+                        C64::new(-0.5 * square, argument * (1.0 - square / 6.0))
+                            .scale(jacobian * u * wu * wv),
+                    );
+                }
+            }
+        }
+        C64::from_re(self.area) + correction.value()
     }
 }
 
@@ -328,6 +395,13 @@ impl ComplexSum {
     }
 }
 
+const GL4_UNIT: [(f64, f64); 4] = [
+    (0.06943184420297371, 0.17392742256872693),
+    (0.33000947820757187, 0.32607257743127307),
+    (0.6699905217924281, 0.32607257743127307),
+    (0.9305681557970262, 0.17392742256872693),
+];
+
 const GL16: [(f64, f64); 8] = [
     (0.09501250983763744, 0.18945061045506864),
     (0.2816035507792589, 0.18260341504492364),
@@ -422,6 +496,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn coherent_polygon_transfer_matches_absolute_complex_pupil_integrals() {
+        // G1: independent separable complex Fresnel C/S integrals for the
+        // square, and 256x256/384x384 Gauss/Duffy AREA integrals for the
+        // triangle. These oracles include phase, which density cannot test.
+        let h = core::f64::consts::FRAC_1_SQRT_2;
+        let square = [[h, h], [-h, h], [-h, -h], [h, -h]];
+        let square_cases = [
+            (
+                [0.0, 0.0],
+                8.0,
+                [-0.02446151083319196, 0.041794184190049675],
+            ),
+            ([3.0, 2.0], 6.0, [0.04241829259030702, 0.04228088036991181]),
+            (
+                [31.999, 0.4],
+                8.0,
+                [-0.0023443087429503803, 0.002600424932201511],
+            ),
+            (
+                [32.001, 0.4],
+                8.0,
+                [-0.0023442768195342054, 0.002606335965033193],
+            ),
+            (
+                [200.0, 131.0],
+                16.0,
+                [-2.6167585292562923e-7, -2.197852208277077e-6],
+            ),
+            (
+                [1000.0, 3.0],
+                16.0,
+                [1.7643085314480575e-5, -1.3348931391210424e-5],
+            ),
+        ];
+        let triangle = [
+            [1.0, 0.0],
+            [-0.5, 3.0_f64.sqrt() / 2.0],
+            [-0.5, -3.0_f64.sqrt() / 2.0],
+        ];
+        let triangle_cases = [
+            (
+                [3.0, 2.0],
+                0.0,
+                [0.07437991639318672, -0.004215375506762649],
+            ),
+            ([3.0, 2.0], 6.0, [0.05287744574146187, 0.05026549675325776]),
+            (
+                [3.0, 2.0],
+                -6.0,
+                [0.05306936454594065, -0.04545831379875606],
+            ),
+            (
+                [31.999, 0.1],
+                8.0,
+                [-0.0006548427267012595, -0.002281724074229573],
+            ),
+            (
+                [32.001, 0.1],
+                8.0,
+                [-0.0006539081398902691, -0.002281120024489723],
+            ),
+            (
+                [200.0, 113.0],
+                16.0,
+                [5.647117734283903e-6, -6.371911924756803e-7],
+            ),
+        ];
+        for (vertices, cases) in [
+            (&square[..], &square_cases[..]),
+            (&triangle[..], &triangle_cases[..]),
+        ] {
+            let pupil = PolygonPupil::new(1.0, vertices);
+            for &(q, phase, expected) in cases {
+                let actual = pupil.normalized_defocused_amplitude(q, phase).unwrap();
+                let expected = C64::new(expected[0], expected[1]);
+                assert!(
+                    (actual - expected).abs() < 3.0e-13,
+                    "{} blades, q={q:?}, phase={phase}: {actual:?} != {expected:?}",
+                    vertices.len()
+                );
+                let density = pupil.defocused_density(q, phase).unwrap();
+                assert!((actual.norm_sq() - density).abs() < 2.0e-14 * density);
+                let conjugate = pupil
+                    .normalized_defocused_amplitude(q.map(|value| -value), -phase)
+                    .unwrap();
+                assert!((actual - conjugate.conj()).abs() < 2.0e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn coherent_polygon_dc_limit_retains_odd_and_quadratic_phase() {
+        // G1: the centered equilateral triangle has <x³>=1/40 and
+        // <r²>=1/4. Both phases disappear from its intensity-only DC shortcut.
+        let triangle = [
+            [1.0, 0.0],
+            [-0.5, 3.0_f64.sqrt() / 2.0],
+            [-0.5, -3.0_f64.sqrt() / 2.0],
+        ];
+        let pupil = PolygonPupil::new(1.0, &triangle);
+        let peak = pupil.area.sqrt() / (2.0 * PI);
+        let q: f64 = 8.0e-5;
+        let focused = pupil.normalized_amplitude([q, 0.0]);
+        assert!((focused.im - peak * q.powi(3) / 240.0).abs() < 3.0e-20);
+        let phase = 7.0e-6;
+        let defocused = pupil
+            .normalized_defocused_amplitude([3.0e-6, -2.0e-6], phase)
+            .unwrap();
+        assert!((defocused.im - peak * phase * 0.25).abs() < 2.0e-18);
+        let density = pupil.defocused_density([3.0e-6, -2.0e-6], phase).unwrap();
+        assert!((defocused.norm_sq() - density).abs() < 2.0e-15 * density);
     }
 
     #[test]

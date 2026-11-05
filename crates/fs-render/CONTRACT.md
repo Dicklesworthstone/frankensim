@@ -3557,6 +3557,36 @@ wide-angle, lens-aberration or measured-lens error. General multi-depth
 occlusion, virtual images, coherent scene transport
 and vector diffraction remain outside this mode.
 
+### Complex pupil transfer for authored coherent fields
+
+`PhysicalCamera::in_focus_diffraction_amplitude` and
+`defocused_diffraction_amplitude` expose the same circular, annular and bladed
+pupils before the intensity square. With unit-circumradius pupil P, area A,
+`s=lambda_medium/(2*pi*a)` and `q=tangent_offset/s`, the transfer is
+`integral_P exp(i*phi*|r|²-i*q.r) dA / (2*pi*sqrt(A)*s)`.
+Its squared magnitude matches the original angular density, and its focused
+on-axis value is positive `sqrt(physical pupil area)/lambda_medium`.
+
+Circular and annular transfers retain their signed piston phase. Polygon
+transfers restore the stationary formula's `exp(-i*|q|²/(4*phi))` and the
+exterior formula's common `i`. Near DC, a cubic complex exponential expansion
+retains odd moments as well as quadratic phase; bounded 4x4 Duffy/Gauss area
+rules integrate that polynomial exactly. Its Taylor remainder per unit area
+is below `5e-18` in the focused branch and `7e-21` in the tiny-defocus branch,
+excluding floating-point error. The original density arithmetic is retained.
+A prepared internal owner reuses wavelength admission and pupil coefficients
+across observations, borrows original polygon vertices and allocates nothing.
+
+These queries share the original medium, material-band, clear-pupil, paraxial
+and 16-radian phase limits. Their reference is the pupil plane; external source
+propagation phases and source coherence must be authored separately. They do
+not change the radiance renderer, support layered source planes, or claim
+polarized vector diffraction. G1/G3 tests compare absolute complex transfers
+with independent square Fresnel and triangle area integrals, both sides of the
+stationary/exterior transition, endpoint asymptotics, annular axial phase,
+small odd moments, density parity, conjugation, physical medium wavelength and
+original material-band refusal.
+
 ### Source-depth-resolved diffraction across separated planes
 
 `PhysicalCamera::with_layered_diffraction(LayeredDiffraction)` admits one to
