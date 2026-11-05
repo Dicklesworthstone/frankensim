@@ -73,6 +73,13 @@ pub mod film;
 /// elastic contact across the grain from the stick card.
 pub mod shaft;
 
+mod contact_island;
+mod contact_response;
+pub use contact_island::{Controls as ContactSolveControls, SolveError as ContactSolveError, SolveReport as ContactSolveReport};
+
+#[cfg(test)]
+mod contact_island_tests;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
@@ -3427,6 +3434,14 @@ pub struct Instrument {
     materials: Option<std::sync::Arc<materials::KitMaterials>>,
     prepared: bool,
     cq: ContactQueue,
+    contact_work: contact_response::Workspace,
+    /// Accuracy and work limits for simultaneous normal contact. All active
+    /// contacts participate, including initially separated ones.
+    pub contact_solver_controls: ContactSolveControls,
+    contact_report: ContactSolveReport,
+    // Air and material prediction can advance before contact refuses. A failed
+    // instrument must not silently continue from that partial interval.
+    contact_failure: Option<ContactSolveError>,
     /// Set by `load_from_rest`. It lives with the state, so a clone finishes the ramp.
     load_on: Option<LoadOn>,
 }
@@ -3450,7 +3465,7 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), load_on: None })
+        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), contact_work: contact_response::Workspace::default(), contact_solver_controls: ContactSolveControls::default(), contact_report: ContactSolveReport::default(), contact_failure: None, load_on: None })
     }
     /// Bring every body's bias on from zero as a raised cosine over `seconds`, not all at once, so
     /// the piece ends that time at rest under its load. A step rings every mode it reaches. This
@@ -3911,7 +3926,29 @@ impl Instrument {
     }
 
     /// One time step; returns each microphone's pressure sample [Pa].
+    /// Panics if normal contact cannot meet its declared tolerances; callers
+    /// that need to handle this refusal should use `try_step`.
     pub fn step(&mut self, out: &mut [f64]) {
+        self.try_step(out).expect("instrument normal-contact step failed");
+    }
+
+    /// The last accepted normal-contact solve, before the separate friction
+    /// stage. Residuals are normalized by `contact_solver_controls`.
+    pub fn contact_solve_report(&self) -> ContactSolveReport { self.contact_report }
+
+    /// Advance one interval, refusing an unconverged normal-contact solution.
+    /// A contact refusal leaves microphone output and the accepted step index
+    /// unchanged and publishes no contact forces or contact displacement update.
+    /// Earlier air/material prediction may already have advanced: the instrument
+    /// then remains failed, and callers must restore a pre-step clone or rebuild
+    /// it. This avoids a full-instrument clone on every successful audio sample.
+    pub fn try_step(&mut self, out: &mut [f64]) -> Result<(), ContactSolveError> {
+        if let Some(error) = &self.contact_failure {
+            return Err(error.clone());
+        }
+        if out.len() < self.mics.len() {
+            return Err(ContactSolveError::InvalidInput("microphone output slice is too short"));
+        }
         if !self.prepared {
             self.prepare();
         }
@@ -4110,8 +4147,18 @@ impl Instrument {
                 crush.deepest = 0.0;
             }
         }
-        // contacts, solved implicitly one at a time (see `solve_contacts`)
-        solve_contacts(&mut self.bodies, &mut self.contacts, &mut self.cq, k);
+        // All normal contacts see one common final pose through the same SAV
+        // and acoustic response used by body prediction.
+        self.contact_report = match contact_response::solve_contacts_checked(
+            &mut self.bodies, &mut self.contacts, &mut self.cq, &mut self.contact_work,
+            k, self.contact_solver_controls,
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                self.contact_failure = Some(error.clone());
+                return Err(error);
+            }
+        };
         if !self.frictions.is_empty() {
             solve_frictions(&mut self.bodies, &self.contacts, &mut self.frictions, k);
         }
@@ -4172,6 +4219,7 @@ impl Instrument {
             b.rotate();
         }
         self.step_index += 1;
+        Ok(())
     }
 
     /// Everything one time step reads, as plain data: for a stepper outside this crate, the CUDA renderer
@@ -4183,6 +4231,9 @@ impl Instrument {
     /// render-gpu's plan refuses a microphone that has one. Nor is a `RadDipole`: the kit attaches one only to
     /// heads carrying a radiation load, which that plan refuses.
     pub fn image(&mut self) -> InstrumentImage {
+        assert!(self.contact_failure.is_none(), "cannot export an instrument after a refused contact step");
+        assert!(!contact_response::requires_coupled_contacts(&self.bodies, &self.contacts),
+            "the exported stepper does not implement simultaneous interacting normal contacts; use Instrument::try_step");
         assert!(self.cavities.iter().filter_map(|c| c.port.as_ref()).all(|q|
             !q.has_baffled_radiation() && q.flow_loss_coefficient() == 0.0),
             "the exported stepper does not implement nonlinear or memory vent pressure laws; use Instrument::step");

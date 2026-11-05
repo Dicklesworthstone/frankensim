@@ -785,6 +785,8 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-qty",
+ "fs-solver",
+ "fs-sparse",
 ]
 
 [[package]]

@@ -1526,13 +1526,13 @@ impl ModalAirLoad {
 }
 
 #[cfg(test)]
-mod centered_tests {
+pub(crate) mod centered_tests {
     use super::*;
     use std::f64::consts::PI;
 
     /// Manufactured passive modal coefficients on a nonorthogonal port basis.
     /// All stepping and response operations below are the production owners.
-    fn manufactured_load(cols: Vec<Vec<f64>>, air: Vec<f64>, resistance: Vec<f64>) -> ModalAirLoad {
+    pub(crate) fn manufactured_load(cols: Vec<Vec<f64>>, air: Vec<f64>, resistance: Vec<f64>) -> ModalAirLoad {
         let n = cols.len();
         let nodes = cols[0].len();
         let mut gram = vec![0.0; n * n];
