@@ -1,18 +1,66 @@
 //! Axis-aligned hydrostatic reconstruction over the original gas reference.
 //!
-//! Only the reference is isothermal. Perturbations evolve adiabatically with
-//! both momentum components and the retained variable-Cp caloric source.
+//! Isothermal and isentropic references share the original gas integration.
+//! Perturbations evolve adiabatically with both momentum components and the
+//! retained variable-Cp caloric source; the reference is not a thermostat.
 //! Gravity work uses the shared mass flux, conserving gas plus midpoint
 //! potential energy. This does not claim arbitrary equilibria or rotating flow.
 
 use super::*;
-pub use fs_gas::dynamics::IsothermalAtmosphere;
+pub use fs_gas::dynamics::{
+    AtmosphereQuadrature, HydrostaticReference, IsentropicAtmosphere, IsothermalAtmosphere,
+};
 use fs_gas::dynamics::{Boundaries, Boundary, Euler1d, Mesh1d};
 use fs_qty::Length;
 
+/// Prepare one compact axial profile in the thermodynamic owner. Both Cartesian
+/// dimensions reuse its integrated conserved averages and physical face states.
+pub(super) fn reference_profile(
+    gas: &FrozenGas,
+    cells: usize,
+    spacing: f64,
+    reference: HydrostaticReference,
+    quadrature: AtmosphereQuadrature,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Euler1d, Error> {
+    let mesh = Mesh1d::uniform(cells, Length::new(spacing), 1.0)?;
+    let ends = Boundaries::Ends {
+        left: Boundary::Reflecting,
+        right: Boundary::Reflecting,
+    };
+    Ok(match reference {
+        HydrostaticReference::Isothermal(value) => {
+            Euler1d::new_isothermal_atmosphere(gas.clone(), mesh, value, ends, cancelled)?
+        }
+        HydrostaticReference::Isentropic(value) => Euler1d::new_isentropic_atmosphere(
+            gas.clone(),
+            mesh,
+            value,
+            quadrature,
+            ends,
+            cancelled,
+        )?,
+    })
+}
+
+pub(super) fn acceleration(reference: HydrostaticReference) -> f64 {
+    match reference {
+        HydrostaticReference::Isothermal(value) => value.acceleration.value(),
+        HydrostaticReference::Isentropic(value) => value.acceleration.value(),
+    }
+}
+
+pub(super) fn reference_position(reference: HydrostaticReference) -> f64 {
+    match reference {
+        HydrostaticReference::Isothermal(value) => value.reference_position.value(),
+        HydrostaticReference::Isentropic(value) => value.reference_position.value(),
+    }
+}
+
 pub(super) struct HydrostaticBalance {
     pub axis: usize,
-    pub reference: IsothermalAtmosphere,
+    pub reference: HydrostaticReference,
+    pub quadrature: AtmosphereQuadrature,
     cells: Vec<(State, Primitive)>,
     // Physical-face primitive and its source-resolved normal pressure flux.
     // Retaining that actual traction also avoids a second EOS roundoff in
@@ -26,7 +74,8 @@ impl HydrostaticBalance {
         grid: &CartesianGrid,
         boundaries: Boundaries2d,
         axis: usize,
-        reference: IsothermalAtmosphere,
+        reference: HydrostaticReference,
+        quadrature: AtmosphereQuadrature,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(cancelled)?;
@@ -39,14 +88,12 @@ impl HydrostaticBalance {
         // Integrate the profile once in the existing thermodynamic owner.
         // Its temporary 1-D evolution workspace is discarded, not retained or
         // stepped alongside the planar solver. Only O(n_axis) data survive.
-        let source = Euler1d::new_isothermal_atmosphere(
-            gas.clone(),
-            Mesh1d::uniform(n, Length::new(grid.spacing[axis]), 1.0)?,
+        let source = reference_profile(
+            gas,
+            n,
+            grid.spacing[axis],
             reference,
-            Boundaries::Ends {
-                left: Boundary::Reflecting,
-                right: Boundary::Reflecting,
-            },
+            quadrature,
             &mut *cancelled,
         )?;
         let mut cells = allocated(n, (State::default(), Primitive::default()))?;
@@ -89,6 +136,7 @@ impl HydrostaticBalance {
         Ok(Self {
             axis,
             reference,
+            quadrature,
             cells,
             faces,
         })
@@ -174,7 +222,7 @@ impl HydrostaticBalance {
         y_flux: &[NormalFaceFlux],
     ) -> [f64; 3] {
         let i = self.position(grid, cell);
-        let g = self.reference.acceleration.value();
+        let g = acceleration(self.reference);
         let perturbation = g * (state.density - self.cells[i].0.density);
         let force =
             (self.faces[i + 1].1 - self.faces[i].1) / grid.spacing[self.axis] + perturbation;
@@ -195,8 +243,8 @@ impl HydrostaticBalance {
         states: &[State],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
-        let g = self.reference.acceleration.value();
-        let datum = self.reference.reference_position.value();
+        let g = acceleration(self.reference);
+        let datum = reference_position(self.reference);
         Ok(sum_arrays(
             states.iter().enumerate().map(|(cell, q)| {
                 let x = grid.cell_center(cell).expect("admitted cell")[self.axis];
@@ -220,10 +268,64 @@ impl Euler2d {
         axis: usize,
         reference: IsothermalAtmosphere,
         boundaries: Boundaries2d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::new_hydrostatic_atmosphere(
+            gas,
+            grid,
+            axis,
+            HydrostaticReference::Isothermal(reference),
+            AtmosphereQuadrature::default(),
+            boundaries,
+            cancelled,
+        )
+    }
+
+    /// Initialize a source-integrated adiabatic atmosphere and retain gravity.
+    ///
+    /// The original gas enthalpy and entropy determine the temperature lapse
+    /// and pressure; no frozen heat-capacity ratio is used. Conserved density
+    /// and energy are integrated with the explicit preparation budget. The
+    /// resulting axial profile is cached, so stepping performs no quadrature.
+    /// Perturbations retain the full Euler energy equation, not fixed entropy.
+    pub fn new_isentropic_atmosphere(
+        gas: FrozenGas,
+        grid: CartesianGrid,
+        axis: usize,
+        reference: IsentropicAtmosphere,
+        quadrature: AtmosphereQuadrature,
+        boundaries: Boundaries2d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::new_hydrostatic_atmosphere(
+            gas,
+            grid,
+            axis,
+            HydrostaticReference::Isentropic(reference),
+            quadrature,
+            boundaries,
+            cancelled,
+        )
+    }
+
+    fn new_hydrostatic_atmosphere(
+        gas: FrozenGas,
+        grid: CartesianGrid,
+        axis: usize,
+        reference: HydrostaticReference,
+        quadrature: AtmosphereQuadrature,
+        boundaries: Boundaries2d,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
-        let balance =
-            HydrostaticBalance::new(&gas, &grid, boundaries, axis, reference, &mut cancelled)?;
+        let balance = HydrostaticBalance::new(
+            &gas,
+            &grid,
+            boundaries,
+            axis,
+            reference,
+            quadrature,
+            &mut cancelled,
+        )?;
         let mut states = allocated(grid.len(), State::default())?;
         for (cell, state) in states.iter_mut().enumerate() {
             poll(&mut cancelled)?;
@@ -253,10 +355,47 @@ impl Euler2d {
         &mut self,
         axis: usize,
         reference: IsothermalAtmosphere,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        self.bind_hydrostatic_reference(
+            axis,
+            HydrostaticReference::Isothermal(reference),
+            AtmosphereQuadrature::default(),
+            cancelled,
+        )
+    }
+
+    /// Bind the source-owned isentrope to caller-authored initial averages.
+    /// The accepted state and its caloric gauge are unchanged. A different
+    /// reference or preparation budget cannot replace an existing binding.
+    pub fn bind_isentropic_atmosphere(
+        &mut self,
+        axis: usize,
+        reference: IsentropicAtmosphere,
+        quadrature: AtmosphereQuadrature,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        self.bind_hydrostatic_reference(
+            axis,
+            HydrostaticReference::Isentropic(reference),
+            quadrature,
+            cancelled,
+        )
+    }
+
+    pub(super) fn bind_hydrostatic_reference(
+        &mut self,
+        axis: usize,
+        reference: HydrostaticReference,
+        quadrature: AtmosphereQuadrature,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), Error> {
         poll(&mut cancelled)?;
-        if self.atmosphere() == Some((axis, reference)) {
+        if self.hydrostatic.as_ref().is_some_and(|balance| {
+            balance.axis == axis
+                && balance.reference == reference
+                && balance.quadrature == quadrature
+        }) {
             return Ok(());
         }
         if self.hydrostatic.is_some() || self.time != 0.0 {
@@ -270,6 +409,7 @@ impl Euler2d {
             self.boundaries,
             axis,
             reference,
+            quadrature,
             &mut cancelled,
         )?;
         for (cell, state) in self.states.iter().enumerate() {
@@ -288,8 +428,17 @@ impl Euler2d {
         Ok(())
     }
 
-    /// Retained gravity axis and original thermodynamic reference.
+    /// Retained isothermal reference; use [`Self::hydrostatic_reference`] for
+    /// either physical family.
     pub fn atmosphere(&self) -> Option<(usize, IsothermalAtmosphere)> {
+        match self.hydrostatic_reference() {
+            Some((axis, HydrostaticReference::Isothermal(reference))) => Some((axis, reference)),
+            _ => None,
+        }
+    }
+
+    /// Retained gravity axis and original thermodynamic reference.
+    pub fn hydrostatic_reference(&self) -> Option<(usize, HydrostaticReference)> {
         self.hydrostatic.as_ref().map(|b| (b.axis, b.reference))
     }
 

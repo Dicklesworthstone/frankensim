@@ -90,6 +90,54 @@ fn energy_partition(flow: &Euler2d) -> (f64, f64) {
 }
 
 #[test]
+fn g3_molecular_trials_preserve_the_original_isentropic_pressure_reference() {
+    use crate::compressible::hydrostatic::{AtmosphereQuadrature, IsentropicAtmosphere};
+    use fs_qty::Acceleration;
+
+    let walls = AxisBoundaries::Ends {
+        lower: BoundaryCondition::Reflecting,
+        upper: BoundaryCondition::Reflecting,
+    };
+    let flow = Euler2d::new_isentropic_atmosphere(
+        gas(0.4),
+        CartesianGrid::new(4, 12, 0.25, 1.0 / 12.0, 0.7).unwrap(),
+        1,
+        IsentropicAtmosphere {
+            acceleration: Acceleration::new(-3.0),
+            reference_temperature: Temperature::new(2.0),
+            reference_pressure: Pressure::new(3.0),
+            reference_position: Length::new(0.0),
+        },
+        AtmosphereQuadrature {
+            relative_tolerance: 2e-11,
+            maximum_panels: 16,
+        },
+        Boundaries2d {
+            x: AxisBoundaries::Periodic,
+            y: walls,
+        },
+        || false,
+    )
+    .unwrap();
+    let initial = flow.states().to_vec();
+    let reference = flow.hydrostatic_reference();
+    // Zero heat conduction is intentional: an isentrope has a temperature
+    // gradient, so Fourier conduction would physically disturb hydrostatics.
+    let transport = law(&flow, 0.02, 0.0, 0.0);
+    let mut coupled = MolecularEuler2d::new(flow, transport, || false).unwrap();
+    for _ in 0..6 {
+        let report = coupled
+            .step(Time::new(0.005), MolecularStepControl::default(), || false)
+            .unwrap();
+        for residual in report.conservation_residual.array() {
+            close(residual, 0.0, 3e-12);
+        }
+    }
+    assert_eq!(coupled.flow().hydrostatic_reference(), reference);
+    assert_eq!(coupled.flow().states(), initial);
+}
+
+#[test]
 fn g1_two_dimensional_fourier_mode_refines_with_original_cv_and_conserves_energy() {
     let w = 2.0 * std::f64::consts::PI;
     let mut errors = Vec::new();

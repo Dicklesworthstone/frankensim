@@ -1,5 +1,5 @@
-use super::*;
 use super::stabilized::StepWork;
+use super::*;
 use crate::compressible::mixture::molecular::stabilized::IntervalFailure;
 
 /// One physical interval shared by diffusion, shock transport and diffusion.
@@ -116,8 +116,13 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
             flow.boundaries,
             &mut cancelled,
         )?;
-        if let Some((axis, reference)) = flow.atmosphere() {
-            trial.bind_isothermal_atmosphere(axis, reference, &mut cancelled)?;
+        if let Some(balance) = &flow.hydrostatic {
+            trial.bind_hydrostatic_reference(
+                balance.axis,
+                balance.reference,
+                balance.quadrature,
+                &mut cancelled,
+            )?;
         }
         let faces = flow.boundary_impulses.len();
         Ok(Self {
@@ -201,9 +206,8 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedMolecularStepReport, MolecularError> {
         let mut work = StepWork::new(stabilization);
-        let transport = self.step_impl(
-            maximum_duration, controls, None, Some(&mut work), cancelled,
-        )?;
+        let transport =
+            self.step_impl(maximum_duration, controls, None, Some(&mut work), cancelled)?;
         Ok(StabilizedMolecularStepReport {
             transport,
             operator_evaluations: work.evaluations,
@@ -233,8 +237,11 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         }
         let mut work = StepWork::new(stabilization);
         let transport = self.step_impl(
-            maximum_duration, controls, Some((force, force_controls, workspace)),
-            Some(&mut work), cancelled,
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            cancelled,
         )?;
         Ok(StabilizedMolecularStepReport {
             transport,
@@ -252,13 +259,22 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularReport, MolecularError> {
         match stabilization {
-            None => self.molecular.advance(&mut self.trial, duration, controls, cancelled),
+            None => self
+                .molecular
+                .advance(&mut self.trial, duration, controls, cancelled),
             Some(work) => {
                 let report = self.molecular.advance_stabilized_with_budget(
-                    &mut self.trial, duration, controls, work.controls,
-                    &mut work.evaluations, cancelled,
+                    &mut self.trial,
+                    duration,
+                    controls,
+                    work.controls,
+                    &mut work.evaluations,
+                    cancelled,
                 )?;
-                work.record(report.maximum_stages_used, report.maximum_scaled_parabolic_number);
+                work.record(
+                    report.maximum_stages_used,
+                    report.maximum_scaled_parabolic_number,
+                );
                 Ok(report.transport)
             }
         }
@@ -286,7 +302,8 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         }
         if let Some(work) = stabilization.as_deref() {
             work.controls.controller(controls.molecular)?;
-            self.molecular.prepare_stabilized(work.controls.maximum_extra_workspace_bytes)?;
+            self.molecular
+                .prepare_stabilized(work.controls.maximum_extra_workspace_bytes)?;
         }
         let before = checked_totals(
             &self.accepted.states,

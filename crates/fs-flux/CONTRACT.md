@@ -1911,8 +1911,28 @@ reconstructions, a two-dimensional disturbance, coarse strongly reduced-density
 states, closed gas-plus-potential conservation, open potential-energy transport,
 additional acceleration and atomic cancellation/reference refusal. This
 bounded reference method does not provide arbitrary hydrostatic profiles,
-rotating equilibria, three-dimensional or changing-composition well balancing,
-an invariant-domain theorem or experimental validation.
+rotating equilibria, changing-composition well balancing, an invariant-domain
+theorem or experimental validation.
+
+`Euler2d::new_isentropic_atmosphere` and `bind_isentropic_atmosphere` use the
+same pressure/gravity residual with the original `fs-gas` isentropic profile.
+That owner integrates conserved density and energy under explicit
+`AtmosphereQuadrature` controls. Temperature follows the source enthalpy
+difference and pressure follows its entropy difference, retaining variable
+heat capacity rather than freezing gamma or imposing a fixed lapse rate.
+Only the reference has uniform entropy; disturbances retain the original
+Euler energy evolution. `hydrostatic_reference()` reports either physical
+family, while `atmosphere()` continues to identify only isothermal references.
+The molecular/Euler/molecular owner retains the original family and quadrature
+in its trial state. No profile integration or allocation is added to stepping.
+
+The isentropic regression target independently integrates a linear-Cp source
+for face temperature, pressure and total mass, then checks resting states,
+two-dimensional pressure disturbances, combined gas/potential conservation,
+source-window and preparation-budget refusal, immutable reference binding,
+and cancellation without state publication. Molecular tests distinguish a
+resting viscous isentrope without heat conduction from the physically evolving
+temperature gradient that nonzero Fourier conduction would introduce.
 
 ### Source-owned molecular transport in the same Cartesian gas
 
