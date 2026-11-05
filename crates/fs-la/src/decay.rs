@@ -34,6 +34,10 @@
 
 use fs_math::det;
 
+/// Constant nonnegative injection through the same positive prepared evolution.
+#[path = "decay/source.rs"]
+pub mod source;
+
 /// Hard limit for the bounded dense prepared maps.
 pub const MAX_DECAY_NODES: usize = 64;
 /// Hard limit for explicit branches, including repeated parent/daughter pairs.
@@ -100,7 +104,8 @@ pub struct DecayAdvance {
     pub populations: Vec<f64>,
     /// decays[i] = integral lambda_i N_i(s) ds; stable entries are zero.
     pub decays: Vec<f64>,
-    /// Signed final minus initial total population, before any correction.
+    /// Signed final minus initial total population, less any supplied injection
+    /// when returned by a source plan, before any correction.
     pub population_balance_residual: f64,
 }
 
@@ -224,8 +229,16 @@ impl DecayPlan {
         edges: &[DecayEdge],
         duration_s: f64,
         limits: DecayLimits,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Self, DecayError> {
+        Self::prepare_impl(rates_per_s, edges, duration_s, limits, false, cancelled)
+            .map(|(plan, _)| plan)
+    }
+
+    fn prepare_impl(
+        rates_per_s: &[f64], edges: &[DecayEdge], duration_s: f64,
+        limits: DecayLimits, with_source: bool, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, Option<source::SourceMaps>), DecayError> {
         poll(&mut cancelled)?;
         let n = rates_per_s.len();
         if limits.maximum_nodes == 0 || limits.maximum_nodes > MAX_DECAY_NODES
@@ -286,10 +299,12 @@ impl DecayPlan {
         let mut integrated = vec![0.0; n * n];
         for i in 0..n { transition[i * n + i] = 1.0; }
         if duration_s == 0.0 || maximum_rate == 0.0 {
+            if with_source { charge(&mut work, 2 * n * n, limits.maximum_work)?; }
             poll(&mut cancelled)?;
-            return Ok(Self { nodes: n, duration_s, transition, integrated, squarings: 0,
+            return Ok((Self { nodes: n, duration_s, transition, integrated, squarings: 0,
                 series_terms: 0, work, tolerance: limits.relative_tolerance,
-                tails: Vec::new(), rates: rates_per_s.to_vec() });
+                tails: Vec::new(), rates: rates_per_s.to_vec() },
+                with_source.then(|| source::SourceMaps::identity(n))));
         }
         let mut h = duration_s;
         let mut squarings = 0;
@@ -352,10 +367,16 @@ impl DecayPlan {
         }
         let mut pnext = vec![0.0; n * n];
         let mut cnext = vec![0.0; n * n];
-        // At most n genuine transitions multiply any individual path. Reserve
+        let mut source_terms = if with_source {
+            charge(&mut work, 6 * n * n, limits.maximum_work)?;
+            Some(source::SourceTerms::new(n))
+        } else { None };
+        // Constant injection adds one genuine transition to each augmented path.
+        // At most this many transitions multiply any individual path. Reserve
         // most of the tolerance for floating arithmetic and semigroup staging.
+        let path_transitions = n + usize::from(with_source);
         let series_tolerance = limits.relative_tolerance.min(1.0e-15)
-            / (8.0 * n as f64 * (squarings + 1) as f64);
+            / (8.0 * path_transitions as f64 * (squarings + 1) as f64);
         let mut series_terms = 0;
         for k in 1..=limits.maximum_series_terms {
             poll(&mut cancelled)?;
@@ -379,16 +400,22 @@ impl DecayPlan {
                     csum[at].add(cnext[at]);
                 }
             }
+            if let Some(source) = &mut source_terms {
+                source.step(&pterm, &cterm, mu, k, &mut work, limits.maximum_work, &mut cancelled)?;
+            }
             core::mem::swap(&mut pterm, &mut pnext);
             core::mem::swap(&mut cterm, &mut cnext);
-            if k >= n {
-                let ratio = mu / (k + 1 - n) as f64;
+            if k >= path_transitions {
+                let ratio = mu / (k + 1 - path_transitions) as f64;
                 let tail = ratio / (1.0 - ratio);
                 let converged = (0..n * n).all(|at| {
                     tail * pterm[at] <= series_tolerance * psum[at].total()
                         && tail * cterm[at] <= series_tolerance * csum[at].total()
                 });
-                if converged { series_terms = k; break; }
+                if converged && source_terms.as_ref().is_none_or(|source| source.converged(tail, series_tolerance)) {
+                    series_terms = k;
+                    break;
+                }
             }
         }
         if series_terms == 0 {
@@ -401,6 +428,7 @@ impl DecayPlan {
         for i in 0..n {
             (transition[i * n + i], integrated[i * n + i]) = diagonal(rates[i], h);
         }
+        let mut source_maps = source_terms.map(|source| source.finish(&rates, h));
         pnext.fill(0.0);
         cnext.fill(0.0);
         for _ in 0..squarings {
@@ -422,21 +450,30 @@ impl DecayPlan {
                 }
                 (pnext[i * n + i], cnext[i * n + i]) = diagonal(rates[i], h);
             }
+            if let Some(source) = &mut source_maps {
+                source.double(&transition, &integrated, &rates, h,
+                    &mut work, limits.maximum_work, &mut cancelled)?;
+            }
             core::mem::swap(&mut transition, &mut pnext);
             core::mem::swap(&mut integrated, &mut cnext);
         }
         validate_maps(&transition, &integrated, &incoming, n, limits.relative_tolerance,
             &mut work, limits.maximum_work, &mut cancelled)?;
+        if let Some(source) = &source_maps {
+            validate_maps(&source.population, &source.decays, &incoming, n, limits.relative_tolerance,
+                &mut work, limits.maximum_work, &mut cancelled)?;
+        }
         let mut original_tails = vec![TailBound::NONE; n * n];
         for i in 0..n { for j in 0..n {
             pnext[order[i] * n + order[j]] = transition[i * n + j];
             cnext[order[i] * n + order[j]] = integrated[i * n + j];
             original_tails[order[i] * n + order[j]] = tails[i * n + j];
         }}
+        if let Some(source) = &mut source_maps { source.reorder(&order); }
         poll(&mut cancelled)?;
-        Ok(Self { nodes: n, duration_s, transition: pnext, integrated: cnext, squarings,
+        Ok((Self { nodes: n, duration_s, transition: pnext, integrated: cnext, squarings,
             series_terms, work, tolerance: limits.relative_tolerance,
-            tails: original_tails, rates: rates_per_s.to_vec() })
+            tails: original_tails, rates: rates_per_s.to_vec() }, source_maps))
     }
 
     #[must_use] pub const fn node_count(&self) -> usize { self.nodes }
@@ -557,4 +594,6 @@ fn validate_maps(
 }
 
 #[cfg(test)]
+#[path = "decay/tests.rs"]
 mod tests;
+

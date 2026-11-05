@@ -919,3 +919,43 @@ unrepresentable in the caller's selected amount unit.
 Scope excludes cyclic reactions, fission/multiplication, external production,
 changing rates, adjoints and physical-data certification. Physical identities,
 activity units, radiation products and energy partitions belong to the caller.
+
+## Constant production on the shared decay owner
+
+`decay::source::DecaySourcePlan` extends the same bounded acyclic propagator
+with constant nonnegative production. It retains the original population map P
+and integrated-transformation map C plus dimensionless mean-age maps
+F = integral(P)/t and G = integral(C)/t. Applying total uniformly produced
+counts J gives N_new = P N_old + F J and decays = C N_old + G J.
+A source's newly created daughters can themselves transform within the interval.
+Zero duration requires zero injected counts; a discrete dose belongs in an
+explicitly constructed inventory.
+
+The source blocks use the original positive uniformization and graph order.
+Their weighted terms satisfy Z_k=(mu Z_(k-1)+Pterm_(k-1))/k and
+W_k=(mu W_(k-1)+Cterm_(k-1))/k, avoiding an inverse tiny rate or a second solver.
+Doubling uses F(2h)=(F(h)+P(h)F(h))/2 and G(2h)=G(h)+C(h)F(h)/2.
+Exact scalar mean-age survival and loss diagonals are restored at every scale.
+The positive-series tail allowance includes the source's extra transition.
+The original stochastic, visit-count and per-node transfer admission also
+checks the source maps. Existing homogeneous preparation does not allocate or
+compute these optional blocks.
+
+Maps remain bounded by one, with O(nodes squared) retained storage and
+application work; preparation still grows logarithmically with the fastest
+dimensionless rate. The original work, memory-shape and cancellation limits
+apply to the extra operations. Sources supply total produced counts per
+application, independently of preparation. Rate-times-duration conversion and
+physical energy destinations belong to the physical owner.
+
+An amplified zero or subnormal source coefficient explicitly refuses. A
+continuing source always creates fresh material, so the original initial-only
+Erlang exhaustion bound cannot justify discarding its source response.
+Accounting tolerances and exact-arithmetic series bounds remain distinct from
+a certified floating-point forward-error enclosure.
+
+All 22 owning tests passed in a direct native Rust source build: the 14 original
+homogeneous tests plus eight production tests covering stable/zero intervals,
+analytic single-parent buildup, repeated-rate ingrowth, small mean-age losses,
+unrelated stiff components, semigroup composition, range refusal and bounded
+cancellation/work. This does not claim a full workspace Cargo gate.
