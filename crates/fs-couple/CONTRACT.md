@@ -1,5 +1,41 @@
 # CONTRACT: fs-couple
 
+## Reciprocal heat in finite-plastic sheet forming
+
+`solid_enthalpy::finite_plastic::sheet::FiniteThermoplasticSheetCoupling` binds
+the original P1/Q1 thermoplastic sheet to one active caloric cell per element.
+It uses the existing source-admitted `FiniteThermoplasticMaterial`: mechanical
+and caloric laws retain the same material card, original caloric object,
+reference density and positive total heat-capacity bound. Reference area times
+original thickness fixes cell volume and mass. Admission checks every accepted
+quadrature temperature against its cell, including after a nonuniform native
+sheet path; a diagnostic mean cannot stand in for the retained point state.
+
+The sheet and tetrahedral couplings share one bounded feedback algorithm and
+thermal observer adapter. Every proposal starts from the same accepted native
+mechanical history and thermal timeline. Original quadrature volumes integrate
+plastic and creep dissipation plus signed reversible heat exactly once. The
+thermal owner retains its substeps, source transitions, conductance observers,
+events and conservative exchanges. Its actual endpoint temperatures then drive
+the mechanical endpoint; relaxation operates on caloric enthalpy. An unrelaxed
+iteration reuses the preceding actual-temperature mechanical proposal.
+
+Acceptance separately checks temperature agreement, the sum of absolute cell
+heat discrepancies, caloric balance and combined mechanical/caloric balance.
+Hardening storage, rate potential and signed endpoint work defects remain
+separate from physical heat. The returned candidate contains the complete
+sheet, thermal simulation, observer history and native equilibrium/energy
+reports. Original cell identities, reference geometry, mass, accepted enthalpy
+and clocks remain binding; rejected iterations change none of these owners.
+
+This is quasistatic membrane mechanics with element-uniform caloric cells and
+independently specified reference-network conductances. Evolving thickness is
+mechanical output, not an implicit update to Fourier or convection geometry.
+The existing finite-plastic enthalpy regression seam adds native heated sheet
+forming and self-heating with independent physical-loss and storage checks.
+Native Rust execution of the new coupling remains pending available build
+resources.
+
 ## Source-bound thermal memory on the original shear shell
 
 MaterialShellImage::with_thermoelastic_memory selects explicit instantaneous

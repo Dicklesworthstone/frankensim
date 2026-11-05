@@ -10,6 +10,8 @@ mod combined;
 mod creep;
 #[path = "finite_plastic_enthalpy/rate.rs"]
 mod rate;
+#[path = "finite_plastic_enthalpy/sheet.rs"]
+mod sheet;
 
 use std::collections::BTreeMap;
 

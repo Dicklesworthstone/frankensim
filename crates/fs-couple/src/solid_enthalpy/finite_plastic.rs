@@ -25,19 +25,24 @@
 //! P1 finite solid, including its volumetric-locking limitations. Optional
 //! inertia uses the same fixed reference mass and endpoint solve.
 
+mod feedback;
 pub mod impact;
 pub mod material;
+/// Reciprocal finite sheet forming and native caloric transport.
+pub mod sheet;
 pub use impact::{
     FiniteThermoplasticEllipticImpactError, FiniteThermoplasticImpactError,
     FiniteThermoplasticSourceImpactError,
 };
 pub use material::{CaloricReference, FiniteThermoplasticMaterial, FiniteThermoplasticQuery};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use fs_exec::Cx;
 use fs_material::phase::PhaseStateError;
+use fs_solid::hyper2d::plastic::thermal::FiniteThermoplasticSheetError;
+use fs_solid::hyper3::plastic::FinitePlasticLawField;
 use fs_solid::hyper3::plastic::thermal::{
     FiniteThermoplasticControls, FiniteThermoplasticTetEnergy, FiniteThermoplasticTetError,
     FiniteThermoplasticTetSolid,
@@ -47,7 +52,7 @@ use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::plastic3::dynamics::InertialEnergy;
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
-    Event, HeatTransfer, StepConfig, ThermalLaw,
+    StepConfig, ThermalLaw,
 };
 
 /// Source, native mechanical/thermal, physical account or iteration refusal.
@@ -57,6 +62,7 @@ pub enum FiniteThermoplasticError<E = Infallible> {
     Source(String),
     Caloric(PhaseStateError),
     Solid(FiniteThermoplasticTetError),
+    Sheet(FiniteThermoplasticSheetError),
     Thermal(DepositionError),
     Observer(E),
     Cancelled,
@@ -229,51 +235,14 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         accepted: bool,
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, FiniteThermoplasticError<E>> {
-        let mut result = Vec::with_capacity(self.cells.len());
-        for (old, material) in self.cells.iter().zip(self.solid.families()) {
-            poll(cx)?;
-            let cell = thermal
-                .cells()
-                .get(&old.id)
-                .ok_or(FiniteThermoplasticError::Invalid(
-                    "finite structural cell became inactive",
-                ))?;
-            if cell.id != old.id
-                || cell.segment_id != old.segment_id
-                || cell.body_id != old.body_id
-                || cell.material_id != old.material_id
-                || cell.geometry != old.geometry
-                || cell.mass_kg.to_bits() != old.mass_kg.to_bits()
-                || accepted && cell.specific_h_j_kg.to_bits() != old.specific_h_j_kg.to_bits()
-                || !thermal.uses_material_law(
-                    cell.material_id,
-                    material.caloric_source().curve() as &dyn ThermalLaw,
-                )
-            {
-                return Err(FiniteThermoplasticError::Invalid(
-                    "finite structural identity, reference geometry, mass or accepted caloric state changed",
-                ));
-            }
-            material
-                .state_at_specific_enthalpy(cell.specific_h_j_kg)
-                .map_err(FiniteThermoplasticError::Caloric)?;
-            result.push(cell.specific_h_j_kg);
-        }
-        Ok(result)
+        self.binding().enthalpies(thermal, accepted, cx)
     }
 
-    fn temperatures<E>(&self, enthalpies: &[f64]) -> Result<Vec<f64>, FiniteThermoplasticError<E>> {
-        self.solid
-            .families()
-            .iter()
-            .zip(enthalpies)
-            .map(|(material, h)| {
-                material
-                    .state_at_specific_enthalpy(*h)
-                    .map(|s| s.temperature_k())
-                    .map_err(FiniteThermoplasticError::Caloric)
-            })
-            .collect()
+    fn binding(&self) -> feedback::ThermalBinding<'_, '_, 'a> {
+        feedback::ThermalBinding {
+            cells: &self.cells,
+            materials: FinitePlasticLawField::PerElement(self.solid.families()),
+        }
     }
 
     /// Advance actual mechanics and heat together. Loads and supports are held
@@ -294,40 +263,20 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         config: FiniteThermoplasticConfig,
         cx: &Cx<'_>,
     ) -> Result<FiniteThermoplasticCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>> {
-        poll(cx)?;
-        let duration_s = target_s - self.time_s;
-        if thermal.time_s() != self.time_s
-            || !positive(duration_s)
-            || !target_s.is_finite()
-            || config.maximum_iterations == 0
-            || config.maximum_iterations > 256
-            || !positive(config.temperature_tolerance_k)
-            || !positive(config.energy_tolerance_j)
-            || !positive(config.enthalpy_relaxation)
-            || config.enthalpy_relaxation > 1.0
-            || !thermal_config.energy_tolerance_j.is_finite()
-            || thermal_config.energy_tolerance_j < 0.0
-            || thermal_config.energy_tolerance_j > config.energy_tolerance_j
-        {
-            return Err(FiniteThermoplasticError::Invalid(
-                "matching clocks, positive interval and bounded independent thermal coupling controls required",
-            ));
-        }
-        let mut enthalpies = self.enthalpies(thermal, true, cx)?;
-        let mut defects = [f64::INFINITY; 4];
-        // Every cached proposal still starts from this SAME accepted solid.
-        // With unrelaxed thermal iteration, the preceding actual-temperature
-        // endpoint is exactly the next trial; do not solve Newton twice for it.
-        let mut next_trial = None;
-        for iteration in 1..=config.maximum_iterations {
-            poll(cx)?;
-            let trial_temperatures = self.temperatures(&enthalpies)?;
-            let trial = if let Some(cached) = next_trial.take() {
-                cached
-            } else {
-                self.solid
+        let next = feedback::advance(
+            self.binding(),
+            self.time_s,
+            thermal,
+            observer,
+            target_s,
+            thermal_config,
+            config,
+            cx,
+            |temperatures, duration_s| {
+                let step = self
+                    .solid
                     .advance(
-                        &trial_temperatures,
+                        temperatures,
                         prescribed_m,
                         nodal_forces_n,
                         body_force_n_m3,
@@ -336,169 +285,47 @@ impl<'a> FiniteThermoplasticSolid<'a> {
                         mechanical_controls,
                         cx,
                     )
-                    .map_err(FiniteThermoplasticError::Solid)?
-            };
-            let trial_heat: Vec<_> = trial
-                .element_energy
-                .iter()
-                .enumerate()
-                .map(|(i, e)| {
-                    finite(
-                        self.solid
-                            .reference_volume_m3(i)
-                            .expect("retained tetrahedron index")
-                            * e.caloric_heat_j_m3(),
-                    )
+                    .map_err(FiniteThermoplasticError::Solid)?;
+                let heat_j = step
+                    .element_energy
+                    .iter()
+                    .enumerate()
+                    .map(|(i, energy)| {
+                        finite(
+                            self.solid
+                                .reference_volume_m3(i)
+                                .expect("retained tetrahedron index")
+                                * energy.caloric_heat_j_m3(),
+                        )
+                    })
+                    .collect::<Result<_, FiniteThermoplasticError<O::Error>>>()?;
+                Ok(feedback::MechanicalProposal {
+                    state: step.solid,
+                    equilibrium: step.equilibrium,
+                    energy: step.energy,
+                    inertia: step.inertia,
+                    heat_j,
                 })
-                .collect::<Result<_, FiniteThermoplasticError<O::Error>>>()?;
-            let applied_heat_j = finite(trial_heat.iter().sum())?;
-            let heat = FiniteHeat {
-                solid: self,
-                inner: observer.clone(),
-                cx,
-                watts: self
-                    .cells
-                    .iter()
-                    .zip(&trial_heat)
-                    .map(|(cell, q)| Ok((cell.id, finite(*q / duration_s)?)))
-                    .collect::<Result<_, FiniteThermoplasticError<O::Error>>>()?,
-            };
-            let (next_thermal, heat, thermal_audit) =
-                thermal.advance_observed(&heat, target_s, thermal_config, || {
-                    cx.checkpoint().map_err(|_| DepositionError::Cancelled)
-                })?;
-            let final_h = self.enthalpies(&next_thermal, false, cx)?;
-            let final_temperatures = self.temperatures(&final_h)?;
-            let actual = if final_temperatures == trial_temperatures {
-                trial
-            } else {
-                self.solid
-                    .advance(
-                        &final_temperatures,
-                        prescribed_m,
-                        nodal_forces_n,
-                        body_force_n_m3,
-                        duration_s,
-                        settings,
-                        mechanical_controls,
-                        cx,
-                    )
-                    .map_err(FiniteThermoplasticError::Solid)?
-            };
-            let actual_heat: Vec<_> = actual
-                .element_energy
-                .iter()
-                .enumerate()
-                .map(|(i, e)| {
-                    finite(
-                        self.solid
-                            .reference_volume_m3(i)
-                            .expect("retained tetrahedron index")
-                            * e.caloric_heat_j_m3(),
-                    )
-                })
-                .collect::<Result<_, FiniteThermoplasticError<O::Error>>>()?;
-            let caloric_heat_j = finite(actual_heat.iter().sum())?;
-            let external_heat_j = finite(thermal_audit.external_heat_j - applied_heat_j)?;
-            let thermal_residual_j = finite(
-                thermal_audit.stored_energy_change_j
-                    - thermal_audit.incoming_energy_j
-                    - external_heat_j
-                    - caloric_heat_j,
-            )?;
-            let inertia_account = actual.inertia.as_ref().map_or(0.0, |inertia| {
-                inertia.kinetic_change_j + inertia.numerical_loss_j
-            });
-            let combined_residual_j = finite(
-                actual.energy.internal_energy_change_j
-                    + thermal_audit.stored_energy_change_j
-                    + actual.energy.endpoint_work_defect_j
-                    + inertia_account
-                    - actual.energy.dead_load_endpoint_work_j
-                    - actual.energy.support_endpoint_work_j
-                    - external_heat_j
-                    - thermal_audit.incoming_energy_j,
-            )?;
-            defects = [
-                trial_temperatures
-                    .iter()
-                    .zip(&final_temperatures)
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0, f64::max),
-                finite(
-                    trial_heat
-                        .iter()
-                        .zip(&actual_heat)
-                        .map(|(a, b)| (a - b).abs())
-                        .sum(),
-                )?,
-                thermal_residual_j,
-                combined_residual_j,
-            ];
-            if defects[0] <= config.temperature_tolerance_k
-                && defects[1] <= config.energy_tolerance_j
-                && defects[2].abs() <= config.energy_tolerance_j
-                && defects[3].abs() <= config.energy_tolerance_j
-            {
-                let cells = self
-                    .cells
-                    .iter()
-                    .map(|cell| next_thermal.cells()[&cell.id].clone())
-                    .collect();
-                let solid = Self {
-                    solid: actual.solid,
-                    cells,
-                    time_s: target_s,
-                };
-                let report = FiniteThermoplasticReport {
-                    iterations: iteration,
-                    equilibrium: actual.equilibrium,
-                    material_energy: actual.energy,
-                    inertia: actual.inertia,
-                    thermal_audit,
-                    applied_heat_j,
-                    external_heat_j,
-                    temperature_defect_k: defects[0],
-                    heat_defect_j: defects[1],
-                    thermal_residual_j,
-                    combined_residual_j,
-                };
-                poll(cx)?;
-                return Ok(FiniteThermoplasticCandidate {
-                    thermal: next_thermal,
-                    solid,
-                    observer: heat.inner,
-                    report,
-                });
-            }
-            if config.enthalpy_relaxation == 1.0 {
-                enthalpies = final_h;
-                next_trial = Some(actual);
-            } else {
-                for (h, new_h) in enthalpies.iter_mut().zip(final_h) {
-                    *h = finite(
-                        (1.0 - config.enthalpy_relaxation) * *h
-                            + config.enthalpy_relaxation * new_h,
-                    )?;
-                }
-            }
-        }
-        poll(cx)?;
-        Err(FiniteThermoplasticError::NotConverged {
-            iterations: config.maximum_iterations,
-            temperature_defect_k: defects[0],
-            heat_defect_j: defects[1],
-            thermal_residual_j: defects[2],
-            combined_residual_j: defects[3],
+            },
+        )?;
+        Ok(FiniteThermoplasticCandidate {
+            thermal: next.thermal,
+            solid: Self {
+                solid: next.state,
+                cells: next.cells,
+                time_s: target_s,
+            },
+            observer: next.observer,
+            report: next.report,
         })
     }
 }
 
 /// Original mechanical and thermal reports plus independently checked coupling.
 #[derive(Debug)]
-pub struct FiniteThermoplasticReport {
+pub struct FiniteThermoplasticReport<E = HyperTetSolution> {
     pub iterations: usize,
-    pub equilibrium: HyperTetSolution,
+    pub equilibrium: E,
     pub material_energy: FiniteThermoplasticTetEnergy,
     pub inertia: Option<InertialEnergy>,
     pub thermal_audit: EnergyAudit,
@@ -546,132 +373,6 @@ impl<'m, 't, O> FiniteThermoplasticCandidate<'m, 't, O> {
     }
 }
 
-#[derive(Clone)]
-struct FiniteHeat<'s, 'm, 'cx, O> {
-    solid: &'s FiniteThermoplasticSolid<'m>,
-    inner: O,
-    cx: &'s Cx<'cx>,
-    watts: BTreeMap<CellId, f64>,
-}
-impl<O: DepositionObserver> DepositionObserver for FiniteHeat<'_, '_, '_, O> {
-    type Error = FiniteThermoplasticError<O::Error>;
-    fn begin(&mut self) -> Result<(), Self::Error> {
-        self.inner
-            .begin()
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-    fn requires_step_interval(&self) -> bool {
-        self.inner.requires_step_interval()
-    }
-    fn next_transition_time_s(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Option<f64>, Self::Error> {
-        self.inner
-            .next_transition_time_s(thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-    fn sources(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.solid.enthalpies(thermal, false, self.cx)?;
-        let mut rates = self
-            .inner
-            .sources(thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)?;
-        for (&cell, &watts) in &self.watts {
-            checkpoint()?;
-            let rate = rates.entry(cell).or_insert(0.0);
-            *rate = finite(*rate + watts)?;
-        }
-        Ok(rates)
-    }
-    fn step_sources(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        start: f64,
-        dt: f64,
-        end: f64,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner
-            .step_sources(thermal, start, dt, end, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-    fn conductances(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<u64, f64>, Self::Error> {
-        self.inner
-            .conductances(thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-    fn reservoir_conductances(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner
-            .reservoir_conductances(thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-
-    fn ambient_conductances(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.inner
-            .ambient_conductances(thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-    fn heat_transfers(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Vec<HeatTransfer>, Self::Error> {
-        self.inner
-            .heat_transfers(thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-    fn limit_timestep_s(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        dt: f64,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<f64, Self::Error> {
-        self.inner
-            .limit_timestep_s(thermal, dt, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)
-    }
-    fn event(
-        &mut self,
-        event: &Event,
-        thermal: &DepositionSimulation<'_>,
-    ) -> Result<(), Self::Error> {
-        self.inner
-            .event(event, thermal)
-            .map_err(FiniteThermoplasticError::Observer)?;
-        self.solid.enthalpies(thermal, false, self.cx).map(|_| ())
-    }
-    fn step(
-        &mut self,
-        start: f64,
-        duration: f64,
-        old: &BTreeMap<CellId, f64>,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), Self::Error> {
-        self.inner
-            .step(start, duration, old, thermal, checkpoint)
-            .map_err(FiniteThermoplasticError::Observer)?;
-        self.solid.enthalpies(thermal, false, self.cx).map(|_| ())
-    }
-}
 fn poll<E>(cx: &Cx<'_>) -> Result<(), FiniteThermoplasticError<E>> {
     cx.checkpoint()
         .map_err(|_| FiniteThermoplasticError::Cancelled)
