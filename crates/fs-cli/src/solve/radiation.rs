@@ -21,6 +21,7 @@ use crate::import::json_string;
 
 pub(super) mod adaptive;
 mod enclosure;
+mod material;
 mod pointwise;
 use pointwise::PointwiseEndpoint;
 pub(super) use pointwise::receipt as pointwise_receipt;
@@ -31,6 +32,8 @@ pub(super) struct LoweredRadiation {
     surfaces: Vec<SurfaceSource>,
     enclosure: Option<enclosure::LoweredEnclosure>,
     pointwise: bool,
+    emissivity_response: Option<fs_project::RadiationEmissivityResponse>,
+    material_sources: Vec<material::MaterialAmbientSource>,
 }
 
 struct SurfaceSource {
@@ -40,6 +43,10 @@ struct SurfaceSource {
 }
 
 impl LoweredRadiation {
+    pub(super) fn is_material_ambient(&self) -> bool {
+        self.emissivity_response == Some(fs_project::RadiationEmissivityResponse::LocalTemperature)
+    }
+
     pub(super) fn is_pointwise(&self) -> bool {
         self.pointwise
     }
@@ -107,6 +114,7 @@ pub(super) fn lower(
     setup: &ConductionSetup,
     cards: &CardPackSet,
 ) -> Result<Option<LoweredRadiation>, SolveRefusal> {
+    material::admit(setup)?;
     if pointwise_requested(spec) {
         super::transient::admit(spec)?;
     }
@@ -118,6 +126,7 @@ pub(super) fn lower(
     };
     let mut patches = Vec::with_capacity(declaration.surfaces.len());
     let mut surfaces = Vec::with_capacity(declaration.surfaces.len());
+    let mut material_sources = Vec::new();
     for surface in &declaration.surfaces {
         if !setup.boundaries.iter().any(|boundary| {
             boundary.target == surface.target && boundary.condition.supports_ambient_radiation()
@@ -131,13 +140,19 @@ pub(super) fn lower(
                 "declare convection or exactly zero outward heat flux on this exterior target; no fictitious convection is needed for radiation-only exchange",
             ));
         }
-        let emissivity = resolve_emissivity(
-            &surface.name,
-            &surface.card,
-            surface.claim.as_deref(),
-            surface.query_temperature.value,
-            cards,
-        )?;
+        let emissivity = if declaration.emissivity_response.is_some() {
+            let (emissivity, source) = material::lower_source(surface, cards)?;
+            material_sources.push(source);
+            emissivity
+        } else {
+            resolve_emissivity(
+                &surface.name,
+                &surface.card,
+                surface.claim.as_deref(),
+                surface.query_temperature.value,
+                cards,
+            )?
+        };
         patches.push(
             AmbientRadiationPatch::new(
                 &surface.target,
@@ -173,6 +188,8 @@ pub(super) fn lower(
         surfaces,
         enclosure: None,
         pointwise: declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise),
+        emissivity_response: declaration.emissivity_response,
+        material_sources,
     }))
 }
 

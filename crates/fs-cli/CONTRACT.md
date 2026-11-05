@@ -1,5 +1,36 @@
 # CONTRACT: fs-cli
 
+## Local-temperature material emissivity — driver 127
+
+An ambient radiation declaration may explicitly select
+`:emissivity-response local-temperature` with pointwise spatial integration
+and primary-enthalpy storage. The omitted setting retains the original fixed
+query behavior. The reference query selects one scalar or linear temperature
+curve; every physical nodal query retains that source and its support.
+
+Every radiating trace must use the same original material card and exact
+caloric object as its storage nodes. The adapter prepares one native material
+radiation owner for each physical boundary trial and reuses it for the complete
+Newton solve and original residual/energy audits. Both source-surface contact
+iteration and coupled contact Newton compose with it, as do the existing
+natural-convection and transported-air loops. Original convection alone heats
+air. No alternate thermal solver or frozen emissivity iteration is introduced.
+
+The native owner interpolates nodal temperature and emissivity on the P1 trace,
+uses positive degree-six quadrature, and retains the complete source-temperature
+feedback in the enthalpy tangent. Reports distinguish the reference query from
+the actual nodal emissivity, phase and source usage. Retained material report
+storage is charged before either time grid starts. Driver 127 invalidates
+older cached producer results.
+
+This increment admits ambient gray exchange with scalar or temperature-curve
+sources; separate coatings, phase-dependent emissivity, local-state enclosure
+declarations, source switching and extrapolation remain outside this CLI mode.
+Requested trajectory derivatives must use original source ordinates; the
+adapter refuses them until that explicit control path is available. Forward
+regressions cover heating, cooling, source identity and domain refusal through
+the real CLI path. Syntax checks alone do not establish numerical execution.
+
 ## Pointwise radiation through live-contact enthalpy histories — driver 126
 
 Final-temperature and sampled-peak total-enthalpy adjoints now compose original

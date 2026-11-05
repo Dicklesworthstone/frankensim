@@ -187,6 +187,8 @@ pub(super) fn lower(
         },
         surfaces,
         pointwise: declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise),
+        emissivity_response: None,
+        material_sources: Vec::new(),
         enclosure: Some(LoweredEnclosure {
             declaration: declaration.clone(),
         }),

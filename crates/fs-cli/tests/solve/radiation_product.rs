@@ -104,6 +104,7 @@ pub(super) fn declare(spec: &mut ProjectSpec, card: &str, target: &str, reservoi
         .unwrap()
         .radiation = Some(ConductionRadiation {
         spatial_model: None,
+        emissivity_response: None,
         surfaces: vec![RadiatingSurface {
             name: "gray-exterior".to_string(),
             target: target.to_string(),

@@ -1081,6 +1081,7 @@ fn radiation_project() -> ProjectSpec {
     };
     conduction.radiation = Some(ConductionRadiation {
         spatial_model: None,
+        emissivity_response: None,
         surfaces: vec![RadiatingSurface {
             name: "black-anodized-sink".to_string(),
             target: "sink-base".to_string(),
@@ -1158,6 +1159,67 @@ fn check_radiation_spatial_models(mut spec: ProjectSpec) {
 #[test]
 fn g0_ambient_radiation_spatial_model_roundtrip_identity_and_refusal() {
     check_radiation_spatial_models(radiation_project());
+}
+
+fn local_temperature_radiation_project() -> ProjectSpec {
+    let mut spec = radiation_project();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.transient = enthalpy_project().cooling.unwrap().conduction.unwrap().transient;
+    let radiation = setup.radiation.as_mut().unwrap();
+    radiation.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+    radiation.emissivity_response = Some(fs_project::RadiationEmissivityResponse::LocalTemperature);
+    spec
+}
+
+#[test]
+fn g0_local_temperature_emissivity_roundtrips_explicit_source_response_without_changing_fixed_mode() {
+    let mut spec = local_temperature_radiation_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let canonical = print_sexpr(&spec).unwrap();
+    assert!(canonical.contains(":spatial-model pointwise"));
+    assert!(canonical.contains(":emissivity-response local-temperature"));
+    let sexpr = parse_sexpr(&canonical).unwrap();
+    let json = print_json(&spec).unwrap();
+    let decoded_json = parse_json(&json).unwrap();
+    assert_eq!(sexpr.spec, spec);
+    assert_eq!(decoded_json.spec, spec);
+    assert_eq!(decoded_json.canonical, canonical);
+    assert!(sexpr.defaults.is_empty() && sexpr.findings().is_empty());
+    for (replacement, code) in [
+        ("temperature-average", "project-field-enum"),
+        ("1.0", "project-malformed-clause"),
+    ] {
+        let malformed = canonical.replacen(":emissivity-response local-temperature",
+            &format!(":emissivity-response {replacement}"), 1);
+        let decoded = parse_sexpr_lenient(&malformed).unwrap();
+        assert!(decoded.recognition.iter().any(|finding| finding.code == code));
+        assert!(parse_sexpr(&malformed).is_err());
+    }
+    assert!(parse_json(&json.replacen("\"local-temperature\"", "\"unknown-response\"", 1)).is_err());
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .radiation.as_mut().unwrap().emissivity_response = None;
+    let fixed = print_sexpr(&spec).unwrap();
+    assert!(!fixed.contains(":emissivity-response"));
+    assert_ne!(canonical_hash(canonical.as_bytes()), canonical_hash(fixed.as_bytes()));
+    assert_eq!(fixed, canonical.replace(" :emissivity-response local-temperature", ""));
+    assert_eq!(parse_sexpr(&fixed).unwrap().spec, spec);
+}
+
+#[test]
+fn g0_local_temperature_emissivity_requires_pointwise_primary_enthalpy_storage() {
+    for spatial in [None, Some(fs_project::RadiationSpatialModel::PatchMean)] {
+        let mut spec = local_temperature_radiation_project();
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .radiation.as_mut().unwrap().spatial_model = spatial;
+        assert!(spec.validate().iter().any(|finding|
+            finding.code == "project-radiation-emissivity-response"));
+    }
+    for storage in [None, transient_project().cooling.unwrap().conduction.unwrap().transient] {
+        let mut spec = local_temperature_radiation_project();
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient = storage;
+        assert!(spec.validate().iter().any(|finding|
+            finding.code == "project-radiation-emissivity-response"));
+    }
 }
 
 #[test]

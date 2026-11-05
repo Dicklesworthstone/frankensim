@@ -2,6 +2,8 @@
 use fs_conduction::{PointwiseEnclosureReport, PointwiseRadiationReport};
 use super::{LoweredRadiation, SolveRefusal, SurfaceSource, conduction_error, json_string, num};
 
+mod material;
+
 pub(super) enum PointwiseEndpoint {
     Ambient(PointwiseRadiationReport),
     Enclosure(PointwiseEnclosureReport),
@@ -60,6 +62,12 @@ pub(in crate::solve) fn receipt(
 ) -> Result<String, SolveRefusal> {
     if !lowering.is_pointwise() {
         return Err(bad("pointwise radiation report has a patch-mean declaration"));
+    }
+    if lowering.is_material_ambient() {
+        return match (ambient, enclosure) {
+            (Some(report), None) => material::receipt(report, lowering, convective_out_w),
+            _ => Err(bad("local material emissivity lost its ambient endpoint report")),
+        };
     }
     let (model, heat, rows, extra) = match (ambient, enclosure) {
         (Some(report), None) if !lowering.is_enclosure() => {

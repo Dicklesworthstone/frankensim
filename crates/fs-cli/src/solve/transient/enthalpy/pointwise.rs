@@ -1,7 +1,8 @@
 //! Pointwise radiation uses the native enthalpy Newton solve and endpoint audit.
 //! No frozen-radiation iteration or separate caloric history is introduced.
 use fs_conduction::{
-    PointwiseAmbientRadiation, PointwiseEnclosureRadiation, PointwiseEnclosureTolerance,
+    MaterialPointwiseAmbientRadiation, PointwiseAmbientRadiation,
+    PointwiseEnclosureRadiation, PointwiseEnclosureTolerance,
 };
 use fs_conduction::radiation::GrayDiffuseEnclosure;
 use fs_conduction::transient::enthalpy::EnthalpyEndpointEvaluation;
@@ -10,12 +11,14 @@ use super::*;
 
 enum Owner<'a> {
     Ambient(PointwiseAmbientRadiation<'a>),
+    MaterialAmbient(MaterialPointwiseAmbientRadiation<'a>),
     Enclosure(PointwiseEnclosureRadiation<'a>),
 }
 
 impl<'a> Owner<'a> {
     fn new(
         cx: &Cx<'_>, problem: ConductionProblem<'a>,
+        engine: &'a HeterogeneousEnthalpyBackwardEuler<'_, '_>,
         lowering: &'a radiation::LoweredRadiation,
         enclosure: Option<&'a GrayDiffuseEnclosure>,
     ) -> Result<Self, SolveRefusal> {
@@ -25,6 +28,9 @@ impl<'a> Owner<'a> {
             || (enclosure.is_some() && ambient_k.is_some())
         {
             return Err(bad("pointwise radiation lost its exact declared spatial model"));
+        }
+        if let Some(owner) = lowering.bind_material_ambient(cx, problem, engine).map_err(lower)? {
+            return Ok(Self::MaterialAmbient(owner));
         }
         if let Some(ambient_k) = ambient_k {
             let model = lowering.bind_open_enclosure(cx, problem).map_err(lower)?
@@ -61,6 +67,9 @@ impl<'a> Owner<'a> {
             Self::Ambient(owner) => engine.evaluate_endpoint_with_pointwise_ambient_radiation(
                 cx, problem, interfaces, old, candidate, dt_s, config, owner,
             ),
+            Self::MaterialAmbient(owner) => engine.evaluate_endpoint_with_material_ambient_radiation(
+                cx, problem, interfaces, old, candidate, dt_s, config, owner,
+            ),
             Self::Enclosure(owner) => engine.evaluate_endpoint_with_pointwise_enclosure_radiation(
                 cx, problem, interfaces, old, candidate, dt_s, config, owner,
             ),
@@ -75,6 +84,9 @@ impl<'a> Owner<'a> {
     ) -> Result<EnthalpyStepSolution, SolveRefusal> {
         match self {
             Self::Ambient(owner) => engine.advance_with_pointwise_ambient_radiation(
+                cx, problem, interfaces, old, dt_s, config, owner,
+            ),
+            Self::MaterialAmbient(owner) => engine.advance_with_material_ambient_radiation(
                 cx, problem, interfaces, old, dt_s, config, owner,
             ),
             Self::Enclosure(owner) => engine.advance_with_pointwise_enclosure_radiation(
@@ -93,10 +105,16 @@ impl<'a> Owner<'a> {
             (Self::Ambient(owner), true) => contacts.advance_enthalpy_newton_with_pointwise_ambient_radiation(
                 cx, engine, problem, old, dt_s, config.native, owner,
             ),
+            (Self::MaterialAmbient(owner), true) => contacts.advance_enthalpy_newton_with_material_ambient_radiation(
+                cx, engine, problem, old, dt_s, config.native, owner,
+            ),
             (Self::Enclosure(owner), true) => contacts.advance_enthalpy_newton_with_pointwise_enclosure_radiation(
                 cx, engine, problem, old, dt_s, config.native, owner,
             ),
             (Self::Ambient(owner), false) => contacts.advance_enthalpy_with_pointwise_ambient_radiation(
+                cx, engine, problem, old, dt_s, config.native.step, config.coupling(), owner,
+            ),
+            (Self::MaterialAmbient(owner), false) => contacts.advance_enthalpy_with_material_ambient_radiation(
                 cx, engine, problem, old, dt_s, config.native.step, config.coupling(), owner,
             ),
             (Self::Enclosure(owner), false) => contacts.advance_enthalpy_with_pointwise_enclosure_radiation(
@@ -113,7 +131,7 @@ pub(in crate::solve::transient) fn advance_contact(
     old: &[f64], dt_s: f64, config: contact::enthalpy::Config,
     lowering: &radiation::LoweredRadiation, enclosure: Option<&GrayDiffuseEnclosure>,
 ) -> Result<ContactEnthalpyStep, SolveRefusal> {
-    Owner::new(cx, problem, lowering, enclosure)?
+    Owner::new(cx, problem, engine, lowering, enclosure)?
         .advance_contact(cx, engine, problem, contacts, old, dt_s, config)
 }
 
@@ -129,7 +147,7 @@ pub(super) fn advance(
     // Reuse the prepared face geometry/radiosity factorization for this whole
     // Newton solve and both physical audits. An outer convection trial binds its
     // own boundary, while all attempts retain this exact old enthalpy.
-    let owner = Owner::new(cx, problem, lowering, enclosure)?;
+    let owner = Owner::new(cx, problem, engine, lowering, enclosure)?;
     let initial = engine.prescribed_endpoint_initial_guess(cx, problem.boundary, old)
         .map_err(|error| match error {
             HeterogeneousEnthalpyError::Enthalpy(inner) => failed(inner),
@@ -209,7 +227,7 @@ pub(in crate::solve::transient) fn evaluate(
     old: &[f64], candidate: &[f64], dt_s: f64, config: EnthalpyStepConfig,
     lowering: &radiation::LoweredRadiation, enclosure: Option<&GrayDiffuseEnclosure>,
 ) -> Result<EnthalpyEndpointEvaluation, SolveRefusal> {
-    Owner::new(cx, problem, lowering, enclosure)?
+    Owner::new(cx, problem, engine, lowering, enclosure)?
         .evaluate(cx, engine, problem, interfaces, old, candidate, dt_s, config)
 }
 

@@ -29,7 +29,7 @@ use crate::spec::{
     Envelope, Fan, FanCurveDecl, FanCurvePoint, FanEfficiency, FanEfficiencyBasis,
     FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding, InterfaceState,
     MaterialBinding, MaterialTolerance, Metadata, OutputRequest, PerfectContactBinding,
-    PowerDissipation, ProjectSpec, RadiatingSurface, RadiationSpatialModel, RequirementDirection,
+    PowerDissipation, ProjectSpec, RadiatingSurface, RadiationEmissivityResponse, RadiationSpatialModel, RequirementDirection,
     RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
     SolverSettings, SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit,
     TransientBoundaryTarget, TransientBoundarySchedule, TransientBoundaryStep,
@@ -863,6 +863,9 @@ fn lower_radiation(radiation: &ConductionRadiation) -> Result<Node, ProjectError
     ];
     if let Some(model) = radiation.spatial_model {
         declaration.extend([kw("spatial-model"), sym(model.slug())]);
+    }
+    if let Some(response) = radiation.emissivity_response {
+        declaration.extend([kw("emissivity-response"), sym(response.slug())]);
     }
     Ok(list(declaration))
 }
@@ -3228,6 +3231,28 @@ fn read_radiation_spatial_model(
     }
 }
 
+fn read_radiation_emissivity_response(
+    node: Option<&Node>,
+    out: &mut Vec<Violation>,
+) -> Option<RadiationEmissivityResponse> {
+    let node = node?;
+    let NodeKind::Symbol(value) = &node.kind else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "`radiation.emissivity-response` expected a source-response symbol".to_string(),
+            fix: "use symbol `local-temperature` or omit the field for a fixed emissivity sample".to_string(),
+        });
+        return None;
+    };
+    match value.as_str() {
+        "local-temperature" => Some(RadiationEmissivityResponse::LocalTemperature),
+        _ => {
+            invalid_enum(out, "radiation.emissivity-response", value, "`local-temperature`");
+            None
+        }
+    }
+}
+
 fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRadiation> {
     let Some(("radiation", body)) = section_name(node) else {
         out.push(Violation {
@@ -3242,6 +3267,7 @@ fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRad
         "radiation",
         &[
             "spatial-model",
+            "emissivity-response",
             "surfaces",
             "max-iterations",
             "temperature-tolerance",
@@ -3319,6 +3345,9 @@ fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRad
             field(&pairs, "spatial-model"),
             "radiation.spatial-model",
             out,
+        ),
+        emissivity_response: read_radiation_emissivity_response(
+            field(&pairs, "emissivity-response"), out,
         ),
         surfaces,
         max_iterations,

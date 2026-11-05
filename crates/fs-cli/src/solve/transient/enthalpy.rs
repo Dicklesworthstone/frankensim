@@ -718,6 +718,9 @@ pub(super) fn solve(
         .as_ref()
         .ok_or_else(|| bad("missing enthalpy storage"))?;
     let objective = adjoint::requested(spec)?;
+    if objective.is_some() && radiation.is_some_and(radiation::LoweredRadiation::is_material_ambient) {
+        return Err(bad("local-temperature emissivity requires original-source trajectory controls; a fixed-snapshot radiation adjoint is not admissible"));
+    }
     if temperature_contacts.is_some() && (interfaces.is_some()
         || radiation.is_some_and(|lowering| !lowering.is_pointwise()))
     {
@@ -845,7 +848,20 @@ pub(super) fn solve(
             .ok_or_else(|| bad("enthalpy knot count overflows"))
     })?;
     let radiation_bytes = if let Some(lowering) = radiation {
+        // Material radiation retains one actual source/phase sample per trace
+        // vertex in every accepted report. Each named exterior face belongs to
+        // one patch, so three times the boundary-face count bounds all such
+        // samples without allocating a dense node-by-patch table. Include the
+        // active endpoint/audit copies as well as both time-grid report rows.
+        let material_reports = if lowering.is_material_ambient() {
+            problem.mesh.boundary().len().checked_mul(3)
+                .and_then(|samples| total_steps.checked_add(3)
+                    .and_then(|steps| samples.checked_mul(steps)))
+                .and_then(|samples| samples.checked_mul(4096))
+                .ok_or_else(|| bad("local-emissivity report storage allowance overflows"))?
+        } else { 0 };
         n.checked_mul(256)
+            .and_then(|v| v.checked_add(material_reports))
             .and_then(|v| elements.checked_mul(2048).and_then(|e| v.checked_add(e)))
             .and_then(|v| {
                 lowering
@@ -1204,6 +1220,8 @@ pub(super) fn solve(
     };
     let radiation_receipt = if let Some(lowering) = radiation {
         let method = match (lowering.is_pointwise(), lowering.is_enclosure()) {
+            (true, false) if lowering.is_material_ambient() =>
+                "implicit-pointwise-p1-material-gray-radiation",
             (true, true) if lowering.open_ambient_temperature_k().is_some() =>
                 "implicit-pointwise-p1-open-gray-diffuse-enclosure",
             (true, true) => "implicit-pointwise-p1-closed-gray-diffuse-enclosure",

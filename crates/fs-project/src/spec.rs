@@ -713,7 +713,9 @@ pub struct ThermalBoundary {
 ///
 /// The immutable material card owns the manufactured surface state and the
 /// emissivity claim. A query temperature selects that claim; it is not the
-/// solved surface temperature, which drives the radiative heat exchange.
+/// solved surface temperature, which drives the radiative heat exchange. When
+/// local-temperature response is explicit, the selected source is re-queried
+/// at each surface node and its card must also own that node's enthalpy chart.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RadiatingSurface {
     /// Unique surface name retained in radiation results and material receipts.
@@ -721,6 +723,7 @@ pub struct RadiatingSurface {
     /// Existing convection or explicit zero-flux geometry-assignment target.
     pub target: String,
     /// Full hexadecimal content hash of the surface-finish material card.
+    /// Local-temperature response requires the original storage-material card.
     pub card: String,
     /// Optional exact emissivity claim pin; conflicts without a pin refuse.
     pub claim: Option<String>,
@@ -750,6 +753,25 @@ impl RadiationSpatialModel {
     }
 }
 
+/// State coordinate used to refresh a selected surface emissivity source.
+/// This choice is independent of the spatial emission discretization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadiationEmissivityResponse {
+    /// Re-query the pinned static scalar or linear temperature curve at each
+    /// original enthalpy node's temperature, retaining the complete h tangent.
+    LocalTemperature,
+}
+
+impl RadiationEmissivityResponse {
+    /// Stable project/report spelling of the explicitly selected response.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::LocalTemperature => "local-temperature",
+        }
+    }
+}
+
 /// Explicit controls for ambient surface-radiation coupling (schema v5).
 ///
 /// Each declared surface sees its own isothermal reservoir with view factor
@@ -759,6 +781,10 @@ pub struct ConductionRadiation {
     /// Explicit spatial model. Absence retains the historical patch-mean law
     /// and its canonical spelling; solver support is admitted by the consumer.
     pub spatial_model: Option<RadiationSpatialModel>,
+    /// Explicit source response. Absence preserves the fixed emissivity sampled
+    /// at query-temperature, including its historical canonical spelling.
+    /// Local-temperature requires pointwise radiation and primary enthalpy.
+    pub emissivity_response: Option<RadiationEmissivityResponse>,
     /// Nonempty, uniquely named exterior surface declarations.
     pub surfaces: Vec<RadiatingSurface>,
     /// Positive, finite outer-iteration budget.
@@ -2455,6 +2481,17 @@ impl ProjectSpec {
         radiation: &ConductionRadiation,
         out: &mut Vec<Violation>,
     ) {
+        if radiation.emissivity_response.is_some()
+            && (radiation.spatial_model != Some(RadiationSpatialModel::Pointwise)
+                || !conduction.transient.as_ref().is_some_and(|time|
+                    time.enthalpy.is_some() && time.capacities.is_empty()))
+        {
+            out.push(violation(
+                "project-radiation-emissivity-response",
+                "local-temperature emissivity requires pointwise radiation with primary total-enthalpy storage",
+                "declare spatial-model pointwise and transient enthalpy, or omit emissivity-response to retain the fixed source sample",
+            ));
+        }
         if radiation.surfaces.is_empty() {
             out.push(violation(
                 "project-radiation-surfaces-empty",

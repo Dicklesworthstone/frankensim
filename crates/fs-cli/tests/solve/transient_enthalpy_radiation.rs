@@ -722,3 +722,6 @@ fn g0_native_enthalpy_radiation_refuses_work_and_source_domain_failures_without_
 
 #[path = "transient_enthalpy_radiation/pointwise_adjoint.rs"]
 mod pointwise_adjoint;
+
+#[path = "transient_enthalpy_radiation/material_emissivity.rs"]
+mod material_emissivity;

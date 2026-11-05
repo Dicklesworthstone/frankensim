@@ -94,7 +94,7 @@ pub use spec::{
     Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
     GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance,
     Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
-    RadiatingSurface, RadiationSpatialModel, RequirementDirection, RequirementSeverity, RequirementSource,
+    RadiatingSurface, RadiationEmissivityResponse, RadiationSpatialModel, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings,
     SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
     TransientBoundarySchedule, TransientBoundaryStep, TransientBoundaryTarget,
