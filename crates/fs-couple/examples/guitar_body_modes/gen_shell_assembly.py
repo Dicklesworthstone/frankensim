@@ -220,6 +220,8 @@ for feat, rs in by_feature.items():
 
 BRIDGE = opts.get("bridge", "0") == "1"
 BRIDGE_MAT = opts.get("bridge_pack", "rosewood")
+# "plan" draws the wall from the plan's own section; "solid" keeps the first table's wall, which read the printed 6 mm as a height drop.
+BRIDGE_SECTION = opts.get("bridge_section", "solid")
 # Saddle station: the plan prints no bridge position; the centre of the gap between the two axis strips is INFERRED. It places the bridge
 # wall when bridge=1 and the three drive points (outer strings and the G string) of the table in every case.
 _neck_strip = [l for l in top_lines if l["name"] == "axis-strip-neck-side"][0]
@@ -238,8 +240,38 @@ if BRIDGE:
         f = min(1.0, (ay - 0.5 * b_mid) / max(1e-9, 0.5 * (b_len - b_mid)))
         return b_h - b_scoop * f
 
-    top_lines.append(dict(name="bridge", a=np.array([xb, -0.5 * b_len]), b=np.array([xb, 0.5 * b_len]), w=b_w, h=b_h, side=1, hfun=bridge_h, pack=BRIDGE_MAT))
-    meta("bridge_model", "bridge as a vertical wall on the OUTER skin of the top at x = %.2f mm (centre of the gap between the two axis strips, INFERRED; the plan prints no bridge position), %.1f mm long, thickness %.1f mm, height %.1f mm over the central %.1f mm falling by the printed %.1f mm scoop to the ends; pack %s (the plan names no bridge wood); the wall is thicker than it is tall (outside thin-shell validity, kept for its mass and its beam stiffness); the patch under the bridge (204 x 30 mm) and the string holes are not modelled" % (xb, b_len, b_w, b_h, b_mid, b_scoop, BRIDGE_MAT))
+    if BRIDGE_SECTION == "plan":
+        # One thickness, as the shell owner requires per component, and heights that carry the printed section's area. A thickness between
+        # the rectangles that match area and second moment on each part (22.78 central, 20.97 wing) keeps I within 7 % and 9 %.
+        b_t = float(opts.get("bridge_t_mm", "22.0"))
+        # Computed from the plan's vector paths, not printed, so these live here and in the table's bridge_model note and not in dimensions.tsv.
+        a_mid, a_wing, v_end = 185.9, 85.8, 308.7  # mm2, mm2, mm3 of one end's last 6 mm
+        b_end = _bd[("end-chamfer", "length")]
+
+        def printed_volume(y0, y1):
+            def over(a, b):
+                return max(0.0, min(y1, b) - max(y0, a))
+
+            mid, wing_in = 0.5 * b_mid, 0.5 * b_len - b_end
+            return (a_mid * over(-mid, mid) + a_wing * (over(mid, wing_in) + over(-wing_in, -mid))
+                    + v_end / b_end * (over(wing_in, 0.5 * b_len) + over(-0.5 * b_len, -wing_in)))
+
+        def bridge_cols(ys):
+            # The columns are the top mesh's and miss the printed step and chamfer: the step is a ramp over one cell, and each end column stands
+            # just tall enough to keep its cell's printed wood, since a wall can't reach the printed zero height.
+            hs = [(a_mid if abs(y) < 0.5 * b_mid else a_wing) / b_t for y in ys]
+            for end, inner in ((0, 1), (len(ys) - 1, len(ys) - 2)):
+                lo, hi = sorted((ys[end], ys[inner]))
+                hs[end] = 2.0 * printed_volume(lo, hi) / (b_t * (hi - lo)) - hs[inner]
+            return hs
+
+        top_lines.append(dict(name="bridge", a=np.array([xb, -0.5 * b_len]), b=np.array([xb, 0.5 * b_len]), w=b_t, h=a_mid / b_t, side=1, hcols=bridge_cols, pack=BRIDGE_MAT))
+    else:
+        top_lines.append(dict(name="bridge", a=np.array([xb, -0.5 * b_len]), b=np.array([xb, 0.5 * b_len]), w=b_w, h=b_h, side=1, hfun=bridge_h, pack=BRIDGE_MAT))
+    if BRIDGE_SECTION == "plan":
+        meta("bridge_model", "bridge as a vertical wall on the OUTER skin of the top at x = %.2f mm (centre of the gap between the two axis strips, INFERRED; the plan prints no bridge position), %.1f mm long, one authored thickness %.1f mm, heights %.2f mm over the central %.1f mm and %.2f mm on the wings, carrying section areas COMPUTED from the plan's vector paths, none of them printed (1_construction_plan.pdf, bridge detail, 1:1, end view at PDF x 856-885, y 2147-2229 pt, read error about 0.01 mm): central %.1f mm2 with the saddle slot empty, under the neck-side curve to 6.00 at 3.50, the slot floor 3.41 to 6.00, the rear slope to 4.48 at 15.00 and the tie block 13 x 8.7; wing %.1f mm2, the lens, a Bezier curve 28 wide with a 4.50 crest; one end's last 6 mm %.1f mm3, the lens cut by the elevation's chamfer, midpoint rule at four stations. Second moments of those sections are 1032 and 120 mm4, against the wall's %.0f and %.0f. The step is a ramp over one mesh cell and each end column keeps its cell's wood; pack %s (the plan names no bridge wood); the wall is thicker than it is tall (outside thin-shell validity, kept for its mass and its beam stiffness); the saddle, the string holes, the tie block's inlay, the patch under the bridge (204 x 30 mm), and the foot's 28 mm width on the plate are not modelled" % (xb, b_len, b_t, a_mid / b_t, b_mid, a_wing / b_t, a_mid, a_wing, v_end, b_t * (a_mid / b_t) ** 3 / 12.0, b_t * (a_wing / b_t) ** 3 / 12.0, BRIDGE_MAT))
+    else:
+        meta("bridge_model", "bridge as a vertical wall on the OUTER skin of the top at x = %.2f mm (centre of the gap between the two axis strips, INFERRED; the plan prints no bridge position), %.1f mm long, thickness %.1f mm, height %.1f mm over the central %.1f mm falling by the printed %.1f mm scoop to the ends; pack %s (the plan names no bridge wood); the wall is thicker than it is tall (outside thin-shell validity, kept for its mass and its beam stiffness); the patch under the bridge (204 x 30 mm) and the string holes are not modelled" % (xb, b_len, b_w, b_h, b_mid, b_scoop, BRIDGE_MAT))
 
 # ---------------------------------------------------------------- depth profile and back surface
 # read the three printed depths by their parameter names
@@ -438,6 +470,7 @@ for ln, chain in top_lines_mesh:
     h_mm = ln["h"]
     w_mm = ln["w"]
     hfun = ln.get("hfun")
+    hcols = ln["hcols"]([float(p[1]) for p in pts]) if "hcols" in ln else None
     spacing = np.hypot(*(pts[1:] - pts[:-1]).T).mean()
     K = max(WALL_K_MIN if h_mm >= 6.0 else 1, int(math.ceil(h_mm / (0.8 * spacing))))
     # walls are not in group "top" (a component's group is its name up to the first '-'): the plate means of the shared body module use the plates only
@@ -446,8 +479,8 @@ for ln, chain in top_lines_mesh:
     idx = []
     for k in range(K + 1):
         row = []
-        for p in pts:
-            h_i = hfun(p[1]) if hfun else h_mm
+        for q, p in enumerate(pts):
+            h_i = hcols[q] if hcols else (hfun(p[1]) if hfun else h_mm)
             row.append(wall.add_node((p[0], p[1], z0 + sgn * h_i * k / K), tuple(nrm)))
         idx.append(row)
     for k in range(K):
