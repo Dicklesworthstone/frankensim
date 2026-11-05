@@ -1293,6 +1293,12 @@ refuses unresolvable radius/separation or time ranges. Six G0/G1/G3 tests cover
 interior crossings, oblique entry, grazing, misses, initial-contact modes,
 near-touch cancellation, rotation, and large/small length scaling.
 
+The transverse geometry uses compensated differences of products. Parallel
+input directions therefore retain zero cross product instead of acquiring a
+rounding offset that grows as separation/radius when the contact normal is
+formed. A rotated central-flight regression checks the normal and absence of
+an artificial orbital angular impulse across large and small length scales.
+
 This is analytic floating-point sphere geometry. It does not certify arbitrary
 shapes, accelerating relative trajectories, or general motion tubes; the
 mechanics owner still checks the actual event geometry and momentum response.
