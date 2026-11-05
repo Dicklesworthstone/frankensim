@@ -57,6 +57,36 @@ domains, and indicial kernels.
   ds = 2·U_conv·dt/c — freezes at U_conv = 0, REFUSES reversed flow
   (`indicial-flow-reversed`), never |U|.
 
+## Unsteady section input histories
+
+`unsteady::DuhamelState::advance` retains the original midpoint-step input
+convention and valid-input arithmetic. `advance_linear` instead integrates an
+endpoint-linear input exactly in reduced time: with z=b*ds, each deficiency is
+`exp(-z)*x + a*delta*(-expm1(-z)/z)`. The zero-z limit is one; overflow of the
+finite b*ds product retains the representable reciprocal limit. Unequal
+partitions of the same ramp agree up to floating-point roundoff. Linearity in
+physical time is equivalent only at constant convection speed.
+
+A zero-duration `advance_linear` freezes every state bit, including the previous
+input. `apply_jump` explicitly applies an instantaneous input change without
+elapsed time: the effective response changes by `(1-sum(a))*delta`, giving the
+Wagner half-gain and Kussner zero-gain limits. Legacy `advance(ds=0)` retains its
+instantaneous-step convention. All paths still admit their inputs and states.
+
+`UnsteadySectionState::{advance,advance_linear,apply_jump}` update motion, gust,
+separation, lift and moment transactionally. Kernels, separation parameters,
+finite load constants and state bounds are checked; invalid second channels or
+non-finite results preserve all accepted history. Separation retains its exact
+scalar exponential toward the endpoint effective-incidence target. It freezes
+exactly at zero elapsed time, including explicit jumps; a varying separation
+target is not integrated exactly. These section models contain no added mass,
+finite-span induction, profile drag or implicit aircraft integration.
+
+`tests/unsteady_ramp_battery.rs` checks independent integrated-step references
+for both kernels, unequal partitions and slope reversal, simultaneous channels,
+explicit jumps and held decay, zero/tiny clocks, extreme admitted poles, and
+atomic refusal. The existing unsteady battery pins legacy midpoint arithmetic.
+
 ## Invariants
 
 - Angles in radians everywhere (units rule, frame-conventions-v1).
@@ -79,7 +109,9 @@ path. Codes: `non-finite-input`, `alpha-outside-domain`,
 `alpha-outside-table`, `query-outside-fitted-domain`,
 `uncertainty-modes-invalid`, `realization-id-empty`,
 `kernel-params-invalid`, `reduced-time-increment-invalid`,
-`timestep-invalid`, `indicial-flow-reversed`. Applicability-domain refusals STATE the admitted domain.
+`timestep-invalid`, `indicial-flow-reversed`, `separation-model-invalid`,
+`unsteady-section-spec-invalid`, `unsteady-state-invalid`. Applicability-domain
+refusals STATE the admitted domain.
 Caps are tested at cap AND cap+1 (workspace law).
 
 ## Determinism class
