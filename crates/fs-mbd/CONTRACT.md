@@ -6133,6 +6133,41 @@ Joint friction, motors, angular stops, backlash, impacts, fixed supports,
 arbitrary dependent constraints, nonlinear state enclosures, exact energy,
 global branches, symplecticity and the other integrator lanes remain unclaimed.
 
+## Finite dry friction on a native revolute joint
+
+`rigid_rattle::distance::graph::revolute_friction::apply_revolute_friction_impulse`
+applies an axial drive/friction event to one existing hinge while every original
+bilateral graph row reacts. The complete full-inertia constrained response is
+`a M^-1 a^T - b^T (J M^-1 J^T)^-1 b`, with `b = J M^-1 a^T`.
+The existing geometry, mobility factorization and native point/couple impulse
+owners preserve shared-body recoil, including off-centre hinges and connected
+spherical, distance or prismatic joints. A locked or unresolved axial response
+refuses without adding compliance.
+
+The caller declares physical torque-impulse capacities. An already moving
+hinge uses only kinetic capacity, including when it arrests. A separate
+`RestingDrive` phase requires exactly zero initial axial relative rate and
+applies the drive and friction together: a subthreshold drive is held with
+exactly zero resultant impulse and work; breakaway uses kinetic capacity.
+No numerical speed threshold spends static capacity on moving spin.
+
+Actual native states retain their original poses. The report separates signed
+drive work, friction work, bounded bilateral residual work and independently
+reconstructed kinetic change. Native total linear/angular momentum increments
+and the actual outgoing axial rate must meet their authored gates; neither
+momentum nor small arrest residuals are projected away. Cancellation, effort,
+memory, rank or conservation refusal publishes no candidate.
+
+This is one frictional joint at a fixed-pose impulse event, with at most the
+original 32 bilateral rows. It reuses the bounded dense graph factorization
+and shared Coulomb impulse projection. The caller owns capacities, phase
+selection and subsequent native time integration; simultaneous friction at
+several joints, continuous stick-slip transitions, bearing load/radius models,
+elastic preslip and heat allocation are outside this operation.
+`tests/rigid_revolute_friction.rs` covers analytic rotors, static hold and
+breakaway, off-centre and third-body recoil, full-tensor frame covariance,
+native RATTLE continuation and atomic refusal.
+
 ## Driven distance actuators inside finite ball-and-hinge mechanisms
 
 `rigid_rattle::distance::graph::advance_driven_joint_graph` accepts a single

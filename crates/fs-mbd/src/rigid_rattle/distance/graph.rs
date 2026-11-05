@@ -36,6 +36,7 @@ pub use joints::{GraphJoint, JointGraphStep, JointRows, SphericalJoint, advance_
 
 #[path = "graph/revolute.rs"]
 mod revolute;
+pub use revolute::friction as revolute_friction;
 pub use revolute::{
     ArticulatedGraphStep, ArticulatedJoint, CoupleImpulseReceipt, JointReactionImpulse,
     RevoluteJoint, advance_articulated_graph,

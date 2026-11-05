@@ -1,5 +1,9 @@
 //! Finite-body hinges with native force and pure-couple reactions.
 
+/// Work-conjugate dry friction on one hinge of the original finite-body graph.
+#[path = "revolute/friction.rs"]
+pub mod friction;
+
 use super::{
     ActionReactionImpulseReceipt, Dd, DistanceGraphControls, DistanceGraphError, DistanceGraphStep,
     DistanceLink, DistanceStepError, Geometry, JointGraphStep, JointRows, MAX_DISTANCE_ROWS,
