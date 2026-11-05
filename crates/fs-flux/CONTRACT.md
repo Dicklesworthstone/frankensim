@@ -3223,6 +3223,46 @@ cellwise motion with exact affine moments and original boundary-reaction
 closure, zero-relative-flow and exact stationary limits, and invalid/overflow
 refusals. No arbitrary-porosity or moving-geometry claim follows from those tests.
 
+### Native transient Brinkman momentum
+
+`FluxSystem::assemble_brinkman_mixed_bdf1` adds the original fluid mass term
+`(u-u_previous)/dt` to the same Stokes–Brinkman equation. The full anisotropic
+Darcy resistance and moving-skeleton load are implicit at the endpoint; no
+explicit drag substeps or second flow integrator are introduced. Coefficients
+compile once per cell, outside quadrature, through the same admission as the
+steady entry. Endpoint geometry, viscosity, permeability, skeleton velocities
+and mixed boundary data remain fixed within the step. The caller retains the
+clock and immutable accepted BDM1 velocity history.
+
+Physical transient inertia anchors every connected velocity component,
+including free-fluid components with only prescribed total traction. All
+original cell continuity equations, per-component pressure datums, SIP terms,
+normal constraints, reaction functionals and checked linear residuals remain
+active. Free-fluid cells produce the same matrix and right-hand side as native
+mixed BDF1 Stokes. Invalid/nonrepresentable timesteps and invalid history are
+refused before load callbacks; no candidate updates caller-owned history.
+
+`MaterialFluxSystem::bdf1_brinkman_mixed_step` uses the existing bound material
+snapshot and the same physical result conversion as the steady solve. Density
+is constant at both time levels: changing material density requires an explicit
+conservative state transfer. Original molecular viscosity sets Darcy drag,
+while the authored effective viscosity sets shear stress. Physical force/work,
+pressure, cell laws and boundary reactions retain their source and units.
+Returned drag powers are endpoint rates, not accumulated heat. Backward Euler
+is first order in time and has a separate numerical kinetic-energy loss; that
+loss is not added to physical Darcy dissipation or to a thermal model.
+
+This is fixed-mesh linear unsteady Stokes–Brinkman with the same one-domain,
+phi=1 velocity convention. It does not supply convective momentum, finite-
+porosity storage, pore-scale added mass, moving interfaces or skeleton dynamics.
+The native synchronous solver's existing execution limits still apply.
+`tests/brinkman/transient.rs` exercises independently solved rotated relaxation
+at a timestep beyond an explicit drag stability limit, endpoint skeleton
+changes, the native mass energy identity with signed skeleton work, first-order
+convergence to exponential relaxation, once-bound material ownership with
+heterogeneous porous/free cells and constrained boundary reactions, exact
+free-fluid operator equivalence, and history/callback refusal boundaries.
+
 ## Inclined two-fluid capillary displacement
 
 The circular meniscus owner now includes both phase columns' hydrostatic head

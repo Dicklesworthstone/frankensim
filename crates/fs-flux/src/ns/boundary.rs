@@ -461,7 +461,7 @@ impl<'m> FluxSystem<'m> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn assemble_stokes_admitted_operator<'a>(
+    pub(super) fn assemble_stokes_admitted_operator<'a>(
         &'a self,
         params: FluxParams,
         viscosity: &dyn Fn(usize, [f64; 2]) -> f64,

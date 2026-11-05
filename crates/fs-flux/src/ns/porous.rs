@@ -1,6 +1,6 @@
-//! Steady anisotropic Stokes–Brinkman flow on the original BDM1–P0 mesh.
+//! Anisotropic Stokes–Brinkman flow on the original BDM1–P0 mesh.
 //!
-//! The macroscopic velocity solves
+//! The steady macroscopic velocity solves
 //! `-div(2 nu_eff D(u)) + nu K^-1 (u-u_s) + grad(pi) = f`, `div(u) = 0`.
 //! Intrinsic `K` is in m², `nu` is the actual fluid's molecular viscosity
 //! divided by the constant reference density, and `pi = p/rho`. The effective
@@ -14,17 +14,21 @@
 //! <https://doi.org/10.1017/jfm.2020.265>. It does not identify finite-porosity
 //! laboratory superficial velocity with intrinsic pore velocity: that would
 //! require the phi factor in equation 2.3 and a different storage/flux model.
-//! The skeleton geometry and coefficients are frozen during this steady solve.
-//! There is no pore inertia/storage, Forchheimer/slip correction, moving mesh,
-//! deformation, unsaturated mobility, thermal deposition or Biot wave.
-//! This steady entry inherits the existing synchronous Stokes solver's
-//! iteration budget and cancellation limitations; it adds no cancellation claim.
+//! Skeleton geometry and coefficients are frozen during each solve. The BDF1
+//! entry adds native fluid inertia, with full tensor drag implicit at the endpoint.
+//! There is no finite-porosity storage or pore-scale added-mass correction,
+//! Forchheimer/slip correction, moving mesh, deformation, unsaturated mobility,
+//! thermal deposition or Biot wave.
+//! These entries inherit the existing synchronous Stokes solver's
+//! iteration budget and cancellation limitations; they add no cancellation claim.
 
 use super::boundary::{StokesAssembly, StokesBoundary, StokesBoundaryError, StokesSolution};
 use super::{FluxParams, FluxSystem};
 use crate::bdm::{CellBasis, eval_basis, tri_quad};
 use fs_material::porous::permeability::IntrinsicPermeability;
 use fs_sparse::Csr;
+
+mod transient;
 
 /// One cell's fixed geometry and explicitly selected Brinkman shear closure.
 /// The original permeability tensor and its world axes remain intact.
@@ -423,6 +427,31 @@ impl BrinkmanAssembly<'_, '_> {
     }
 }
 
+// Compile material coefficients once per solve, outside the quadrature loops.
+// All native Brinkman entries share this admission and molecular/shear split.
+fn compile_cells(
+    cells: &[BrinkmanCell],
+    expected_cells: usize,
+    nu: f64,
+) -> Result<(Vec<DarcyDrag>, Vec<f64>), StokesBoundaryError> {
+    if cells.len() != expected_cells || !positive(nu) {
+        return Err(invalid(
+            "Brinkman requires one cell law per triangle and positive molecular viscosity",
+        ));
+    }
+    let mut drag = Vec::with_capacity(cells.len());
+    let mut effective_nu = Vec::with_capacity(cells.len());
+    for &cell in cells {
+        drag.push(DarcyDrag::compile(cell, nu)?);
+        let effective = nu * cell.effective_viscosity_ratio;
+        if !positive(effective) {
+            return Err(invalid("effective Brinkman viscosity is not representable"));
+        }
+        effective_nu.push(effective);
+    }
+    Ok((drag, effective_nu))
+}
+
 impl<'m> FluxSystem<'m> {
     /// Assemble steady, fully saturated Stokes–Brinkman momentum.
     ///
@@ -450,21 +479,7 @@ impl<'m> FluxSystem<'m> {
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<BrinkmanAssembly<'a, 'm>, StokesBoundaryError> {
-        if cells.len() != self.mesh.tris.len() || !positive(params.nu) {
-            return Err(invalid(
-                "Brinkman requires one cell law per triangle and positive molecular viscosity",
-            ));
-        }
-        let mut drag = Vec::with_capacity(cells.len());
-        let mut effective_nu = Vec::with_capacity(cells.len());
-        for &cell in cells {
-            drag.push(DarcyDrag::compile(cell, params.nu)?);
-            let effective = params.nu * cell.effective_viscosity_ratio;
-            if !positive(effective) {
-                return Err(invalid("effective Brinkman viscosity is not representable"));
-            }
-            effective_nu.push(effective);
-        }
+        let (drag, effective_nu) = compile_cells(cells, self.mesh.tris.len(), params.nu)?;
         let mut anchors = vec![false; self.pressure_component_count()];
         for (cell, law) in cells.iter().enumerate() {
             anchors[self.pressure_component[cell]] |= law.permeability.is_some();

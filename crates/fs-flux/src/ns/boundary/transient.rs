@@ -143,18 +143,7 @@ impl<'m> FluxSystem<'m> {
         previous_velocity: &[f64],
         timestep_s: f64,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
-        let inv_dt = timestep_s.recip();
-        if !timestep_s.is_finite()
-            || timestep_s <= 0.0
-            || !inv_dt.is_finite()
-            || inv_dt <= 0.0
-            || previous_velocity.len() != self.n_u
-            || previous_velocity.iter().any(|value| !value.is_finite())
-        {
-            return Err(StokesBoundaryError::InvalidInput(
-                "BDF1 needs finite velocity moments and a representable positive timestep in seconds",
-            ));
-        }
+        let inv_dt = self.admit_mixed_bdf1_history(previous_velocity, timestep_s)?;
         // M/dt is positive definite on every velocity component, including
         // rigid translation/rotation. This is physical transient momentum,
         // not an artificial steady pin or porous resistance.
@@ -173,6 +162,28 @@ impl<'m> FluxSystem<'m> {
             None,
             relative_density,
         )
+    }
+
+    // Shared by native mixed Stokes and Brinkman. Admission is read-only and
+    // precedes all user callbacks; no caller may silently repair bad history.
+    pub(in crate::ns) fn admit_mixed_bdf1_history(
+        &self,
+        previous_velocity: &[f64],
+        timestep_s: f64,
+    ) -> Result<f64, StokesBoundaryError> {
+        let inv_dt = timestep_s.recip();
+        if !timestep_s.is_finite()
+            || timestep_s <= 0.0
+            || !inv_dt.is_finite()
+            || inv_dt <= 0.0
+            || previous_velocity.len() != self.n_u
+            || previous_velocity.iter().any(|value| !value.is_finite())
+        {
+            return Err(StokesBoundaryError::InvalidInput(
+                "BDF1 needs finite velocity moments and a representable positive timestep in seconds",
+            ));
+        }
+        Ok(inv_dt)
     }
 
     /// Advance one checked constant-viscosity linear mixed-Stokes step.

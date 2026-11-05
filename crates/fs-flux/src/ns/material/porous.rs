@@ -190,6 +190,51 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         force_density: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries: &[MaterialStokesBoundary<'_>],
     ) -> Result<MaterialBrinkmanSolution, MaterialFluxError> {
+        self.solve_brinkman_mixed_with_history(cells, force_density, boundaries, None)
+    }
+
+    /// Advance native Stokes–Brinkman by one fully implicit backward-Euler step.
+    ///
+    /// Force density [N/m³], total traction [Pa], velocities [m/s] and cell laws
+    /// prescribe the endpoint; the timestep is seconds. The immutable bound
+    /// transport snapshot supplies molecular viscosity and the SAME density to
+    /// inertia, drag, stress and physical reaction recovery. Changing density
+    /// between steps requires an explicitly conservative state transfer; a new
+    /// material binding alone does not perform that transfer.
+    ///
+    /// Previous velocity contains exactly the native BDM1 velocity moments and
+    /// is never modified. The original pressure constraints, boundary reactions
+    /// and checked linear solve are retained. Returned Darcy powers are endpoint
+    /// rates, not accumulated heat; numerical time-discretization loss is separate.
+    /// Geometry stays fixed and no convection, finite-porosity storage, moving
+    /// interface or solid dynamics is inferred from a moving skeleton velocity.
+    ///
+    /// # Errors
+    /// Preserves [`Self::solve_brinkman_mixed`] material and native refusals,
+    /// also rejecting invalid history or timestep before sampling callbacks.
+    pub fn bdf1_brinkman_mixed_step(
+        &self,
+        cells: &[BrinkmanCell],
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+    ) -> Result<MaterialBrinkmanSolution, MaterialFluxError> {
+        self.solve_brinkman_mixed_with_history(
+            cells,
+            force_density,
+            boundaries,
+            Some((previous_velocity, timestep_s)),
+        )
+    }
+
+    fn solve_brinkman_mixed_with_history(
+        &self,
+        cells: &[BrinkmanCell],
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        history: Option<(&[f64], f64)>,
+    ) -> Result<MaterialBrinkmanSolution, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
         let scaled_tractions: Vec<_> = boundaries
             .iter()
@@ -234,59 +279,82 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 }
             })
             .collect();
-        let assembly = self
-            .system
-            .assemble_brinkman_mixed(
+        let force = |point| {
+            let physical = force_density(point);
+            [physical[0] / density, physical[1] / density]
+        };
+        let assembly = match history {
+            Some((previous_velocity, timestep_s)) => self.system.assemble_brinkman_mixed_bdf1(
                 self.params,
                 cells,
-                &|point| {
-                    let physical = force_density(point);
-                    [physical[0] / density, physical[1] / density]
-                },
+                &force,
                 &primitive_boundaries,
-            )
-            .map_err(MaterialFluxError::Boundary)?;
-        let flow = assembly.solve().map_err(MaterialFluxError::Boundary)?;
-        let cell_darcy_exchange: Vec<_> = assembly
-            .cell_darcy_exchange_per_density(&flow.field.x[..self.system.n_u])
-            .map_err(MaterialFluxError::Boundary)?
-            .into_iter()
-            .map(|value| MaterialBrinkmanDragExchange::from_kinematic(value, density))
-            .collect::<Result<_, _>>()?;
-        let mut darcy_exchange = MaterialBrinkmanDragExchange::default();
-        let cell_darcy_power_w_per_m: Vec<_> = cell_darcy_exchange
-            .iter()
-            .map(|exchange| {
-                darcy_exchange.add(*exchange);
-                exchange.dissipation_w_per_m
-            })
-            .collect();
-        darcy_exchange.admit()?;
-        let darcy_power_w_per_m = darcy_exchange.dissipation_w_per_m;
-        let pressure_pa: Vec<_> = flow
-            .pressure
-            .iter()
-            .map(|pressure| density * pressure)
-            .collect();
-        if pressure_pa.iter().any(|value| !value.is_finite())
-            || cell_darcy_power_w_per_m
-                .iter()
-                .any(|value| !value.is_finite())
-            || !darcy_power_w_per_m.is_finite()
-        {
-            return Err(MaterialFluxError::Invalid(
-                "Brinkman physical pressure or dissipation is not representable",
-            ));
+                previous_velocity,
+                timestep_s,
+            ),
+            None => self.system.assemble_brinkman_mixed(
+                self.params,
+                cells,
+                &force,
+                &primitive_boundaries,
+            ),
         }
-        Ok(MaterialBrinkmanSolution {
-            flow,
-            transport: self.transport,
-            cells: cells.to_vec(),
-            pressure_pa,
-            cell_darcy_power_w_per_m,
-            darcy_power_w_per_m,
-            cell_darcy_exchange,
-            darcy_exchange,
-        })
+        .map_err(MaterialFluxError::Boundary)?;
+        let flow = assembly.solve().map_err(MaterialFluxError::Boundary)?;
+        let exchanges = assembly
+            .cell_darcy_exchange_per_density(&flow.field.x[..self.system.n_u])
+            .map_err(MaterialFluxError::Boundary)?;
+        material_brinkman_solution(flow, self.transport, cells, exchanges)
     }
+}
+
+// One physical recovery path for all native Brinkman solves. Child closures may
+// retain additional resistance channels without replacing this source binding,
+// pressure conversion or the original discrete boundary reaction owner.
+fn material_brinkman_solution(
+    flow: StokesSolution,
+    transport: FluidTransportState,
+    cells: &[BrinkmanCell],
+    exchanges: Vec<BrinkmanDragExchange>,
+) -> Result<MaterialBrinkmanSolution, MaterialFluxError> {
+    let density = transport.density_kg_m3();
+    let cell_darcy_exchange: Vec<_> = exchanges
+        .into_iter()
+        .map(|value| MaterialBrinkmanDragExchange::from_kinematic(value, density))
+        .collect::<Result<_, _>>()?;
+    let mut darcy_exchange = MaterialBrinkmanDragExchange::default();
+    let cell_darcy_power_w_per_m: Vec<_> = cell_darcy_exchange
+        .iter()
+        .map(|exchange| {
+            darcy_exchange.add(*exchange);
+            exchange.dissipation_w_per_m
+        })
+        .collect();
+    darcy_exchange.admit()?;
+    let darcy_power_w_per_m = darcy_exchange.dissipation_w_per_m;
+    let pressure_pa: Vec<_> = flow
+        .pressure
+        .iter()
+        .map(|pressure| density * pressure)
+        .collect();
+    if pressure_pa.iter().any(|value| !value.is_finite())
+        || cell_darcy_power_w_per_m
+            .iter()
+            .any(|value| !value.is_finite())
+        || !darcy_power_w_per_m.is_finite()
+    {
+        return Err(MaterialFluxError::Invalid(
+            "Brinkman physical pressure or dissipation is not representable",
+        ));
+    }
+    Ok(MaterialBrinkmanSolution {
+        flow,
+        transport,
+        cells: cells.to_vec(),
+        pressure_pa,
+        cell_darcy_power_w_per_m,
+        darcy_power_w_per_m,
+        cell_darcy_exchange,
+        darcy_exchange,
+    })
 }

@@ -10,6 +10,9 @@ use fs_material::porous::permeability::IntrinsicPermeability;
 use fs_solid::Mesh2;
 use std::cell::Cell;
 
+#[path = "brinkman/transient.rs"]
+mod transient;
+
 fn tensor(angle: f64) -> IntrinsicPermeability {
     let (s, c) = angle.sin_cos();
     IntrinsicPermeability::orthotropic(
