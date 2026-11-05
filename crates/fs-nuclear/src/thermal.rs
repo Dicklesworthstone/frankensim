@@ -356,7 +356,7 @@ impl DepositionObserver for FissionHeating {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Option<f64>, Self::Error> {
         self.validate(thermal, self.time_s, checkpoint)?;
-        Ok(self.sources().filter_map(|source| source.rates.next_after(self.time_s))
+        Ok(FissionHeating::sources(self).filter_map(|source| source.rates.next_after(self.time_s))
             .min_by(f64::total_cmp))
     }
 

@@ -167,17 +167,18 @@ analytic; that does not make the spatial thermal evolution exact or implicit.
 Six owning integration regressions cover analytic shutdown calorimetry with
 additive boundary heat, finite-coolant contact and first-order refinement,
 multiple material/source schedules, identical-partition restart, fuel
-exhaustion, and joint rollback/admission failures. They were written and
-reviewed against the native APIs, but could not be compiled or run in the
-implementation session: the shared filesystems filled and the execution
-environment then became unavailable. Run the real native gate with
+exhaustion, and joint rollback/admission failures. All six now pass in the
+focused native source build described below. That build exposed and fixed a
+method-resolution error in the original fission schedule hook: its iterator
+accessor is now explicitly qualified as `FissionHeating::sources`.
+The complete Cargo gate remains
 
 ```bash
 cargo test -p fs-nuclear --features thermal --locked
 ```
 
-before treating those coupled regressions as executed evidence. DSR and the
-complete constellation/layout checks were not available as successful gates.
+DSR and the complete constellation/layout checks were not available as
+successful gates.
 
 ## Radioactive parent/daughter inventories
 
@@ -235,6 +236,52 @@ using the unchanged production decay modules from `fs-la` and `fs-thermochem`
 and the real `fs-math` and `fs-qty` crates. This isolated the applicable owners
 from unavailable constellation dependencies; it is not a workspace Cargo gate.
 
+## Radioactive decay heat on the shared thermal timeline
+
+With the existing `thermal` feature, `decay::thermal::DecayHeating` binds each
+explicit inventory to an already active thermal cell and its original material.
+It uses the original `DepositionObserver` transaction and the final accepted
+interval after thermal CFL, event and target clipping. Only integrated deposited
+joules divided by that same duration enter the native heat-source path. Authored
+boundary heat remains additive; outward radiation and escaped energy are never
+credited as local heat.
+
+The original thermal step must succeed before the corresponding populations,
+transformation counts and energy history are accepted. Refused material-domain,
+work, numerical-account or checkpoint candidates discard both histories. The
+caller's exact thermal checkpoint error is preserved. Per-advance accounts sum
+absolute population and energy defects across all cells and substeps, so an
+unresolved parent debit cannot repeatedly spend a fresh tolerance each substep.
+The original thermal energy budget remains independently mandatory.
+
+Each binding caches its immutable prepared decay map by exact interval duration;
+repeated durations use `trial_prepared`, and clones share maps through `Arc`.
+Changing the interval prepares a matching map before any publication. Inventories
+retain their own history; sharing a model or map never shares mutable populations.
+Original thermal material identity, caloric identity when available, storage basis,
+reference mass and geometry are checked before and after the common step.
+Decaying nuclei do not silently change the material caloric chart or bulk mass.
+
+`fs_couple::radioactive`, enabled by the existing `nuclear-thermal` feature,
+re-exports these original owners. `CoupledObservers` can combine radioactive
+inventories and the existing prescribed fission source in one thermal advance.
+The facade adds no second source implementation or thermal solver. Source
+integration remains analytic up to the numerical propagator's admission; thermal
+contact remains the original explicit uniform-cell approximation and needs its
+own timestep refinement.
+
+Eight native coupling regressions pass: separated-channel half-life calorimetry,
+daughter ingrowth heat within one interval, contact convergence, multiple-source
+restart and internal-energy storage, common rollback and checkpoint preservation,
+accumulated unresolved-debit refusal, binding/instantaneous-balance admission,
+and composition with the existing fission observer. The passing run compiled the
+actual `fs-nuclear` root with `thermal` enabled: 43 tests total (29 source, six
+fission thermal, eight radioactive thermal). Its thermal dependency selected the
+unchanged current production enthalpy, observer, coverage, boundary and composition
+code while excluding unrelated module declarations; no replacement heat law or
+integrator was used. This focused source result does not claim a full workspace
+or `fs-couple` Cargo build, which still needs the missing constellation checkouts.
+
 ## Shared coupling facade and original-water example
 
 Enable `fs-couple/nuclear-thermal` to use `fs_couple::fission`. This facade
@@ -257,9 +304,28 @@ cargo run -p fs-nuclear --features thermal --example prescribed_fission_water --
 cargo check -p fs-couple --features nuclear-thermal --locked
 ```
 
-The example, facade check, and a thirteenth core regression for independently
-budgeting total-yield product roundoff were added after the execution environment
-became unavailable. They have not been compiled or executed in this session;
-the final snapshot must be rerun through the native checks above. The previously
-executed 12-test result is not a claim that these later changes passed.
+The original-water example and full facade Cargo check remain unexecuted; those
+checks still need the complete constellation. The thirteenth fission regression
+for independently budgeting total-yield product roundoff is included in the
+passing source runs described above.
+
+## Runnable parent/daughter example
+
+`examples/decay_chain.rs` constructs a synthetic two-second parent, a half-second
+daughter and an explicit stable endpoint. It starts with 1e12 expected parent
+nuclei and reuses one prepared half-second map for 16 advances. CSV output reports
+all populations, activities, separate lifetime energy channels and daughter heat.
+Assertions check population conservation, branch counts, four parent half-lives
+and lifetime-energy consistency. It requires no thermal feature:
+
+```bash
+cargo run -p fs-nuclear --example decay_chain --locked
+```
+
+The exact public-source compile and example execution passed. At eight seconds,
+the parent population is 6.25e10 and cumulative deposited energy is
+0.4625015258789 J, including 0.2750015258789 J from daughter transformations.
+All coefficients are explicitly synthetic; this verifies integration and accounts,
+not an empirical isotope model. This direct source run is separate from the
+unavailable full Cargo workspace gate.
 

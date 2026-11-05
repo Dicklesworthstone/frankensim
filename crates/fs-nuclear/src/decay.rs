@@ -23,6 +23,10 @@ use fs_thermochem::decay::DecayLawV1;
 
 use crate::{Accumulator, EnergyChannels, channel_values, nonnegative, sum};
 
+/// Decay heat on the original material-backed thermal timeline.
+#[cfg(feature = "thermal")]
+pub mod thermal;
+
 /// A dataset-owned nuclide identity and its immutable admitted half-life law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecayNuclide {

@@ -41,6 +41,17 @@ pub mod fission {
     pub use fs_nuclear::thermal::*;
 }
 
+/// Radioactive daughter inventories and deposited heat on the original thermal owner.
+#[cfg(feature = "nuclear-thermal")]
+pub mod radioactive {
+    pub use fs_nuclear::EnergyChannels;
+    pub use fs_nuclear::decay::{
+        DecayBranch, DecayBudget, DecayError, DecayInventory, DecayModel,
+        DecayNuclide, DecayStep, PreparedDecay,
+    };
+    pub use fs_nuclear::decay::thermal::*;
+}
+
 pub mod acoustic_realize;
 pub mod air_path;
 /// Original admitted frequency-dependent loads on accepted shell assemblies.
