@@ -5,8 +5,9 @@
 //! conductivity, current and irreversible E.J power keep electrical units.
 //! Cellwise fields are not smoothed across material interfaces. This is a
 //! stationary, fixed-geometry, symmetric positive DC law, without induction,
-//! Hall response, dielectric storage or field-dependent sigma. Matching material
-//! contacts use the same operator with exact triangular voltage-jump traces.
+//! Hall response or dielectric storage. [`response`] closes original scalar
+//! field-dependent sources against this same operator and actual E/J. Matching
+//! material contacts retain exact triangular voltage-jump traces.
 
 mod contact;
 pub use contact::{SpatialConductionContact, SpatialConductionContactResponse};
@@ -18,6 +19,8 @@ pub use matrix::{
     SpatialMixedConductanceControls,
 };
 pub mod motion;
+/// Original scalar source laws at the recovered three-dimensional E/J.
+pub mod response;
 
 use super::{
     ScalarBoundary, SpatialGeometry, SpatialMagneticError, dot, prepare_geometry,
@@ -172,6 +175,20 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
+        Self::assemble_admitted(geometry, conductors, limits, cancelled, |source| {
+            source.has_admitted_ohmic_sources()
+        })
+    }
+
+    // The nonlinear scalar owner admits complete original laws before using
+    // this same assembly. Ordinary snapshots retain their fixed-source gate.
+    fn assemble_admitted(
+        geometry: Arc<SpatialGeometry>,
+        conductors: Vec<C>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(&C) -> bool,
+    ) -> Result<Self> {
         check(cancelled)?;
         if conductors.len() != geometry.mesh.tets.len()
             || geometry.mesh.vertex_count > limits.max_dofs
@@ -184,7 +201,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         let mut weights = Vec::with_capacity(conductors.len());
         for source in &conductors {
             check(cancelled)?;
-            if !source.has_admitted_ohmic_sources() {
+            if !admit(source) {
                 return Err(SpatialConductionError::Invalid(
                     "original electrical sources need fixed external or explicitly owned phase conditions",
                 ));

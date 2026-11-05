@@ -6,6 +6,8 @@ mod contacts;
 mod matrix;
 #[path = "spatial_conduction/motion.rs"]
 mod motion;
+#[path = "spatial_conduction/response.rs"]
+mod response;
 #[path = "spatial_conduction/terminals.rs"]
 mod terminals;
 

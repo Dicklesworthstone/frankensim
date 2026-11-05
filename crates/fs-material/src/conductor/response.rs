@@ -232,9 +232,30 @@ impl ScalarConductorResponse {
         electric_field_v_m: [f64; 2],
         current_density_a_m2: [f64; 2],
     ) -> Result<ResolvedConductorState, ConductorError> {
+        self.at_field_components(seed, electric_field_v_m, current_density_a_m2)
+    }
+
+    /// The same original source and context at actual THREE-dimensional E/J.
+    /// All components enter the rotational invariants; no planar projection or
+    /// independently fitted spatial material law is used.
+    pub fn at_spatial_fields(
+        &self,
+        seed: &ResolvedConductorState,
+        electric_field_v_m: [f64; 3],
+        current_density_a_m2: [f64; 3],
+    ) -> Result<ResolvedConductorState, ConductorError> {
+        self.at_field_components(seed, electric_field_v_m, current_density_a_m2)
+    }
+
+    fn at_field_components<const N: usize>(
+        &self,
+        seed: &ResolvedConductorState,
+        electric_field_v_m: [f64; N],
+        current_density_a_m2: [f64; N],
+    ) -> Result<ResolvedConductorState, ConductorError> {
         self.admit(seed)?;
-        let e = electric_field_v_m[0].hypot(electric_field_v_m[1]);
-        let j = current_density_a_m2[0].hypot(current_density_a_m2[1]);
+        let e = electric_field_v_m.into_iter().fold(0.0, f64::hypot);
+        let j = current_density_a_m2.into_iter().fold(0.0, f64::hypot);
         if !e.is_finite() || !j.is_finite() {
             return Err(invalid(
                 "finite physical electric field and current density",

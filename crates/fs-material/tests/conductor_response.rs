@@ -160,6 +160,13 @@ fn actual_rotational_invariants_refresh_one_complete_pinned_material_bundle() {
     }
     let reversed = law.at_fields(&seed, [-4.0, 3.0], [-8.0, 6.0]).unwrap();
     assert_eq!(next, reversed);
+    for (e, j) in [
+        ([0.0, 3.0, 4.0], [0.0, 6.0, 8.0]),
+        ([4.0, 0.0, -3.0], [8.0, 0.0, -6.0]),
+        ([0.0, 0.0, -5.0], [0.0, 0.0, -10.0]),
+    ] {
+        assert_eq!(law.at_spatial_fields(&seed, e, j).unwrap(), next);
+    }
     assert_eq!(law.original(), &original);
 }
 
@@ -192,6 +199,18 @@ fn multiple_owned_axes_do_not_admit_unowned_or_retyped_conditions() {
         ScalarConductorResponse::new(&card, original.clone(), &[("field", e), ("current", j)])
             .unwrap();
     assert!(law.at_fields(&original, [11.0, 0.0], [1.0, 0.0]).is_err());
+    assert!(
+        law.at_spatial_fields(&original, [0.0, 0.0, 11.0], [1.0, 0.0, 0.0])
+            .is_err()
+    );
+    assert!(
+        law.at_spatial_fields(&original, [0.0, 0.0, 1.0], [0.0, 0.0, 21.0])
+            .is_err()
+    );
+    assert!(
+        law.at_spatial_fields(&original, [0.0, 0.0, f64::NAN], [0.0; 3])
+            .is_err()
+    );
     assert!(
         law.at_fields(&original, [f64::NAN, 0.0], [0.0, 0.0])
             .is_err()

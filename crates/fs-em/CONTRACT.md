@@ -786,6 +786,32 @@ Existing induction keeps its stricter static-source admission. This adds no
 phase mixing rule, Hall law, dielectric storage, induction, contact layers,
 moving geometry, field-dependent conduction or measured-material validation.
 
+## Nonlinear scalar source response on original tetrahedra
+
+`spatial::conduction::response::SpatialConductionResponse` closes the original
+`ScalarConductorResponse` laws at actual three-component E/J magnitudes. The
+shared material query retains all source roles, conditions, pins and support;
+ordinary frozen 3D snapshots still refuse unowned electrical coordinates.
+Each bounded Picard iteration reuses the original geometry and rebuilds only
+the native bulk/contact operator and its terminal response. Boundary traces
+and simultaneous voltage/current/floating electrodes use the same field owner,
+including actual source work and unsmoothed bulk/contact Joule heat. Nonlinear
+operating points are never scaled as fixed resistances.
+
+Acceptance separately gates conductivity, source-evaluated current density and
+the sum of absolute cellwise constitutive power defects, alongside native
+current/Hodge/work balance. Every N-1 terminal basis solve is charged across
+discarded iterations before the work begins. The immutable candidate retains
+applied and evaluated complete sources. Unsupported states, budget exhaustion,
+nonconvergence and cancellation leave the original owner unchanged. This is a
+stationary scalar, memoryless closure with prescribed temperature/phase context
+and fixed contact sources; positive conductivity establishes neither global
+convergence nor uniqueness. No nonlinear tensor/contact or thermal solver is
+inferred. Manufactured 3D regressions use independent quadratic series/contact
+and current-dependent bar solutions, including third-component fields, floating
+and injecting electrodes, polarity, common bias, local heat and source-work
+closure, constitutive refusal and accumulated basis-solve budgets.
+
 ## Ionized-gas current and Joule heating
 
 `PlanarConduction` accepts the sealed `PlanarOhmicResponse` material response,
