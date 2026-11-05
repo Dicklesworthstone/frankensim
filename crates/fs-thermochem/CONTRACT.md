@@ -3170,6 +3170,8 @@ Three focused actual-source controls cover fourth-order differences of the origi
 
 Focused controls compare the pressure and both mixed-derivative directions with fourth-order differences of the original state across ten liquid/vapor conditions, preserve the separate saturation tangents, and recover the independently evaluated dilute virial curvature down to 1e-140 Pa. These are single-phase local derivatives; the API supplies no phase-mixture tangent or regional crossing.
 
+`If97DenseState::density_jet` extends that same typed response to Region 3 by implicit differentiation of the original Helmholtz pressure law. Three compensated coefficient sums evaluate its pressure Hessian directly; first responses retain the admitted state's stiffness and thermal pressure slope. This allocation-free query requires no pressure inversion and leaves ordinary state cost unchanged. Its isobaric projection uses the same derivatives. `If97FluidState` routes both jet queries to the retained Region 1, 2 or 3 source, preserving achieved pressure and solve diagnostics. Saturation endpoints keep their single-phase tangent and near-critical amplification remains visible; no finite mixture derivative, smoothing, extrapolation or reduced source uncertainty is implied. Focused regressions compare native pressure and density derivatives in both mixed directions with independent fourth-order differences, and cover dense coexistence, critical amplification and exact regional delegation.
+
 ## Source-bound pyrrhotite oxidant and acid balances
 
 Three matched NBS/1989 packs add 15 point claims for crystalline alpha FeS,

@@ -243,6 +243,27 @@ impl If97FluidState {
     source_property!(thermal_expansion, ThermalExpansion);
     source_property!(isothermal_compressibility, IsothermalCompressibility);
 
+    /// Original single-phase density derivatives in pressure/temperature space.
+    ///
+    /// Dense states retain their achieved pressure and inversion diagnostics;
+    /// this evaluates their analytic tangent without another pressure solve.
+    pub fn density_jet(self) -> Result<super::density::DensityJet, If97FluidError> {
+        match self {
+            Self::Gibbs(s) => s.density_jet().map_err(If97FluidError::Gibbs),
+            Self::Dense(s) => s.state.density_jet()
+                .map_err(|error| DensePressureError::Source(error).into()),
+        }
+    }
+
+    /// Original isobaric density slope and curvature without regional blending.
+    pub fn isobaric_density_jet(self) -> Result<super::density::IsobaricDensityJet, If97FluidError> {
+        match self {
+            Self::Gibbs(s) => s.isobaric_density_jet().map_err(If97FluidError::Gibbs),
+            Self::Dense(s) => s.state.isobaric_density_jet()
+                .map_err(|error| DensePressureError::Source(error).into()),
+        }
+    }
+
     pub fn dh_dp_at_temperature(self) -> MassSpecificVolume {
         MassSpecificVolume::new(
             self.specific_volume().value()

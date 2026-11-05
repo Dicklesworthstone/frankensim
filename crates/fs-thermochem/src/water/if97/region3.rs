@@ -36,6 +36,8 @@ pub mod increments;
 
 /// Stable changes between original dense-water states at arbitrary endpoints.
 pub mod difference;
+/// Analytic pressure/temperature density response of the original dense source.
+pub mod density;
 /// Bounded pressure inversion and original Region 3/4 saturation endpoints.
 pub mod pressure;
 
