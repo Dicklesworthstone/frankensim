@@ -36,7 +36,7 @@ pub use forcing::{
     BoundaryForcingError3, DarcyForchheimer3, LinearResistance3, ResistanceMomentumExchange3,
     RigidFrame3,
 };
-use forcing::{EndpointForcing3, PreparedResistance3, ResistanceStream3};
+use forcing::{EndpointForcing3, EndpointSource3, PreparedResistance3, ResistanceStream3};
 mod curved;
 pub use curved::{CurvedWall3, CurvedWallLink3, CurvedWallStep3};
 mod rotor;
@@ -1528,7 +1528,10 @@ impl BoundaryGrid3 {
         endpoint_forcing: Option<EndpointForcing3>,
     ) -> Result<(WallMomentumExchange3, Option<[FiniteMassWallReceipt3; 2]>), BoundaryStepError3>
     {
-        let defer_topology_lock = matches!(&endpoint_forcing, Some(EndpointForcing3::Field { .. }));
+        let defer_topology_lock = matches!(
+            &endpoint_forcing,
+            Some(EndpointForcing3::Field { .. } | EndpointForcing3::Acceleration { .. })
+        );
         if finite_walls.is_none() && !defer_topology_lock {
             self.topology_locked = true;
         }
@@ -1580,7 +1583,7 @@ impl BoundaryGrid3 {
                 solid: &self.solid,
                 endpoint_field: endpoint_forcing
                     .as_ref()
-                    .and_then(EndpointForcing3::sampled_field),
+                    .and_then(EndpointForcing3::stream_source),
                 resistance: None,
                 next: chunk_groups(&mut next),
             };
@@ -1704,6 +1707,10 @@ impl BoundaryGrid3 {
                 self.force_field = Some(local);
                 self.force_field_shape = None;
             }
+            Some(EndpointForcing3::Acceleration {
+                value,
+                initial_field,
+            }) => self.publish_endpoint_body_acceleration(value, initial_field),
             None => {}
         }
         Ok(())
@@ -2335,6 +2342,9 @@ impl BoundaryGrid3 {
             Some(EndpointForcing3::Field { uniform, local }) => {
                 cell_force(*uniform, Some(local), tile, lane)
             }
+            Some(EndpointForcing3::Acceleration { .. }) => {
+                unreachable!("body acceleration refuses open faces before stepping")
+            }
             None => cell_force(self.force, self.force_field.as_deref(), tile, lane),
         }
     }
@@ -2760,13 +2770,15 @@ impl StreamView<'_> {
         populations: &[f64; Q3],
         tile: usize,
         lane: usize,
-        endpoint: Option<([f64; 3], &[[f64; 3]])>,
+        endpoint: Option<EndpointSource3<'_>>,
     ) -> bool {
         // Open-owned values are only provisional here; their final physical
         // frame is admitted by the shared regularized reconstruction.
         self.open_link_masks[tile].0[lane] != 0
-            || endpoint.is_none_or(|(uniform, local)| {
-                finite_forced_populations(populations, cell_force(uniform, Some(local), tile, lane))
+            || endpoint.is_none_or(|source| {
+                source
+                    .force(populations, tile, lane)
+                    .is_some_and(|force| finite_forced_populations(populations, force))
             })
     }
 
@@ -2913,7 +2925,7 @@ impl CollidePass<'_> {
 struct StreamPass<'a> {
     view: StreamView<'a>,
     solid: &'a [u64],
-    endpoint_field: Option<([f64; 3], &'a [[f64; 3]])>,
+    endpoint_field: Option<EndpointSource3<'a>>,
     resistance: Option<&'a ResistanceStream3<'a>>,
     next: Vec<Mutex<[&'a mut [Tile]; Q3]>>,
 }

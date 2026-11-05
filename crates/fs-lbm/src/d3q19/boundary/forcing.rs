@@ -4,6 +4,7 @@ use super::*;
 
 mod frame;
 pub use frame::RigidFrame3;
+mod acceleration;
 mod forchheimer;
 mod impulse;
 mod resistance;
@@ -19,13 +20,54 @@ pub(super) enum EndpointForcing3 {
         uniform: [f64; 3],
         local: Vec<[f64; 3]>,
     },
+    Acceleration {
+        value: [f64; 3],
+        // Subsequent steps reuse the accepted force allocation. Its first
+        // allocation stays private until populations and forcing publish.
+        initial_field: Option<Vec<[f64; 3]>>,
+    },
 }
 
 impl EndpointForcing3 {
-    pub(super) fn sampled_field(&self) -> Option<([f64; 3], &[[f64; 3]])> {
+    pub(super) fn stream_source(&self) -> Option<EndpointSource3<'_>> {
         match self {
-            Self::Field { uniform, local } => Some((*uniform, local)),
+            Self::Field { uniform, local } => Some(EndpointSource3::Field {
+                uniform: *uniform,
+                local,
+            }),
+            Self::Acceleration { value, .. } => Some(EndpointSource3::Acceleration(*value)),
             Self::Scale(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum EndpointSource3<'a> {
+    Field {
+        uniform: [f64; 3],
+        local: &'a [[f64; 3]],
+    },
+    Acceleration([f64; 3]),
+}
+
+impl EndpointSource3<'_> {
+    pub(super) fn force(
+        self,
+        populations: &[f64; Q3],
+        tile: usize,
+        lane: usize,
+    ) -> Option<[f64; 3]> {
+        match self {
+            Self::Field { uniform, local } => Some(cell_force(uniform, Some(local), tile, lane)),
+            Self::Acceleration(acceleration) => {
+                let density = populations.iter().sum::<f64>();
+                let force = acceleration.map(|value| density * value);
+                force
+                    .iter()
+                    .zip(acceleration)
+                    .all(|(force, a)| force.is_finite() && (a == 0.0 || *force != 0.0))
+                    .then_some(force)
+            }
         }
     }
 }
@@ -169,7 +211,7 @@ impl BoundaryGrid3 {
             boundaries: self.boundaries,
             dims: [self.nx, self.ny, self.nz],
         };
-        let endpoint_field = endpoint.sampled_field();
+        let endpoint_field = endpoint.stream_source();
         for tile in 0..self.f[0].len() {
             if let Err(error) = endpoint_checkpoint(gate) {
                 self.next = Some(next);

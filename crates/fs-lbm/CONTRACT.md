@@ -11051,6 +11051,33 @@ compatible collision models, physical-momentum closure, sinusoidal convergence,
 the incorrect-order negative control, serial/pooled bits and atomic refusals
 (G0/G1/G3/G4/G5). No new turbulence or open-boundary accuracy claim is made.
 
+### Actual-density body acceleration on the dense lattice
+
+`BoundaryGrid3::rebind_body_acceleration` uses the original zero-motion rigid-frame
+preparation to select `F = rho*a` without elapsed impulse or a stress reset.
+`step_with_endpoint_body_acceleration` and its pooled/selected-wall variants
+then use the original collision, streaming and wall-load kernels. Collision
+retains `F_n`; the streamed density supplies `F_(n+1) = rho_(n+1)*a_(n+1)`.
+There is no endpoint population reframe, so physical momentum receives the
+native trapezoidal source impulse `(F_n+F_(n+1))/2`. Passing the same acceleration
+at successive endpoints gives a held physical acceleration at every density.
+An ordinary `step` still holds force density, as its existing contract states.
+
+The endpoint force/velocity admission runs on the populations already held by
+each streaming kernel. Publication reuses the accepted force allocation after
+first use; it needs no new grid clone, source solver or second collision.
+Cancellation, nonrepresentable endpoint forces and late collision/stream refusal
+leave accepted populations and sources unchanged. Closed walls and periodic
+domains are supported; open faces refuse before stepping because their
+density-dependent force/reconstruction closure is not supplied here. Immersed
+finite-body feedback and full-flow energy conservation are not claimed.
+
+`tests/dense_body_acceleration.rs` checks unequal-density response and changing
+acceleration through four collision laws, retained non-equilibrium stress,
+independent affine-density endpoint moments, sinusoidal second-order time
+convergence, periodic total/local momentum, wall linear/angular impulse,
+serial/pooled population bits and transactional refusal (G0/G1/G3/G4/G5).
+
 ### Shared momentum reduction for immersed finite bodies
 
 Single- and multiple-body partial-saturation coupling share one native spatial
