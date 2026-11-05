@@ -44,6 +44,89 @@ fn coupled_controls(dt: f64) -> ConductiveThermalVolumeMomentumControls {
 }
 
 #[test]
+fn exterior_bath_heat_drives_original_density_flow_and_cell_impulse_once() {
+    use crate::d3q19::Face3;
+
+    // v=1+h/8, T=300+h. Initially M=4/5, h=2. The two actual
+    // half-cell baths supply +1/4 and -1/4 J, so q=1/4 m3/s.
+    let material = card("T", &[(300.0, 1.0), (304.0, 1.0)]);
+    let caloric = curve(
+        &material,
+        &[(0.0, 300.0, 1.0, 1.0), (4.0, 304.0, 1.0, 2.0 / 3.0)],
+    );
+    let source = source(&material, &caloric, [0.0, 4.0]);
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let states = [Some(caloric.state_at_specific_enthalpy(2.0).unwrap()); 2];
+    let zero = [[0.0; 3]; 2];
+    let data = ThermalVolumeMomentumInput {
+        volume: input(&[0.8; 2], &states, &[0.0; 2]),
+        momentum_kg_m_s: &zero,
+        acceleration_m_s2: [0.0; 3],
+        force_density_n_m3: &zero,
+        boundary_velocity_m_s: [None; 6],
+    };
+    let baths = [
+        ThermalVolumeBathFace {
+            cell: 0,
+            face: Face3::XMin,
+            temperature_k: 303.0,
+            resistance_m2_k_w: 0.0,
+        },
+        ThermalVolumeBathFace {
+            cell: 1,
+            face: Face3::XMax,
+            temperature_k: 301.0,
+            resistance_m2_k_w: 0.0,
+        },
+    ];
+    let controls = coupled_controls(0.125);
+    let gate = CancelGate::new_clock_free();
+    let actual = field
+        .advance_isotropic_conductive_thermal_volume_momentum_with_baths(
+            &domain,
+            [FlowFace::Wall; 6],
+            None,
+            &source,
+            &baths,
+            data,
+            controls,
+            &gate,
+        )
+        .unwrap();
+    let expected = field
+        .advance_piecewise_thermal_volume_momentum(
+            &domain,
+            [FlowFace::Wall; 6],
+            &caloric,
+            ThermalVolumeMomentumInput {
+                volume: input(&[0.8; 2], &states, &[0.25, -0.25]),
+                ..data
+            },
+            controls.evolution,
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(actual.evolution, expected);
+    close(actual.report.boundary_heat_j[0], 0.25);
+    close(actual.report.boundary_heat_j[1], -0.25);
+    close(actual.report.absolute_boundary_heat_j, 0.5);
+    let volume = &actual.evolution.thermal.volume;
+    close(volume.transport.mass_kg[0], 128.0 / 165.0);
+    close(volume.transport.mass_kg[1], 136.0 / 165.0);
+    close(volume.transport.specific_enthalpy_j_kg[0], 37.0 / 16.0);
+    close(volume.transport.specific_enthalpy_j_kg[1], 29.0 / 17.0);
+    close(volume.transport.projection.field.flux_x(1, 0, 0), 0.25);
+    close(volume.report.material_enthalpy_change_j, 0.0);
+    assert!(volume.report.required_source_pressure_work_j > 0.0);
+    for velocity in &actual.evolution.momentum.velocity_m_s {
+        close(velocity[0], 0.125);
+        assert_eq!([velocity[1], velocity[2]], [0.0; 2]);
+    }
+    assert_eq!(field, FlowField::quiescent(&domain));
+}
+
+#[test]
 fn original_source_heat_drives_density_volume_and_cell_momentum_together() {
     // T=300+h, k=T-299, v=1+h/8: at h=[1,3] the harmonic conductance
     // is 8/3. dt=3/32 transfers 1/2 J and drives Q=2/3 m3/s.

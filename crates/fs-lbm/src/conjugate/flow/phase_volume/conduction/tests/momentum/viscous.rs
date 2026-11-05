@@ -171,6 +171,73 @@ fn original_heat_and_viscous_impulse_share_one_pressure_and_material_transport()
     assert_eq!(molecular.calls.get(), 4);
     assert_eq!(run(data).unwrap(), result);
     assert_eq!(molecular.calls.get(), 6);
+
+    // The XMin bath supplies dt*A*(302-301)/(.5/2+.25)=1/4 J.
+    // Internal +/-1/2 J, authored +/-1/8 J and physical molecular
+    // heat must each enter the same original transport exactly once.
+    let authored = [0.125, -0.125];
+    let bath_data = ThermalVolumeMomentumInput {
+        volume: CoexistenceVolumeInput {
+            net_enthalpy_increment_j: &authored,
+            ..data.volume
+        },
+        ..data
+    };
+    let with_bath = field
+        .advance_isotropic_conductive_thermal_volume_momentum_with_viscosity_and_baths(
+            &domain,
+            Some((faces, profile)),
+            &conductivity,
+            &[ThermalVolumeBathFace {
+                cell: 0,
+                face: crate::d3q19::Face3::XMin,
+                temperature_k: 302.0,
+                resistance_m2_k_w: 0.25,
+            }],
+            bath_data,
+            viscosity,
+            coupled_controls(0.125),
+            viscous_controls(),
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(molecular.calls.get(), 8);
+    let combined = [0.875, -0.625];
+    let independent = field
+        .advance_piecewise_thermal_volume_momentum_with_viscosity_and_pressure_profile(
+            &domain,
+            faces,
+            profile,
+            &caloric,
+            ThermalVolumeMomentumInput {
+                volume: CoexistenceVolumeInput {
+                    net_enthalpy_increment_j: &combined,
+                    ..data.volume
+                },
+                ..data
+            },
+            viscosity,
+            coupled_controls(0.125).evolution,
+            viscous_controls(),
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(with_bath.evolution, independent);
+    assert_eq!(with_bath.conductive_enthalpy_increment_j, [0.75, -0.5]);
+    close(with_bath.report.boundary_heat_j[0], 0.25);
+    close(with_bath.report.absolute_boundary_heat_j, 0.25);
+    close(with_bath.evolution.viscosity.molecular_heat_j, 16.0 / 25.0);
+    close(
+        with_bath
+            .evolution
+            .evolution
+            .thermal
+            .volume
+            .report
+            .requested_enthalpy_increment_j,
+        0.25 + 16.0 / 25.0,
+    );
+    assert_eq!(molecular.calls.get(), 10);
     assert_eq!(field, FlowField::quiescent(&domain));
     assert_eq!(mass, [2.0; 2]);
     assert_eq!(momentum, [[2.0, 0.0, 0.0]; 2]);

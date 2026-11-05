@@ -51,6 +51,7 @@ pub use phase_volume::{
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
     ConductiveViscousThermalVolumeMomentumStep, PiecewiseThermalVolumeControls,
+    ThermalVolumeBathFace,
     ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
     ResolvedResistiveThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
     ThermalResistanceCouplingReport, ThermalVolumeControls, ThermalVolumeMomentumControls,

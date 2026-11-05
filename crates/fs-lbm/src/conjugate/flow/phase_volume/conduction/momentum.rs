@@ -25,7 +25,7 @@ pub struct ConductiveThermalVolumeMomentumControls {
 pub struct ConductiveThermalVolumeMomentumStep {
     /// Original phase/volume result and the momentum it actually transported.
     pub evolution: ThermalVolumeMomentumStep,
-    /// Paired original-source heat, before authored net caloric increments [J].
+    /// Internal and bath source heat, before authored net caloric increments [J].
     pub conductive_enthalpy_increment_j: Vec<f64>,
     /// Same source identity, heat, work cap and shared enthalpy gates as the
     /// original conduction owner. Mechanical source work remains separate.
@@ -63,7 +63,47 @@ impl FlowField {
         controls: ConductiveThermalVolumeMomentumControls,
         gate: &CancelGate,
     ) -> Result<ConductiveThermalVolumeMomentumStep, ChtError> {
-        self.conduct_thermal_momentum(domain, faces, None, conductivity, input, controls, gate)
+        self.conduct_thermal_momentum(
+            domain,
+            faces,
+            None,
+            conductivity,
+            &[],
+            input,
+            controls,
+            gate,
+        )
+    }
+
+    /// The same heat/volume/momentum endpoint with explicit exterior thermal
+    /// baths. Geometry, source conductivity, latent storage and stability use
+    /// [`Self::advance_isotropic_conductive_thermal_volume_with_baths`].
+    /// Bath heat drives the original density/pressure/momentum trials once;
+    /// neither bath mass nor pressure work is added to its thermal account.
+    /// An optional original mechanical pressure profile remains independent
+    /// of the thermal bath temperatures and their resistance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_conductive_thermal_volume_momentum_with_baths(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        input: ThermalVolumeMomentumInput<'_>,
+        controls: ConductiveThermalVolumeMomentumControls,
+        gate: &CancelGate,
+    ) -> Result<ConductiveThermalVolumeMomentumStep, ChtError> {
+        self.conduct_thermal_momentum(
+            domain,
+            faces,
+            profile,
+            conductivity,
+            baths,
+            input,
+            controls,
+            gate,
+        )
     }
 
     /// The same coupled source-heat step with the existing borrowed mechanical
@@ -90,6 +130,7 @@ impl FlowField {
             faces,
             Some(profile),
             conductivity,
+            &[],
             input,
             controls,
             gate,
@@ -103,6 +144,7 @@ impl FlowField {
         faces: [FlowFace; 6],
         profile: Option<StaggeredBoundaryPressure<'_>>,
         conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
         input: ThermalVolumeMomentumInput<'_>,
         controls: ConductiveThermalVolumeMomentumControls,
         gate: &CancelGate,
@@ -110,6 +152,7 @@ impl FlowField {
         let accepted = self.conduct_then_advance(
             domain,
             conductivity,
+            baths,
             input.volume,
             ConductiveThermalVolumeControls {
                 volume: controls.evolution.volume,

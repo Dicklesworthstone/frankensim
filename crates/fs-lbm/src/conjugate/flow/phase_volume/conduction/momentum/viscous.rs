@@ -49,10 +49,11 @@ impl FlowField {
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
     ) -> Result<ConductiveViscousThermalVolumeMomentumStep, ChtError> {
-        self.conduct_viscous_thermal_momentum(
+        self.advance_isotropic_conductive_thermal_volume_momentum_with_viscosity_and_baths(
             domain,
             None,
             conductivity,
+            &[],
             input,
             viscosity,
             controls,
@@ -82,10 +83,11 @@ impl FlowField {
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
     ) -> Result<ConductiveViscousThermalVolumeMomentumStep, ChtError> {
-        self.conduct_viscous_thermal_momentum(
+        self.advance_isotropic_conductive_thermal_volume_momentum_with_viscosity_and_baths(
             domain,
             Some((faces, profile)),
             conductivity,
+            &[],
             input,
             viscosity,
             controls,
@@ -94,12 +96,22 @@ impl FlowField {
         )
     }
 
+    /// Combine exterior bath conduction and original molecular stress heat
+    /// before the existing thermal-volume and momentum transport, once each.
+    /// Baths obey [`Self::advance_isotropic_conductive_thermal_volume_with_baths`].
+    /// `reservoir` optionally carries the existing mechanical faces and pressure
+    /// profile; without it the original viscosity boundaries own those faces.
+    ///
+    /// # Errors
+    /// Any original bath, material, viscosity, pressure, caloric, source-bound
+    /// or cancellation refusal returns no endpoint and mutates no inventory.
     #[allow(clippy::too_many_arguments)]
-    fn conduct_viscous_thermal_momentum(
+    pub fn advance_isotropic_conductive_thermal_volume_momentum_with_viscosity_and_baths(
         &self,
         domain: &VoxelDomain,
         reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
         conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
         input: ThermalVolumeMomentumInput<'_>,
         viscosity: MaterialMomentumViscosityInput<'_>,
         controls: ConductiveThermalVolumeMomentumControls,
@@ -109,6 +121,7 @@ impl FlowField {
         let accepted = self.conduct_then_advance(
             domain,
             conductivity,
+            baths,
             input.volume,
             ConductiveThermalVolumeControls {
                 volume: controls.evolution.volume,

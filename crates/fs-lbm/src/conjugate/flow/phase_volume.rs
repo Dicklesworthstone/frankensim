@@ -6,6 +6,7 @@ pub use conduction::{
     ConductiveThermalVolumeControls, ConductiveThermalVolumeMomentumControls,
     ConductiveThermalVolumeMomentumStep, ConductiveThermalVolumeReport,
     ConductiveThermalVolumeStep, ConductiveViscousThermalVolumeMomentumStep,
+    ThermalVolumeBathFace,
 };
 mod momentum;
 pub use momentum::{

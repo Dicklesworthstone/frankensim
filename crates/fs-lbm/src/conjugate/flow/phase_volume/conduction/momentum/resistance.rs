@@ -4,7 +4,9 @@ use super::super::super::{
     ResistiveThermalVolumeMomentumControls, ResolvedResistiveThermalVolumeMomentumStep,
     ThermalVolumeMomentumInput,
 };
-use super::super::{ConductiveThermalVolumeControls, ConductiveThermalVolumeReport, refuse};
+use super::super::{
+    ConductiveThermalVolumeControls, ConductiveThermalVolumeReport, ThermalVolumeBathFace, refuse,
+};
 use crate::conjugate::flow::{FlowFace, FlowField, StaggeredBoundaryPressure, poll_every};
 use crate::conjugate::{ChtError, VoxelDomain, finite, poll};
 use fs_exec::CancelGate;
@@ -77,11 +79,12 @@ impl FlowField {
             &EquilibriumPhaseState,
         ) -> Result<ResolvedPhaseTransportState, ChtError>,
     ) -> Result<ConductiveResistiveThermalVolumeMomentumStep, ChtError> {
-        self.conduct_phase_resistance_thermal_volume_momentum(
+        self.advance_isotropic_conductive_phase_resistance_thermal_volume_momentum_with_baths(
             domain,
             faces,
             None,
             conductivity,
+            &[],
             law,
             input,
             controls,
@@ -113,11 +116,12 @@ impl FlowField {
             &EquilibriumPhaseState,
         ) -> Result<ResolvedPhaseTransportState, ChtError>,
     ) -> Result<ConductiveResistiveThermalVolumeMomentumStep, ChtError> {
-        self.conduct_phase_resistance_thermal_volume_momentum(
+        self.advance_isotropic_conductive_phase_resistance_thermal_volume_momentum_with_baths(
             domain,
             faces,
             Some(profile),
             conductivity,
+            &[],
             law,
             input,
             controls,
@@ -126,13 +130,23 @@ impl FlowField {
         )
     }
 
+    /// Add prescribed exterior bath heat to original material conduction once,
+    /// before the existing phase-resistance, physical drag heat and volume trials.
+    /// Baths obey [`Self::advance_isotropic_conductive_thermal_volume_with_baths`].
+    /// The optional original pressure profile carries only mechanical work;
+    /// bath and drag heat keep their distinct physical energy accounts.
+    ///
+    /// # Errors
+    /// Any original source, boundary, explicit-step, coupled phase/resistance,
+    /// energy-budget or cancellation refusal returns no endpoint.
     #[allow(clippy::too_many_arguments)]
-    fn conduct_phase_resistance_thermal_volume_momentum(
+    pub fn advance_isotropic_conductive_phase_resistance_thermal_volume_momentum_with_baths(
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
         profile: Option<StaggeredBoundaryPressure<'_>>,
         conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
         law: &MushyPhaseLaw<'_>,
         input: ThermalVolumeMomentumInput<'_>,
         controls: ConductiveResistiveThermalVolumeMomentumControls,
@@ -154,6 +168,7 @@ impl FlowField {
         let accepted = self.conduct_then_advance(
             domain,
             conductivity,
+            baths,
             input.volume,
             ConductiveThermalVolumeControls {
                 volume: controls.resistance.thermal.volume,

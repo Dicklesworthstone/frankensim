@@ -135,6 +135,7 @@ pub use flow::{
     ConductiveResistiveThermalVolumeMomentumStep, ConductiveThermalVolumeControls,
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
+    ThermalVolumeBathFace,
     ConductiveViscousThermalVolumeMomentumStep, DensityForceControls, DensityForceInput,
     DensityForcePrediction, DensityForceReport, DensityMomentumReconstruction,
     DensityMomentumReconstructionControls, DensityMomentumReconstructionReport, DensityProjection,

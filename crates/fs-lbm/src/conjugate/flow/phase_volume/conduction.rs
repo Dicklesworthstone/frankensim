@@ -9,7 +9,9 @@ use super::{
     poll, poll_every,
 };
 
+mod boundary;
 mod momentum;
+pub use boundary::ThermalVolumeBathFace;
 pub use momentum::{
     ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
@@ -23,8 +25,9 @@ pub struct ConductiveThermalVolumeControls {
     /// Its enthalpy-defect budget covers heat accumulation, adding authored
     /// increments, caloric representation and native transport TOGETHER.
     pub volume: PiecewiseThermalVolumeControls,
-    /// Maximum internal fluid/fluid faces inspected, including insulating and
-    /// isothermal faces. Each face is visited once, independent of source trials.
+    /// Maximum internal fluid/fluid plus explicitly supplied bath faces inspected,
+    /// including insulating and isothermal faces. Each face is visited once,
+    /// independent of source trials.
     pub max_conductive_faces: usize,
 }
 
@@ -34,12 +37,21 @@ pub struct ConductiveThermalVolumeReport {
     /// Identity already retained by the prepared original k(T,f) source.
     pub conductivity_source_identity: ContentHash,
     pub conductive_faces: usize,
+    /// Number of explicitly supplied exterior bath faces, including zero heat.
+    pub boundary_faces: usize,
+    /// Signed heat supplied by each bath side, ordered x-, x+, y-, y+, z-, z+ [J].
+    /// This is external heat, separate from native advective enthalpy transport.
+    pub boundary_heat_j: [f64; 6],
+    /// Sum of absolute individual bath-face transfers [J]. Opposed heating and
+    /// cooling remain visible even when their signed supply cancels.
+    pub absolute_boundary_heat_j: f64,
     /// Sum of |dt G (T_b-T_a)|, counting each internal face once [J].
     pub exchanged_heat_j: f64,
-    /// Largest sum of the actual enthalpy-secant diffusion weights. At most
-    /// one; this is an explicit-step monotonicity condition, not a Cp model.
+    /// Largest sum of internal enthalpy-secant weights and bath conductances
+    /// weighted by the original chart's maximum dT/dh. At most one; this is a
+    /// frozen-coefficient explicit-step bound, not a fitted Cp model.
     pub maximum_enthalpy_mixing_weight: f64,
-    /// Absolute sum of the returned paired cell heat increments [J].
+    /// Absolute net cell heat minus independently summed bath supply [J].
     pub conduction_balance_defect_j: f64,
     /// Sum of absolute floating-point addition residuals when accumulating
     /// face heat and combining it with the caller's authored net increments.
@@ -57,7 +69,7 @@ pub struct ConductiveThermalVolumeReport {
 pub struct ConductiveThermalVolumeStep {
     /// Unmodified original chart, mass/enthalpy, pressure and volume result.
     pub thermal: ThermalVolumeStep,
-    /// Paired heat received by each cell [J], before adding authored increments.
+    /// Internal and bath heat received by each cell [J], before authored increments.
     /// Solid entries are zero. Numerical pressure loss is never placed here.
     pub conductive_enthalpy_increment_j: Vec<f64>,
     pub report: ConductiveThermalVolumeReport,
@@ -115,9 +127,55 @@ impl FlowField {
         controls: ConductiveThermalVolumeControls,
         gate: &CancelGate,
     ) -> Result<ConductiveThermalVolumeStep, ChtError> {
+        self.advance_isotropic_conductive_thermal_volume_with_baths(
+            domain,
+            faces,
+            conductivity,
+            &[],
+            input,
+            controls,
+            gate,
+        )
+    }
+
+    /// Advance the same source-owned conduction and volume transport with
+    /// explicit thermal baths on selected exterior fluid-cell faces.
+    ///
+    /// Each bath adds `dt*A*(T_bath-T_cell)/(d/k_cell+R)`, where the original
+    /// graded grid supplies the physical area A and cell-centre-to-face distance
+    /// d (half the local width). R is the authored area-specific external
+    /// resistance; zero gives a prescribed surface temperature. Conductivity
+    /// is frozen at the SAME original cell state as internal conduction.
+    /// Unlisted exterior faces and all fixed-solid interfaces stay insulated.
+    /// A bath supplies no material mass or extra caloric storage.
+    ///
+    /// Bath conductances share the internal explicit-step bound, using the
+    /// maximum dT/dh of the original chart over its admitted conductivity range.
+    /// True latent plateaus retain their original energy and zero thermal slope.
+    /// Bath temperature is an external condition, not a new material query;
+    /// actual heated and transported cells must still stay in source support.
+    /// This is frozen-coefficient, first-order heat/volume splitting. It does
+    /// not solve a finite wall, a nonlinear through-wall profile or a bath EOS.
+    ///
+    /// Signed bath heat enters native enthalpy once and is reported separately
+    /// from advective inlet/outlet enthalpy and required pressure-source work.
+    /// Input/source, topology, work, energy, stability and cancellation refusals
+    /// publish no endpoint and leave every supplied inventory unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_conductive_thermal_volume_with_baths(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        input: CoexistenceVolumeInput<'_>,
+        controls: ConductiveThermalVolumeControls,
+        gate: &CancelGate,
+    ) -> Result<ConductiveThermalVolumeStep, ChtError> {
         let accepted = self.conduct_then_advance(
             domain,
             conductivity,
+            baths,
             input,
             controls,
             gate,
@@ -145,6 +203,7 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
         input: CoexistenceVolumeInput<'_>,
         controls: ConductiveThermalVolumeControls,
         gate: &CancelGate,
@@ -173,6 +232,7 @@ impl FlowField {
         let chart_identity = curve.identity();
         let card_identity = curve.material_card_identity();
         let bounds = conductivity.enthalpy_bounds_j_kg();
+        let baths = boundary::prepare(domain, baths, controls.max_conductive_faces, gate)?;
         let admit = |state: fs_material::phase::EquilibriumPhaseState| {
             if state.phase_curve_identity() != chart_identity
                 || state.material_card_identity() != card_identity
@@ -286,6 +346,21 @@ impl FlowField {
             }
         }
 
+        let boundary = boundary::apply(
+            domain,
+            conductivity,
+            &baths,
+            &samples,
+            input.mass_kg,
+            dt,
+            conductive_faces,
+            controls.max_conductive_faces,
+            &mut increments,
+            &mut mixing_weights,
+            &mut assembly_defect,
+            gate,
+        )?;
+
         let mut combined = Vec::with_capacity(n);
         let mut conductive_balance = Sum::default();
         let mut maximum_weight = 0.0_f64;
@@ -303,6 +378,11 @@ impl FlowField {
                         "calorically advanced state leaves the original conductivity source",
                     ));
                 }
+            }
+        }
+        for heat in boundary.heat_j {
+            if heat != 0.0 {
+                conductive_balance.add(-heat);
             }
         }
         let balance_defect = conductive_balance.value.abs();
@@ -346,6 +426,9 @@ impl FlowField {
             report: ConductiveThermalVolumeReport {
                 conductivity_source_identity: conductivity.identity(),
                 conductive_faces,
+                boundary_faces: baths.len(),
+                boundary_heat_j: boundary.heat_j,
+                absolute_boundary_heat_j: boundary.absolute_heat_j,
                 exchanged_heat_j: exchanged.value,
                 maximum_enthalpy_mixing_weight: maximum_weight,
                 conduction_balance_defect_j: balance_defect,

@@ -11136,6 +11136,40 @@ first-order frozen-source split with caller-owned thermodynamic work and phase
 support, not a pressure-dependent EOS or deformable-solid closure. All stages
 must accept before any endpoint is returned.
 
+## Prescribed thermal baths driving phase-volume heat and momentum
+
+`advance_isotropic_conductive_thermal_volume_with_baths` and
+`advance_isotropic_conductive_thermal_volume_momentum_with_baths` attach explicit
+`ThermalVolumeBathFace` laws to the original conductive volume timeline. Each
+unique exterior fluid-cell face supplies its bath temperature and nonnegative
+area-specific resistance. The original graded grid supplies actual face area
+and half-cell distance; the same original k(T,f) sample used by internal
+conduction gives `G=A/(d/k+R)`. No fixed-solid cell, bath mass or second material
+law is introduced. Unlisted faces retain insulation. The same bath input is
+available alongside the original molecular-viscosity and phase-resistance
+momentum owners, including their existing mechanical pressure profiles. Each
+owner keeps one bath entry point and delegates legacy insulation to empty baths.
+
+Bath heat enters the existing net-enthalpy/phase-density/pressure/momentum
+advance exactly once. Signed six-side heat and gross absolute transfers remain
+separate from internal exchange, advective enthalpy and required mechanical
+source work. The original local heat-addition defects and total enthalpy budget
+still gate publication. Sorted physical cell/face order removes input-list
+ordering from the floating-point result. Combined internal/bath face work is
+bounded by the existing conductive face limit.
+
+Bath weights use the original piecewise caloric chart's maximum dT/dh over
+the admitted source range, jointly with the original internal enthalpy secants.
+Sharp latent storage is not replaced by an apparent heat capacity; an entirely
+latent source interval has zero thermal slope and still enforces actual
+enthalpy-domain admission. Coefficients are held at the original cell state
+for this explicit interval. This is first-order split heat transport, not a
+nonlinear through-wall solve, evolving finite bath, or closed pressure-work
+model. Focused G1/G3/G4 regression definitions cover six graded physical faces,
+source coefficients and caloric datum shifts, opposed bath heat, latent energy,
+native material momentum, additive molecular heat, work/stability refusal and
+cancellation/replay.
+
 ## Source conductivity driving thermal-density momentum
 
 `FlowField::advance_isotropic_conductive_thermal_volume_momentum` and its
