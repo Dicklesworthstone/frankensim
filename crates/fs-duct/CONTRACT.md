@@ -229,6 +229,37 @@ compliance `sum(beta_T V) - T0*sum(alpha V)^2/sum(rho Cp V)`. Opposite-expansion
 regions distinguish internal heat continuity from artificial local adiabatic
 resets, which give the wrong compliance even at zero frequency.
 
+`BulkThermalCylinder::from_relaxation_regions` and its controlled variant
+extend those SAME four-field contacts to `BulkThermalRelaxationRegion` values
+borrowing original `RelaxationState` sources. Each region evaluates its own
+complex heat capacity once at the requested frequency and retains its own gas,
+shear viscosity, conductivity and reservoir spectrum. The common reference
+temperature is required; different original compositions and relaxation times
+are supported without averaging. Interior thermal fields remain connected
+through the original reference junctions and Redheffer composition. Only the
+two external ends receive thermal boundary conditions. The first region fixes
+the outer power references while both endpoint pressure maps retain their
+own original material. No extra bulk-viscosity or ISO absorption is added.
+
+A single region preserves the homogeneous molecular arithmetic exactly, and
+all-empty spectra reproduce the original classical regional chain bitwise.
+Complete region-count admission precedes preparation; cancellation is checked
+inside each native exponential/scattering preparation, across contacts and
+after thermal-end reduction before publication. The same frozen, common-T0,
+constant-area, slip-wall scope applies. This supplies no background heat or
+species transport, mixing, contact resistance, mean flow or lateral wall loss;
+mechanical and phase compatibility remain the caller's responsibility.
+
+Four focused G1/G3/G4 tests in `thermal/molecular/tests/regional.rs` check exact
+single/empty-source parity, full dimensional NSF field continuity through two
+independently authored gases in both orders, and independent positive shear,
+Fourier and original-reservoir heat against boundary work (relative gate
+`3e-9`). They also retain opaque splitting/regrouping, reciprocal scattering,
+common-temperature/capacity refusal and early/late cancellation. Native
+verification uses the complete original thermal/traction source modules and
+their original gas/coherence/caloric, complex-LU, exponential and scattering
+owners; unrelated full-workspace adapters/runtime remain outside that closure.
+
 ### Regional shared-fluid pressure and flow
 
 `fluid::regional::{duct_chain,input_impedance_load}` and their `_with_loss`

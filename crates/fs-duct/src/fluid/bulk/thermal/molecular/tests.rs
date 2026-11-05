@@ -13,6 +13,8 @@ use fs_thermochem::SpeciesId;
 const RADIUS: f64 = 0.02;
 const LIMIT: f64 = 1e12;
 
+mod regional;
+
 // Authored transport and reservoir data isolate the coupled equations; these
 // are not measured air properties. Strong transport makes BOTH spatial modes
 // resolvable in a short independent integration without a growing long-span
@@ -28,7 +30,11 @@ fn medium(count: usize, time_scale: f64) -> RelaxationState {
         101325.0,
     )
     .unwrap();
-    let id = SpeciesId::new("authored").unwrap();
+    state_with_gas(gas, count, time_scale, "authored")
+}
+
+fn state_with_gas(gas: GasState, count: usize, time_scale: f64, name: &str) -> RelaxationState {
+    let id = SpeciesId::new(name).unwrap();
     let processes = (0..count)
         .map(|i| RelaxationProcess {
             reservoir: InternalReservoir::Vibrational(vec![VibrationalMode {

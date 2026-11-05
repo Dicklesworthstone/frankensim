@@ -84,28 +84,14 @@ impl BulkThermalCylinder {
         )?;
         for (index, region) in regions.iter().enumerate().skip(1) {
             poll(&mut cancelled, index)?;
-            let mut right = ThermalNetwork::new(
+            let right = ThermalNetwork::new(
                 &region.material,
                 radius_m,
                 region.length_m,
                 omega_rad_s,
                 options.maximum_condition,
             )?;
-            right.rebase(
-                network.references,
-                options.maximum_condition,
-                &mut cancelled,
-            )?;
-            let (scattering, condition) = redheffer_star(
-                &network.scattering,
-                &right.scattering,
-                2,
-                options.maximum_condition,
-                &mut cancelled,
-            )?;
-            network.scattering.copy_from_slice(&scattering);
-            network.endpoints[1] = right.endpoints[1];
-            network.condition = network.condition.max(right.condition).max(condition);
+            network.append(right, options.maximum_condition, &mut cancelled)?;
         }
         poll(&mut cancelled, regions.len())?;
         Ok(Self::from_network(
@@ -125,6 +111,29 @@ fn poll(cancelled: &mut impl FnMut() -> bool, completed_steps: usize) -> Result<
 }
 
 impl ThermalNetwork {
+    // Shared by classical and molecular regions. Join BEFORE thermal end
+    // elimination: resetting local heat or temperature would remove the
+    // thermal contact mode and change the physical compliance and loss.
+    pub(super) fn append(
+        &mut self,
+        mut right: Self,
+        limit: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DuctError> {
+        if self.temperature_k != right.temperature_k {
+            return Err(bad(
+                "regional thermal contacts require one common equilibrium temperature",
+            ));
+        }
+        right.rebase(self.references, limit, cancelled)?;
+        let (scattering, condition) =
+            redheffer_star(&self.scattering, &right.scattering, 2, limit, cancelled)?;
+        self.scattering.copy_from_slice(&scattering);
+        self.endpoints[1] = right.endpoints[1];
+        self.condition = self.condition.max(right.condition).max(condition);
+        Ok(())
+    }
+
     // Change both EXTERNAL power references through lossless physical-field
     // continuity. Keep the original endpoint pressure maps in THEIR references.
     fn rebase(

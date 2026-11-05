@@ -9,7 +9,9 @@
 //! original molecular reservoirs enter through
 //! [`BulkThermalCylinder::from_relaxation`]. Authored
 //! homogeneous regions may share ideal mechanical/thermal contacts through
-//! [`BulkThermalCylinder::from_regions`]. Radius supplies area only: this is
+//! [`BulkThermalCylinder::from_regions`] or retain their independent original
+//! molecular reservoirs through [`BulkThermalCylinder::from_relaxation_regions`].
+//! Radius supplies area only: this is
 //! planar/slip-wall propagation, not a no-slip viscothermal bore model.
 
 use super::super::{bad, wave_from_state};
@@ -23,6 +25,7 @@ use fs_math::{c64::C64, det};
 mod regional;
 pub use regional::BulkThermalRegion;
 mod molecular;
+pub use molecular::BulkThermalRelaxationRegion;
 
 /// Homogeneous thermal condition at one axial end, independent of its load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
