@@ -2968,7 +2968,7 @@ mod head_dipole_tests {
         let difference = |ins: &Instrument| 0.5 * (rate(&ins.bodies[0]) - rate(&ins.bodies[1]));
         // Stored energy at the half step, less the backward-velocity correction of the two radiation terms.
         let stored = |ins: &Instrument| -> f64 {
-            let heads: f64 = ins.bodies.iter().map(|b| b.discrete_energy(k()) + 0.5 * b.air_mass / (b.area * b.area) * rate(b).powi(2)).sum();
+            let heads: f64 = ins.bodies.iter().map(|b| b.discrete_energy(k())).sum();
             let (now, before): (f64, f64) = (ins.bodies.iter().map(|b| volume(b, &b.w)).sum(), ins.bodies.iter().map(|b| volume(b, &b.wp)).sum());
             let air = 0.5 * gas.density * gas.sound_speed.powi(2) / cavity_volume * now * before;
             heads + air - 0.25 * k() * (r_m * net(ins).powi(2) + r_d * difference(ins).powi(2))

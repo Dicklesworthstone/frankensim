@@ -22,6 +22,9 @@
 //! frequency, found by fixed-point iteration on the head's Rayleigh-quotient
 //! stiffness and mass. The neglected coupling between modes of one family is
 //! bounded to first order and reported, never silently dropped.
+//! Air inertia and resistance share the implicit low-rank solve. The resistance
+//! acts on centred velocity, so its work is nonnegative and its discretization
+//! does not introduce the first-order frequency bias of a backward velocity.
 //!
 //! Only arithmetic, `sqrt` and `fs_math::det`'s deterministic `ln`/`exp` are
 //! used here (no platform libm), so native and WASM builds evaluate the same
@@ -536,22 +539,24 @@ impl RadiationTable {
 /// With area-weighted shapes `U = W Phi`, Gram `G = Phi' W Phi`, retained
 /// resistances `R` and air masses `Ma` (diagonal), the generalized velocity
 /// is `G^-1 U' v`, so the nodal damping is `U B U'` with `B = G^-1 R G^-1`
-/// and the nodal added mass `U A U'` with `A = G^-1 Ma G^-1`.
+/// and the nodal added mass `U A U'` with `A = G^-1 Ma G^-1`. The centred
+/// resistance and air inertia enter the same prepared factor through
+/// `C = A / k^2 + B / (2 k)`; no additional dynamical states are needed.
 #[derive(Clone, Debug)]
 pub struct ModalAirLoad {
     /// Area-weighted shapes, one per retained mode and parity: `h^2 phi(node)`.
     pub(crate) cols: Vec<Vec<f64>>,
     gram: Vec<f64>,
     air: Vec<f64>,
+    /// Diagonal modal resistance, including any admitted viscous face layer.
+    /// Retained alongside `air` to prepare their joint Gram congruence directly.
+    resistance: Vec<f64>,
     /// `B` and `A` (row-major, `cols.len()` square).
     pub(crate) damping: Vec<f64>,
     pub(crate) mass: Vec<f64>,
-    /// `trace(B U' M^-1 U)`, an upper bound on the damping's largest
-    /// `M^-1 C` eigenvalue for the explicit-step admission.
-    pub(crate) rate_bound: f64,
     /// The lowest and highest retained shapes' loaded frequencies [Hz].
     pub(crate) loaded_hz: (f64, f64),
-    /// Woodbury data for the implicit air mass at the step it was prepared for.
+    /// Woodbury data for the air mass and centred resistance at the prepared step.
     pub(crate) prepared: Option<Prepared>,
     /// Per-step buffers: nodal right-hand side and correction, projections.
     pub(crate) rhs: Vec<f64>,
@@ -574,8 +579,9 @@ pub struct ModalAirLoad {
 pub(crate) struct Prepared {
     pub(crate) k: f64,
     /// Cholesky factor (lower, row-major) of `C^-1 + V' D^-1 V` over the
-    /// columns `[u?, modal...]`, with `C^-1 = k^2 A^-1 = k^2 G Ma^-1 G` for
-    /// the modal block and `1 / mu` for the volume column.
+    /// columns `[u?, modal...]`, with
+    /// `C^-1 = k^2 G (Ma + k R / 2)^-1 G` for the modal block and
+    /// `1 / mu` for the volume column.
     pub(crate) chol: Vec<f64>,
     pub(crate) with_volume: bool,
 }
@@ -1175,28 +1181,12 @@ impl ModalAirLoad {
             }
             out
         };
-        let damping = sandwich(&|r| retained[r].resistance + retained[r].viscous_resistance);
+        let resistance: Vec<f64> = retained
+            .iter()
+            .map(|r| r.resistance + r.viscous_resistance)
+            .collect();
+        let damping = sandwich(&|r| resistance[r]);
         let mass_matrix = sandwich(&|r| retained[r].air_mass);
-        let mut inverse_mass_gram = vec![0.0; n * n];
-        for i in 0..n {
-            for j in 0..=i {
-                let v: f64 = cols[i]
-                    .iter()
-                    .zip(&cols[j])
-                    .zip(mass)
-                    .map(|((a, b), m)| a * b / m)
-                    .sum();
-                inverse_mass_gram[i * n + j] = v;
-                inverse_mass_gram[j * n + i] = v;
-            }
-        }
-        let rate_bound: f64 = (0..n)
-            .map(|i| {
-                (0..n)
-                    .map(|j| damping[i * n + j] * inverse_mass_gram[j * n + i])
-                    .sum::<f64>()
-            })
-            .sum();
         // First-order back-reaction of the dropped in-family coupling at each
         // retained mode's loaded frequency (same parity only: the families
         // of a circular baffled disk do not couple cos to sin).
@@ -1393,9 +1383,9 @@ impl ModalAirLoad {
             cols,
             gram,
             air: retained.iter().map(|r| r.air_mass).collect(),
+            resistance,
             damping,
             mass: mass_matrix,
-            rate_bound,
             loaded_hz: retained
                 .iter()
                 .map(|r| r.omega / (2.0 * std::f64::consts::PI))
@@ -1430,22 +1420,22 @@ impl ModalAirLoad {
     }
 
     /// The modal part of a step's right-hand side,
-    /// `rhs = U (A (2 P_w - P_wp) / k^2 - B (P_w - P_wp) / k)` with `P = U' w`:
-    /// the air mass's share of the leapfrog inertia and the backward-velocity
-    /// radiation force. Leaves `U' wp` in `p_wp` for the energy account.
+    /// `rhs = U (A (2 P_w - P_wp) / k^2 + B P_wp / (2 k))` with `P = U' w`.
+    /// The unknown `U B U' wn / (2 k)` is in the prepared system, so the full
+    /// force is `-U B U' (wn - wp) / (2 k)`. Leaves `U' wp` in `p_wp` for heat.
     pub(crate) fn load_rhs(&mut self, w: &[f64], wp: &[f64], k: f64) {
         let n = self.cols.len();
         for r in 0..n {
             let (pw, pwp) = (crate::dot(&self.cols[r], w), crate::dot(&self.cols[r], wp));
             self.p_wp[r] = pwp;
             self.y[r] = (2.0 * pw - pwp) / (k * k);
-            self.b[r] = (pw - pwp) / k;
+            self.b[r] = pwp / (2.0 * k);
         }
         ModalAirLoad::apply(&self.mass, &self.y[..n], &mut self.za);
         ModalAirLoad::apply(&self.damping, &self.b[..n], &mut self.zb);
         self.rhs.fill(0.0);
         for r in 0..n {
-            let z = self.za[r] - self.zb[r];
+            let z = self.za[r] + self.zb[r];
             for (out, u) in self.rhs.iter_mut().zip(&self.cols[r]) {
                 *out += z * u;
             }
@@ -1465,6 +1455,9 @@ impl ModalAirLoad {
 
     /// Prepare the Woodbury factor for step `k`, nodal compliances `ia`
     /// (`D^-1`) and an optional volume column `u = h^2` with weight `mu`.
+    /// The modal block is `A / k^2 + B / (2 k)`. Its inverse is formed from
+    /// the original positive masses and nonnegative resistances, preserving
+    /// the Gram congruence without another dense inverse or a timestep CFL.
     pub(crate) fn prepare(
         &mut self,
         k: f64,
@@ -1478,7 +1471,10 @@ impl ModalAirLoad {
         for i in 0..n {
             for j in 0..n {
                 let v: f64 = (0..n)
-                    .map(|r| self.gram[i * n + r] * self.gram[r * n + j] / self.air[r])
+                    .map(|r| {
+                        self.gram[i * n + r] * self.gram[r * n + j]
+                            / (self.air[r] + 0.5 * k * self.resistance[r])
+                    })
                     .sum();
                 q[(i + off) * size + j + off] = k * k * v;
             }
@@ -1515,5 +1511,273 @@ impl ModalAirLoad {
             with_volume: volume.is_some(),
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod centered_tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    /// Manufactured passive modal coefficients on a nonorthogonal port basis.
+    /// All stepping and response operations below are the production owners.
+    fn manufactured_load(cols: Vec<Vec<f64>>, air: Vec<f64>, resistance: Vec<f64>) -> ModalAirLoad {
+        let n = cols.len();
+        let nodes = cols[0].len();
+        let mut gram = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                gram[i * n + j] = crate::dot(&cols[i], &cols[j]);
+            }
+        }
+        let inverse = invert_spd(&gram, n).unwrap();
+        let (mut mass, mut damping) = (vec![0.0; n * n], vec![0.0; n * n]);
+        for i in 0..n {
+            for j in 0..n {
+                for r in 0..n {
+                    mass[i * n + j] += inverse[i * n + r] * air[r] * inverse[r * n + j];
+                    damping[i * n + j] += inverse[i * n + r] * resistance[r] * inverse[r * n + j];
+                }
+            }
+        }
+        ModalAirLoad {
+            cols,
+            gram,
+            air,
+            resistance,
+            damping,
+            mass,
+            loaded_hz: (1.0, 10_000.0),
+            prepared: None,
+            rhs: vec![0.0; nodes],
+            corr: vec![0.0; nodes],
+            p_wp: vec![0.0; n],
+            y: vec![0.0; n + 1],
+            b: vec![0.0; n + 1],
+            w2: vec![0.0; n + 1],
+            za: vec![0.0; n],
+            zb: vec![0.0; n],
+            receipt: vec![],
+            dropped_loss_share: 0.0,
+            dropped_mass_share: 0.0,
+        }
+    }
+
+    fn near(actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance * expected.abs().max(1e-25),
+            "{actual:.16e} vs {expected:.16e}"
+        );
+    }
+
+    /// Independent pivoted elimination of the full nodal matrix, not Woodbury.
+    fn dense_solve(mut matrix: Vec<f64>, mut rhs: Vec<f64>) -> Vec<f64> {
+        let n = rhs.len();
+        for j in 0..n {
+            let pivot = (j..n)
+                .max_by(|&i, &k| matrix[i * n + j].abs().total_cmp(&matrix[k * n + j].abs()))
+                .unwrap();
+            for k in 0..n {
+                matrix.swap(j * n + k, pivot * n + k);
+            }
+            rhs.swap(j, pivot);
+            let diagonal = matrix[j * n + j];
+            for k in j..n {
+                matrix[j * n + k] /= diagonal;
+            }
+            rhs[j] /= diagonal;
+            for i in 0..n {
+                if i != j {
+                    let factor = matrix[i * n + j];
+                    for k in j..n {
+                        matrix[i * n + k] -= factor * matrix[j * n + k];
+                    }
+                    rhs[i] -= factor * rhs[j];
+                }
+            }
+        }
+        rhs
+    }
+
+    fn nodal_matrix(load: &ModalAirLoad, matrix: &[f64]) -> Vec<f64> {
+        let n = load.cols[0].len();
+        let modes = load.cols.len();
+        let mut out = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                for r in 0..modes {
+                    for s in 0..modes {
+                        out[i * n + j] += load.cols[r][i] * matrix[r * modes + s] * load.cols[s][j];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn g1_centered_head_load_matches_dense_response_with_volume_and_sav() {
+        let k = 0.002;
+        let h2 = 0.6;
+        let masses = [1.2, 0.7, 1.5, 0.9];
+        let s0 = [0.0, 2.0, 7.0, 3.0];
+        let cf: Vec<_> = (0..4)
+            .map(|i| [k * k / (masses[i] * (1.0 + s0[i] * k)), 0.0, 0.0, 0.0])
+            .collect();
+        let gradient = [120.0, -80.0, 30.0, 50.0];
+        let rhs = [0.2, -1.0, 0.5, 3.0];
+        let port = [0.3, -0.7, 1.0, 0.4];
+        for air in [false, true] {
+            for volume in [false, true] {
+                for sav in [false, true] {
+                    let mu = if volume { 0.12 / (k * k) } else { 0.0 };
+                    let mut load = manufactured_load(
+                        vec![vec![1.0, 0.2, -0.1, 0.7], vec![0.4, 0.9, 0.3, -0.2]],
+                        vec![0.3, 0.15],
+                        vec![120.0, 75.0],
+                    );
+                    load.prepare(
+                        k,
+                        &cf.iter().map(|a| a[0]).collect::<Vec<_>>(),
+                        volume.then_some((h2, mu)),
+                    )
+                    .unwrap();
+                    let mass = nodal_matrix(&load, &load.mass);
+                    let damping = nodal_matrix(&load, &load.damping);
+                    let mut operator = vec![0.0; 16];
+                    for i in 0..4 {
+                        for j in 0..4 {
+                            let entry = &mut operator[i * 4 + j];
+                            *entry = if i == j { 1.0 / cf[i][0] } else { 0.0 };
+                            if air {
+                                *entry +=
+                                    mass[i * 4 + j] / (k * k) + damping[i * 4 + j] / (2.0 * k);
+                            }
+                            if volume {
+                                *entry += mu * h2 * h2;
+                            }
+                            if sav {
+                                *entry += gradient[i] * gradient[j] / 4.0;
+                            }
+                        }
+                    }
+                    let expected = dense_solve(operator.clone(), rhs.to_vec());
+                    let mut actual = rhs;
+                    let factor = load.prepared.as_ref().unwrap().chol.as_ptr();
+                    crate::solve_body_response(
+                        &cf,
+                        &gradient,
+                        sav,
+                        h2,
+                        mu,
+                        air.then_some(&mut load),
+                        &mut actual,
+                        k,
+                    );
+                    for i in 0..4 {
+                        near(actual[i], expected[i], 2e-12);
+                    }
+                    let mut response = port;
+                    crate::solve_body_response(
+                        &cf,
+                        &gradient,
+                        sav,
+                        h2,
+                        mu,
+                        air.then_some(&mut load),
+                        &mut response,
+                        k,
+                    );
+                    let expected = dense_solve(operator, port.to_vec());
+                    let compliance = crate::dot(&port, &response);
+                    near(compliance, crate::dot(&port, &expected), 3e-13);
+                    assert!(compliance > 0.0);
+                    near(
+                        crate::dot(&port, &actual),
+                        crate::dot(&rhs, &response),
+                        3e-13,
+                    );
+                    // Repeated port queries reuse the prepared factor.
+                    assert_eq!(factor, load.prepared.as_ref().unwrap().chol.as_ptr());
+                }
+            }
+        }
+    }
+
+    fn one_mode_step(
+        load: &mut ModalAirLoad,
+        cf: &[[f64; 4]],
+        w: f64,
+        wp: f64,
+        k: f64,
+        dry_mass: f64,
+        stiffness: f64,
+    ) -> f64 {
+        load.load_rhs(&[w], &[wp], k);
+        let mut response = [dry_mass * (2.0 * w - wp) / (k * k) - stiffness * w + load.rhs[0]];
+        crate::solve_body_response(cf, &[0.0], false, 1.0, 0.0, Some(load), &mut response, k);
+        response[0]
+    }
+
+    #[test]
+    fn g1_centered_head_resonance_converges_in_pitch_and_decay() {
+        let (dry, air, sigma) = (1.2, 0.8, 400.0);
+        let mass = dry + air;
+        let omega = 2.0 * PI * 1000.0;
+        let stiffness = mass * omega * omega;
+        let omega_d = (omega * omega - sigma * sigma).sqrt();
+        let mut errors = Vec::new();
+        for rate in [24_000.0, 48_000.0, 96_000.0] {
+            let k = 1.0 / rate;
+            let cf = [[k * k / dry, 0.0, 0.0, 0.0]];
+            let mut load = manufactured_load(vec![vec![1.0]], vec![air], vec![2.0 * sigma * mass]);
+            load.prepare(k, &[cf[0][0]], None).unwrap();
+            // Recover the amplification polynomial from two production steps.
+            let a = one_mode_step(&mut load, &cf, 1.0, 0.0, k, dry, stiffness);
+            let b = one_mode_step(&mut load, &cf, 0.0, 1.0, k, dry, stiffness);
+            let radius = (-b).sqrt();
+            let decay = -radius.ln() / k;
+            let frequency = (a / (2.0 * radius)).acos() / k;
+            errors.push([
+                (decay / sigma - 1.0).abs(),
+                (frequency / omega_d - 1.0).abs(),
+            ]);
+        }
+        for observable in 0..2 {
+            for rung in 0..2 {
+                let order = (errors[rung][observable] / errors[rung + 1][observable]).log2();
+                assert!(
+                    (1.95..2.05).contains(&order),
+                    "observable {observable}, rung {rung}: convergence order {order}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g0_centered_head_radiation_closes_staggered_energy() {
+        let (dry, air, sigma, rate) = (1.2, 0.8, 400.0, 48_000.0);
+        let mass = dry + air;
+        let stiffness = mass * (2.0 * PI * 1000.0).powi(2);
+        let k = 1.0 / rate;
+        for resistance in [0.0, 2.0 * sigma * mass] {
+            let cf = [[k * k / dry, 0.0, 0.0, 0.0]];
+            let mut load = manufactured_load(vec![vec![1.0]], vec![air], vec![resistance]);
+            load.prepare(k, &[cf[0][0]], None).unwrap();
+            let energy =
+                |w: f64, wp: f64| 0.5 * mass * ((w - wp) / k).powi(2) + 0.5 * stiffness * w * wp;
+            let (mut w, mut wp) = (1e-5, 1e-5);
+            let initial = energy(w, wp);
+            let (mut heat, mut worst) = (0.0, 0.0_f64);
+            for _ in 0..960 {
+                let wn = one_mode_step(&mut load, &cf, w, wp, k, dry, stiffness);
+                let loss = load.radiated(&[wn], k);
+                assert!(loss >= 0.0);
+                heat += loss;
+                worst = worst.max(((energy(wn, w) + heat - initial) / initial).abs());
+                (wp, w) = (w, wn);
+            }
+            assert!(worst < 5e-12, "relative energy closure {worst}");
+        }
     }
 }

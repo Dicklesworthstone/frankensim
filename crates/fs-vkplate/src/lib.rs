@@ -1515,8 +1515,8 @@ impl Body {
         }
     }
 
-    /// Factor the implicit air-mass system at step `k` (with the volume
-    /// column when the piston air mass is present).
+    /// Factor the implicit air mass and centered radiation resistance at
+    /// step `k` (with the volume column when the piston air mass is present).
     fn prepare_head_radiation(&mut self, k: f64) -> Result<(), String> {
         let Some(load) = self.head_radiation.as_deref_mut() else { return Ok(()) };
         let mu = if self.air_mass > 0.0 { self.air_mass / (self.area * self.area * k * k) } else { 0.0 };
@@ -1611,13 +1611,12 @@ impl Body {
         if let Some(load) = self.head_radiation.as_deref_mut() {
             load.load_rhs(&self.w[..n], &self.wp[..n], k);
         }
-        let (mut gy, mut gzg, mut uy, mut uzu, mut gzu) = (0.0, 0.0, 0.0, 0.0, 0.0);
         let (cf, w, wp, f, g) = (&self.cf[..n], &self.w[..n], &self.wp[..n], &self.f[..n], &self.g[..n]);
         let (wn, tmp) = (&mut self.wn[..n], &mut self.tmp[..n]);
         let s1 = self.s1 > 0.0;
         let modal: &[f64] = self.head_radiation.as_deref().map_or(&[], |load| &load.rhs);
         for i in 0..n {
-            let [ia, cw, cwp, cs1] = cf[i];
+            let [_, cw, cwp, cs1] = cf[i];
             let mut rhs = cw * w[i] - cwp * wp[i] + f[i] + extra;
             if !modal.is_empty() {
                 rhs += modal[i];
@@ -1628,80 +1627,10 @@ impl Body {
             if scale > 0.0 {
                 rhs -= g[i] * sc;
             }
-            let x = rhs * ia;
-            wn[i] = x;
-            if scale > 0.0 {
-                let z = g[i] * ia;
-                tmp[i] = z;
-                gy += g[i] * x;
-                gzg += g[i] * z;
-                gzu += h2 * z;
-            }
-            if mu > 0.0 {
-                uy += h2 * x;
-                uzu += h2 * h2 * ia;
-            }
-        }
-        if let Some(load) = self.head_radiation.as_deref_mut() {
-            // Woodbury with U = [g, V], V = [u?, modal shapes], C = diag(1/4, C_V):
-            // with Q = C_V^-1 + V'D^-1V factored, b = V'D^-1 g and y = V'D^-1 r,
-            // c_g = (g'D^-1 r - b'Q^-1 y) / (4 + g'D^-1 g - b'Q^-1 b), c_V = Q^-1 (y - b c_g).
-            let prepared = load.prepared.as_ref().filter(|p| p.k == k)
-                .expect("prepared for this step with the update coefficients");
-            let off = usize::from(prepared.with_volume);
-            let size = off + load.cols.len();
-            if off == 1 {
-                (load.y[0], load.b[0]) = (uy, gzu);
-            }
-            for (r, col) in load.cols.iter().enumerate() {
-                load.y[off + r] = dot(col, wn);
-                load.b[off + r] = if scale > 0.0 { dot(col, tmp) } else { 0.0 };
-            }
-            radiation::cholesky_solve(&prepared.chol, size, &mut load.y[..size]);
-            let cg = if scale > 0.0 {
-                load.w2[..size].copy_from_slice(&load.b[..size]);
-                radiation::cholesky_solve(&prepared.chol, size, &mut load.w2[..size]);
-                let cg = (gy - dot(&load.b[..size], &load.y[..size])) / (4.0 + gzg - dot(&load.b[..size], &load.w2[..size]));
-                for (y, w2) in load.y[..size].iter_mut().zip(&load.w2[..size]) {
-                    *y -= w2 * cg;
-                }
-                cg
-            } else {
-                0.0
-            };
-            load.corr.fill(if off == 1 { h2 * load.y[0] } else { 0.0 });
-            for (r, col) in load.cols.iter().enumerate() {
-                let c = load.y[off + r];
-                for (out, u) in load.corr.iter_mut().zip(col) {
-                    *out += c * u;
-                }
-            }
-            for i in 0..n {
-                let zg = if scale > 0.0 { tmp[i] } else { 0.0 };
-                wn[i] -= zg * cg + load.corr[i] * cf[i][0];
-            }
-            self.sav = scale > 0.0;
-            return;
-        }
-        // Woodbury with U = [g, u], C = diag(1/4, mu): solve (C^-1 + U' D^-1 U) c = U' D^-1 r
-        let (cg, cu) = match (scale > 0.0, mu > 0.0) {
-            (false, false) => (0.0, 0.0),
-            (true, false) => (gy / (4.0 + gzg), 0.0),
-            (false, true) => (0.0, uy / (1.0 / mu + uzu)),
-            (true, true) => {
-                let (a11, a12, a22) = (4.0 + gzg, gzu, 1.0 / mu + uzu);
-                let det = a11 * a22 - a12 * a12;
-                ((a22 * gy - a12 * uy) / det, (a11 * uy - a12 * gy) / det)
-            }
-        };
-        if cg != 0.0 || cu != 0.0 {
-            let hc = h2 * cu;
-            for i in 0..n {
-                let zg = if scale > 0.0 { tmp[i] } else { 0.0 };
-                wn[i] -= zg * cg + hc * cf[i][0];
-            }
+            wn[i] = rhs;
         }
         self.sav = scale > 0.0;
+        solve_body_response(cf, g, self.sav, h2, mu, self.head_radiation.as_deref_mut(), wn, k);
     }
 
     /// After contacts have adjusted `wn`: advance the auxiliary variable consistently.
@@ -1759,10 +1688,40 @@ impl Body {
         }
     }
 
-    /// Displacement per unit force on node `i` within one step (k^2 / a).
+    /// The diagonal part of displacement per unit force. It is the complete
+    /// response only when no SAV or air-load column couples the nodes.
     #[inline]
     fn compliance(&self, i: usize, k: f64) -> f64 {
         if self.kc == k && i < self.cf.len() { self.cf[i][0] } else { k * k / (self.mass[i] * (1.0 + self.s0[i] * k)) }
+    }
+
+    #[inline]
+    fn nonlocal_response(&self) -> bool {
+        self.sav || self.air_mass > 0.0 || self.head_radiation.is_some()
+    }
+
+    /// Replace a force assembled in `tmp` by its displacement response at
+    /// this step. Contacts and friction use the same frozen SAV gradient and
+    /// cached air-load factor as the free prediction, without allocating.
+    fn solve_force_response(&mut self, k: f64) {
+        let h2 = self.h * self.h;
+        let mu = if self.air_mass > 0.0 { self.air_mass / (self.area * self.area * k * k) } else { 0.0 };
+        solve_body_response(&self.cf, &self.g, self.sav, h2, mu,
+            self.head_radiation.as_deref_mut(), &mut self.tmp, k);
+    }
+
+    /// Assemble signed force footprints, including repeated nodes, into the
+    /// existing scratch and apply the prepared response once.
+    fn footprint_response(&mut self, body: usize, a: &[(usize, usize, f64)], sa: f64,
+        b: &[(usize, usize, f64)], sb: f64, k: f64) {
+        self.tmp.fill(0.0);
+        for &(bi, i, w) in a {
+            if bi == body { self.tmp[i] += sa * w; }
+        }
+        for &(bi, i, w) in b {
+            if bi == body { self.tmp[i] += sb * w; }
+        }
+        self.solve_force_response(k);
     }
 
     fn rotate(&mut self) {
@@ -1947,10 +1906,12 @@ impl Body {
         self.viscosity.as_ref().map(|v| (&v.source, v.angle))
     }
 
-    /// Staggered structural energy for the explicit curvature-viscosity step.
-    /// For a linear isolated body it satisfies delta E = -dt ||G v_center||².
-    /// The negative dt/4 v'C v correction is numerical stored energy, never
-    /// reported as material heat. Positivity needs the admitted damping CFL.
+    /// Staggered structural and attached-air energy.
+    /// For an isolated body, each loss pairs with its centered-velocity work.
+    /// Only backward-velocity curvature and modal losses need the negative
+    /// dt/4 v'C v stored-energy correction and their explicit damping CFL;
+    /// this correction is never reported as material heat. Centered head
+    /// radiation adds positive air inertia and dissipates without that correction.
     /// Coupling/contact/source work belongs to the complete instrument balance.
     /// With a film law it includes the branches' storage, and the law's midpoint heat is one more loss.
     pub fn discrete_energy(&self, k: f64) -> f64 {
@@ -1965,21 +1926,25 @@ impl Body {
             .as_deref()
             .map_or(0.0, |f| f.stored_j(&self.w, &self.wp));
         let kinetic = self.mass.iter().zip(&velocity).map(|(m, v)| 0.5*m*v*v).sum::<f64>();
+        let volume_air = if self.air_mass > 0.0 {
+            let mean_velocity = self.h * self.h * velocity.iter().sum::<f64>() / self.area;
+            0.5 * self.air_mass * mean_velocity * mean_velocity
+        } else { 0.0 };
         let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0)
             + self.modal.as_ref().map_or(0.0, |m| k * m.c.quad(&velocity) / 4.0);
-        // Head radiation: the shapes' air kinetic energy, less the same
-        // backward-velocity damping correction as the viscous law.
+        // Centered radiation resistance removes energy directly; unlike the
+        // explicit viscous law, it needs no negative stored-energy correction.
         let air = self.head_radiation.as_deref().map_or(0.0, |load| {
             let p: Vec<f64> = load.cols.iter().map(|c| dot(c, &velocity)).collect();
-            let (mut a, mut b) = (vec![0.0; p.len()], vec![0.0; p.len()]);
+            let mut a = vec![0.0; p.len()];
             radiation::ModalAirLoad::apply(&load.mass, &p, &mut a);
-            radiation::ModalAirLoad::apply(&load.damping, &p, &mut b);
-            0.5 * dot(&p, &a) - k * dot(&p, &b) / 4.0
+            0.5 * dot(&p, &a)
         });
-        kinetic + air + film + 0.5 * dot(&self.wp, &kw) + 0.5 * self.psi * self.psi - correction
+        kinetic + volume_air + air + film + 0.5 * dot(&self.wp, &kw) + 0.5 * self.psi * self.psi - correction
     }
 
-    /// Kinetic + linear potential + auxiliary (nonlinear) energy at the half step (diagnostics).
+    /// Structural kinetic + linear potential + auxiliary energy at the half
+    /// step (diagnostics). `discrete_energy` also includes attached air loads.
     pub fn energy(&self, k: f64) -> f64 {
         let mut e = 0.0;
         for i in 0..self.n {
@@ -1995,6 +1960,93 @@ impl Body {
             + 0.5 * bending * self.stiff.quad(&mid)
             + film
             + 0.5 * self.psi * self.psi
+    }
+}
+
+/// Apply the inverse used by a body's prediction to an unscaled nodal RHS.
+/// Its operator is `D + gg'/4 + mu uu' + U (A/k² + B/2k) U'`, omitting
+/// inactive terms, with `D^-1 = cf[][0]` and `u_i = h²`. The SAV gradient
+/// is frozen during prediction/contact/friction; the modal-plus-volume
+/// Woodbury factor is cached at setup. No factorization or allocation occurs
+/// here. Reusing this action is necessary when a local force moves remote
+/// nodes through the air inertia, centered radiation, or nonlinear storage.
+fn solve_body_response(
+    cf: &[[f64; 4]], g: &[f64], sav: bool, h2: f64, mu: f64,
+    load: Option<&mut radiation::ModalAirLoad>, response: &mut [f64], k: f64,
+) {
+    let n = response.len();
+    let (mut gy, mut gzg, mut uy, mut uzu, mut gzu) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for i in 0..n {
+        let ia = cf[i][0];
+        response[i] *= ia;
+        if sav {
+            let z = g[i] * ia;
+            gy += g[i] * response[i];
+            gzg += g[i] * z;
+            gzu += h2 * z;
+        }
+        if mu > 0.0 {
+            uy += h2 * response[i];
+            uzu += h2 * h2 * ia;
+        }
+    }
+    if let Some(load) = load {
+        // V = [u?, modal shapes], Q = C_V^-1 + V'D^-1V,
+        // b = V'D^-1 g, y = V'D^-1 rhs. The remaining SAV correction is
+        // c_g = (g'D^-1 rhs - b'Q^-1y)/(4 + g'D^-1g - b'Q^-1b).
+        let prepared = load.prepared.as_ref().filter(|p| p.k == k)
+            .expect("prepared for this step with the update coefficients");
+        let off = usize::from(prepared.with_volume);
+        let size = off + load.cols.len();
+        if off == 1 {
+            (load.y[0], load.b[0]) = (uy, gzu);
+        }
+        for (r, col) in load.cols.iter().enumerate() {
+            load.y[off + r] = dot(col, response);
+            load.b[off + r] = if sav {
+                col.iter().zip(g).zip(cf).map(|((u, g), a)| u * (g * a[0])).sum()
+            } else { 0.0 };
+        }
+        radiation::cholesky_solve(&prepared.chol, size, &mut load.y[..size]);
+        let cg = if sav {
+            load.w2[..size].copy_from_slice(&load.b[..size]);
+            radiation::cholesky_solve(&prepared.chol, size, &mut load.w2[..size]);
+            let cg = (gy - dot(&load.b[..size], &load.y[..size]))
+                / (4.0 + gzg - dot(&load.b[..size], &load.w2[..size]));
+            for (y, w2) in load.y[..size].iter_mut().zip(&load.w2[..size]) {
+                *y -= w2 * cg;
+            }
+            cg
+        } else { 0.0 };
+        load.corr.fill(if off == 1 { h2 * load.y[0] } else { 0.0 });
+        for (r, col) in load.cols.iter().enumerate() {
+            let c = load.y[off + r];
+            for (out, u) in load.corr.iter_mut().zip(col) {
+                *out += c * u;
+            }
+        }
+        for i in 0..n {
+            let zg = if sav { g[i] * cf[i][0] } else { 0.0 };
+            response[i] -= zg * cg + load.corr[i] * cf[i][0];
+        }
+        return;
+    }
+    let (cg, cu) = match (sav, mu > 0.0) {
+        (false, false) => (0.0, 0.0),
+        (true, false) => (gy / (4.0 + gzg), 0.0),
+        (false, true) => (0.0, uy / (1.0 / mu + uzu)),
+        (true, true) => {
+            let (a11, a12, a22) = (4.0 + gzg, gzu, 1.0 / mu + uzu);
+            let det = a11 * a22 - a12 * a12;
+            ((a22 * gy - a12 * uy) / det, (a11 * uy - a12 * gy) / det)
+        }
+    };
+    if cg != 0.0 || cu != 0.0 {
+        let hc = h2 * cu;
+        for i in 0..n {
+            let zg = if sav { g[i] * cf[i][0] } else { 0.0 };
+            response[i] -= zg * cg + hc * cf[i][0];
+        }
     }
 }
 
@@ -3039,17 +3091,48 @@ impl ContactQueue {
     }
 }
 
-/// Push the contact's nodes apart by force `f` and record it.
+/// Prepare the nonlocal part of `N' A^-1 N` for the signed contact gradient
+/// N. Each affected body's `tmp` retains A^-1 N until `apply_force`; these
+/// contacts are solved immediately because even disjoint nodes can interact.
+fn nonlocal_contact_compliance(bodies: &mut [Body], c: &Contact, k: f64) -> f64 {
+    let mut comp = 0.0;
+    for (bi, body) in bodies.iter_mut().enumerate() {
+        if !body.nonlocal_response() || !c.a.iter().chain(&c.b).any(|&(b, _, _)| b == bi) {
+            continue;
+        }
+        body.footprint_response(bi, &c.a, 1.0, &c.b, -1.0, k);
+        for &(b, i, w) in &c.a {
+            if b == bi { comp += w * body.tmp[i]; }
+        }
+        for &(b, i, w) in &c.b {
+            if b == bi { comp -= w * body.tmp[i]; }
+        }
+    }
+    comp
+}
+
+/// Apply the contact force through the prediction's displacement response.
 #[inline]
 fn apply_force(bodies: &mut [Body], c: &mut Contact, f: f64, d_pred: f64, comp: f64, k: f64) {
     if f > 0.0 {
         for &(b, i, w) in &c.a {
-            let cm = bodies[b].compliance(i, k);
-            bodies[b].wn[i] -= w * cm * f;
+            if !bodies[b].nonlocal_response() {
+                let cm = bodies[b].compliance(i, k);
+                bodies[b].wn[i] -= w * cm * f;
+            }
         }
         for &(b, i, w) in &c.b {
-            let cm = bodies[b].compliance(i, k);
-            bodies[b].wn[i] += w * cm * f;
+            if !bodies[b].nonlocal_response() {
+                let cm = bodies[b].compliance(i, k);
+                bodies[b].wn[i] += w * cm * f;
+            }
+        }
+        for (bi, body) in bodies.iter_mut().enumerate() {
+            if body.nonlocal_response() && c.a.iter().chain(&c.b).any(|&(b, _, _)| b == bi) {
+                for (next, response) in body.wn.iter_mut().zip(&body.tmp) {
+                    *next -= f * response;
+                }
+            }
         }
     }
     c.peak_force = c.peak_force.max(f);
@@ -3058,9 +3141,11 @@ fn apply_force(bodies: &mut [Body], c: &mut Contact, f: f64, d_pred: f64, comp: 
 }
 
 /// Every active contact in list order, each solved implicitly with the others' updates applied.
-/// Runs of contacts on disjoint nodes with the sqrt law and no crush (snare wires, hi-hat rims,
-/// sticks) are queued and solved interleaved; any other contact, or one that shares a node with the queue,
-/// first flushes the queue. The result is bit-identical to solving one contact at a time.
+/// Runs of contacts on disjoint nodes with diagonal body response, the sqrt
+/// law and no crush are queued and solved interleaved. Nonlocal response,
+/// another law, or a shared node first flushes the queue. Batch eligibility
+/// therefore reflects the actual response, not just footprint overlap.
+/// This remains a sequential sweep, not a simultaneous nonlinear island solve.
 fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut ContactQueue, k: f64) {
     if q.mark.len() != bodies.len() {
         q.mark.resize_with(bodies.len(), Vec::new);
@@ -3077,8 +3162,9 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
             continue;
         }
         let Law::Power { k: kk, alpha, mu } = contacts[jc].law;
-        let queued = alpha == 1.5 && contacts[jc].crush.is_none() && contacts[jc].retardation_s.is_none();
         let c = &contacts[jc];
+        let nonlocal = c.a.iter().chain(&c.b).any(|&(b, _, _)| bodies[b].nonlocal_response());
+        let queued = alpha == 1.5 && c.crush.is_none() && c.retardation_s.is_none() && !nonlocal;
         if !queued || c.a.iter().chain(&c.b).any(|&(b, i, _)| q.mark[b][i] == q.batch) {
             q.flush(bodies, contacts, k);
         }
@@ -3089,12 +3175,15 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
         for &(b, i, w) in &c.a {
             d_pred += w * bodies[b].wn[i];
             previous += w * bodies[b].wp[i];
-            comp += w * w * bodies[b].compliance(i, k);
+            if !bodies[b].nonlocal_response() { comp += w * w * bodies[b].compliance(i, k); }
         }
         for &(b, i, w) in &c.b {
             d_pred -= w * bodies[b].wn[i];
             previous -= w * bodies[b].wp[i];
-            comp += w * w * bodies[b].compliance(i, k);
+            if !bodies[b].nonlocal_response() { comp += w * w * bodies[b].compliance(i, k); }
+        }
+        if nonlocal && !(d_pred <= 0.0 && previous <= 0.0) {
+            comp += nonlocal_contact_compliance(bodies, c, k);
         }
         // Read the actual previous pose, not a cache another contact or
         // friction solve may have invalidated. The secant spans two steps.
@@ -3211,6 +3300,7 @@ fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [F
         let (dx, dy) = (inc(&fr.sx), inc(&fr.sy));
         let (mut cxx, mut cyy, mut cxy) = (0.0, 0.0, 0.0);
         for &(b, i, w) in &fr.sx {
+            if bodies[b].nonlocal_response() { continue; }
             let cm = bodies[b].compliance(i, k);
             cxx += w * w * cm;
             for &(b2, i2, w2) in &fr.sy {
@@ -3220,7 +3310,29 @@ fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [F
             }
         }
         for &(b, i, w) in &fr.sy {
-            cyy += w * w * bodies[b].compliance(i, k);
+            if !bodies[b].nonlocal_response() { cyy += w * w * bodies[b].compliance(i, k); }
+        }
+        // The full 2x2 slip compliance is N' A^-1 N. A local shear force
+        // also moves distant nodes when the same body carries SAV or air
+        // loading, so a diagonal nodal mass is not its response.
+        let nonlocal = fr.sx.iter().chain(&fr.sy).any(|&(b, _, _)| bodies[b].nonlocal_response());
+        if nonlocal {
+            for (bi, body) in bodies.iter_mut().enumerate() {
+                if !body.nonlocal_response() || !fr.sx.iter().chain(&fr.sy).any(|&(b, _, _)| b == bi) {
+                    continue;
+                }
+                body.footprint_response(bi, &fr.sx, 1.0, &[], 0.0, k);
+                for &(b, i, w) in &fr.sx {
+                    if b == bi { cxx += w * body.tmp[i]; }
+                }
+                for &(b, i, w) in &fr.sy {
+                    if b == bi { cxy += w * body.tmp[i]; }
+                }
+                body.footprint_response(bi, &fr.sy, 1.0, &[], 0.0, k);
+                for &(b, i, w) in &fr.sy {
+                    if b == bi { cyy += w * body.tmp[i]; }
+                }
+            }
         }
         let det = cxx * cyy - cxy * cxy;
         if !(det > 0.0) {
@@ -3231,12 +3343,26 @@ fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [F
         let (fx, fy, stuck) = friction_force(dx, dy, cxx, cyy, cxy, fr.mu * n);
         fr.stuck = stuck;
         for &(b, i, w) in &fr.sx {
-            let cm = bodies[b].compliance(i, k);
-            bodies[b].wn[i] += cm * w * fx;
+            if !bodies[b].nonlocal_response() {
+                let cm = bodies[b].compliance(i, k);
+                bodies[b].wn[i] += cm * w * fx;
+            }
         }
         for &(b, i, w) in &fr.sy {
-            let cm = bodies[b].compliance(i, k);
-            bodies[b].wn[i] += cm * w * fy;
+            if !bodies[b].nonlocal_response() {
+                let cm = bodies[b].compliance(i, k);
+                bodies[b].wn[i] += cm * w * fy;
+            }
+        }
+        if nonlocal && (fx != 0.0 || fy != 0.0) {
+            for (bi, body) in bodies.iter_mut().enumerate() {
+                if body.nonlocal_response() && fr.sx.iter().chain(&fr.sy).any(|&(b, _, _)| b == bi) {
+                    body.footprint_response(bi, &fr.sx, fx, &fr.sy, fy, k);
+                    for (next, response) in body.wn.iter_mut().zip(&body.tmp) {
+                        *next += response;
+                    }
+                }
+            }
         }
         fr.force = (fx * fx + fy * fy).sqrt();
     }
@@ -3434,12 +3560,8 @@ impl Instrument {
                 " + gradient loss"
             });
         }
-        let radiation_rate2 = 2.0 * self.rate * self.bodies.iter().filter_map(|b| b.head_radiation.as_deref())
-            .map(|load| load.rate_bound).fold(0.0_f64, f64::max);
-        if radiation_rate2 > 0.0 {
-            worst.0 += radiation_rate2;
-            worst.1.push_str(" + head radiation");
-        }
+        // Head radiation's positive resistance is centered in the prepared
+        // implicit inertia. It introduces no explicit-drag CFL restriction.
         let link_rate2 = self.link_admission_rate2(self.rate);
         if link_rate2 > 0.0 {
             worst.0 += link_rate2;

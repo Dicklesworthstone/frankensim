@@ -1,6 +1,7 @@
 //! Head radiation: the shapes against independent references, the shipped
 //! table against the analytic low-ka dipole, refusals, and the stepper's
-//! energy account with the implicit air mass and explicit resistance.
+//! energy account with implicit air mass and centered resistance, including
+//! the shared response used during contact and friction.
 
 use super::*;
 use crate::radiation::{ModeShape, RadiationTable, SHIPPED_TABLE, bessel_j, bessel_zero};
@@ -181,6 +182,173 @@ fn g0_head_air_mass_and_resistance_close_the_discrete_energy() {
         copy.step(&mut []);
     }
     assert_eq!(ins.bodies[0].w, copy.bodies[0].w);
+}
+
+#[test]
+fn g0_one_contact_on_a_radiating_head_closes_structural_air_and_contact_energy() {
+    let mut head = loaded_head(0.04, Nonlinear::Berger);
+    head.air_mass = 0.025;
+    let node = head.node_at(0.12, 0.08).unwrap();
+    let mut ins = Instrument::new(48_000.0);
+    let k = ins.k();
+    ins.add(head);
+    let mut striker = Body::point("manufactured striker", 0.004);
+    striker.w[0] = 1e-5;
+    striker.wp[0] = striker.w[0] + 0.8 * k;
+    ins.add(striker);
+    let stiffness = 2e7;
+    ins.contacts.push(Contact::new(
+        vec![(0, node, 1.0)],
+        vec![(1, 0, 1.0)],
+        0.0,
+        Law::Power {
+            k: stiffness,
+            alpha: 1.5,
+            mu: 0.0,
+        },
+    ));
+    ins.validate_head_radiation().unwrap();
+    let energy = |ins: &Instrument| {
+        let d = (ins.bodies[0].w[node] - ins.bodies[1].w[0]).max(0.0);
+        let dp = (ins.bodies[0].wp[node] - ins.bodies[1].wp[0]).max(0.0);
+        // The contact's two-step discrete gradient stores the average of
+        // its two endpoint potentials at the same half step as the bodies.
+        ins.bodies.iter().map(|b| b.discrete_energy(k)).sum::<f64>()
+            + 0.5 * stiffness / 2.5 * (d * d * d.sqrt() + dp * dp * dp.sqrt())
+    };
+    let initial = energy(&ins);
+    let mut sav_seen = false;
+    for _ in 0..1200 {
+        ins.step(&mut []);
+        sav_seen |= ins.bodies[0].sav;
+        let closed = energy(&ins) + ins.bodies[0].head_radiated_j();
+        assert!(
+            (closed - initial).abs() < 1e-8 * initial,
+            "one contact must use the loaded body's inertia: {closed} vs {initial}"
+        );
+    }
+    assert!(sav_seen && ins.contacts[0].peak_force > 0.0);
+    assert!(ins.bodies[0].head_radiated_j() > 0.0);
+}
+
+/// Independent multiplication by the physical step operator; no prepared
+/// inverse or Woodbury solve enters this reference.
+fn response_force(body: &Body, displacement: &[f64], k: f64) -> Vec<f64> {
+    let mut force: Vec<_> = displacement
+        .iter()
+        .zip(&body.cf)
+        .map(|(q, c)| q / c[0])
+        .collect();
+    if body.sav {
+        let a = 0.25 * dot(&body.g, displacement);
+        for (f, g) in force.iter_mut().zip(&body.g) {
+            *f += a * g;
+        }
+    }
+    if body.air_mass > 0.0 {
+        let a = body.air_mass * body.h.powi(4) / (body.area * body.area * k * k)
+            * displacement.iter().sum::<f64>();
+        for f in &mut force {
+            *f += a;
+        }
+    }
+    if let Some(load) = body.head_radiation.as_deref() {
+        let p: Vec<_> = load.cols.iter().map(|u| dot(u, displacement)).collect();
+        for (r, u) in load.cols.iter().enumerate() {
+            let a: f64 = p
+                .iter()
+                .enumerate()
+                .map(|(s, q)| {
+                    (load.mass[r * p.len() + s] / (k * k)
+                        + load.damping[r * p.len() + s] / (2.0 * k))
+                        * q
+                })
+                .sum();
+            for (f, u) in force.iter_mut().zip(u) {
+                *f += a * u;
+            }
+        }
+    }
+    force
+}
+
+#[test]
+fn g0_friction_on_a_loaded_head_uses_the_same_nonlocal_force_response() {
+    let k = 1.0 / 48_000.0;
+    let mut head = loaded_head(0.04, Nonlinear::Berger);
+    head.air_mass = 0.025;
+    let shape = ModeShape::new(1, 1);
+    for (i, p) in head.xy.iter().enumerate() {
+        let a = shape.value(p[0] / 0.32, p[1] / 0.32, false);
+        head.w[i] = 3e-4 * a;
+        head.wp[i] = head.w[i] - 0.03 * k * a;
+    }
+    head.sync();
+    head.linear_forces();
+    head.predict(k);
+    assert!(head.sav);
+    let a = head.node_at(0.12, 0.08).unwrap();
+    let b = head.node_at(0.16, 0.08).unwrap();
+    let c = head.node_at(0.12, 0.12).unwrap();
+    for cap in [1e-5, 1e5] {
+        let mut bodies = vec![head.clone()];
+        let mut normal = Contact::new(
+            vec![],
+            vec![],
+            0.0,
+            Law::Power {
+                k: 1.0,
+                alpha: 1.5,
+                mu: 0.0,
+            },
+        );
+        normal.force = 1.0; // prescribed normal preload for this slip test
+        let mut friction = [Friction {
+            contact: 0,
+            sx: vec![(0, a, 1.0), (0, b, -1.0)],
+            sy: vec![(0, a, 1.0), (0, c, -1.0)],
+            mu: cap,
+            force: 0.0,
+            stuck: false,
+        }];
+        let before = bodies[0].wn.clone();
+        solve_frictions(&mut bodies, &[normal], &mut friction, k);
+        let body = &bodies[0];
+        let change: Vec<_> = body.wn.iter().zip(&before).map(|(x, y)| x - y).collect();
+        let force = response_force(body, &change, k);
+        let (fx, fy) = (-force[b], -force[c]);
+        let scale = friction[0].force;
+        assert!(scale > 0.0);
+        for (i, f) in force.iter().enumerate() {
+            let expected = if i == a {
+                fx + fy
+            } else if i == b {
+                -fx
+            } else if i == c {
+                -fy
+            } else {
+                0.0
+            };
+            assert!(
+                (f - expected).abs() < 1e-8 * scale,
+                "a local friction force must satisfy the full loaded operator at node {i}: {f} vs {expected}"
+            );
+        }
+        assert!((fx.hypot(fy) - scale).abs() < 1e-8 * scale);
+        assert!(
+            change
+                .iter()
+                .enumerate()
+                .any(|(i, x)| i != a && i != b && i != c && *x != 0.0)
+        );
+        assert_eq!(friction[0].stuck, cap > 1.0);
+        if friction[0].stuck {
+            let slip = |j| (body.wn[a] - body.w[a]) - (body.wn[j] - body.w[j]);
+            assert!(slip(b).hypot(slip(c)) < 1e-12);
+        } else {
+            assert!((scale / cap - 1.0).abs() < 1e-10);
+        }
+    }
 }
 
 #[test]
