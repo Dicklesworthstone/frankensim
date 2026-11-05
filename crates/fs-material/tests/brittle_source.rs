@@ -315,3 +315,6 @@ fn geometric_band_width_preserves_original_source_fracture_energy() {
         assert_eq!(resolved.material().card_identity(), source.content_hash());
     }
 }
+
+#[path = "brittle_source/initiation.rs"]
+mod initiation;

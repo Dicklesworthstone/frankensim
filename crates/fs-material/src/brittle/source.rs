@@ -13,6 +13,9 @@
 //! Resolving a second temperature alone never authorizes replacing a law under
 //! an accepted history. Rate dependence needs a separate history/work owner.
 
+/// Original-source tensile onset and elastic-to-crack-band handoff.
+pub mod initiation;
+
 use super::{
     BrittleCrackBand, BrittleCrackBandParameters, BrittleCrackBandSettings, BrittleError,
     BrittleSmallStrain,

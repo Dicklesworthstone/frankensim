@@ -15775,3 +15775,18 @@ Characteristic-length scaling does not establish arbitrary-mesh crack-path
 objectivity. Finite deformation, crack topology, new-surface contact, erosion,
 fragments, history transfer, Lode dependence, heat partition and experimental
 qualification remain outside this model.
+
+## Source-bound tensile initiation and elastic handoff
+
+`brittle::source::initiation` binds the native tensile detector and onset to the
+complete original `ResolvedBrittleCrackBand`. The detected plane may be resolved
+at a receiving geometry's declared crack-band width without requerying or
+replacing source coefficients. Handoff requires the same original source bundle,
+all fracture parameters, strain domain and material-work gate, then delegates
+native stress/storage continuity and undamaged-history checks. Additional
+multiphysics receipts remain attached; an equal-valued foreign material or state
+cannot substitute. This bridge supplies no independent crack geometry,
+existing-history reset, all-plane mixed-mode criterion or experimental
+calibration. Focused regression definitions cover physical plane discovery,
+source/context mismatch, temperature-dependent onset and bounded refusals; Rust
+parsing/formatting passed, while compiled execution remains outstanding.
