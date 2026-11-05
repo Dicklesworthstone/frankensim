@@ -5,6 +5,10 @@
 //! inventory update combines these fluxes with every separately declared path;
 //! the original chemistry, circuit, thermal and moving-wall owners then advance.
 
+/// Adaptive accuracy over the complete molecular/thermal/electromechanical assembly.
+#[path = "molecular_coupled.rs"]
+pub mod coupled;
+
 use super::*;
 use fs_gas::material::transport::parcel::{
     ParcelMolecularLink, ParcelMolecularSolve, ParcelMolecularStep, ParcelMolecularTransport,

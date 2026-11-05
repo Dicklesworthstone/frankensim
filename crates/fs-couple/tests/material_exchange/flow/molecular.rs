@@ -1,5 +1,8 @@
 //! G1/G3/G4: physical cross diffusion in the original complete live assembly.
 //! Synthetic source cards; no measured-material or engine validation claim.
+#[path = "molecular_coupled.rs"]
+mod coupled_tests;
+
 use super::*;
 use fs_gas::material::transport::parcel::{
     ParcelMolecularError, ParcelMolecularLink, ParcelMolecularSolve, ParcelMolecularTransport,

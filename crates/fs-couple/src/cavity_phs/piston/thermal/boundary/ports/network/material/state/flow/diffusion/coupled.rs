@@ -206,7 +206,7 @@ impl<'m> MaterialExchangeState<'m> {
         &self, cx: &Cx<'_>, target_s: f64, ports: &[f64], drives: &[ChamberDrive],
         reactions: &[ChamberReaction<'_>], species_controls: SpeciesNetworkSolve,
         controls: NetworkSolve, guess_j: &[f64], time: CoupledDiffusionControls,
-        evolve: impl Fn(&Self, f64, &[ChamberDrive], &[f64])
+        mut evolve: impl FnMut(&Self, f64, &[ChamberDrive], &[f64])
             -> Result<(Self, MaterialFlowAdvance<F>), MaterialFlowError>,
     ) -> Result<(Self, CoupledDiffusionReport<F>), Error> {
         check(cx)?;
@@ -241,7 +241,7 @@ impl<'m> MaterialExchangeState<'m> {
             let fine_error_factor = error::fine_error_factor(midpoint - before, end - midpoint)
                 .ok_or(Error::Invalid("coupled diffusion half-step ratio is unrepresentable"))?;
             let accepted_substeps = steps.len();
-            let evaluate = |state: &Self, end: f64, evaluations: &mut usize| {
+            let mut evaluate = |state: &Self, end: f64, evaluations: &mut usize| {
                 check(cx)?;
                 if *evaluations >= cap {
                     return Err(Error::WorkLimit { time_s: before, evaluations: *evaluations, accepted_substeps });
