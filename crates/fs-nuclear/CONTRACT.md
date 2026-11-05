@@ -644,3 +644,55 @@ convolution and related phi functions; see [Al-Mohy and Higham (2011)](https://e
 The implementation retains this project's positive DAG uniformization and its
 own explicit numerical admission rather than claiming the paper's general
 matrix-exponential error analysis.
+
+## Product-resolved fission, capture and radioactive inventories
+
+`burnup` represents an explicitly supplied network of unique `NuclideId`s,
+admitted spontaneous-decay laws, disjoint neutron reaction channels, product
+yields and event energy. The same frozen linear reaction operator evolves fuel,
+capture products, fission products and radioactive daughters together. Products
+created during an interval can decay or react again inside that interval.
+Integrated parent removals come from `fs_la::decay::reaction::ReactionPlan`;
+each channel's relative hazard attributes those removals to actual events.
+
+Fission product yields are expected multiplicities, never normalized branch
+probabilities. The network may contain sinks, repeated transformations, cycles
+and self-return reactions. Nodewise production/removal residuals are checked;
+total tracked nucleus count is not falsely conserved across fission. All
+unstable nuclides must declare their complete spontaneous-decay branching,
+with probabilities summing to one. Empty product lists explicitly export the
+products from this tracked inventory. Particle mass/charge accounting and
+composition-dependent thermal material laws remain outside this owner.
+
+Microscopic cross sections use square metres and group-integrated absolute flux
+uses neutrons/m²/s. The full named energy grid and edges must match. Data stay
+fixed inside the explicit Kelvin range; no interpolation, Doppler broadening,
+self-shielding or source normalization is inferred. Energy-dependent yields can
+be supplied as disjoint partial channels; duplicated total cross sections would
+double-count a physical reaction and are not an evaluated-data admission.
+
+Each reaction's energy belongs to that event alone. Fission/capture energies
+exclude future daughter-decay energy; the explicit product populations generate
+that later release, including after zero-flux shutdown. An all-inclusive fission
+Q value or an additional effective decay-heat fit would count the same energy
+twice and must not be assigned to this network. Deposited, transportable radiation
+and escaped channels remain disjoint. Cumulative event and energy accounts use
+the existing compensated accumulator. Absolute noncancelling population and
+energy defects consume separate user-supplied allowances.
+
+`PreparedBurnup` binds immutable interval maps to the exact model, flux and work
+limits and can serve multiple inventories. `BurnupInventory::trial` retains one
+shared immutable prepared map for exact repeated duration/flux/limit inputs;
+temperature is still validated on every call, but a change within the declared
+fixed-coefficient domain does not rebuild an identical operator. Preparation
+cost is paid only on a cache miss; application and retained maps are quadratic
+in node count. Changed limits cannot bypass numerical preparation. Candidate
+state, cumulative accounts and the cache are published only after acceptance.
+
+The formulation follows the production-minus-loss depletion equation described
+in [OpenMC's depletion methodology](https://docs.openmc.org/en/latest/methods/depletion.html).
+This is a bounded dense reduced network using the native positive propagator,
+not OpenMC's CRAM or a spatial neutron transport solver. Accounting admission,
+series truncation, coupled timestep error and nuclear-data uncertainty are
+separate claims. No evaluated isotope dataset, criticality prediction or
+reactor-design qualification is supplied.
